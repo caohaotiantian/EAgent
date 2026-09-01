@@ -511,6 +511,127 @@ test("TRACE PRINTS A TREE, and the indentation is the run's real shape", async (
   }
 });
 
+// ── DESIGN item 14 — the two verbs that re-execute a run find its graph ──────
+
+/**
+ * A graph that is NOT the one the run under test compiled, for the mismatch arms below.
+ * Built from `GRAPH` so the only thing that differs is the thing being tested.
+ */
+const OTHER_GRAPH = {
+  ...GRAPH,
+  metadata: { name: "other-graph", project: "demo", version: 1 },
+  nodes: GRAPH.nodes.filter((n) => n.id === "read"),
+  outputs: ["body"],
+  edges: [],
+};
+
+/** Run `GRAPH` once out of `graphs/copy.json` and hand back the workspace and the runId. */
+async function recordedRun(d: { dir: string }): Promise<{ graphFile: string; runId: string }> {
+  const graphFile = seed(d.dir);
+  const first = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ source: "input.txt" })]);
+  assert.equal(first.code, 0, first.err);
+  return { graphFile, runId: (JSON.parse(first.out) as { runId: string }).runId };
+}
+
+test("REPLAY AND TRACE FIND THE GRAPH THE RUN RECORDED, and name the file they picked", async () => {
+  // DESIGN item 14, driven at `823982e` in a workspace built from README's own "Try it" block:
+  //
+  //     $ loom replay 01M1EWJQV3Q6ZAJ5YBYW36X3H7
+  //     E_CONFIG_INVALID: --graph needs a path, and none was given.
+  //     $ loom trace 01M1EWJQV3Q6ZAJ5YBYW36X3H7
+  //     E_CONFIG_INVALID: --graph needs a path, and none was given.
+  //
+  // — while `loom approve` and `loom audit` answered the SAME run by id alone in that same
+  // workspace. Two verbs already did the lookup, and the two that RE-EXECUTE a run were the two
+  // that made the operator remember which file it ran.
+  const d = emptyDir();
+  try {
+    const { runId } = await recordedRun(d);
+
+    const r = await run(["replay", runId, "--workspace", d.dir]);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /"match": true/, r.out);
+    // AND IT SAYS WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a
+    // verb whose output cannot be checked, which is why this is asserted and not just the exit.
+    assert.match(r.err, /graphs\/copy\.json/, `replay must name the file it resolved:\n${r.err}`);
+    assert.match(r.err, /copy-file v1 \(sha256:/, r.err);
+
+    const t = await run(["trace", runId, "--workspace", d.dir]);
+    assert.equal(t.code, 0, t.err);
+    assert.match(t.out, /conformance: ok/, t.out);
+    assert.match(t.err, /graphs\/copy\.json/, `trace must name the file it resolved:\n${t.err}`);
+  } finally {
+    d.dispose();
+  }
+});
+
+test("A PUBLISHED GRAPH THAT IS NOT THIS RUN'S IS A DIFFERENT ANSWER FROM NO GRAPH AT ALL", async () => {
+  // The absence-is-not-zero rule, on the lookup. Both cases refuse — the search is by hash and
+  // nothing else can win it, because a replay against a graph the run did not use reports
+  // `match: false` about the RUN when the replayer is what differed. But they are different
+  // diagnoses with different fixes, so the operator is told WHICH.
+  const d = emptyDir();
+  try {
+    const { runId, graphFile } = await recordedRun(d);
+
+    // (1) graphs/ holds a graph, and it is not this run's.
+    rmSync(graphFile);
+    writeFileSync(join(d.dir, "graphs", "other.json"), JSON.stringify(OTHER_GRAPH));
+    await assert.rejects(
+      () => run(["replay", runId, "--workspace", d.dir]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        e.code === CODES.E_RUN_NOT_FOUND &&
+        /It publishes 1, and none is this run's/.test(e.message) &&
+        /graphs\/other\.json other-graph v1/.test(e.message),
+      "a workspace full of other people's graphs must name them, not report emptiness",
+    );
+
+    // (2) graphs/ holds nothing this process can compile.
+    rmSync(join(d.dir, "graphs", "other.json"));
+    await assert.rejects(
+      () => run(["trace", runId, "--workspace", d.dir]),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND && /publishes no graph this process can compile/.test(e.message),
+      "an empty graphs/ is its own sentence",
+    );
+  } finally {
+    d.dispose();
+  }
+});
+
+test("`--graph` STILL WINS, and a graph the run did not compile is refused rather than replayed", async () => {
+  // The flag is how a candidate living outside `graphs/` is named without publishing it —
+  // `loom score --graph` documents exactly that use and refuses a hash that is not the run's.
+  // Same rule here, and it is the rule `replay-fidelity` exists to keep: re-executing against
+  // the wrong graph produces a `match: false` that blames the run.
+  const d = emptyDir();
+  try {
+    const { runId, graphFile } = await recordedRun(d);
+
+    // The run's own graph, from outside graphs/ — the documented override, and it wins.
+    const outside = join(d.dir, "candidate.json");
+    writeFileSync(outside, readFileSync(graphFile, "utf8"));
+    rmSync(graphFile);
+    const r = await run(["replay", runId, "--graph", outside, "--workspace", d.dir]);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, /"match": true/, r.out);
+    assert.match(r.err, /from --graph /, `it must say the flag is what it used:\n${r.err}`);
+
+    // A DIFFERENT graph is refused, and the code says which fact is wrong.
+    const wrong = join(d.dir, "wrong.json");
+    writeFileSync(wrong, JSON.stringify(OTHER_GRAPH));
+    for (const verb of ["replay", "trace"]) {
+      await assert.rejects(
+        () => run([verb, runId, "--graph", wrong, "--workspace", d.dir]),
+        (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH && e.message.includes(runId),
+        `${verb} must refuse a graph this run did not compile`,
+      );
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
 // ── the jail applies to built-in tools ───────────────────────────────────────
 
 test("a built-in tool cannot escape the workspace", async () => {
