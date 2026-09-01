@@ -479,6 +479,100 @@ export async function awaitBanner(
   }
 }
 
+/**
+ * WAIT UNTIL THE CHILD CAN BE STOPPED, which is a STRICTLY LATER INSTANT than "the banner has
+ * landed" — and the gap between those two is TODO A.20, measured.
+ *
+ * `serve` installs its SIGINT handler in `serveUntilInterrupt`, which it calls AFTER
+ * `announce` returns. Until that call, SIGINT's disposition is the DEFAULT one: the kernel
+ * terminates the process where it stands, at any instruction, with no handler and no flush.
+ * So a `stop()` that lands in that gap does not stop the child, it KILLS it — and every
+ * stderr line `announce` had not written yet is never written at all.
+ *
+ * THE GAP, MEASURED on 2026-09-01 with an external `--import` hook that timestamps each
+ * banner write and the instant `process.on("SIGINT", …)` is first called, ten boots:
+ *
+ *     `  models:` (the last stdout line, and what `awaitBanner` returns on)   t
+ *     `! CALLBACK ROUTE OPEN`                                                t + 0.15 ms
+ *     `! NO CALLBACK BASE URL`                                               t + 0.17 ms
+ *     SIGINT handler installed                                               t + 0.28 ms
+ *                                              min 0.28 ms, median 0.31 ms, max 0.32 ms
+ *
+ * A window of a third of a millisecond, entered only if the OS deschedules the child inside
+ * it while the parent signals from another core. That is why five sightings never reproduced
+ * and why 144 boots under 12-way load are green: it is not rare because it is unlikely, it is
+ * rare because it is SHORT. Held still — the same hook busy-waiting 60 ms right after
+ * `! CALLBACK ROUTE OPEN`, which is the OS deschedule made visible rather than a change to
+ * the program — it is 10/10: `code=null signal=SIGINT`, stderr holding every line up to and
+ * including `CALLBACK ROUTE OPEN` and never `NO CALLBACK BASE URL`. That is the sighting,
+ * exactly: the earlier assertions green and that one red.
+ *
+ * WHY ONE ANSWERED `/health` IS A PROOF AND NOT A DELAY, which is the whole reason this is a
+ * fix rather than a hardening. In `cli.ts`'s `serve` case, `announce(plane, …)` and
+ * `serveUntilInterrupt`'s `process.on("SIGINT", onSigint)` run in ONE SYNCHRONOUS STRETCH:
+ * the listener goes on inside a `new Promise` executor, which runs synchronously at
+ * construction, and there is no `await` between the two. The child's event loop therefore
+ * CANNOT turn between the last banner byte and the handler. An answered HTTP request is
+ * evidence that the loop turned. So an answer means the handler exists — not "probably by
+ * now", but by construction.
+ *
+ * That proof has a premise, and `stopVerdict` below is what happens when the premise stops
+ * being true: put an `await` between `announce` and `serveUntilInterrupt` and this reasoning
+ * is void, so the stop refuses rather than handing back a truncated buffer.
+ *
+ * ANY status counts, 401 included: the claim is that the loop turned, not that the caller was
+ * authorized. WHEN IT CANNOT DECIDE IT REFUSES, naming the last errno it saw. The deadline is
+ * a failure deadline and never a measurement.
+ */
+export async function awaitStoppable(
+  probe: () => Promise<{ status?: number; error?: string }>,
+  abort: () => string | null,
+  describe: (lastError: string) => string,
+  deadlineMs = 15_000,
+): Promise<void> {
+  const giveUp = Date.now() + deadlineMs;
+  let last = "(it never answered and never errored)";
+  for (;;) {
+    const dead = abort();
+    if (dead !== null) throw new Error(dead);
+    const answer = await probe();
+    if (answer.status !== undefined) return;
+    last = answer.error ?? last;
+    if (Date.now() > giveUp) throw new Error(describe(last));
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+/**
+ * HOW THE CHILD DIED, read as a VERDICT rather than as an exit code — and it fails closed.
+ *
+ * `stop()` used to return `child.on("close")`'s first argument and nothing looked at the
+ * second. For a process killed by a signal that first argument is `null` and the SECOND one
+ * names the signal, so a child that `stop()`'s own SIGINT had killed outright was reported to
+ * the caller as `null` — indistinguishable, to every call site in the tree, from an ordinary
+ * stop. The caller then asserted on `err`, which was a PREFIX of the banner, and the failure
+ * surfaced hundreds of lines away as "this line is missing" with no hint that the process had
+ * been shot.
+ *
+ * So this is the net under `awaitStoppable`, and it exists because that proof rests on a
+ * premise about another file's control flow that nothing else here can check. If the window
+ * ever reopens, the next sighting arrives NAMED and on its first occurrence, instead of being
+ * a sixth one that "never reproduced".
+ *
+ * A guard that cannot decide fails closed: there is no reading of a signal death under which
+ * `out` and `err` are the whole of what the child meant to write, so there is nothing to
+ * return and it throws.
+ */
+export function stopVerdict(argv: readonly string[], code: number | null, signal: string | null, err: string): number | null {
+  if (signal === null) return code;
+  throw new Error(
+    `\`loom ${argv.join(" ")}\` was KILLED by ${signal}, not stopped by it — so \`out\` and \`err\` are a PREFIX of what ` +
+      `it meant to write, and any assertion on them is reading whatever happened to arrive first.\n` +
+      `${signal === "SIGINT" ? "This is TODO A.20: the stop landed before `serveUntilInterrupt` installed its handler, while SIGINT still had its DEFAULT disposition. `awaitStoppable` is what should have made that impossible — see its note.\n" : ""}` +
+      `stderr so far:\n${err}`,
+  );
+}
+
 export interface Serving {
   readonly out: string;
   readonly err: string;
@@ -505,12 +599,18 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
   // `awaitErr` below is what stops a caller RACING it. Both halves are needed and only the
   // first was here.
   child.stderr.on("data", (c: string) => (err += c));
-  const exited = new Promise<number | null>((r) => child.on("close", (code) => r(code)));
+  // BOTH ARGUMENTS OF `close`, because the second one is the only place a signal death is
+  // visible and `stopVerdict` is built on it. Keeping only the code is what let a killed
+  // child look like a stopped one.
+  const exited = new Promise<{ code: number | null; signal: string | null }>((r) =>
+    child.on("close", (code, signal) => r({ code, signal: signal === null ? null : String(signal) })),
+  );
   // A CRASH AT BOOT IS A FAILURE, NOT A TIMEOUT. Without this the loop below spins the full
   // 15 s on a child that died in its first 20 ms and then reports "never booted", which sends
-  // the reader looking for a hang. `null` is a signal death, which is also not a boot.
-  let died: number | null | undefined;
-  void exited.then((code) => (died = code));
+  // the reader looking for a hang. A signal death is also not a boot, and now says so by name.
+  let died: { code: number | null; signal: string | null } | undefined;
+  void exited.then((how) => (died = how));
+  const howItDied = (): string => (died === undefined ? "" : died.signal === null ? `exited (${died.code})` : `was killed by ${died.signal}`);
   try {
     // WAIT FOR THE WHOLE BANNER, as a NAMED SET of COMPLETE lines — not for one substring
     // believed to be last. `BANNER_KEYS` says why, and `boot-banner.test.ts` is what keeps
@@ -525,7 +625,7 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
       () =>
         died === undefined
           ? null
-          : `\`loom ${argv.join(" ")}\` exited (${died}) before it finished booting.\nstdout:\n${out}\nstderr:\n${err}`,
+          : `\`loom ${argv.join(" ")}\` ${howItDied()} before it finished booting.\nstdout:\n${out}\nstderr:\n${err}`,
       (missing) =>
         `\`loom ${argv.join(" ")}\` never booted — no complete line for: ${missing.join(", ")}.\n` +
         `stdout:\n${out}\nstderr:\n${err}`,
@@ -533,6 +633,18 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
     // Run over COMPLETE lines, so the port cannot be a prefix of itself.
     const m = /loom listening on http:\/\/(\[[^\]]+\]|[^:\s]+):(\d+)/.exec(completeLines(out).join("\n"));
     if (m?.[1] === undefined || m[2] === undefined) throw new Error(`no address line in:\n${out}`);
+    const host = m[1].replace(/^\[/, "").replace(/\]$/, "");
+    const port = Number(m[2]);
+    // THE BANNER IS NOT THE READINESS SIGNAL — being STOPPABLE is, and it arrives ~0.3 ms
+    // later. `awaitStoppable` says what that gap is, why one answered request proves the
+    // child is past it, and what it cost. Nothing below asserts how long the wait took.
+    await awaitStoppable(
+      async () => await reach(host, port),
+      () => (died === undefined ? null : `\`loom ${argv.join(" ")}\` ${howItDied()} between its banner and its first request.\nstderr:\n${err}`),
+      (lastError) =>
+        `\`loom ${argv.join(" ")}\` announced ${origin(host, port)} and then never answered /health (${lastError}), so it ` +
+        `cannot be shown to have reached its SIGINT handler and stopping it would kill it.\nstdout:\n${out}\nstderr:\n${err}`,
+    );
     return {
       get out() {
         return out;
@@ -540,8 +652,8 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
       get err() {
         return err;
       },
-      host: m[1].replace(/^\[/, "").replace(/\]$/, ""),
-      port: Number(m[2]),
+      host,
+      port,
       /**
        * WAIT for a stderr line, rather than reading whatever has arrived.
        *
@@ -563,10 +675,18 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
        * DRAINED, so `out`/`err` read after it are everything the process wrote and not a
        * prefix. Boot no longer returns on a prefix of stdout, but stderr is still written
        * after the banner, so `stop()` (or `awaitErr`) remains the way to read it.
+       *
+       * `close` MEANING DRAINED IS THE HALF THAT WAS ALWAYS TRUE, and it was worth
+       * eliminating rather than assuming, because A.20's other hypothesis was that it is
+       * not: 30 children writing 4 MB of stderr each through a parent whose loop is
+       * deliberately starved so the pipe backs up — `close` fired on a truncated buffer
+       * 0/30 times. The truncation is entirely on the CHILD's side of the pipe, which is
+       * what `stopVerdict` reads.
        */
       stop: async () => {
         child.kill("SIGINT");
-        return await exited;
+        const how = await exited;
+        return stopVerdict(argv, how.code, how.signal, err);
       },
     };
   } catch (e) {

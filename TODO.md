@@ -353,7 +353,49 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   it is re-derived against a named scope (which files, which predicate) — or dropped with an
   argument. Keeping it in its present shape past the next re-check is the wrong choice.
 
-- **A.20 · A rare suite flake: four sightings, never reproduced.** The last one was captured — a
+- ~~**A.20 · A rare suite flake: four sightings, never reproduced.**~~ **CLOSED, 2026-09-01. The
+  cause is a 0.28–0.32 ms window in which `stop()` was not a stop but a KILL.** `serve` installs
+  its SIGINT handler in `serveUntilInterrupt`, which it calls *after* `announce` returns; until
+  then SIGINT has its DEFAULT disposition and the kernel terminates the child where it stands. The
+  harness returned from `serving()` on the last STDOUT banner line, which is inside that window, so
+  a `stop()` landing in it killed the child mid-banner and every stderr line `announce` had not yet
+  written was never written at all.
+
+  **Measured, not argued.** An external `--import` hook (no source edit) timestamping each banner
+  write and the first `process.on("SIGINT", …)`, ten boots: `  models:` at *t*, `! CALLBACK ROUTE
+  OPEN` at *t*+0.15 ms, `! NO CALLBACK BASE URL` at *t*+0.17 ms, handler installed at *t*+0.28 ms
+  (min 0.28, median 0.31, max 0.32). **Held still** — the same hook busy-waiting 60 ms right after
+  `! CALLBACK ROUTE OPEN`, which is the OS deschedule made visible rather than a change to the
+  program — the fifth sighting reproduces 10/10, exactly as reported: `code=null signal=SIGINT`,
+  stderr holding every line through `CALLBACK ROUTE OPEN` and never `NO CALLBACK BASE URL`. That
+  is why five sightings never reproduced and why 144 boots under 12-way load are green: the window
+  is not unlikely, it is SHORT.
+
+  **The other hypothesis was ELIMINATED, not assumed away.** "`close` can fire before stderr has
+  drained": 30 children writing 4 MB of stderr each through a parent whose loop is deliberately
+  starved so the pipe backs up — `close` fired on a truncated buffer 0/30 times. `close` means
+  drained. The truncation is entirely on the CHILD's side of the pipe. (A child that calls
+  `process.exit()` with a backed-up pipe *does* lose the queue — 30/30 — which is a real hazard
+  and is not this one: every banner write flushed synchronously, 0 queued across 10 boots.)
+
+  **The fix is `harness.ts`'s `awaitStoppable`, and it is a proof rather than a delay.** In
+  `cli.ts`'s `serve`, `announce(…)` and `process.on("SIGINT", onSigint)` run in ONE synchronous
+  stretch — the listener goes on inside a `new Promise` executor, and there is no `await` between
+  them — so the child's event loop cannot turn between the last banner byte and the handler. One
+  ANSWERED `/health` round trip is therefore evidence the handler exists, by construction. That
+  proof rests on another file's control flow, so `stopVerdict` is the fail-closed net under it:
+  `close`'s second argument is the only place a signal death is visible and `stop()` returned only
+  the first, unread, which is why five sightings surfaced as "this line is missing" hundreds of
+  lines from the cause. It now refuses by name. Tests: the two A.20 cases in
+  `test/deployment/boot-banner.test.ts` (hand-driven, for the reason that file already argues —
+  a 0.3 ms window is not something a real child can be asked about), plus the exit code asserted
+  at the sighting's own call site in `cli/cli.test.ts`.
+
+  The superseded entry, kept because the *shape* of the four-sighting record is the lesson — a
+  helper invariant was repaired, the flake was declared unexplained, and the unrepaired half was
+  in the other stream:
+
+- **A.20 (superseded) · A rare suite flake: four sightings, never reproduced.** The last one was captured — a
   child process's stderr read as a prefix — and `5ebad55` fixed the *decidable* half: both spawn
   helpers waited for `"  clock:"` calling it "the LAST stdout line", and `announce` writes
   `  models:` after it, so `serving` returned with 60 bytes still in flight on ten of ten boots.
