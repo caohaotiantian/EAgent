@@ -265,7 +265,19 @@ and the honest thing was to stop calling them a plan rather than to relax the ru
 verbatim and still numbered 1–8, below the live list — a Sequence with its outcomes attached is
 the only evidence anyone has about what this project's estimates are worth.
 
-**THE RULE HOLDS FOR ITEMS 9–14 TOO, and it is the only thing that makes the list worth reading.**
+**THE LIVE LIST IS EMPTY, 2026-09-02.** Items 9 through 14 have all landed, and item 9 — the last
+of them — closed by a DECISION the maintainer made rather than by code somebody wrote: a rewind's
+undo now runs with `nodeApproved: true`, because A.34 and A.35 together made its operator a
+verified human who was SHOWN that exact undo list and bound it with a hash. A run failure's
+rollback still refuses, which is the asymmetry the whole decision rests on.
+
+**So this section is a record again, and the honest thing is to say so rather than to fill it.**
+The rule below is why it can be trusted, and it is also why nothing is written here yet: an item
+needs a command that FAILS at this commit, and finding one is a measurement, not an afternoon of
+thinking. `TODO.md` carries what is known to be open; the next Sequence gets written when
+something in there has been reproduced through the binary rather than argued for.
+
+**THE RULE HELD FOR ITEMS 9–14, and it is the only thing that makes a list like this worth reading.**
 Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
 an item whose command passes gets cut rather than reworded. **Applied to the list itself:
 IT IS TWO ITEMS — 9 and 14.** Items 10, 11, 12 and 13's first half have all landed and are marked
@@ -327,7 +339,8 @@ now moved three times without the item closing**, which is the fact §9 is about
 
 | item | command re-run | verdict |
 |---|---|---|
-| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3/3, and the item is still OPEN** — the third case PINS `charges [ 42 ] refunds []`. It is now a DECISION and not a build: `TODO.md` §A.8's, driven by flipping `#compensateOne`'s `nodeApproved`, which takes this suite to 2/3 and `rewind-plan.test.ts` to 6/7 in one edit. See §9 |
+| 14 · replay and trace demand a graph the workspace holds | `node --test packages/core/test/cli/cli.test.ts` | **PASSES — 38/38. Item 14 is DONE** |
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **PASSES — 3/3. Item 9 is DONE**, by a DECISION rather than a build: `nodeApproved: trigger === "rewind"` |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **PASSES — 13/13. Item 10 is DONE** — the pin was renamed `THE HOLE THIS CLOSES` and asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
 | 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **PASSES — 18/18. Item 12 is DONE**, and the two `--*-module` flags are still `unknown flag` on purpose |
