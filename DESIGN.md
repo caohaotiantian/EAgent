@@ -87,11 +87,21 @@ effects: {
 and the runtime hands the body a bound, keyed, retryable invoker per declared name. **Declaring a
 capability and declaring a journaled effect become the same act.** That turns "every
 nondeterministic call is journaled" from a rule people must remember into a structural property —
-which matters because the memory-only-state class has been violated five times, every time by a
-field somebody forgot to journal — the five are named in
-`packages/core/test/run/oversight-survives-restart.test.ts`. A sixth has not been added, but
-member #3 (accumulated spend) has since regressed one layer down: the restore arm works and the
-projection it restores from does not fold `model.called`. See `TODO.md` §A.
+which matters because the memory-only-state class has been violated **six** times, every time by a
+value somebody forgot to journal. **The enumeration is SPLIT and this paragraph was the first
+casualty of that**: it used to end "a sixth has not been added", and one has — E8 in
+`packages/core/test/run/escalation.test.ts:836`, marked `THE SIXTH MEMBER`, where payload
+externalisation moved a channel value over 64 KiB out of `task.committed.writes` and
+`#restoreEvidence` folded `writes` alone, so a restart rebuilt the taint set WITHOUT the
+externalised channel and the charge ran under a human de-escalation with no gate. Five are named
+in `packages/core/test/run/oversight-survives-restart.test.ts`; the sixth landed in a different
+file, and the pointer here still said five. **A pointer to an enumeration is only as good as that
+enumeration's own discipline about growing** — which is why both files are now cited, and why
+`CLAUDE.md` and `TODO.md` §F.1 state the split rather than a single address. **The other stale
+half of this paragraph is now FIXED and is recorded as such rather than left standing:** it said
+member #3 (accumulated spend) had regressed one layer down because the projection the restore arm
+reads did not fold `model.called`. It does — `run/projection.ts:1019` — and the fix is in
+`TODO.md` §Z's list of defects whose measurement is no longer needed to read the residue.
 
 ### D3 · The clock is bound to the journal, not recorded
 
@@ -140,6 +150,17 @@ a security boundary with no demonstrable gain is a bad trade however elegant the
 is what relaxing `GRAPH010` for provably-exclusive router arms would create. If that lands, this
 decision is the first thing to revisit, and the `TaintSet` shape is in the history.
 
+**AS SHIPPED, ONE AXIS OF (b) IS DONE AND THE OTHER IS NOT, and they do not close the same way.**
+Integrity landed 2026-09-01 (`5bff93b`): `isExternal` no longer defaults to trusted, and
+"unlabelled means untrusted" is now a named set of pure types (`router`, `join`, `human_gate`)
+plus two label reads — a `function` is untrusted unless it declares `effects: []`, and an
+`evaluator` splits on `kind`; `agent` is unconditionally untrusted. **Confidentiality is still
+default-trusted and the symmetric fix does not exist**: `applySecretFlow` reads the declared
+classification, and there is no `effects: []` equivalent for a channel, while marking every
+unclassified channel sensitive is the constant-gate failure that arm's own docstring refuses. So
+the honest statement of this decision today is *one axis fails closed, one fails open*, and
+`TODO.md` §G.4 carries the open half.
+
 ### D5 · The extension surface is versioned mechanically
 
 *Alternatives:* (a) semver and discipline; (b) VS Code's proposed-API model; (c) both, plus
@@ -166,8 +187,21 @@ the candidate, which turns "is this eval fair?" into a timestamp comparison.
 
 Temporal-ecosystem guidance says prompt edits need no version guard. **Restate is right and
 Temporal's guidance does not transfer:** in an agent runtime the prompt *is an input to a recorded
-effect*, so editing it silently corrupts a resumed run. Prompt text and tool-description text go
-into the artifact hash and into the per-effect fingerprint.
+effect*, so editing it silently corrupts a resumed run.
+
+**AS SHIPPED, THE MECHANISM IS NOT THE ONE THIS SECTION ORIGINALLY NAMED, and the difference is
+load-bearing rather than pedantic.** This paragraph used to end "prompt text and tool-description
+text go into the artifact hash"; they do not, and were never going to. `graphHash` is
+`digest(spec)` (`compile.ts:351`) and a ref'd prompt's text is not in the spec. The binding is
+`RunGraph.resolutionManifest`, which pins every ref to a CONTENT digest and is journaled on
+`run.compiled`; three doors check it (`Engine.#assertBound` on gate decisions and on `advance`,
+and `replayRun`'s `refsBound`), and `RunGraph.documents` freezes the bytes by value. Driven
+through the shipped binary: run a workspace graph to a gate, edit `resources/prompt/writer.md`,
+and `loom approve` refuses with `E_GRAPH_MISMATCH`. **The hash is deliberately left out of it**,
+because `cohortKeyOf` keys on `graphHash` — putting prompt text in the hash would make every
+prompt edit its own cohort of one, and comparing two runs across a prompt edit is precisely the
+candidate kind D6 defines self-improvement as producing. So the run is pinned and the cohort is
+not, which is the whole design and is the opposite of what one hash would have given.
 
 ## What we deliberately do not build
 
@@ -227,7 +261,10 @@ the only evidence anyone has about what this project's estimates are worth.
 
 **THE RULE HOLDS FOR ITEMS 9–13 TOO, and it is the only thing that makes the list worth reading.**
 Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
-an item whose command passes gets cut rather than reworded. Four candidates were cut that way
+an item whose command passes gets cut rather than reworded. **Applied to the list itself on
+2026-09-01: item 11's command now passes, so item 11 is marked DONE and the live list is four —
+9, 10, 12, 13, each re-run and each still red.** The status table at the head of the live list
+carries the commands and their verdicts. Four candidates were cut that way
 while this list was being written: `loom suite freeze --cohort` (already shipped — see item 5),
 the trajectory fold's blindness to externalised writes (fixed at `7d627b4`), the D.7.6 provider
 refusal that could not re-derive on replay (fixed at `633e265` — for journals carrying the new
@@ -271,6 +308,33 @@ replay divergence is terminal **for the recorded-effect path** only, which was i
 
 ## The live list — items 9 to 13, written 2026-08-29
 
+**STATUS AT 2026-09-01, arrived at by RUNNING all five commands rather than by reading the diffs
+that landed between.** The rule this list is written under — *every item names a command that
+fails today; an item that cannot fail is a wish and gets cut* — was applied to itself:
+
+| item | command re-run | verdict |
+|---|---|---|
+| 9 · a rewind does not run the child's undo | the driver below, rebuilt and re-run | **still fails** — `charges [ 42 ]  refunds []` |
+| 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **still fails** — its `THE HOLE THIS DOES NOT CLOSE` pin is green, which is the item failing |
+| 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
+| 12 · the fork ledger's two DEBT rows | `node packages/core/src/cli.ts serve --identity-module ./oidc.mjs` and `--channels-module ./smtp.mjs` | **still fails** — both still `E_CONFIG_INVALID: unknown flag` |
+| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **still fails** — 4/4 green *including* the case that pins the two unreachable runs |
+
+**Two of those verdicts are worth stating as a method and not just a result.** Items 10 and 13
+"fail" by way of a test that PASSES: each has a pinned residual whose green is the item's red, and
+each pin's own body says it must be deleted when the item lands. That is the shape a roadmap item
+should have — a claim that cannot quietly become true — and it is why neither could be marked done
+by reading a changelog. **Item 11 is the counter-example that proves the list is honest:** it is
+the only one whose command flipped, and it flipped because two named lines landed
+(`Engine.#functionBody` calling `bodyEntered` at FETCH, and `resources/functions.ts` carrying the
+realm brand onto the wrapper), exactly the pair the item said would be needed and neither of which
+would have worked alone.
+
+**THE SEAM COST DID NOT MOVE, and the estimate held.** `node scripts/check-kernel.mjs` reports
+`10 files pinned, 193 commits since 86b84c9, 8 declared seams` — still **8**. Item 11 predicted it
+would cost nothing because it is a `fix` of a guard that already exists, and it cost nothing. The
+price of what remains is unchanged at two trailers, for items 10 and 13.
+
 **THE ORDERING ARGUMENT, because "what the three properties need" has to be an argument and not a
 preference.** Items 9, 10 and 11 are one defect class wearing three costumes, and it is the class
 `TODO.md` names as accounting for nearly every real finding of the last session: **a guard
@@ -282,17 +346,21 @@ are capability gaps, and both announce themselves — a refusal naming the flag 
 exist, a `truncated: true` on every tick and a stderr banner at boot. **Silent-and-wrong outranks
 loud-and-missing**, and that is the whole ordering.
 
-**WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census is
-**8** today — `git log --grep='^Kernel-seam:' --oneline | wc -l` says 8, and
-`node scripts/check-kernel.mjs` prints `10 files pinned, 164 commits since 86b84c9, 8 declared
-seams` and then lists every one with its reason. Items 10 and 13 are each a `feat` that must touch
+**WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census
+was **8** when this was written and is **8** now — `git log --grep='^Kernel-seam:' --oneline | wc -l`
+says 8, and `node scripts/check-kernel.mjs` prints `10 files pinned, 193 commits since 86b84c9,
+8 declared seams` (it said 164 commits when this paragraph was written; the commit count moves
+and the seam count is the number that must not) and then lists every one with its reason.
+Items 10 and 13 are each a `feat` that must touch
 a pinned kernel file — `journal/events.ts`
 for a seventh `effect.started.kind`, `journal/store.ts` for a listing cursor — so each costs one
 `Kernel-seam:` trailer and the census would end this list at **10**. Items 9 and 11 are `fix`es of
 guards that already exist and do not hold; `fix` may touch the kernel freely, which is what a
 kernel is for. Item 12 touches `cli.ts`, which is not kernel. **Two trailers is the price of this
 list, it is not hidden in it, and a maintainer who thinks the census has grown fast enough should
-cut 13 first** — its argument is the weakest, and §13 says so itself.
+cut 13 first** — its argument is the weakest, and §13 says so itself. *Item 11 has since landed
+as a `fix` and cost nothing, which is the first evidence this paragraph's method produces a
+number that survives contact.*
 
 ### 9 · A rewind is permitted BECAUSE a compensation exists, then does not run it
 
@@ -318,15 +386,39 @@ happens. Driven, one `subgraph` node whose child charges `pay.refundable` (irrev
 
 *Fails today:* that assertion — a rewind across a `subgraph` node runs the child's declared undo.
 
-**The named siblings go with it, because they are the same walk over the same journal.** There
-are three `run.failed` append sites in `advance` (engine.ts:7060, 7102, 7130) and only the middle
-one calls `#compensate`; the other two are the unmaterialised fan-out and `E_OUTPUT_MISSING`, and
-the budget/fatal floor at the top of `advance` is a fourth path. The engine's own comment argues
-the floor out — rolling back underneath a task still in flight would race the thing it is undoing
-— and leaves the other two unargued, which is the half to close. Separately, `#compensateOne`
-hands the undo `{}` when the original `effect.completed` recorded no `details`: an undo invoked
-with no arguments is not a refusal, and it should be `not_attempted` with a reason, the same
-fail-closed shape its three neighbouring guards already use.
+**RE-RUN 2026-09-01 AND IT STILL FAILS, but the cause has moved and the item is now narrower than
+what it was written against.** The driver was rebuilt from `rewind-through-subgraph.test.ts`'s own
+harness with a refund recorder added, and printed:
+
+    status succeeded charges [ 42 ]
+    rewind refused: no
+    charges [ 42 ]  refunds []
+
+**What changed underneath it is that both halves now exist and are not connected.**
+`#uncompensatedIrreversible` descends into child runs, so the PERMISSION crosses the boundary —
+that was already true. `#compensate` descends into child runs since `7c8b89c`, splicing each
+child's plan into the parent's reverse walk at the seq of the parent's `subgraph.started`, so the
+PROMISE can now be kept. What sits between them is one condition, `engine.ts:2980`:
+
+    if (plan.steps.length > 0 && live !== undefined) {
+      await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
+    }
+
+`plan` is `planCompensation` over the parent's own events. A parent that delegated has **zero**
+steps of its own, so the descent that exists is never entered. **The item is therefore no longer
+"build the walk" but "ask the same question the refusal one screen above already answers, in the
+other direction"** — and that is a strictly smaller change than the one this section originally
+scoped, which is worth recording because a stale item usually grows rather than shrinks.
+
+**Both named siblings have CLOSED, and neither closed the item.** The three `run.failed` append
+sites are now **one**: `Engine.#failRun` (`engine.ts:7412`, appending at 7417), which all three
+exits of `#finish` call and which compensates first — so the unmaterialised fan-out and
+`E_OUTPUT_MISSING` roll back for the same reason a failed task does (`7c8b89c`). And
+`#compensateOne` no longer hands the undo `{}` when there is no recorded `effect.completed`; it
+returns `not_attempted` with a reason naming the missing record. **One residue of that second
+sibling survives and it is smaller than the original:** a record that EXISTS but carries no
+`details` still yields `args = {}` at `engine.ts:1450`, because `effect.completed.result` is typed
+`unknown`. That is `TODO.md` §A.30's, not this item's.
 
 **Not in scope, and the reason is recorded so it is not re-litigated:** `#edgesToTake` still has
 `case "compensation": break;`. A rollback names a CALL and an edge names a NODE; traversing the
@@ -371,7 +463,24 @@ writes it. Two members have already been added and deleted for exactly that reas
 converts a refusal the live run really made into a refusal the record cannot show, and the whole
 value of `hermetic`/`match` is that a recorded run reproduces including its refusals.
 
-### 11 · `hermetic`'s third conjunct has no producer, so `hermetic: true` still over-claims
+### 11 · ~~`hermetic`'s third conjunct has no producer, so `hermetic: true` still over-claims~~ — **DONE 2026-09-01**
+
+**CLOSED by `dea4c09` (the forgeable brand), `9dce84d` and `686bc03` (the brand's own checks) and
+`e500a2e` (the two lines below).** `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts`
+is **13/13**, and the two assertions this section pasted as its failures are now among the names
+it prints: `A REPLAY THAT RE-EXECUTED AN UNVOUCHED-FOR BODY REPORTS 'hermetic: false' — driven,
+not composed` and `AND THE PAIR: the same graph loaded from a ResourceStore replays
+'hermetic: true'`. **The item's own prediction about the pair held exactly**, which is the reason
+this section is kept verbatim below rather than deleted: it said the second line was not optional
+because `isRealmBounded` was `true` on the realm call and `false` on the loader's wrapper, and the
+work confirmed that landing only the first would have made `hermetic` permanently false — a term
+false for everything distinguishes nothing. It also said the census test would go red on purpose
+when the caller appeared; it did, and it is kept inverted, asserting exactly one caller at the
+fetch site. Three existing assertions changed value, each true only while the term was inert —
+including the flagship `incident-triage` workflow, which is how the tree learned that workflow
+does not exercise the product's own function-loading path.
+
+*The original item, kept verbatim:*
 
 `ReplayReport.hermetic` is the field the replay thesis is quoted by, and its third term —
 "no body ran that the runtime could not vouch for" — is inert. The brand exists
@@ -786,9 +895,13 @@ API. Neither is buildable today and the reason is measured, not aesthetic:
 - There is nothing to pin. `GRAPH_API_VERSION` accepts exactly one value; `loom.dev/v2` and a
   missing field both fail `GRAPH000_API_VERSION`. No default has changed that an old graph would
   want preserved, so the event would be written by every run and read by nothing — the shape
-  `run.cancelled.forced` is already DECIDED FOR DELETION in `journal/events.ts`: written
-  once as the literal `false`, read by nothing, named by no document. (Its neighbour `clean`
-  is the field that survives, because an operator does ask what it answers.)
+  `run.cancelled.forced` had, which was written once as the literal `false`, read by nothing and
+  named by no document. **That field is now GONE rather than merely decided-for-deletion**, and
+  the correction matters because the example was doing the arguing: `run.cancelled`'s payload at
+  `journal/events.ts:165` is `{clean, unknownEffects}` and nothing in that file spells `forced`.
+  Its neighbour `clean` is the field that survived, because an operator does ask what it answers.
+  A decision is not a diff, and this sentence describing the field as pending outlived the diff
+  that executed it.
 - "An extension using a proposed API cannot be published" has no publish boundary to attach to.
   `@stable` here means a file landed in `resources/<kind>/` and `readResources` picked it up at
   boot. There is no registry and no publish step to refuse at.
@@ -850,9 +963,13 @@ measurement is how the last list got an item about labels on branch coordinates.
 sequence it:* a run rate at which the ceiling is reached often enough that "the surplus waits"
 stops being an acceptable answer — which under D.2's tens-of-runs-a-day it is not.
 
-**Splitting `engine.ts`.** 8,152 lines at this commit, against 3,552 for the next largest pinned
-file (`run/gates.ts`) and 18,338 for all ten together — 44% of the kernel by line count, in one
-file. Not
+**Splitting `engine.ts`.** Re-measured 2026-09-01: **8,454** lines, against **3,552** for the next
+largest pinned file (`run/gates.ts`) and **18,724** for all ten together — **45.2%** of the kernel
+by line count, in one file. **The previous reading, three days and three waves earlier, was
+8,152 / 18,338 / 44%** — so the file grew 302 lines and its share of the kernel rose 1.2 points
+while nothing on any roadmap touched it, entirely under `fix` traffic. Two readings are not a
+trend and this file will not pretend they are; what they establish is that the SHARE is the
+quantity worth re-measuring, because it can move without anyone deciding it should. Not
 sequenced, and the reason is unchanged: `scripts/kernel.json`'s header carries three structural
 arguments for co-location and none of them has moved. What the kernel gate establishes is that
 the boundary is OBSERVABLE — a `feat` touching a pinned file costs a `Kernel-seam:` trailer — not

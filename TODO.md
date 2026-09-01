@@ -21,48 +21,81 @@ still true and still open.
   A row with no closing condition is a row nobody owns, and it should be deleted with an argument
   instead of carried.
 
-`§Z` at the bottom is the register of what was closed 2026-08-25 → 2026-08-29 and must not be
+`§Z` at the bottom is the register of what was closed 2026-08-25 → 2026-09-01 and must not be
 re-fixed. It is short on purpose: the argument for each closure lives in the commit that made it,
 and the sha is the citation.
 
 ---
 
-## State — measured 2026-08-29, one command each
+## State — measured 2026-09-01, one command each
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,678 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| pinned public exports | **526** | `scripts/surface.json` (`check-surface.mjs` needs `dist/`, which needs a build) |
+| tests | **2,708 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| pinned public exports | **528** | `scripts/surface.json` (`check-surface.mjs` needs `dist/`, which needs a build) |
 | kernel | **10 files, 8 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **61 source files** | `node scripts/check-zero-dep.mjs` |
 | source files in `packages/core/src` | **61** | `find packages/core/src -name '*.ts' \| wc -l` |
 | tracked files carrying a NUL byte | **5**, and **0** invalid UTF-8 | census over `git ls-files` — see §F.15 for why grep cannot count these |
 | wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
 
-**The seam census is 8 and did not move this session.** Two `feat` commits landed (`cc320d1`,
-`cc64481`) and neither touched a kernel file, so no `Kernel-seam:` trailer was written.
+**The seam census is 8 and has not moved across the whole of this effort.** `check-kernel.mjs`
+reports `193 commits since 86b84c9, 8 declared seams`. The two `feat` commits of the last three
+waves (`50f7c03`, `8482859`) touch `cli.ts` and `evolution/live.ts`, neither of which is one of
+the ten pinned files, so no `Kernel-seam:` trailer was written.
 `git log --grep='^Kernel-seam:'` is the ledger and it is not a number anyone can quietly reset.
 
-**The roadmap is closed.** All eight items in `DESIGN.md`'s Sequence name a command that passes;
-the last was met against a live provider (`docs/evolution-loop-2026-08-27.md`). The next Sequence
-is unwritten and no longer blocked — §D was answered.
+**The roadmap is NOT closed, and the line here that said so was about the wrong list.** Items 1–8
+are the record and all eight pass; `DESIGN.md` then wrote items **9–13** on 2026-08-29, and four
+of those five still name a command that fails. **Item 11 is the one that closed** — `hermetic`'s
+third conjunct has a producer, and `test/run/hermetic-names-the-live-bodies.test.ts` is 13/13
+green on the pair the item specified. Items **9, 10, 12 and 13** were each re-run at this commit
+and each still fails; the reproductions are in `DESIGN.md` beside the items. Three have a backlog
+row here — item 9 is §A.30, item 10 is §A.1, item 13 is §A.15. **Item 12 has none, deliberately:**
+its subject is `README.md`'s fork ledger, whose two DEBT rows it closes, and §E's closing
+paragraph is explicit that the ledger is not to be re-enumerated in this file.
 
 ---
 
 ## What is still open, by section
 
-Counted off the rows, not remembered.
+**Recounted 2026-09-01 by running the grep, not by arithmetic on the previous number** — which is
+the only method that has ever produced a right answer here. Every column below comes from one of
+these three commands, and a reader who does not believe a cell should run them rather than argue:
 
-| section | rows | the shape of it |
-|---|---|---|
-| §A | 27 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
-| §B | 2 | declared and wired to nothing — down from 13 |
-| §C | 5 | unbuilt observability |
-| §D | 5 | decisions still owed, all of them narrow |
-| §E | 8 | deferred on purpose, with the reason — do not silently revive |
-| §F | 17 | properties to preserve, not history to honour |
-| §G | 7 | field-survey work the redesign creates |
-| §H | 1 | housekeeping |
+```bash
+# every row id, in order — §A–§E and §G–§H
+/usr/bin/grep -aoE '^- (~~)?\*\*[A-Z]\.[0-9]+ ' TODO.md | /usr/bin/grep -aoE '[A-Z]\.[0-9]+'
+# the struck subset, which is what "closed" means in this file's convention
+/usr/bin/grep -aoE '^- ~~\*\*[A-Z]\.[0-9]+ '  TODO.md | /usr/bin/grep -aoE '[A-Z]\.[0-9]+'
+# §F is a numbered list and is counted its own way
+/usr/bin/grep -acE '^[0-9]+\. \*\*' TODO.md
+```
+
+**Three columns, because one was the bug.** The old table had a single `rows` number and no rule
+saying whether a struck-through row counted, so it drifted every time a row closed: it said **27**
+for §A against **31** present rows and **25** unstruck ones — a number matching neither reading —
+and **1** for §H against **3**. A closed row is kept on purpose (§Z's header says why), so "rows
+present" and "rows still open" are different facts, and a table that states only their difference
+can be wrong without being falsifiable.
+
+| section | rows | struck | still open | the shape of it |
+|---|---|---|---|---|
+| §A | 31 | 9 | 22 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
+| §C | 5 | 1 | 4 | unbuilt observability |
+| §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
+| §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
+| §F | 17 | — | — | properties to preserve, not history to honour; nothing here is "open" |
+| §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
+| §H | 4 | 1 | 3 | housekeeping |
+
+The struck members, so the column is checkable and not merely asserted: **§A** A.3, A.4, A.5,
+A.16, A.17, A.22, A.27, A.28, A.33; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+
+**The §A numbering has two holes and they are not errors.** A.7 and A.9 are absent because both
+closed and moved bodily into §Z, where the argument for each closure is the commit. Ids are never
+reused — §H.2 is the record of what a renumber cost the last time one happened.
 
 ---
 
@@ -150,13 +183,19 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
 ### Oversight, and the places a floor is weaker than it reads
 
 - **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
-  `engine.ts:1153` argues it at length — an undo that policy answers `gate` must be REFUSED, or
+  `engine.ts:1199` argues it at length — an undo that policy answers `gate` must be REFUSED, or
   compensation becomes the back door that performs an irreversible action a gate would have
-  stopped. **Measured today**: flipping `engine.ts:1273` to `true` and running
-  `node --test "packages/core/test/run/*.test.ts"` leaves **1047/1047 green**. A guard nothing
-  would notice the deletion of is not yet a guard. **Closes when** a fixture drives a rollback
-  whose undo tool policy answers `gate`, and asserts `compensation.recorded {failed}` rather than
-  a performed undo.
+  stopped. **Re-measured 2026-09-01, and it got WORSE rather than going stale**: flipping the
+  seventh argument at `engine.ts:1457` (`#compensateOne`'s single `#invokeTool` call) from `false`
+  to `true` and running the WHOLE suite — not just `run/`, which is what the earlier reading of
+  this row did — leaves **2,708/2,708 green**. The original number was 1047/1047 over
+  `packages/core/test/run/*.test.ts`; that directory is 1061 tests now and the wider run says the
+  guard is unobserved everywhere, not merely in its own neighbourhood. A guard nothing would
+  notice the deletion of is not yet a guard. **Closes when** a fixture drives a rollback whose
+  undo tool policy answers `gate`, and asserts `compensation.recorded {failed}` rather than a
+  performed undo. **The two line numbers in this row moved once already** — they were `1153` and
+  `1273` — which is the argument for citing the SYMBOL (`#compensateOne`, the `nodeApproved`
+  paragraph above `#compensate`) beside the line, and it is now done.
 
 - **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
   covers synchronous execution only. The refusal is correct and is stated once at the seam
@@ -260,7 +299,9 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   the run, and an `open` gate suspends it, both excluded upstream — which is the argument for
   "unreachable" and is not the same as having shown it.
 
-- **A.22 · CLOSED — the branch is reachable, and its message was wrong.** The route was the one
+- ~~**A.22 · `loom score`'s `! N run(s) folded without their graph` line is a backstop with no
+  end-to-end test.**~~ **CLOSED by `fabc360` — the branch is reachable, and its message was
+  wrong.** The route was the one
   stated: a peer that reached the cohort key through `graph.mutated` while its spec is looked up
   by `run.submitted`'s hash. Driven, not argued — `compileMutation` builds a successor as
   `{...spec, nodes: [...nodes, ...added]}`, so a graph that is a PREFIX of another compiles to
@@ -279,8 +320,15 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   every control stays green including the function-body candidate. The budget half is worse than
   unimplemented — the obvious fail-closed answer, refusing any different-graph candidate that
   declares a budget, turns the gate off for every well-formed graph: `test/run/skeleton.ts`'s own
-  `summarize` declares `budget.costUsd: 0.15`, so do nodes in both `examples/graphs` the loop is
-  driven on, and `GRAPH009_UNBOUNDED_NODE` tells authors to add them. The narrower refusal is not
+  `summarize` declares `policy: {budget: {costUsd: 0.15}}` (`skeleton.ts:73`), and so do nodes in
+  **both** of the graphs the loop is actually driven on — `examples/graphs/review-bench.json` and
+  `examples/graphs/self-review.json`, two `costUsd` occurrences each — while
+  `GRAPH009_UNBOUNDED_NODE` tells authors to ADD that field to any spending node
+  (`graph/validate.ts:1962`, and `evolution/gate.ts:310` says so where the refusal would go).
+  **So "refuse a candidate whose policy the offline gate cannot exercise" is not free: it turns
+  the offline gate into a refuse-everything gate for every well-formed graph.** That is the
+  measurement, and it is the reason this half is carried rather than attempted again.
+  The narrower refusal is not
   expressible either, because the recording's SPEC is not in the journal (A.24), so nothing can
   tell "the candidate lowered the ceiling" from "it kept it and changed a body". **Closes when**
   replay can serve an adapter's answers, i.e. A.1's seam. Stated with the numbers at
@@ -314,8 +362,9 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   bound removes the SYMMETRY assumption (the signed-rank null IS sign symmetry — what it removes
   is normality). **Closes when** the mode can run an input more than once.
 
-- **A.27 · CLOSED — the median gates in the LIVE mode; the replayed one still cannot express
-  one.** §D.4 is decided: a pair's ratio is `candidate / baseline` when the baseline spent
+- ~~**A.27 · The live cost check divides TOTALS where D10.d says medians.**~~ **CLOSED by
+  `50f7c03`, and corrected by `160985c` — the median gates in the LIVE mode; the replayed one
+  still cannot express one.** §D.4 is decided: a pair's ratio is `candidate / baseline` when the baseline spent
   anything, 1 when neither side spent, and UNBOUNDED when a free input became a paid one — the
   limit of the ratio, not a convention, and a median is an order statistic so it never does
   arithmetic on it. That makes the rule total, which is what the "a check that sometimes has no
@@ -324,8 +373,18 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   `ran: false` to a refusal. The total is reported in the detail. `gateCandidate`'s `3-cost` is
   untouched and still divides `EvalReport` totals, because that type has no median to divide —
   see its docstring; closing THAT needs a `medianCostUsd` where `p95WallMs` already is.
+  **AND THE FIRST VERSION PICKED THE WRONG MIDDLE, which is worth keeping because the gate read
+  as built while it was still off for half its domain.** `Math.floor((length - 1) / 2)` is index 2
+  of 6 — the permissive side — so at an even count THREE pairs could go from a $0 baseline to a
+  paying candidate and `3-cost` still passed: driven, `3 × $0 → $100` plus `3 × $1 → $1` reported
+  `median pair cost ratio 1.00x` and PROMOTED while its own passing line printed
+  `totals 303.000000 vs 3.000000`. The upper median (`Math.floor(length / 2)`, `live.ts:435`) is
+  what makes "half the pairs went from free to paid" refuse. A check closed at 6-of-6 and open at
+  3-of-6 is not a check, and only an even-count fixture could show it.
 
-- **A.28 · A saturated outcome ranks cheapness.** Measured on five real runs sharing a cohort:
+- ~~**A.28 · A saturated outcome ranks cheapness.**~~ **CLOSED by `a0f0cec`.** The original
+  reading is kept in full, because the MEASUREMENT is what made it findable and the escape it
+  names is still the only real one. Measured on five real runs sharing a cohort:
   every one had `outcome: 1`, `costNormalized` clamps at the cohort median, two ranked and three
   tied at exactly 0.600, unrankable — and `isGolden` condition 2 is "top decile", so a saturated
   outcome makes that read "the cheapest decile". The cause is **S2, the human gate decision**
@@ -368,7 +427,39 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
   journal can justify), rebuilding the child's context from the parent's frozen
   `subgraphs[ref]`, and journaling `not_attempted` **in the child's journal** where it cannot.
   `test/run/compensation-reaches-children.test.ts` fails without both halves.
+  **Also closed since, by `160985c`, and each was a guard recording a thing as handled when
+  nothing had handled it:** a rollback made every CHILD journal fail the repo's own audit
+  (`loom audit <childRunId>` said `3 violation(s)` on a rollback the engine had just performed
+  correctly, because a child is already terminal when its parent fails — `audit.ts` gains an arm
+  opened only by `effect.started{kind:"compensate"}`, not a relaxation); a TRANSIENT block was
+  settled as if structural (`planCompensation` settled a seq on any `compensation.recorded`, so
+  planning after "this engine cannot rebuild the child's graph" gave `steps= 0  settled= [8]` —
+  a zero-step plan produced by following the row's own advice — and `compensation.recorded` now
+  carries an optional `retryable`, absent meaning not retryable so every existing journal settles
+  exactly as it did); and a GRANDCHILD's effects were dropped in silence, `#compensateChild`
+  having journaled one level and returned.
+  **A residue of `#compensateOne`, narrower than the row it came from and still there:** the
+  "no `effect.completed` recorded at all" case is now `not_attempted` with a reason, but a record
+  that EXISTS and carries no `details` still yields `args = {}` at `engine.ts:1450`, because
+  `effect.completed.result` is typed `unknown` and nothing constrains it. An undo invoked with no
+  arguments is not a refusal. **Closes when** that case is `not_attempted` too, which is one arm
+  and the same fail-closed shape its three neighbours already use.
   **Still open:**
+  - **A REWIND ACROSS A `subgraph` NODE IS PERMITTED BECAUSE THE CHILD DECLARED AN UNDO, AND
+    THEN DOES NOT RUN IT.** This is `DESIGN.md`'s Sequence item 9 and it is the one the child
+    descent above did NOT close — driven again at this commit, one `subgraph` node whose child
+    charges `pay.refundable` (irreversible, `compensation: {tool: "pay.refund"}`), then
+    `engine.rewind(runId, 1)`: `status succeeded  charges [42]` → `rewind refused: no` →
+    `charges [ 42 ]  refunds []`. **The reason is now sharper than when the item was written, and
+    it is an ordering of two guards rather than a missing feature.** `#uncompensatedIrreversible`
+    DOES descend into child runs, so the permission crosses the boundary; `#compensate` DOES
+    descend into child runs since `7c8b89c`, so the machinery to run the undo exists. What sits
+    between them is `rewind`'s entry condition at `engine.ts:2980`,
+    `if (plan.steps.length > 0 && live !== undefined)`, where `plan` is `planCompensation` over
+    **the parent's own events only**. A parent that delegated has zero steps of its own, so the
+    descent that exists is never entered. **Closes when** that condition asks whether there is
+    anything to undo ANYWHERE under the run — which is the same question
+    `#uncompensatedIrreversible` already answers one screen above it, in the opposite direction.
   - **`JoinNode.onBranchError: "compensate"`**, refused at compile by
     `GRAPH008_COMPENSATE_UNIMPLEMENTED`. What it would take is recorded at `#absorbedByJoin`:
     a BRANCH-PATH scope the planner does not have (its only scope is `sinceSeq`, and branches
@@ -523,18 +614,59 @@ is a better view of nothing.
   - **`loom.scheduler.tick`** — C.3, and a design gap rather than a wiring one: there is no
     tick loop in `run/scheduler.ts` to instrument.
 
-  `loom.schedule.admit` is not among the six: §D refused admission control, so the count went
-  8 → 7 by a decision. This is the first time it has moved by a build.
+  **The two movements of this count are different things and the row says which is which.**
+  8 → 7 was a DECISION: `loom.schedule.admit` is not among the six because §D refused admission
+  control permanently, so the name has no subject and never will — nothing was built and nothing
+  is owed. 7 → 6 was a BUILD: `loom.effect` is minted and folded. A backlog count that falls
+  because work landed and a backlog count that falls because the work was cancelled are the same
+  arithmetic and opposite facts, and a row that reports only the number reports neither.
 
-- **C.2 · Eleven documented span attributes are set on no built span.** `budget.cost_usd`,
-  `trigger.kind` (`loom.run`); `node.type` (`loom.task`); `capability`,
-  `gen_ai.request.max_tokens`, `loom.replayed` (two spans), `tool.attempt`, `tool.source`,
-  `reducers`, `gate.posture`, `gate.batched`. Re-verified 2026-08-29: `grep -ac '"<attr>"'` over
-  `spans.ts` returns **0 for all eleven**, and the two attributes an earlier count wrongly
-  included — `state.hash.before` / `state.hash.after` — return **2 each**, which is the control
-  proving the grep discriminates rather than failing silently. Those two ARE set, on
-  `loom.state.reduce` and not on the span the source table blamed; the old figure of "roughly
-  fifteen" was wrong under every scoping.
+- **C.2 · Three of the eleven are built; the remaining eight are NOT DERIVABLE, and that
+  falsifies this row's own premise rather than shrinking it.** The row used to say eleven
+  documented span attributes are set on no built span *and* that "every one of them is a value the
+  journal fold already has in hand". `deafe43` tested the second half by trying to build all
+  eleven. **It is false for eight of them, and this row must be read as a correction and not as a
+  tick.**
+
+  **Three were journaled fields this fold already read the event for and discarded** — a span
+  poorer than the journal by accident. `policy.decided.capability` → `capability` on `loom.policy`;
+  `gate.raised.batch.id` → `gate.batched` on `loom.gate`; `effect.started.attempt` →
+  `tool.attempt`, on the `loom.tool` arm only. Reproduced by folding a journal carrying all three
+  (`capability: "fs:write"`, `batch.id: "g0"`, `attempt: 3`) and finding none on any span; driven
+  on the one that varies today, `gate-saturation`'s five-branch fan-out now gives five
+  `loom.gate` spans all reading the founder's gate id. **Two of the three are faithful reads of
+  DEAD WRITERS and saying so is the point:** `run/engine.ts` builds both `policy.decided` payloads
+  literally and neither includes `capability`, and all five `effect.started` writers pass the
+  literal `1`.
+
+  **Eight are not in the journal at all**, each for a stated reason, and a span attribute carrying
+  a guess is worse than an absent one: `node.type` (only on `task.started`, which has no writer —
+  §B.2); `budget.cost_usd` (the ceiling is never journaled; `budget.reserved`/`budget.settled`
+  have no writer either); `reducers` (`channel.written` has no writer, and `state.reduced` carries
+  channels rather than reducers); `trigger.kind` (nothing journals a trigger —
+  `run.submitted.submittedBy.kind` is WHO, and relabelling it is a different fact under a
+  documented name); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never
+  the request; the spelling was checked against the OpenTelemetry gen_ai conventions and is right,
+  the value is absent); `tool.source` (no `source` on `ToolManifestLite`, `ToolDefinition` or
+  `tool.called` — the concept is not in the tree); `loom.replayed`, on both its spans (a served
+  effect appends nothing, and a replay rewrites `model.called.provider` to the recorded leaf **on
+  purpose**, so a replayed journal is designed to be indistinguishable); `gate.posture` (a
+  constant `"in"` reached by pairing two events — a constant obtained by an inference is both
+  things this file refuses).
+
+  **The grep this row was previously re-verified with was itself an undercount, which is why the
+  eleven must be counted two ways.** `/usr/bin/grep -ac '"<attr>"'` returns 0 for `capability` at
+  HEAD even though it IS set, because `spans.ts` writes it as a bare identifier (`capability:`,
+  `spans.ts:798`). Counting both spellings —
+  `/usr/bin/grep -aoE '"(budget\.cost_usd|…|gate\.batched)"|(^|[^.\w"])(capability|reducers|trigger|source)\s*:' packages/core/src/telemetry/spans.ts`
+  — returns exactly three today: `capability:`, `"gate.batched"`, `"tool.attempt"`. The control
+  that proves the grep discriminates rather than failing silently is still
+  `state.hash.before`/`state.hash.after`, **2 each**, set on `loom.state.reduce` and not on the
+  span the source table used to blame.
+
+  **Closes when** each of the eight either gains the journal event it needs — which is a
+  `journal/events.ts` change and therefore a seam, for every one of them — or is struck from the
+  documented set with the reason above beside it. **It does not close by emitting them.**
 
 - **C.3 · No scheduler-tick telemetry, and there is no tick loop to instrument.** A design gap,
   not a wiring gap. **Per-task queue wait is already measurable** — `task.ready` and `task.leased`
@@ -546,17 +678,30 @@ is a better view of nothing.
   `loom trace` follows it; nothing off this machine can. **Closes when** an exporter exists — and
   it belongs outside the core, which takes no runtime dependencies.
 
-- **C.5 · The span taxonomy was NOT grown for subgraphs: a subgraph renders as `loom.tool`.**
-  Verified at `spans.ts:862`, where `subgraph.started` opens a span named `loom.tool` carrying
-  `effect.kind: "subgraph"`, `subgraph.child_run_id`, `.ref`, `.graph_hash`, `.budget_usd` and a
-  `SpanLink`. Every attribute a reader needs is there and the NAME is wrong. **Closes when** §D.2
-  decides whether a ninth span name is warranted.
+- ~~**C.5 · The span taxonomy was NOT grown for subgraphs: a subgraph renders as `loom.tool`.**~~
+  **CLOSED by `aaa4a9a`, and NOT by adding a name — §D.2 was answered "no ninth name".** The
+  original reading was right about the defect and wrong about the remedy: `subgraph.started` did
+  open a span named `loom.tool`, and every attribute a reader needs (`effect.kind: "subgraph"`,
+  `subgraph.child_run_id`, `.ref`, `.graph_hash`, `.budget_usd`, a `SpanLink`) was already on it.
+  What was actually broken was the partition — the fold split a six-member union with `modelish`
+  and its NEGATION, and `!modelish` is not `tool` — so `subgraph` and `random` both landed on
+  `loom.tool` for the same reason. Three arms fix all of it: `model|summarize → loom.model`,
+  `tool|compensate → loom.tool`, `subgraph|random → loom.effect`. `subgraph.started` now opens
+  `loom.effect` at `spans.ts:993`, and the two literals that can name that span agree by
+  construction because `start` is a no-op on an open id — if they disagreed, a span's name would
+  depend on which events a read happened to contain. Driven:
+  `test/telemetry/subgraph-trace-driven.test.ts`, 2/2, selecting the span by
+  `attributes["effect.kind"] === "subgraph"` rather than by name — which is the check that shows
+  a ninth name was never what the reader needed.
 
 ---
 
 ## D · Decisions still owed
 
-**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remain, renumbered `D.1`–`D.5`.**
+**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remain, renumbered `D.1`–`D.5`, and
+of those five only THREE are still owed — `D.1`, `D.3`, `D.5`.** `D.4` was answered by
+`50f7c03` and `D.2` by `aaa4a9a`; both are struck below and kept, because a decision's argument is
+the thing a future reader needs and deleting the row deletes it.
 Twelve were answered on 2026-08-28 and are in §Z with the commit that executed each — the rest had
 already closed before this session. **The surviving five do NOT keep their old numbers**, which is
 why §H.2 exists. Many were answered by DELETION, which is the honest direction for a tree whose §B
@@ -590,14 +735,23 @@ Each row below states what a decision would settle. None is the implementer's to
   findings die, and a §D item nobody picks up is functionally the silence that gave §B thirteen
   entries. If this is still open at the next re-check, filing it was the wrong call.
 
-- **D.2 · A ninth span name for a subgraph.** See §C.5. The decision is whether the span taxonomy
-  is a closed vocabulary; if it is, the name stays `loom.tool` and C.5 is closed by argument.
+- ~~**D.2 · A ninth span name for a subgraph.**~~ **ANSWERED: no ninth name.** The question was
+  whether the span taxonomy is a closed vocabulary. It is, and the decision landed with the code
+  in `aaa4a9a` rather than as a note: a subgraph is named by the existing `loom.effect` and told
+  apart by `effect.kind`, which is how the shipped test already selects it. **The alternative was
+  rejected on a measurement, not on taste** — a generic parent over all four effect kinds would
+  either mint a second span per effect (doubling a row count `spans.ts`'s own header budgets at
+  "~500 task spans, not 2,500") or rename `loom.model` and `loom.tool` out of existence, losing
+  the `gen_ai.*` and `tool.*` groupings that are the reason those two names are worth having.
+  A parent whose only content is the union of its children is an indirection, not a taxonomy.
 
 - **D.3 · Whether an author gets a graph-level cleanup node on failure**, beside journal-driven
   rollback. Compensation edges are a compile-time declaration by design (§A.30); this asks whether
   there should also be a node an author can point at.
 
-- **D.4 · ANSWERED: the median gates, and an undefined pair is UNBOUNDED rather than dropped.**
+- ~~**D.4 · Whether the median gates, and what an undefined pair does to it.**~~
+  **ANSWERED by `50f7c03`: the median gates, and an undefined pair is UNBOUNDED rather than
+  dropped.**
   See §A.27 for the rule and `pairedCostRatio` in `evolution/live.ts` for the derivation. The
   live mode gates on the median pair; the replayed one still divides totals because `EvalReport`
   carries no median, and that divergence is now stated at both `3-cost` docstrings rather than
@@ -618,10 +772,14 @@ how a deferral becomes a permanent exemption nobody re-examines — which is wha
 of these on 2026-08-26.
 
 **Vintage, stated rather than implied: every reason below was last tested by running on
-2026-08-25/26, not on 2026-08-29.** The two facts re-checked today are E.1's (`LeasedScheduler`
-still has no caller — see §B.1) and E.5's fork-list membership. A reason nobody has re-run in
-three days is still the best evidence there is for these, and it is not the same as a measurement
-taken now.
+2026-08-25/26, not on 2026-09-01.** The two facts re-checked today are E.1's — `LeasedScheduler`
+still has no construction site anywhere in `src/`
+(`/usr/bin/grep -arn 'LeasedScheduler' packages/core/src` returns only its own definition in
+`run/scheduler.ts` and four docstring mentions in `cli.ts` and `engine.ts`; see §B.1) — and E.5's
+fork-list membership, where `README.md` still names **a reducer** among the five things that need
+a fork. **A reason nobody has re-run in a week is still the best evidence there is for these, and
+it is not the same as a measurement taken now.** The gap has widened by four days since this
+paragraph was written, which is exactly the fact it exists to expose rather than to excuse.
 
 - **E.1 · Distributed deployment.** A distributed v1 by a small team yields a distributed
   prototype, not a product. **The half of this that was false is now §B.1**, where it belongs: the
@@ -795,6 +953,14 @@ Each traces to a decision in `DESIGN.md`.
   today; (b) `#compileChild`'s docstring still says a child's own refs "go to the live resolver on
   every compile", which this change makes false for every child `resolveSubgraphs` collected — the
   claim about `tools.manifests()` in the same paragraph is unaffected and still holds.
+  **(b) is the only part of this row still open, and it is a FALSE CLAIM rather than a missing
+  one, which is the worse kind.** Re-checked at this commit by reading both sides:
+  `engine.ts:5655` still says `resolveManifest` "walks only the PARENT's nodes, so the child's own
+  `function/…` and `prompt/…` refs miss the frozen map", while `compile.ts:294` now calls
+  `resolveManifest(input, subgraphs)` and its own line 288 says "the manifest pins the refs of
+  these child specs too". A reader who trusts the engine comment will conclude the freeze is
+  weaker than it is and may re-fix something already fixed. **Closes when** that paragraph is
+  rewritten to keep the `tools.manifests()` half and drop the refs half.
 - **G.6 · Proposed-API mechanism and a version pin (D5).** Both halves unbuilt: no proposed-API
   declaration file, no opt-in, no publish-time refusal for an extension that uses one, and no
   runtime version pin.
@@ -845,8 +1011,10 @@ Each traces to a decision in `DESIGN.md`.
   distinguishes "no sources" from "sources I cannot read" rather than passing on either. **Still
   open:** nothing rebuilds the binary automatically, so the standing condition remains — after a
   source edit, `npm run build:binary` before trusting `bin/loom`.
-- **H.2 · The 2026-08-29 renumber broke thirteen in-tree citations of this file; all are
-  repointed.** Recorded as a set rather than described, because two of them had the dangerous
+- ~~**H.2 · The 2026-08-29 renumber broke thirteen in-tree citations of this file.**~~
+  **CLOSED by `814e283` — all thirteen are repointed.** Kept, not deleted, because the TABLE is
+  the thing a future renumber needs and the command at the end of it is the cheap half of the
+  lesson. Recorded as a set rather than described, because two of them had the dangerous
   shape — after the renumber they resolved to a *plausible, unrelated, live* row instead of to
   nothing, which is worse than dangling. `src/run/engine.ts:7096` cited `§B.1` for a compensation
   gap and landed on `LeasedScheduler`; `test/deployment/boot-banner.test.ts:18` cited `A.15` for
@@ -869,12 +1037,45 @@ Each traces to a decision in `DESIGN.md`.
   — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
   into enumerations.
 
+- **H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four.** Found
+  while re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy
+  §F.8. `graph/compile.ts:163` says "**THE SET IS `agent`, `tool`, `evaluator`**" and "why the
+  other **five** do not"; the bullets below it describe four members (`function` is the fourth,
+  added by `ff4888d`) and the next heading says "**THE FOUR** WITHOUT ONE". The CODE is right —
+  `effectiveTimeout` at `compile.ts:206` tests all four — so nothing is mis-executed; what is
+  wrong is the two summary numbers, which are the only part of a 45-line comment a hurried reader
+  takes away. **Closes when** both read four, and the fix is two words. Recorded rather than done
+  because this lane owns `TODO.md` and `DESIGN.md` and not `src/`.
+
 ---
 
-## Z · Closed 2026-08-25 → 2026-08-29 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-01 — do not re-fix these
 
 The register. Each line names what closed and the commit carrying the argument; `git show <sha>`
 is the citation, and it is durable in a way a working-notes directory is not.
+
+**Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
+paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
+body type with no realm — `function`, excluded first on a false argument and added after a
+reviewer drove a hand-registered async body hanging forever — and that the subgraph descent was
+order-dependent and now keys on `reachedAt`.) The promotion gate: the saturated ladder (`a0f0cec` — §A.28), the paired
+cost median (`50f7c03`, corrected at `160985c` — §A.27), the improvement bound (`8482859` —
+§A.26's first half), the no-graph note (`fabc360` — §A.22), and the `maxTurns` half of §A.23
+(`a702063`). `loom.effect` is minted and the fold no longer names a PRNG seed draw `loom.tool`
+(`aaa4a9a` — §C.5 with it). Three span attributes the fold read and threw away (`deafe43`).
+Compensation reaches children and every `run.failed` exit — of which there is now exactly one
+(`7c8b89c`) — and a rollback no longer fails the repo's own audit, a transient block is no longer
+recorded as settled, and a grandchild's effects are no longer dropped (`160985c`). Unlabelled ⇒
+untrusted on the integrity axis (`5bff93b` — §G.4's first half). A subgraph's own prompt was read
+live while the parent's task was executing (`0f605a9` — §G.5). Transport retry collapsed into the
+engine's journaled curve, 9 HTTP requests per dead turn down to 3 (`683d928` — §G.7). And a
+malformed `effects` value could claim the PURITY label: `isExternal` asked
+`effects === undefined || effects.length > 0`, so `null` and `""` read as "declared, and empty" —
+the author's claim that a node is pure computation — while `{}`, `0` and `{length: 0}` crashed
+`reachableToolNames`, the helper the capability ceiling, the unknown-tool diagnostic and the
+oversight floor all share. Refused at compile and failed closed in `isExternal` (`7e889a1`).
+**None of these opened a row here, and that is deliberate: a defect found and closed inside one
+wave is history, not backlog.**
 
 **Answered by DELETION (a decision, not a shortfall).** `JoinNode.timeoutMs` and
 `E_JOIN_TIMEOUT` (`21be5ce`) — a barrier deadline's undecidable case has no journaled answer, and
@@ -921,9 +1122,13 @@ loop is closed end to end against a live provider.
 **Two floors that read as claims about a node and were claims about its declaration** (`f5a047e`,
 `02d3db0`). §A.9 — a node declaring no `timeoutMs` had NO deadline, measured as `Engine.advance`
 unsettled at 1,500 ms on one `tool` node and never going to settle; `NodePlan.timeoutMs` now
-carries an effective deadline for `agent`, `tool` and `evaluator`, the engine reads the PLAN, and
-`loom compile` prints it with `declared` or `default`. The commit names why each of the other five
-node types gets none. §A.7 — `reachableToolNames` does not descend, and it still does not: the
+carries an effective deadline for **`agent`, `tool`, `evaluator` and `function`** — four, not the
+three `f5a047e` shipped. `ff4888d` added the fourth after the exclusion's argument was driven and
+found false: `functions.register("function/hang@stable", async () => new Promise(() => {}))` on a
+node declaring no `timeoutMs` gave `STILL HANGING after 1500ms`, the identical reproduction that
+opened the item for `tool`. The engine reads the PLAN, `loom compile` prints it with `declared` or
+`default`, and the FOUR that get none — `router`, `join`, `human_gate`, `subgraph` — each carry a
+stated reason at `compile.ts`'s `effectiveTimeout`. §A.7 — `reachableToolNames` does not descend, and it still does not: the
 descent is `reachableToolNamesThrough` in `graph/validate.ts`, folded into the parent's class
 floor, capability ceiling and mutation gate. **Billed honestly: it closed no oversight hole** — the
 child always gated on its own floor — what it bought is the parent's missing
