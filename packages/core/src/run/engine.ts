@@ -2993,7 +2993,27 @@ export class Engine {
     // blocked journals nothing, because `#compensate` dispatches through `#invokeTool` and takes
     // a `RunContext` it has no way to build. The refusal above does not cover it either — there
     // is nothing to dispatch, so there is nothing to be unable to dispatch.
-    if (plan.steps.length > 0 && live !== undefined) {
+    //
+    // AND THE QUESTION IS "IS THERE ANYTHING TO UNDO ANYWHERE UNDER THIS RUN", NOT "DOES THE
+    // PARENT HAVE A STEP OF ITS OWN". `plan` is `planCompensation` over the parent's OWN events,
+    // and a parent whose only work was DELEGATED has zero steps of its own — so the descent
+    // `#compensate` grew for exactly this case was never entered from a rewind, and the guard
+    // that was supposed to skip an empty rollback skipped every delegated one instead.
+    //
+    // Measured on `rewind-through-subgraph`'s fixture, the same `pay.refundable` call in the two
+    // positions the file already contrasts: run it in the parent and the rewind journals a
+    // `compensation.recorded`; delegate it to a subgraph and the rewind wrote NOTHING, in any
+    // journal, with the charge standing and no row saying so. That is precisely the asymmetry
+    // `#uncompensatedIrreversible` closed for the REFUSAL half one screen above — "we refuse to
+    // rewind past a child's charge" held while "we undo a child's charge" did not — arriving a
+    // second time at the second half of the same feature.
+    //
+    // `#compensate` is the only thing that can answer the tree-wide question, because answering
+    // it means walking the tree: it collects the `subgraph.started` events after `sinceSeq`
+    // itself, descends, and returns a zero tally when neither it nor any descendant has a step.
+    // So the pre-check is DELETED rather than widened — a second copy of the descent here is the
+    // drift hazard, not the fix.
+    if (live !== undefined) {
       await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
