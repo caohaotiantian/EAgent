@@ -267,8 +267,12 @@ named THE WRONG DOOR:
     E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?). …
 
 (Each line continues "A flag this binary does not understand is IGNORED unless it is refused here
-— and for --token, ignored means the control plane authenticates nobody." The `…` is there
-because a quote that silently stops mid-sentence is not the quote this section's rule asks for.)
+— and for --token, ignored means the control plane authenticates nobody. Run `loom help` for the
+list." The `…` is there because a quote that silently stops mid-sentence is not the quote this
+section's rule asks for — and the first version of THIS parenthetical, written to fix exactly that,
+itself stopped one sentence early and unmarked. A correction that commits the defect it corrects is
+the failure mode this file's rules name most often; it is cheap to avoid by pasting what the binary
+printed and reading to the end of it.)
 
 **There is still no such flag, and there is deliberately not going to be one.** All four rows came
 off through the SAME door: `--extension-module`'s default export is now handed

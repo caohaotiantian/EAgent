@@ -129,7 +129,7 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 34 | 12 | 22 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 34 | 14 | 20 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 1 | 4 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
@@ -139,7 +139,11 @@ can be wrong without being falsifiable.
 | §H | 4 | 1 | 3 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+(A.34 and A.35 joined this list a commit later than they should have: both were written with the
+`~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
+grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
+convention is `- ~~**A.N · …`, and the column is only checkable if every row obeys it.)
 
 **§A's `rows` column counts 34 LINES against 33 distinct ids, and the extra one is deliberate.**
 A.20 matches the grep twice — the struck row that closed it, and the superseded four-sighting
@@ -249,7 +253,7 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 ### Oversight, and the places a floor is weaker than it reads
 
-- **A.34 · `Engine.rewind` had no floor. It has the GATED half of one now; the LOUD half is A.35.**
+- ~~**A.34 · `Engine.rewind` had no floor.**~~ **DONE 2026-09-01 — the GATED half; the LOUD half is A.35, also done.**
   `rewind(runId, atSeq, reason, by = SYSTEM_ACTOR("operator"))` defaulted to a system actor and
   checked it nowhere. Driven, 2026-09-01: `rewind(runId, before, reason)` with no fourth argument
   at all was accepted and journaled `system:operator`, and over HTTP a plane whose `identify`
@@ -274,7 +278,7 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   the seventh argument to `#invokeTool` in `#compensateOne` — `nodeApproved`, cited by NAME here
   because every `engine.ts:NNNN` this file carried was stale when re-checked (see §F.18).
 
-- **A.35 · ~~A rewind's authorization is blind~~ — DONE 2026-09-01, and the plan it was written
+- ~~**A.35 · A rewind's authorization is blind.**~~ **DONE 2026-09-01, and the plan it was written
   from was wrong about its own premise.** The decision is `b90b137`'s fifth — a compensation edge
   fires on rewind as well as on run failure, so "an operator inspecting history can trigger
   real-world undo", which must be "loud, gated by the same oversight floor an irreversible action
@@ -1179,10 +1183,17 @@ anecdotes.
     eight distinct line numbers, and all eight were stale** — every one landed on an unrelated
     comment. `:1457` (the `nodeApproved` argument) is at 1636; `:2980` (a condition that has since
     been DELETED) is mid-docstring; `:7412` (`#failRun`) is at 8116. They were replaced by symbol
-    names in the same commit as this entry, and that same grep now returns exactly two lines:
-    §A.34's mention of the *pattern* `engine.ts:NNNN` (no digits), and §H.2's `engine.ts:7096`,
-    which is the exception below. **Neither is a citation, which is what makes this rule
-    checkable rather than merely stated.** A symbol is greppable, survives every edit above it,
+    names in the same commit as this entry. **The invariant, stated instead of a count:** no
+    line-numbered citation into `src/` remains anywhere in these two files. Every surviving match
+    of that grep is one of three non-citations — this entry's own example, §A.34's mention of the
+    *pattern* `engine.ts:NNNN`, and §H.2's historical `engine.ts:7096`, which is the exception
+    below. **None is a pointer, which is what makes this rule checkable rather than merely
+    stated.**
+    An earlier draft of this sentence said the grep "returns exactly two lines". It returns
+    three, and the third is THIS ENTRY — the line describing the grep matches it. That is
+    §F.9 ("a self-describing claim has no fixed point") broken by the row asserting §F.18, which
+    is the second time this session a rule was violated by the paragraph stating it. State the
+    invariant; never total the matches of a grep inside the text the grep searches. A symbol is greppable, survives every edit above it,
     and fails LOUDLY when it is renamed; a line number into a nine-thousand-line file goes stale
     on the next commit and fails SILENTLY, by pointing at something plausible. One exception, and
     §H.2's own rows are it: a citation that records what a pointer *was* is the one use a stale

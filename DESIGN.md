@@ -265,13 +265,16 @@ and the honest thing was to stop calling them a plan rather than to relax the ru
 verbatim and still numbered 1–8, below the live list — a Sequence with its outcomes attached is
 the only evidence anyone has about what this project's estimates are worth.
 
-**THE RULE HOLDS FOR ITEMS 9–13 TOO, and it is the only thing that makes the list worth reading.**
+**THE RULE HOLDS FOR ITEMS 9–14 TOO, and it is the only thing that makes the list worth reading.**
 Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
-an item whose command passes gets cut rather than reworded. **Applied to the list itself at
-`5ffc223`: THE LIVE LIST IS ONE ITEM.** Items 10, 11, 12 and 13's first half have all landed and
-are marked DONE; item 9 alone is still red, and what is left of it is a DECISION rather than a
-build (`TODO.md` §A.8) — so this list has stopped being a roadmap in the ordinary sense, and what
-comes next is the section headed "What follows item 9" below. The status table at the head of the
+an item whose command passes gets cut rather than reworded. **Applied to the list itself:
+IT IS TWO ITEMS — 9 and 14.** Items 10, 11, 12 and 13's first half have all landed and are marked
+DONE. Item 9 is still red and what is left of it is a DECISION rather than a build (`TODO.md`
+§A.8). Item 14 was added in the same commit that closed the others and its command fails today, so
+by this section's own rule it is a live item like any other.
+**An earlier version of this paragraph said ONE, and said it in the commit that added the second** —
+the count and the thing counted moved together, which is why the sentence now names the members
+instead of totalling them. The status table at the head of the
 live list carries the commands and their verdicts. Four candidates were cut that way
 while this list was being written: `loom suite freeze --cohort` (already shipped — see item 5),
 the trajectory fold's blindness to externalised writes (fixed at `7d627b4`), the D.7.6 provider
@@ -280,7 +283,7 @@ refusal that could not re-derive on replay (fixed at `633e265` — for journals 
 onto the channel, and no fix can invent a field those journals do not have), and admission
 control's successor, which is not a build at all — see "Deliberately not sequenced".
 
-**THAT BLOCKER IS GONE, 2026-08-28, and the next Sequence is below as items 9–13.** This section
+**THAT BLOCKER IS GONE, 2026-08-28, and the next Sequence is below as items 9–14.** This section
 used to say the next list "cannot be written here yet" because it was blocked on thirteen `TODO.md`
 §D decisions only the maintainer could make, with `D.2` — the real tenant, concurrency and
 run-rate numbers — first. `D.2` was ANSWERED: **one machine, one tenant, the maintainer's own

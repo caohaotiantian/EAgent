@@ -213,15 +213,23 @@ test("A REWIND IS NOT A HUMAN'S YES TO THE UNDO — THE STEP IS JOURNALED failed
   //     CAN suspend and a human answers the gate. It dispatches. The only difference between the
   //     two legs is who said yes, which is what `nodeApproved` carries.
   //
-  //     It is journaled `failed` rather than performed because THE REWIND DOOR DOES NOT GATE.
-  //     `Engine.rewind` defaults `by` to `SYSTEM_ACTOR("operator")` and checks nothing about it,
-  //     unlike `steer`, `resolveGate` and `resolveBatch`, which each refuse a non-human actor —
-  //     and the HTTP command route hands it `commandActor`'s system actor for a service token
-  //     unchanged. `runThenRewind` passes no actor at all and is accepted, which is that fact
-  //     driven rather than read. So an undo inheriting "the operator already approved this"
-  //     would be an automated path granting itself approval, the one direction oversight may
-  //     not move. The undos become dispatchable when the rewind door grows a floor of its own,
-  //     and not before.
+  //     It is journaled `failed` rather than performed, and the reason is now a DECISION rather
+  //     than a missing floor. That floor exists: `rewind` takes `by: HumanActor` and a
+  //     `RewindAuthorization`, both required with no default, and refuses a non-human first —
+  //     `steer`'s shape. The operator has also SEEN this exact step, because `planRewind` returns
+  //     the dispatch list and `rewind` refuses a hash that no longer matches it.
+  //
+  //     THIS COMMENT SAID THE OPPOSITE UNTIL 2026-09-01, and it is worth saying why it survived:
+  //     the sentence it carried — "`Engine.rewind` defaults `by` to `SYSTEM_ACTOR("operator")`
+  //     and checks nothing about it" — was true when written, was deleted from `DESIGN.md` as
+  //     spent when A.34 landed, and lived on HERE for two more commits. A false claim in a source
+  //     comment outlives the document that retired it, which is `TODO.md` §G.5(b)'s class exactly.
+  //
+  //     So what is left is not a gap but a question, and it is `TODO.md` §A.8's: the human
+  //     authorized THIS PLAN, and `#compensateOne`'s own docstring argues the other way — "a
+  //     rollback is not a human's yes to anything: the human, if there was one, approved the
+  //     action being undone". Flipping the seventh argument turns this assertion and A.8's guard
+  //     over in the same character, which is how you know they are one decision.
   const delegated = await runThenRewind("subgraph", "pay.refundable");
   assert.equal(delegated.refused, undefined, "the baseline from the test above: this rewind is allowed");
 
