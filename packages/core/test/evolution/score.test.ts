@@ -57,6 +57,7 @@ function trajectory(over: Partial<Trajectory> = {}): Trajectory {
   return {
     runId: "run_1" as RunId,
     graphHash: "h",
+    authoredGraphHash: "h",
     cohort: { workflow: "w", graphHash: "h", tenantTier: "default", inputBucket: "b" },
     steps: [],
     outcome: signals(),

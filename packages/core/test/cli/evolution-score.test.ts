@@ -34,10 +34,11 @@ import { join } from "node:path";
 
 import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
-import type { GraphSpec } from "../../src/graph/spec.ts";
+import { compileMutation } from "../../src/graph/mutate.ts";
+import type { EdgeSpec, GraphSpec, NodeSpec } from "../../src/graph/spec.ts";
 import type { ToolRegistry } from "../../src/run/registry.ts";
 import { SYSTEM_ACTOR, isEvent, type EventPayloads, type JournalEvent } from "../../src/journal/events.ts";
-import type { RunId } from "../../src/ids.ts";
+import type { NodeId, RunId, TaskId } from "../../src/ids.ts";
 
 const GRAPH = {
   apiVersion: "loom.dev/v1",
@@ -532,6 +533,149 @@ test("A SCORE UNDER OTHER WEIGHTS IS NOT A MEMBER, and the exclusion is counted"
     const seen = JSON.parse(r.out) as { members: { runId: string }[]; excludedForWeights: number };
     assert.deepEqual(seen.members.map((m) => m.runId), [a], "a member measured with another ruler is not a member");
     assert.equal(seen.excludedForWeights, 1, "and dropping it silently would be the defect, not the fix");
+  } finally {
+    w.dispose();
+  }
+});
+
+/**
+ * The tail `loom score`'s no-graph note needs, and the whole reason A.22 was open.
+ *
+ * `BASE` is `GRAPH` with one extra channel declared and nothing else changed; `FULL` is
+ * `{...BASE, nodes: [...BASE.nodes, TAP], edges: [...BASE.edges, E2]}`, which is the expression
+ * `graph/mutate.ts` itself uses to build a successor. So a run of BASE that adopts this mutation
+ * folds a `graphHash` equal to FULL's while its `run.submitted` still names BASE's — which is
+ * exactly the split the note exists for.
+ */
+const TAP = {
+  id: "tap",
+  type: "tool",
+  reads: ["body"],
+  writes: ["note"],
+  tool: { name: "fs.write", version: "1.0", args: { path: "out/note.txt", body: "${body}" } },
+  unhandled: true,
+};
+const E2 = { id: "e2", from: "write", to: "tap", kind: "seq" };
+const BASE = {
+  ...GRAPH,
+  channels: { ...GRAPH.channels, note: { type: "object", reduce: "replace" } },
+};
+const FULL = { ...BASE, nodes: [...BASE.nodes, TAP], edges: [...BASE.edges, E2] };
+
+test("A PEER CAN REACH THIS COHORT BY MUTATION AND NOT BY PUBLICATION — the no-graph note is reachable", async () => {
+  // A.22 asked whether `loom score`'s `! N run(s) folded without their graph` line is reachable
+  // at all, or a backstop to delete. It IS reachable, and this is the only route left:
+  //
+  //   `foldTrajectory` takes a run's `graphHash` from `graph.mutated.newHash` when there is one,
+  //   while `cohortPeers` looks the peer's SPEC up by `run.submitted.graphHash`. Two different
+  //   authored graphs that mutate to the same successor therefore share a cohort key and need
+  //   not share a lookup — and the judged run's own graph, which `loom score` adds to the
+  //   lookup by hash, is keyed by the hash it was SUBMITTED under, so it does not cover a peer
+  //   that arrived at that hash from somewhere else.
+  //
+  // The premise is not asserted, it is COMPILED: `compileMutation` is run on BASE with the
+  // mutation that adds `tap`, and its successor hash is checked against FULL's. That is the
+  // engine's own function, so the `graph.mutated` row appended below is one `#applyMutation`
+  // could have written — the row is hand-appended because driving it would need a `canMutate`
+  // agent and a model adapter, and neither is what this test is about.
+  const w = workspace();
+  try {
+    const basePath = join(w.dir, "base.json");
+    const fullPath = join(w.dir, "graphs", "full.json");
+    writeFileSync(basePath, JSON.stringify(BASE));
+    writeFileSync(fullPath, JSON.stringify(FULL));
+
+    // The judged run, of the PUBLISHED graph.
+    const judged = await drive(w.dir, fullPath);
+    // The peer, of a graph that is NOT in graphs/.
+    const peer = await drive(w.dir, basePath);
+
+    const hashOf = async (runId: string): Promise<string> => {
+      const submitted = (await journal(w.dir, runId)).find((e) => isEvent(e, "run.submitted"));
+      assert.ok(submitted, "every run journals its submission");
+      return (submitted.payload as { graphHash: string }).graphHash;
+    };
+    const fullHash = await hashOf(judged);
+    const baseHash = await hashOf(peer);
+    assert.notEqual(fullHash, baseHash, "the premise: two different authored graphs");
+
+    // THE PREMISE, COMPILED. A real mutation of BASE reaches FULL's hash exactly.
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const compiledBase = compileOrThrow({
+        spec: BASE as unknown as GraphSpec,
+        resolver: ws.resolver,
+        tools: (ws.engine.tools as ToolRegistry).manifests(),
+        tenantCapabilities: ws.granted,
+      });
+      const mutated = compileMutation({
+        base: compiledBase,
+        mutation: {
+          addNodes: [TAP as unknown as NodeSpec],
+          addEdges: [E2 as unknown as EdgeSpec],
+          proposedBy: "t1" as TaskId,
+          proposedByNode: "write" as NodeId,
+        },
+        budget: { consumedNodes: 0, expansion: compiledBase.expansion },
+        resolver: ws.resolver,
+        tools: (ws.engine.tools as ToolRegistry).manifests(),
+        tenantCapabilities: ws.granted,
+      });
+      assert.equal(mutated.ok, true, `the mutation must compile: ${JSON.stringify(mutated)}`);
+      assert.equal(
+        mutated.ok && mutated.graph.graphHash,
+        fullHash,
+        "a run of BASE really can adopt a successor whose hash is FULL's — that is what makes this reachable",
+      );
+
+      await ws.store.append({
+        runId: peer as RunId,
+        expectedSeq: await ws.store.head(peer as RunId),
+        events: [
+          {
+            type: "graph.mutated",
+            payload: {
+              parentHash: baseHash,
+              newHash: fullHash,
+              addedNodes: ["tap" as NodeId],
+              addedEdges: ["e2"],
+              nodes: [TAP as unknown as NodeSpec],
+              edges: [E2 as unknown as EdgeSpec],
+              proposedBy: "t1" as TaskId,
+              proposedByNode: "write" as NodeId,
+              budgetConsumed: 1,
+            },
+            actor: SYSTEM_ACTOR("executor"),
+          },
+        ],
+      });
+    } finally {
+      ws.close();
+    }
+
+    const r = await cli(["score", judged, "--workspace", w.dir]);
+    assert.equal(r.code, 0, r.err);
+    assert.ok(
+      r.err.includes("folded without their graph"),
+      `the peer joined this cohort by mutation and its spec is not published, so the note must fire: ${JSON.stringify(r.err)}`,
+    );
+    assert.ok(r.err.includes(baseHash), `and it must name the hash nobody could resolve: ${JSON.stringify(r.err)}`);
+
+    // AND THE EXCLUSION IS REAL, not just announced: the peer is dropped from the population, so
+    // `n` counts the judged run alone. A cohort that shrank has to say why, and this is the why.
+    const printed = JSON.parse(r.out) as EventPayloads["evolution.scored"];
+    assert.equal(printed.cohort.n, 1, "the unmeasurable peer is not a member");
+
+    // CONTROL — publish BASE and the note stops firing, because the peer's spec now resolves.
+    writeFileSync(join(w.dir, "graphs", "base.json"), JSON.stringify(BASE));
+    const after = await cli(["score", judged, "--workspace", w.dir]);
+    assert.equal(after.code, 0, after.err);
+    assert.equal(
+      after.err.includes("folded without their graph"),
+      false,
+      `publishing the peer's authored graph resolves it: ${JSON.stringify(after.err)}`,
+    );
+    assert.equal((JSON.parse(after.out) as EventPayloads["evolution.scored"]).cohort.n, 2, "…and it rejoins the population");
   } finally {
     w.dispose();
   }
