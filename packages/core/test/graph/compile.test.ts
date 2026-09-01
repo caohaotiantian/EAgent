@@ -73,6 +73,45 @@ test("effective posture folds every level by max", () => {
   assert.equal(g.plans["gather_signals" as NodeId]?.posture, "on");
 });
 
+test("EVERY NODE THAT CAN BLOCK CARRIES A DEADLINE, and the author's own always wins", () => {
+  // A node declaring no `timeoutMs` had NO deadline: `#withNodeDeadline` returned straight
+  // through, so a hanging tool held its Task forever and a join over that branch waited with it.
+  // The fix is `NodePlan.timeoutMs`, the shape `NodePlan.retry` already set.
+  //
+  // THE SET IS NAMED, not counted, and this fixture is the only one in the tree that carries all
+  // eight node types at once — which is why the whole rule fits in one test.
+  const g = compileOrThrow(base(incidentTriage()));
+  const ms = (id: string): number | undefined => g.plans[id as NodeId]?.timeoutMs;
+
+  // Declared, and untouched at both ends of the range — a default is a floor for nodes that
+  // declared nothing, never an override and never a merge.
+  assert.equal(ms("gather_signals"), 20_000, "a tool node's own 20s stands");
+  assert.equal(ms("investigate"), 120_000, "and an agent node's own 120s is not raised to the default");
+
+  // Defaulted: the three types whose BODY can fail to settle — an agent awaits a provider stream
+  // no clock in this tree bounds, a tool awaits an extension's `execute`, and an evaluator's
+  // `rubric` arm is `#runAgent` again.
+  assert.equal(ms("hypothesise"), 600_000, "agent");
+  assert.equal(ms("apply_remediation"), 600_000, "tool");
+  assert.equal(ms("grade"), 600_000, "evaluator");
+
+  // AND FOUR OF THE FIVE WITH NONE, each named — `compile.ts`'s `effectiveTimeout` says why for
+  // each. `human_gate` is the one that MUST stay absent: it has `slaMs` plus `onTimeout`, and a
+  // gate that expires because nobody wrote a number is oversight failing open. The fifth is
+  // `subgraph`, which this fixture has none of — `effectiveTimeout` says why it gets none too.
+  for (const id of ["correlate", "choose_path", "approve_remediation", "write_report"]) {
+    assert.equal(ms(id), undefined, `${id} must not be given one`);
+  }
+  assert.deepEqual(
+    incidentTriage()
+      .nodes.filter((x) => ["correlate", "choose_path", "approve_remediation", "write_report"].includes(x.id))
+      .map((x) => x.type)
+      .sort(),
+    ["function", "human_gate", "join", "router"],
+    "the four ids above really are one of each excluded type",
+  );
+});
+
 test("a system floor of `in` raises every node, and nothing can lower it", () => {
   const g = compileOrThrow(base(incidentTriage(), { systemPostureFloor: "in" }));
   for (const plan of Object.values(g.plans)) assert.equal(plan.posture, "in");

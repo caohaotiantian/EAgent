@@ -3517,7 +3517,14 @@ export class Engine {
     w: Wave,
     body: () => Promise<NodeOutcome> | NodeOutcome,
   ): Promise<NodeOutcome> {
-    const ms = w.node.timeoutMs;
+    // THE COMPILED DEADLINE, NOT THE AUTHORED ONE — the same correction `#retryDecision` makes
+    // two thousand lines down, and for the same defect. This read `w.node.timeoutMs`, so a node
+    // whose author declared nothing had no deadline: measured, a one-`tool`-node graph with no
+    // declaration left `Engine.advance` unsettled at 1,500 ms and would never have settled.
+    // `plans[id].timeoutMs` is `node.timeoutMs ?? <default for the type>`, so the `??` here is
+    // not a second policy — it is the graph-from-an-older-build case `#runSubgraph` guards the
+    // same way.
+    const ms = ctx.graph.plans[w.node.id]?.timeoutMs ?? w.node.timeoutMs;
     if (ms === undefined) return body();
 
     const timer = new AbortController();

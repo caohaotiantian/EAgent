@@ -2786,6 +2786,28 @@ function printRetryPlan(graph: RunGraph): void {
   }
 }
 
+/**
+ * Say what deadline each node will ACTUALLY run under, and where it came from.
+ *
+ * UNCONDITIONAL, beside `printRetryPlan`, for the identical reason and after the identical bug.
+ * Before `NodePlan.timeoutMs`, a node declaring no `timeoutMs` had no deadline at all and its
+ * Task hung forever; the fix is a compiled DEFAULT, and a default an operator has to know to ask
+ * about is a hidden default with extra steps.
+ *
+ * `(declared)` versus `(default)` is the half that matters most here: an author who wrote a
+ * number needs to see that nothing touched it, and an author who wrote none needs to see that
+ * something now applies. Nodes with no deadline are silent — this lists what WILL happen, and
+ * the five types that get none say so through `loom validate`'s schema, not through a line here
+ * repeating "none" once per node.
+ */
+function printTimeoutPlan(graph: RunGraph): void {
+  for (const n of graph.spec.nodes) {
+    const ms = graph.plans[n.id]?.timeoutMs;
+    if (ms === undefined) continue;
+    process.stdout.write(`  deadline ${n.id} (${n.timeoutMs === undefined ? "default" : "declared"}): timeoutMs=${ms}\n`);
+  }
+}
+
 /** How many times `loom run` will wait out a backoff before giving up and saying so. */
 const MAX_BACKOFF_WAITS = 64;
 
@@ -4212,6 +4234,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const compiled = loadGraph(ws, requirePositional(args, 0, "a graph file"));
         process.stdout.write("ok\n");
         printRetryPlan(compiled);
+        printTimeoutPlan(compiled);
         return 0;
       }
 
