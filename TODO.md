@@ -182,6 +182,25 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
 
 ### Oversight, and the places a floor is weaker than it reads
 
+- **A.34 · `Engine.rewind` gates nobody, and §D.5 says it must.** `rewind(runId, atSeq, reason,
+  by = SYSTEM_ACTOR("operator"))` — the actor DEFAULTS to a system one and is checked nowhere; the
+  HTTP route hands it a service token's system actor unchanged, and a rewind with no actor at all
+  is accepted. Driven. So `trigger: "rewind"` is today indistinguishable from an automated path.
+  **This was found by testing a decision's PRECONDITION rather than its conclusion**, and it
+  killed the decision: the plan was to let a rewind's undos inherit its authorization
+  (`nodeApproved: true`), on the argument that the operator had already passed the oversight floor
+  at the rewind. They had not. Granting it would have been the automated loosening the
+  non-negotiable forbids, so the undos stay `nodeApproved: false` and an undo whose class demands a
+  human is journaled `failed` with its reason — which is now at least VISIBLE for a delegated run,
+  where it used to be silent.
+  **Closes when** `rewind` has a floor of its own. The minimum is `steer`'s check
+  (`by.kind !== "human"` → `E_HUMAN_APPROVAL_REQUIRED`). §D.5 asks for more — "loud, gated by the
+  same oversight floor an irreversible action gets, and never silent" means the operator sees WHICH
+  undos the rewind will dispatch before authorizing, and today's signature has no shape for that.
+  `plannedUndo` is already computed one screen above the dispatch and IS that list, so the seam is
+  close. Only after that door gates may the seventh argument at `engine.ts:1457` flip for
+  `trigger === "rewind"`.
+
 - **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
   `engine.ts:1199` argues it at length — an undo that policy answers `gate` must be REFUSED, or
   compensation becomes the back door that performs an irreversible action a gate would have
@@ -832,9 +851,15 @@ paragraph was written, which is exactly the fact it exists to expose rather than
   that does not exist at all** (`email` is only an `Actor.via` label).
 
 **Do not re-enumerate the fork list here.** It lives in `README.md`, "Extending it, and where that
-stops" — **ten things need no fork, five do**, each quoted from the refusal the binary prints.
+stops" — **twelve things need no fork, three do**, each quoted from the refusal the binary prints.
 That list moving the wrong way is property 2's alarm; shrinking it is what property 2 means in
-practice, and §D.1 is the next entry that would.
+practice. **It went five → three on 2026-09-01**, when `--extension-module`'s object widened from
+`{models, tools}` to `{models, tools, channels, identity}` — no new flag, because the argv-only
+trust argument is written once at that flag and a second door would have to re-earn it.
+**The remaining three have no DEBTS in them**: a node type, a reducer and a ninth hook point are
+all bounds closed by replay, so the honest next move on this property is a new capability rather
+than another row off this list. This paragraph opens by saying not to re-enumerate and then
+carried the numbers anyway, which is why it was stale twice.
 
 ---
 

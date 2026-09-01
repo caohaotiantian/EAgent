@@ -228,8 +228,8 @@ not, which is the whole design and is the opposite of what one hash would have g
 change keeps old behaviour for graphs that declared an older version.
 
 **Unlimited extensibility** — everything not the kernel is an extension against the same declared
-surface. *As shipped that claim covers a named set and not everything:* **ten** things need no fork
-and **five** do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
+surface. *As shipped that claim covers a named set and not everything:* **twelve** things need no fork
+and **three** do, enumerated with the binary's own refusal text in `README.md`'s "Extending it, and
 where that stops". Those numbers moved on 2026-08-28 and both directions are the point: the fork
 list was re-counted at seven (an undercount corrected — a ledger that undercounts turns this
 property's alarm into a false all-clear), and `--extension-module` then took it to five. Two of
