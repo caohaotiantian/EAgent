@@ -54,21 +54,26 @@ The test of this property is not "can you add a tool". It is **"can somebody who
 commit access build the thing they need, and can they do it without forking?"**
 
 **Today the answer is a named set, not "yes", and the set lives in `README.md`'s "Extending it,
-and where that stops"** — the same escape-hatch-and-ledger shape as §1's kernel list: ten things
+and where that stops"** — the same escape-hatch-and-ledger shape as §1's kernel list: twelve things
 need no fork (a graph, a prompt/profile/skill, a subgraph, a `function` body, a `hook` body, an
 MCP tool, an OpenAI-wire provider, an ANY-wire provider, an in-process tool, an HTTP delivery
-endpoint) and five do: three schema sets (a node type, a reducer, a ninth hook point) and two that
-are forks *from the CLI only* — a non-webhook delivery transport and an identity source — each of
-which a library embedder builds against a pinned type instead
-(`DeliveryChannel`/`GateDispatcher`, `IdentitySource`/`startControlPlane`). Every entry there is
-quoted from the refusal the binary actually prints. The reason the three schema sets are closed is
-replay: a fold can only reproduce a decision whose vocabulary the folding binary already knows.
-The two CLI rows are closed for a weaker reason — nobody built the seam — which is why they are
-debts. **Shrinking that second list is what this property means in practice; the list moving the
-other way is the alarm.** It went six → seven on 2026-08-28 by being measured again rather than
-because a door closed, then seven → five when `--extension-module` gave the CLI the door onto
-`ModelRegistry` and `ToolRegistry` that a library embedder always had — and the blanket "closed by
-replay" reason went with the two rows it did not fit.
+endpoint, a non-webhook delivery transport, an identity source) and **three** do: the schema sets
+— a node type, a reducer, a ninth hook point. Every entry there is quoted from the refusal the
+binary actually prints. All three are closed for ONE reason, replay: a fold can only reproduce a
+decision whose vocabulary the folding binary already knows. **Shrinking that second list is what
+this property means in practice; the list moving the other way is the alarm.** It went six → seven
+on 2026-08-28 by being measured again rather than because a door closed, then seven → five when
+`--extension-module` gave the CLI the door onto `ModelRegistry` and `ToolRegistry` that a library
+embedder always had — and the blanket "closed by replay" reason went with the two rows it did not
+fit. It went **five → three** on 2026-09-01 when the same flag's object widened from
+`{models, tools}` to `{models, tools, channels, identity}`, deleting the two rows that were forks
+*from the CLI only*: `DeliveryChannel`/`GateDispatcher` and `IdentitySource`/`startControlPlane`
+were pinned public types a library embedder always reached, so those two were never bounds, only
+debts — and the whole debt was reachability from argv. **What is left has no debts in it**, which
+is why the honest next move on this property is a new capability rather than another row off this
+list. The trust argument that bounds the widening is stated at `loadExtensionModules`: the module
+path comes from ARGV and nowhere else, because a path read out of a file would let a FILE decide
+who may approve.
 
 ### 3 · Endless self-improvement
 

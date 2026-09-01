@@ -1,5 +1,5 @@
 /**
- * THE FORK LEDGER IS TWO ROWS SHORTER, AND THIS IS THE MEASUREMENT THAT SAYS SO.
+ * THE FORK LEDGER IS FOUR ROWS SHORTER, AND THIS IS THE MEASUREMENT THAT SAYS SO.
  *
  * README's "Extending it, and where that stops" listed "a wire protocol that is not
  * Anthropic's or OpenAI's" and "an in-process tool, from the CLI" among the things that
@@ -20,22 +20,41 @@
  * export a function, or registers nothing is a deployment the operator believes is extended
  * and is not — so every one of them REFUSES TO BOOT, and each case is asserted below rather
  * than argued.
+ *
+ * **THE OTHER TWO ROWS ARE `channels` AND `identity`, AND THEIR REASON WAS NEVER REPLAY EITHER.**
+ * README said so itself — *"a delivery transport, an identity source — nobody built the seam"* —
+ * and named the pinned types a library embedder already reached: `DeliveryChannel`,
+ * `GateDispatcher`, `IdentitySource`, `startControlPlane`. The refusals the binary printed were
+ * honest and named the WRONG DOOR:
+ *
+ *     E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?)
+ *     E_CONFIG_INVALID: unknown flag: --identity-module (did you mean --identity-file?)
+ *
+ * There is still no such flag and there is deliberately not going to be one: `cli.ts`'s own
+ * docstring said a transport "should EXTEND this object when it is built, rather than invent a
+ * second flag", because the argv-only trust argument is written once and a second door would
+ * have to re-earn it. So the factory is handed `{models, tools, channels, identity}` and the
+ * last three tests here drive what that buys: a transport that is not an HTTP webhook taking a
+ * real gate delivery with no channels file in sight, a source that is not a token file deciding
+ * who a caller is, and the collisions that refuse rather than pick a winner by load order.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadExtensionModules, main, openWorkspace, parseArgs, readModels } from "../../src/cli.ts";
+import { controlPlaneOptions, loadExtensionModules, main, openWorkspace, parseArgs, readChannels, readModels } from "../../src/cli.ts";
 import { completeLines, serving } from "../deployment/harness.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { ModelRegistry } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
+import { HumanGateBroker } from "../../src/run/gates.ts";
+import { RunLog } from "../../src/run/log.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
-import type { RunId } from "../../src/ids.ts";
+import type { NodeId, RunId, TaskId } from "../../src/ids.ts";
 
 /**
  * A wire that is neither Anthropic's nor OpenAI's, written the way a stranger would have to
@@ -479,6 +498,185 @@ test("A REPEATED --extension-module IS REFUSED — last-wins would drop a module
     const twice = parseArgs(["compile", "g.json", "--grant", "a:b", "--grant", "c:d"]);
     assert.equal(twice.flags["grant"], "c:d");
     assert.deepEqual([...twice.repeated], ["grant"], "seen, and deliberately not refused");
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── the other two rows: a transport, and who a caller is ─────────────────────
+
+/**
+ * A transport that is not an HTTP webhook, written the way a stranger would have to write it.
+ *
+ * IT RECORDS TO A FILE BESIDE ITSELF rather than to a variable, and that is not a convenience:
+ * `--extension-module` loads through `await import()`, so the channel object lives in the
+ * module's own graph and a test cannot reach into it. A file is the only observation that
+ * proves the delivery went all the way through the dispatcher THIS BINARY built — the same
+ * boundary a real SMTP or Slack-app channel is on the far side of.
+ */
+const SMTP_MODULE = `
+import { appendFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+const LOG = fileURLToPath(new URL("./delivered.log", import.meta.url));
+class SmtpChannel {
+  name = "ops-email";
+  async deliver(target) {
+    appendFileSync(LOG, target.gate.gateId + "\\n");
+    return "smtp-message-id";
+  }
+}
+export default ({ channels }) => { channels.register(new SmtpChannel()); };
+`;
+
+/** A source that is not a token file: it trusts a header a terminating proxy set. */
+const OIDC_MODULE = `
+class ProxyHeaderIdentity {
+  name = "NAME";
+  identify(req) {
+    const s = req.headers["x-forwarded-subject"];
+    return s === undefined ? undefined : { subject: s, kind: "human", via: "console" };
+  }
+}
+export default ({ identity }) => { identity.register(new ProxyHeaderIdentity()); };
+`;
+
+test("a DELIVERY TRANSPORT that is no HTTP webhook takes a real gate — with NO --channels-file at all", async () => {
+  const w = workspace();
+  try {
+    const mod = moduleAt(w.dir, "smtp.mjs", SMTP_MODULE);
+    const ext = await loadExtensionModules([mod]);
+
+    // REGISTERING ONLY A CHANNEL IS REGISTERING SOMETHING. Had the "registered nothing"
+    // check kept asking only about adapters and tools, this module — the whole reason the
+    // seam exists — would have been the one deployment it refused to boot.
+    assert.deepEqual([...ext.channelNames], ["ops-email"]);
+
+    // NO --channels-file. Requiring one beside this would mean writing a JSON file of webhook
+    // rows to enable a transport that is not a webhook.
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]), process.env, undefined, [], ext);
+    try {
+      assert.notEqual(ws.delivery, undefined, "no file, and still channels");
+      assert.deepEqual(ws.delivery?.notifyOnly, ["ops-email"], "it defines no parseCallback, so it can be told and not answered");
+      assert.deepEqual(ws.delivery?.answerable, []);
+      assert.deepEqual(ws.delivery?.fromModules, ["ops-email"], "and the banner can tell whose channel it is");
+
+      // THE DELIVERY ITSELF, through the dispatcher `openWorkspace` built, into a module this
+      // process only knows by path. Anything short of this is a test of the wiring's shape.
+      const runId = "run_ext_channel" as RunId;
+      const log = new RunLog(runId, { store: ws.store });
+      const broker = new HumanGateBroker({ dispatcher: ws.delivery!.dispatcher });
+      const gateId = await broker.raise(log, {
+        runId,
+        taskId: "ship@root#0" as TaskId,
+        nodeId: "ship" as NodeId,
+        policyRef: "oversight/ship@stable",
+        payload: { question: "ship it?" },
+        delivery: { channels: ["ops-email"] },
+      });
+      assert.equal(readFileSync(join(w.dir, "delivered.log"), "utf8"), `${gateId}\n`);
+    } finally {
+      ws.close();
+    }
+  } finally {
+    w.dispose();
+  }
+});
+
+test("a module channel MERGES with --channels-file, and a name across the two REFUSES", async () => {
+  const w = workspace();
+  try {
+    const ext = await loadExtensionModules([moduleAt(w.dir, "smtp.mjs", SMTP_MODULE)]);
+    const file = join(w.dir, "channels.json");
+
+    // BOTH HALVES REACH ONE DISPATCHER, because a graph's delivery spec resolves every channel
+    // name through exactly one — so two dispatchers is the one arrangement that cannot work.
+    writeFileSync(file, JSON.stringify({ channels: [{ name: "pager", url: "https://events.example.invalid/x" }] }));
+    const merged = readChannels(file, ext.channels);
+    assert.deepEqual([...merged.notifyOnly].sort(), ["ops-email", "pager"]);
+    assert.notEqual(merged.dispatcher.channel("ops-email"), undefined, "the module's channel is addressable by name");
+    assert.deepEqual(merged.fromModules, ["ops-email"], "and the file's row is not attributed to the module");
+
+    // AND THE COLLISION REFUSES rather than letting a `Map` keep one silently. The refusal
+    // names the module half, because "entry 0 repeats a name" would send an operator looking
+    // for a second row in a file that has only one.
+    writeFileSync(file, JSON.stringify({ channels: [{ name: "ops-email", url: "https://hooks.example.invalid/x" }] }));
+    assert.throws(
+      () => readChannels(file, ext.channels),
+      (e: unknown) =>
+        isLoomError(e) &&
+        e.code === CODES.E_CONFIG_INVALID &&
+        /repeats the channel name "ops-email", which an --extension-module already registered/.test(e.message),
+    );
+
+    // TWO MODULES, ONE CHANNEL NAME — the same refusal one namespace over from the adapter one,
+    // and it names both modules.
+    const second = moduleAt(
+      w.dir,
+      "smtp-again.mjs",
+      `export default ({ channels }) => { channels.register({ name: "ops-email", deliver: async () => "x" }); };\n`,
+    );
+    await assert.rejects(
+      () => loadExtensionModules([join(w.dir, "smtp.mjs"), second]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        /registers the channel name "ops-email", which .* already registered/.test(e.message) &&
+        e.message.includes(join(w.dir, "smtp.mjs")) &&
+        e.message.includes(second),
+    );
+  } finally {
+    w.dispose();
+  }
+});
+
+test("an IDENTITY SOURCE that is not a token file decides who a caller is — and a SECOND one refuses", async () => {
+  const w = workspace();
+  try {
+    const mod = moduleAt(w.dir, "oidc.mjs", OIDC_MODULE.replace("NAME", "proxy-header"));
+    const ext = await loadExtensionModules([mod]);
+    const ws = openWorkspace(parseArgs(["serve", "--workspace", w.dir]), process.env, undefined, [], ext);
+    try {
+      // THE PLANE IS BUILT WITH IT. `--identity-file` is not given and does not need to be:
+      // this is the field `ControlPlane` authenticates through and `announce` prints as `who:`.
+      const opts = controlPlaneOptions(ws, parseArgs(["serve", "--workspace", w.dir]));
+      assert.equal(opts.identity?.name, "proxy-header");
+      // AND IT REALLY IS THE MODULE'S OBJECT, not a same-named stand-in.
+      assert.equal(opts.identity, ext.identity);
+
+      // BOTH TOGETHER IS REFUSED, and the reason is the one non-negotiable this seam could have
+      // broken: a chain accepts the UNION of two credential sets, so adding a source could only
+      // ever widen who gets in — loosening along a path no human chose.
+      const ids = join(w.dir, "identities.json");
+      writeFileSync(ids, JSON.stringify({ subjects: [{ subject: "u:you", token: "s3cret" }] }));
+      assert.throws(
+        () => controlPlaneOptions(ws, parseArgs(["serve", "--workspace", w.dir, "--identity-file", ids])),
+        (e: unknown) =>
+          isLoomError(e) &&
+          e.code === CODES.E_CONFIG_INVALID &&
+          /both establish who a caller is \("proxy-header"\)/.test(e.message) &&
+          /union of two credential sets/.test(e.message),
+      );
+    } finally {
+      ws.close();
+    }
+
+    // TWO MODULES, SAME REASON, refused at load with both paths named — acceptance must not
+    // depend on argv order.
+    const second = moduleAt(w.dir, "oidc-again.mjs", OIDC_MODULE.replace("NAME", "mtls"));
+    await assert.rejects(
+      () => loadExtensionModules([mod, second]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        /registers the identity source "mtls", and .* already registered one/.test(e.message) &&
+        e.message.includes(mod) &&
+        e.message.includes(second),
+    );
+
+    // AND A SOURCE THAT CANNOT SAY WHO IT IS is refused at the call, naming the module: the
+    // name is what `/health` and every refusal print, so a nameless one is undiagnosable.
+    await assert.rejects(
+      () => loadExtensionModules([moduleAt(w.dir, "nameless.mjs", `export default ({ identity }) => { identity.register({ identify: () => undefined }); };\n`)]),
+      (e: unknown) => isLoomError(e) && /threw while registering.*identity\.register was given a source whose "name" is/s.test(e.message),
+    );
   } finally {
     w.dispose();
   }
