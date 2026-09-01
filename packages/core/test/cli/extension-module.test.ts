@@ -681,3 +681,105 @@ test("an IDENTITY SOURCE that is not a token file decides who a caller is — an
     w.dispose();
   }
 });
+
+// ── what the boot banner says when BOTH halves are configured ────────────────
+
+/** The module half of a mixed plane: a channel that can be ANSWERED, so the route opens. */
+const ANSWERABLE_MODULE = `
+class SmtpChannel {
+  name = "ops-email";
+  async deliver(target) { return "smtp-message-id"; }
+  parseCallback(req) { return undefined; }
+}
+export default ({ channels }) => { channels.register(new SmtpChannel()); };
+`;
+
+test("ON A MIXED PLANE THE BANNER NAMES THE RIGHT FILE — a credential is not in a file that has no row for it", { timeout: 90_000 }, async () => {
+  // THE COMMIT THAT SPLIT THESE LINES BY ORIGIN FIXED THE MODULE-ONLY CASE AND ONLY THAT. With
+  // no `--channels-file`, `DeliveryConfig.file` IS the module paths, so every sentence naming
+  // it was accidentally right. Add one file row and `file` becomes the channels file while the
+  // ANSWERABLE channel is still the module's, and two lines then said something false:
+  //
+  //     A secret in <channels.json> is a credential — rotate it the way you would rotate --token.
+  //     …is decided inside <channels.json> and cannot be read from here.
+  //
+  // The first is the one that matters: it names a credential and tells an operator to rotate
+  // it, and there is no secret for `ops-email` in that file — the file's own row is
+  // notify-only. Rotating the wrong secret is worse than being told nothing, because the
+  // operator believes the hole is closed.
+  const w = workspace();
+  try {
+    const mod = moduleAt(w.dir, "answerable.mjs", ANSWERABLE_MODULE);
+    const file = join(w.dir, "channels.json");
+    writeFileSync(file, JSON.stringify({ channels: [{ name: "pager", url: "https://events.example.invalid/x" }] }));
+
+    const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--channels-file", file, "--extension-module", mod]);
+    await s.stop();
+
+    // The route IS open — the module's channel is what opened it, so the warning must fire.
+    assert.match(s.err, /CALLBACK ROUTE OPEN/);
+    assert.match(s.err, /on: ops-email/);
+
+    // AND THE CREDENTIAL SENTENCE IS ABSENT, because no answerable channel came from the file.
+    assert.doesNotMatch(s.err, /A secret in .*channels\.json is a credential/, s.err);
+    // What it says instead points at the thing that actually authenticates the callback.
+    assert.match(s.err, /ops-email: registered by an --extension-module, so its parseCallback\(req\)/);
+    assert.match(s.err, new RegExp(`it lives\\n?\\s*in ${mod.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), s.err);
+
+    // The second line, one further down: the address is decided in the MODULE, not the file.
+    assert.match(s.err, /CALLBACK ADDRESS NOT VISIBLE — ops-email/);
+    assert.doesNotMatch(s.err, /decided inside .*channels\.json/, s.err);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("…AND THE FILE'S HALF STILL GETS THE FILE'S ADVICE — the control for the split above", { timeout: 90_000 }, async () => {
+  // A split that named the module unconditionally would be the same defect mirrored. Same
+  // fixture, one difference: the answerable channel is the FILE's row, so the secret sentence
+  // must come back and name the file — this is the deployment `cli.test.ts` already covers,
+  // driven here beside a module so the module's presence alone cannot suppress it.
+  const w = workspace();
+  try {
+    const mod = moduleAt(w.dir, "notify.mjs", SMTP_MODULE);
+    const file = join(w.dir, "channels.json");
+    writeFileSync(
+      file,
+      JSON.stringify({ channels: [{ name: "slack", url: "https://hooks.example.invalid/a", callbackSecret: "shhh-not-a-real-secret" }] }),
+    );
+
+    const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--channels-file", file, "--extension-module", mod]);
+    await s.stop();
+
+    assert.match(s.err, /slack: an HMAC signature over the raw request body/);
+    assert.match(s.err, new RegExp(`A secret in ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is a credential`), s.err);
+    // `ops-email` is notify-only, so it is not on the open route and must not be named there.
+    assert.match(s.err, /on: slack\b/);
+    assert.doesNotMatch(s.err, /ops-email: registered by an --extension-module/, s.err);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("EVERY CHANNEL NOTIFY-ONLY, ACROSS BOTH HALVES — the header claims a set it can actually name", { timeout: 90_000 }, async () => {
+  // `every channel in <channels file> is notify-only` was a claim about set membership, and
+  // `ops-email` is not in that file at all. Both fixes below were already split by origin and
+  // both are right; the header above them was the line that was not.
+  const w = workspace();
+  try {
+    const mod = moduleAt(w.dir, "notify.mjs", SMTP_MODULE);
+    const file = join(w.dir, "channels.json");
+    writeFileSync(file, JSON.stringify({ channels: [{ name: "pager", url: "https://events.example.invalid/x" }] }));
+
+    const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--token", "s3cret", "--channels-file", file, "--extension-module", mod]);
+    await s.stop();
+
+    assert.match(s.err, /NO ANSWERABLE CHANNEL — every channel this plane has is notify-only/);
+    assert.doesNotMatch(s.err, /every channel in .*channels\.json/, s.err);
+    assert.match(s.err, /on: ops-email, pager/, "and it names its members, which is what makes the claim checkable");
+    assert.match(s.err, new RegExp(`give a channel in ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} a "callbackSecret"`), s.err);
+    assert.match(s.err, /ops-email came from an --extension-module — give that channel a parseCallback\(req\)/);
+  } finally {
+    w.dispose();
+  }
+});

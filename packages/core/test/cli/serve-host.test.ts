@@ -414,3 +414,64 @@ test("…AND WHEN IT CAN BE, NOTHING IS PRINTED — the report must not fire whe
     w.dispose();
   }
 });
+
+// ── 6 · the credential a non-loopback bind needs is not two flags ────────────
+
+/** A source that is not a token file: it trusts a header a terminating proxy set. */
+const OIDC_MODULE = `
+class ProxyHeaderIdentity {
+  name = "proxy-header";
+  identify(req) {
+    const s = req.headers["x-forwarded-subject"];
+    return s === undefined ? undefined : { subject: s, kind: "human", via: "console" };
+  }
+}
+export default ({ identity }) => { identity.register(new ProxyHeaderIdentity()); };
+`;
+
+test("AN IDENTITY SOURCE **IS** THE CREDENTIAL — a module's source binds 0.0.0.0 with no --token and no --identity-file", { timeout: 90_000 }, async () => {
+  // WHAT `listen` ACTUALLY REFUSES ON is `openToEveryCaller` — no token AND no identity SOURCE
+  // — and since `--extension-module` grew the `identity` seam there have been three doors onto
+  // it, not two. Two usage strings still named two: `--help`'s `--host` block and `httpHost`'s
+  // own refusal both said "needs --token or --identity-file", which reads as an enumeration and
+  // is one short. `listen`'s refusal was already generic ("no token and no identity source"),
+  // so the binary contradicted itself depending on which message you hit first.
+  //
+  // THE BEHAVIOUR IS DRIVEN FIRST AND THE STRINGS SECOND, in that order deliberately: a test
+  // that only asserted on the text would stay green if the third door were later closed, which
+  // would make the strings right again and the product worse.
+  const w = workspace();
+  const mod = join(w.dir, "oidc.mjs");
+  writeFileSync(mod, OIDC_MODULE);
+  const s = await serving(["serve", "--workspace", w.dir, "--port", "0", "--host", "0.0.0.0", "--extension-module", mod]);
+  try {
+    assert.equal(s.host, "0.0.0.0", "the module's identity source is the credential — this bind is not refused");
+    // …and the plane really is credentialed: `who:` names the source, so this is not a bind
+    // that slipped through with nobody authenticating.
+    assert.match(s.out, /who:\s+proxy-header/);
+    await s.stop();
+    assert.match(s.err, /NON-LOOPBACK BIND/, "still a routable socket, and still said out loud");
+  } finally {
+    await s.stop();
+  }
+
+  // NOW THE TWO STRINGS. Neither may enumerate two doors when the binary has three.
+  //
+  // Reached through `unknown command`, which prints the whole usage text to STDERR and exits 2
+  // — `--help` writes the same text to stdout and exits 0, which `refusing` does not capture.
+  const usage = await refusing(["nonsense"]);
+  assert.equal(usage.code, 2);
+  // Column-padded across five lines, so the run of whitespace is collapsed before matching —
+  // otherwise this assertion is about the usage block's indentation and not about its claim.
+  const flat = usage.err.replace(/\s+/g, " ");
+  assert.doesNotMatch(flat, /non-loopback host needs --token or --identity-file/, "the usage text was the first copy to fall behind");
+  assert.match(
+    flat,
+    /non-loopback host needs a credential — --token, or ANY identity source: --identity-file or one an --extension-module registers\./,
+    usage.err,
+  );
+
+  const empty = await refusing(["serve", "--workspace", w.dir, "--port", "0", "--host="]);
+  assert.match(empty.err, /--extension-module/, "and so was `httpHost`'s own refusal, which an operator hits without ever running --help");
+  w.dispose();
+});

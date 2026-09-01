@@ -95,9 +95,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            machine can reach the plane,
                                                            which also means no Slack
                                                            button can answer a gate. A
-                                                           non-loopback host needs --token
-                                                           or --identity-file — it is
-                                                           refused without one
+                                                           non-loopback host needs a
+                                                           credential — --token, or ANY
+                                                           identity source: --identity-file
+                                                           or one an --extension-module
+                                                           registers. Refused without one
                [--identity-file identities.json]           who may approve, one token each.
                                                            An --extension-module may register
                                                            an OIDC or mTLS source instead;
@@ -3559,8 +3561,15 @@ function httpHost(args: Args): string {
   const refuse: (why: string) => never = (why) => {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
+      // "--token or --identity-file" NAMED TWO OF THREE DOORS. The condition `listen` actually
+      // refuses on is `openToEveryCaller` — no token AND no identity SOURCE — and an
+      // `--extension-module` registering an OIDC or mTLS source satisfies it with neither flag
+      // given. Driven: `serve --extension-module <ext.mjs> --host 0.0.0.0` binds. `listen`'s own
+      // refusal already said "no token and no identity source" generically; these two usage
+      // strings were the copies that fell behind the seam.
       `--host ${why}. Omit it for the default of ${DEFAULT_HOST} — loopback, reachable only from this machine — ` +
-        `or name an interface such as 0.0.0.0 on purpose, which also needs --token or --identity-file.`,
+        `or name an interface such as 0.0.0.0 on purpose, which also needs a credential: --token, or an identity ` +
+        `source from --identity-file or an --extension-module.`,
     );
   };
   if (raw === true) refuse('was given with no value at all, and a missing value would become the literal name "true"');
@@ -4534,11 +4543,39 @@ function announce(
   // not `delivery.answerable`, because it is the field the plane was actually built with:
   // if the two ever disagree, this line follows the one that decides the route.
   if (opts.dispatcher !== undefined && delivery !== undefined) {
+    // SPLIT BY ORIGIN HERE TOO, and the reason is sharper than the base-URL split below: this
+    // line names a CREDENTIAL and tells the operator to rotate it. `A secret in <channels file>
+    // is a credential` was printed unconditionally, so on a plane whose only ANSWERABLE channel
+    // came from an `--extension-module` it named a file that holds no secret for that channel —
+    // and on a mixed plane it still does, because the file row that IS in it is notify-only.
+    // "Rotate the wrong thing" is worse than saying nothing: the operator believes they closed
+    // the hole. Driven with one notify-only file row plus one module channel carrying
+    // `parseCallback`, which is the smallest configuration that has both halves.
+    //
+    // THE HMAC CLAIM MOVED WITH IT. It is true of `SignedWebhookChannel` — the one transport
+    // this binary builds from a file row — and it is a guess about a module's `parseCallback`,
+    // which may check anything or nothing. What is true of every answerable channel is that the
+    // bearer check does not apply, so that is what the shared header says.
+    const answerableFromFile = delivery.answerable.filter((n) => !delivery.fromModules.includes(n));
+    const answerableFromModule = delivery.answerable.filter((n) => delivery.fromModules.includes(n));
+    // WHERE THE MODULES ARE, read off `ws.extensions` rather than off `delivery.file`, which is
+    // the module paths ONLY when there is no channels file — the exact case this split exists
+    // for is the one where it is not.
+    const moduleFiles = ws.extensions === undefined ? delivery.file : ws.extensions.files.join(", ");
     process.stderr.write(
       `! CALLBACK ROUTE OPEN — POST /runs/:id/callbacks/:channel accepts decisions WITHOUT the bearer token,\n` +
-        `  on: ${delivery.answerable.join(", ")}. An HMAC signature over the raw request body is the ONLY\n` +
-        `  authentication that route has, so a leaked channel secret approves production actions. A secret in\n` +
-        `  ${delivery.file} is a credential — rotate it the way you would rotate --token.\n`,
+        `  on: ${delivery.answerable.join(", ")}. The bearer check does not apply to that route, so whatever the\n` +
+        `  channel itself checks about the request is the ONLY authentication it has.\n` +
+        (answerableFromFile.length === 0
+          ? ""
+          : `  ${answerableFromFile.join(", ")}: an HMAC signature over the raw request body, keyed by "callbackSecret" — so a\n` +
+            `  leaked secret approves production actions. A secret in ${delivery.file} is a credential — rotate it the\n` +
+            `  way you would rotate --token.\n`) +
+        (answerableFromModule.length === 0
+          ? ""
+          : `  ${answerableFromModule.join(", ")}: registered by an --extension-module, so its parseCallback(req) is what\n` +
+            `  authenticates a callback and this binary cannot say what that checks. Whatever credential it is, it lives\n` +
+            `  in ${moduleFiles} and not in a channels file.\n`),
     );
     // Configured to be answered, and no address published: every receiver still has to be
     // told the URL out of band, which is the thing having a callback route was meant to fix.
@@ -4549,20 +4586,23 @@ function announce(
     // this banner exists to avoid — and for a module channel the fact is not "no address" at
     // all, it is that this process cannot see one either way.
     if (!delivery.publishesAddress) {
-      const fromFile = delivery.answerable.filter((n) => !delivery.fromModules.includes(n));
-      if (fromFile.length > 0) {
+      if (answerableFromFile.length > 0) {
         process.stderr.write(
           `! NO CALLBACK BASE URL — delivered gates carry no address to answer at, so each receiver must still be\n` +
             `  told this deployment's URL out of band.\n` +
-            `  on: ${fromFile.join(", ")}\n` +
+            `  on: ${answerableFromFile.join(", ")}\n` +
             `  fix: add "callbackBaseUrl": "https://<this deployment's public origin>" to ${delivery.file}\n`,
         );
       }
-      const fromModule = delivery.answerable.filter((n) => delivery.fromModules.includes(n));
-      if (fromModule.length > 0) {
+      if (answerableFromModule.length > 0) {
+        // `moduleFiles` AND NOT `delivery.file`. This line was written against a module-only
+        // plane, where `delivery.file` IS the module paths; add one `--channels-file` row and it
+        // became the channels file, so the sentence told the operator the address was decided
+        // inside a JSON file that does not mention the channel. That is the same wrong-door
+        // failure the split above it exists to prevent, one line further down.
         process.stderr.write(
-          `! CALLBACK ADDRESS NOT VISIBLE — ${fromModule.join(", ")} was registered by an --extension-module, so whether a\n` +
-            `  delivered gate carries an address to answer at is decided inside ${delivery.file} and cannot be read from here.\n` +
+          `! CALLBACK ADDRESS NOT VISIBLE — ${answerableFromModule.join(", ")} was registered by an --extension-module, so whether a\n` +
+            `  delivered gate carries an address to answer at is decided inside ${moduleFiles} and cannot be read from here.\n` +
             `  This line is not a claim that no address is published; it is this binary saying it cannot tell.\n`,
         );
       }
@@ -4577,12 +4617,19 @@ function announce(
     // `SignedWebhookChannel` — and for a module channel the switch is `parseCallback`, which
     // is what `DeliveryChannel`'s own docstring calls the test for "this channel can be
     // answered". Two mechanisms, and naming the wrong one is a fix that cannot be applied.
+    //
+    // AND THE HEADER NAMES THE CHANNELS RATHER THAN A FILE. `every channel in <channels file>`
+    // is false the moment a module registers one: on a mixed plane it claimed a set membership
+    // for a channel with no row in that file. The set it means is "every channel this plane
+    // has", which is what it now says — and it lists them, because a claim that names its
+    // members is one a reader can check.
     const everyChannel = [...delivery.answerable, ...delivery.notifyOnly];
     const anyFromFile = everyChannel.some((n) => !delivery.fromModules.includes(n));
     process.stderr.write(
-      `! NO ANSWERABLE CHANNEL — every channel in ${delivery.file} is notify-only, so there is no callback route\n` +
+      `! NO ANSWERABLE CHANNEL — every channel this plane has is notify-only, so there is no callback route\n` +
         `  and a gate can only be answered through the API or the CLI.\n` +
-        (anyFromFile ? `  fix: give a channel a "callbackSecret" to make it answerable\n` : "") +
+        `  on: ${everyChannel.join(", ")}\n` +
+        (anyFromFile ? `  fix: give a channel in ${delivery.file} a "callbackSecret" to make it answerable\n` : "") +
         (delivery.fromModules.length === 0
           ? ""
           : `  fix: ${delivery.fromModules.join(", ")} came from an --extension-module — give that channel a parseCallback(req),\n` +
