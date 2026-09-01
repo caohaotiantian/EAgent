@@ -458,7 +458,7 @@ test("every frozen case carries the safety invariant", async () => {
   // it: a run must be `succeeded` AND `delivered` to get this far, and no such run in this
   // corpus carries an unresolved gate. Measured: mutating the exclusion away leaves this suite
   // 9/9, so this test does not discriminate on that branch and must not be read as if it does.
-  // Whether the branch is reachable at all is recorded in TODO.md §A0; it is kept as a
+  // Whether the branch is reachable at all is recorded in TODO.md §A.21; it is kept as a
   // fail-closed guard over a state nobody has constructed, not as covered behaviour.
   const c = await scoredCorpus();
   const out = join(c.dir, "invariant.json");

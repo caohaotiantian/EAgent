@@ -269,8 +269,8 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   counts a gate as unresolved only when its folded state is neither `decided` nor `cancelled`.
   Measured, and the test says so in its own prose (`test/cli/suite-freeze.test.ts`, the case
   "every frozen case carries the safety invariant"): mutating the exclusion away leaves the suite
-  9/9. **That comment cites "TODO.md §A0", which this rewrite renumbered to this row** — follow it
-  here. Two possibilities wanting different answers: the state is unreachable for an eligible run
+  9/9. **The comment that cited "TODO.md §A0" now cites this row by number**, along with the twelve
+  other citations the renumber broke — see §H.2. Two possibilities wanting different answers: the state is unreachable for an eligible run
   (delete it and say why), or it is reachable by a path nobody has found (build the fixture).
   **Closes when** somebody decides which, by
   construction rather than by argument. A `gate.timeout{fail}` leaves a gate `expired` and fails
@@ -489,9 +489,11 @@ is a better view of nothing.
 
 ## D · Decisions still owed
 
-**§D was thirteen items and is five.** The twelve answered on 2026-08-28 are in §Z with the commit
-that executed each; many were answered by DELETION, which is the honest direction for a tree whose
-§B had eleven "declared and wired to nothing" entries. The framing question was answered by the
+**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remain, renumbered `D.1`–`D.5`.**
+Twelve were answered on 2026-08-28 and are in §Z with the commit that executed each — the rest had
+already closed before this session. **The surviving five do NOT keep their old numbers**, which is
+why §H.2 exists. Many were answered by DELETION, which is the honest direction for a tree whose §B
+table carried thirteen rows under a header claiming eleven. The framing question was answered by the
 maintainer: **single machine, single tenant, the maintainer's own workflows** — tens of runs per
 day, retention in weeks, one `loom serve`, one operator. Four items resolved on that answer and
 three of them resolved to *do not build*.
@@ -518,7 +520,7 @@ Each row below states what a decision would settle. None is the implementer's to
   from a config file is a threshold this binary should cross. Under one operator it is defensible;
   at more than one it must be reconsidered, because "the operator" and "the person who wrote the
   mcp file" stop being the same person. **Dissent, recorded:** filing rather than building is how
-  findings die, and a §D item nobody picks up is functionally the silence that gave §B eleven
+  findings die, and a §D item nobody picks up is functionally the silence that gave §B thirteen
   entries. If this is still open at the next re-check, filing it was the wrong call.
 
 - **D.2 · A ninth span name for a subgraph.** See §C.5. The decision is whether the span taxonomy
@@ -705,6 +707,29 @@ Each traces to a decision in `DESIGN.md`.
   distinguishes "no sources" from "sources I cannot read" rather than passing on either. **Still
   open:** nothing rebuilds the binary automatically, so the standing condition remains — after a
   source edit, `npm run build:binary` before trusting `bin/loom`.
+- **H.2 · The 2026-08-29 renumber broke thirteen in-tree citations of this file; all are
+  repointed.** Recorded as a set rather than described, because two of them had the dangerous
+  shape — after the renumber they resolved to a *plausible, unrelated, live* row instead of to
+  nothing, which is worse than dangling. `src/run/engine.ts:7096` cited `§B.1` for a compensation
+  gap and landed on `LeasedScheduler`; `test/deployment/boot-banner.test.ts:18` cited `A.15` for
+  the suite flake and landed on `RUN_CLOCK_SCAN_CEILING`.
+
+  | was | is now | sites |
+  |---|---|---|
+  | `§A0` | `§A` | `DESIGN.md` ×3 |
+  | `§A0` | `§A.21` | `test/cli/suite-freeze.test.ts` |
+  | `§D.4` | `§Z` | `src/run/engine.ts`, `test/run/cancel-does-not-wait.test.ts`, `test/run/operator-steer.test.ts` |
+  | `§D.14` | `§Z` | `README.md`, `test/readme-gaps.test.ts` |
+  | `§B.1` | `§A.30` | `src/run/engine.ts` |
+  | `§E.1` | `§B.1` | `src/cli.ts` |
+  | `A.15` | `A.20` | `test/deployment/boot-banner.test.ts` |
+
+  Four citations were checked and left alone because they still resolve: `§E.2` (`src/cli.ts`) and
+  §F items 11, 12 and 13, which survived because §F is a numbered list whose numbering did not
+  move. **The command that enumerates the whole set**, so the next renumber can run it first:
+  `/usr/bin/grep -arno 'TODO\.md[^"]\{0,4\}§\?[A-Z]0\?\.\?[0-9]*' packages/core/src packages/core/test scripts *.md`
+  — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
+  into enumerations.
 
 ---
 

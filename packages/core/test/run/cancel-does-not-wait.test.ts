@@ -2,7 +2,7 @@
  * DOES `cancel` WAIT FOR AN IN-FLIGHT EFFECT TO SETTLE? Measured here, because a second verb
  * was going to be built on the answer.
  *
- * `TODO.md` §D.4 defines `kill` as "`cancel` that does not wait for an in-flight effect to
+ * `TODO.md` §Z (D.4, answered 2026-08-28) defines `kill` as "`cancel` that does not wait for an in-flight effect to
  * settle", with `run.cancelled.forced` as its record. That definition presumes `cancel` waits.
  * This file is the reproduction of what it actually does, and it is a test rather than a note
  * because the premise is the kind of thing that changes under later edits: if `cancel` ever

@@ -91,7 +91,7 @@ which matters because the memory-only-state class has been violated five times, 
 field somebody forgot to journal — the five are named in
 `packages/core/test/run/oversight-survives-restart.test.ts`. A sixth has not been added, but
 member #3 (accumulated spend) has since regressed one layer down: the restore arm works and the
-projection it restores from does not fold `model.called`. See `TODO.md` §A0.
+projection it restores from does not fold `model.called`. See `TODO.md` §A.
 
 ### D3 · The clock is bound to the journal, not recorded
 
@@ -255,7 +255,7 @@ recorded dissent. Two things about those decisions belong here rather than in th
   count spanning runs while the journal is addressed per run. `D.10`'s `preAuthorization`
   envelope makes three.
 
-Evidence for each item below is in `TODO.md` §A0 and
+Evidence for each item below is in `TODO.md` §A and
 `docs/audit-2026-08-25.md`; the ones marked `gated` are held by
 `docs/audit-2026-08-25.md`, which also records the five gated cases that fired as each was
 fixed, and why only executable ones survived.
@@ -584,7 +584,7 @@ a credential, and does not repeat its side effect.
 **What it cost to learn what a test could not.** The first attempt produced a report of nothing:
 the model spent its entire token budget reasoning and returned empty content under
 `finish_reason: "max_tokens"`, and the runtime wrote `""` to the channel and called the run
-`succeeded`. Two defects, both in `TODO.md` §A0, neither reachable from any offline test. This is
+`succeeded`. Two defects, both in `TODO.md` §A, neither reachable from any offline test. This is
 the item's real return: not that the mechanism works, but that one real workload found in eight
 minutes what 2,215 tests could not.
 

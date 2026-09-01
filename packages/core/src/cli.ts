@@ -577,7 +577,7 @@ function refuseRepeated(args: Args, name: string, consequence: string): void {
  * `task.leased.workerId`, so a journal written by two planes says WHICH plane did what
  * instead of attributing everything to one `worker-0`. `test/deployment/two-planes.test.ts`
  * reads those names back out of the journal and is the reason this is not speculative.
- * The scheduler having no caller is TODO.md §E.1, and it is that item, not this one.
+ * The scheduler having no caller is TODO.md §B.1, and it is that item, not this one.
  */
 let workspaceOrdinal = 0;
 function planeWorkerId(): string {

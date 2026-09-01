@@ -15,7 +15,7 @@
  * `out` before `stop()` was reading a prefix and passing because the prefix happened to be
  * long enough.
  *
- * TODO.md A.15 records "a rare suite flake, four sightings, never reproduced … the test
+ * TODO.md A.20 records "a rare suite flake, four sightings, never reproduced … the test
  * helper waits for a known-last line on stdout and for nothing on stderr". This file does
  * not reproduce the sighting — see the report; ten loops of the spawned suites under
  * sixteen CPU burners are green. It fixes the part that is decidable at a sha: whether the

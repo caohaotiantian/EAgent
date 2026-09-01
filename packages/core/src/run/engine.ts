@@ -2374,7 +2374,7 @@ export class Engine {
   /**
    * PUT A RUNNING GRAPH ONTO A DIFFERENT EDGE ITS AUTHOR DECLARED.
    *
-   * `TODO.md` §D.4 fixes the shape: steer is "confined to the compiled edge set, exactly as a
+   * `TODO.md` §Z (D.4, answered 2026-08-28) fixes the shape: steer is "confined to the compiled edge set, exactly as a
    * `router` is", and it must not reach an edge the compiled graph does not contain — that is
    * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
    * operator surface would be oversight routing around itself.
@@ -7093,7 +7093,7 @@ export class Engine {
       // unmaterialised fan-out, and `E_OUTPUT_MISSING` — are Loom disagreeing with itself, and
       // the budget/fatal floor at the top of `advance` fails a run that may still have leased
       // tasks in flight; rolling back underneath a live task would race the thing it is undoing.
-      // Those are not compensated today. `TODO.md` §B.1 carries the gap.
+      // Those are not compensated today. `TODO.md` §A.30 carries the gap.
       await this.#compensate(ctx, p, "run_failed");
       await this.#serialize(() =>
         ctx.log.append([

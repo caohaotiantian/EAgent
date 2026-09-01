@@ -1,7 +1,7 @@
 /**
  * STEER: AN OPERATOR PUTS A RUNNING GRAPH ONTO A DIFFERENT EDGE THE AUTHOR DECLARED.
  *
- * `TODO.md` §D.4 fixes the shape and the bound: "steer is confined to the compiled edge set,
+ * `TODO.md` §Z (D.4, answered 2026-08-28) fixes the shape and the bound: "steer is confined to the compiled edge set,
  * exactly as a `router` is", and it must not reach an edge the compiled graph does not
  * contain — that is `graph:mutate`, a capability a tenant either holds or does not, and
  * routing around it from the operator surface would be oversight loosening itself.

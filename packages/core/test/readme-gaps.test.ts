@@ -246,7 +246,7 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
       assert.deepEqual(
         offenders,
         [],
-        "something now removes a journal row or a payload file — update the row and re-read TODO.md §D.14",
+        "something now removes a journal row or a payload file — update the row and re-read TODO.md §Z (D.14, answered by deletion 2026-08-28)",
       );
     },
   },
