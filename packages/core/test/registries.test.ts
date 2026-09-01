@@ -354,7 +354,7 @@ function appendedEffectKinds(engineText: string): readonly string[] {
 test("EVERY DECLARED EFFECT KIND HAS A WRITER, except the ones pinned here", () => {
   const declared = declaredEffectKinds(EVENTS_TEXT);
   const written = appendedEffectKinds(CODE_TEXT.get(join(SRC_DIR, "run/engine.ts"))!);
-  assert.deepEqual(declared, ["compensate", "model", "random", "subgraph", "summarize", "tool"], "the union moved — say so in a commit, not here by accident");
+  assert.deepEqual(declared, ["compensate", "model", "quote", "random", "subgraph", "summarize", "tool"], "the union moved — say so in a commit, not here by accident");
 
   assert.ok(written.length > 0, "no effect.started append site was found at all — this check would pass everything while watching nothing");
   assert.deepEqual(written.filter((k) => k.startsWith("?")), [], "an effect.started site declares a kind this test cannot resolve — it refuses rather than guessing");
@@ -494,7 +494,7 @@ test("the registries are non-empty, so none of the above can pass vacuously", ()
   assert.ok(Object.keys(ESCALATION_RULES).length >= 8, "ESCALATION_RULES is populated");
   assert.ok(FILES.length >= 40, `scanned ${String(FILES.length)} source files`);
   assert.ok(
-    declaredEffectKinds(EVENTS_TEXT).length >= 6,
+    declaredEffectKinds(EVENTS_TEXT).length >= 7,
     "effect.started.kind lost members — an empty union would make the writer check pass while watching nothing",
   );
 });

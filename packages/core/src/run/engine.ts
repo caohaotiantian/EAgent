@@ -4839,13 +4839,20 @@ export class Engine {
       // THE CEILING THIS TURN WAS SENT UNDER, hoisted out of the reservation because two things
       // need it: the token budget charges against it, and a turn that comes back truncated has
       // to NAME it — an operator told "raise the ceiling" without being told what it is now
-      // cannot tell a margin from an order of magnitude. `undefined` in a replay, which reaches
-      // no adapter and therefore has nothing to ask.
+      // cannot tell a margin from an order of magnitude. `undefined` only when the recording has
+      // no quote to serve — see `#quoteEffect`.
       let ceiling: number | undefined;
       try {
-        // A replay makes no call, so it reserves nothing. Estimating against a provider
-        // that is not there would be inventing a cost for work that never happens.
-        const estimateUsd = adapter?.estimateOf(shaped) ?? 0;
+        // WHAT THE ADAPTER SAID THIS TURN WOULD COST, ASKED ONCE AND RECORDED. Both numbers come
+        // from one journaled effect so that a replay reaches the same three refusals below from
+        // the record instead of re-deriving them against an adapter it does not have. The two
+        // used to be two bare adapter calls straddling the `costUsd` check; asking them together
+        // moves an `outputCeilingOf` REFUSAL (`E_PROVIDER_BAD_REQUEST`, for an adapter that will
+        // not state a ceiling) ahead of that check, which is the right order — a request whose
+        // ceiling nobody will state cannot be budgeted, and the budget arithmetic below is what
+        // that ceiling feeds.
+        const quote = await this.#quoteEffect(ctx, p, w, shaped, turn, adapter);
+        const estimateUsd = quote.estimateUsd;
 
         // THE NODE'S OWN CEILING, and until now a number nothing read. D2 says this loop is
         // "bounded by `maxTurns` AND node budget, whichever binds first"; the second half was
@@ -4896,45 +4903,35 @@ export class Engine {
         // and add two the provider bills separately, and a ceiling that over-counts refuses work
         // that fit.
         //
-        // THE CEILING IS ASKED FOR, NOT ASSUMED — D.7.3. A REPLAY reserves nothing, exactly as
-        // `estimateOf` above already does and for the same reason: no call is made, so there is
-        // no output to bill and no ceiling to describe. Inventing a number here would price work
-        // that never happens.
-        ceiling = adapter === undefined ? undefined : outputCeilingOf(adapter, shaped, `node "${w.node.id}"`);
-        // A FLOOR ON REPLAY, AND THE JOURNAL CANNOT YET DO BETTER. Stated here rather than left
-        // to be discovered, because D.7.3 moved this number without saying it had: the padding
-        // used to be a made-up constant of 1,024, which both paths computed, so a `budget.tokens`
-        // refusal replayed event for event and message for message. Now the live path asks the
-        // adapter and the replay path has no adapter to ask.
-        //
-        // WHAT THE `?? 0` IS AND IS NOT. It is a LOWER BOUND on the live estimate — same
-        // `shaped`, no padding — so it is SOUND in one direction and holed in the other:
+        // THE CEILING IS ASKED FOR, NOT ASSUMED — D.7.3 — AND NOW IT IS RECORDED. It comes off
+        // the quote above, which is one journaled effect on every path: a live turn asks the
+        // adapter, a re-execution and a replay are handed the number the recording got. So the
+        // refusal below re-derives instead of being re-guessed.
+        ceiling = quote.outputCeiling;
+        // WHAT `undefined` STILL MEANS, AND IT IS NOW EXACTLY ONE CASE: a replay of a journal
+        // written before the `quote` effect existed. There is no quote to serve and none can be
+        // invented, so `ceiling ?? 0` stands for those recordings — a LOWER BOUND on the live
+        // estimate (same `shaped`, no padding), sound in one direction and holed in the other:
         //   - a replay can never refuse a turn the live run allowed. That direction is safe, and
         //     it is why this check is not simply switched off in replay. Measured, node cap 10:
         //     LIVE refuses at 1043, REPLAY refuses at 19 — skipping the check would have lost
         //     that refusal entirely and died on the missing effect instead.
         //   - a replay CAN fail to refuse a turn the live run refused, whenever the refusal
-        //     needed the padding. Measured, node cap 500: LIVE fails E_BUDGET_EXHAUSTED at 1043,
-        //     REPLAY does not refuse at 19, reaches the model effect the live run never made, and
-        //     dies E_REPLAY_DIVERGENCE with zero `budget.exhausted` rows in the shadow journal.
-        //     `replayRun`'s `compare()` grades both as `failed` and reports `match: true`, so
-        //     nothing announces it — that last part is in `run/replay.ts`, not here.
+        //     needed the padding. Measured before this change, node cap 500: LIVE failed
+        //     E_BUDGET_EXHAUSTED at 1043 and REPLAY did not refuse at 19, reached the model
+        //     effect the live run never made, and died E_REPLAY_DIVERGENCE.
+        // A journal this binary writes has the quote, so both of those are now about OLD
+        // recordings only. Replay reproduces what happened; it does not re-judge a run under a
+        // rule its binary never had.
         //
-        // THE CLASS, NAMED. Three token/cost refusals cannot be re-derived by a replay today and
-        // all three for the same reason — the quantity is an ADAPTER's answer and the journal
-        // does not carry it: this node ceiling; the node `costUsd` ceiling above, whose
-        // `estimateOf(shaped) ?? 0` makes it refuse nothing at all in replay (older than this
-        // change, and undocumented until now); and `ctx.policy.reserve` below, which charges the
-        // RUN's token budget the same padded number live and an unpadded one in replay. Only
-        // `wallMs` is exempt, and only because it is settled-only.
-        //
-        // WHAT WOULD CLOSE IT, and why it is not here. `outputCeilingOf` is a call into the
-        // adapter, so the rule that applies is this repo's own — every nondeterministic call is
-        // recorded under a derived key and replay serves the record. That means a seventh member
-        // of `effect.started.kind` in `journal/events.ts` plus an index for it in
-        // `ReplayEffects`, and that union's docstring is explicit that its membership is a
-        // measured, guarded set rather than a place to add a field. It is a vocabulary change,
-        // not a repair, and it is the seam this hole is asking for.
+        // THE CLASS THAT IS NOW CLOSED, named because it was named here as open. Three
+        // token/cost refusals could not be re-derived by a replay, all for one reason — the
+        // quantity is an ADAPTER's answer and the journal did not carry it: this node ceiling;
+        // the node `costUsd` ceiling above, whose `estimateOf(shaped) ?? 0` made it refuse
+        // nothing at all in replay; and `ctx.policy.reserve` below, which charged the RUN's
+        // token budget a padded number live and an unpadded one in replay. All three read the
+        // quote now. `wallMs` was and is exempt, because it is settled-only — there is no worst
+        // case for a duration until the call has been made.
         const estimateTokensForTurn = estimateTurnTokens(shaped, ceiling ?? 0);
         const nodeCapTokens = w.node.policy?.budget?.tokens;
         const taskTokens = usage.inputTokens + usage.outputTokens;
@@ -4949,8 +4946,9 @@ export class Engine {
               // of `test/run/replay-fidelity.test.ts` was written about, a wrong answer
               // announcing itself as a different wrong answer.
               (ceiling === undefined
-                ? `, a FLOOR: a replay has no adapter to state the output ceiling, so the padding ` +
-                  `the recorded run reserved against is missing from this number`
+                ? `, a FLOOR: this recording carries no quote effect for the turn — it was written ` +
+                  `before one existed — so the padding the recorded run reserved against is missing ` +
+                  `from this number`
                 : "") +
               `)`,
             {
@@ -4961,9 +4959,10 @@ export class Engine {
                 spent: taskTokens,
                 reserved: 0,
                 requested: estimateTokensForTurn,
-                // `null` is "nobody stated one", which on this path means a replay. Written
-                // rather than omitted so an auditor reading `budget.exhausted`'s error record can
-                // tell a padded estimate from an unpadded one without knowing how it got there.
+                // `null` is "nobody stated one", which now means exactly one thing: a replay of a
+                // journal older than the `quote` effect. Written rather than omitted so an auditor
+                // reading `budget.exhausted`'s error record can tell a padded estimate from an
+                // unpadded one without knowing how it got there.
                 ceiling: ceiling ?? null,
               },
             },
@@ -5728,6 +5727,101 @@ export class Engine {
     });
     this.#childGraphs.set(key, compiled);
     return compiled;
+  }
+
+  /**
+   * WHAT THE ADAPTER SAID THIS TURN WOULD COST, ASKED ONCE AND WRITTEN DOWN.
+   *
+   * `estimateOf(req)` and `outputCeilingOf(req)` are calls INTO the adapter, and three refusals
+   * in `#runAgent` are computed from their answers: the node `costUsd` ceiling, the node `tokens`
+   * ceiling, and the run-level `PolicyEngine.reserve`. They were the one such call nobody
+   * journaled, so a replay — which reaches no adapter — re-derived them as `?? 0` and reached
+   * DIFFERENT refusals than the run it claims to reproduce. This is the repo's own rule applied
+   * to them: every nondeterministic call is recorded under a derived key, and replay serves the
+   * record.
+   *
+   * BOTH NUMBERS IN ONE EFFECT, because they answer one question about one request and are read
+   * together. Two effects would mean two keys, two ordinals to keep in step, and a window in
+   * which a turn is half-priced.
+   *
+   * THE KEY IS `taskId:quote:<turn>` — the same task coordinate and the same ordinal as the
+   * `model` effect of the turn it prices. `TaskId` is derived (`nodeId@branchPath#iteration`) and
+   * the turn is the loop index, so a retry, a resumed task and a replay all recompute it. It is
+   * deliberately NOT `taskId:model:<turn>`: a quoted turn that a budget then refuses makes no
+   * model call, so the two are different facts and collapsing them would put a completion under
+   * a key whose call never happened.
+   *
+   * THREE PATHS, AND THE APPEND IS WHAT THEY SHARE:
+   *   - LIVE — ask the adapter, record the answer.
+   *   - LIVE RE-EXECUTION — `#servedEffect` hands back the recorded answer and appends nothing,
+   *     so a second attempt prices the turn exactly as the first did rather than at whatever the
+   *     adapter now says. Same reason the model turn beside it is served.
+   *   - REPLAY — serve the record and append it again, so the shadow journal has the same events
+   *     under the same keys as the original. That is `#randomSeedEffect`'s lesson, measured
+   *     there: a replay branch that returns before its append leaves the shadow two events
+   *     shorter per body and `spansFrom` builds a different tree.
+   *
+   * AND THE FOURTH CASE, WHICH IS AN OLD JOURNAL. A recording written before this effect existed
+   * has no quote to serve, and none can be invented. It gets `outputCeiling: undefined` and
+   * `estimateUsd: 0` — verbatim the `?? 0` that stood before — which is a LOWER bound and
+   * therefore sound in the only direction that matters: such a replay can fail to reproduce a
+   * refusal the recording made, and can never invent one it did not. NOTHING IS APPENDED in that
+   * case, deliberately: a fabricated quote in a shadow journal would be this file claiming an
+   * adapter answered when none was asked.
+   *
+   * A RECORD THIS BUILD CANNOT READ IS A DIVERGENCE, not a fallback to zero. Falling back would
+   * turn a corrupt row into a silently skipped refusal, which is loosening; refusing is always
+   * allowed.
+   */
+  async #quoteEffect(
+    ctx: RunContext,
+    p: RunProjection,
+    w: Wave,
+    req: ModelRequest,
+    turn: number,
+    adapter: ModelAdapter | undefined,
+  ): Promise<{ readonly estimateUsd: number; readonly outputCeiling: number | undefined }> {
+    const key = effectKey(w.task.taskId, "quote", turn);
+    const write = async (q: RecordedQuote): Promise<void> => {
+      // ONE BATCH. The write-ahead `effect.started` that `journal/sqlite.ts` describes exists so
+      // a crash mid-call is distinguishable from a call never made; a quote is two synchronous
+      // questions with no such window, so the pair goes down together — the shape
+      // `#randomSeedEffect` and the subgraph effect already use, and it keeps
+      // `effect.completion-has-a-start` satisfied either way.
+      await this.#serialize(() =>
+        ctx.log.append(
+          [
+            { type: "effect.started", payload: { key, kind: "quote", attempt: 1 }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId },
+            { type: "effect.completed", payload: { key, result: q, resultDigest: digest(q) }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId },
+          ],
+          { taskId: w.task.taskId },
+        ),
+      );
+    };
+
+    const served = await this.#servedEffect(ctx, p, key);
+    if (served !== undefined) return recordedQuote(served.result, key);
+
+    if (this.#replay !== undefined) {
+      if (!this.#replay.has(key)) return { estimateUsd: 0, outputCeiling: undefined };
+      const recorded = recordedQuote(this.#replay.require(key).result, key);
+      await write(recorded);
+      return recorded;
+    }
+
+    if (adapter === undefined) {
+      // Unreachable by construction — `#runAgent` binds `adapter` to `models.require()` on every
+      // path that is not a replay, and the replay path returned above. Refusing rather than
+      // defaulting, because a default here is a number nobody vouched for, which is exactly what
+      // `outputCeilingOf` exists to refuse.
+      throw err.internal(CODES.E_INTERNAL, `node "${w.node.id}" turn ${String(turn)}: no model adapter to price the turn against`);
+    }
+    const quote: RecordedQuote = {
+      estimateUsd: estimateUsdOf(adapter, req, `node "${w.node.id}"`),
+      outputCeiling: outputCeilingOf(adapter, req, `node "${w.node.id}"`),
+    };
+    await write(quote);
+    return quote;
   }
 
   /**
@@ -8372,6 +8466,78 @@ function outputCeilingOf(adapter: ModelAdapter, req: ModelRequest, where: string
       // this refusal is journaled. Putting the raw value in `details` turns a clean refusal into
       // an unhandled `CanonicalizationError` from inside the commit, which is a worse failure
       // than the one being reported. Measured: `non-finite number NaN at error.details.returned`.
+      { details: { where, provider: adapter.provider, returned: String(n) } },
+    );
+  }
+  return n;
+}
+
+/**
+ * What a `quote` effect records: the two adapter answers a turn's budget refusals are made from.
+ *
+ * NOT THE REQUEST THAT WAS PRICED. A digest of that already rides on `model.called.requestDigest`,
+ * and a turn a budget refuses makes no model call to carry one — so this is the ANSWER only, and
+ * the effect key is what binds it to a turn.
+ */
+type RecordedQuote = { readonly estimateUsd: number; readonly outputCeiling: number };
+
+/**
+ * A recorded quote, or a DIVERGENCE — never a fallback to zero.
+ *
+ * Zero is the reading an OLD journal gets, where there is no row at all and the lower bound is
+ * honest. A row that is present and unreadable is a different fact: something wrote a shape this
+ * build does not understand, and reading it as zero would silently drop a refusal the recording
+ * made. Refusing is always allowed; loosening never is.
+ *
+ * The bounds are the ones the writers guarantee — `outputCeilingOf` refuses anything that is not
+ * finite and positive, `estimateUsdOf` anything that is not finite and non-negative — so a value
+ * outside them did not come from this engine.
+ */
+function recordedQuote(result: unknown, key: string): RecordedQuote {
+  const o = result as { estimateUsd?: unknown; outputCeiling?: unknown } | null | undefined;
+  const usd = o?.estimateUsd;
+  const ceiling = o?.outputCeiling;
+  if (
+    typeof usd !== "number" ||
+    !Number.isFinite(usd) ||
+    usd < 0 ||
+    typeof ceiling !== "number" ||
+    !Number.isFinite(ceiling) ||
+    ceiling <= 0
+  ) {
+    throw err.internal(
+      CODES.E_REPLAY_DIVERGENCE,
+      `effect "${key}" recorded a quote this build cannot read — expected {estimateUsd >= 0, outputCeiling > 0}, ` +
+        `got estimateUsd=${String(usd)} outputCeiling=${String(ceiling)}. Refusing rather than pricing the turn at zero, ` +
+        `which would drop a refusal the recorded run made.`,
+      { details: { key, estimateUsd: String(usd), outputCeiling: String(ceiling) } },
+    );
+  }
+  return { estimateUsd: usd, outputCeiling: ceiling };
+}
+
+/**
+ * The adapter's own dollar estimate, or a REFUSAL — the sibling of `outputCeilingOf` and added
+ * for the same reason one step later.
+ *
+ * This used to be a bare `adapter?.estimateOf(shaped) ?? 0`, and a `NaN` from it disabled the run
+ * budget in silence: `spent + NaN > cap` is `false`, so the node ceiling never fires, and
+ * `PolicyEngine.reserve(scope, NaN, …)` reserves nothing measurable. Journaling the number makes
+ * that worse rather than better — `canonicalize` refuses a non-finite number on the durable write
+ * path, so the run would die `E_INTERNAL` from inside the commit instead of reporting anything
+ * useful. So it is checked here, where the answer is still a value and not yet a row.
+ *
+ * `String(n)` in `details` for the reason `outputCeilingOf` gives: the values that reach this arm
+ * are exactly the ones the write path refuses.
+ */
+function estimateUsdOf(adapter: ModelAdapter, req: ModelRequest, where: string): number {
+  const n = (adapter as Partial<ModelAdapter>).estimateOf?.(req);
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+    throw err.validation(
+      CODES.E_PROVIDER_BAD_REQUEST,
+      `${where}: model adapter "${adapter.provider}" did not state a cost estimate — \`estimateOf(req)\` returned ` +
+        `${String(n)}, and the run's dollar budget reserves against that number. It must return a finite, non-negative ` +
+        `cost in USD. Refusing the turn rather than reserving a number nobody vouched for.`,
       { details: { where, provider: adapter.provider, returned: String(n) } },
     );
   }

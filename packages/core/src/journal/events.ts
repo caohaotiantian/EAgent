@@ -326,8 +326,8 @@ export interface EventPayloads {
    * `model` is a member but was never the summariser's, and `mailbox` is not a member at all.
    *
    * THE MEMBERS ARE THE MEASURED SET. Every one is appended somewhere in `run/engine.ts` —
-   * `model`, `subgraph`, `summarize` and `random` at their own sites, `tool` and `compensate`
-   * through the one site that takes the kind as an argument. `test/registries.test.ts`'s
+   * `model`, `subgraph`, `summarize`, `random` and `quote` at their own sites, `tool` and
+   * `compensate` through the one site that takes the kind as an argument. `test/registries.test.ts`'s
    * `EVERY DECLARED EFFECT KIND HAS A WRITER` re-derives that from the source on every run and
    * goes red on a member with no writer, so this list cannot quietly grow a promise again. Two
    * members did exactly that and are gone: `clock`, because DESIGN.md D3 rejected journalling
@@ -340,10 +340,42 @@ export interface EventPayloads {
    * overturned, the missing seam is an eighth `EdgeKind` in `graph/spec.ts`, which has seven; an
    * effect kind would FOLLOW it. Re-adding a member here first would be the same declared-and-
    * wired-to-nothing defect a second time.
+   *
+   * `quote` IS THE SEVENTH, AND IT IS AN ADAPTER CALL THAT WAS NEVER TREATED AS ONE. Before a
+   * model turn is sent, `Engine.#runAgent` asks the adapter two questions whose answers decide
+   * whether the turn happens at all: `estimateOf(req)` — the dollars this request may bill — and
+   * `outputCeilingOf(req)` — the output tokens it may bill. Three refusals are computed from
+   * them (the node `costUsd` ceiling, the node `tokens` ceiling, and the run-level
+   * `PolicyEngine.reserve`), and the answers were never written down. A replay reaches no
+   * adapter, so it re-derived them as `?? 0` and reached DIFFERENT refusals than the run it
+   * claims to reproduce: measured on a one-agent graph with `budget.tokens: 500`, the live run
+   * failed `E_BUDGET_EXHAUSTED` at 1,041 estimated tokens and the replay did not refuse at 17,
+   * went on to a model effect the live run never made, and died `E_REPLAY_DIVERGENCE`.
+   *
+   * So it is exactly the rule this repo already has — every nondeterministic call is recorded
+   * under a derived key, and replay serves the record — applied to the one such call nobody
+   * journaled. The key is `effectKey(taskId, "quote", turn)`: same task coordinate and same
+   * ordinal as the `model` effect of the turn it prices, so a retry, a resume and a replay all
+   * recompute it. The result is `{ estimateUsd, outputCeiling }` and NOT the request that was
+   * priced — a digest of that already rides on `model.called.requestDigest`, and a turn that is
+   * refused makes no model call to carry one.
+   *
+   * IT IS NOT A MODEL CALL AND MUST NOT BE FOLDED AS ONE. No provider is reached, nothing is
+   * billed, and `projection.ts` charges usage off `model.called`, which a quote never writes —
+   * so a quoted-and-refused turn adds no spend to the run, which is what actually happened.
+   *
+   * AN OLD JOURNAL HAS NO `quote`, AND THE SAFE READING IS THE ONE IT ALREADY GOT. Replay asks
+   * `ReplayEffects.has(key)` and falls back to `estimateUsd = 0`, `outputCeiling = undefined`
+   * when the answer is no — verbatim the `?? 0` that stood before this field existed. That
+   * bound is SOUND IN ONE DIRECTION: it can only under-count, so an old recording's replay can
+   * still fail to reproduce a refusal that needed the padding, but it can never invent one the
+   * recording did not make. Replay reproduces what happened; it does not re-judge old runs under
+   * a rule their binary never had. And the fallback appends NOTHING — a replay that had no quote
+   * to serve must not write a fabricated one into the shadow journal.
    */
   "effect.started": {
     readonly key: string;
-    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "random" | "compensate";
+    readonly kind: "model" | "tool" | "subgraph" | "summarize" | "random" | "compensate" | "quote";
     readonly attempt: number;
   };
   "effect.completed": { readonly key: string; readonly result: unknown; readonly resultDigest: string };

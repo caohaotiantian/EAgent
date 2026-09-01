@@ -810,8 +810,9 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // `tool.name` / `tool.version` / `tool.irreversibility` / `tool.idempotent` already
       // follow. The three NAME literals stay inline on `name:` for the reason below.
       //
-      // THREE ARMS OVER SIX KINDS, AND THE SIX ARE A CLOSED LIST — `effect.started.kind` in
-      // `journal/events.ts` is `model | tool | subgraph | summarize | random | compensate`. The
+      // THREE ARMS OVER SEVEN KINDS, AND THE SEVEN ARE A CLOSED LIST — `effect.started.kind` in
+      // `journal/events.ts` is `model | tool | subgraph | summarize | random | compensate |
+      // quote`. The
       // partition is total because `Unplaced` below is checked against that union, NOT because
       // three arms happen to cover it today: a reviewer falsified the earlier wording of this
       // sentence by appending a seventh kind, which compiled clean and landed on `loom.effect`
@@ -855,8 +856,15 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       // `Exclude` over the union is what holds the claim: a seventh kind that is in none of the
       // three lists makes `_Unplaced` non-empty and this assignment stops compiling, naming the
       // kind nobody placed. Costs one line and no runtime.
-      const otherish = e.payload.kind === "subgraph" || e.payload.kind === "random";
-      type Placed = "model" | "summarize" | "tool" | "compensate" | "subgraph" | "random";
+      //
+      // `quote` IS PLACED HERE DELIBERATELY, and the temptation was `modelish`. It is asked of a
+      // model adapter, so it looks like a model call — but it reaches no provider, bills nothing
+      // and has no `model.called` beside it, so `loom.model` would put `gen_ai.*` groupings on a
+      // span with no generation and DOUBLE the model-span count per agent turn, against this
+      // file's own row budget ("~500 task spans, not 2,500"). `loom.effect` is the remainder arm
+      // for exactly this: an effect that is neither a model call nor a tool call.
+      const otherish = e.payload.kind === "subgraph" || e.payload.kind === "random" || e.payload.kind === "quote";
+      type Placed = "model" | "summarize" | "tool" | "compensate" | "subgraph" | "random" | "quote";
       type Unplaced = Exclude<EventPayloads["effect.started"]["kind"], Placed>;
       // `[X] extends [never]` and not `X extends never`: the bare form is a DISTRIBUTIVE
       // conditional, which over `never` distributes across nothing and yields `never` rather

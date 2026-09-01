@@ -101,25 +101,34 @@ reused — §H.2 is the record of what a renumber cost the last time one happene
 
 ## A · Open defects and unguarded behaviour
 
-### The replay-fidelity class — three refusals a replay cannot re-derive
+### The replay-fidelity class — three refusals a replay could not re-derive
 
-This is the sharpest class in the file, because it is the first non-negotiable failing in the one
-place the project sells: *the journal is the only authoritative state.* All three members are
-named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
+This was the sharpest class in the file, because it was the first non-negotiable failing in the one
+place the project sells: *the journal is the only authoritative state.* **A.1 is fixed and the
+three are closed**; the comment that named them, at `run/engine.ts`'s `THE CLASS THAT IS NOW
+CLOSED`, names them still and says what each now reads. A.2 is the class one level out — the
+same blindness about a refusal's TEXT rather than its identity — and is open.
 
-- **A.1 · Three token/cost refusals cannot be re-derived by a replay, all for one reason.** The
-  quantity is an ADAPTER's answer and the journal does not carry it: the node **token** ceiling;
-  the node **`costUsd`** ceiling, whose `estimateOf(shaped) ?? 0` makes it refuse *nothing at all*
-  in replay; and **`ctx.policy.reserve`**, which charges the run's token budget a padded number
-  live and an unpadded one in replay. **Only `wallMs` is exempt, and only because it is
-  settled-only.** The `costUsd` member predates this session and was undocumented until now.
-  Measured, node cap 500: LIVE fails `E_BUDGET_EXHAUSTED` at 1043; REPLAY does not refuse at 19,
-  reaches an effect the live run never made, and dies `E_REPLAY_DIVERGENCE` — while `compare()`
-  grades both `failed` and reports `match: true`, so nothing announces it. Pinned as debt by
-  `test/run/replay-fidelity.test.ts`, "THE HOLE THIS DOES NOT CLOSE".
-  **Closes when** `effect.started.kind` gains a seventh member for the adapter call plus an index
-  for it in `ReplayEffects` — a vocabulary change in a kernel file, so it is a `Kernel-seam:` and
-  the census goes to 9. That is the seam this hole is asking for; it is not a repair.
+- ~~**A.1 · Three token/cost refusals cannot be re-derived by a replay, all for one reason.**~~
+  **FIXED.** The quantity is an ADAPTER's answer and the journal now carries it: `effect.started.kind`
+  has a seventh member, `quote`, written by `Engine.#quoteEffect` under
+  `effectKey(taskId, "quote", turn)` and served by `ReplayEffects` like every other effect. It
+  records `{estimateUsd, outputCeiling}` — the two answers all three refusals are computed from.
+  The census goes to **9**; the trailer is on the commit that added it.
+  All three are driven in `test/run/replay-fidelity.test.ts`, each with a control that strips the
+  quote rows out of the SAME recording and shows the old answer coming back:
+
+      node tokens 500   LIVE 1041 / REPLAY 1041   (was: REPLAY E_REPLAY_DIVERGENCE)
+      node costUsd      LIVE $0.0010 refused      (was: REPLAY refused nothing at all)
+      run  runTokens    LIVE 1041 / REPLAY 1041   (was: REPLAY reserved 17)
+
+  **The `match: true` half is fixed as well**, because the fix would otherwise be unobservable:
+  `compare()` weighed `status` alone, so two runs that failed for unrelated reasons scored green.
+  It weighs the error code now — `expected failed:E_BUDGET_EXHAUSTED, got failed:E_REPLAY_DIVERGENCE`.
+  A.2's MESSAGE frame is a different item and is untouched.
+  **What is left is confined to OLD journals**, which carry no quote to serve and keep the
+  `ceiling ?? 0` lower bound: they can fail to reproduce a refusal and can never invent one. That
+  residual is pinned in the same file and now ANNOUNCES itself through the code frame.
 
 - **A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**
   **The instance is fixed; the class is not.** The provider refusal opened with
@@ -129,6 +138,9 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   **Still open:** `run/replay.ts`'s `compare()` has no message frame, so any OTHER refusal whose
   text depends on the live path diverges the same way and nothing announces it. **Closes when**
   `compare()` grades the message, or when a test pins that no refusal's text can vary by path.
+  **Narrowed by A.1's fix**, which is worth saying precisely rather than as progress: `compare()`
+  now grades the error CODE, so a refusal that becomes a DIFFERENT refusal is announced. A refusal
+  that keeps its code and changes its wording still is not.
 
 - ~~**A.3 · Three sites named the wrong set for "a journal with no `provider`".**~~ **FIXED.**
   All three now say *journals written before `e6d00f2`* rather than *every journal written before
@@ -358,9 +370,15 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   measurement, and it is the reason this half is carried rather than attempted again.
   The narrower refusal is not
   expressible either, because the recording's SPEC is not in the journal (A.24), so nothing can
-  tell "the candidate lowered the ceiling" from "it kept it and changed a body". **Closes when**
-  replay can serve an adapter's answers, i.e. A.1's seam. Stated with the numbers at
-  `unexercised`.
+  tell "the candidate lowered the ceiling" from "it kept it and changed a body".
+  **The named precondition is met: A.1's seam landed, and it moved this on its own.** Driven,
+  a recording with no node ceiling replayed under a candidate that adds one, `onGraphChange:
+  "allow"`: `budget.tokens: 500` and `budget.costUsd: 0.0005` each now replay
+  `failed E_BUDGET_EXHAUSTED, match false`, where both replayed CLEAN before — the reservation is
+  the recording's own quote instead of zero. **Closes when** someone measures whether that is
+  enough: it catches a ceiling the recording's quote crosses, not one lowered to somewhere above
+  it, and it does nothing for journals written before the quote effect. Stated with the two rows
+  at `unexercised`.
 
 - **A.24 · `run.compiled` carries node counts, not the spec.** `{graphHash, nodes, edges,
   resolutionManifest}` — so a trajectory's S1/S4/S5 depend on a file on disk, and `isGolden` reads

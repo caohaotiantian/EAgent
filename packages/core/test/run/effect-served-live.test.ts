@@ -234,6 +234,15 @@ test("A COMPLETED EFFECT IS RECORDED ONCE — the retry appends no second `effec
     `one completion per key, or the auditor calls the run unhealthy; saw ${JSON.stringify(completed)}`,
   );
   assert.equal(completed.filter((k) => k.endsWith(":model:0")).length, 1, "the served model turn appends nothing");
+
+  // AND THE QUOTE, which is the same rule one step earlier in the turn. `#quoteEffect` asks the
+  // adapter what the request will cost and journals the answer, so a re-execution that asked
+  // again would append a second completion under one key AND could price the turn differently
+  // from the attempt that is being reproduced. Both turns are covered: turn 0's model call was
+  // served, and turn 1's was re-performed after a 429 — the quote is served on both, because it
+  // is recorded before the call that failed.
+  assert.equal(completed.filter((k) => k.endsWith(":quote:0")).length, 1, "the retry serves turn 0's quote rather than re-asking");
+  assert.equal(completed.filter((k) => k.endsWith(":quote:1")).length, 1, "and turn 1's, whose model call is the one that failed");
 });
 
 test("A REWIND THAT SUPPRESSED THE EFFECT GETS A FRESH CALL, not the recorded one", async () => {
