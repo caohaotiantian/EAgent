@@ -222,6 +222,78 @@ export function pairedDifference(diffs: readonly number[]): PairedDifference {
 export const MIN_PAIRED_RUNS = 6;
 
 /**
+ * The per-pair cost comparison, and the answer to "does the median gate?" — it does.
+ *
+ * D10.d asks for a ratio of MEDIANS. The replayed gate divides TOTALS and its own docstring says
+ * so, for a reason that is about expressibility rather than preference: `EvalReport` carries no
+ * median, so the stricter reading is not merely unimplemented there, it cannot be written down.
+ * **Pairing removes that reason.** Every input is measured on both graphs, so the per-pair ratio
+ * exists, and with it the statistic D10.d actually named. This mode computed it, journaled it,
+ * and gated on the totals anyway — reported, not gated — and the argument for that was one
+ * sentence: a pair whose baseline cost $0 makes the ratio undefined, and "a check that sometimes
+ * has no answer is worse than one clear rule".
+ *
+ * That objection is answered by making the rule TOTAL rather than by declining to take it:
+ *
+ * | pair | ratio | why |
+ * |---|---|---|
+ * | `baseline > 0` | `candidate / baseline` | the ordinary case |
+ * | `baseline == 0`, `candidate == 0` | 1 | neither side spent; cost did not increase |
+ * | `baseline == 0`, `candidate > 0` | UNBOUNDED | a free input became a paid one, and no finite ceiling contains that |
+ *
+ * The third row is the one that used to be "undefined", and calling it unbounded is not a
+ * convention — it is the limit of `candidate / baseline` as the baseline goes to zero with the
+ * candidate held positive. Making it a value rather than a hole is what lets the check always
+ * have an answer, and it is the FAIL-CLOSED direction: the previous code answered that case `1`,
+ * the passing value, until this lane's reviewer drove six pairs at `$0` baseline and `$100`
+ * candidate through it and watched them promote at "cost ratio 1.00×".
+ *
+ * A median never has to do arithmetic on an unbounded value — it is an order statistic, so an
+ * unbounded pair sorts last and participates by position. The check fails only when the median
+ * ITSELF is unbounded, which takes half the pairs having gone from free to paid.
+ *
+ * WHY THE MEDIAN IS THE BETTER GATE, and not merely the one the roadmap named. A ratio of totals
+ * is dominated by the most expensive input on either side, so it fails in both directions: one
+ * expensive pair hides behind a cheap one, and one expensive pair sinks a candidate that is
+ * cheaper on five of six inputs. The median asks "did the typical input get dearer", which is the
+ * question a cost ceiling is for. The total is still REPORTED in the check's detail — the two
+ * numbers disagreeing is a fact a reader should see — so this reverses which one is the gate and
+ * loses nothing off the page.
+ *
+ * `medianRatio` is `null` when the median is unbounded and when there are no pairs at all. Those
+ * are different facts and `n`/`unbounded` separate them; `null` rather than `Infinity` because a
+ * verdict is journaled and canonical form has no infinity to write.
+ */
+export interface PairedCost {
+  readonly n: number;
+  /** Pairs whose baseline spent nothing while the candidate spent something. */
+  readonly unbounded: number;
+  /** The median per-pair ratio; `null` when that median is unbounded, or when `n` is 0. */
+  readonly medianRatio: number | null;
+  readonly baselineTotalUsd: number;
+  readonly candidateTotalUsd: number;
+}
+
+export function pairedCostRatio(pairs: readonly LivePair[]): PairedCost {
+  const baselineTotalUsd = pairs.reduce((a, p) => a + p.baselineCostUsd, 0);
+  const candidateTotalUsd = pairs.reduce((a, p) => a + p.candidateCostUsd, 0);
+  // `Number.POSITIVE_INFINITY` sorts last under `a - b`, which is the whole use of it here: the
+  // value is picked by POSITION and never added, divided or rounded, so it never reaches a
+  // journal or a `toFixed`.
+  const ratios = pairs
+    .map((p) => (p.baselineCostUsd > 0 ? p.candidateCostUsd / p.baselineCostUsd : p.candidateCostUsd > 0 ? Number.POSITIVE_INFINITY : 1))
+    .sort((a, b) => a - b);
+  const median = ratios.length === 0 ? undefined : ratios[Math.floor((ratios.length - 1) / 2)]!;
+  return {
+    n: pairs.length,
+    unbounded: pairs.filter((p) => p.baselineCostUsd <= 0 && p.candidateCostUsd > 0).length,
+    medianRatio: median === undefined || !Number.isFinite(median) ? null : round6(median),
+    baselineTotalUsd: round6(baselineTotalUsd),
+    candidateTotalUsd: round6(candidateTotalUsd),
+  };
+}
+
+/**
  * One promotion criterion. `ran` is the field the replayed gate's `PromotionVerdict` does not
  * have, and it is what makes a live verdict unable to impersonate a replayed one.
  *
@@ -245,7 +317,11 @@ export interface LivePromotionVerdict {
 }
 
 export interface LiveCriteria {
-  /** Candidate total cost must be ≤ this multiple of baseline total. Default 1.1, as `3-cost`. */
+  /**
+   * The MEDIAN pair's cost ratio must be ≤ this. Default 1.1, the same number `3-cost` uses —
+   * but a different statistic from the replayed gate's, which divides totals because
+   * `EvalReport` has no median to divide. See `pairedCostRatio`.
+   */
   readonly maxCostRatio?: number;
   /** Prompt byte growth ceiling, unless the paired mean gains `bloatOffset`. Default 0.15. */
   readonly maxPromptGrowth?: number;
@@ -274,9 +350,19 @@ export interface LivePromotionInput {
  * Nine criteria. Eight run; one cannot, and says so.
  *
  * The ids are chosen so a reader can tell at a glance which rules are shared with the replayed
- * gate and which are new. `3-cost`, `5-prompt-size` and `6-oversight-diff` keep their numbers
- * because they are the SAME RULE evaluated on live evidence — `6-oversight-diff` is literally
- * the same `compile` call with the same `baselinePostures`. Everything an `L` prefixes is new
+ * gate and which are new. `5-prompt-size` and `6-oversight-diff` keep their numbers because they
+ * are the SAME RULE evaluated on live evidence — `6-oversight-diff` is literally the same
+ * `compile` call with the same `baselinePostures`.
+ *
+ * `3-cost` KEEPS ITS NUMBER AND IS NOT THE SAME RULE, which is the one place that mapping is
+ * loose and is said here rather than left for a reader to trip on. It is D10.d's cost criterion
+ * in both modes, at the same default ceiling — but the replayed gate divides suite TOTALS
+ * because `EvalReport` has no median to divide, and pairing makes the median expressible, so
+ * here the MEDIAN PAIR gates and the total is reported beside it. Two certificates carrying
+ * `3-cost` are answering the same question with different arithmetic; `mode` on the journaled
+ * row is what tells them apart. See `pairedCostRatio`.
+ *
+ * Everything an `L` prefixes is new
  * or measured differently, and `8-determinism` keeps its number precisely so that its
  * `ran: false` is legible next to the mode that can run it.
  *
@@ -409,38 +495,37 @@ export function gateCandidateLive(input: LivePromotionInput): LivePromotionVerdi
   });
 
   // REAL MONEY, ON BOTH SIDES. The baseline half is what those recordings actually cost when
-  // they ran; the candidate half is what this command just spent. Same formula and same default
-  // as `3-cost`, and the same weakness: it divides TOTALS where D10.d says medians, so one
-  // expensive input can hide behind a cheap one. The per-pair median is REPORTED by the caller
-  // for a reader to check it against; it is not gated, because a pair whose baseline cost 0
-  // makes the ratio undefined and a check that sometimes has no answer is worse than one clear
-  // rule.
-  const baseCost = input.pairs.reduce((a, p) => a + p.baselineCostUsd, 0);
-  const candCost = input.pairs.reduce((a, p) => a + p.candidateCostUsd, 0);
-  // A RATIO OVER A ZERO BASELINE IS NOT 1, IT IS UNDECIDABLE — and the first version answered
-  // it `1`, which is the passing value. Driven by this lane's reviewer: six pairs at
-  // `baselineCostUsd: 0` and `candidateCostUsd: 100` promoted, reporting "cost ratio 1.00× —
-  // $600.000000 vs $0.000000". A check that invents its own passing answer for the case it
-  // cannot compute is the permissive-branch shape this tree has been caught by repeatedly, and
-  // it sits one function away from the unpriced-route refusal that exists to stop exactly this.
+  // they ran; the candidate half is what this command just spent.
   //
-  // Reported the way `8-determinism` is, and for the same reason: `ran: false` with
-  // `pass: false`, never a bare pass. A consumer folding `checks.every(c => c.pass)` must not
-  // read "I could not measure this" as "this is fine", and the decision is taken over the
-  // checks that RAN, so an undecidable cost does not by itself refuse a promotion the rest of
-  // the gate approves — it refuses to certify a comparison nobody made.
-  const costDecidable = input.pairs.length > 0 && baseCost > 0;
-  const costRatio = baseCost === 0 ? Number.NaN : candCost / baseCost;
+  // THE MEDIAN GATES HERE, WHICH IS THE ONE THING THE REPLAYED `3-cost` CANNOT DO. See
+  // `pairedCostRatio` for the rule and for why every pair now has an answer, the $0-baseline
+  // one included. The total is reported beside it because the two disagreeing is a fact worth
+  // seeing, and because the replayed gate's number is the total — a reader comparing two
+  // certificates should be able to find both.
+  const cost = pairedCostRatio(input.pairs);
+  const totals = `totals ${cost.candidateTotalUsd.toFixed(6)} vs ${cost.baselineTotalUsd.toFixed(6)}`;
+  const unboundedNote =
+    cost.unbounded === 0
+      ? ""
+      : ` ${String(cost.unbounded)} of ${String(cost.n)} pair(s) had a $0 baseline and a paying candidate, which is ` +
+        `an unbounded increase and sorts above every ceiling`;
   checks.push({
     id: "3-cost",
-    ran: costDecidable,
-    pass: costDecidable && costRatio <= maxCost,
+    // `ran` is now decided by whether there is a pair, not by whether the arithmetic worked. A
+    // check that sometimes has no answer is worse than one clear rule — the rule is in
+    // `pairedCostRatio`, and it is total.
+    ran: cost.n > 0,
+    pass: cost.n > 0 && cost.medianRatio !== null && cost.medianRatio <= maxCost,
     detail:
-      input.pairs.length === 0
+      cost.n === 0
         ? "no pair was measured, so nothing was spent to compare"
-        : baseCost === 0
-          ? `DID NOT RUN — the baseline pairs cost $0.000000, so there is no ratio to take. The candidate spent ${candCost.toFixed(6)}. A live cohort that spent nothing is a cohort that called no priced provider; check the models file rather than reading this as a pass`
-          : `cost ratio ${costRatio.toFixed(2)}× (max ${String(maxCost)}×) — ${candCost.toFixed(6)} vs ${baseCost.toFixed(6)}`,
+        : cost.medianRatio === null
+          ? `the MEDIAN pair went from a $0 baseline to a paying candidate, so the typical input's cost ratio is ` +
+            `unbounded and no ceiling contains it (max ${String(maxCost)}×).${unboundedNote}. ${totals}. A live ` +
+            `cohort whose baselines spent nothing is a cohort that called no priced provider; check the models ` +
+            `file rather than reading this as a candidate that got dear`
+          : `median pair cost ratio ${cost.medianRatio.toFixed(2)}× over ${String(cost.n)} pair(s) ` +
+            `(max ${String(maxCost)}×) — ${totals}.${unboundedNote}`,
   });
 
   // The paired MEAN is what buys prompt growth here, where the replayed gate uses its pass-rate

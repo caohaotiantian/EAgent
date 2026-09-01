@@ -84,7 +84,7 @@ import {
   scoreTrajectory,
 } from "./evolution/score.ts";
 import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
-import { gateCandidateLive, MIN_PAIRED_RUNS, type LivePair, type Unmeasured } from "./evolution/live.ts";
+import { gateCandidateLive, MIN_PAIRED_RUNS, pairedCostRatio, type LivePair, type Unmeasured } from "./evolution/live.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -6349,13 +6349,6 @@ function gateShapeOf(events: readonly JournalEvent[]): { status: string; decided
   return { status: p.status, decidedNodes, unresolved };
 }
 
-/** The middle value, or `null` when there is nothing to take a median of. */
-function medianOf(xs: readonly number[]): number | null {
-  if (xs.length === 0) return null;
-  const sorted = [...xs].sort((a, b) => a - b);
-  return sorted[Math.floor((sorted.length - 1) / 2)]!;
-}
-
 /**
  * JUDGE A CANDIDATE BY RUNNING IT, on inputs that predate it.
  *
@@ -6643,10 +6636,14 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     process.stdout.write(`${c.ran ? (c.pass ? "✓" : "✗") : "⊘"} ${c.id.padEnd(26)} ${c.detail}\n`);
   }
 
-  // REPORTED, NOT GATED — see `3-cost` in `evolution/live.ts`. D10.d asks for a ratio of
-  // MEDIANS and the replayed gate cannot express one; pairing makes it expressible, and it is
-  // put on the page for a reader to check the gated ratio of totals against.
-  const medianCostRatio = medianOf(pairs.filter((p) => p.baselineCostUsd > 0).map((p) => p.candidateCostUsd / p.baselineCostUsd));
+  // GATED, NOT MERELY REPORTED — and it is `3-cost` in `evolution/live.ts` that gates it, which
+  // is why this line no longer computes a median of its own. It used to: the same statistic was
+  // derived here for the journal row and derived again nowhere for the decision, with a filter
+  // (`baselineCostUsd > 0`) silently dropping the pairs that had no answer. `pairedCostRatio` is
+  // the single definition, its rule covers those pairs instead of dropping them, and the row and
+  // the verdict now cannot disagree because they are the same call.
+  const cost = pairedCostRatio(pairs);
+  const medianCostRatio = cost.medianRatio;
 
   const decision = {
     // THE FIRST FIELD, AND THE ONE THAT STOPS A LIVE VERDICT IMPERSONATING A REPLAYED ONE.
