@@ -29,31 +29,62 @@ and the sha is the citation.
 
 ## State — measured 2026-09-01, one command each
 
+**Every row here was RE-RUN on 2026-09-01, and three of the seven had moved without the date
+moving with them** — tests 2,708 → 2,728 at `e8d59c4` (2,733 with the five cases this commit's
+siblings add), exports 528 → 529, seams 8 → 10. A dated table is only as good as the last time
+somebody ran its commands, and the date is not the evidence; the command is. The exports row now
+names a command that produces its number, because `scripts/surface.json` is a path and a path is
+not a measurement.
+
 | fact | value | command |
 |---|---|---|
-| tests | **2,708 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| pinned public exports | **528** | `scripts/surface.json` (`check-surface.mjs` needs `dist/`, which needs a build) |
-| kernel | **10 files, 8 declared seams** | `node scripts/check-kernel.mjs` |
+| tests | **2,733 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| pinned public exports | **529** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
+| kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **61 source files** | `node scripts/check-zero-dep.mjs` |
 | source files in `packages/core/src` | **61** | `find packages/core/src -name '*.ts' \| wc -l` |
 | tracked files carrying a NUL byte | **5**, and **0** invalid UTF-8 | census over `git ls-files` — see §F.15 for why grep cannot count these |
 | wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
 
-**The seam census is 8 and has not moved across the whole of this effort.** `check-kernel.mjs`
-reports `a commit count that moves with every commit — the seam count, 8, is the one that must not, 8 declared seams`. The two `feat` commits of the last three
-waves (`50f7c03`, `8482859`) touch `cli.ts` and `evolution/live.ts`, neither of which is one of
-the ten pinned files, so no `Kernel-seam:` trailer was written.
+**The seam census is 10, and it MOVED — which is what this row exists to make impossible to
+miss.** Re-measured at `e8d59c4`: `node scripts/check-kernel.mjs` prints
+`kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
+out here because it moves with every commit including the one carrying this line, and a number
+that invalidates itself the moment it is written is not a measurement anybody can check. Ten is
+the field that must not move by accident, and `git log --grep='^Kernel-seam:' --oneline | wc -l`
+agrees with it independently. The two newest are `a8d62fb`
+(item 10's `quote` effect, which needed `journal/events.ts` and `run/replay.ts`) and `3762a0e`
+(item 13's `RunFilter.after`, which needed `journal/store.ts`) — both approved before they were
+spent, and both are ancestors of `e8d59c4` with nine commits after them. **This paragraph said 8
+across all nine**, and it said so while quoting a `check-kernel.mjs` line the guard does not
+print — the guard's real first line is the one pasted above. That is how a stale number survives a
+reader who checks: the quotation is the strongest-looking evidence on the page and it was the
+invented part. Paste the guard's output or cite nothing.
 `git log --grep='^Kernel-seam:'` is the ledger and it is not a number anyone can quietly reset.
 
-**The roadmap is NOT closed, and the line here that said so was about the wrong list.** Items 1–8
-are the record and all eight pass; `DESIGN.md` then wrote items **9–13** on 2026-08-29, and four
-of those five still name a command that fails. **Item 11 is the one that closed** — `hermetic`'s
-third conjunct has a producer, and `test/run/hermetic-names-the-live-bodies.test.ts` is 13/13
-green on the pair the item specified. Items **9, 10, 12 and 13** were each re-run at this commit
-and each still fails; the reproductions are in `DESIGN.md` beside the items. Three have a backlog
-row here — item 9 is §A.30, item 10 is §A.1, item 13 is §A.15. **Item 12 has none, deliberately:**
-its subject is `README.md`'s fork ledger, whose two DEBT rows it closes, and §E's closing
-paragraph is explicit that the ledger is not to be re-enumerated in this file.
+**The roadmap's items 9–13 are FOUR CLOSED AND ONE OPEN, re-run 2026-09-01, one command each.**
+This paragraph said the opposite — "items 9, 10, 12 and 13 were each re-run at this commit and
+each still fails" — and it was wrong about three of the four. Each row below was RUN rather than
+transcribed from `DESIGN.md`'s verdict table, and that mattered: **the two documents had drifted
+in OPPOSITE directions and DESIGN had also drifted from itself.** Its table recorded item 10 as
+"still fails" while item 10's own section two hundred lines below it was headed
+**DONE 2026-09-01**, and it recorded item 12 as 15/15 after the suite had grown. Both are
+corrected in the same commit as this paragraph, from the same runs.
+
+| item | command | measured |
+|---|---|---|
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass — and the item is still OPEN.** The green is the residual: `A REWIND IS NOT A HUMAN'S YES TO THE UNDO` pins `charges [42] refunds []`, which is the item's own failing output. What moved is that it is no longer silent — the descent into the child runs, the undo is journaled `failed`, and the reason names §A.8's `nodeApproved: false`. It closes when the rewind door grows an approval floor |
+| 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **13 pass. DONE** — the pin was renamed `THE HOLE THIS CLOSES` and now asserts the refusal |
+| 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **13 pass. DONE** |
+| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **18 pass. DONE** — 15 when `DESIGN.md` measured it; three banner cases landed since |
+| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **6 pass. First half DONE** — 5 when `DESIGN.md` measured it. The second half (two planes dividing one listing) is §E.2's coordinator and is not a cursor |
+
+Of the three backlog rows those items pointed at, one is still live: item 9's is **§A.30**. Item
+10's **§A.1** is already struck FIXED and item 13's **§A.15** already reads CLOSED, each carrying
+only the residual its closure did not cover — so the pointer and the row agreed and this
+paragraph did not agree with either. **Item 12 has no row, deliberately:** its subject is
+`README.md`'s fork ledger, whose two DEBT rows it closes, and §E's closing paragraph is explicit
+that the ledger is not re-enumerated here.
 
 ---
 
@@ -303,6 +334,17 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   `run-clock-window.test.ts`'s pin of the two unreachable runs is now its opposite. The cost is
   named rather than hidden: a tick reads `N` `run_head` rows where it read `min(N, 10 000)`, and
   the fold budget is untouched at `limit`.
+
+  **AND THE TRAVERSAL NOW REFUSES A STORE THAT WILL NOT TERMINATE IT.** Deleting the ceiling
+  moved the loop's exit condition entirely into `StateStore` — every break is a property of the
+  page — so a backend that accepts `after` and ignores it returns the same full page forever.
+  Both shipped backends conform and `test/journal/conformance.ts` pins that, but `StateStore` is
+  an extension point, and the stall was the worst possible shape: `startRunClock`'s `running`
+  latch stays true, so the clock stops advancing runs AND its failure line never prints, because
+  that line is on a rejection path and the promise never settles. `runClockTick` now throws
+  `E_CONFIG_INVALID` the first time a page boundary repeats — decidable with no false positive,
+  since an exclusive cursor over a strict order can never hand back a boundary already taken.
+  Pinned by `run-clock-window.test.ts`'s sixth case.
 
   **THE HALF OF THIS ROW THAT WAS WRONG, and finding out is what building it bought.** It said two
   planes duplicating one window "want the same cursor". They do not, and no cursor could have
