@@ -231,7 +231,7 @@ function parentSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-async function drive(spec: GraphSpec): Promise<{ world: World; status: string; store: MemoryStateStore; runId: RunId }> {
+async function drive(spec: GraphSpec): Promise<{ world: World; status: string; store: MemoryStateStore; runId: RunId; engine: Engine }> {
   const r = rig();
   const graph = compileOrThrow({ spec, resolver: r.resolver, tools: MANIFESTS, tenantCapabilities: [] });
   const runId = await r.engine.submit({ graph, inputs: { seed: "x" } });
@@ -241,7 +241,7 @@ async function drive(spec: GraphSpec): Promise<{ world: World; status: string; s
     status = p.status;
     if (p.status === "succeeded" || p.status === "failed") break;
   }
-  return { world: r.world, status, store: r.store, runId };
+  return { world: r.world, status, store: r.store, runId, engine: r.engine };
 }
 
 async function eventsOf(store: MemoryStateStore, runId: RunId): Promise<JournalEvent[]> {
@@ -341,4 +341,75 @@ test("EVERY EXIT THAT FAILS THE RUN ROLLS IT BACK, NOT ONLY THE ONE WITH A FAILE
   // short-circuits on a terminal run, so a rollback appended after it is work on a dead run.
   const rec = events.find((e) => e.type === "compensation.recorded");
   assert.equal(rec!.seq < failure!.seq, true, "the rollback lands before the terminal event");
+});
+
+
+/**
+ * A parent whose ONLY node is the delegation — zero steps of its own — and which SUCCEEDS, so the
+ * one thing that can roll it back is an operator's rewind.
+ *
+ * BOTH of those are load-bearing and neither is decoration. `parentSpec` above has `ins1` and
+ * `ins2` of its own, which is enough to satisfy a guard that asks "does the parent have a step":
+ * measured, the test below PASSES against the broken guard when the fixture keeps them. The
+ * defect shows only on the shape it was reported on — a parent that delegated everything.
+ */
+function delegatedOnlySpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "delegated-only", project: "comp", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 32, maxDepth: 3, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["seed"],
+    outputs: ["out"],
+    nodes: [
+      {
+        id: "delegate",
+        type: "subgraph",
+        reads: ["seed"],
+        writes: ["out"],
+        subgraph: { ref: "graph/child@stable", inputs: { seed: "seed" }, outputs: { out: "out" } },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
+}
+
+test("A REWIND REACHES THE CHILDREN TOO — THE OTHER TRIGGER ON THE SAME DESCENT", async () => {
+  // THE DEFECT, and it is the descent above reached through the other door. `rewind` guarded its
+  // rollback on `planCompensation(the parent's OWN events).steps.length > 0`, which asks "does
+  // the PARENT have a step" — and a parent that delegated has none. So the guard meant to skip an
+  // empty rollback skipped every fully-delegated one, and `#compensate`'s descent was unreachable
+  // from a rewind.
+  //
+  // Measured on this fixture with the old guard in place: `rows [7, 9]` before the rewind and
+  // `rows [7, 9]` after it, `undone []`, and ZERO `compensation.recorded` in any of the three
+  // journals. The rewind reported success, hid the record of two writes that were both still
+  // there, and said nothing about either.
+  const { world, status, store, runId, engine } = await drive(delegatedOnlySpec());
+  assert.equal(status, "succeeded", "this run must SUCCEED — a failure would roll back on the other trigger");
+  assert.deepEqual(world.rows, [7, 9], "the child and the grandchild wrote; the parent itself wrote nothing");
+
+  await engine.rewind(runId, 1 as Seq, "operator asked to undo the whole tree");
+
+  assert.deepEqual(world.rows, [], "a rewind hides the record; it must not leave the writes standing");
+  // The same order claim as the failed-run test, and it has to be: one descent, two triggers.
+  assert.deepEqual(world.undone, [9, 7], "reverse across the tree — the grandchild ran last, so it is undone first");
+
+  // AND EACH JOURNAL CARRIES ITS OWN ROLLBACK, which is what distinguishes "the descent ran" from
+  // "the parent happened to undo two things".
+  const parentEvents = await eventsOf(store, runId);
+  const childId = parentEvents.find((e) => e.type === "subgraph.started")!.payload.childRunId;
+  const grandchildId = (await eventsOf(store, childId)).find((e) => e.type === "subgraph.started")!.payload.childRunId;
+  assert.equal(
+    parentEvents.filter((e) => e.type === "compensation.recorded").length,
+    0,
+    "the parent ran nothing itself, so its journal stays the size of the parent",
+  );
+  for (const [label, id] of [["child", childId], ["grandchild", grandchildId]] as const) {
+    const recs = (await eventsOf(store, id)).filter((e) => e.type === "compensation.recorded");
+    assert.equal(recs.length, 1, `the ${label}'s own journal records its own step`);
+    assert.equal((recs[0]!.payload as { outcome: string }).outcome, "compensated");
+    assert.equal((recs[0]!.payload as { trigger: string }).trigger, "rewind", "and says which door asked for it");
+  }
 });
