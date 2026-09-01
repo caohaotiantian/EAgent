@@ -119,6 +119,42 @@
  *
  * `loom score` goes further and refuses to run at all, because the CLI can say the one thing
  * this file cannot: WHICH graph is missing and where to put it.
+ *
+ * ## …AND A COHORT WHOSE LADDER SAID THE SAME THING ABOUT EVERY MEMBER RANKS PRICE
+ *
+ * The three sections above are all about ONE run's score being wrong. This one is about the
+ * RANK — `isGolden` condition 2, `score >= cohort.p90Score` — and it fails in a cohort where
+ * every score is right.
+ *
+ * `outcome` is 0.6 of the score and the other 0.4 is cost, latency and human effort. When the
+ * ladder is SATURATED — every member at the same outcome — that 0.6 is a constant, so the
+ * ordering `p90Score` induces is the ordering of the remaining 0.4, and all three of those terms
+ * pay a run for doing less. Measured on five real runs sharing a cohort, every one approved by a
+ * human (S2 = 1) and differing only in spend:
+ *
+ * ```
+ *      cost      outcome   score    condition 2
+ *   $0.001          1      0.780       PASSES
+ *   $0.002          1      0.760
+ *   $0.010          1      0.600   ← `costNormalized` clamps at the cohort median, so
+ *   $0.020          1      0.600     everything at or above p50 ties here: three of five
+ *   $0.050          1      0.600     members are not merely mis-ranked, they are UNRANKABLE
+ * ```
+ *
+ * The cheapest run is golden and the ladder had nothing to do with it. **A workflow whose only
+ * signal is human approval cannot rank its own runs** — and that is not a bug in S2, it is what
+ * S2 is: a gate decision is the highest-quality label this system ever gets, and an operator
+ * approving a report-generating workflow approves nearly all of them. S5 is not the cause
+ * either; its weight is 0.0, so it contributes nothing ever.
+ *
+ * What CAN be fixed is that the saturation was invisible. `CohortStats.outcomeSpread` measures
+ * it and condition 2 refuses on it, so the verdict says "this cohort cannot be ranked, every
+ * member scored 1" instead of quietly handing the crown to the cheapest. Refusing is always
+ * allowed; a number nobody should trust is not.
+ *
+ * The escape is a signal that VARIES, and it is a real one rather than an argument:
+ * `evaluator{kind:"assertion"}` scores `k/n`, so a cohort of runs of `review-bench` spreads over
+ * the ladder and the rank measures correctness again.
  */
 
 import { digest, type Digest } from "../canonical.ts";
@@ -190,6 +226,17 @@ export interface CohortStats {
   readonly p50Gates: number;
   /** The 90th-percentile SCORE. Condition 2 of the golden threshold reads it. */
   readonly p90Score: number;
+  /**
+   * MAX MINUS MIN OF THE MEMBERS' OUTCOMES — the spread of the ladder over this cohort, and
+   * the number that says whether `p90Score` is a ranking on quality or a ranking on price.
+   *
+   * Zero means the ladder said the same thing about every member, so the only terms left
+   * separating one score from another are cost, latency and gates — all three of which reward
+   * a run for doing LESS. `isGolden` condition 2 refuses on it; see there for the measurement.
+   *
+   * 0 for an empty cohort, which is the same refusal for the same reason: nothing was ranked.
+   */
+  readonly outcomeSpread: number;
   /** Hash of the weights the cohort was measured under. */
   readonly weightsDigest: Digest;
 }
@@ -463,6 +510,11 @@ export const MIN_OUTCOME = 0.8;
  * a run that broke a rule, 4 blocks fitting to noise, 5 blocks self-training on the
  * output of an unpromoted candidate, and 6 blocks learning from a run NOBODY MEASURED.
  *
+ * 2 HAS TWO HALVES AND THE SECOND IS A REFUSAL, not a comparison: a cohort whose members all
+ * scored the same on the ladder is ranked by cost alone, so "top decile" reads "cheapest
+ * decile" and the condition declines to take the rank at all. See `CohortStats.outcomeSpread`
+ * and the header section for the five-run measurement.
+ *
  * 6 is not a rung and it is not redundant with 1. With the ladder unreadable, 1 fails too — but
  * it fails saying `outcome 0.000`, which reads as "this run was bad" and is the exact confusion
  * `goldenBlockers` exists to prevent. The condition names the cause instead — and it names the
@@ -484,8 +536,26 @@ export function isGolden(
     {
       id: 2,
       name: "top decile of its cohort",
-      pass: scored.score >= cohort.p90Score,
-      detail: `score ${scored.score.toFixed(3)} vs p90 ${cohort.p90Score.toFixed(3)}`,
+      // A SATURATED LADDER MAKES "TOP DECILE" MEAN "CHEAPEST DECILE", so the rank is refused
+      // rather than taken. See `CohortStats.outcomeSpread` and the section in the header.
+      pass: cohort.outcomeSpread > 0 && scored.score >= cohort.p90Score,
+      detail:
+        cohort.outcomeSpread > 0
+          ? `score ${scored.score.toFixed(3)} vs p90 ${cohort.p90Score.toFixed(3)}`
+          : cohort.n === 0
+            ? "UNRANKABLE — this cohort has no measurable member, so p90Score is a bar nobody set"
+            : // THE COMMON OUTCOME IS NOT NAMED HERE ON PURPOSE. `scored` need not be a member of
+              // its own cohort — a failed or unmeasured run is scored against a population it was
+              // dropped from — so `scored.outcome` is not the value the members shared, and a
+              // refusal that guessed it would be asserting a fact it cannot read. The spread is
+              // what `CohortStats` carries and the spread is what this says.
+              `UNRANKABLE — the ladder separated no two of this cohort's ${String(cohort.n)} members ` +
+              `(outcome spread 0.000), so the only terms left separating their scores are cost, latency and ` +
+              `gates — and every one of those rewards a run for doing LESS. "Top decile" would read ` +
+              `"cheapest decile". Give this workflow a signal that varies — an evaluator{kind:"assertion"} ` +
+              `node scores k/n rather than pass/fail — and the rank means something again. (This run scored ` +
+              `${scored.score.toFixed(3)} against a p90 of ${cohort.p90Score.toFixed(3)}, which is the ` +
+              `number being refused, not accepted.)`,
     },
     {
       id: 3,
@@ -618,17 +688,22 @@ export function measureCohort(
     p50Wall: p50(members.map((m) => m.usage.wallMs)),
     p50Gates: p50(members.map((m) => m.policy.gatesRaised)),
     p90Score: 0,
+    outcomeSpread: 0,
     weightsDigest,
   };
 
-  const scores = members
-    .map((m) => {
-      const d = opts.downstream?.get(m.runId);
-      return scoreTrajectory(m, base, { weights, ...(d === undefined ? {} : { downstream: d }) }).score;
-    })
-    .sort((a, b) => a - b);
+  const scored = members.map((m) => {
+    const d = opts.downstream?.get(m.runId);
+    return scoreTrajectory(m, base, { weights, ...(d === undefined ? {} : { downstream: d }) });
+  });
+  const scores = scored.map((s) => s.score).sort((a, b) => a - b);
+  const outcomes = scored.map((s) => s.outcome);
 
-  return { ...base, p90Score: scores.length === 0 ? 0 : scores[Math.min(scores.length - 1, Math.floor(scores.length * 0.9))]! };
+  return {
+    ...base,
+    p90Score: scores.length === 0 ? 0 : scores[Math.min(scores.length - 1, Math.floor(scores.length * 0.9))]!,
+    outcomeSpread: outcomes.length === 0 ? 0 : Math.max(...outcomes) - Math.min(...outcomes),
+  };
 }
 
 /**

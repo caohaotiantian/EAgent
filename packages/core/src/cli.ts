@@ -5087,6 +5087,19 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
               `which is a different fact from having finished badly. Re-score it once it is terminal.\n`,
           );
         }
+        // A SATURATED COHORT IS NOT A BAD SCORE, IT IS AN ABSENT RANKING, and the person at the
+        // terminal is reading a number. `goldenBlockers` carries condition 2's full sentence into
+        // the journal, so this adds no fact the row does not have — it puts the fact where it is
+        // read, the same bargain the `!completed` note above makes.
+        if (cohort.n > 0 && cohort.outcomeSpread === 0) {
+          process.stderr.write(
+            `! this cohort's ${String(cohort.n)} member(s) all scored the same on the signal ladder, so p90Score ` +
+              `${cohort.p90Score.toFixed(3)} ranks cost, latency and gates and nothing else — every one of which ` +
+              `pays a run for doing LESS work. The golden verdict refuses the rank rather than crowning the ` +
+              `cheapest run; the score itself is still the measured one. fix: give this workflow a signal that ` +
+              `varies — an evaluator{kind:"assertion"} node scores k/n rather than pass/fail.\n`,
+          );
+        }
         const payload: EventPayloads["evolution.scored"] = {
           cohortKey: scored.cohortKey,
           score: scored.score,

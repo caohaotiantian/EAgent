@@ -257,6 +257,11 @@ const cohort = (over: Partial<CohortStats> = {}): CohortStats => ({
   p50Wall: 1000,
   p50Gates: 1,
   p90Score: 0.5,
+  // A HAND-BUILT COHORT IS RANKABLE BY DEFAULT. `outcomeSpread` 0 makes `isGolden` condition 2
+  // refuse outright (a saturated ladder ranks price), and every fixture below that is about some
+  // OTHER condition would then be testing this one instead. The tests that mean to exercise the
+  // refusal set it to 0 by name.
+  outcomeSpread: 0.5,
   weightsDigest: digest(DEFAULT_WEIGHTS),
   ...over,
 });
