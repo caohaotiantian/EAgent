@@ -195,6 +195,8 @@ import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
+import { spansFrom } from "../telemetry/spans.ts";
+import { otlpTraceRequest } from "../telemetry/otlp.ts";
 import { layoutGraph } from "./layout.ts";
 import { CONSOLE_HTML } from "./console.ts";
 
@@ -1075,6 +1077,18 @@ const MAX_TIMER_MS = 2_147_483_647;
  * this caps is a multiple of that limit, not of a small constant.
  */
 const MAX_IDEMPOTENT_SUBMITS = 10_000;
+
+/**
+ * How much of a journal `GET /runs/:id/trace` will fold in one request.
+ *
+ * A journal is the one input to that route a caller supplies without limit, and unlike
+ * `/runs/:id/events` — which streams, so the memory ceiling is one frame — a fold has to
+ * hold every event to close a span. The bound is generous rather than tight: 100k events is
+ * well past any run this engine schedules, and a run that exceeds it is answered with a
+ * prefix and `truncated: true` rather than with an error, because `spansFrom` renders a
+ * prefix as an in-flight trace and an in-flight trace is a normal thing to look at.
+ */
+const MAX_TRACE_EVENTS = 100_000;
 
 /**
  * The other two caller-supplied numbers, bounded — because a cap is a GUARD and `NaN`
@@ -3087,6 +3101,80 @@ export class ControlPlane {
         // Scoped inside `#streamEvents`, before its 200 is written — see the note there
         // about why the check cannot live out here.
         handle: async (ctx) => this.#streamEvents(ctx),
+      },
+
+      {
+        method: "GET",
+        pattern: /^\/runs\/([^/]+)\/trace$/,
+        /**
+         * THE RUN'S TRACE, OVER HTTP — the half of TODO C.4 that is a pull rather than a push.
+         *
+         * `spansFrom` has produced a full span tree for several waves and the only thing that
+         * could read it was `loom trace`, on the machine holding the journal. That is a
+         * telemetry system nothing can observe: a console cannot draw a waterfall, and an
+         * operator debugging a run on a control plane has to `ssh` to the box the journal is
+         * on. This route is the read; `telemetry/otlp.ts`'s exporter is the push. They share
+         * one encoder, so what a collector receives and what this answers cannot drift.
+         *
+         * `?format=otlp` GIVES THE COLLECTOR'S OWN BYTES, which is the point rather than a
+         * convenience: an operator can `curl … | tee` it straight into a collector, and a
+         * deployment that cannot reach a collector from the engine process — the common shape
+         * behind a NAT — can have something else pull and forward. The default is the raw
+         * `Span[]`, because that is what a console draws and it is one JSON parse from useful.
+         *
+         * IT DOES NOT SPLICE SUBGRAPHS, AND THAT IS THE DESIGN. A child run is its own trace
+         * (`traceId` is `digest(runId)`), and `spansFrom` already mints a cross-trace
+         * `SpanLink` for it — which under `format=otlp` is a real OTLP `Link{traceId, spanId}`
+         * a collector resolves by itself. `loom trace` splices because a terminal has no
+         * collector to do the join; a caller here follows the link with a second GET on
+         * `/runs/<childRunId>/trace`, which also keeps each fetch's authorization scoped to
+         * one run instead of silently widening it to every descendant.
+         *
+         * REDACTION IS THE FOLD'S, NOT THIS FILE'S, and the difference from the five
+         * projection routes is worth stating because it looks like an omission. Those routes
+         * carry channel VALUES, so they redact by the graph the run compiled; a span carries
+         * no channel value — `state.reduced` contributes two hashes, and those are classified
+         * `pii` in `ATTRIBUTE_CLASSES` and tokenised or dropped by `spansFrom`'s own
+         * `redactAttributes` under a run-scoped key. Adding a second redactor here would
+         * re-redact already-redacted text; the thing that must not happen is a THIRD fold,
+         * and there is only one.
+         *
+         * BOUNDED, because a journal is the one input a caller supplies without limit and this
+         * route materialises it. Past `MAX_TRACE_EVENTS` the fold is over a PREFIX, which
+         * `spansFrom` renders honestly — unclosed spans get `status: "unset"` and an endTime at
+         * the last event seen, exactly as an in-flight run does — and the response says
+         * `truncated: true` so nobody reads a partial waterfall as a finished one.
+         */
+        handle: async ({ res, params, url, auth }) => {
+          const runId = params[0] as RunId;
+          // 404 means "no such run", never "not yours" — the sibling routes' rule, and a
+          // trace is reconnaissance about a run's whole shape, so it is not a weaker one.
+          const p = await engine.projection(runId);
+          if (p === undefined || !ownsRun(p, mustAuth(auth))) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          }
+          const format = url.searchParams.get("format");
+          if (format !== null && format !== "otlp" && format !== "spans") {
+            throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `?format must be "spans" (the default) or "otlp", not "${format}"`);
+          }
+          const events: JournalEvent[] = [];
+          let truncated = false;
+          for await (const e of store.read(runId, 1 as Seq)) {
+            if (events.length >= MAX_TRACE_EVENTS) {
+              truncated = true;
+              break;
+            }
+            events.push(e);
+          }
+          const spans = spansFrom(events);
+          send(
+            res,
+            200,
+            format === "otlp"
+              ? otlpTraceRequest(spans, { resourceAttributes: { "service.name": "loom", "loom.run_id": runId } })
+              : { runId, traceId: spans[0]?.traceId, spans, truncated },
+          );
+        },
       },
 
       {
