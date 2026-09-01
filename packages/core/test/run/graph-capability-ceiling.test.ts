@@ -151,13 +151,27 @@ const CHILD_RESOLVER: ResourceResolver = {
   subgraph: (ref) => (ref === "graph/child@stable" ? CHILD : undefined),
 };
 
-test("A CEILING TRAVELS INTO A SUBGRAPH — delegation may not widen it", async () => {
+test("A CEILING TRAVELS INTO A SUBGRAPH — and now the COMPILER says so", () => {
+  // This used to end "the parent's own node reaches no tool — a `subgraph` node names none — so
+  // the compile-time check cannot see this. Only the run-time ceiling can." That was true, and
+  // it was the cost: the refusal arrived as an `E_CAP_DENIED` that killed a RUNNING run, which
+  // is precisely the "compiles, then fails at run time" the compile stage exists to prevent.
+  // GRAPH017 now folds the resolved child spec into the parent's ceiling.
+  const refused = compile({ spec: parentSpec([]), resolver: CHILD_RESOLVER, tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  assert.equal(refused.ok, false, "a parent that declares nothing must not compile over a child that charges");
+  const d = refused.diagnostics.filter((x) => x.code === "GRAPH017_CAPABILITY_NOT_DECLARED");
+  assert.equal(d.length, 1, JSON.stringify(refused.diagnostics));
+  // NAMING THE CHILD, not the parent's node alone — the two have different fixes, and an author
+  // told only "node delegate" has nowhere to look.
+  assert.match(d[0]!.message, /tool "pay\.charge" used by subgraph "graph\/child@stable" under node "delegate"/);
+});
+
+test("…and the RUN-TIME ceiling still stands behind it, for a graph that skipped this compiler", async () => {
   // T6's lesson, applied before it could become T6's defect: a guarantee a child escapes is not
-  // a guarantee. The PARENT declares no capabilities at all; the CHILD declares `pay` and the
-  // tenant holds it, so nothing below the parent would refuse on its own.
-  //
-  // The parent's own node reaches no tool — a `subgraph` node names none — so the compile-time
-  // check cannot see this. Only the run-time ceiling can, which is the second reason it exists.
+  // a guarantee. `plans` are excluded from `graphHash` and `attach` is public, so a graph can
+  // reach the engine without passing this build's compiler — so the compile diagnostic above is
+  // the EARLIER answer, never the only one. Compiled while the parent still declared `pay`, then
+  // the declaration is taken away, exactly as the run-time test further up does.
   const charged: number[] = [];
   const now = (): number => 1_700_000_000_000;
   const store = new MemoryStateStore({ now });
@@ -170,7 +184,8 @@ test("A CEILING TRAVELS INTO A SUBGRAPH — delegation may not widen it", async 
     resolver: CHILD_RESOLVER, policy: { granted: ["pay"], systemFloor: "out" },
   });
 
-  const bounded = compileOrThrow({ spec: parentSpec([]), resolver: CHILD_RESOLVER, tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  const compiled = compileOrThrow({ spec: parentSpec(["pay"]), resolver: CHILD_RESOLVER, tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  const bounded = { ...compiled, spec: { ...compiled.spec, policy: { ...compiled.spec.policy, capabilities: [] } } };
   const p = await engine.advance(await engine.submit({ graph: bounded, inputs: {} }));
   assert.equal(p.status, "failed", "a parent that declares nothing must not charge through a child");
   assert.equal(charged.length, 0, "and the money must not move");

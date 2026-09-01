@@ -73,6 +73,109 @@ test("effective posture folds every level by max", () => {
   assert.equal(g.plans["gather_signals" as NodeId]?.posture, "on");
 });
 
+test("EVERY NODE THAT CAN BLOCK CARRIES A DEADLINE, and the author's own always wins", () => {
+  // A node declaring no `timeoutMs` had NO deadline: `#withNodeDeadline` returned straight
+  // through, so a hanging tool held its Task forever and a join over that branch waited with it.
+  // The fix is `NodePlan.timeoutMs`, the shape `NodePlan.retry` already set.
+  //
+  // THE SET IS NAMED, not counted, and this fixture is the only one in the tree that carries all
+  // eight node types at once — which is why the whole rule fits in one test.
+  const g = compileOrThrow(base(incidentTriage()));
+  const ms = (id: string): number | undefined => g.plans[id as NodeId]?.timeoutMs;
+
+  // Declared, and untouched at both ends of the range — a default is a floor for nodes that
+  // declared nothing, never an override and never a merge.
+  assert.equal(ms("gather_signals"), 20_000, "a tool node's own 20s stands");
+  assert.equal(ms("investigate"), 120_000, "and an agent node's own 120s is not raised to the default");
+
+  // Defaulted: the three types whose BODY can fail to settle — an agent awaits a provider stream
+  // no clock in this tree bounds, a tool awaits an extension's `execute`, and an evaluator's
+  // `rubric` arm is `#runAgent` again.
+  assert.equal(ms("hypothesise"), 600_000, "agent");
+  assert.equal(ms("apply_remediation"), 600_000, "tool");
+  assert.equal(ms("grade"), 600_000, "evaluator");
+
+  // AND FOUR OF THE FIVE WITH NONE, each named — `compile.ts`'s `effectiveTimeout` says why for
+  // each. `human_gate` is the one that MUST stay absent: it has `slaMs` plus `onTimeout`, and a
+  // gate that expires because nobody wrote a number is oversight failing open. The fifth is
+  // `subgraph`, which this fixture has none of — `effectiveTimeout` says why it gets none too.
+  for (const id of ["correlate", "choose_path", "approve_remediation", "write_report"]) {
+    assert.equal(ms(id), undefined, `${id} must not be given one`);
+  }
+  assert.deepEqual(
+    incidentTriage()
+      .nodes.filter((x) => ["correlate", "choose_path", "approve_remediation", "write_report"].includes(x.id))
+      .map((x) => x.type)
+      .sort(),
+    ["function", "human_gate", "join", "router"],
+    "the four ids above really are one of each excluded type",
+  );
+});
+
+/**
+ * A parent whose entire body is one delegation, over a child that applies an irreversible tool.
+ *
+ * TWO LEVELS DEEP, because the descent has to be a walk rather than a peek: `k8s.apply` sits in
+ * the GRANDCHILD, so a one-level fold would answer `out` here exactly as no fold at all does.
+ */
+function delegatingTree(parentCaps?: readonly string[]): Parameters<typeof compile>[0] {
+  const graph = (name: string, nodes: readonly NodeSpec[], caps: readonly string[]): GraphSpec => ({
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name, project: "test", version: 1 },
+    policy: { posture: "out", capabilities: [...caps], expansion: { maxNodes: 16, maxDepth: 3, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { inp: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["inp"],
+    outputs: ["out"],
+    nodes: [...nodes],
+    edges: [],
+  });
+  const delegate = (ref: string): NodeSpec => ({
+    id: "delegate" as NodeId,
+    type: "subgraph",
+    reads: ["inp"],
+    writes: ["out"],
+    subgraph: { ref, inputs: { inp: "inp" }, outputs: { out: "out" } },
+    unhandled: true,
+  });
+  const grandchild = graph("grandchild", [
+    { id: "act" as NodeId, type: "tool", reads: ["inp"], writes: ["out"], tool: { name: "k8s.apply", version: "3.0", args: {} }, unhandled: true },
+  ], ["k8s:write"]);
+  const child = graph("child", [delegate("subgraph/grandchild@stable")], ["k8s:write"]);
+  const parent = graph("parent", [delegate("subgraph/child@stable")], parentCaps ?? ["k8s:write"]);
+  return base(parent, {
+    resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child, "subgraph/grandchild@stable": grandchild } }),
+    tenantCapabilities: ["k8s:write"],
+  });
+}
+
+test("A SUBGRAPH NODE IS CLASSIFIED BY WHAT ITS CHILD CAN REACH, not by the tools it names", () => {
+  // A `subgraph` node names no tool, so the `max` fold saw nothing and floored it at `out`
+  // however irreversible the child was — measured, `plans.delegate.posture` was `out` over a
+  // child that charges a card. It is NOT an oversight hole (every irreversible call still gates
+  // on the CHILD's own floor), which is why the claim here is about WHERE the human is asked:
+  // at `in` the parent asks BEFORE the child starts doing reversible work, rather than at the
+  // innermost call several runs down.
+  const g = compileOrThrow(delegatingTree());
+  assert.equal(g.plans["delegate" as NodeId]?.posture, "in", "the grandchild's `k8s.apply` reaches the parent's floor");
+
+  // AND THE FIFTH EXCLUDED TYPE from the deadline set, checked where a subgraph node exists:
+  // `#runSubgraph`'s body is `advance(child)`, so a constant here would bound a whole child RUN.
+  assert.equal(g.plans["delegate" as NodeId]?.timeoutMs, undefined, "a subgraph node gets no default deadline");
+});
+
+test("…and the parent's capability CEILING descends with it", () => {
+  // The refusal used to arrive as a run-time `E_CAP_DENIED`, which is the "compiles, then fails
+  // at run time" the compile stage exists to prevent. The child and grandchild each declare
+  // `k8s:write` for themselves, so nothing below the parent refuses on its own.
+  const r = compile(delegatingTree([]));
+  assert.equal(r.ok, false, "a parent declaring `capabilities: []` must not compile over this tree");
+  const d = r.diagnostics.filter((x) => x.code === "GRAPH017_CAPABILITY_NOT_DECLARED");
+  assert.equal(d.length, 1, JSON.stringify(r.diagnostics));
+  assert.match(d[0]!.message, /tool "k8s\.apply" used by subgraph "subgraph\/child@stable" under node "delegate"/);
+  assert.equal(compile(delegatingTree(["k8s:write"])).ok, true, "declaring it is how you delegate it");
+});
+
 test("a system floor of `in` raises every node, and nothing can lower it", () => {
   const g = compileOrThrow(base(incidentTriage(), { systemPostureFloor: "in" }));
   for (const plan of Object.values(g.plans)) assert.equal(plan.posture, "in");

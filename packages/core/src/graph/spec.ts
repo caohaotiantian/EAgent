@@ -260,11 +260,14 @@ export interface RouterNode {
  * partial evidence has `mode: "any"` and `mode: "quorum"`, which are journaled as partial by
  * construction.
  *
- * DELETING IT DOES NOT CLOSE THE "WAITS FOREVER" HOLE, and nothing here should be read as
- * claiming otherwise: `engine.ts`'s `#withNodeDeadline` returns straight through when a node
- * declares no `timeoutMs`, so an `agent` or `tool` node with none hangs its task forever. That
- * is a default node deadline's job, at the one enforcement point that already covers every
- * node type.
+ * DELETING IT DID NOT CLOSE THE "WAITS FOREVER" HOLE — a default node deadline did, and this
+ * paragraph records the order because the argument for deleting the field depended on it. The
+ * claim was "every branch of a join already has an enforceable deadline at its own locus", and
+ * that was only true of a branch whose author had written a number: `#withNodeDeadline` returned
+ * straight through when a node declared none, so an `agent` or `tool` node with none hung its
+ * task forever and a join over it waited forever too. `NodePlan.timeoutMs` now carries an
+ * effective deadline for the three node types `compile.ts` names, at the one enforcement point
+ * that covers every node type, so the branch-locus argument is now true of every branch.
  *
  * THERE IS NO `drain` FIELD EITHER, and its absence is the honest form of what the runtime does.
  * It meant "keep non-arriving branches running after the join fires", and the runtime
@@ -667,6 +670,23 @@ export interface NodePlan {
    * same authored spec keeps the identity it already had on every journal.
    */
   readonly retry?: RetryPolicy;
+  /**
+   * The node deadline that will ACTUALLY be enforced, or absent when this node has none.
+   *
+   * The third effective-after-fold value on this record, and it is here for exactly the reason
+   * `retry` is one field up: before it, a node declaring no `timeoutMs` had NO deadline at all.
+   * `Engine.#withNodeDeadline` read `NodeSpec.timeoutMs` and returned straight through when it
+   * was `undefined`, so a hanging tool held its Task forever and a join over that branch waited
+   * forever with it — measured, `Engine.advance` on a one-`tool`-node graph with no declaration
+   * was still unsettled at 1,500 ms and would never have settled.
+   *
+   * A FLOOR FOR NODES THAT DECLARED NOTHING, never an override: `NodeSpec.timeoutMs` wins wherever
+   * an author wrote one, at any value, including one far larger than the default. `compile.ts`'s
+   * `effectiveTimeout` names the three node types that get one and says why the other five do not.
+   *
+   * DERIVED, and therefore outside `graphHash` like every other field on this record.
+   */
+  readonly timeoutMs?: number;
   /** Rank for the UI's layered layout, so the browser never runs graph layout. */
   readonly layoutRank: number;
 }

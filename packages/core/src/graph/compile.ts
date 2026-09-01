@@ -22,7 +22,6 @@ import { CLASSIFICATION_POSTURE_FLOOR, CLASS_DEFAULT_POSTURE, maxPosture, type P
 import {
   DEFAULT_EXPANSION,
   dataFloorOf,
-  reachableToolNames,
   type ExpansionBudget,
   type GraphSpec,
   type NodePlan,
@@ -32,7 +31,7 @@ import {
   type RunGraph,
   observedChannels,
 } from "./spec.ts";
-import { indexGraph, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
+import { indexGraph, reachableToolNamesThrough, validateGraph, type Diagnostic, type ValidationContext } from "./validate.ts";
 
 /**
  * The retry policy a provider-calling node gets when its author declared none.
@@ -133,6 +132,74 @@ function effectiveRetry(n: NodeSpec): RetryPolicy | undefined {
   return reEntersAChild(n) ? DEFAULT_SUBGRAPH_RETRY : undefined;
 }
 
+/**
+ * The deadline a node gets when its author declared none, in ms.
+ *
+ * NOT EXPORTED, for `DEFAULT_PROVIDER_RETRY`'s reason: what a caller needs is the effective
+ * number, and that is on `NodePlan.timeoutMs` where it can be READ and where `loom compile`
+ * prints it.
+ *
+ * LOOKED UP, NOT GUESSED. Nothing in `providers/` sets a request deadline — `anthropic.ts`,
+ * `openai.ts` and `fallback.ts` each take only the run's `AbortSignal`, and `http.ts` passes it
+ * to `fetch` unmodified, so a provider that accepts a connection and never writes a byte is
+ * bounded by nothing in this process. The number is therefore the vendor SDKs' own: both the
+ * Anthropic and OpenAI clients default to a **10-minute** per-request timeout. Using theirs
+ * makes this a BACKSTOP rather than a policy — it can only fire where a request has already
+ * outlived the deadline its own SDK would have applied, which is exactly the case this tree has.
+ *
+ * ONE NUMBER FOR ALL THREE TYPES, deliberately. A per-type figure would imply a precision nobody
+ * here has measured; this is the difference between "fails eventually" and "never", not a tuning
+ * knob. An author who wants a real bound writes one, and `NodeSpec.timeoutMs` always wins.
+ *
+ * IT IS AN OUTER BOUND, not the only one. A tool with its own clock still fires first
+ * (`mcp/client.ts` at 30 s, `sandbox/subprocess.ts`'s required `timeoutMs`), and so does a
+ * sandboxed `function` body's realm deadline. Nothing here loosens any of them.
+ */
+const DEFAULT_NODE_TIMEOUT_MS = 600_000;
+
+/**
+ * The node types that get a default deadline, and why the other five do not.
+ *
+ * THE SET IS `agent`, `tool`, `evaluator`. Read off `Engine.#dispatchBody`, which is the only
+ * thing `#withNodeDeadline` wraps — so the question is not "can this node type take a long time"
+ * but "can its BODY fail to settle", and only these three can:
+ *
+ *   - `agent` — `#runAgent` awaits a provider stream that no clock in this tree bounds.
+ *   - `tool` — `#runToolNode` awaits an extension's `execute`. The case `node-timeout.test.ts`
+ *     was written for: "a hanging tool held its Task forever".
+ *   - `evaluator` — its `rubric` arm delegates to `#runAgent`, so it inherits the first case
+ *     whole. Given to the TYPE rather than to the arm because the `assertion` arm's other host,
+ *     a hand-registered `FunctionBody`, is host code with no realm and no timeout either (A13).
+ *
+ * THE FIVE WITHOUT ONE, each for its own reason and none of them "we forgot":
+ *
+ *   - `function` — a graph-reachable body cannot fail to settle. `realm.ts` refuses an `async`
+ *     body at LOAD (`ASYNC_RULE`) and a returned thenable when it returns (`THENABLE_RULE`), and
+ *     what is left is synchronous and TERMINATED by `vm`'s per-call timeout at the node's
+ *     declared number or `FunctionLoaderOptions.callTimeoutMs`, default 30 s — which fires first
+ *     in every case, so a default here would be inert. The residue is A13's hand-registered
+ *     body, and for the synchronous half of it a deadline cannot help anyway: that body owns the
+ *     event loop, so the `setTimeout` this default arms could not fire.
+ *   - `router` — `#runRouter` evaluates declared expressions against the scope and returns. No
+ *     await, no I/O.
+ *   - `join` — `#dispatchBody` returns `{status: "succeeded"}` synchronously; a join's waiting
+ *     happens in the SCHEDULER, which is not what this deadline wraps, so a number here would be
+ *     inert. It would also be `JoinNode.timeoutMs` under a new name — the field this schema
+ *     deleted, for the reason its docstring still gives.
+ *   - `human_gate` — same structural inertness (it returns `{status: "gate"}` synchronously),
+ *     and it must not get one even if it were reachable: a gate's clock is `slaMs` plus
+ *     `onTimeout`, an author's explicit choice about what happens when nobody answers. A gate
+ *     that expires because nobody wrote a number is oversight failing OPEN.
+ *   - `subgraph` — `#runSubgraph`'s body is `await this.advance(childRunId)`, so a constant here
+ *     would bound a whole child RUN by a per-node figure. Every node in that child now carries
+ *     its own default, which is the locus that can actually enforce one — the same argument the
+ *     deleted barrier deadline lost.
+ */
+function effectiveTimeout(n: NodeSpec): number | undefined {
+  if (n.timeoutMs !== undefined) return n.timeoutMs;
+  return n.type === "agent" || n.type === "tool" || n.type === "evaluator" ? DEFAULT_NODE_TIMEOUT_MS : undefined;
+}
+
 export type CompileInput = Omit<ValidationContext, "depth" | "expanding">;
 
 export type CompileResult =
@@ -208,6 +275,12 @@ export function compile(input: CompileInput): CompileResult {
 
   const plans: Record<NodeId, NodePlan> = {};
   const layoutRanks = computeLayoutRanks(spec, idx);
+  // HOISTED ABOVE THE PLAN LOOP, because the class floor now reads it. This is the same map the
+  // `RunGraph` carries and `Engine.#runSubgraph` executes from, so the floor a `subgraph` node is
+  // given at compile is computed from exactly the child bytes the run will use — not from a
+  // second resolver call that could answer differently.
+  const subgraphs = resolveSubgraphs(input, expansion);
+  const childSpec = (ref: string): GraphSpec | undefined => subgraphs[ref] ?? input.resolver.subgraph?.(ref);
 
   for (const n of spec.nodes) {
     // `max` over every tool the node can reach. An agent node names no tool, so keying
@@ -222,7 +295,10 @@ export function compile(input: CompileInput): CompileResult {
             // compiler cannot see should floor the node is a separate question from which
             // tools the node can reach, and answering it here would gate every graph
             // compiled against a partial manifest map.
-            ...reachableToolNames(n).flatMap((name) => {
+            // THROUGH A SUBGRAPH TOO. A `subgraph` node names no tool, so it was floored at `out`
+            // however irreversible its child was — see `reachableToolNamesThrough` for the three
+            // things folding the child in actually buys, and for what it does NOT claim.
+            ...reachableToolNamesThrough(n, childSpec, expansion.maxDepth).flatMap((name) => {
               const entry = input.tools[name];
               return entry === undefined ? [] : [CLASS_DEFAULT_POSTURE[entry.irreversibility]];
             }),
@@ -233,6 +309,7 @@ export function compile(input: CompileInput): CompileResult {
     // the declared set leaves a second, quieter answer to the question the engine just fixed.
     const dataFloor = dataFloorOf(spec.channels, n);
     const retry = effectiveRetry(n);
+    const timeoutMs = effectiveTimeout(n);
 
     plans[n.id] = {
       id: n.id,
@@ -250,6 +327,7 @@ export function compile(input: CompileInput): CompileResult {
       ),
       layoutRank: layoutRanks.get(n.id) ?? 0,
       ...(retry === undefined ? {} : { retry }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     };
   }
 
@@ -265,7 +343,7 @@ export function compile(input: CompileInput): CompileResult {
     terminalNodes: idx.terminalNodes,
     resolutionManifest: manifest,
     documents: resolveDocuments(input, manifest),
-    subgraphs: resolveSubgraphs(input, expansion),
+    subgraphs,
     expansion,
   };
 

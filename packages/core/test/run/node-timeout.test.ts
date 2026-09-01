@@ -17,6 +17,7 @@ import { InProcessEventBus } from "../../src/bus.ts";
 import { CODES } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { NodeId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
@@ -108,19 +109,49 @@ test("A NODE THAT HANGS PAST ITS timeoutMs FAILS THE TASK", async () => {
   }
 });
 
-test("AND A NODE WITH NO timeoutMs IS UNCHANGED — the deadline is opt-in", async () => {
-  // The refusal must be about the declaration, not about tool nodes in general. Without a
-  // `timeoutMs` the same tool is awaited exactly as before, so this resolves only because the
-  // test releases it.
+test("AND A NODE WITH NO timeoutMs GETS THE COMPILED DEFAULT — the deadline is no longer opt-in", async () => {
+  // THIS TEST USED TO SAY THE OPPOSITE, and the claim it made was the hole: "without a
+  // `timeoutMs` the same tool is awaited exactly as before". Exactly as before meant forever —
+  // measured on this very graph, `Engine.advance` was still unsettled at 1,500 ms and nothing
+  // in the process would ever have settled it, and a join over such a branch waited with it.
+  // `NodePlan.timeoutMs` now carries a default for the three node types `compile.ts` names.
   const r = rig();
   const graph = compileOrThrow({ spec: spec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:read"] });
-  const runId = await r.engine.submit({ graph, inputs: { a: "x" } });
+  assert.equal(graph.plans["n" as NodeId]?.timeoutMs, 600_000, "a tool node that declared nothing still has a deadline");
+
   // RELEASED ONCE THE TOOL IS ACTUALLY RUNNING. `release` is assigned by `execute`, which
   // `advance` reaches asynchronously — calling it on the line after `advance` starts hits the
   // initial no-op, the tool promise never resolves, and the test hangs forever. It did.
+  const runId = await r.engine.submit({ graph, inputs: { a: "x" } });
   const advancing = r.engine.advance(runId);
   await r.started;
   r.release();
   const p = await advancing;
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+});
+
+test("THE ENGINE READS THE COMPILED DEADLINE, not the authored field", async () => {
+  // The seam, tested at the seam, because the default itself is ten minutes and no offline
+  // deterministic test may wait for it. `plans` are DERIVED and excluded from `graphHash`, so a
+  // plan carrying a number its node never declared is a legal `RunGraph` — the same technique
+  // `graph-capability-ceiling.test.ts` uses to reach the run-time half of its rule.
+  //
+  // Before the fix `#withNodeDeadline` read `w.node.timeoutMs`, which is `undefined` here, and
+  // this test hangs rather than fails: the assertion below is only reachable because the engine
+  // now reads the plan.
+  const r = rig();
+  const compiled = compileOrThrow({ spec: spec(), resolver: resolver(), tools: {}, tenantCapabilities: ["fs:read"] });
+  const id = "n" as NodeId;
+  const graph = { ...compiled, plans: { ...compiled.plans, [id]: { ...compiled.plans[id]!, timeoutMs: 25 } } };
+  try {
+    const runId = await r.engine.submit({ graph, inputs: { a: "x" } });
+    const p = await r.engine.advance(runId);
+
+    assert.equal(p.status, "failed", `the run must not hang: ${p.status}`);
+    const failed = Object.values(p.tasks).filter((t) => t.state === "failed");
+    assert.equal(failed[0]?.error?.code, CODES.E_TASK_TIMEOUT, JSON.stringify(failed[0]?.error));
+    assert.match(failed[0]!.error?.message ?? "", /timeoutMs of 25ms/);
+  } finally {
+    r.release();
+  }
 });

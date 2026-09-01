@@ -24,7 +24,7 @@ import { SYSTEM_ACTOR, type Actor, type JournalEvent } from "../../src/journal/e
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { RunLog } from "../../src/run/log.ts";
-import type { GateRecord } from "../../src/run/projection.ts";
+import type { GateRecord, RunProjection } from "../../src/run/projection.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
@@ -337,8 +337,12 @@ test("A PARENT REPLAY DOES NOT RE-RUN THE CHILD", async () => {
   const runId = await r.engine.submit({ graph, inputs: { total: 4 } });
   let p = await r.engine.advance(runId);
 
-  // The child's charge is irreversible, so it gates — through the PARENT.
+  // The child's charge is irreversible, so it gates — TWICE through the PARENT: once before the
+  // delegation starts, on the subgraph node's own compile floor, and once as the mirror of the
+  // child's gate. This test is about neither; it wants the child to have run.
   assert.equal(p.status, "awaiting_gate");
+  p = await pastDelegationGate(r, runId, p);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
   const gate = Object.values(p.gates).find((g) => g.state === "open")!;
   p = await r.engine.resolveGate(runId, {
     gateId: gate.gateId,
@@ -378,6 +382,8 @@ test("ONE HUMAN DECISION, not two — the parent's answer resolves the child's g
   let p = await r.engine.advance(runId);
 
   assert.equal(p.status, "awaiting_gate");
+  p = await pastDelegationGate(r, runId, p);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
   const gate = Object.values(p.gates).find((g) => g.state === "open")!;
   // The rendered payload lives on the broker's summary, not on the projection row — the
   // projection stays the durable part, the payload is re-derivable.
@@ -416,6 +422,8 @@ test("REJECTING at the parent rejects IN THE CHILD, and takes no money", async (
   const graph = compileParent(child, parentSpec({}, { result: "receipt" }));
   const runId = await r.engine.submit({ graph, inputs: { total: 10 } });
   let p = await r.engine.advance(runId);
+  p = await pastDelegationGate(r, runId, p);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
   const gate = Object.values(p.gates).find((g) => g.state === "open")!;
 
   p = await r.engine.resolveGate(runId, {
@@ -518,11 +526,33 @@ function twoGateChild(): GraphSpec {
   };
 }
 
+/**
+ * Answer the parent's OWN pre-delegation gate, if it raised one, and return the projection.
+ *
+ * A `subgraph` node's compile floor folds in the tools its CHILD can reach, so a parent that
+ * delegates to a child which charges a card stands at posture `in` and the human is asked BEFORE
+ * the child starts — not at the innermost irreversible call. That gate carries no `mirrorOf`,
+ * because at raise time there is no child gate to mirror; every test in this file is about the
+ * MIRROR, so this steps past the earlier one and leaves the shape they were written for.
+ */
+async function pastDelegationGate(r: Rig, runId: RunId, p: RunProjection): Promise<RunProjection> {
+  const own = Object.values(p.gates).find((g) => g.state === "open" && g.mirrorOf === undefined);
+  if (own === undefined) return p;
+  return r.engine.resolveGate(runId, {
+    gateId: own.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:a", via: "console" },
+    idempotencyKey: `delegation-${own.gateId}`,
+  });
+}
+
 /** Park a parent run on the mirror gate its child raised. */
 async function parkedOnMirror(child: GraphSpec, spec = parentSpec({}, { result: "receipt" })) {
   const r = rig(child);
   const runId = await r.engine.submit({ graph: compileParent(child, spec), inputs: { total: 10 } });
-  const p = await r.engine.advance(runId);
+  let p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+  p = await pastDelegationGate(r, runId, p);
   assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
   return { r, runId, gate: Object.values(p.gates).find((g) => g.state === "open")! };
 }
@@ -562,7 +592,9 @@ test("AND THE CHILD'S SEPARATION OF DUTIES BINDS IT TOO — the same hole, one f
     inputs: { total: 10 },
     submittedBy: { kind: "human", subject: SECURITY_LEAD, method: "sso" },
   });
-  const p = await r.engine.advance(runId);
+  let p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+  p = await pastDelegationGate(r, runId, p);
   assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
   const gate = Object.values(p.gates).find((g) => g.state === "open")!;
   assert.deepEqual(gate.excludedApprovers, [SECURITY_LEAD], "the mirror inherits the rule, not only the list");
@@ -722,7 +754,9 @@ async function twoGateRig(): Promise<{
   const r = rig(child);
   const graph = compileParent(child, parentSpec({}, { result: "receipt" }));
   const runId = await r.engine.submit({ graph, inputs: { total: 10 } });
-  const p = await r.engine.advance(runId);
+  let p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+  p = await pastDelegationGate(r, runId, p);
   assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
 
   const childRunId = `${runId}~delegate@root#0` as RunId;
