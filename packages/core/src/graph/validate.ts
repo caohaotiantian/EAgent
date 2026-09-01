@@ -1079,6 +1079,38 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
       fatal = true;
     }
+    // `function.effects` IS A LABEL A GUARD READS, so its SHAPE is load-bearing rather than
+    // cosmetic. `isExternal` asks `effects === undefined || effects.length > 0`, so anything with
+    // no numeric `length` — `null`, `{}`, `0` — reads as "declared, and empty", which is the
+    // author's claim that this node is PURE COMPUTATION and its output need not be tainted.
+    // Measured before this rule: `effects: null` and `effects: ""` compiled with no error at all
+    // and marked the node pure, while `effects: {}`, `effects: 0` and `effects: {length: 0}`
+    // crashed `reachableToolNames` with a raw `TypeError: object is not iterable` — a guard
+    // reporting a fault and then tripping over it, the third instance of that shape this week.
+    //
+    // Refused rather than coerced. An empty array is a CLAIM and must be written as one; a
+    // malformed value is not a smaller claim, it is an unreadable one, and the fail-closed
+    // reading of an unreadable label is that the node is untrusted — which `isExternal` now also
+    // answers on its own, because a journal can carry a shape this compiler never saw.
+    if (n.type === "function" && n.function !== undefined) {
+      const declared: unknown = (n.function as { effects?: unknown }).effects;
+      const bad =
+        declared !== undefined &&
+        (!Array.isArray(declared) || declared.some((x) => typeof x !== "string" || !isSafeId(x)));
+      if (bad) {
+        d.push({
+          severity: "error",
+          code: "GRAPH003_MALFORMED",
+          message:
+            `node "${n.id}" declares \`effects\` as ${JSON.stringify(declared)}, which is not a list of tool names — ` +
+            `and \`effects\` is the label that says this node is pure computation, so an unreadable one is not a smaller claim`,
+          at: { nodeId: n.id },
+          fix: `write \`effects: []\` to declare the node reaches no tool, or list the tool names it may invoke`,
+        });
+        fatal = true;
+      }
+    }
+
     // `timeoutMs` IS A TIMER, so it joins the family every other caller-supplied duration is in.
     // `setTimeout` truncates anything above MAX_TIMER_MS to ONE MILLISECOND, so an out-of-range
     // deadline is not a loose one — it is a node that fails instantly.

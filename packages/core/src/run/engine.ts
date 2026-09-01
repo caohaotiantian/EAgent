@@ -7787,7 +7787,16 @@ function isExternal(node: NodeSpec): boolean {
   // exactly as an agent with tools does; one that declared the empty set has no name it can say
   // and so cannot reach one. Widening `reachableToolNames` without widening this is the same set
   // answered two ways, which is the shape that produced the agent hole in the first place.
-  if (node.type === "function") return node.function?.effects === undefined || node.function.effects.length > 0;
+  // `Array.isArray` and not `.length`, because this reads a value that can arrive from a JOURNAL
+  // as well as from a compiler that now refuses the bad shapes. `null`, `{}`, `0` and
+  // `{length: 0}` all have no usable `length`, so the old test read them as "declared, and
+  // empty" — the author's claim of purity — and marked the node TRUSTED. An unreadable label
+  // fails closed: it is not a smaller claim, it is one nobody can check.
+  if (node.type === "function") {
+    const declared: unknown = node.function?.effects;
+    if (declared === undefined) return true;
+    return !Array.isArray(declared) || declared.length > 0;
+  }
   if (node.type === "evaluator") return node.evaluator?.kind !== "assertion";
   return true;
 }

@@ -30,6 +30,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
+import { compile } from "../../src/graph/compile.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
@@ -196,4 +198,40 @@ test("`effects: []` DOES NOT LAUNDER — a declared-pure node downstream of a fe
 
   assert.equal(r.charged(), 0, "a declared-pure node LAUNDERED a fetch's output — the label cleared a taint");
   assert.equal(p.status, "awaiting_gate", `expected the taint to survive the normaliser, got ${p.status}`);
+});
+
+test("A MALFORMED `effects` IS REFUSED, because an unreadable label is not a smaller claim", () => {
+  // `isExternal` asked `effects === undefined || effects.length > 0`, so any value with no
+  // numeric `length` read as "declared, and empty" — the author's claim that this node is pure
+  // computation. Measured: `effects: null` and `effects: ""` compiled with no error at all and
+  // marked the node PURE, while `{}`, `0` and `{length: 0}` crashed `reachableToolNames` with a
+  // raw `TypeError: object is not iterable`. Fail-open and crash, from the same missing check.
+  //
+  // Both halves are closed: the compiler refuses the shape, and `isExternal` reads `isArray`
+  // rather than `.length` so a value arriving from a JOURNAL — which this compiler never saw —
+  // still fails closed. Only the compile half is reachable from an authored graph, so only it is
+  // driven here.
+  const spec = (effects: unknown): GraphSpec =>
+    ({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "h", project: "p", version: 1 },
+      policy: { posture: "out", capabilities: [] },
+      channels: { out: { type: "string", reduce: "replace" } },
+      inputs: [],
+      outputs: ["out"],
+      nodes: [{ id: "n", type: "function", reads: [], writes: ["out"], function: { ref: "function/f@stable", effects } }],
+      edges: [],
+    }) as unknown as GraphSpec;
+  const resolver = { resolve: () => undefined, get: () => undefined } as never;
+  const codesFor = (effects: unknown): readonly string[] =>
+    compile({ spec: spec(effects), resolver, tools: {}, tenantCapabilities: [] })
+      .diagnostics.filter((x) => x.severity === "error" && x.code !== "GRAPH015_RESOURCE_NOT_FOUND")
+      .map((x) => x.code);
+
+  for (const bad of [null, "", 0, {}, { length: 0 }, ["ok", 7], ["../escape"]]) {
+    assert.deepEqual(codesFor(bad), ["GRAPH003_MALFORMED"], `effects: ${JSON.stringify(bad)} must be refused`);
+  }
+  // And the two real shapes still compile clean, so this refuses a shape and not the feature.
+  for (const good of [undefined, [], ["net.fetch"]]) assert.deepEqual(codesFor(good), []);
 });
