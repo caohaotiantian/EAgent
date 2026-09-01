@@ -29,6 +29,7 @@ import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { auditRun } from "../../src/journal/audit.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { OPERATOR } from "./operator.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -390,7 +391,7 @@ test("A REWIND REACHES THE CHILDREN TOO — THE OTHER TRIGGER ON THE SAME DESCEN
   assert.equal(status, "succeeded", "this run must SUCCEED — a failure would roll back on the other trigger");
   assert.deepEqual(world.rows, [7, 9], "the child and the grandchild wrote; the parent itself wrote nothing");
 
-  await engine.rewind(runId, 1 as Seq, "operator asked to undo the whole tree");
+  await engine.rewind(runId, 1 as Seq, "operator asked to undo the whole tree", OPERATOR);
 
   assert.deepEqual(world.rows, [], "a rewind hides the record; it must not leave the writes standing");
   // The same order claim as the failed-run test, and it has to be: one descent, two triggers.

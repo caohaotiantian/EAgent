@@ -42,6 +42,7 @@ import { suppressedRanges } from "../../src/run/projection.ts";
 import { foldRun, type RunStatus } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { ZERO_USAGE } from "../../src/vocab.ts";
+import { OPERATOR } from "./operator.ts";
 import {
   DOCS,
   SKELETON_TENANT_CAPS,
@@ -320,7 +321,7 @@ test("REWIND DOES NOT REPLAY PAST A HUMAN'S REJECTION", async () => {
   assert.equal(failed.status, "failed", "a rejection ends the run");
   assert.equal(h.writes.length, 0);
 
-  await assert.rejects(() => h.engine.rewind(runId, at, "try again"), conflict(CODES.E_RESTORE_ILLEGAL));
+  await assert.rejects(() => h.engine.rewind(runId, at, "try again", OPERATOR), conflict(CODES.E_RESTORE_ILLEGAL));
 
   const after = (await h.engine.projection(runId))!;
   assert.equal(after.status, "failed", "the refusal stands");
@@ -362,7 +363,7 @@ test("A REJECTION CAN NEVER BE INSIDE A SUPPRESSED RANGE — which is why the sc
   assert.equal(rejectSeqs.length, 1, "one rejection, so the property below is about something");
 
   for (let target = 0; target <= Number(head) + 1; target++) {
-    await h.engine.rewind(runId, target as Seq, "sweep").catch(() => undefined);
+    await h.engine.rewind(runId, target as Seq, "sweep", OPERATOR).catch(() => undefined);
   }
 
   // Whatever was accepted, the rejection is still live: no suppressed range covers it.
@@ -394,7 +395,7 @@ test("…but rewinding past an APPROVAL is allowed, because it ASKS AGAIN rather
   assert.equal(done.status, "succeeded");
   assert.equal(h.writes.length, 1, "the approved write happened");
 
-  const rewound = await h.engine.rewind(runId, at, "re-run the write");
+  const rewound = await h.engine.rewind(runId, at, "re-run the write", OPERATOR);
   assert.equal(rewound.status, "awaiting_gate", "the run is back in front of the human");
   assert.equal(rewound.gates[gateId]?.state, "open", "THE GATE IS ASKED AGAIN, not assumed");
   assert.equal(rewound.gates[gateId]?.decision, undefined);
@@ -422,8 +423,8 @@ test("A REWIND TO SEQ 0 IS REFUSED, because it ERASES the run rather than rewind
   // would have kept.
   const { h, runId, gateId } = await parked();
 
-  await assert.rejects(() => h.engine.rewind(runId, 0 as Seq, "start over"), conflict(CODES.E_RESTORE_ILLEGAL));
-  await assert.rejects(() => h.engine.rewind(runId, -1 as Seq, "start over"), conflict(CODES.E_RESTORE_ILLEGAL));
+  await assert.rejects(() => h.engine.rewind(runId, 0 as Seq, "start over", OPERATOR), conflict(CODES.E_RESTORE_ILLEGAL));
+  await assert.rejects(() => h.engine.rewind(runId, -1 as Seq, "start over", OPERATOR), conflict(CODES.E_RESTORE_ILLEGAL));
 
   const after = (await h.engine.projection(runId))!;
   assert.equal(after.status, "awaiting_gate", "the run is exactly where it was");
@@ -445,7 +446,7 @@ test("…and seq 1 is the floor, not a synonym for it: a run keeps its identity 
   // something. Seq 0 is the one where the run stops being a run.
   const { h, runId } = await parked();
 
-  const rewound = await h.engine.rewind(runId, 1 as Seq, "back to the submission");
+  const rewound = await h.engine.rewind(runId, 1 as Seq, "back to the submission", OPERATOR);
   assert.equal(rewound.status, "queued", "no run.started survives, so the run is not running");
   assert.deepEqual(rewound.channels["paths"], DOCS, "BUT ITS INPUTS DO");
   assert.notEqual(rewound.graphHash, "", "…and so does the graph it was compiled against");
@@ -660,14 +661,14 @@ test("A REWIND ONTO A GATE'S EXPIRY IS REFUSED, for the same reason as one onto 
   assert.equal(failed.seq, timeout.seq + 1, "the expiry and the failure are ONE append, two seqs");
 
   await assert.rejects(
-    () => h.engine.rewind(runId, timeout.seq, "undo the expiry"),
+    () => h.engine.rewind(runId, timeout.seq, "undo the expiry", OPERATOR),
     conflict(CODES.E_RESTORE_ILLEGAL),
     "rewinding onto the expiry's own seq keeps it and drops the failure",
   );
 
   // …and both coherent readings of what the operator asked for still work, which is what
   // makes this a refusal rather than a wall. `atSeq - 1` reopens the gate.
-  const reopened = await h.engine.rewind(runId, (timeout.seq - 1) as Seq, "ask again");
+  const reopened = await h.engine.rewind(runId, (timeout.seq - 1) as Seq, "ask again", OPERATOR);
   assert.equal(reopened.status, "awaiting_gate");
   assert.equal(Object.values(reopened.gates).filter((g) => g.state === "open").length, 1, "the gate is answerable again");
   assert.equal(h.writes.length, 0, "and the action behind it still has not run");
@@ -695,7 +696,7 @@ test("…and a gate.timeout that is NOT an expiry is still a legal boundary", as
   ]);
   const marker = await h.store.head(runId);
 
-  const rewound = await h.engine.rewind(runId, marker, "undo the clock's no-op");
+  const rewound = await h.engine.rewind(runId, marker, "undo the clock's no-op", OPERATOR);
   assert.equal(rewound.status, "awaiting_gate", "the run is where it was");
   assert.equal(rewound.gates[gateId]?.state, "open", "and the gate is still answerable");
   assert.ok(at <= marker, "the boundary really was inside this run's history");

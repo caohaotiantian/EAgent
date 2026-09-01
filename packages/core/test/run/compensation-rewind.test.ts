@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, isLoomError } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
@@ -23,6 +24,7 @@ import type { JournalEvent } from "../../src/journal/events.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { OPERATOR } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const NOW = 1_700_000_000_000;
@@ -146,7 +148,7 @@ async function ran(): Promise<{
 
 test("A REWIND UNDOES THE EFFECTS IT HIDES, LAST FIRST", async () => {
   const r = await ran();
-  await r.engine.rewind(r.runId, r.before, "operator asked to redo from the top");
+  await r.engine.rewind(r.runId, r.before, "operator asked to redo from the top", OPERATOR);
 
   assert.deepEqual(r.world.rows, [], "the rows the rewind hid are gone from the world, not merely from the fold");
   assert.deepEqual(r.world.undone, [2, 1], "reverse order — the last thing done is the first undone");
@@ -176,13 +178,13 @@ test("A REWIND UNDOES THE EFFECTS IT HIDES, LAST FIRST", async () => {
 
 test("A SECOND REWIND TO THE SAME BOUNDARY DOES NOT UNDO ANYTHING TWICE", async () => {
   const r = await ran();
-  await r.engine.rewind(r.runId, r.before, "first");
+  await r.engine.rewind(r.runId, r.before, "first", OPERATOR);
   assert.deepEqual(r.world.undone, [2, 1]);
 
   // A rewind can itself be retried — an operator repeats it, or a process died partway and the
   // resumed one re-plans. `compensation.recorded` is keyed by the SEQ of the call it undoes, so
   // the journal is what remembers: a flag on the engine would survive this and not a restart.
-  await r.engine.rewind(r.runId, r.before, "again");
+  await r.engine.rewind(r.runId, r.before, "again", OPERATOR);
   assert.deepEqual(r.world.undone, [2, 1], "the second rewind found both calls already settled");
 });
 
@@ -225,7 +227,7 @@ test("AN EFFECT NOTHING CAN UNDO IS STILL RECORDED, EVEN WHEN NO STEP DISPATCHES
   const call = evs.find((e) => e.type === "tool.called");
   assert.notEqual(call, undefined, "the note really was written");
 
-  await engine.rewind(runId, (call!.seq - 2) as Seq, "undo it if you can");
+  await engine.rewind(runId, (call!.seq - 2) as Seq, "undo it if you can", OPERATOR);
 
   const recs = (await journal(store, runId)).filter((e) => e.type === "compensation.recorded");
   assert.equal(recs.length, 1, "one recorded call, one decision about it");
@@ -247,7 +249,7 @@ test("A DETACHED RUN IS REFUSED RATHER THAN CROSSED", async () => {
   // Bound to the SAME world: a different process shares the database, not a copy of it.
   const cold = engineOn(r.store, r.world);
   await assert.rejects(
-    () => cold.rewind(r.runId, r.before, "from a process that never ran it"),
+    () => cold.rewind(r.runId, r.before, "from a process that never ran it", OPERATOR),
     (e: Error) => {
       assert.match(e.message, /holds no context/, "the message names the reason");
       assert.match(e.message, /attach\(runId, graph\)/, "and the fix");
@@ -260,6 +262,56 @@ test("A DETACHED RUN IS REFUSED RATHER THAN CROSSED", async () => {
   // ATTACHED, THE SAME CALL WORKS. The refusal is about a missing capability, not a policy — so
   // it must lift the moment the capability is there, or it is a wall rather than a door.
   cold.attach(r.runId, r.graph);
-  await cold.rewind(r.runId, r.before, "now it can");
+  await cold.rewind(r.runId, r.before, "now it can", OPERATOR);
   assert.deepEqual(r.world.rows, [], "attach, then rewind, and the effects really are undone");
+});
+
+test("ONLY A HUMAN MAY REWIND, WHETHER OR NOT THERE IS ANYTHING TO UNDO", async () => {
+  // `b90b137`'s fifth decision — cited by commit because `TODO.md` called it "§D.5" and §D has
+  // since been renumbered — says rewind-compensation must be "loud, gated by the same oversight
+  // floor an irreversible action gets, and never silent", and an irreversible action at `in`
+  // requires a person. The floor did not exist: `by` defaulted to `SYSTEM_ACTOR("operator")` and
+  // was checked nowhere, so — measured on this rig before the check — `rewind(runId, before, reason)` with no
+  // fourth argument at all returned `queued`, dispatched both `db.delete` calls, and journaled
+  // the marker as `system:operator`. This file is where it belongs because the dispatch is the
+  // reason: a rewind is the one operator command that reaches out and changes the world.
+  const r = await ran();
+  const service = { kind: "system", component: "principal:svc:deployer" } as const;
+
+  const refused = (e: unknown): true => {
+    assert.ok(isLoomError(e), String(e));
+    assert.equal(e.code, CODES.E_HUMAN_APPROVAL_REQUIRED, e.message);
+    // Both ways out are named, because over HTTP this refusal is a 403 where a service token
+    // used to get a 200, and an operator meets it with a run half-finished in front of them.
+    assert.match(e.message, /Authenticate as a person/, "the message says how to become allowed");
+    assert.match(e.message, /use cancel/, "and what still works for the caller it just refused");
+    return true;
+  };
+
+  await assert.rejects(() => r.engine.rewind(r.runId, r.before, "a service token asked", service as never), refused);
+  // REFUSING UNDOES NOTHING, which is the same rule the `E_RESTORE_ILLEGAL` refusals above hold
+  // to: unwinding half a run and then declining to rewind it leaves the operator worse off than
+  // either answer alone. That is why the actor is the FIRST check and not the last.
+  assert.deepEqual(r.world.rows, [1, 2], "the refused rewind left the world exactly as it found it");
+  assert.deepEqual(r.world.undone, []);
+  const after = await journal(r.store, r.runId);
+  assert.equal(after.filter((e) => e.type === "checkpoint.restored").length, 0, "and wrote no marker");
+  assert.equal(after.filter((e) => e.type === "compensation.recorded").length, 0, "and no rollback record");
+
+  // AND THE SAME REFUSAL WITH NOTHING TO UNDO. The boundary here is the journal's own head, so
+  // the range `(atSeq, marker)` is empty and there is not one compensable effect inside it. The
+  // rule does not consult that, deliberately: `plannedUndo` is computed after four refusals and a
+  // full journal read, so a caller cannot know whether their rewind has undos until it has
+  // already run, and a rule conditioned on it is a rule nobody can follow.
+  const head = after[after.length - 1]!.seq;
+  await assert.rejects(() => r.engine.rewind(r.runId, head, "and nothing to undo", service as never), refused);
+
+  // THE CONTROL, and it is the whole argument: the only thing wrong with the call above is who
+  // made it. The same empty-range rewind from a person is taken, marker and all.
+  await r.engine.rewind(r.runId, head, "a person asked for the same thing", OPERATOR);
+  const marks = (await journal(r.store, r.runId)).filter((e) => e.type === "checkpoint.restored");
+  assert.equal(marks.length, 1, "exactly the human's rewind is on the record");
+  assert.equal(marks[0]!.actor.kind, "human");
+  assert.equal((marks[0]!.actor as { subject?: string }).subject, "u:alice");
+  assert.deepEqual(r.world.undone, [], "and it undid nothing, because its range held nothing");
 });

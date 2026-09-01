@@ -872,7 +872,7 @@ function principalOf(auth: AuthContext): SubmittedBy {
 }
 
 /**
- * The actor a cancel or a rewind is journaled under — the ENVELOPE, not a payload field.
+ * The actor an operator command is journaled under — the ENVELOPE, not a payload field.
  *
  * A cancel is caused by its caller directly, so the event's own `actor` is the honest home;
  * `run.submitted` is the other way round and puts its principal in the payload. Three cases:
@@ -887,6 +887,12 @@ function principalOf(auth: AuthContext): SubmittedBy {
  *     `system:operator`, exactly what this path journaled before. A marker describes what the
  *     perimeter concluded rather than naming anyone, so `principal:(shared-token)` would
  *     claim a principal by that name. "An operator did it" is the most that can be said.
+ *
+ * IT DECIDES WHO THE CALLER IS, NOT WHAT THEY MAY DO, and the two non-human arms are refused
+ * outright by two of the six verbs on `/runs/:id/commands` — `steer` and `rewind`, each in the
+ * engine and each for its own reason. This function stays the one place the perimeter's answer
+ * is computed; the floor lives with the verb that needs it, so a caller cannot get a different
+ * answer by arriving through the library instead.
  */
 function commandActor(auth: AuthContext | undefined): CommandActor {
   if (auth === undefined) return SYSTEM_ACTOR("operator");
@@ -1925,10 +1931,23 @@ export class ControlPlane {
     // — so on a routable address, anyone who can reach the port can `POST /runs` (spend this
     // deployment's provider budget), `POST /runs/:id/gates/:gateId` (approve any open human
     // gate, which is the whole oversight perimeter), and `POST /runs/:id/commands`
-    // (`cancel`, `rewind`, `advance`). Those three are read off `#buildRoutes` rather than
-    // remembered: an earlier draft of this comment named `POST /runs/:id/decisions` and
+    // (`cancel`, `pause`, `resume`, `advance`). Those three are read off `#buildRoutes` rather
+    // than remembered: an earlier draft of this comment named `POST /runs/:id/decisions` and
     // `DELETE /runs/:id`, and NEITHER ROUTE EXISTS. That is not a posture; it is the absence
     // of one, and the default bind is the only thing that has ever stood in front of it.
+    //
+    // THE COMMANDS LIST IS FOUR VERBS, NOT SIX, and it shrank rather than being miscounted: the
+    // route also takes `steer` and `rewind`, and both refuse a caller who is not a person. On an
+    // open plane `commandActor` yields `SYSTEM_ACTOR("operator")` for every request, so neither
+    // is reachable here at all. It used to say "cancel, rewind, advance", which was true when it
+    // was written and stopped being true when `Engine.rewind` grew its human floor — naming the
+    // verbs an anonymous caller ACTUALLY gets is the only version of this sentence that stays
+    // honest, and it is the reason to read them off the switch rather than recall them.
+    //
+    // MEASURED, all six through this plane with no token and no identity source: `cancel` 200,
+    // `pause` 200, `advance` 200, `resume` 409 `E_ILLEGAL_TRANSITION` (a refusal about the run's
+    // STATE, not about who asked — it passed the authority check), `steer` 403 and `rewind` 403,
+    // both `E_HUMAN_APPROVAL_REQUIRED`.
     //
     // REFUSED RATHER THAN WARNED, unlike everything `announce` prints, because the two
     // readings of `listen(0, "0.0.0.0")` on an open plane are "I am behind something that
@@ -1946,7 +1965,7 @@ export class ControlPlane {
         `refusing to bind ${host === "" ? '"" (which binds EVERY interface)' : host}:${port} — this ControlPlane has no token and no ` +
           `identity source, so every caller is authorized. On a non-loopback address that hands POST /runs (spending this ` +
           `deployment's provider budget), POST /runs/:id/gates/:gateId (approving any open human gate) and ` +
-          `POST /runs/:id/commands (cancel, rewind, advance) to anyone who can route to the port. ` +
+          `POST /runs/:id/commands (cancel, pause, resume, advance) to anyone who can route to the port. ` +
           `Give the plane a token or an identity source, or bind 127.0.0.1 — the default — and put a proxy in front of it.`,
         { details: { host, port } },
       );
@@ -3148,7 +3167,23 @@ export class ControlPlane {
               if (typeof atSeq !== "number") {
                 throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, "rewind requires atSeq");
               }
-              send(res, 200, this.#summary(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by)));
+              // `by` IS THE CALLER, and `Engine.rewind` refuses a non-human one, exactly as
+              // `steer` above does. This is the SECOND verb on this route to leave the group
+              // that takes `commandActor`'s answer whatever it is, and the reason is stronger
+              // than steer's: a rewind dispatches real-world undos and can suppress a
+              // `gate.decided` a person spent their judgement on.
+              //
+              // IT IS A 403 WHERE A SERVICE TOKEN USED TO GET A 200 — measured before the
+              // change, an `identify` returning `{kind: "service", subject: "svc:deployer"}`
+              // rewound to seq 2 and the marker was journaled `system:principal:svc:deployer`.
+              // A tightening is allowed and this one is required, but it is a behaviour an
+              // operator meets in production, so the engine's refusal names both ways out:
+              // authenticate as a person, or use `cancel`, which still accepts this caller.
+              send(
+                res,
+                200,
+                this.#summary(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by as HumanActor)),
+              );
               return;
             }
             case "advance":

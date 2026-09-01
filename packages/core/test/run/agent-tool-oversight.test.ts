@@ -29,6 +29,7 @@ import {
   type ToolDefinition,
 } from "../../src/run/registry.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
+import { OPERATOR } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -213,7 +214,7 @@ test("rewind refuses to cross an irreversible tool an AGENT actually invoked", a
   assert.deepEqual(r.deletions, ["prod-db"], "precondition: the action ran");
 
   await assert.rejects(
-    () => r.engine.rewind(runId, 1 as never, "operator asked to undo"),
+    () => r.engine.rewind(runId, 1 as never, "operator asked to undo", OPERATOR),
     /irreversible|compensation/i,
     "rewind must refuse to cross an uncompensated irreversible effect, whoever invoked it",
   );
@@ -228,7 +229,7 @@ test("rewind is NOT blocked by a tool the agent only declared", async () => {
 
   // Declaring a dangerous tool and never reaching for it must not make the run
   // permanently un-rewindable — the scan is over what happened, not over what was listed.
-  await r.engine.rewind(runId, 1 as never, "operator asked to undo");
+  await r.engine.rewind(runId, 1 as never, "operator asked to undo", OPERATOR);
 });
 
 test("an UNAPPROVED agent turn is refused, and the refusal is journaled", async () => {

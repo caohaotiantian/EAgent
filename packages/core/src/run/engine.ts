@@ -2707,8 +2707,63 @@ export class Engine {
    *
    * The original journal is never edited; the fold hides `(atSeq, marker)` instead.
    * So a rewind is itself auditable, and a trace still shows what was undone.
+   *
+   * A NON-HUMAN CALLER IS REFUSED FIRST — `E_HUMAN_APPROVAL_REQUIRED`, and there is
+   * deliberately no `SYSTEM_ACTOR` default the way `cancel` and `pause` have one. The decision
+   * this implements is `b90b137`'s fifth: a compensation edge fires on rewind as well as on run
+   * failure, so "an operator inspecting history can trigger real-world undo", and that must be
+   * "loud, gated by the same oversight floor an irreversible action gets, and never silent".
+   * An irreversible action at `in` requires a human. CITED BY COMMIT AND NOT AS "§D.5", which
+   * is what `TODO.md` called it and what this comment said first: §D has been renumbered since,
+   * and D.5 today is a different question entirely — a stale pointer into a renumbered
+   * enumeration is the failure `CLAUDE.md` already records once.
+   *
+   * This parameter defaulted to `SYSTEM_ACTOR("operator")` and was then checked
+   * nowhere, so the floor did not exist: measured before this check, a rewind with NO actor
+   * argument at all was accepted and journaled as `system:operator`, and over HTTP a service
+   * token's rewind was accepted 200 and journaled as `system:principal:svc:deployer`.
+   *
+   * WHAT A REWIND WOULD BREAK THAT MAKES A HUMAN NECESSARY, which is the question `steer`'s
+   * docstring answers for itself and this one must answer for its own verb. A rewind
+   * DISPATCHES real-world undos — `#compensate` runs `fs.restore`, `pay.refund` and whatever
+   * else the crossed tools declare — so it is the one operator command that reaches out and
+   * changes the world rather than only the record. And it does the opposite of what oversight
+   * is for on the same pass: the range it suppresses may contain the very `gate.decided` a
+   * person spent their judgement on, and the run then re-runs those nodes against whatever
+   * their ceiling is now. The four refusals below exist because rewinding past someone's
+   * decision overrules them; letting an automated caller drive the verb that does that would
+   * make those refusals the only thing standing between a service token and a human's answer.
+   *
+   * UNCONDITIONALLY, NOT ONLY WHEN THERE IS SOMETHING TO UNDO — and this is the half worth
+   * arguing rather than asserting. A rewind that dispatches nothing still suppresses events,
+   * re-arms leases and changes what the run does next, so it is not the empty operation the
+   * "no undos" reading suggests. But the decisive reason is that `plannedUndo` is computed six
+   * screens below, AFTER four refusals and a full journal read: a caller cannot know whether
+   * their rewind has undos until it has already run. A rule conditioned on that is a rule
+   * nobody can follow, and a guard that cannot decide fails closed.
+   *
+   * IT IS `steer`'S SHAPE AND NOT `cancel`'S, and the two are not near-misses of each other.
+   * `cancel` accepts an anonymous caller because refusing is always allowed — it stops a run
+   * and reports what it left unaccounted for. A rewind does not stop anything; it puts the run
+   * back on a path the operator picked and erases the record in between, which is `steer`'s
+   * kind of act with a larger blast radius.
+   *
+   * WHAT "LOUD" STILL WANTS AND THIS DOES NOT GIVE IT — `TODO.md` A.35: the operator should see
+   * WHICH undos a rewind will dispatch BEFORE authorizing it. `plannedUndo`, one screen above
+   * the dispatch, IS that list — but it is computed after the point of no return in a single
+   * call, and this signature has no shape for handing it back and waiting. That is a two-phase
+   * rewind (`planRewind(runId, atSeq) -> plan`, then `rewind(runId, atSeq, reason, by, planHash)`
+   * refusing a stale hash) and it is deliberately not built here. So this method is the GATED
+   * half of that decision and none of the LOUD half.
    */
-  async rewind(runId: RunId, atSeq: Seq, reason: string, by: CommandActor = SYSTEM_ACTOR("operator")): Promise<RunProjection> {
+  async rewind(runId: RunId, atSeq: Seq, reason: string, by: HumanActor): Promise<RunProjection> {
+    if (by.kind !== "human") {
+      throw err.policy(
+        CODES.E_HUMAN_APPROVAL_REQUIRED,
+        `rewinding run ${runId} dispatches real-world undos and suppresses the record of what it undid, decisions a human already made included; only a human may do that. Authenticate as a person, or use cancel, which stops the run without touching what it already did`,
+        { details: { runId, atSeq, actor: by } },
+      );
+    }
     // A rewind reads the log and appends a marker, and needs nothing else from a live
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as

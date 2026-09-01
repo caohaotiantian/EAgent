@@ -194,10 +194,13 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 ### Oversight, and the places a floor is weaker than it reads
 
-- **A.34 · `Engine.rewind` gates nobody, and §D.5 says it must.** `rewind(runId, atSeq, reason,
-  by = SYSTEM_ACTOR("operator"))` — the actor DEFAULTS to a system one and is checked nowhere; the
-  HTTP route hands it a service token's system actor unchanged, and a rewind with no actor at all
-  is accepted. Driven. So `trigger: "rewind"` is today indistinguishable from an automated path.
+- **A.34 · `Engine.rewind` had no floor. It has the GATED half of one now; the LOUD half is A.35.**
+  `rewind(runId, atSeq, reason, by = SYSTEM_ACTOR("operator"))` defaulted to a system actor and
+  checked it nowhere. Driven, 2026-09-01: `rewind(runId, before, reason)` with no fourth argument
+  at all was accepted and journaled `system:operator`, and over HTTP a plane whose `identify`
+  returned `{kind: "service", subject: "svc:deployer"}` rewound to seq 2 with a **200**, journaled
+  `system:principal:svc:deployer`. So `trigger: "rewind"` was indistinguishable from an automated
+  path.
   **This was found by testing a decision's PRECONDITION rather than its conclusion**, and it
   killed the decision: the plan was to let a rewind's undos inherit its authorization
   (`nodeApproved: true`), on the argument that the operator had already passed the oversight floor
@@ -205,13 +208,37 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   non-negotiable forbids, so the undos stay `nodeApproved: false` and an undo whose class demands a
   human is journaled `failed` with its reason — which is now at least VISIBLE for a delegated run,
   where it used to be silent.
-  **Closes when** `rewind` has a floor of its own. The minimum is `steer`'s check
-  (`by.kind !== "human"` → `E_HUMAN_APPROVAL_REQUIRED`). §D.5 asks for more — "loud, gated by the
-  same oversight floor an irreversible action gets, and never silent" means the operator sees WHICH
-  undos the rewind will dispatch before authorizing, and today's signature has no shape for that.
-  `plannedUndo` is already computed one screen above the dispatch and IS that list, so the seam is
-  close. Only after that door gates may the seventh argument at `engine.ts:1457` flip for
-  `trigger === "rewind"`.
+  **Done:** `by: HumanActor` with no default, and `by.kind !== "human"` →
+  `E_HUMAN_APPROVAL_REQUIRED` as the FIRST check, `steer`'s shape. **Unconditionally, not only
+  when the rewind has undos to dispatch** — `plannedUndo` is computed after four refusals and a
+  full journal read, so a caller cannot know whether theirs has any until it has already run, and
+  a rule nobody can follow is not a floor. The HTTP route is a 403 for a service token and for an
+  open plane, and the refusal names both ways out (authenticate as a person; `cancel` still works
+  for you). 36 test call sites, 32 of which relied on the default, now name a person.
+  **Still open, and it is what gates the seventh argument at `engine.ts:1457`:** see **A.35**.
+
+- **A.35 · A rewind's authorization is blind — the operator cannot see WHICH undos they are
+  approving.** The decision is `b90b137`'s fifth — a compensation edge fires on rewind as well as
+  on run failure, so "an operator inspecting history can trigger real-world undo", which must be
+  "loud, gated by the same oversight floor an irreversible action gets, and never silent".
+  **Cited by commit, because A.34 used to call it "§D.5" and that pointer is now wrong**: §D was
+  renumbered to `D.1`–`D.5` and today's D.5 is the graph-scoped-durable-fact question. Same
+  failure `CLAUDE.md` records for the journal-violation enumeration — a pointer into an
+  enumeration is only as good as that enumeration's discipline about being renumbered.
+  A.34 delivered the GATED half; the LOUD half is not built. `plannedUndo` inside `Engine.rewind` IS the list the operator should see — it names every
+  `tool -> undo` pair the rewind will dispatch — but it is computed after the point of no return
+  in a single call, and the signature has no shape for handing it back and waiting.
+  **The shape this wants** is two-phase: `planRewind(runId, atSeq)` returning the plan plus a
+  hash of it, and `rewind(runId, atSeq, reason, by, planHash)` refusing a hash that no longer
+  matches what it would now dispatch — a stale plan is the failure this exists to prevent, since
+  the run can move between the two calls. Over HTTP that is a `GET`-shaped preview beside the
+  existing `POST /runs/:id/commands`. Deliberately NOT built in the lane that closed A.34's half,
+  because designing a two-phase rewind under a one-line-check task is how a seam gets guessed at.
+  **Closes when** an operator authorizing a rewind has seen its dispatch list, and a rewind whose
+  list changed under them is refused rather than run. **Only then** may the seventh argument at
+  `engine.ts:1457` flip for `trigger === "rewind"` — that argument is A.8's subject, and the
+  reason it may flip at all is that the operator will by then have passed a floor *against the
+  specific undos*, which is what A.34's human check alone still does not give.
 
 - **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
   `engine.ts:1199` argues it at length — an undo that policy answers `gate` must be REFUSED, or
