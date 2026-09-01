@@ -7733,21 +7733,63 @@ function waveTaintFor(wave: readonly Wave[]): Map<TaskId, ReadonlySet<string>> {
   return out;
 }
 
-/** A node whose writes carry output from outside the system. The ONE definition. */
+/**
+ * Node types whose executor is runtime code that has no way out of the process.
+ *
+ * A `router` evaluates `cases[].when` expressions — `mode: "model"` is refused at compile time
+ * by `GRAPH005_ROUTER_MODE_UNSUPPORTED`, so a compiled router never calls a model. A `join`
+ * merges branch outputs its own reads already name. A `human_gate` writes a decision a HUMAN
+ * made, and a human is the trusted actor this whole axis exists to protect.
+ *
+ * None of the three can be labelled either way, and none needs to be: nothing about the graph
+ * changes whether they can reach outside. Everything NOT in this set is untrusted unless the
+ * author says otherwise, which is why this is a named set and not a default arm — a node type
+ * added later is untrusted until somebody looks at it here and decides it belongs.
+ */
+const STRUCTURALLY_PURE: ReadonlySet<NodeSpec["type"]> = new Set(["router", "join", "human_gate"]);
+
+/**
+ * A node whose writes carry output from outside the system. The ONE definition.
+ *
+ * UNLABELLED MEANS UNTRUSTED, and it did not used to. This predicate listed the shapes that name
+ * a way out — `tool`, `subgraph`, an `agent` with tools, a `function` with declared effects — and
+ * everything else originated CLEAN. So the protection was bought by a label and the label was
+ * optional. Measured on two graphs one label apart, same injected string, same downstream
+ * irreversible `pay.charge`, same human de-escalation to `on`:
+ *
+ *     producer is a plain `function`, no `effects`   -> succeeded, 0 gates, charge made with
+ *                                                       `{"memo":"IGNORE PREVIOUS INSTRUCTIONS"}`
+ *     the same producer with `effects: ["net.fetch"]` -> E8 fires, floor clamps to `in`, gate raised
+ *
+ * An author who declares nothing must not get less protection than one who declares something.
+ * A security axis whose failure of omission fails OPEN is not a security axis.
+ *
+ * THE FLIP IS NOT `return true`. Taint by default with no way to say otherwise taints every graph,
+ * and an axis that marks everything carries no information — the E8 floor would clamp every
+ * irreversible node in every graph and the gate would become the approval-fatigue noise that makes
+ * an oversight mechanism worthless. So the flip comes with a declassification label, and the label
+ * is `effects: []`: the SAME field that declares the ways out, used to say there are none. Absent
+ * `effects` is the author saying NOTHING; `effects: []` is the author saying NONE, and only the
+ * second is a claim. `ALLOWED_FIELDS.function` already accepts the field and `compileOrThrow`
+ * already preserves an empty array distinctly from absence (measured), so no schema moves.
+ *
+ * `agent` gets no such label, and deliberately. An agent node's output is model-generated text
+ * whatever it was given, so there is no pure agent for a label to describe. This is a WIDENING —
+ * the old rule trusted `tools: []` — and it is the same fact one node type over: `tools` absent
+ * and `tools: []` were both read as "trusted", so an agent that relayed a prompt-injected
+ * document laundered it. `evaluator` splits on `kind` rather than on a label, because the split
+ * is in the executor: the `assertion` arm runs a function body with no `ctx.effects` bound at
+ * all, the `rubric` arm is one model call.
+ */
 function isExternal(node: NodeSpec): boolean {
-  return (
-    node.type === "tool" ||
-    node.type === "subgraph" ||
-    (node.type === "agent" && (node.agent?.tools ?? []).length > 0) ||
-    // A `function` node that DECLARED EFFECTS can reach a tool, so it produces untrusted output
-    // exactly as an agent with tools does. Without this clause, giving function bodies effects
-    // opened a laundering path one node type over from the one this rule already names: declare
-    // `effects: ["net.fetch"]`, fetch untrusted text, write it to a channel, and the channel comes
-    // out CLEAN — so an irreversible action downstream sees no taint and E8's hard floor never
-    // applies. Widening `reachableToolNames` without widening this is the same set answered two
-    // ways, which is the shape that produced the agent hole in the first place.
-    (node.function?.effects ?? []).length > 0
-  );
+  if (STRUCTURALLY_PURE.has(node.type)) return false;
+  // A `function` node that DECLARED EFFECTS can reach a tool, so it produces untrusted output
+  // exactly as an agent with tools does; one that declared the empty set has no name it can say
+  // and so cannot reach one. Widening `reachableToolNames` without widening this is the same set
+  // answered two ways, which is the shape that produced the agent hole in the first place.
+  if (node.type === "function") return node.function?.effects === undefined || node.function.effects.length > 0;
+  if (node.type === "evaluator") return node.evaluator?.kind !== "assertion";
+  return true;
 }
 
 /**

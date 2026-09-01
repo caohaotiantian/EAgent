@@ -13,22 +13,29 @@
  *
  * **WHAT A DEAD PROVIDER COSTS, MEASURED — AND WHY THERE IS NO CIRCUIT BREAKER.** The backlog
  * claimed "a source that is failing every call is retried at full rate". That is false. A dead
- * provider costs **3 engine attempts x 3 `postJson` attempts = 9 requests and about 2.25 s of a
- * held worker slot**, and then the run FAILS naming `E_PROVIDER_OVERLOADED`; the holds are
- * bounded by `maxDelayMs x (maxAttempts - 1)` and `E_PROVIDER_AUTH` is not retryable at all, so
- * a bad key costs one call. What a breaker would have bought against that: with no chain
- * configured, 8 of 9 requests on a run that already fails in about three seconds naming its
- * code; with a chain configured, three requests and ~750 ms per model turn on a run that
- * already succeeds. It is refused on VALUE, not on danger — and the fact that decides it is in
+ * provider costs **3 requests and then the run FAILS naming `E_PROVIDER_OVERLOADED`** — one per
+ * engine attempt, and `E_PROVIDER_AUTH` is not retryable at all, so a bad key costs one call.
+ * What a breaker would have bought against that: 2 of 3 requests on a run that already fails
+ * naming its code. It is refused on VALUE, not on danger — and the fact that decides it is in
  * `journal/store.ts`'s header: the journal is addressed per run, and a breaker's verdict is a
  * per-source count spanning runs, so no fold can reconstruct it.
  *
- * The real cost is the one that is NOT bounded: `FallbackAdapter` is stateless, so a configured
- * chain with a dead primary pays those three requests on every model turn, indefinitely, while
- * runs succeed. `cli.ts`'s `providerNotice` is the answer to that — a report, not a guard.
+ * **IT USED TO COST 9, AND THE MISSING 6 WERE THIS FILE RETRYING SOMEBODY ELSE'S RETRY.** The
+ * engine reschedules a failed provider-calling node under `DEFAULT_PROVIDER_RETRY`
+ * (`maxAttempts: 3`), and this loop defaulted to 3 attempts of its own, so the two layers
+ * MULTIPLIED and nothing decremented across them: 3 x 3 per turn, times the fan-out width.
+ * Measured through the engine on one agent node against a provider answering 503 forever —
+ * `{requests: 9, retriesScheduled: 2}` before, `{requests: 3, retriesScheduled: 2}` after. The
+ * journaled curve is untouched; only the invisible copy of it is gone. That asymmetry is the
+ * whole argument: an engine retry appends `task.retry_scheduled`, so an operator can see it and
+ * a fold can reproduce it, where a `postJson` attempt is visible to nobody and reproducible by
+ * nothing.
  *
- * Reopen the question if a provider is reached that BILLS FOR 5xx RESPONSES: the eight wasted
- * calls stop being free and the arithmetic above changes side.
+ * A 429 never multiplied — it is rethrown below without a hold — so the number that moved is
+ * for every OTHER retryable code, and `{requests: 22, retriesScheduled: 21}` on a permanent 429
+ * measured identical either way.
+ *
+ * Reopen the question if a provider is reached that BILLS FOR 5xx RESPONSES.
  *
  */
 
@@ -60,7 +67,19 @@ export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 export interface HttpOptions {
   readonly fetch?: FetchLike;
   /**
-   * Bounded retries for transient failures BEFORE the first byte. Default 3.
+   * Bounded retries for transient failures BEFORE the first byte. **Default 1 — no retry.**
+   *
+   * IT IS THE CALLER WHO SHOULD OWN THE CURVE, because the caller is the only party that can
+   * make its retries visible. Under `@loom/core`'s engine every provider-calling node already
+   * carries `DEFAULT_PROVIDER_RETRY`, and a second curve here does not add resilience — it
+   * MULTIPLIES, 3 x 3 requests per model turn, with two thirds of them appearing in no journal.
+   * See this file's header for the measurement.
+   *
+   * SET IT TO 3 TO GET THE OLD BEHAVIOUR, and do that when there is no retrying caller above:
+   * an embedder driving an adapter directly gets the error on the first pre-response failure
+   * now, where before the call silently spent up to 16 s of their thread and then failed anyway.
+   * That is the same trade the rate-limit arm below already took deliberately, applied to the
+   * rest of the retryable codes.
    *
    * A whole number of at least 1. `Infinity` is refused, and that is not defensive
    * typing: `for (let attempt = 1; attempt <= Infinity; …)` is a loop with no exit, on a
@@ -101,7 +120,8 @@ export interface HttpOptions {
  */
 const MAX_TIMER_MS = 2_147_483_647;
 
-const DEFAULT_MAX_ATTEMPTS = 3;
+/** One attempt, no retry. See `HttpOptions.maxAttempts` for why the caller owns the curve. */
+const DEFAULT_MAX_ATTEMPTS = 1;
 const DEFAULT_BASE_DELAY_MS = 250;
 const DEFAULT_MAX_DELAY_MS = 8_000;
 
@@ -589,12 +609,27 @@ async function hold(ms: number, signal: AbortSignal, sleep: (ms: number) => Prom
  * wait is long, so it is the case where deferring is both possible and worth it: the error
  * carries `retryAfterMs` out to a caller that can wait without holding anything.
  *
- * **WHAT STILL SLEEPS HERE, AND ITS BOUND.** Everything else retryable — a transport reset, a
- * `503`/`529` overload, `408`/`425` — has no advice worth scheduling and is usually fixed by
- * trying again in a moment, so paying it here is cheaper than a journal round-trip. The bound
- * is `maxDelayMs` per hold and `maxAttempts - 1` holds: **16 s by default** (8 s × 2), and
- * whatever an operator chose if they raised either. That is a conditional sleep on purpose,
- * and it is bounded by two numbers the deployment picked rather than by the provider's.
+ * **NOTHING SLEEPS HERE BY DEFAULT ANY MORE, and the bound when something does.** This used to
+ * hold for everything else retryable — a transport reset, a `503`/`529` overload, `408`/`425` —
+ * on the argument that a moment's wait is cheaper than a journal round-trip. That argument is
+ * only true when nobody above is retrying, and under an engine somebody always is: the two
+ * curves multiplied to 3 x 3 requests per turn with two thirds of them invisible. `maxAttempts`
+ * now defaults to 1, so the loop runs once and hands the caller a retryable error.
+ *
+ * An embedder that raises it gets the old shape back, bounded exactly as before — `maxDelayMs`
+ * per hold and `maxAttempts - 1` holds, so `maxAttempts: 3` is **16 s** (8 s × 2). That is a
+ * conditional sleep on purpose, and it is bounded by two numbers the deployment picked rather
+ * than by the provider's.
+ *
+ * **WHAT THE CALLER MUST NOW DO, NAMED.** Only pre-response failures were ever retried here, so
+ * nothing about a mid-stream failure moves — that decision already belonged to the node's
+ * `retry` policy. What moves is the pre-response transport reset and the 5xx: the engine covers
+ * both, because `graph/compile.ts` hands every provider-calling node type
+ * `DEFAULT_PROVIDER_RETRY` and `test/run/retry-default-policy.test.ts` pins that set. THE ONE
+ * CASE THAT LOSES A RETRY is a `RunGraph` whose `plans` a caller assembled WITHOUT the compiler:
+ * `#retryDecision` returns on `policy === undefined`, and this loop was the only retry such a
+ * graph had. It costs a journal round-trip instead of 250 ms, which is the price of being able
+ * to see it.
  *
  * **WITH NO ENGINE PRESENT** — the adapter is embeddable on its own — a 429 now surfaces on
  * the first response instead of after two hidden holds. That is a behaviour change and it is
