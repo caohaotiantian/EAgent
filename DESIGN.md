@@ -249,7 +249,7 @@ harness and LangChain's Deep Agents converged on independently.
 ## Sequence
 
 *The roadmap `CLAUDE.md` points at. It runs across the next three sections: this preamble and the
-rule the list is written under, then **The live list** (items 9–13, what to build), then **The
+rule the list is written under, then **The live list** (items 9–14, what to build), then **The
 record** (items 1–8, closed) and **Deliberately not sequenced** (what is left out, and why).*
 
 **Rewritten 2026-08-25**, after an audit and a re-check of every backlog item by running it.
@@ -267,10 +267,12 @@ the only evidence anyone has about what this project's estimates are worth.
 
 **THE RULE HOLDS FOR ITEMS 9–13 TOO, and it is the only thing that makes the list worth reading.**
 Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
-an item whose command passes gets cut rather than reworded. **Applied to the list itself on
-2026-09-01: item 11's command now passes, so item 11 is marked DONE and the live list is four —
-9, 10, 12, 13, each re-run and each still red.** The status table at the head of the live list
-carries the commands and their verdicts. Four candidates were cut that way
+an item whose command passes gets cut rather than reworded. **Applied to the list itself at
+`5ffc223`: THE LIVE LIST IS ONE ITEM.** Items 10, 11, 12 and 13's first half have all landed and
+are marked DONE; item 9 alone is still red, and what is left of it is a DECISION rather than a
+build (`TODO.md` §A.8) — so this list has stopped being a roadmap in the ordinary sense, and what
+comes next is the section headed "What follows item 9" below. The status table at the head of the
+live list carries the commands and their verdicts. Four candidates were cut that way
 while this list was being written: `loom suite freeze --cohort` (already shipped — see item 5),
 the trajectory fold's blindness to externalised writes (fixed at `7d627b4`), the D.7.6 provider
 refusal that could not re-derive on replay (fixed at `633e265` — for journals carrying the new
@@ -312,15 +314,17 @@ replay divergence is terminal **for the recorded-effect path** only, which was i
 
 ---
 
-## The live list — items 9 to 13, written 2026-08-29
+## The live list — written 2026-08-29 as items 9 to 13; item 14 added 2026-09-01
 
-**STATUS AT 2026-09-01, arrived at by RUNNING all five commands rather than by reading the diffs
+**STATUS AT `5ffc223`, arrived at by RUNNING all five commands rather than by reading the diffs
 that landed between.** The rule this list is written under — *every item names a command that
-fails today; an item that cannot fail is a wish and gets cut* — was applied to itself:
+fails today; an item that cannot fail is a wish and gets cut* — was applied to itself. All five
+verdicts below are unchanged from the previous re-run; **only item 9's REASON moved, and it has
+now moved three times without the item closing**, which is the fact §9 is about.
 
 | item | command re-run | verdict |
 |---|---|---|
-| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3/3, and the item is still OPEN** — `charges [ 42 ] refunds []` is now PINNED by the third case rather than produced by an ad-hoc driver. See §9 |
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3/3, and the item is still OPEN** — the third case PINS `charges [ 42 ] refunds []`. It is now a DECISION and not a build: `TODO.md` §A.8's, driven by flipping `#compensateOne`'s `nodeApproved`, which takes this suite to 2/3 and `rewind-plan.test.ts` to 6/7 in one edit. See §9 |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **PASSES — 13/13. Item 10 is DONE** — the pin was renamed `THE HOLE THIS CLOSES` and asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
 | 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **PASSES — 18/18. Item 12 is DONE**, and the two `--*-module` flags are still `unknown flag` on purpose |
@@ -398,6 +402,50 @@ as a `fix` and cost nothing, and items 10 and 13 have since landed as `a8d62fb` 
 one trailer each, touching exactly the two files named above. The method produced a number that
 survived contact — three predictions, three hits.*
 
+### What follows item 9
+
+**This is written under the same rule and it is deliberately SHORT: one candidate, driven, with
+its failure pasted.** A Sequence is not a wish-list, and the honest state at `5ffc223` is that
+three of the five items have fully landed (10, 11, 12), a fourth's first half has (13), the fifth
+is a decision somebody has to make rather than code somebody has to write (9), and exactly one
+further gap has been reproduced through the shipped binary rather than argued for. **A second
+entry written without a run would be the thing this section exists to refuse.**
+
+**14 · `loom replay` and `loom trace` refuse a run whose graph the workspace already holds.**
+Driven at `5ffc223` in a workspace built from `README.md`'s own "Try it" block — `graphs/copy.json`
+published, the run submitted from it and `succeeded`:
+
+    $ loom replay 01M1EQVE8FB7K9D4DV051GHX5B
+    E_CONFIG_INVALID: --graph needs a path, and none was given.
+
+    $ loom trace 01M1EQVE8FB7K9D4DV051GHX5B
+    E_CONFIG_INVALID: --graph needs a path, and none was given.
+
+*Fails today:* either of those two commands, in a workspace publishing the graph the run recorded.
+
+**THE SEAM ALREADY EXISTS, WHICH IS WHY THIS IS A GAP AND NOT A DESIGN QUESTION.** Two other verbs
+in the same workspace answer the same question without being told:
+
+    $ loom approve 01M1EQWS995BJ8JEF3HE472EJJ gate_01M1EQWS9CH5CHX9GDAYJR1805 --as u:alice
+    { "status": "succeeded", "outputs": { "written": { "bytes": 7, "path": "shipped.txt" } } }
+
+    $ loom audit 01M1EQVE8FB7K9D4DV051GHX5B
+    ok — 12 rule(s) checked, 14 skipped
+
+`approve` searches the workspace for the hash the journal recorded — the first of the three things
+`README.md` says that command does not do, and it reproduces — and `audit` degrades to the rules
+it can check without a graph, naming every skip ("the compiled graph is not in the journal, only
+its hash"). So a run in this workspace can be APPROVED and AUDITED by id alone, and the two verbs
+that RE-EXECUTE it are the two that demand the operator remember which file it ran.
+**That is a gap in the goal, not in an invariant** — `CLAUDE.md`'s bar is "watch it, stop it, and
+trust what it did", and this is the last step of it.
+
+**What it costs the kernel: nothing.** The lookup is `cli.ts`'s, beside the one `approve` already
+performs; `journal/events.ts` needs no field, because `run.compiled.graphHash` is already the key
+`approve` resolves against. §A.24 is the row for the harder version of the question — putting the
+SPEC in the journal rather than its hash — and this item is deliberately not that: it reuses the
+workspace as the store, which is what the other two verbs do.
+
 ### 9 · A rewind is permitted BECAUSE a compensation exists, then does not run it
 
 The sharpest of the three, because the refusal that guards it works. `Engine.rewind` descends into
@@ -434,8 +482,8 @@ harness with a refund recorder added, and printed:
 `#uncompensatedIrreversible` descends into child runs, so the PERMISSION crosses the boundary —
 that was already true. `#compensate` descends into child runs since `7c8b89c`, splicing each
 child's plan into the parent's reverse walk at the seq of the parent's `subgraph.started`, so the
-PROMISE can now be kept. What sat between them was one condition, at `engine.ts:2980` when this
-was written:
+PROMISE can now be kept. What sat between them was one condition, at `rewind`'s call to
+`#compensate` when this was written:
 
     if (plan.steps.length > 0 && live !== undefined) {
       await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
@@ -458,22 +506,23 @@ condition is correctly identified, and a second blocker sits behind it:
       "reason":"\"pay.refund\" did not undo \"pay.refundable\": \"pay.refund\" is
        reversible_write and requires human approval this turn cannot request"}
 
-That refusal is the `nodeApproved: false` seventh argument at `engine.ts:1457` — **§A.8's own
-untested guard**, which the same backlog records as load-bearing with nothing discriminating on
-it. So closing this item also requires deciding what a compensating undo does when policy answers
-`gate` inside a child, and the two items are entangled rather than adjacent. An earlier version of
-this paragraph called it "a strictly smaller change than this section originally scoped"; that was
+That refusal is the `nodeApproved: false` argument `#compensateOne` passes to `#invokeTool` —
+**§A.8's own untested guard**, which the same backlog recorded as load-bearing with nothing
+discriminating on it. So closing this item also requires deciding what a compensating undo does
+when policy answers `gate` inside a child, and the two items are entangled rather than adjacent.
+An earlier version of this paragraph
+called it "a strictly smaller change than this section originally scoped"; that was
 reached by reading the condition rather than by mutating it, and it was wrong.
 
 **Both named siblings have CLOSED, and neither closed the item.** The three `run.failed` append
-sites are now **one**: `Engine.#failRun` (`engine.ts:7412`, appending at 7417), which all three
+sites are now **one**: `Engine.#failRun`, which all three
 exits of `#finish` call and which compensates first — so the unmaterialised fan-out and
 `E_OUTPUT_MISSING` roll back for the same reason a failed task does (`7c8b89c`). And
 `#compensateOne` no longer hands the undo `{}` when there is no recorded `effect.completed`; it
 returns `not_attempted` with a reason naming the missing record. **One residue of that second
 sibling survives and it is smaller than the original:** a record that EXISTS but carries no
-`details` still yields `args = {}` at `engine.ts:1450`, because `effect.completed.result` is typed
-`unknown`. That is `TODO.md` §A.30's, not this item's.
+`details` still yields `args = {}` — `#compensateOne`'s `detailsOf(result)` — because
+`effect.completed.result` is typed `unknown`. That is `TODO.md` §A.30's, not this item's.
 
 **THE ITEM'S OUTPUT IS PINNED IN THE TREE NOW, which is the only change to its status.**
 `rewind-through-subgraph.test.ts`'s third case — `A REWIND IS NOT A HUMAN'S YES TO THE UNDO — THE
@@ -483,21 +532,47 @@ the approval it could not request. It carries a control: the same `pay.refund` o
 same registry and grant, where the chain CAN suspend and a human answers — and there it
 dispatches. So "the refund did not run" has exactly one explanation left, and the item's red is a
 green test that says out loud what is not happening. `node --test
-packages/core/test/run/rewind-through-subgraph.test.ts` → 3 pass. **What still closes the item is
-unchanged:** the rewind door has no approval floor of its own — `Engine.rewind` defaults `by` to a
-system actor and checks nothing — so an undo inheriting "the operator already approved this" would
-be an automated path granting itself approval. Until that floor exists, refusing is the only
-answer oversight permits.
+packages/core/test/run/rewind-through-subgraph.test.ts` → 3 pass. **The next sentence is the
+BEFORE-STATE and is kept only as that**, because the paragraph under it is what overtook it: the
+rewind door had no approval floor of its own — `Engine.rewind` defaulted `by` to a system actor
+and checked nothing — so an undo inheriting "the operator already approved this" would have been
+an automated path granting itself approval, and refusing was the only answer oversight permitted.
 
-**The floor now exists, in both halves, and the item is a step from closing — 2026-09-01.** A.34
-built the GATED half (`by: HumanActor`, no default, refused first) and A.35 the LOUD half:
+**The floor now exists, in both halves — 2026-09-01.** A.34 built the GATED half
+(`by: HumanActor`, no default, refused first) and A.35 the LOUD half:
 `Engine.planRewind(runId, atSeq, by)` returns the dispatch list plus a `planHash`, and
 `rewind(runId, atSeq, reason, by, {planHash})` refuses a hash that no longer matches what it would
 dispatch. So an operator has passed a floor *against the specific undos* rather than against the
-verb, which is precisely the precondition this paragraph said was missing. **What is left is A.8's
-own evidence, not this argument**: flipping `#compensateOne`'s `nodeApproved` for
-`trigger === "rewind"` still needs a fixture that drives a rollback whose undo policy answers
-`gate` and asserts the refusal, because today the whole suite is green with the guard flipped.
+verb, which is precisely the precondition the paragraph above said was missing.
+
+**AND THE FIXTURE EXISTS TOO, WHICH RETIRES THE LAST THING THIS SECTION CALLED "LEFT".** The
+paragraph here said *"flipping `#compensateOne`'s `nodeApproved` still needs a fixture … because
+today the whole suite is green with the guard flipped"*. That has been false since
+`rewind-plan.test.ts` landed as a side effect of the preview work, and it was written from
+reading rather than from mutating. **Driven at `5ffc223`**, flipping that one argument to `true`:
+
+    rewind-plan.test.ts            6/7  an undo policy refuses must not reach the world
+                                        actual [ 21 ]  expected []
+    rewind-through-subgraph.test.ts 2/3  an undo policy answers `gate` is refused, not performed
+                                        actual 'compensated'  expected 'failed'
+
+restored, 7/7 and 3/3.
+
+**SO ITEM 9 IS §A.8'S DECISION WEARING A ROADMAP NUMBER, AND THAT IS THE HONEST STATEMENT OF IT.**
+The second failure above is item 9's *Fails today* assertion coming true, and the step from one to
+the other is stated rather than assumed: the assertion threw on the OUTCOME, before the harness's
+`refunds` line, so `[42]` was not printed. `compensated` is returned only when `#invokeTool`
+comes back without an error, and the harness pushes into `refunds` inside `pay.refund`'s own
+`execute` — so `compensated` on the delegated leg means the refund ran. **The same edit that
+closes item 9 turns A.8's guard off.**
+**One flag, two pins, opposite directions:** item 9 says run the child's
+declared undo; A.8 says a rollback is not a human's yes to anything, and neither can close
+without the other. This item has now had its cause replaced THREE times — the parent-only plan
+(fixed), the missing approval floor (built), the missing fixture (exists) — and each replacement
+was found by mutating rather than by reading the previous one. **What is left is not a mechanism.
+It is a decision, it is written down once, in `TODO.md` §A.8, and this section cites it rather
+than restating it.** It stays on the live list only because its assertion is still red, which is
+the rule; the moment §A.8 is answered either way, this item is a record and not a roadmap entry.
 
 **And the preview closed a hole this section's own framing hid.** `rewind` computed a preview over
 the rewound run's OWN journal while dispatching the tree walk described above, so on the delegated
