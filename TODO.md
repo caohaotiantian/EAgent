@@ -88,64 +88,46 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   for it in `ReplayEffects` — a vocabulary change in a kernel file, so it is a `Kernel-seam:` and
   the census goes to 9. That is the seam this hole is asking for; it is not a repair.
 
-- **A.2 · A replayed refusal can carry a DIFFERENT message and nothing says so.** Driven through
-  `replayRun`: live prints `model adapter "wrapper" ended the turn without naming the provider…`,
-  replay prints `the recorded turn ended the turn without naming the provider…`, and `match` is
-  `true` because `compare()` has no message frame. **Closes when** either the phrase is made
-  path-independent (drop the adapter name, or journal the wrapper name beside `provider`) or
-  `run/replay.ts` grades the message. The second is the general fix and the larger one.
+- **A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**
+  **The instance is fixed; the class is not.** The provider refusal opened with
+  `model adapter "<name>"` live and `the recorded turn` in replay, because `adapter` is undefined
+  under replay — same code, same status, different text, and `match: true` throughout. The wording
+  is path-independent now and the adapter's name stays on `details.adapter`.
+  **Still open:** `run/replay.ts`'s `compare()` has no message frame, so any OTHER refusal whose
+  text depends on the live path diverges the same way and nothing announces it. **Closes when**
+  `compare()` grades the message, or when a test pins that no refusal's text can vary by path.
 
-- **A.3 · Journals written in the window `e6d00f2..633e265^` replay a provider refusal as a
-  SUCCESS, and the comment claiming otherwise names the wrong set.** `engine.ts:4580` says an
-  absent `provider` "is also what every journal written before this field says, which reads
-  correctly rather than by luck". False for that window: D.7.6's guard existed there and did
-  refuse, while nothing wrote the field. Driven — a journal built with the `9788c10` engine,
-  replayed with the fixed one: `BASE LIVE failed E_PROVIDER_BAD_REQUEST` → `FIXED REPLAY
-  succeeded`, the refused string on the channel. **This is not a code defect** — the field
-  genuinely is not there and no fix can invent it. **The set is three sites, and only two carry
-  the literal sentence**, which is why a grep for it undercounts: `engine.ts:4580` and
-  `test/run/replay-fidelity.test.ts:176` share the wording, and `engine.ts:7391` makes the same
-  claim differently — "an old recording replays as the run it actually was rather than being
-  re-judged under a rule its binary never had". **Closes when** all three name the set that
-  actually reads correctly: *journals written before `e6d00f2`*.
+- ~~**A.3 · Three sites named the wrong set for "a journal with no `provider`".**~~ **FIXED.**
+  All three now say *journals written before `e6d00f2`* rather than *every journal written before
+  this field*. The difference is one real window — between `e6d00f2` and `633e265^` D.7.6's
+  refusal existed while nothing wrote the field, so a journal from that range replays a provider
+  refusal as a SUCCESS with the refused string on the channel. **The behaviour is unchanged and
+  cannot be changed**: the value genuinely is not in those journals. Naming the window was the
+  whole remedy, and it is recorded at `engine.ts`'s three-state table.
 
-- **A.4 · `hermetic`'s third conjunct has no producer in `src/`.** `ReplayEffects.liveBodies` is
-  `[]` on every run, so `effects.liveBodies.length === 0` is inert and `hermetic` reports on two
-  conjuncts while claiming three. This is knowable rather than asserted: the census test
-  `NOTHING IN src/ CALLS bodyEntered YET — so hermetic's third term is inert` passes
-  (`node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` → 12/12).
-  **Closes when** `Engine.#functionBody` calls `bodyEntered(taskId, isRealmBounded(body))` at
-  FETCH time — which `replay.ts:443` already writes down as the wiring — and that census test
-  goes red, which is what it is for.
+- ~~**A.4 · `hermetic`'s third conjunct had no producer in `src/`.**~~ **FIXED.**
+  `Engine.#functionBody` now calls `bodyEntered(taskId, isRealmBounded(body))` at FETCH, and —
+  the half that makes the first mean anything — `resources/functions.ts` carries the realm's brand
+  onto the wrapper it returns, via a `carryRealmBrand` that propagates and cannot mint. Without
+  that second line `isRealmBounded` was true on the `RealmCall` and false on everything the engine
+  holds, so every body would have read as unvouched-for and a term false for everything
+  distinguishes nothing. The census test fired exactly as designed and is kept inverted (one
+  caller, at the fetch site); the `fromStore` patch is gone, replaced by the pair D.9 asked for.
+  **Three existing assertions changed value**, each true only while the term was inert — including
+  the flagship `incident-triage` workflow, which is how we learned it does not exercise the
+  product's own function-loading path.
 
-- **A.5 · Two kernel files state a set as total and are not, and it is the same lesson twice.**
-
-  **(a) `run/replay.ts:293` and `:406` enumerate a stale two-member set.** `:293` says an
-  unbranded realm is "an embedder's hand-registered host closure … or a realm built over a
-  non-empty `RealmOptions.globals`, because **those two are the cases**", and `:406` enumerates
-  the same pair. The refusal set was widened and neither enumeration moved: a body that
-  un-shadows `Date` or `Intl` at definition time, a body that swaps `Math`, a `Date` installed as
-  an accessor, and a realm whose `Math.random` was never replaced all answer `false` now. This
-  sits in the kernel file that will feed A.4's conjunct.
-
-  **(b) `graph/spec.ts:92-96` claims the unknown-field tables "refuse an unknown key at every
-  authoring scope the compiler has", and `sla.reminders[i]` is a scope they do not reach.**
-  Driven through `node packages/core/src/cli.ts compile`, with its control, on two graphs
-  identical but for where the bad key sits:
-
-      reminders: [{afterMs: 1000, nonsenseKey: true}]   → no diagnostic. Compiles past it.
-      sla:       {respondWithinMs: …, nonsenseKey: true} → GRAPH020_UNKNOWN_FIELD, as it should
-
-  Both graphs also carry an unresolved `ref`, and the control still fires — so the silence is the
-  scope, not a short-circuit. `GateSlaSpec.reminders` is an inline anonymous type, which is why a
-  `NESTED_FIELDS` row for it would sit outside the drift test that keeps the others honest; that
-  is a reason the hole is awkward to close, not a reason the sentence may claim it is closed.
-  The rest of the `humanGate` scopes ARE guarded now (`cf491fe`), which is what makes the
-  remaining exception worth naming rather than lost in a general complaint.
-
-  **Closes when** each sentence states its property — *the runtime could not vouch for this
-  realm*; *these are the scopes the tables cover* — or names its exceptions. Note which lesson
-  this is: §F.8, twice, in the two files where a false total is most expensive.
+- ~~**A.5 · Two kernel files stated a set as total and were not.**~~ **FIXED, and one of them
+  was a real hole rather than a wrong sentence.** `run/replay.ts`'s two enumerations named two
+  cases where `compileRealm`'s checks had grown to six; both now state the PROPERTY — *this module
+  did not make the realm, or could not finish vouching for it* — and let `resources/realm.ts` hold
+  the set beside the checks that decide it, which is the only place it can be right.
+  `graph/spec.ts`'s "every authoring scope" was false for `sla.reminders[i]`, and that scope is
+  now guarded. **Why it had stayed open is the part worth keeping:** `reminders` was an anonymous
+  inline type, and `allowed-fields.test.ts` checks each `NESTED_FIELDS` row against the interface
+  it covers — so a row for it would have sat OUTSIDE the drift guard that keeps the others honest.
+  Naming the shape `GateReminderSpec` put it back inside. A false total is expensive; a true one
+  that cannot be checked is not much better.
 
 - **A.6 · A pass-through value with a two-faced `then` getter still crosses the realm boundary,
   and it is left open deliberately.** The thenable refusal now lives once at the seam in
@@ -397,22 +379,17 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
 
 ### One more, found while writing this file — a decision that was made and not executed
 
-- **A.33 · `PolicyEngine.clearCeiling` still exists, in a kernel file, with no caller but a test.**
-  It was DECIDED for deletion on 2026-08-28 — a mutator arrives with its caller, the same rule
-  `errors.ts` states for a code and its raiser — and the deletion never landed. This row exists
-  because the closing sweep nearly recorded it as closed on the strength of the decision rather
-  than the code, which is the exact failure this file's first rule names. **Reproduced:**
-  `/usr/bin/grep -arn clearCeiling` over `packages/core/` returns `run/policy.ts:696`, the
-  definition, and `test/run/oversight.test.ts:119`, the only call.
-  **And the reason for the deletion checks out, which is why it should still happen.** A human
-  ceiling is folded from `policy.deescalated` (`projection.ts:846` sets `p.ceilings[scope]`) and
-  **no event ever clears one** — so `clearCeiling` deletes an in-memory entry that
-  `PolicyEngine.restore` re-installs from the projection on the next attach (`engine.ts:1623`).
-  The ceiling comes back at the lowered posture. That is §F.1's class — a decision reading a value
-  the journal cannot reconstruct — sitting inside the object built to defend against it, and the
-  method's own docstring ("Always allowed: it tightens") is true about the direction and silent
-  about the durability. **Closes when** it is deleted along with its test call, or given a
-  journaled event and a fold; deleting is the decided answer and nothing has changed.
+- ~~**A.33 · `PolicyEngine.clearCeiling` existed in a kernel file with no caller but a test.**~~
+  **FIXED — the decided deletion has now landed.** The row is kept because of how it was found:
+  the closing sweep nearly recorded it as closed on the strength of the DECISION rather than the
+  code, and two independent readers caught that. A decision is not a diff.
+  The reason held up under re-derivation: a human ceiling is folded from `policy.deescalated` and
+  **no event ever clears one**, so `clearCeiling` deleted an in-memory entry that
+  `PolicyEngine.restore` re-installed from the projection on the next attach — the ceiling came
+  back at the LOWERED posture. Its docstring ("Always allowed: it tightens") was true about the
+  direction and silent about the durability, which is §F.1's class inside the object built to
+  defend against it. The capability never needed the method: `deescalate(scope, "in", …)` is the
+  same tightening, refused for a non-human, and folded.
 
 ---
 
