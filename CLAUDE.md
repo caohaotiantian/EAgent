@@ -113,31 +113,20 @@ and the measurement has to be one that cannot be gamed by the thing being measur
 - **Name the set a claim covers.** "This is total" cannot be checked; a claim that names its members
   can.
 - Every module says *why it exists* at the top, not what it does.
-- **Tests are offline and deterministic — no network, no API key, and as of 2026-08-29 no test
-  asserts on a RATIO OF TWO TIMINGS.** That distinction is the whole content of this entry, so
-  state it precisely rather than as "no wall-clock dependence": eight assertions still read a
-  clock, and all eight are ABSOLUTE bounds with an order-of-magnitude margin
-  (`ms < 100`, `elapsed < 3000`, and so on). Those are fine and are not what kept going red.
-  The two RATIOS are gone. `scale.test.ts` now asserts on a count of the compiler's spec reads
-  and merely reports its wall-clock ratio; `server/layout.test.ts` counts the reads
-  `layoutGraph` makes instead of timing it, which also made it STRICTER — the timing bound was
-  60x and a quadratic sweep is 25x, so the old assertion could not have caught the thing it was
-  written to catch, while the read ratio measures 5.37x against a bound of 10x.
-  **This entry has carried a claim that did not reproduce three times, always about the same
-  measurement, and that is the fact worth keeping rather than the numbers.** The first said the
-  test flakes 1 run in 10 alone; the second said "believe a red one"; the third said "alone,
-  10/10 pass". Measured 2026-08-29 on an idle machine, three runs of each tree: HEAD 29.6× 42.9×
-  48.5× (0/3 would pass) and `2c36026` 27.9× / 35.6× plus one pass — **and that one pass came
-  from a 100-node sample of 15.5 ms against 4.5–5.0 ms everywhere else.** The assertion was
-  `t500/t100 < 25`, so a noisy-SLOW denominator is what made it green: it was likeliest to pass
-  when its baseline sample was worst. It had been failing on both trees before this session
-  touched the compiler, and the read count reads an identical `17.89×` on both, which is how we
-  know the algorithm never moved.
-  The lesson, which is the reason this is still here at all: **a ratio of two timings is not a
-  more robust measurement than one timing, it is a less robust one** — the noise does not cancel,
-  it compounds, and it compounds asymmetrically. A constant-factor regression is now caught by an
-  absolute bound in its own test ("a 500-node graph compiles well inside a second"), which is a
-  single measurement and has none of this failure mode.
+- **Tests are offline and deterministic — no network, no API key, and no test asserts on a RATIO
+  OF TWO TIMINGS.** That distinction is the whole content of this entry: assertions that READ a
+  clock are fine and several remain, because every one is an ABSOLUTE bound with an
+  order-of-magnitude margin (`ms < 100`, `elapsed < 3000`). **There is deliberately no count
+  here** — this line carried one three times and it did not reproduce three times, and no single
+  grep enumerates the set anyway (a bound on a differently-named variable escapes a grep for
+  `ms`/`elapsed`, and two of the bounds are LOWER ones asserting that something waited). The two
+  ratios are gone: `scale.test.ts` and `server/layout.test.ts` each count the property reads
+  their subject makes instead of timing it — byte-identical run to run, and tighter than what it
+  replaced. Re-run 2026-09-01, layout measures **5.37× against a bound of 10×**.
+  **A ratio of two timings is not more robust than one timing, it is less** — the noise does not
+  cancel, it compounds asymmetrically, so `t_big / t_small < K` is likeliest to pass when its own
+  denominator sample is worst. `TODO.md` §F.17 carries the measurements; this entry carries the
+  rule, which is the only half that stays true.
 - `/usr/bin/grep -a` always, and the path matters: this shell's `grep` is a ugrep wrapper that
   passes `-I`. Empty output is not evidence of absence. **The trigger set is NUL ∪ invalid
   UTF-8**, not non-ASCII — valid non-ASCII matches fine. **Five** tracked files carry a NUL byte

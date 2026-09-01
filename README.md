@@ -261,10 +261,14 @@ either — the library accepted both all along, through `GateDispatcher({channel
 named THE WRONG DOOR:
 
     $ loom serve --identity-module ./oidc.mjs
-    E_CONFIG_INVALID: unknown flag: --identity-module (did you mean --identity-file?)
+    E_CONFIG_INVALID: unknown flag: --identity-module (did you mean --identity-file?). …
 
     $ loom serve --channels-module ./smtp.mjs
-    E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?)
+    E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?). …
+
+(Each line continues "A flag this binary does not understand is IGNORED unless it is refused here
+— and for --token, ignored means the control plane authenticates nobody." The `…` is there
+because a quote that silently stops mid-sentence is not the quote this section's rule asks for.)
 
 **There is still no such flag, and there is deliberately not going to be one.** All four rows came
 off through the SAME door: `--extension-module`'s default export is now handed

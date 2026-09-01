@@ -29,16 +29,25 @@ and the sha is the citation.
 
 ## State — measured 2026-09-01, one command each
 
-**Every row here was RE-RUN on 2026-09-01, and three of the seven had moved without the date
-moving with them** — tests 2,708 → 2,728 at `e8d59c4` (2,733 with the five cases this commit's
-siblings add), exports 528 → 529, seams 8 → 10. A dated table is only as good as the last time
-somebody ran its commands, and the date is not the evidence; the command is. The exports row now
-names a command that produces its number, because `scripts/surface.json` is a path and a path is
-not a measurement.
+**Every row here was RE-RUN at `5ffc223`, and one of the seven had moved** — tests 2,733 → 2,746
+as A.34's and A.35's cases landed. Exports, kernel files, seams, source files and the NUL census
+all came back unchanged. A dated table is only as good as the last time somebody ran its commands,
+and the date is not the evidence; the command is. **The tests row is the one that moves on almost
+every commit, so read it as a floor rather than as an identity** — a re-run that comes back higher
+is the suite growing, and only a re-run that comes back LOWER or non-zero on `fail` is news.
+
+**AND DO NOT CARRY THIS NUMBER INTO `README.md`'s Gates row, which says `2,300+` ON PURPOSE.**
+Tried at `5ffc223` and it went red twice, which is the pin working:
+`test/readme-gaps.test.ts` binds that row's text verbatim as a probe's `claims` string, AND
+asserts the stated floor is at or below what the suite declares — and its metric is
+`^test(` declarations, **2,617**, not the 2,746 cases `node --test` executes, because a `test()`
+in a loop runs more than once. So `2,700+` is both a broken probe and an overstatement by the
+README's own measure. The floor is there so growth costs no doc edit; raising it to today's count
+is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,733 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,746 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **529** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **61 source files** | `node scripts/check-zero-dep.mjs` |
@@ -62,29 +71,37 @@ reader who checks: the quotation is the strongest-looking evidence on the page a
 invented part. Paste the guard's output or cite nothing.
 `git log --grep='^Kernel-seam:'` is the ledger and it is not a number anyone can quietly reset.
 
-**The roadmap's items 9–13 are FOUR CLOSED AND ONE OPEN, re-run 2026-09-01, one command each.**
-This paragraph said the opposite — "items 9, 10, 12 and 13 were each re-run at this commit and
-each still fails" — and it was wrong about three of the four. Each row below was RUN rather than
-transcribed from `DESIGN.md`'s verdict table, and that mattered: **the two documents had drifted
-in OPPOSITE directions and DESIGN had also drifted from itself.** Its table recorded item 10 as
-"still fails" while item 10's own section two hundred lines below it was headed
-**DONE 2026-09-01**, and it recorded item 12 as 15/15 after the suite had grown. Both are
-corrected in the same commit as this paragraph, from the same runs.
+**The roadmap's items 9–13 are FOUR CLOSED AND ONE OPEN, re-run at `5ffc223`, one command each.**
+All five verdicts below reproduce unchanged from the previous re-run; only item 9's *reason* has
+moved, and it has now moved three times without the item closing. Each row was RUN rather than
+transcribed from `DESIGN.md`'s verdict table, which is the discipline that caught the last drift:
+**the two documents had drifted in OPPOSITE directions and DESIGN had also drifted from itself**,
+recording item 10 as "still fails" while item 10's own section was headed **DONE 2026-09-01**.
 
 | item | command | measured |
 |---|---|---|
-| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass — and the item is still OPEN.** The green is the residual: `A REWIND IS NOT A HUMAN'S YES TO THE UNDO` pins `charges [42] refunds []`, which is the item's own failing output. What moved is that it is no longer silent — the descent into the child runs, the undo is journaled `failed`, and the reason names §A.8's `nodeApproved: false`. It closes when the rewind door grows an approval floor |
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass — still OPEN, and it is now §A.8's DECISION rather than any missing mechanism.** The green is the residual: the third case pins `charges [42] refunds []`. The reason it used to give — "it closes when the rewind door grows an approval floor" — is spent: A.34 built the gated half and A.35 the loud one. Measured at `5ffc223` by flipping `#compensateOne`'s `nodeApproved` to `true`: this suite goes 2/3 (`compensated` where `failed` is pinned) **and** `rewind-plan.test.ts` goes 6/7 (`refunds [21]` where `[]` is pinned), and item 9's own *Fails today* assertion becomes TRUE — one edit, both pins, one question. See §A.8 |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **13 pass. DONE** — the pin was renamed `THE HOLE THIS CLOSES` and now asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **13 pass. DONE** |
 | 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **18 pass. DONE** — 15 when `DESIGN.md` measured it; three banner cases landed since |
 | 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **6 pass. First half DONE** — 5 when `DESIGN.md` measured it. The second half (two planes dividing one listing) is §E.2's coordinator and is not a cursor |
 
-Of the three backlog rows those items pointed at, one is still live: item 9's is **§A.30**. Item
-10's **§A.1** is already struck FIXED and item 13's **§A.15** already reads CLOSED, each carrying
-only the residual its closure did not cover — so the pointer and the row agreed and this
-paragraph did not agree with either. **Item 12 has no row, deliberately:** its subject is
+Of the three backlog rows those items pointed at, one is still live — **and it is no longer the
+row this paragraph named.** Item 9's home was **§A.30**, whose sub-bullet stated the cause as
+`rewind`'s parent-only entry condition; that condition is DELETED and the descent is entered, so
+§A.30's copy was the third statement of item 9 and the only one still asserting a cause that is
+gone. It now points at **§A.8**, which owns what is actually left: the decision. Item 10's
+**§A.1** is already struck FIXED and item 13's **§A.15** already reads CLOSED, each carrying only
+the residual its closure did not cover. **Item 12 has no row, deliberately:** its subject is
 `README.md`'s fork ledger, whose two DEBT rows it closes, and §E's closing paragraph is explicit
 that the ledger is not re-enumerated here.
+
+**`DESIGN.md` added an item 14 at `5ffc223` — `loom replay` and `loom trace` refuse a run whose
+graph the workspace already publishes, while `approve` and `audit` in the same workspace do not.
+It gets no row here either, and for the same reason item 12 gets none:** it is a CLI gap driven
+through the binary, its reproduction is the two refusals pasted in that section, and a second copy
+of a driven failure is the copy that rots. §A.24 is the different and harder question — putting
+the SPEC in the journal rather than its hash — and it stays where it is.
 
 ---
 
@@ -112,17 +129,24 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 31 | 9 | 22 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 34 | 12 | 22 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 1 | 4 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
-| §F | 17 | — | — | properties to preserve, not history to honour; nothing here is "open" |
+| §F | 18 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
 | §H | 4 | 1 | 3 | housekeeping |
 
-The struck members, so the column is checkable and not merely asserted: **§A** A.3, A.4, A.5,
-A.16, A.17, A.22, A.27, A.28, A.33; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
+A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+
+**§A's `rows` column counts 34 LINES against 33 distinct ids, and the extra one is deliberate.**
+A.20 matches the grep twice — the struck row that closed it, and the superseded four-sighting
+record kept beneath it because the *shape* of that record is the lesson. The last recount said
+**9** struck against 12, having named its members and then not re-derived them when A.1, A.14 and
+A.20 were struck; the member list above is what makes that failure visible rather than a
+disagreement between two numbers.
 
 **The §A numbering has two holes and they are not errors.** A.7 and A.9 are absent because both
 closed and moved bodily into §Z, where the argument for each closure is the commit. Ids are never
@@ -246,7 +270,9 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   a rule nobody can follow is not a floor. The HTTP route is a 403 for a service token and for an
   open plane, and the refusal names both ways out (authenticate as a person; `cancel` still works
   for you). 36 test call sites, 32 of which relied on the default, now name a person.
-  **Still open, and it is what gates the seventh argument at `engine.ts:1457`:** see **A.35**.
+  **A.34 and A.35 are both DONE, and what they were the precondition for is §A.8's decision:**
+  the seventh argument to `#invokeTool` in `#compensateOne` — `nodeApproved`, cited by NAME here
+  because every `engine.ts:NNNN` this file carried was stale when re-checked (see §F.18).
 
 - **A.35 · ~~A rewind's authorization is blind~~ — DONE 2026-09-01, and the plan it was written
   from was wrong about its own premise.** The decision is `b90b137`'s fifth — a compensation edge
@@ -272,6 +298,19 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   "the preview is the dispatch list" true by construction rather than by a test that only ever
   exercises the non-delegated case. **A row that names a variable as the answer has usually not
   checked which of two computations that variable is.**
+  **AND "BOTH HALVES CONSUME IT" WAS STILL ONE STEP SHORT — the extraction is not the fix, the
+  THREADING is.** As first written, `rewind` called `#planRollback` for the hash check and then
+  `#compensate`, which planned AGAIN from a fresh read; a reviewer disposed the undo tool between
+  the two and the rewind was ACCEPTED, journaling an authorization that asserted
+  `pay.refundable -> pay.refund` while `compensation.recorded` said `not_attempted, names a
+  compensation that is not a registered tool`. The audit artifact was describing a dispatch that
+  did not happen. `rewind` now destructures `{plan, walk}` from ONE call and dispatches that
+  `walk` — `#dispatchRollback(walk, "rewind")` — the one whose digest the operator authorized,
+  pinned by `rewind-plan.test.ts`'s "THE PREVIEW IS THE LIST THAT DISPATCHES", 7/7 at `5ffc223`.
+  **`dispatch` means WILL BE ATTEMPTED, not will run**, and the difference is the whole of §A.8:
+  it counts steps with an `undo` that are not `undispatchable`, so a step policy then refuses is
+  IN the number the operator authorized. A plan that promised "will run" would be false today on
+  every delegated leg.
   **And the same false premise had already produced a live loosening:** the detached-rewind
   refusal read `plannedUndo`, so a detached rewind of a fully-delegated run was ACCEPTED, wrote no
   `compensation.recorded` in any journal, and left the charge standing — "nothing to undo" and "an
@@ -279,33 +318,55 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   **The hash does not close a concurrent second rewind and the chain does.** Two rewinds plan from
   the same journal, so both hashes matched and both dispatched: measured, two
   `compensation.recorded` rows for one `compensatesSeq`. `rewind` has a per-run chain now, the
-  shape `advance` has carried since `engine.ts:1941`; the second caller then re-plans after the
+  shape `advance` has carried in `#advancing`; the second caller then re-plans after the
   first settled its steps and the hash refuses it. **A check at the top of a method that is not
   serialized end-to-end checks nothing about the second caller.**
   **What the operator saw is journaled on `operator.command`** — `kind: "rewind.plan"` for what
-  was shown (idempotent on the hash, so polling writes one row) and `kind: "rewind"` for what was
-  authorized, appended AFTER the marker so the rewind cannot suppress its own authorization. No
+  was shown and `kind: "rewind"` for what was authorized, appended AFTER the marker so the rewind
+  cannot suppress its own authorization. No
   new event type, so no `Kernel-seam:` and the census is still 10: the payload is
   `{kind: string, args: Record<string, unknown>}`, deliberately open, and `run/projection.ts`
   folds only `kind: "steer"`. The plan TEXT rides along with the hash because the plan is NOT
   recomputable from the journal later — it depends on the process's `ToolRegistry` and on which
   child graphs rehydrate — so a bare hash would certify a list nobody can reproduce.
+  **Two things about the preview row that a first draft got wrong in the same direction — it
+  recorded WHAT and not WHO, and it was idempotent for one caller only.** Its `actor` is now the
+  human who asked, not `SYSTEM_ACTOR`: a route that requires a person precisely because
+  enumerating a run's undoable effects is sensitive, and then does not record which person asked,
+  keeps the half that is not the audit record. And the idempotence compares EVERY prior hash on
+  the log rather than the last row — measured, 25 previews alternating between `atSeq` 1 and 2
+  wrote 25 rows and took the journal from 18 events to 43, because each preview differed from the
+  one immediately before it. **"Idempotent" that holds only while a caller does not change its
+  mind is a cache, not idempotence.**
   **Residues, named rather than implied.** (1) The chain is `rewind`-against-`rewind` only; a
   rewind concurrent with an `advance` is still unserialized, and sharing `#advancing` risks a
   deadlock nothing has evidence for. (2) A DETACHED run whose steps are all BLOCKED still journals
   nothing — the refusal has no `undo` to catch — though `planRewind` now shows those steps.
-  **A.8 is what is left**: the seventh argument at `#compensateOne` may now be *argued* for
-  `trigger === "rewind"`, because the operator has passed a floor against the specific undos. It
-  still needs its own fixture, since the whole suite is green with the guard flipped.
+  **A.8 is what is left**: `#compensateOne`'s `nodeApproved` may now be *argued* for
+  `trigger === "rewind"`, because the operator has passed a floor against the specific undos —
+  and A.8's fixture, which this row's first draft said was still missing, exists as a side effect
+  of the preview work. The decision is the whole of what is open.
 
 - **A.8 · ~~The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests
   it.~~ THE FIXTURE EXISTS NOW; the DECISION is what is left.** `test/run/rewind-plan.test.ts`
   asserts, on both the direct and the delegated leg, that a refused undo reaches neither the world
   (`refunds` is empty) nor a false record (`compensation.recorded.outcome` is `failed`).
-  Mutation-checked: flipping the seventh argument at `#compensateOne` turns
-  *"an undo policy refuses must not reach the world"* red. Before this the file asserted only
+  **Mutation-checked at `5ffc223`, by RUNNING it rather than by trusting the row that claimed
+  it:** flip `#compensateOne`'s `nodeApproved` from `false` to `true` in its `#invokeTool` call
+  and `rewind-plan.test.ts` goes 6/7 — `an undo policy refuses must not reach the world`,
+  `actual [21] expected []`. Restored, 7/7. Before the fixture the file asserted only
   `undo === "pay.refund"`, which a row carries whatever its outcome — so the suite drove A.8's
   exact path and would have stayed green through the flip.
+  **THE SAME FLIP IS `DESIGN.md` ITEM 9's WHOLE REMAINING CONTENT, which is the fact that stops
+  this being carried twice.** The same edit takes `rewind-through-subgraph.test.ts` to 2/3 —
+  *"an undo policy answers `gate` is refused, not performed"*, `actual 'compensated' expected
+  'failed'`. That assertion throws before the harness's `refunds` line, so `[42]` is not printed;
+  the step to item 9 is that `compensated` is returned only when `#invokeTool` comes back without
+  an error, and the harness pushes into `refunds` inside `pay.refund`'s own `execute` — so on the
+  delegated leg `compensated` means the refund RAN, which is item 9's
+  *Fails today* assertion coming TRUE. One flag, two pins, opposite directions:
+  item 9 says flip it, this row says not without an argument. **Neither can close without the
+  other, so the decision is recorded HERE and item 9 cites it.**
   **What remains is not coverage, it is the question:** should a rewind's undos run with
   `nodeApproved: true`? A.35 delivered the operator seeing and authorizing the specific list, which
   is the floor that made the question askable at all. It is still not obviously yes: the human
@@ -648,26 +709,23 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
   having journaled one level and returned.
   **A residue of `#compensateOne`, narrower than the row it came from and still there:** the
   "no `effect.completed` recorded at all" case is now `not_attempted` with a reason, but a record
-  that EXISTS and carries no `details` still yields `args = {}` at `engine.ts:1450`, because
+  that EXISTS and carries no `details` still yields `args = {}` — `#compensateOne` calls
+  `detailsOf(result)` and hands the result straight to `#invokeTool`, because
   `effect.completed.result` is typed `unknown` and nothing constrains it. An undo invoked with no
   arguments is not a refusal. **Closes when** that case is `not_attempted` too, which is one arm
   and the same fail-closed shape its three neighbours already use.
   **Still open:**
-  - **A REWIND ACROSS A `subgraph` NODE IS PERMITTED BECAUSE THE CHILD DECLARED AN UNDO, AND
-    THEN DOES NOT RUN IT.** This is `DESIGN.md`'s Sequence item 9 and it is the one the child
-    descent above did NOT close — driven again at this commit, one `subgraph` node whose child
-    charges `pay.refundable` (irreversible, `compensation: {tool: "pay.refund"}`), then
-    `engine.rewind(runId, 1)`: `status succeeded  charges [42]` → `rewind refused: no` →
-    `charges [ 42 ]  refunds []`. **The reason is now sharper than when the item was written, and
-    it is an ordering of two guards rather than a missing feature.** `#uncompensatedIrreversible`
-    DOES descend into child runs, so the permission crosses the boundary; `#compensate` DOES
-    descend into child runs since `7c8b89c`, so the machinery to run the undo exists. What sits
-    between them is `rewind`'s entry condition at `engine.ts:2980`,
-    `if (plan.steps.length > 0 && live !== undefined)`, where `plan` is `planCompensation` over
-    **the parent's own events only**. A parent that delegated has zero steps of its own, so the
-    descent that exists is never entered. **Closes when** that condition asks whether there is
-    anything to undo ANYWHERE under the run — which is the same question
-    `#uncompensatedIrreversible` already answers one screen above it, in the opposite direction.
+  - ~~**A REWIND ACROSS A `subgraph` NODE IS PERMITTED BECAUSE THE CHILD DECLARED AN UNDO, AND
+    THEN DOES NOT RUN IT.**~~ **NOT CLOSED, MOVED — this was the THIRD live statement of
+    `DESIGN.md` item 9, and the only one still asserting a cause that no longer exists.** It said
+    the blocker was `rewind`'s entry condition, `if (plan.steps.length > 0 && live !== undefined)`
+    over the parent's own events. That condition is DELETED — `rewind` reads
+    `if (live !== undefined)` and dispatches the tree walk — and the descent is entered,
+    journaling the refusal in the CHILD's journal.
+    Nothing about compensation WIRING is left here, which is why it does not
+    belong in this row: what remains is whether the undo may run `nodeApproved: true`, and that
+    is **§A.8**, with the mutation that proves the two are one flag. **A backlog row that keeps
+    restating a roadmap item's cause will always be the last copy to hear that the cause moved.**
   - **`JoinNode.onBranchError: "compensate"`**, refused at compile by
     `GRAPH008_COMPENSATE_UNIMPLEMENTED`. What it would take is recorded at `#absorbedByJoin`:
     a BRANCH-PATH scope the planner does not have (its only scope is `sinceSeq`, and branches
@@ -799,8 +857,9 @@ is a better view of nothing.
     Not fixable by an event: a request is accepted before a runId exists, so it has no journal
     to go in. Needs a durable stream that is not keyed on a run.
   - **`loom.compile`** — **not "possible but redundant", MEASURED IMPOSSIBLE.** `run.submitted`,
-    `run.compiled`, `run.started` and the entry `task.ready`s are ONE append (engine.ts:1526,
-    the only site), and `journal/store.ts`'s `prepare` stamps one `ts` per batch. Driven with a
+    `run.compiled`, `run.started` and the entry `task.ready`s are ONE append inside
+    `Engine.submit` — re-checked at `5ffc223`, `run.compiled` still has exactly one appender in
+    `src/` — and `journal/store.ts`'s `prepare` stamps one `ts` per batch. Driven with a
     clock ticking +7ms per call, all four came back `ts: 1700000000014`, so a span bracketed
     submitted→compiled is zero-width by construction. Worse, `compileOrThrow` runs in the
     CALLER — `engine.submit` receives an already-compiled graph — so `run.compiled` records the
@@ -1113,6 +1172,21 @@ anecdotes.
     timing must stay, make it ONE absolute bound with an order-of-magnitude margin, never a ratio.
     **This entry has now carried a claim that did not reproduce three separate times, always about
     this same measurement**, which is why it states the rule and not a fourth set of numbers.
+18. **Cite a source by SYMBOL, never by line number.** §H.2 is the record of what renumbering
+    *this file* cost; this is the same failure pointed the other way, at the source. Measured on
+    the two documents AS THEY STOOD AT `5ffc223`, before this entry existed:
+    `/usr/bin/grep -aon 'engine\.ts:[0-9]*' TODO.md DESIGN.md` found **eleven citations across
+    eight distinct line numbers, and all eight were stale** — every one landed on an unrelated
+    comment. `:1457` (the `nodeApproved` argument) is at 1636; `:2980` (a condition that has since
+    been DELETED) is mid-docstring; `:7412` (`#failRun`) is at 8116. They were replaced by symbol
+    names in the same commit as this entry, and that same grep now returns exactly two lines:
+    §A.34's mention of the *pattern* `engine.ts:NNNN` (no digits), and §H.2's `engine.ts:7096`,
+    which is the exception below. **Neither is a citation, which is what makes this rule
+    checkable rather than merely stated.** A symbol is greppable, survives every edit above it,
+    and fails LOUDLY when it is renamed; a line number into a nine-thousand-line file goes stale
+    on the next commit and fails SILENTLY, by pointing at something plausible. One exception, and
+    §H.2's own rows are it: a citation that records what a pointer *was* is the one use a stale
+    number is correct for.
 
 ---
 
@@ -1180,17 +1254,15 @@ Each traces to a decision in `DESIGN.md`.
   **Residue, both narrow and both pre-existing:** (a) `#assertBound` checks the manifest only when
   the attached graph IS the compiled one, so a MUTATED run's successor carries no recorded manifest
   to compare — the engine says so where the gap is, and mutation is unreachable from the binary
-  today; (b) `#compileChild`'s docstring still says a child's own refs "go to the live resolver on
-  every compile", which this change makes false for every child `resolveSubgraphs` collected — the
-  claim about `tools.manifests()` in the same paragraph is unaffected and still holds.
-  **(b) is the only part of this row still open, and it is a FALSE CLAIM rather than a missing
-  one, which is the worse kind.** Re-checked at this commit by reading both sides:
-  `engine.ts:5655` still says `resolveManifest` "walks only the PARENT's nodes, so the child's own
-  `function/…` and `prompt/…` refs miss the frozen map", while `compile.ts:294` now calls
-  `resolveManifest(input, subgraphs)` and its own line 288 says "the manifest pins the refs of
-  these child specs too". A reader who trusts the engine comment will conclude the freeze is
-  weaker than it is and may re-fix something already fixed. **Closes when** that paragraph is
-  rewritten to keep the `tools.manifests()` half and drop the refs half.
+  today; (b) ~~`#compileChild`'s docstring still says a child's own refs "go to the live resolver
+  on every compile"~~ — **CLOSED by `6af4a02`, verified at `5ffc223` by running the grep the row
+  was written against:** `/usr/bin/grep -arn 'live resolver on every compile' packages/core/src`
+  returns nothing, and the paragraph now reads "It used to be TWO… `0f605a9` made the manifest
+  walk the frozen child specs too, which closed it; this paragraph outlived the fix by two
+  commits and would have sent a reader to re-fix something already fixed." That is exactly the
+  rewrite the closing condition asked for, keeping the `tools.manifests()` half. **(a) is now the
+  whole of what this row carries**, and it is a gap the engine states where it lives rather than
+  a false claim anywhere.
 - **G.6 · Proposed-API mechanism and a version pin (D5).** Both halves unbuilt: no proposed-API
   declaration file, no opt-in, no publish-time refusal for an extension that uses one, and no
   runtime version pin.
