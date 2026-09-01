@@ -195,9 +195,15 @@ text go into the artifact hash"; they do not, and were never going to. `graphHas
 `digest(spec)` (`compile.ts:351`) and a ref'd prompt's text is not in the spec. The binding is
 `RunGraph.resolutionManifest`, which pins every ref to a CONTENT digest and is journaled on
 `run.compiled`; three doors check it (`Engine.#assertBound` on gate decisions and on `advance`,
-and `replayRun`'s `refsBound`), and `RunGraph.documents` freezes the bytes by value. Driven
-through the shipped binary: run a workspace graph to a gate, edit `resources/prompt/writer.md`,
-and `loom approve` refuses with `E_GRAPH_MISMATCH`. **The hash is deliberately left out of it**,
+and `replayRun`'s `refsBound`), and `RunGraph.documents` freezes the bytes by value. Driven by
+`test/run/graph-binding.test.ts`, whose "THE SAME SPEC WITH DIFFERENT RESOURCES IS REFUSED" case
+asserts `rebound.graphHash === original.graphHash` while the manifest moves and `resolveGate`
+throws `E_GRAPH_MISMATCH` — 5/5. That is an in-process rig. It WAS also driven through the
+binary once, against a workspace built for the purpose — but that run named
+`resources/prompt/writer.md`, which exists in no repo path, so an auditor re-running it found
+nothing and was right to. The test is the artifact; a binary-level regression for this is
+unwritten, and `examples/graphs/self-review.json` is where one would go, since it carries both
+`prompt/review@stable` and a `human_gate`. **The hash is deliberately left out of it**,
 because `cohortKeyOf` keys on `graphHash` — putting prompt text in the hash would make every
 prompt edit its own cohort of one, and comparing two runs across a prompt edit is precisely the
 candidate kind D6 defines self-improvement as producing. So the run is pinned and the cohort is
@@ -331,7 +337,7 @@ realm brand onto the wrapper), exactly the pair the item said would be needed an
 would have worked alone.
 
 **THE SEAM COST DID NOT MOVE, and the estimate held.** `node scripts/check-kernel.mjs` reports
-`10 files pinned, 193 commits since 86b84c9, 8 declared seams` — still **8**. Item 11 predicted it
+`10 files pinned, 8 declared seams` (the guard also prints a commit count, which moves with every commit including this one — the SEAM count is the number that must not move) — still **8**. Item 11 predicted it
 would cost nothing because it is a `fix` of a guard that already exists, and it cost nothing. The
 price of what remains is unchanged at two trailers, for items 10 and 13.
 
@@ -348,7 +354,7 @@ loud-and-missing**, and that is the whole ordering.
 
 **WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census
 was **8** when this was written and is **8** now — `git log --grep='^Kernel-seam:' --oneline | wc -l`
-says 8, and `node scripts/check-kernel.mjs` prints `10 files pinned, 193 commits since 86b84c9,
+says 8, and `node scripts/check-kernel.mjs` prints `10 files pinned, a commit count that moves with every commit — the seam count, 8, is the one that must not,
 8 declared seams` (it said 164 commits when this paragraph was written; the commit count moves
 and the seam count is the number that must not) and then lists every one with its reason.
 Items 10 and 13 are each a `feat` that must touch
@@ -405,10 +411,23 @@ PROMISE can now be kept. What sits between them is one condition, `engine.ts:298
     }
 
 `plan` is `planCompensation` over the parent's own events. A parent that delegated has **zero**
-steps of its own, so the descent that exists is never entered. **The item is therefore no longer
-"build the walk" but "ask the same question the refusal one screen above already answers, in the
-other direction"** — and that is a strictly smaller change than the one this section originally
-scoped, which is worth recording because a stale item usually grows rather than shrinks.
+steps of its own, so the descent that exists is never entered. **Widening that condition is necessary and NOT sufficient, measured rather than reasoned.** An
+auditor applied a superset of the prescribed change — deleting the guard outright — and the
+result was unchanged: `charges [ 42 ]  refunds []`. Probes show the descent does now run, so the
+condition is correctly identified, and a second blocker sits behind it:
+
+    CPROBE trigger= rewind sinceSeq= 1 depth= 0 plan.steps= 0 children= 1
+    CPROBE trigger= rewind sinceSeq= 0 depth= 1 plan.steps= 1 children= 0
+    OPROBE step= pay.refundable -> pay.refund outcome= {"outcome":"failed",
+      "reason":"\"pay.refund\" did not undo \"pay.refundable\": \"pay.refund\" is
+       reversible_write and requires human approval this turn cannot request"}
+
+That refusal is the `nodeApproved: false` seventh argument at `engine.ts:1457` — **§A.8's own
+untested guard**, which the same backlog records as load-bearing with nothing discriminating on
+it. So closing this item also requires deciding what a compensating undo does when policy answers
+`gate` inside a child, and the two items are entangled rather than adjacent. An earlier version of
+this paragraph called it "a strictly smaller change than this section originally scoped"; that was
+reached by reading the condition rather than by mutating it, and it was wrong.
 
 **Both named siblings have CLOSED, and neither closed the item.** The three `run.failed` append
 sites are now **one**: `Engine.#failRun` (`engine.ts:7412`, appending at 7417), which all three

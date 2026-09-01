@@ -40,7 +40,7 @@ and the sha is the citation.
 | wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
 
 **The seam census is 8 and has not moved across the whole of this effort.** `check-kernel.mjs`
-reports `193 commits since 86b84c9, 8 declared seams`. The two `feat` commits of the last three
+reports `a commit count that moves with every commit — the seam count, 8, is the one that must not, 8 declared seams`. The two `feat` commits of the last three
 waves (`50f7c03`, `8482859`) touch `cli.ts` and `evolution/live.ts`, neither of which is one of
 the ten pinned files, so no `Kernel-seam:` trailer was written.
 `git log --grep='^Kernel-seam:'` is the ledger and it is not a number anyone can quietly reset.
@@ -774,8 +774,13 @@ of these on 2026-08-26.
 **Vintage, stated rather than implied: every reason below was last tested by running on
 2026-08-25/26, not on 2026-09-01.** The two facts re-checked today are E.1's — `LeasedScheduler`
 still has no construction site anywhere in `src/`
-(`/usr/bin/grep -arn 'LeasedScheduler' packages/core/src` returns only its own definition in
-`run/scheduler.ts` and four docstring mentions in `cli.ts` and `engine.ts`; see §B.1) — and E.5's
+(`/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` returns ONE line — `cli.ts:572`,
+the docstring asserting it appears zero times — and that self-reference is the whole result: no
+construction site exists. The bare name returns ten: four in `run/scheduler.ts`, which is its
+declaration rather than "its own definition", and six docstrings, five in `cli.ts` and one in
+`engine.ts`. An earlier wording here said "its own definition and four docstring mentions" and
+miscounted both halves, and the correction to it first said the construction grep returns ZERO,
+which is also wrong for the same reason — a claim about a grep has to be run, not reasoned. See §B.1) — and E.5's
 fork-list membership, where `README.md` still names **a reducer** among the five things that need
 a fork. **A reason nobody has re-run in a week is still the best evidence there is for these, and
 it is not the same as a measurement taken now.** The gap has widened by four days since this
@@ -927,10 +932,16 @@ Each traces to a decision in `DESIGN.md`.
   row as written was half stale.** `graphHash` is still `digest(spec)` and a ref'd prompt's text
   is still not in it — that part was always true and is deliberate. What the row got wrong is the
   conclusion: the text is bound anyway, by `RunGraph.resolutionManifest`, which pins every ref to
-  a CONTENT digest and is journaled on `run.compiled`. Reproduced through the shipped binary at
-  the top level: run a workspace graph to a gate, edit `resources/prompt/writer.md`, and
-  `loom approve` refuses — `E_GRAPH_MISMATCH: … matches run …'s spec, but the resources behind
-  its refs have changed since it was compiled`. Three doors check it (`Engine.#assertBound` on
+  a CONTENT digest and is journaled on `run.compiled`. Reproduced two ways, and the difference
+  matters to whoever re-runs it. In-tree and repeatable: `test/run/graph-binding.test.ts`'s
+  "THE SAME SPEC WITH DIFFERENT RESOURCES IS REFUSED", which asserts the graphHash is IDENTICAL
+  while the manifest moves and `resolveGate` throws — 5/5. And once through the binary, against a
+  workspace the driver constructed for the purpose: run to a gate, edit the prompt file, and
+  `loom approve` refuses with `E_GRAPH_MISMATCH: … matches run …'s spec, but the resources behind
+  its refs have changed since it was compiled`. **That second one names no repo path**, because
+  the workspace was temporary — an auditor looking for `resources/prompt/writer.md` in this tree
+  correctly found nothing. The test is the artifact; the binary run is evidence that was not
+  written down in a form anyone can repeat. Three doors check it (`Engine.#assertBound` on
   gate decisions and on `advance`, and `replayRun`'s `refsBound`), and `RunGraph.documents`
   freezes the bytes by value so `#documentFor` asks no resolver at run time.
   **What was NOT bound, and is the half that was real: a SUBGRAPH's own refs.**
@@ -1011,10 +1022,13 @@ Each traces to a decision in `DESIGN.md`.
   distinguishes "no sources" from "sources I cannot read" rather than passing on either. **Still
   open:** nothing rebuilds the binary automatically, so the standing condition remains — after a
   source edit, `npm run build:binary` before trusting `bin/loom`.
-- ~~**H.2 · The 2026-08-29 renumber broke thirteen in-tree citations of this file.**~~
-  **CLOSED by `814e283` — all thirteen are repointed.** Kept, not deleted, because the TABLE is
+- ~~**H.2 · The 2026-08-29 renumber broke FOURTEEN in-tree citations of this file.**~~
+  **CLOSED — thirteen by `814e283`, and a fourteenth its own command could not see.** Kept, not deleted, because the TABLE is
   the thing a future renumber needs and the command at the end of it is the cheap half of the
-  lesson. Recorded as a set rather than described, because two of them had the dangerous
+  lesson. **IT SAID THIRTEEN, AND THE FOURTEENTH IS THE ONE ITS OWN COMMAND COULD NOT SEE:**
+  `cli.ts` wrote `TODO §D.19` with no `.md`, and the grep this row published hard-required
+  `TODO\.md` — so the row shipped a checklist that undercounts by exactly the shape it exists to
+  catch. Found by an auditor re-running it, not by the command. The grep below is loosened. Recorded as a set rather than described, because two of them had the dangerous
   shape — after the renumber they resolved to a *plausible, unrelated, live* row instead of to
   nothing, which is worse than dangling. `src/run/engine.ts:7096` cited `§B.1` for a compensation
   gap and landed on `LeasedScheduler`; `test/deployment/boot-banner.test.ts:18` cited `A.15` for
@@ -1028,12 +1042,13 @@ Each traces to a decision in `DESIGN.md`.
   | `§D.14` | `§Z` | `README.md`, `test/readme-gaps.test.ts` |
   | `§B.1` | `§A.30` | `src/run/engine.ts` |
   | `§E.1` | `§B.1` | `src/cli.ts` |
+  | `§D.19` | `§Z` | `src/cli.ts` |
   | `A.15` | `A.20` | `test/deployment/boot-banner.test.ts` |
 
   Four citations were checked and left alone because they still resolve: `§E.2` (`src/cli.ts`) and
   §F items 11, 12 and 13, which survived because §F is a numbered list whose numbering did not
   move. **The command that enumerates the whole set**, so the next renumber can run it first:
-  `/usr/bin/grep -arno 'TODO\.md[^"]\{0,4\}§\?[A-Z]0\?\.\?[0-9]*' packages/core/src packages/core/test scripts *.md`
+  `/usr/bin/grep -arno 'TODO\(\.md\)\?[^"]\{0,4\}§\?[A-Z]0\?\.\?[0-9]*' packages/core/src packages/core/test scripts *.md`
   — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
   into enumerations.
 

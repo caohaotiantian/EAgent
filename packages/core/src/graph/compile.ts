@@ -158,9 +158,9 @@ function effectiveRetry(n: NodeSpec): RetryPolicy | undefined {
 const DEFAULT_NODE_TIMEOUT_MS = 600_000;
 
 /**
- * The node types that get a default deadline, and why the other five do not.
+ * The node types that get a default deadline, and why the other four do not.
  *
- * THE SET IS `agent`, `tool`, `evaluator`. Read off `Engine.#dispatchBody`, which is the only
+ * THE SET IS `agent`, `tool`, `evaluator`, `function`. Read off `Engine.#dispatchBody`, which is the only
  * thing `#withNodeDeadline` wraps — so the question is not "can this node type take a long time"
  * but "can its BODY fail to settle", and only these three can:
  *

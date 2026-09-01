@@ -3693,7 +3693,7 @@ export function runDispatcher(
  * reconstruct. That is the first non-negotiable, and it is the reason the breaker is refused
  * rather than deferred.
  *
- * WHAT THE MEASUREMENT ACTUALLY FOUND, because the backlog's claim was false. TODO §D.19 said
+ * WHAT THE MEASUREMENT ACTUALLY FOUND, because the backlog's claim was false. TODO.md §Z (D.19, refused 2026-08-28) said
  * "a source that is failing every call is retried at full rate"; at HEAD a dead provider costs
  * 3 engine attempts x 3 `postJson` attempts = 9 requests and about 2.25 s of held slot, and
  * then the run FAILS naming `E_PROVIDER_OVERLOADED`. Nothing is retried forever. Two real

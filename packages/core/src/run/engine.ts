@@ -5650,11 +5650,15 @@ export class Engine {
     // standing in for.
     //
     // "THE SAME ONE" IS NOT "BYTE-IDENTICAL", and the stronger claim was written here first and
-    // is false. Two of `compileOrThrow`'s inputs are live rather than frozen: `resolveManifest`
-    // walks only the PARENT's nodes, so the child's own `function/…` and `prompt/…` refs miss
-    // the frozen map and go to the live resolver on every compile — measured, a probe recording
-    // `resolve` during `advance` saw `function/double@stable` three times. And `tools.manifests()`
+    // is false. ONE of `compileOrThrow`'s inputs is live rather than frozen: `tools.manifests()`
     // reads a registry an embedder may `register`/dispose at any time, which feeds `classFloor`.
+    //
+    // It used to be TWO. The other was `resolveManifest` walking only the PARENT's nodes, so a
+    // child's own `function/…` and `prompt/…` refs missed the frozen map and went to the live
+    // resolver on every compile — measured, a probe recording `resolve` during `advance` saw
+    // `function/double@stable` three times. `0f605a9` made the manifest walk the frozen child
+    // specs too, which closed it; this paragraph outlived the fix by two commits and would have
+    // sent a reader to re-fix something already fixed.
     // So a recompile that straddles a promotion or a tool disposal can differ, and for a
     // long-lived subgraph Task the window is human-sized.
     //
