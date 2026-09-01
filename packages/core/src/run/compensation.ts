@@ -244,3 +244,90 @@ export const BLOCK_REASON: Readonly<Record<CompensationBlock, (s: CompensationSt
   no_compensation: (s) => `"${s.tool}" declares no compensation, so this ${s.irreversibility} effect stands`,
   unknown_compensation: (s) => `"${s.tool}" names a compensation that is not a registered tool`,
 };
+
+/**
+ * ── THE PREVIEW AN OPERATOR AUTHORIZES ───────────────────────────────────────
+ *
+ * A `CompensationStep` is one journal's answer. A REWIND's answer spans a TREE of journals, and
+ * that difference is the whole reason these types exist rather than `readonly CompensationStep[]`
+ * being handed back as-is.
+ *
+ * `Engine.rewind` used to compute its preview as `planCompensation` over the rewound run's OWN
+ * events, and the thing it dispatches is a walk that splices each child run's plan into the
+ * parent's at the parent's `subgraph.started` seq. Those are two different computations, and the
+ * gap is not theoretical: measured on `rewind-through-subgraph`'s delegated leg, the parent-only
+ * plan had ZERO steps while the rewind dispatched a `pay.refund` in the child. A preview built on
+ * the first would show "nothing to undo" over a charge that was about to be reversed — the
+ * loudest possible version of the silence `b90b137`'s fifth decision forbids.
+ *
+ * So a step here carries `runId`: WHICH journal it will be recorded in is the one fact an
+ * operator cannot guess, and it is the same fact `Engine.rewind`'s child-run refusal already
+ * names in its message.
+ *
+ * These live in this file rather than `engine.ts` because this file is where the rollback is
+ * DECIDED and `engine.ts` is where it is PERFORMED — the split this module's header states — and
+ * because `run/compensation.ts` is not re-exported by `src/index.ts`, so naming them costs the
+ * pinned public surface nothing.
+ */
+export interface RewindPlanStep {
+  /** The journal this step's `compensation.recorded` will land in — the parent, or a child run. */
+  readonly runId: string;
+  /** `CompensationStep.seq`: the seq of the `tool.called` being undone. Its identity. */
+  readonly seq: number;
+  readonly compensates: string;
+  readonly tool: string;
+  readonly irreversibility: string;
+  readonly ok: boolean;
+  /** The tool that undoes it. Absent iff `blocked` is present. */
+  readonly undo?: string;
+  /** Why nothing will be attempted at all. Absent iff `undo` is present. */
+  readonly blocked?: CompensationBlock;
+  /**
+   * A digest of the arguments the undo would be called with.
+   *
+   * WHY THE PLAN IS NOT BOUND WITHOUT IT. An undo's arguments are not in the step: they are the
+   * compensated call's recorded `details`, read through a suppression-aware scan at dispatch
+   * time. So two plans naming the same `tool -> undo` at the same seq can dispatch DIFFERENT
+   * undos, and a hash over the tool names alone would call them equal. Absent when no live
+   * `effect.completed` is recorded, which is exactly the case `#compensateOne` answers
+   * `not_attempted`.
+   */
+  readonly argsDigest?: string;
+  /**
+   * Why THIS ENGINE cannot dispatch this step now. Absent iff it can.
+   *
+   * The third state, and the one a two-answer preview deletes. "Nothing to undo" and "an effect
+   * stands and nobody will try" must not read the same, which is the rule the executor already
+   * lives on for its records and the preview now lives on too.
+   */
+  readonly undispatchable?: string;
+}
+
+/** What a rewind would undo, in dispatch order, with the hash that binds it. */
+export interface RewindPlan {
+  readonly runId: string;
+  readonly atSeq: number;
+  /** Reverse order of what happened, across the whole run tree. The dispatch order. */
+  readonly steps: readonly RewindPlanStep[];
+  /** Steps that will run an undo tool. */
+  readonly dispatch: number;
+  /** Steps nothing will attempt, for either reason — `blocked` or `undispatchable`. */
+  readonly blocked: number;
+  /** Whether this engine holds a context for the run at all. Part of what `planHash` covers. */
+  readonly attached: boolean;
+  /** `digest` of `{runId, atSeq, attached, steps}`. What `rewind` refuses a mismatch of. */
+  readonly planHash: string;
+}
+
+/**
+ * The operator's answer to a `RewindPlan`, and the reason it is an OBJECT.
+ *
+ * `Engine.rewind`'s arity moved once already this session (A.34 gave it a mandatory `by`). A
+ * fifth positional would move it a second time and a sixth would move it a third; a named field
+ * on one parameter costs the next addition nothing. It is required and has no default for the
+ * same reason `by` has none: a default is how the last floor came to be checked nowhere.
+ */
+export interface RewindAuthorization {
+  /** The `planHash` of the plan the operator was shown. */
+  readonly planHash: string;
+}

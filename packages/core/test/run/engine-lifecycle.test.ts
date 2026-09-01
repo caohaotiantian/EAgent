@@ -31,7 +31,7 @@ import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -141,6 +141,6 @@ test("A TERMINAL RUN IS RETIRED AUTOMATICALLY, and every operation on it still w
   assert.deepEqual(await engine.openGates(runId), []);
   // Rewinding a retired run is the case that blocked automatic retirement: the runs most
   // worth rewinding are the finished ones.
-  const rewound = await engine.rewind(runId, 2 as never, "probe", OPERATOR);
+  const rewound = await rewindWithPlan(engine, runId, 2 as never, "probe");
   assert.notEqual(rewound, undefined);
 });

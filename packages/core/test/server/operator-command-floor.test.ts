@@ -221,11 +221,29 @@ test("NEITHER AN ANONYMOUS PLANE NOR A SERVICE TOKEN MAY REWIND, AND BOTH MAY ST
 });
 
 test("a person's rewind over the same route is taken, and journaled under their name", async () => {
-  // The control for the two refusals above: nothing about the request changed except who sent it.
+  // The control for the two refusals above: nothing about the request changed except who sent it —
+  // and, since A.35, that the person went through the preview first. Both halves are here rather
+  // than in two tests, because "who" and "what did they see" are the two questions this route's
+  // rewind now answers and a control that skipped the second would not be the same request.
   const r = await rig(ops);
   try {
     const runId = await parked(r);
-    const ok = await command(r, runId, { kind: "rewind", atSeq: 2, reason: "start it again" });
+
+    // THE HANDSHAKE'S FIRST HALF, on its own route. A `rewind` command with no `planHash` is a
+    // 400 that names this URL, so the two are discoverable from each other.
+    const missing = await command(r, runId, { kind: "rewind", atSeq: 2, reason: "start it again" });
+    assert.equal(missing.status, 400, "a person who saw no plan is refused too — the floor is not only about who");
+    const why = (await missing.json()) as { error?: { message?: string } };
+    assert.match(String(why.error?.message), /rewind-plan\?atSeq=2/, "and the refusal names the route that answers it");
+
+    const preview = await fetch(`${r.base}/runs/${runId}/rewind-plan?atSeq=2`, { headers: { authorization: "Bearer anything" } });
+    assert.equal(preview.status, 200);
+    const plan = (await preview.json()) as { planHash?: string; steps?: unknown[]; dispatch?: number; attached?: boolean };
+    assert.equal(typeof plan.planHash, "string");
+    assert.ok(Array.isArray(plan.steps), "the plan is a LIST, which is the whole point of showing it");
+    assert.equal(plan.attached, true, "the plane bound the graph, so the plan can say the undos are runnable");
+
+    const ok = await command(r, runId, { kind: "rewind", atSeq: 2, reason: "start it again", planHash: plan.planHash });
     assert.equal(ok.status, 200);
 
     const log: JournalEvent[] = [];
@@ -234,6 +252,30 @@ test("a person's rewind over the same route is taken, and journaled under their 
     assert.equal(marks.length, 1);
     assert.equal(marks[0]!.actor.kind, "human");
     assert.equal((marks[0]!.actor as { subject?: string }).subject, "u:ops");
+
+    // WHAT THEY AUTHORIZED IS ON THE RECORD, under their name, above the marker.
+    const auth = log.filter((ev) => ev.type === "operator.command" && (ev.payload as { kind: string }).kind === "rewind");
+    assert.equal(auth.length, 1, "the rewind journals an operator.command like every other operator verb");
+    assert.equal((auth[0]!.actor as { subject?: string }).subject, "u:ops");
+    assert.equal((auth[0]!.payload as unknown as { args: { planHash: string } }).args.planHash, plan.planHash);
+    assert.ok(auth[0]!.seq > marks[0]!.seq, "and after the marker, so the rewind it authorized cannot suppress it");
+  } finally {
+    await r.close();
+  }
+});
+
+test("A SERVICE TOKEN MAY NOT EVEN READ THE PLAN", async () => {
+  // GATING THE ACT WHILE PUBLISHING THE RECONNAISSANCE IS NOT A FLOOR. The plan enumerates a run's
+  // undoable real-world effects — the effect key, the tool, and the tool that would reverse it —
+  // which is exactly the list the 403 above exists to keep a service token from acting on. So the
+  // preview carries the same floor: it is the read half of one verb, not a second verb.
+  const r = await rig(deployer);
+  try {
+    const runId = await parked(r);
+    const refused = await fetch(`${r.base}/runs/${runId}/rewind-plan?atSeq=2`, { headers: { authorization: "Bearer anything" } });
+    assert.equal(refused.status, 403);
+    const body = (await refused.json()) as { error?: { code?: string } };
+    assert.equal(body.error?.code, "E_HUMAN_APPROVAL_REQUIRED");
   } finally {
     await r.close();
   }

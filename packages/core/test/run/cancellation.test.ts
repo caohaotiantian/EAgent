@@ -33,7 +33,7 @@ import { HumanGateBroker, type GateRequest } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
 import { foldRun } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { DOCS, compileSkeleton, harness, resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -359,7 +359,7 @@ test("A CANCELLED RUN CANNOT BE REWOUND BACK TO LIFE", async () => {
   const { h, runId, gateId } = await parked();
   await h.engine.cancel(runId, "stop");
 
-  await assert.rejects(() => h.engine.rewind(runId, 1 as Seq, "undo the cancel", OPERATOR), (e: unknown) => {
+  await assert.rejects(() => rewindWithPlan(h.engine, runId, 1 as Seq, "undo the cancel"), (e: unknown) => {
     assert.ok(isLoomError(e));
     assert.equal(e.code, CODES.E_RESTORE_ILLEGAL, e.message);
     return true;
@@ -382,6 +382,6 @@ test("…but a FAILED run may still be rewound, because that is a retry and not 
     },
   ]);
 
-  const p = await h.engine.rewind(runId, 1 as Seq, "try again", OPERATOR);
+  const p = await rewindWithPlan(h.engine, runId, 1 as Seq, "try again");
   assert.notEqual(p.status, "failed", "the rewind took effect");
 });

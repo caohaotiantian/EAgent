@@ -50,7 +50,7 @@ import { FunctionRegistry } from "../../src/run/registry.ts";
 import { openGates } from "../../src/run/projection.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { spansFrom } from "../../src/telemetry/spans.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -521,7 +521,7 @@ async function rewindPastApproval(r: Rig, runId: RunId, gateId: GateId, key = "y
   // `raisedAtSeq + 1` is the `run.suspended` that shipped in the raise's own append, so the
   // suppressed range is exactly the decision and its resume. Rewinding to the decision's own
   // seq is refused; rewinding to the raise's would drop the suspension with it.
-  await r.engine.rewind(runId, (raisedAtSeq + 1) as Seq, "the change window moved", OPERATOR);
+  await rewindWithPlan(r.engine, runId, (raisedAtSeq + 1) as Seq, "the change window moved");
   const p = (await r.engine.projection(runId))!;
   assert.equal(p.status, "awaiting_gate", "the FOLD honours the marker");
   assert.equal(p.gates[gateId]?.state, "open", "…and the gate is a live question again");
