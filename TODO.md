@@ -210,17 +210,33 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   grows `listRuns(after)` with a conformance test behind it — `runClockTick`'s own docstring names
   it — and the rotation is then the thing to delete. §E.2's coordinator is the second half.
 
-- **A.16 · What else is process-local and unreconstructable?** `startGateClock`'s `armed` map is
-  memory — a memo, so losing it costs a fold rather than correctness, which is why it was left.
-  The generalisable lesson `oversight-survives-restart.test.ts` states is that the unit needing a
-  restore arm is not the FIELD but the PRODUCER. **Closes when** somebody sweeps every long-lived
-  `new Map()` and object literal in `cli.ts` and classifies each as memo or state. Nobody has.
+- ~~**A.16 · What else is process-local and unreconstructable?**~~ **CLOSED — the sweep is done
+  and the set is named in `cli.ts`.** Ten long-lived mutable
+  producers, each classified above `runDispatcher` with what reads it and what a restart costs;
+  the set was closed by a census of every module-level binding (`workspaceOrdinal` is the only
+  mutable one of thirty-seven) plus every container construction that outlives its call. **Nine
+  lose only work.** The tenth, `planeWorkerId`'s counter, loses a bounded WAIT — §A.17.
+  **What the sweep found that a re-fold does not repair, and it is not a container at all:** a
+  plane that dies between `task.leased` and `task.committed` leaves that task `leased` forever,
+  so `runClockTick`'s `due` predicate never offers the run again. Measured — in view, never
+  driven, with a control — in `test/deployment/run-clock-survives-restart.test.ts`. Widening the
+  predicate would not help, because `InProcessScheduler.eligible` returns `ready` tasks only;
+  it is a cost of **§B.1** and is recorded there.
 
-- **A.17 · A plane that RESTARTS gets a new `workerId`, so it cannot reclaim its own pre-restart
-  leases through the identity arm and waits for `reclaimable()`.** Arguably correct — after a
-  restart they ARE foreign — but **nobody has measured what it costs a fast redeploy**. A real
-  trade, recorded as one. **Closes when** somebody measures a redeploy under load and either
-  accepts the number or gives a plane a stable identity across restarts.
+- ~~**A.17 · A plane that RESTARTS cannot reclaim its own pre-restart leases.**~~ **CLOSED —
+  measured, and the number is written at `planeWorkerId`.** Driven against
+  `LeasedScheduler.select` with `leaseMs` 30,000: a restarted plane's wait is **exactly one
+  `leaseMs`** (first eligible at `at + leaseMs + 1`, the boundary being inclusive-live), it
+  applies **only** to tasks that are `ready` while still carrying a lease, and it is **zero** for
+  a task that was genuinely `leased` — `reclaimable` expires every holder including the one that
+  took it, so there was no head start to lose. Less in practice: the residual is
+  `max(0, leaseMs - downtime)`. **Accepted rather than fixed**, because no identity does better:
+  a name stable across a restart that still separates two live planes on one host is not
+  derivable from `hostname:pid`, and not from the journal either — nothing journals a plane
+  starting or stopping, so a fold cannot tell "A restarted" from "B booted beside A". Anything
+  stronger is a coordinator, and D.2 is single machine / single tenant. Pinned by
+  `test/deployment/two-planes.test.ts`, which goes red if the identity is made stable — that
+  direction re-opens the double-execution defect the identity fix closed.
 
 ### Boundaries that are unexamined rather than broken
 
@@ -405,6 +421,17 @@ believes a feature is present. This section was thirteen rows and is two.
   the file are two docstrings in `cli.ts` and one in `engine.ts`. **Either plug it in or delete
   it. Both are decisions and neither is the current state.** This lived in §E under "distributed
   deployment"; it is a §B item and belongs here, which is the whole reason the row moved.
+  **THE ROW NOW HAS A PRICE, found by §A.16's sweep and measured rather than argued.** A plane
+  that dies between `task.leased` and `task.committed` strands that run permanently: the fold
+  puts the task back in `leased`, `runClockTick`'s `due` predicate wants a `ready` one, and
+  `InProcessScheduler.eligible` would return nothing even if the clock did offer it. Driven on a
+  real journal truncated after its `task.leased` —
+  `status: running, tasks: [apply@root#0 leased] · run clock visited: 2 · drove: []` — with a
+  control run one event shorter that IS driven, in
+  `test/deployment/run-clock-survives-restart.test.ts`. **Reclaiming it needs a lease DEADLINE,
+  which is the one signal that separates a dead holder from a slow one, and `LeasedScheduler` is
+  where that lives.** So "delete it" is no longer free: it deletes the only design in the tree
+  for a crash-stranded task.
 
 - **B.2 · Five event types have no appender**, each pinned in `test/registries.test.ts` with a
   written reason and a `blockedOn` file list, and a test that goes red the moment the reason stops

@@ -250,7 +250,105 @@ test("EACH PLANE NAMES ITSELF, SO A LIVE LEASE HELD BY ONE IS NOT SELECTABLE BY 
   }
 });
 
-// ── 4 · and the product's own judge agrees ──────────────────────────────────
+// ── 4 · what naming the planes COSTS a restart, measured ────────────────────
+
+/**
+ * THE TRADE THE IDENTITY FIX MADE, PRICED — TODO.md §A.17.
+ *
+ * Test 3 establishes that a live foreign lease is not selectable. The same line has a second
+ * consequence nobody had measured: a plane that RESTARTS comes back under a new name, so its
+ * OWN pre-restart leases are foreign to it too, and it waits for `reclaimable()` rather than
+ * taking them back through the identity arm. Arguably correct — after a restart those leases
+ * ARE held by a process that is gone — but "arguably correct" is not a number, and a fast
+ * redeploy is the case where a number decides whether the trade is acceptable.
+ *
+ * TWO NAMES FROM A REAL RESTART, not two literals: `d.open()` twice around a `close()` is the
+ * harness's restart, and both names are read back out of `task.leased`, so this measures the
+ * identity the product actually journals. WHAT THAT DOES NOT COVER, per `harness.ts`: it is
+ * one OS process, so the two names differ in their ORDINAL where a real restart differs in its
+ * PID. The property under test — the restarted plane does not answer to the old name — is the
+ * same either way, and it is the only thing the scheduler reads.
+ *
+ * OFFLINE AND DETERMINISTIC, and specifically NOT A TIMING: every `now` here is an integer
+ * handed to `select`, and the answer is a set of task ids. Nothing sleeps and no elapsed time
+ * is asserted on. The searched boundary is the product's own arithmetic, not a stopwatch.
+ *
+ * IT PINS THE PRICE RATHER THAN A FIX, and that is deliberate — see `planeWorkerId` for why no
+ * identity can do better without a coordinator. It goes red in the direction that matters: an
+ * identity made stable across restarts would let the restarted plane take the lease at t=1100,
+ * which is the double-execution defect test 3 exists to keep closed.
+ */
+test("A RESTARTED PLANE WAITS EXACTLY ONE LEASE FOR ITS OWN ORPHANED WORK, AND NO LONGER", async () => {
+  const d = deployment();
+  try {
+    const one = await parked(d);
+    const second = await parked(d);
+    let before: string;
+    let after: string;
+    {
+      const w = d.open();
+      try {
+        await armForeignGates(w, new Map<RunId, Seq>());
+        await w.engine.resolveGate(one.runId, { gateId: one.gateId, actor: ALICE, decision: { kind: "approve" }, idempotencyKey: "k-1" });
+        before = String(((await events(w.store, one.runId)).filter((e) => e.type === "task.leased").at(-1)!.payload as { workerId: string }).workerId);
+      } finally {
+        w.close();
+      }
+    }
+    // THE RESTART. A second `openWorkspace` over the same directory, leasing on its own run so
+    // the name it journals is its own rather than a copy of the first plane's.
+    {
+      const w = d.open();
+      try {
+        await armForeignGates(w, new Map<RunId, Seq>());
+        await w.engine.resolveGate(second.runId, { gateId: second.gateId, actor: ALICE, decision: { kind: "approve" }, idempotencyKey: "k-2" });
+        after = String(((await events(w.store, second.runId)).filter((e) => e.type === "task.leased").at(-1)!.payload as { workerId: string }).workerId);
+      } finally {
+        w.close();
+      }
+    }
+    assert.notEqual(before, after, "the precondition: a restart changes the name, which is what costs the wait");
+
+    const LEASE_MS = 30_000;
+    const AT = 1_000;
+    const s = new LeasedScheduler({ leaseMs: LEASE_MS });
+    const ask = (workerId: string, now: number, state: "ready" | "leased"): readonly string[] =>
+      s
+        .select({
+          projection: { status: "running", tasks: { t: { taskId: "t", nodeId: "n", branch: "", state, attempt: 1, lease: { workerId: before, at: AT } } } },
+          graph: { plans: { n: { criticalPathLength: 0 } } },
+          nodes: new Map([["n", { id: "n", type: "tool" }]]),
+          maxParallelism: 4,
+          now,
+          workerId,
+        } as never)
+        .map((r) => String(r.task.taskId));
+
+    // THE COST IS ZERO ON THE CASE THAT SOUNDS WORST. A task genuinely in flight when the
+    // plane died is `leased`, and `reclaimable` expires EVERY holder including the one that
+    // took it — so the pre-restart plane had no head start to lose here.
+    assert.deepEqual(ask(before, 1_100, "leased"), [], "not even its own live lease is reclaimed early");
+    assert.deepEqual(ask(after, 1_100, "leased"), [], "so a restart costs a genuinely-leased task nothing");
+
+    // AND IT IS ONE LEASE ON THE CASE THAT ACTUALLY PAYS: a retry or a resolved gate returns a
+    // task to `ready` without clearing who last held it, and there the identity arm is what a
+    // restart loses.
+    assert.deepEqual(ask(before, 1_100, "ready"), ["t"], "the same plane takes its own ready-with-a-lease task back at once");
+    assert.deepEqual(ask(after, 1_100, "ready"), [], "the restarted one may not — this is the wait being measured");
+
+    // THE NUMBER, SEARCHED RATHER THAN ASSUMED. The first instant the restarted plane may take
+    // the task is the product's arithmetic, not a constant copied out of it.
+    for (const state of ["ready", "leased"] as const) {
+      let n = AT;
+      while (n < AT + 5 * LEASE_MS && ask(after, n, state).length === 0) n += 1;
+      assert.equal(n - AT, LEASE_MS + 1, `a restarted plane waits one leaseMs for a ${state} task, not ${String(n - AT)}ms`);
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
+// ── 5 · and the product's own judge agrees ──────────────────────────────────
 
 test("THE JOURNAL TWO PLANES PRODUCE PASSES `auditRun` WITH NO VIOLATIONS", async () => {
   // The producer is checked by the JUDGE the product ships, not by a bespoke assertion — and

@@ -578,6 +578,32 @@ function refuseRepeated(args: Args, name: string, consequence: string): void {
  * instead of attributing everything to one `worker-0`. `test/deployment/two-planes.test.ts`
  * reads those names back out of the journal and is the reason this is not speculative.
  * The scheduler having no caller is TODO.md §B.1, and it is that item, not this one.
+ *
+ * WHAT A RESTART COSTS, WHICH IS THE TRADE THIS FIX MADE AND THE NUMBER §A.17 ASKED FOR.
+ * A restarted plane comes back under a new pid, so it CANNOT reclaim its own pre-restart
+ * leases through the identity arm — after a restart those leases are foreign, and it waits for
+ * `reclaimable()` instead. Driven against `LeasedScheduler.select` with `leaseMs` 30,000 and a
+ * lease taken at t=1000, asked as the pre-restart name and as the post-restart one:
+ *
+ *                     ready-with-a-lease            leased
+ *     same plane      selectable from t=1000        NOT before t=31001
+ *     restarted       NOT before t=31001            NOT before t=31001
+ *
+ * So the wait is BOUNDED AT ONE `leaseMs` (the boundary is inclusive-live, so the first
+ * eligible instant is `at + leaseMs + 1`), it applies only to tasks that are `ready` while
+ * still carrying a lease, and it is ZERO for a task that was actually `leased` — `reclaimable`
+ * expires everyone equally, including the holder, so a restart costs that case nothing at all.
+ * Less than one `leaseMs` in practice: the redeploy itself burns part of the window, and the
+ * residual is `max(0, leaseMs - downtime)`. `test/deployment/two-planes.test.ts` measures it.
+ *
+ * ACCEPTED RATHER THAN FIXED, and the reason is that no identity can do better here. The fix
+ * would need a name stable across a restart that still separates two live planes on one host;
+ * `hostname:pid` cannot be both, and neither can anything the JOURNAL supplies — nothing
+ * journals a plane starting or stopping, so a fold cannot tell "A restarted" from "B booted
+ * beside A". A name that guessed would re-open exactly the defect above, on the side that
+ * costs a double execution rather than a wait. Anything stronger needs a coordinator, and D.2
+ * is single machine / single tenant for that reason. One `leaseMs` is the price, and it is the
+ * SAME price a crashed plane's work already pays — which is what the lease mechanism is for.
  */
 let workspaceOrdinal = 0;
 function planeWorkerId(): string {
@@ -3445,6 +3471,27 @@ export async function runClockTick(
     // never-driven case the dispatcher's withholding creates; `retryAfter <= now` is the
     // backoff case this clock was written for. See the header for the three things that keep
     // the wider predicate from fighting a live driver.
+    //
+    // THE SET THIS PREDICATE DOES NOT COVER, named because the sweep above claims a re-fold
+    // fixes everything and this is the one place it does not. A plane that dies BETWEEN
+    // `task.leased` and `task.committed` leaves that task `leased` in the journal forever —
+    // the state only advances when its holder commits, and its holder is gone. Such a run is
+    // `running` with no `ready` task, so `due` is false at every tick from here to the heat
+    // death of the deployment. Measured on a real journal (a `loom run` of a one-tool graph,
+    // truncated after its `task.leased`, then folded by a fresh `openWorkspace`):
+    //
+    //     status after restart: running   tasks: [{ apply@root#0, leased }]
+    //     run clock visited: 2   drove: []          ← in view, never driven
+    //
+    // WIDENING THIS LINE WOULD NOT FIX IT, which is why it is not widened. `advance` selects
+    // through `InProcessScheduler`, whose `eligible` returns `ready` tasks only; the arm that
+    // reclaims a dead holder's lease is `LeasedScheduler.reclaimable`, and `openWorkspace`
+    // passes no scheduler. So driving such a run would fold it and do nothing. This is the
+    // COST of TODO.md §B.1 ("either plug it in or delete it"), measured rather than argued,
+    // and it belongs to that row: the missing piece is a lease DEADLINE, which is the one
+    // thing that can tell a dead holder from a slow one, and there is no honest signal here
+    // without it — a tick landing mid-`advance` sees exactly the same journal.
+    // `test/deployment/run-clock-survives-restart.test.ts` holds the reproduction.
     const due = Object.values(p.tasks).some((t) => t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now));
     if (!due) continue;
     index ??= graphsByHash(ws).index;
@@ -3457,6 +3504,62 @@ export async function runClockTick(
   }
   return { visited: visible.map((r) => r.runId), truncated };
 }
+
+/**
+ * EVERY LONG-LIVED MUTABLE CONTAINER IN THIS FILE, AND WHAT LOSING ONE COSTS.
+ *
+ * The sweep TODO.md §A.16 asked for, done once and written down here so the next reader
+ * inherits the answers instead of re-deriving them. The unit is the PRODUCER and not the
+ * FIELD — that is the generalisable lesson `oversight-survives-restart.test.ts` states, and
+ * the reason is mechanical: a restore arm belongs to whatever BUILDS the container, so a
+ * per-field audit finds one field and misses its sibling in the same closure.
+ *
+ * HOW THE SET WAS CLOSED, because "every" is a claim that has to be checkable. Two passes: a
+ * census of every module-level binding (`^(export )?(const|let|var|class)`), of which exactly
+ * one — `workspaceOrdinal` — is mutable and the other thirty-six are frozen primitives or
+ * literal tables; and every container construction (`new Map(`, `new Set(`, a mutable array
+ * or object literal) checked for whether it outlives the call that built it. Everything else
+ * is per-call and cannot survive anything. The question asked of each survivor is the one the
+ * first non-negotiable asks: WHAT READS IT, and what does a decision do when a restart hands
+ * it back empty?
+ *
+ *   1 · `planeWorkerId`'s `workspaceOrdinal`. Read by the lease identity, journaled into
+ *       `task.leased`, consumed by `LeasedScheduler.select`'s "my own lease, take it back"
+ *       arm. Empty is harmless for UNIQUENESS — the pid differs — so it costs neither
+ *       correctness nor a fold. It costs a WAIT, and the measured number is at
+ *       `planeWorkerId`. This is §A.17 and it is the only member whose cost is not a re-fold.
+ *   2 · `fallbackFeed`'s `listeners`. Read by `FallbackAdapter`'s catch. Empty means nobody
+ *       hears a fall-through until `serve` builds `providerNotice`, which happens before the
+ *       socket binds. A report that decides nothing. MEMO.
+ *   3 · `ObservedModelRegistry`'s `registered`/`calls` and `ObservedToolRegistry`'s `calls`.
+ *       Read by `loadExtensionModules`'s "this module registered nothing" refusal and by the
+ *       boot banner. Rebuilt from argv at every boot, before the workspace exists. CONFIG.
+ *   4 · `startMcp`'s `clients`. Read only by teardown. Empty after a restart is CORRECT: the
+ *       children died with the plane that spawned them. CONFIG.
+ *   5 · `runDispatcher`'s `inFlight`. The ceiling and the dedupe set. Empty is the safe
+ *       direction — fewer runs at once, never more — and costs a re-fold. Its docstring names
+ *       the set that claim covers and the one it does not.
+ *   6 · `providerNotice`'s `down`. Its own docstring says memo and says why. MEMO.
+ *   7 · `startRunClock`'s `running`, `failing`, `toldAboutCeiling`. Memos over what to SAY;
+ *       losing them costs a repeated line. The exception in this producer was `rot.offset`,
+ *       which decided WHICH RUNS RAN and is gone — `run-clock-survives-restart.test.ts` is
+ *       the defect it was, and is why this producer is the one already swept.
+ *   8 · `startGateClock`'s `running`, `failing`. The same latch, the same cost.
+ *   9 · `armForeignGates`'s `armed`, built by `startGateClock`. A memo on `headSeq`. Losing
+ *       it makes the plane do MORE work and never less: one re-fold per gated run in view.
+ *       That direction is also its only repair — a run whose graph was missing when the memo
+ *       first saw it is recorded as done at a `headSeq` that cannot advance (it is suspended),
+ *       so publishing the graph later re-arms nothing until a restart clears the map.
+ *  10 · `controlPlaneOptions`'s `graphs`, a `discoverGraphs` snapshot the plane holds for its
+ *       lifetime. Rebuilt from `graphs/` at every boot. CONFIG — that a graph published AFTER
+ *       boot is invisible until the next one is a staleness property, the opposite direction
+ *       from this sweep's question.
+ *
+ * SO: ten producers, nine of which lose only work, and the tenth loses a bounded wait. The
+ * `Workspace`'s own fields are deliberately not on this list — they are read-only after
+ * `openWorkspace` and are rebuilt from the workspace DIRECTORY, which is the same input the
+ * pre-restart plane read, so a restart cannot hand any of them back different.
+ */
 
 /**
  * HOW MANY RUNS THIS PROCESS DRIVES AT ONCE — a ceiling, never a door.
@@ -3480,6 +3583,12 @@ export async function runClockTick(
  * journal on the next tick and offers it again. The slots and the dedupe set are process
  * memory that a restart empties — which costs at most one repeated fold, because nothing a
  * decision reads lives here.
+ *
+ * THE SET THAT LAST SENTENCE COVERS, since it used to read as total. It covers runs this
+ * object WITHHELD: never dispatched, so their task never left `ready`, so the clock re-offers
+ * them. It does NOT cover a run whose `advance` was in flight when the process died — that
+ * task is `leased` in the journal and no fold makes it `ready` again. Measured, and the reason
+ * it is a §B.1 cost rather than a defect of this object, at `runClockTick`'s `due` predicate.
  *
  * WHAT IT DOES WHEN IT CANNOT DECIDE: it does not dispatch. The undecidable case is "I cannot
  * tell whether that slot released" — an `advance` whose promise never settles — and the slot
