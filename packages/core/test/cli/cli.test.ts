@@ -405,15 +405,19 @@ test("trace prints spans and asserts graph conformance", async () => {
 });
 
 test("a subgraph is not a tool, and the trace stops calling it one", async () => {
-  // D9.1 fixes the span taxonomy at eight names and registers `loom.effect` as
-  // designed-not-built, so every effect folds into `loom.model` or `loom.tool` — and the fold
-  // sends `subgraph` to `loom.tool`. Measured by driving one through `bin/loom`: a parent whose
-  // ONLY node is a `subgraph` traced as `loom.tool`, so the line standing for a whole child
-  // graph called it a tool, and nothing in the output led to the child's own run.
+  // Measured by driving one through `bin/loom`: a parent whose ONLY node is a `subgraph` traced
+  // as `loom.tool`, so the line standing for a whole child graph called it a tool, and nothing
+  // in the output led to the child's own run.
   //
-  // The `effect.kind` attribute was on the span the whole time. Printing it is a rendering fix;
-  // adding a `loom.subgraph` span would be a taxonomy change, which is a design decision and is
-  // recorded as one rather than taken here.
+  // THE RENDERING FIX CAME FIRST AND THE TAXONOMY FIX CAME AFTER, and this assertion has now
+  // seen both. Printing the `effect.kind` attribute — which was on the span the whole time —
+  // stopped the line lying while the name still said `loom.tool`; this comment used to record
+  // that "adding a `loom.subgraph` span would be a taxonomy change, which is a design decision
+  // and is recorded as one rather than taken here". That decision was then taken, and the
+  // answer was not `loom.subgraph`: TODO C.1 already registered `loom.effect` as designed and
+  // unbuilt, and `telemetry/spans.ts` now folds every effect kind that is neither a model call
+  // nor a tool call — `subgraph` and `random` — onto it. So the parenthesis is still printed
+  // (`loom.effect` does not say WHICH effect) and the name no longer needs it to be honest.
   const d = emptyDir();
   try {
     mkdirSync(join(d.dir, "graphs"), { recursive: true });
@@ -450,7 +454,7 @@ test("a subgraph is not a tool, and the trace stops calling it one", async () =>
 
     const r = await run(["trace", runId, "--graph", parentFile, "--workspace", d.dir]);
     assert.equal(r.code, 0, r.err);
-    assert.match(r.out, /loom\.tool \(subgraph\)/, `the child graph must not read as a plain tool:\n${r.out}`);
+    assert.match(r.out, /loom\.effect \(subgraph\)/, `the child graph must not read as a plain tool:\n${r.out}`);
 
     // AND THE TRACE FOLLOWS IT. Naming the effect kind stopped the line LYING; it did not
     // make the child reachable, and the run below is where the reader wanted to go. Measured

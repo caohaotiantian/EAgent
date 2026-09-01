@@ -121,6 +121,13 @@ test("a driven subgraph produces ONE span, and it carries the child's run id and
   assert.ok(child, "the fold produced no route into the child");
   assert.equal(child, `${runId}~delegate@root#0`, "the child's id is derived from the parent's, and the trace says which");
 
+  // AND IT IS NOT CALLED A TOOL. `subgraph.started` and `effect.started` both mint this span
+  // and `start` is a no-op on an open id, so the name is whichever arm fires first — which
+  // makes a DRIVEN run the only place the two arms are checked against each other. They agreed
+  // on `loom.tool` before, which is why a child run wore a tool's name for so long.
+  assert.equal(sub.name, "loom.effect", "a whole child graph traced as a tool call");
+  assert.ok(!("tool.attempt" in sub.attributes), "a tool.* key on a span that is not a tool call");
+
   assert.equal(sub.attributes["subgraph.status"], "succeeded", "the child's own verdict, which the parent's task status does not carry");
   assert.equal(sub.attributes["effect.outcome"], "completed");
   assert.equal(sub.attributes["subgraph.ref"], LEAF_REF);

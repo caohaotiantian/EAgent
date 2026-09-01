@@ -434,19 +434,61 @@ believes a feature is present. This section was thirteen rows and is two.
 **This block gates the UI direction.** A richer operator surface over a plane that is not emitting
 is a better view of nothing.
 
-- **C.1 · Seven designed span names are unbuilt.** `loom.request`, `loom.compile`,
-  `loom.schedule.pick`, `loom.context.assemble`, `loom.effect`, `loom.scheduler.tick`,
-  `loom.replay`. **Eight names ARE minted, and none of them is one of the seven above**:
-  `loom.run`, `loom.gate`, `loom.task`, `loom.policy`, `loom.tool`, `loom.state.reduce`,
-  `loom.checkpoint` — the seven that
+- **C.1 · Six designed span names are unbuilt, and five of the six are closed decisions
+  rather than open work.** **`loom.effect` was built 2026-09-01** and the count went 7 → 6 by a
+  build. **Nine names are minted now**: `loom.run`, `loom.gate`, `loom.task`, `loom.policy`,
+  `loom.effect`, `loom.state.reduce`, `loom.checkpoint` — the seven that
   `/usr/bin/grep -an 'name: "loom\.' packages/core/src/telemetry/spans.ts` returns — plus
-  **`loom.model`, which that grep misses**, because `spans.ts:784` mints it through a ternary
-  (`name: e.payload.kind === "model" || … ? "loom.model" : "loom.tool"`). So the grep undercounts
-  the built set by one. **`loom.effect` carries the opposite trap**: `loom.effect.key` is an
-  ATTRIBUTE at `spans.ts:788`, so a bare `grep -c` on it returns nonzero and reads as built.
-  **The count was 8 and is 7** — `loom.schedule.admit` was struck when
-  §D decided admission control will never be built, a count moving down by a decision rather than
-  by a build. The members survive only in git history; the design corpus was deleted at `f975f9f`.
+  **`loom.model` and `loom.tool`, which that grep misses**, because both are minted through one
+  ternary. So the grep undercounts the built set by TWO, and the seventh literal it does see
+  used to be the `subgraph.started` arm saying `loom.tool` — the mis-classification itself.
+  **`loom.effect` used to carry the opposite trap**: `loom.effect.key` is an ATTRIBUTE, so a
+  bare `grep -c` on it returned nonzero and read as built while no span bore the name.
+
+  **What `loom.effect` fixed.** `effect.started.kind` is a closed six-member union
+  (`model | tool | subgraph | summarize | random | compensate`) and the fold partitioned it with
+  `modelish` and its NEGATION — but `!modelish` is not `tool`. Measured by driving a `function`
+  body of `Math.random()` through `Engine`: the PRNG seed the engine journals so a body can be
+  replayed folded to `loom.tool  effect.kind=random  tool.name=undefined`, a seed draw named a
+  tool call, and it carried `tool.attempt` too. `subgraph` had the same defect, papered over in
+  `cli.ts` by printing the kind in parentheses. The partition is now three arms:
+  `model|summarize → loom.model`, `tool|compensate → loom.tool` (a compensation IS a tool call —
+  `#callTool` journals `tool.called` on both paths), `subgraph|random → loom.effect`. NOT a
+  generic parent over all four: that would either double the span count this file's header
+  budgets or delete the `gen_ai.*`/`tool.*` groupings that are the reason those names exist.
+
+  **The remaining six, each with the event that would have to exist.** The constraint is that
+  `spansFrom` is a pure fold over one journal, so a name is buildable only if the journal
+  already covers it.
+  - **`loom.request`** — no journal event covers ingress; the first append is `run.submitted`.
+    Not fixable by an event: a request is accepted before a runId exists, so it has no journal
+    to go in. Needs a durable stream that is not keyed on a run.
+  - **`loom.compile`** — **not "possible but redundant", MEASURED IMPOSSIBLE.** `run.submitted`,
+    `run.compiled`, `run.started` and the entry `task.ready`s are ONE append (engine.ts:1526,
+    the only site), and `journal/store.ts`'s `prepare` stamps one `ts` per batch. Driven with a
+    clock ticking +7ms per call, all four came back `ts: 1700000000014`, so a span bracketed
+    submitted→compiled is zero-width by construction. Worse, `compileOrThrow` runs in the
+    CALLER — `engine.submit` receives an already-compiled graph — so `run.compiled` records the
+    RESULT of work that finished before the journal existed. Its three attributes are already
+    on `loom.run`. Would need a `durationMs` on `run.compiled`, i.e. a `journal/events.ts`
+    change, which is the kernel.
+  - **`loom.schedule.pick`** — the INTERVAL is journaled (`task.ready` → `task.leased`, and
+    C.3 notes the wait is already a span event on `loom.task`); the DECISION is not. The name
+    means "which task did the scheduler choose, out of what queue, against what limit", and
+    three of its four designed attributes (`queue.depth`, `concurrency.used`,
+    `concurrency.limit`) are scheduler state no event carries. A span minted with one of four
+    would manufacture C.2 defects. Needs a `schedule.picked` event carrying those three.
+  - **`loom.context.assemble`** — `run/context.ts` assembles and journals nothing.
+  - **`loom.replay`** — the gap is TWO deep, not one. `replayRun` submits a shadow run through
+    the ordinary `engine.submit`, so its journal carries no marker; and the shadow lives in a
+    fresh `MemoryStateStore` (replay.ts:640) that dies with the call, so there is no durable
+    replay journal to fold at all. Needs an optional `replayOf: RunId` on `run.submitted` —
+    which has optional-field precedent in `submittedBy` — plus a durable shadow store.
+  - **`loom.scheduler.tick`** — C.3, and a design gap rather than a wiring one: there is no
+    tick loop in `run/scheduler.ts` to instrument.
+
+  `loom.schedule.admit` is not among the six: §D refused admission control, so the count went
+  8 → 7 by a decision. This is the first time it has moved by a build.
 
 - **C.2 · Eleven documented span attributes are set on no built span.** `budget.cost_usd`,
   `trigger.kind` (`loom.run`); `node.type` (`loom.task`); `capability`,
