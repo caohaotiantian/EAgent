@@ -190,8 +190,13 @@ test("NEITHER AN ANONYMOUS PLANE NOR A SERVICE TOKEN MAY REWIND, AND BOTH MAY ST
       assert.equal(body.error?.code, "E_HUMAN_APPROVAL_REQUIRED", what);
       // THE REFUSAL SAYS WHAT TO DO, because this is a 403 where the same request used to get a
       // 200 and the caller is an operator who has a run in front of them, not a test.
-      assert.match(String(body.error?.message), /Authenticate as a person/, what);
-      assert.match(String(body.error?.message), /use cancel/, what);
+      // NAMES THE FLAG, not a posture: this 403 reaches an operator on a plane that may have no
+      // identity source at all, where "authenticate as a person" is not something they can act on.
+      assert.match(String(body.error?.message), /--identity-file/, what);
+      // AND SAYS WHAT `cancel` IS NOT. README's crash-recovery row sends an operator to rewind
+      // precisely because it re-arms a stuck lease, which cancel does not — so offering cancel as
+      // the alternative would name a way out that is not one for the case they arrived from.
+      assert.match(String(body.error?.message), /not a substitute/, what);
 
       // THE CONTROL, and it is the same one `steer` has: the identical caller on the identical
       // run may still STOP it. Refusing is always allowed; it is the undoing that is not.

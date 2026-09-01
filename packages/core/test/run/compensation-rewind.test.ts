@@ -281,10 +281,15 @@ test("ONLY A HUMAN MAY REWIND, WHETHER OR NOT THERE IS ANYTHING TO UNDO", async 
   const refused = (e: unknown): true => {
     assert.ok(isLoomError(e), String(e));
     assert.equal(e.code, CODES.E_HUMAN_APPROVAL_REQUIRED, e.message);
-    // Both ways out are named, because over HTTP this refusal is a 403 where a service token
-    // used to get a 200, and an operator meets it with a run half-finished in front of them.
-    assert.match(e.message, /Authenticate as a person/, "the message says how to become allowed");
-    assert.match(e.message, /use cancel/, "and what still works for the caller it just refused");
+    // THE WAY OUT IS NAMED AS A FLAG, not as a posture. Over HTTP this refusal is a 403 where a
+    // service token used to get a 200, and an operator meets it with a run half-finished in front
+    // of them — on a plane that may have no identity source at all, where "authenticate as a
+    // person" is not something they can act on.
+    assert.match(e.message, /--identity-file/, "the message names the flag that makes the caller allowed");
+    // AND IT SAYS WHAT `cancel` IS NOT. README sends an operator here to recover a STUCK LEASE,
+    // which a rewind re-arms and a cancel does not; offering cancel as the alternative for that
+    // case names a way out that is not one.
+    assert.match(e.message, /not a substitute/, "and refuses to offer cancel as an equivalent");
     return true;
   };
 

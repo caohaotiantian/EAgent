@@ -2760,7 +2760,14 @@ export class Engine {
     if (by.kind !== "human") {
       throw err.policy(
         CODES.E_HUMAN_APPROVAL_REQUIRED,
-        `rewinding run ${runId} dispatches real-world undos and suppresses the record of what it undid, decisions a human already made included; only a human may do that. Authenticate as a person, or use cancel, which stops the run without touching what it already did`,
+        `rewinding run ${runId} dispatches real-world undos and suppresses the record of what it undid, decisions a human already made included; only a human may do that. ` +
+          // NAMES THE FLAG, because "authenticate as a person" is not actionable on a plane that
+          // has no identity source at all — and the alternative below is deliberately NOT offered
+          // as an equivalent. README sends an operator here to recover a STUCK LEASE, which a
+          // rewind re-arms and `cancel` does not; saying "use cancel instead" for that case would
+          // name a way out that is not one.
+          `Give the plane an identity source (\`--identity-file\`, or an \`--extension-module\` that registers one) ` +
+          `and send a person\u2019s credential. \`cancel\` stops a run but does NOT re-arm a lease, so it is not a substitute here`,
         { details: { runId, atSeq, actor: by } },
       );
     }
