@@ -6586,7 +6586,16 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     const submitted = baseEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
     if (submitted === undefined) continue;
     // The RECORDED input, verbatim. This is the line that makes the exam older than the student.
+    //
+    // AND ITS EXTERNALISED HALF, FETCHED BACK INTO A VALUE. A recording whose input crossed
+    // `EXTERNALISE_ABOVE_BYTES` keeps it in `ws.payloads` under the BASELINE run's id, and the
+    // candidate is a new run with its own id and its own payload scope — so the handle cannot
+    // travel and the value has to. Without this the candidate ran the exam with the question
+    // missing and scored as though the graph were at fault.
     const inputs = { ...submitted.payload.inputs };
+    for (const [channel, ref] of Object.entries(submitted.payload.external ?? {})) {
+      inputs[channel] = await ws.payloads.get(t.runId, ref);
+    }
 
     const { runId } = await startAndDrive(ws, {
       graph: candidate,

@@ -1703,6 +1703,21 @@ export class Engine {
       ...(budgetWallMs === undefined ? {} : { runWallMs: budgetWallMs }),
     });
 
+    // THE LAST INLINE COPY OF A PAYLOAD, and the reason it was left behind was recorded as
+    // "externalising it needs a store the SUBMIT path can reach, which `submit` does not have
+    // today". Measured: that is false on both readings. ACCESS — `this.#payloads` is an engine
+    // field, in scope here as it is in `#commit`. ORDER — `#externalise` needs a runId and a
+    // compiled graph and nothing else; `store.put` is content-addressed, so there is no "point
+    // at something a node produced" for inputs to be too early for. `ctx` is built above and
+    // carries both. The real obligation was never the store: it was that `run.submitted` is
+    // the event a REPLAY re-submits from, which is why `run.submitted.external` is declared in
+    // `journal/events.ts` and resolved in `run/replay.ts` rather than fetched by the fold.
+    //
+    // Measured on the same three-node chain moving one 300 KB document that
+    // `payload-externalisation.test.ts` uses: the externalised journal was 304,556 bytes, of
+    // which seq 1 alone was 300,261 — the whole of the residual. It is now 4,556.
+    const seeded = await this.#externalise(ctx, input.inputs);
+
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
     await ctx.log.append([
@@ -1711,7 +1726,8 @@ export class Engine {
         payload: {
           workflow: input.workflow ?? input.graph.spec.metadata.name,
           graphHash: input.graph.graphHash,
-          inputs: input.inputs,
+          inputs: seeded.values,
+          ...(seeded.external === undefined ? {} : { external: seeded.external }),
           idempotencyKey: input.idempotencyKey ?? runId,
           configDigest: digest(this.#policyOpts),
           ...(input.submittedBy === undefined ? {} : { submittedBy: input.submittedBy }),

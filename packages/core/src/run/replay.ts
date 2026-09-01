@@ -581,7 +581,35 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   for await (const e of opts.store.read(opts.runId, 1)) events.push(e);
 
   const submitted = events.find((e) => isEvent(e, "run.submitted"));
-  const inputs = submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.inputs : {};
+  const recordedInputs = submitted !== undefined && isEvent(submitted, "run.submitted") ? submitted.payload.inputs : {};
+  // AN EXTERNALISED INPUT IS FETCHED HERE, NOT CARRIED FORWARD AS A HANDLE, and the reason is
+  // the runId. A `PayloadRef` is scoped to the run that stored it (`journal/payloads.ts`: the
+  // key is `(runId, digest)`), and the shadow gets a fresh runId — so handing `submit` the
+  // recorded handle would name a cell the shadow cannot address. The value comes back under
+  // the ORIGINAL run's scope and the shadow's own `submit` re-puts it under its own, which
+  // costs one copy and is what makes the shadow a self-contained run.
+  //
+  // NO STORE PLUS A HANDLE IS A REFUSAL, the same one `Engine.#resolveReads` makes: the
+  // recording's inputs exist and are simply unreachable from here, and a shadow submitted
+  // WITHOUT them would run a different run and report `match: false` about the recording.
+  const submittedExternal =
+    submitted !== undefined && isEvent(submitted, "run.submitted") ? (submitted.payload.external ?? {}) : {};
+  const inputs: Record<string, unknown> = { ...recordedInputs };
+  if (Object.keys(submittedExternal).length > 0) {
+    const store = opts.engine.payloads;
+    if (store === undefined) {
+      throw err.internal(
+        CODES.E_PAYLOAD_UNRESOLVED,
+        `run ${opts.runId} externalised its input${Object.keys(submittedExternal).length === 1 ? "" : "s"} ${Object.keys(
+          submittedExternal,
+        )
+          .map((c) => `"${c}"`)
+          .join(", ")} — replaying it needs the same \`payloads\` store the recording was written with`,
+        { details: { runId: opts.runId, channels: Object.keys(submittedExternal) } },
+      );
+    }
+    for (const [channel, ref] of Object.entries(submittedExternal)) inputs[channel] = await store.get(opts.runId, ref);
+  }
 
   // The SUBMITTED hash, not `original.graphHash`. The projection's field folds
   // `graph.mutated` too, so on a run that rewrote itself mid-flight it holds the FINAL

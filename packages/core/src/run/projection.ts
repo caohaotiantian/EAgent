@@ -804,7 +804,13 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   // ── run lifecycle ─────────────────────────────────────────────────────────
   if (isEvent(e, "run.submitted")) {
     p.graphHash = e.payload.graphHash;
-    p.channels = { ...p.channels, ...e.payload.inputs };
+    // THE SAME MERGE `state.reduced` DOES, for the same reason: an input above the
+    // externalisation threshold is seeded into the projection as a handle, and `#resolveReads`
+    // fetches it for whichever node declares it exactly as it fetches a handle a node wrote.
+    // No `delete` sibling here — this is the first event of a run, so `p.external` is empty and
+    // there is no stale entry an input could be shadowing.
+    p.channels = { ...p.channels, ...withHandles(e.payload.inputs, e.payload.external) };
+    for (const [c, ref] of Object.entries(e.payload.external ?? {})) p.external[c] = ref;
     // FIRST WINS, INCLUDING WHEN THE FIRST ANSWER IS "NOBODY". The read-model column the
     // next phase adds is written on the row-creating INSERT and never on the update —
     // `first_ts`'s shape — so a second `run.submitted` leaves it alone whatever it says. If

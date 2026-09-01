@@ -482,7 +482,15 @@ export function foldTrajectory(
       workflow = e.payload.workflow;
       graphHash = e.payload.graphHash;
       authoredGraphHash = e.payload.graphHash;
-      inputs = e.payload.inputs;
+      // THE EXTERNALISED INPUTS ARE PUT BACK AS HANDLES, not dropped, and this fold stays pure
+      // — it constructs the marker and fetches nothing, exactly as `withHandles` does in the
+      // projection. `defaultBucket` digests `shapeOf(inputs)`, so an input that vanished from
+      // this map would change a run's COHORT: two runs of one workflow would bucket apart on
+      // nothing but whether one of their documents crossed 64 KiB.
+      inputs = { ...e.payload.inputs };
+      for (const [channel, ref] of Object.entries(e.payload.external ?? {})) {
+        (inputs as Record<string, unknown>)[channel] = payloadHandle(ref);
+      }
       continue;
     }
     if (isEvent(e, "graph.mutated")) {

@@ -25,6 +25,7 @@ import { canonicalize } from "../../src/canonical.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { RunId } from "../../src/ids.ts";
+import { isEvent, type JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, memoryPayloads, type PayloadStore } from "../../src/journal/payloads.ts";
 import type { StateStore } from "../../src/journal/store.ts";
@@ -69,10 +70,34 @@ function chainSpec(hops: number): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+/**
+ * A chain whose big value is PRODUCED rather than submitted: the input is a short seed that
+ * stays inline, and `h0` inflates it. That separates the two directions externalisation runs
+ * in — an externalised WRITE and an externalised INPUT — so a test can pin one without the
+ * other, which `chainSpec` cannot do because its `doc` is both.
+ */
+function growSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "grow", project: "payloads", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { doc: { type: "string", reduce: "replace" }, out: { type: "string", reduce: "replace" } },
+    inputs: ["doc"],
+    outputs: ["out"],
+    nodes: [
+      { id: "h0", type: "function", reads: ["doc"], writes: ["doc"], function: { ref: "function/grow@stable" } },
+      { id: "tail", type: "function", reads: ["doc"], writes: ["out"], function: { ref: "function/measure@stable" } },
+    ],
+    edges: [{ id: "e1", from: "h0", to: "tail", kind: "seq" }],
+  } as unknown as GraphSpec;
+}
+
 /** `h*` passes the document on unchanged; `tail` reports what it actually received. */
 function functions(): FunctionRegistry {
   const f = new FunctionRegistry();
   f.register("function/hop@stable", (view) => ({ writes: { doc: view.get<string>("doc") } }));
+  f.register("function/grow@stable", () => ({ writes: { doc: BIG } }));
   f.register("function/measure@stable", (view) => {
     const doc = view.get<string>("doc");
     // WHAT THE BODY SEES, recorded as a channel so the assertion is about the run's own
@@ -263,13 +288,74 @@ test("A REPLAY OF AN EXTERNALISED RUN MATCHES — and does not, if the replayer 
   });
   assert.equal(same.match, true, JSON.stringify(same.frames.filter((f) => !f.match).map((f) => f.kind)));
 
+  // A REPLAYER WITH NO STORE IS TWO DIFFERENT OUTCOMES NOW, and the split is the point.
+  //
+  // An externalised WRITE it can still replay: it re-executes, journals the value inline where
+  // the recording journaled a handle, and the frame comparison reports the disagreement. That
+  // is this graph — a short seed input, a node that inflates it — and it is the case the
+  // `loom replay` defect above was found on.
+  const grown = compile(growSpec());
+  const growRun = await live.engine.submit({ graph: grown, inputs: { doc: "seed" } });
+  assert.equal((await live.engine.advance(growRun)).status, "succeeded");
   const without = await replayRun({
     store: live.store,
-    runId,
-    graph,
+    runId: growRun,
+    graph: grown,
     engine: { functions: functions(), policy: { granted: [], systemFloor: "out" }, now: () => NOW },
   });
   assert.equal(without.match, false, "a replayer that externalises nothing must not silently agree");
+
+  // An externalised INPUT it cannot replay AT ALL, and it refuses instead of reporting. The
+  // shadow is seeded from `run.submitted`, so a replayer that cannot fetch the recording's
+  // inputs would have to submit the run WITHOUT them — a different run, whose `match: false`
+  // would be a true statement about the wrong thing. Refusing is always allowed.
+  await assert.rejects(
+    () =>
+      replayRun({
+        store: live.store,
+        runId,
+        graph,
+        engine: { functions: functions(), policy: { granted: [], systemFloor: "out" }, now: () => NOW },
+      }),
+    (e: unknown) => (e as { code?: string }).code === "E_PAYLOAD_UNRESOLVED",
+    "a replayer that cannot reach the recorded inputs must refuse, not judge",
+  );
+});
+
+test("THE SUBMITTED INPUTS LEAVE THE JOURNAL TOO — the last inline copy of a payload", async () => {
+  // A.14. The residual after externalisation shipped was `run.submitted.inputs`, and the
+  // recorded blocker was "externalising it needs a store the SUBMIT path can reach, which
+  // `submit` does not have today". Measured on this graph, that is false twice over: the store
+  // is the engine's own `#payloads` field, and `store.put` is content-addressed so an input
+  // arriving before any node has run is not too early for anything.
+  const graph = compile(chainSpec(3));
+  const rigged = rig(memoryPayloads());
+  const runId = await rigged.engine.submit({ graph, inputs: { doc: BIG } });
+  const p = await rigged.engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+
+  // NOT ONE EVENT CARRIES THE DOCUMENT. Measured per event rather than in total, because a
+  // total under a bound is also what "one copy in a journal that shrank elsewhere" looks like.
+  for await (const e of rigged.store.read(runId, 1)) {
+    const bytes = Buffer.byteLength(canonicalize(e.payload), "utf8");
+    assert.ok(bytes < BIG.length / 10, `${e.type} at seq ${String(e.seq)} still carries ${String(bytes)} bytes`);
+  }
+
+  // AND THE DECLARATION IS ON THE EVENT, not inferred from the shape of `inputs`. This is the
+  // same rule `task.committed.external` carries: a submitter who could name a payload by
+  // writing `{$payload: …}` into `inputs` could name one it never produced.
+  const submitted: JournalEvent[] = [];
+  for await (const e of rigged.store.read(runId, 1)) if (isEvent(e, "run.submitted")) submitted.push(e);
+  assert.equal(submitted.length, 1);
+  const ev = submitted[0]!;
+  assert.ok(isEvent(ev, "run.submitted"));
+  assert.equal(ev.payload.inputs["doc"], undefined, "the document is not in `inputs`");
+  assert.equal(ev.payload.external?.["doc"]?.digest, p.external["doc"]?.digest, "it is declared in `external`");
+
+  // AND `#resolveReads` ALREADY REACHED IT. The input-seeded handle needed no new machinery:
+  // every node that declares `doc` was handed the 300,000 characters, synchronously, which is
+  // what the last node reports.
+  assert.equal(p.outputs["out"], `string:${BIG.length}`, "the last node saw the whole document");
 });
 
 test("A CHANNEL AN EXPRESSION CAN REACH IS NEVER ELIGIBLE", () => {
