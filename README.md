@@ -205,8 +205,12 @@ comment:
 ## Extending it, and where that stops
 
 Read this before you fork, not after. Loom's stated property is *unlimited extensibility*, and the
-honest version of that sentence names its set. **Ten things need no fork. Five do**, and the two
+honest version of that sentence names its set. **Twelve things need no fork. Three do**, and the two
 lists below were each driven through the shipped binary rather than read off a header.
+
+Both counts moved on 2026-09-01, in the same direction, from one change. The fork list has been six,
+then seven when an undercount was found, then five, and is now **three** — every row that was there
+because *nobody built the seam* is gone, and what is left is three rows that are there for a reason.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 
@@ -219,70 +223,67 @@ lists below were each driven through the shipped binary rather than read off a h
 | a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
 | a tool | `--mcp-file` — any MCP server, stdio | driven against a 30-line stdio server: `loom run --mcp-file …` reaches its tool as `mcp__demo__reverse`, holding capability `mcp:demo`, and it GATES before it runs, because every MCP tool is irreversible. `test/mcp/client.test.ts` is the shipped reproduction |
 | a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl`. A keyless endpoint says so: `"apiKeyEnv": null` | the adapters row `{"provider":"openai","name":"local","baseUrl":"http://127.0.0.1:9/v1","apiKeyEnv":null}`, in a file that also carries `routes` → `ok`, exit 0; the same row *without* `apiKeyEnv` → `E_CONFIG_INVALID: … adapters[0] ("local") needs the environment variable OPENAI_API_KEY, which is not set` |
-| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it | a 25-line module on an invented wire, driven offline: an `agent` node routed to it answers `"draft": "[echowire] echo-1 answered"`, and `loom replay` of that run *without* the module → `{"match": true, "hermetic": true}`. `test/cli/extension-module.test.ts` is the shipped reproduction. `examples/extensions/bedrock-converse.mjs` is the worked real-provider version and needs an AWS signer it deliberately does not ship, so it is a reference and not a reproduction |
+| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools, channels, identity}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it | a 25-line module on an invented wire, driven offline: an `agent` node routed to it answers `"draft": "[echowire] echo-1 answered"`, and `loom replay` of that run *without* the module → `{"match": true, "hermetic": true}`. `test/cli/extension-module.test.ts` is the shipped reproduction. `examples/extensions/bedrock-converse.mjs` is the worked real-provider version and needs an AWS signer it deliberately does not ship, so it is a reference and not a reproduction |
 | an in-process tool | `--extension-module` — the same module's `tools.register(…)`; it is registered before the grant list is derived, so its capability is held | `test/cli/extension-module.test.ts` |
-| a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | see the fork list's note on transports |
+| a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | a file with a signed `slack` row and an unsigned `pager` row boots to `gates:  slack (answerable), pager (notify-only)`, and the perimeter says so: `! CALLBACK ROUTE OPEN — POST /runs/:id/callbacks/:channel accepts decisions WITHOUT the bearer token, on: slack` |
+| a delivery TRANSPORT that is not an HTTP webhook | `--extension-module` — the same module's `channels.register(…)`. A `DeliveryChannel` is `{name, deliver}`, plus `parseCallback` when a human can ANSWER through it. It needs no `--channels-file`, and merges with one when there is one | a module registering an SMTP channel called `ops-email`, with no channels file at all, boots to `ext:    …/smtp.mjs → no adapters, channel ops-email` and `gates:  ops-email (notify-only)` — and a gate raised on it reaches the module's own `deliver`, asserted in `test/cli/extension-module.test.ts` by the receipt the module writes beside itself. A name it shares with a file row refuses: `E_CONFIG_INVALID: --channels-file …: entry 0 repeats the channel name "ops-email", which an --extension-module already registered — a dispatcher keys channels by name, so one of them would never deliver` |
+| an identity source | `--extension-module` — the same module's `identity.register(…)`. An `IdentitySource` is `{name, identify}`, where `undefined` establishes NOBODY and throwing REFUSES. One per deployment | a module registering a proxy-header source boots to `who:    proxy-header`, and a graph naming an approver it cannot enumerate is reported per gate rather than passed: `! CANNOT TELL — root/gate names u:alice: proxy-header cannot enumerate its subjects, so whether any of u:alice can hold a credential is unknown here`. Beside a `--identity-file` it refuses: `E_CONFIG_INVALID: --identity-file and the --extension-module …/oidc.mjs both establish who a caller is ("proxy-header"), and a deployment has ONE answer to that` |
 
-**Fork required.** Each of these is a CLOSED SET, and the binary names its members when you miss —
-the compiler for the first three, the flag and config parsers for the rest. That is the point of
-the list, and it is why every refusal below is quoted rather than described: a row nobody can
-reproduce by running the thing does not belong on it.
+**Fork required.** Each of these is a CLOSED SET, and the COMPILER names its members when you miss —
+all three are compiler refusals now, which is the shape the list converged on rather than a
+coincidence. That is the point of the list, and it is why every refusal below is quoted rather than
+described: a row nobody can reproduce by running the thing does not belong on it. All three were
+re-driven on 2026-09-01 against the binary at `packages/core/src/cli.ts`.
 
 - **a node type** — `GRAPH020_UNKNOWN_TYPE … fix: use one of function, agent, tool, router, join, evaluator, human_gate, subgraph`
 - **a reducer** — `GRAPH003_UNKNOWN_REDUCER … fix: use one of replace, append_ordered, merge_object, sum, max, min, union_set, last_write_wins_by_ts`
 - **a ninth hook point** — `GRAPH003_UNKNOWN_HOOK_POINT … fix: one of: preNode, preModel, postModel, preTool, postTool, onError, onGate, onComplete`
-- **a delivery TRANSPORT that is not an HTTP webhook, from the CLI** — email, SMS, a Slack app
-  rather than a Slack webhook URL. `--channels-file` builds `WebhookChannel` or
-  `SignedWebhookChannel` and nothing else. A `{"transport":"smtp"}` entry is refused —
-  `E_CONFIG_INVALID: --channels-file …: entry 0 ("ops-email") needs a non-empty string "url" to
-  deliver to` — but say what that refusal covers, because it is narrower than the row: it checks
-  the FIELD, not the scheme. `{"url":"mailto:ops@example.invalid"}` boots (`gates: ops-email
-  (notify-only)`) and fails at delivery, not at config. The bound is that there is nothing but an
-  HTTP POST behind the row, not that the parser knows what you meant. SPLIT, the same way the
-  identity row below is: `DeliveryChannel` and `GateDispatcher` are both on `scripts/surface.json`,
-  so a LIBRARY EMBEDDER hands a hand-written channel to `new GateDispatcher({channels: […]})` and
-  forks nothing — measured with a stdout channel, which the dispatcher then reports as answerable
-  because it defines `parseCallback`.
-- **an identity source, from the CLI** — OIDC, mTLS, a proxy-set header. `--identity-file` is the
-  only flag that establishes WHO a caller is (`--token` is one shared secret and names nobody),
-  and it is `BearerTokenIdentity`'s options file: an OIDC-shaped one gets `E_CONFIG_INVALID:
-  --identity-file <path> must be {"subjects":[{"subject":"u:you","token":"…"}]} with at least one
-  entry`, and there is no module flag to point at anything else — `E_CONFIG_INVALID: unknown flag:
-  --identity-module (did you mean --identity-file?) …`. SPLIT again, and the same shape: `IdentitySource`
-  and `startControlPlane` are both on `scripts/surface.json`, so a LIBRARY EMBEDDER passes a
-  header-trusting or OIDC source straight to `startControlPlane({identity})` and forks nothing —
-  measured. This row is a DEBT, not a bound: a CLI seam for an identity source deletes it.
 
-**Two of those five say "from the CLI", and the count keeps them.** A row that a library
-embedder can walk around is still a fork for the person holding the binary, which is who this
-list is written for; merging the two claims into one number is the compromise, and the split is
-spelled out in each row rather than hidden in it.
+**All three are there for ONE reason, and it is replay.** Each is a word a journal records and a
+fold re-reads, and a fold can only reproduce a decision whose vocabulary the folding binary already
+knows. A node type that arrived from a config file would make a recorded run unreadable by anything
+but the process that wrote it. These three are BOUNDS, and the tell that each is honest is that its
+refusal NAMES ITS MEMBERS — all three above do. There is no longer a second bullet under this
+heading, and getting to one reason is most of what this section's history is about: it used to carry
+the blanket claim *"the reason is replay, not taste — every one of those closed sets is journaled
+vocabulary"*, which was measurably false of the rows it covered, and then a split between three
+BOUNDS and two DEBTS.
 
-**Each row's reason is its own, and the blanket one this section used to carry was measurably
-false.** It read *"the reason is replay, not taste — every one of those closed sets is journaled
-vocabulary"*, and it covered a wire protocol, which is not journaled vocabulary at all. So:
+**Four rows have left this list, in two changes, and neither was a door closing.** A wire protocol
+and an in-process tool went first, under a replay reason that did not apply to either: an adapter
+produces no journal vocabulary, `replay.ts` never reaches one, journals `provider: "replay"`, and
+`reboundEffects` excludes the provider from comparison — so a run served by a third-wire adapter
+replays `{"match": true, "hermetic": true}` against an EMPTY `ModelRegistry`, in a binary that has
+never heard of it. A delivery transport and an identity source went second, under the honest reason
+this section had already written down for them: *nobody built the seam*. Replay never required
+either — the library accepted both all along, through `GateDispatcher({channels})` and
+`startControlPlane({identity})`, which are pinned public types — and the refusals the binary printed
+named THE WRONG DOOR:
 
-- **a node type, a reducer, a ninth hook point — replay.** Each is a word a journal records and a
-  fold re-reads, and a fold can only reproduce a decision whose vocabulary the folding binary
-  already knows. A node type that arrived from a config file would make a recorded run unreadable
-  by anything but the process that wrote it. These three are BOUNDS, and the tell that each is
-  honest is that its refusal names its members — all three above do.
-- **a delivery transport, an identity source — nobody built the seam.** Replay does not require
-  either: the library already accepts both, so a run using one folds fine. A flag parser cannot
-  name the members of "an identity source", so these two refusals name the door that does exist
-  instead of the one you asked for — the weaker version, which is why each row also says which
-  pinned type a library embedder builds against. These two are DEBTS, and the honest direction for
-  this list is two rows shorter.
+    $ loom serve --identity-module ./oidc.mjs
+    E_CONFIG_INVALID: unknown flag: --identity-module (did you mean --identity-file?)
 
-**A wire protocol and an in-process tool used to be on this list under the replay reason, and it
-did not apply to either.** An adapter produces no journal vocabulary: `replay.ts` never reaches an
-adapter, journals `provider: "replay"`, and `reboundEffects` excludes the provider from
-comparison — so a run served by a third-wire adapter replays `{"match": true, "hermetic": true}`
-against an EMPTY `ModelRegistry`, in a binary that has never heard of it. Both were artefacts of
-the CLI having no door onto `ModelRegistry` and `ToolRegistry`, which are pinned public types a
-library embedder always reached. `--extension-module` is that door. It loads host-realm code from
-ARGV and nowhere else — not from a config file, not from the workspace — because the whole trust
-argument is that the operator who passes the path already chose which binary to run.
+    $ loom serve --channels-module ./smtp.mjs
+    E_CONFIG_INVALID: unknown flag: --channels-module (did you mean --channels-file?)
+
+**There is still no such flag, and there is deliberately not going to be one.** All four rows came
+off through the SAME door: `--extension-module`'s default export is now handed
+`{models, tools, channels, identity}`. A second flag would have to re-earn the trust argument this
+one is built on, and that argument is the constraint rather than a footnote: **the module is loaded
+from ARGV and nowhere else — not from a config file, not from a `--*-file`, not from a resource ref,
+not from the data directory** — because a path read out of a file would let a FILE decide what code
+this process runs, in a process holding `fs:write`. With `{models, tools}` that bought a wrong
+provider and a wrong tool. With `{channels, identity}` the same file would decide WHO MAY APPROVE
+and WHERE A GATE IS SENT, which is oversight loosening itself along a path no human touched. If any
+of it ever becomes loadable from anywhere but argv, that argument fails and the seam has to move
+behind a process boundary first.
+
+The refusals are the other half of the seam, and each is a case where two things claim one slot:
+a second module claiming an adapter or channel name the first took, a second identity source (from
+another module or from `--identity-file`), a module that does not resolve, throws, has no function
+default export, or registers nothing. Every one REFUSES TO BOOT rather than pick a winner by load
+order — chaining two identity sources would accept the UNION of two credential sets, which is a
+widening no human asked for. `test/cli/extension-module.test.ts` drives all of them.
 
 `TODO.md` carries the entries under active reconsideration; custom reducers are argued on the
 merits there. This list is a bound with a reason, not an apology.

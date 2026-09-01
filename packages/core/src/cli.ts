@@ -97,9 +97,15 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            non-loopback host needs --token
                                                            or --identity-file — it is
                                                            refused without one
-               [--identity-file identities.json]           who may approve, one token each
+               [--identity-file identities.json]           who may approve, one token each.
+                                                           An --extension-module may register
+                                                           an OIDC or mTLS source instead;
+                                                           both together is refused
                [--channels-file channels.json]             how gates reach humans, and how
-                                                           humans answer them
+                                                           humans answer them, over HTTP
+                                                           webhooks. Any other transport is
+                                                           an --extension-module channel, and
+                                                           needs no file at all
                [--sweep-ms 1000]                           how often gate SLAs are checked
                [--max-runs-in-flight 4]                    how many runs this process drives
                                                            at once. A CEILING, never a door:
@@ -228,21 +234,32 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     stored in it. Accepted by every command, not just serve.
   --extension-module P,P  host-realm modules to load before anything is configured, as a
                     comma-separated list of paths. Each is imported and its DEFAULT EXPORT
-                    called with {models, tools} — this process's ModelRegistry and
-                    ToolRegistry — so a provider on a wire that is neither Anthropic's nor
-                    OpenAI's, and an in-process tool, need no fork. A models-file "routes"
-                    row may name an adapter registered here.
+                    called with {models, tools, channels, identity} — this process's
+                    ModelRegistry and ToolRegistry, and a collector for each of the other
+                    two — so FOUR things need no fork: a provider on a wire that is neither
+                    Anthropic's nor OpenAI's, an in-process tool, a gate delivery transport
+                    that is not an HTTP webhook (email, SMS, a Slack app), and an identity
+                    source that is not a bearer-token file (OIDC, mTLS, a proxy-set header).
+                    A models-file "routes" row may name an adapter registered here, and a
+                    channel registered here is merged with --channels-file's rows.
                     A ModelAdapter must implement provider, stream, priceOf, estimateOf and
-                    outputCeilingOf, and its "done" frame must carry provider. That list is
-                    the extension CONTRACT: adding a member to it breaks every adapter this
-                    repo did not write, which is the surface this flag exists to open.
+                    outputCeilingOf, and its "done" frame must carry provider. A
+                    DeliveryChannel is {name, deliver}, plus parseCallback if a human can
+                    ANSWER through it. An IdentitySource is {name, identify}, where
+                    undefined establishes nobody and throwing refuses. Those lists are
+                    the extension CONTRACT: adding a member to one breaks every extension
+                    this repo did not write, which is the surface this flag exists to open.
                     IT IS ARGV, SO IT IS YOUR OWN CHOICE LOADED INTO YOUR OWN PROCESS: the
                     module runs unsandboxed with everything this binary has — the same trust
                     a resources/function body and a hand-registered tool already carry. It
                     is deliberately loadable from NOWHERE ELSE; a path read out of a config
                     file or the workspace would let a file decide what code this process
-                    runs. A module that does not resolve, throws, has no function default
-                    export, or registers nothing REFUSES TO BOOT. So does a REPEATED
+                    runs — and with identity here, that file would decide WHO MAY APPROVE.
+                    A module that does not resolve, throws, has no function default export,
+                    or registers nothing REFUSES TO BOOT. So does a second module claiming
+                    an adapter or channel name the first took, and so does a second identity
+                    source — from another module or from --identity-file — because a
+                    deployment has one answer to who a caller is. So does a REPEATED
                     --extension-module: flags here are last-wins, so a second one would
                     discard the first module in silence. Use the comma form for two.
   --allow-exec P,P  programs proc.exec may run, matched EXACTLY by name — not as a
@@ -293,10 +310,33 @@ export interface DeliveryConfig {
   readonly answerable: readonly string[];
   /** Channels that can only be TOLD. A pager is legitimately one of these. */
   readonly notifyOnly: readonly string[];
-  /** Whether a public base URL was configured, i.e. whether delivered gates say where to answer. */
+  /**
+   * Whether a public base URL was configured FOR THE FILE'S CHANNELS.
+   *
+   * It says nothing about a channel an `--extension-module` registered, and cannot: that
+   * channel was constructed inside the module with whatever address the module chose, and
+   * nothing here can read it back. `fromModules` is how the banner says so instead of
+   * guessing — see the CALLBACK ADDRESS NOT VISIBLE line in `announce`.
+   */
   readonly publishesAddress: boolean;
-  /** The resolved path, so every message can name the file the operator edited. */
+  /**
+   * WHERE THESE CHANNELS CAME FROM, for every message that has to name it.
+   *
+   * The resolved `--channels-file` path when there is one — the file the operator edited —
+   * and otherwise the `--extension-module` path(s) that registered the channels, because a
+   * plane can now have channels and no channels file at all. It is a LABEL for diagnostics
+   * and nothing reads it back as a path.
+   */
   readonly file: string;
+  /**
+   * Channel names an `--extension-module` registered, as opposed to file rows.
+   *
+   * Carried for one decision and not for display: the banner's "no callback base URL" fix
+   * tells an operator to edit a JSON file, which is wrong advice for a channel that has no
+   * row in one. A boolean would not do — a deployment can have both, and the fix is right
+   * for the file's half and wrong for the module's.
+   */
+  readonly fromModules: readonly string[];
 }
 
 /**
@@ -722,7 +762,14 @@ export function openWorkspace(
   // BEFORE ANYTHING IS CREATED OR OPENED. A malformed channels file is a refusal to start,
   // and a refusal that has already made a directory and opened a SQLite handle is a
   // refusal that leaks one — `main`'s `finally` only closes a workspace it was handed.
-  const delivery = args.flags["channels-file"] === undefined ? undefined : readChannels(requireFileFlag(args, "channels-file"));
+  const delivery =
+    args.flags["channels-file"] === undefined
+      ? // NO FILE IS NO LONGER NO CHANNELS. A module that registers an SMTP or Slack-app
+        // channel is the whole point of the `channels` seam, and requiring a `--channels-file`
+        // beside it would mean writing a JSON file with a webhook row in it to enable a
+        // transport that is not a webhook.
+        extensionDelivery(extensions)
+      : readChannels(requireFileFlag(args, "channels-file"), extensions?.channels ?? []);
   // Same rule, same reason: a models file naming an env var that is not set is a refusal
   // to start, and it must happen before the journal is opened. `env` is a PARAMETER so a
   // test can hand this function a key without writing one into the process — the same
@@ -1075,6 +1122,72 @@ export function readIdentities(file: string): IdentitySource {
 }
 
 /**
+ * The dispatcher every delivery path in this binary is built with, in one place.
+ *
+ * TWO CALLERS NOW — the channels file and an `--extension-module` with no file — and the
+ * fallback is the reason this is a function rather than two literals: a plane whose channels
+ * came from a module must land an undelivered gate on the operator's terminal for exactly the
+ * reason a plane configured from a file must, and a second copy of that decision is a second
+ * place for it to stop being true.
+ */
+function dispatcherOver(channels: readonly DeliveryChannel[]): GateDispatcher {
+  return new GateDispatcher({
+    channels: [...channels],
+    // THE GATE ALWAYS LANDS SOMEWHERE. When every configured channel fails, the console
+    // fallback puts it on the operator's terminal rather than letting "nobody was told"
+    // be the outcome. Its `queued` array is process-lifetime — a bound worth knowing
+    // about on a `serve` whose every delivery is failing, and a small one: one entry per
+    // gate, and a deployment in that state has a louder problem than memory.
+    fallback: new ConsoleChannel({
+      sink: (line) => process.stderr.write(`! UNDELIVERED — ${line}\n`),
+    }),
+  });
+}
+
+/**
+ * `parseCallback !== undefined` is the ONE test for "this channel can be answered".
+ *
+ * `DeliveryChannel`'s own docstring says so, and reading it here rather than re-deriving
+ * answerability from how a channel was configured is what lets a module-supplied SMTP or
+ * Slack-app channel be reported truthfully: this binary knows nothing about how it was
+ * built and does not have to. The file path classifies by `callbackSecret` instead, and
+ * lands on the same answer, because that field is exactly what selects the signed class.
+ */
+function splitByAnswerability(channels: readonly DeliveryChannel[]): { answerable: string[]; notifyOnly: string[] } {
+  const answerable: string[] = [];
+  const notifyOnly: string[] = [];
+  for (const c of channels) (c.parseCallback === undefined ? notifyOnly : answerable).push(c.name);
+  return { answerable, notifyOnly };
+}
+
+/**
+ * Delivery for a plane with `--extension-module` channels and NO `--channels-file`.
+ *
+ * A separate function and not a default-empty `readChannels`, because that reader's first
+ * act is to refuse a file that declares no channels — the honest refusal for a file, and
+ * exactly wrong for the case where there is no file to be malformed. `undefined` here means
+ * what it has always meant on `Workspace.delivery`: no channels, so a gate is delivered
+ * nowhere and answered through the API or the CLI.
+ */
+function extensionDelivery(ext: ExtensionModules | undefined): DeliveryConfig | undefined {
+  if (ext === undefined || ext.channels.length === 0) return undefined;
+  const { answerable, notifyOnly } = splitByAnswerability(ext.channels);
+  return {
+    dispatcher: dispatcherOver(ext.channels),
+    answerable,
+    notifyOnly,
+    // FALSE, AND IT IS NOT A CLAIM THAT NO ADDRESS IS PUBLISHED. There is no
+    // `callbackBaseUrl` in this arrangement because there is no file to hold one; whether a
+    // module's channel puts an address in what it delivers is decided inside the module.
+    // `fromModules` covers every name here, so `announce` says "not visible" rather than
+    // "missing" — the undecidable case named instead of answered.
+    publishesAddress: false,
+    file: ext.files.join(", "),
+    fromModules: [...ext.channelNames],
+  };
+}
+
+/**
  * How gates reach humans, and how humans answer them — read from a file at boot.
  *
  * The shape is one row per channel, and each row is very nearly the constructor options
@@ -1115,7 +1228,18 @@ export function readIdentities(file: string): IdentitySource {
  * all four the identical notify-only webhook. See the check itself for why `"webhook"` is
  * refused with the rest.
  */
-export function readChannels(file: string): DeliveryConfig {
+export function readChannels(
+  file: string,
+  /**
+   * Channels an `--extension-module` already registered, merged with the file's rows.
+   *
+   * A parameter, exactly as `readModels`' `preRegistered` is, and for the same reason: the
+   * two halves have to be checked against each other and this is the only frame holding
+   * both. The alternative — build two dispatchers — is the one arrangement that cannot
+   * work, since `GateDispatcher` is what a graph's delivery spec resolves names through.
+   */
+  preRegistered: readonly DeliveryChannel[] = [],
+): DeliveryConfig {
   const path = resolve(file);
   let parsed: unknown;
   try {
@@ -1140,10 +1264,16 @@ export function readChannels(file: string): DeliveryConfig {
     refuse(`"callbackBaseUrl" must be a non-empty string, or absent — an empty one is what an unset variable expands to`);
   }
 
-  const channels: DeliveryChannel[] = [];
-  const answerable: string[] = [];
-  const notifyOnly: string[] = [];
-  const seen = new Set<string>();
+  // MODULE CHANNELS FIRST, in the order the modules were named on argv, and their names are
+  // in `seen` before the first row is read — so a file row repeating one is refused, naming
+  // the module. The reverse (rows first) would refuse identically; what must not happen is
+  // neither, which is what a `Map` keyed by name does silently.
+  const mine = splitByAnswerability(preRegistered);
+  const seenFromModules = new Set<string>(preRegistered.map((c) => c.name));
+  const channels: DeliveryChannel[] = [...preRegistered];
+  const answerable: string[] = [...mine.answerable];
+  const notifyOnly: string[] = [...mine.notifyOnly];
+  const seen = new Set<string>(seenFromModules);
 
   rows.forEach((raw, i) => {
     const where = `entry ${i}`;
@@ -1153,7 +1283,15 @@ export function readChannels(file: string): DeliveryConfig {
     const url = row["url"];
     if (typeof name !== "string" || name === "") refuse(`${where} needs a non-empty string "name"`);
     if (typeof url !== "string" || url === "") refuse(`${where} ("${name}") needs a non-empty string "url" to deliver to`);
-    if (seen.has(name)) refuse(`${where} repeats the channel name "${name}" — a dispatcher keys channels by name, so one of them would never deliver`);
+    if (seen.has(name)) {
+      // NAMING THE MODULE HALF WHEN THAT IS WHAT IT COLLIDED WITH. "entry 0 repeats a name" is
+      // true and sends an operator looking for a second row in a file that has only one.
+      refuse(
+        `${where} repeats the channel name "${name}"` +
+          `${preRegistered.some((c) => c.name === name) ? ", which an --extension-module already registered" : ""}` +
+          ` — a dispatcher keys channels by name, so one of them would never deliver`,
+      );
+    }
     seen.add(name);
 
     // A `kind` WAS READ AND THROWN AWAY. Driven through this function before this refusal
@@ -1232,21 +1370,16 @@ export function readChannels(file: string): DeliveryConfig {
   });
 
   return {
-    dispatcher: new GateDispatcher({
-      channels,
-      // THE GATE ALWAYS LANDS SOMEWHERE. When every configured channel fails, the console
-      // fallback puts it on the operator's terminal rather than letting "nobody was told"
-      // be the outcome. Its `queued` array is process-lifetime — a bound worth knowing
-      // about on a `serve` whose every delivery is failing, and a small one: one entry per
-      // gate, and a deployment in that state has a louder problem than memory.
-      fallback: new ConsoleChannel({
-        sink: (line) => process.stderr.write(`! UNDELIVERED — ${line}\n`),
-      }),
-    }),
+    dispatcher: dispatcherOver(channels),
     answerable,
     notifyOnly,
-    publishesAddress: baseUrl !== undefined && answerable.length > 0,
+    // `answerable` NOW COUNTS MODULE CHANNELS TOO, and this expression deliberately does not:
+    // a `callbackBaseUrl` in the file reaches the `SignedWebhookChannel`s this reader builds
+    // and nothing else, so "the file published an address" must stay a claim about the file's
+    // own rows. Hence the second condition on FILE answerables rather than on `answerable`.
+    publishesAddress: baseUrl !== undefined && answerable.some((n) => !seenFromModules.has(n)),
     file: path,
+    fromModules: [...seenFromModules],
   };
 }
 
@@ -1355,12 +1488,16 @@ function fallbackFeed(): FallbackFeed {
 }
 
 /**
- * `--extension-module` — the door onto the two registries this binary already builds.
+ * `--extension-module` — the door onto the four seams this binary already builds.
  *
- * **THE SEAM ALREADY EXISTED; ONLY THE CLI COULD NOT REACH IT.** `ModelAdapter`,
- * `ModelRegistry` and `ToolRegistry` are all on the pinned public surface, so a LIBRARY
- * EMBEDDER writes a third-wire provider or an in-process tool and forks nothing:
- * `Engine` already takes a `ModelRegistry` and `#runAgent` already resolves through it.
+ * **THE SEAM ALWAYS EXISTED; ONLY THE CLI COULD NOT REACH IT.** `ModelAdapter`,
+ * `ModelRegistry`, `ToolRegistry`, `DeliveryChannel`, `GateDispatcher`, `IdentitySource`
+ * and `startControlPlane` are all on the pinned public surface, so a LIBRARY EMBEDDER
+ * writes a third-wire provider, an in-process tool, an SMTP channel or an OIDC identity
+ * source and forks nothing:
+ * `Engine` already takes a `ModelRegistry` and `#runAgent` already resolves through it,
+ * `GateDispatcher` already takes any `DeliveryChannel`, and `startControlPlane` already
+ * takes any `IdentitySource`.
  * README's fork list nevertheless carried two entries — "a wire protocol that is not
  * Anthropic's or OpenAI's" and "an in-process tool, from the CLI" — under the blanket
  * reason that the closed sets here are closed by REPLAY. That reason is measurably false
@@ -1379,11 +1516,16 @@ function fallbackFeed(): FallbackFeed {
  * async body at load, and a coercion applied to a value trusted code produced would be a
  * guard answering an undecidable question with the passing value.
  *
- * **ARGV-ONLY IS LOAD-BEARING, NOT STYLISTIC.** Discovering modules by scanning the
- * workspace would let a FILE decide what code this process runs, and a run holds
- * `fs:write` — the escalation `openWorkspace`'s deny-list exists to stop. If this ever
- * becomes loadable from `--models-file`, a resource ref or the data directory, every
- * argument above fails and the seam has to move behind a process boundary.
+ * **ARGV-ONLY IS LOAD-BEARING, NOT STYLISTIC, AND `identity` RAISED WHAT IT IS HOLDING UP.**
+ * Discovering modules by scanning the workspace would let a FILE decide what code this
+ * process runs, and a run holds `fs:write` — the escalation `openWorkspace`'s deny-list
+ * exists to stop. With `{models, tools}` that bought a wrong provider and a wrong tool; with
+ * `{channels, identity}` the same file would decide WHO MAY APPROVE and WHERE A GATE IS SENT,
+ * which is oversight loosening itself along a path no human touched. So the rule is not a
+ * preference and it is not "argv is tidier": **if any of this ever becomes loadable from a
+ * config file, a `--*-file`, a resource ref or the data directory, every argument above fails
+ * and the seam has to move behind a process boundary before the widening lands.** A module is
+ * still trusted code either way; what argv buys is that a human typed the path.
  *
  * **IT REFUSES TO BOOT** rather than continue unextended, in five decidable cases, each
  * naming the path: the module does not resolve; it throws at import; its default export is
@@ -1393,14 +1535,40 @@ function fallbackFeed(): FallbackFeed {
  * `readModels`, where both halves are in hand: an adapter name colliding with a
  * `--models-file` row would leave one of the two permanently unreachable.
  *
- * **SCOPED TO `{models, tools}` EXACTLY** — the two entries this removes from the fork
- * list, and no more. A delivery transport sits in the same merely-recorded bucket and
- * should EXTEND this object when it is built, rather than invent a second flag.
+ * **AND THREE MORE THE TWO NEW SEAMS BRING**, each the same shape — two things claiming one
+ * slot, where the registry silently keeps one and nothing says which: two modules registering
+ * one CHANNEL NAME (`GateDispatcher` keys by name, exactly `readChannels`'s duplicate-row
+ * refusal); a module channel colliding with a `--channels-file` row; and a SECOND identity
+ * source, from a second module or from `--identity-file`, because a deployment has one answer
+ * to "who is this caller" and a silent second one is oversight decided by load order.
+ *
+ * **SCOPED TO `{models, tools, channels, identity}` EXACTLY** — the four entries this
+ * removes from README's fork list, and no more. This object is the place a fifth seam
+ * EXTENDS when somebody builds one; a second flag is the move to refuse, because the trust
+ * argument above is written once and a second door would have to re-earn it.
  */
 export interface ExtensionModules {
   /** Handed to `openWorkspace` in place of the registry it would have constructed. */
   readonly models: ModelRegistry;
   readonly tools: ToolRegistry;
+  /**
+   * Channels the modules registered, in load order, for `GateDispatcher`.
+   *
+   * A plain ARRAY and not a registry object, because `GateDispatcher`'s constructor takes
+   * an array and this is the whole of what a channel is to this process: something with a
+   * `name` and a `deliver`. `readChannels` merges these with its own rows and refuses a
+   * name collision between them.
+   */
+  readonly channels: readonly DeliveryChannel[];
+  /**
+   * The identity source a module registered, or `undefined`.
+   *
+   * SINGULAR, and that is the whole design: a deployment has ONE answer to "who is this
+   * caller". Two sources would be a chain whose order decides whether a credential is
+   * accepted, which is oversight loosened by load order — so a second one refuses, and so
+   * does this one arriving beside a `--identity-file`. See `pickIdentity`.
+   */
+  readonly identity: IdentitySource | undefined;
   /**
    * Adapters by the `provider` name each registered under.
    *
@@ -1412,6 +1580,8 @@ export interface ExtensionModules {
   readonly adapters: ReadonlyMap<string, ModelAdapter>;
   /** Tool names the modules registered, for the boot banner. */
   readonly toolNames: readonly string[];
+  /** Channel names the modules registered, for the boot banner. Order matches `channels`. */
+  readonly channelNames: readonly string[];
   /** Resolved paths, in load order, for the boot banner. */
   readonly files: readonly string[];
   /**
@@ -1470,12 +1640,98 @@ class ObservedToolRegistry extends ToolRegistry {
   }
 }
 
+/**
+ * The two new seams have no registry class to subclass, so the COLLECTOR is the seam.
+ *
+ * `models` and `tools` reach a module as the real `ModelRegistry`/`ToolRegistry` this
+ * process runs on; a delivery channel and an identity source have no such object — a
+ * `GateDispatcher` is CONSTRUCTED from an array once `readChannels` has read the file, and
+ * `startControlPlane` takes one `IdentitySource` by value. Handing a module the dispatcher
+ * would mean building it before the file is read, which is the ordering `openWorkspace`'s
+ * first line exists to prevent: a malformed channels file must refuse before anything is
+ * created or opened. So these two collect, and the objects are built afterwards from what
+ * they hold.
+ *
+ * They VALIDATE AT THE CALL, and that placement is the point: this is the only frame that
+ * knows which module handed the value over. A nameless channel reaching `GateDispatcher`
+ * instead throws from inside `serve`, long after the module that produced it is off the
+ * stack, and names nobody.
+ */
+class CollectedChannels {
+  readonly registered: DeliveryChannel[] = [];
+  /** Every `register` CALL's name, in order — the distinction `ObservedModelRegistry.calls` makes. */
+  readonly calls: string[] = [];
+  register(channel: DeliveryChannel): void {
+    const c = channel as { name?: unknown; deliver?: unknown } | null;
+    if (typeof c !== "object" || c === null) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `channels.register was given ${c === null ? "null" : typeof c}, not a DeliveryChannel`);
+    }
+    if (typeof c.name !== "string" || c.name === "") {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `channels.register was given a channel whose "name" is ${JSON.stringify(c.name) ?? "absent"} — a dispatcher keys channels by ` +
+          `name and a graph's delivery spec names them, so a channel without one can never be addressed.`,
+      );
+    }
+    if (typeof c.deliver !== "function") {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `channels.register was given "${c.name}", which has no deliver() — a DeliveryChannel is ` +
+          `{name, deliver(target, signal), parseCallback?(req)}, and defining parseCallback is what makes it ANSWERABLE.`,
+      );
+    }
+    // AFTER the checks, for `ObservedToolRegistry`'s stated reason: a refused registration
+    // must not count as this module having done something.
+    this.calls.push(c.name);
+    this.registered.push(channel);
+  }
+}
+
+/**
+ * Every identity source registered, not the last one — so the loop can name BOTH modules.
+ *
+ * An array for a slot that holds one. Keeping only the winner would leave the refusal below
+ * able to say a second source arrived and unable to say where the first came from, which is
+ * the shape of report this file refuses everywhere else.
+ */
+class CollectedIdentity {
+  readonly sources: IdentitySource[] = [];
+  register(source: IdentitySource): void {
+    const src = source as { name?: unknown; identify?: unknown } | null;
+    if (typeof src !== "object" || src === null) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `identity.register was given ${src === null ? "null" : typeof src}, not an IdentitySource`);
+    }
+    if (typeof src.name !== "string" || src.name === "") {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `identity.register was given a source whose "name" is ${JSON.stringify(src.name) ?? "absent"} — it is printed at boot and in ` +
+          `refusals, and a deployment that cannot name who decides its callers is one nobody can diagnose.`,
+      );
+    }
+    if (typeof src.identify !== "function") {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `identity.register was given "${src.name}", which has no identify() — an IdentitySource is {name, identify(req)}, where ` +
+          `undefined establishes NOBODY and throwing REFUSES. It must never answer undefined because its upstream is down: an ` +
+          `identity outage that degrades to "no identity" is how oversight quietly stops being enforced.`,
+      );
+    }
+    this.sources.push(source);
+  }
+}
+
 export async function loadExtensionModules(paths: readonly string[]): Promise<ExtensionModules> {
   const models = new ObservedModelRegistry();
   const tools = new ObservedToolRegistry();
+  const channels = new CollectedChannels();
+  const identity = new CollectedIdentity();
   const files: string[] = [];
   /** Which module registered each adapter name, so a collision refusal can name both. */
   const owner = new Map<string, string>();
+  /** The same, one namespace over. Adapter names and channel names do not collide with each other. */
+  const channelOwner = new Map<string, string>();
+  /** Which module registered the one identity source, so the second one's refusal can name it. */
+  let identityOwner: string | undefined;
   for (const raw of paths) {
     const path = resolve(raw);
     const refuse: (why: string) => never = (why) => {
@@ -1486,6 +1742,8 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     // registered plenty.
     const adaptersBefore = models.calls.length;
     const toolsBefore = tools.calls.length;
+    const channelsBefore = channels.calls.length;
+    const identityBefore = identity.sources.length;
     let mod: { default?: unknown };
     try {
       // `pathToFileURL`, not the bare path: a relative specifier would resolve against
@@ -1504,8 +1762,9 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     if (typeof factory !== "function") {
       refuse(
         `has no default export that is a function. An extension module is ` +
-          `\`export default ({models, tools}) => { … }\`, called with this process's ModelRegistry and ` +
-          `ToolRegistry before any configuration is read. Found ` +
+          `\`export default ({models, tools, channels, identity}) => { … }\`, called with this process's ` +
+          `ModelRegistry and ToolRegistry, a channel collector and an identity collector, before any ` +
+          `configuration is read. Found ` +
           `${factory === undefined ? "no default export" : `a default export of type ${typeof factory}`}.`,
       );
     }
@@ -1513,14 +1772,31 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
       // AWAITED, because a module that has to read a manifest before it can register
       // cannot do that synchronously, and a returned promise nobody awaits is a
       // registration race whose loser is every check below.
-      await (factory as (reg: { models: ModelRegistry; tools: ToolRegistry }) => unknown)({ models, tools });
+      await (
+        factory as (reg: {
+          models: ModelRegistry;
+          tools: ToolRegistry;
+          channels: CollectedChannels;
+          identity: CollectedIdentity;
+        }) => unknown
+      )({ models, tools, channels, identity });
     } catch (e) {
       refuse(`threw while registering: ${isLoomError(e) ? e.message : (e as Error).message}`);
     }
-    if (models.calls.length === adaptersBefore && tools.calls.length === toolsBefore) {
+    if (
+      models.calls.length === adaptersBefore &&
+      tools.calls.length === toolsBefore &&
+      // COUNTED TOO, and the omission would have been the quietest defect in this change: a
+      // module whose whole job is an SMTP channel registers no adapter and no tool, so a
+      // check that still asked only those two would have refused the very deployment this
+      // seam was built for.
+      channels.calls.length === channelsBefore &&
+      identity.sources.length === identityBefore
+    ) {
       refuse(
-        `registered nothing. Its default export must call \`models.register(adapter)\` or \`tools.register(tool)\`; ` +
-          `a module that registers nothing is a deployment the operator believes is extended and is not.`,
+        `registered nothing. Its default export must call \`models.register(adapter)\`, \`tools.register(tool)\`, ` +
+          `\`channels.register(channel)\` or \`identity.register(source)\`; a module that registers nothing is a ` +
+          `deployment the operator believes is extended and is not.`,
       );
     }
     // TWO MODULES, ONE ADAPTER NAME — the same refusal `readModels` makes about a file row
@@ -1532,6 +1808,29 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
         refuse(`registers the adapter name "${provider}", which ${first} already registered. One of them would never be reachable.`);
       }
       owner.set(provider, path);
+    }
+    // THE SAME REFUSAL FOR CHANNELS, and the reason is `readChannels`'s own about a duplicate
+    // row rather than a new one: `GateDispatcher` keys its channels by name in a `Map`, so a
+    // second `ops-email` silently replaces the first and one configured channel never delivers
+    // anything, with nothing anywhere saying so.
+    for (const name of channels.calls.slice(channelsBefore)) {
+      const first = channelOwner.get(name);
+      if (first !== undefined) {
+        refuse(`registers the channel name "${name}", which ${first} already registered. One of them would never deliver.`);
+      }
+      channelOwner.set(name, path);
+    }
+    // AND THE ONE SLOT THAT HOLDS ONE. A second source is not a shadow, it is a second answer
+    // to "who is this caller" — so whether a credential is accepted would be decided by argv
+    // order, which is oversight loosening along a path nobody chose. Refusing is always allowed.
+    for (const source of identity.sources.slice(identityBefore)) {
+      if (identityOwner !== undefined) {
+        refuse(
+          `registers the identity source "${source.name}", and ${identityOwner} already registered one. A deployment has ONE answer ` +
+            `to "who is this caller": a second would make acceptance depend on load order.`,
+        );
+      }
+      identityOwner = path;
     }
     files.push(path);
   }
@@ -1552,6 +1851,13 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     // was the one field that was not.
     adapters: new Map(models.registered),
     toolNames: tools.list().map((t) => t.name),
+    // SNAPSHOTS BY CONSTRUCTION — `CollectedChannels` is not handed to anything that appends
+    // to it later, which is exactly the aliasing that made `adapters` print `adapter mock` for
+    // a module that registered none. Copied anyway, so that stays true of the returned object
+    // and not merely of today's callers.
+    channels: [...channels.registered],
+    channelNames: [...channels.calls],
+    identity: identity.sources[0],
     files,
     // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
     // rather than a second rule invented here. `ModelRegistry.register` claims the default
@@ -3051,9 +3357,42 @@ function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
  * Every refusal below happens BEFORE the socket, so a misconfigured deployment is a
  * process that does not start rather than one that starts wide open.
  */
+/**
+ * WHO DECIDES WHO A CALLER IS — one source, from a file or from a module, never both.
+ *
+ * `--identity-file` builds a `BearerTokenIdentity`; an `--extension-module` may register an
+ * OIDC, mTLS or proxy-header source instead. Both together is REFUSED rather than chained,
+ * and the refusal is the interesting half of this function:
+ *
+ *  - A chain that tries one and then the other ACCEPTS THE UNION of two credential sets, so
+ *    adding a source can only ever widen who gets in. That is loosening along an automated
+ *    path, which this codebase's second non-negotiable forbids outright — and it would do it
+ *    invisibly, since neither half can see the other.
+ *  - Preferring one silently is worse: the operator wrote both files, one of them decides
+ *    nothing, and the plane boots looking configured — `readChannels`' named failure, moved
+ *    onto the field that says who may approve.
+ *
+ * So: refusing is always allowed, and this refuses. An operator who wants both writes the
+ * `--identity-file` subjects into their module, which is a source that can read a file.
+ */
+function pickIdentity(ws: Workspace, args: Args): IdentitySource | undefined {
+  const fromFile = args.flags["identity-file"] === undefined ? undefined : readIdentities(requireFileFlag(args, "identity-file"));
+  const fromModule = ws.extensions?.identity;
+  if (fromFile !== undefined && fromModule !== undefined) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--identity-file and the --extension-module ${ws.extensions?.files.join(", ") ?? ""} both establish who a caller is ` +
+        `("${fromModule.name}"), and a deployment has ONE answer to that. Chaining them would accept the union of two ` +
+        `credential sets — a widening no human asked for — and preferring one would leave the other configured and reading ` +
+        `nothing. Drop one: a module source that also wants those subjects can read the file itself.`,
+    );
+  }
+  return fromFile ?? fromModule;
+}
+
 export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOptions {
   const graphs = discoverGraphs(ws);
-  const identity = args.flags["identity-file"] === undefined ? undefined : readIdentities(requireFileFlag(args, "identity-file"));
+  const identity = pickIdentity(ws, args);
   // TWO WAYS THE FLAG ARRIVES EMPTY, and both used to become a shared secret.
   //
   //  - `--token "$LOOM_TOKEN"` with the variable unset hands the flag the empty
@@ -4058,7 +4397,12 @@ function announce(
     process.stdout.write(
       `  ext:    ${ext.files.join(", ")} → ` +
         `${[...ext.adapters.keys()].map((n) => `adapter ${n}`).join(", ") || "no adapters"}` +
-        `${ext.toolNames.length === 0 ? "" : `, ${ext.toolNames.map((n) => `tool ${n}`).join(", ")}`}\n`,
+        `${ext.toolNames.length === 0 ? "" : `, ${ext.toolNames.map((n) => `tool ${n}`).join(", ")}`}` +
+        // APPENDED, not inserted, and the `no adapters` head stays first: `extension-module.test.ts`
+        // pins the whole line, and the two new seams are absent from most modules — a module that
+        // registers neither prints exactly what it printed before.
+        `${ext.channelNames.length === 0 ? "" : `, ${ext.channelNames.map((n) => `channel ${n}`).join(", ")}`}` +
+        `${ext.identity === undefined ? "" : `, identity ${ext.identity.name}`}\n`,
     );
   }
   process.stdout.write(`  who:    ${identity === undefined ? "(nobody — no identity source)" : identity.name}\n`);
@@ -4158,21 +4502,51 @@ function announce(
     );
     // Configured to be answered, and no address published: every receiver still has to be
     // told the URL out of band, which is the thing having a callback route was meant to fix.
+    //
+    // SPLIT BY WHERE THE ANSWERABLE CHANNELS CAME FROM, because the fix is a JSON key and a
+    // module's channel has no row to put it in. Telling an operator to edit a file that does
+    // not describe their channel is a fix that cannot be applied, which is the failure mode
+    // this banner exists to avoid — and for a module channel the fact is not "no address" at
+    // all, it is that this process cannot see one either way.
     if (!delivery.publishesAddress) {
-      process.stderr.write(
-        `! NO CALLBACK BASE URL — delivered gates carry no address to answer at, so each receiver must still be\n` +
-          `  told this deployment's URL out of band.\n` +
-          `  fix: add "callbackBaseUrl": "https://<this deployment's public origin>" to ${delivery.file}\n`,
-      );
+      const fromFile = delivery.answerable.filter((n) => !delivery.fromModules.includes(n));
+      if (fromFile.length > 0) {
+        process.stderr.write(
+          `! NO CALLBACK BASE URL — delivered gates carry no address to answer at, so each receiver must still be\n` +
+            `  told this deployment's URL out of band.\n` +
+            `  on: ${fromFile.join(", ")}\n` +
+            `  fix: add "callbackBaseUrl": "https://<this deployment's public origin>" to ${delivery.file}\n`,
+        );
+      }
+      const fromModule = delivery.answerable.filter((n) => delivery.fromModules.includes(n));
+      if (fromModule.length > 0) {
+        process.stderr.write(
+          `! CALLBACK ADDRESS NOT VISIBLE — ${fromModule.join(", ")} was registered by an --extension-module, so whether a\n` +
+            `  delivered gate carries an address to answer at is decided inside ${delivery.file} and cannot be read from here.\n` +
+            `  This line is not a claim that no address is published; it is this binary saying it cannot tell.\n`,
+        );
+      }
     }
   } else if (delivery !== undefined) {
-    // A channels file with nothing answerable in it. Gates are delivered and cannot be
-    // answered where they were delivered, which is a configuration an operator can easily
-    // believe is complete.
+    // Nothing answerable anywhere. Gates are delivered and cannot be answered where they
+    // were delivered, which is a configuration an operator can easily believe is complete.
+    //
+    // THE FIX DEPENDS ON WHERE THE CHANNELS CAME FROM, and it used to be the file's one
+    // unconditionally: driven against a module-only plane, this line told an operator to add
+    // `"callbackSecret"` to a `.mjs`. For a file row the secret IS the switch — it selects
+    // `SignedWebhookChannel` — and for a module channel the switch is `parseCallback`, which
+    // is what `DeliveryChannel`'s own docstring calls the test for "this channel can be
+    // answered". Two mechanisms, and naming the wrong one is a fix that cannot be applied.
+    const everyChannel = [...delivery.answerable, ...delivery.notifyOnly];
+    const anyFromFile = everyChannel.some((n) => !delivery.fromModules.includes(n));
     process.stderr.write(
       `! NO ANSWERABLE CHANNEL — every channel in ${delivery.file} is notify-only, so there is no callback route\n` +
         `  and a gate can only be answered through the API or the CLI.\n` +
-        `  fix: give a channel a "callbackSecret" to make it answerable\n`,
+        (anyFromFile ? `  fix: give a channel a "callbackSecret" to make it answerable\n` : "") +
+        (delivery.fromModules.length === 0
+          ? ""
+          : `  fix: ${delivery.fromModules.join(", ")} came from an --extension-module — give that channel a parseCallback(req),\n` +
+            `       which is the whole test for "this channel can be answered"\n`),
     );
   }
   // WHO CAN ANSWER WHICH GATE, said per GATE rather than per graph, and with three verdicts
@@ -4187,14 +4561,23 @@ function announce(
   // honest move was to name what it cannot see.
   //
   // THERE IS NO SEPARATE "REACHABILITY NOT CHECKED" BANNER, and that is a decision. It was
-  // written, and then deleted before it shipped, because from THIS BINARY it could never
-  // fire: `--identity-file` is the only flag that establishes who a caller is, it builds a
-  // `BearerTokenIdentity`, and that source enumerates. A line no path reaches is the
-  // declared-and-wired-to-nothing shape this repo keeps finding, and it would have read as a
-  // guard while being one. The fact itself is not lost — a source that cannot enumerate
-  // produces a per-gate `cannot-tell` whose `why` says exactly "<source> cannot enumerate its
-  // subjects", on this boot path and on `startControlPlane`'s, which is the path a library
-  // embedder with an OIDC source actually takes.
+  // written, and then deleted before it shipped, on the argument that from THIS BINARY it
+  // could never fire: `--identity-file` was the only flag that established who a caller is,
+  // it builds a `BearerTokenIdentity`, and that source enumerates.
+  //
+  // **THAT ARGUMENT IS NOW FALSE, AND THE DECISION IT SUPPORTED IS STILL RIGHT.** An
+  // `--extension-module` may register an OIDC or proxy-header source, and such a source
+  // legitimately cannot list its population — so the case reaches this binary. Driven, on a
+  // module registering a source called `proxy-header` with no `knownSubjects`:
+  //
+  //     ! CANNOT TELL — root/gate names u:alice: proxy-header cannot enumerate its subjects,
+  //       so whether any of u:alice can hold a credential is unknown here
+  //
+  // Which is the point: the fact was never lost, it is reported PER GATE with the source
+  // named, by the same `gateAnswerability` call a library embedder's plane makes. A separate
+  // banner would have said the same thing once, less precisely. What changed is that this
+  // paragraph's reason has to be "the per-gate report already covers it" rather than "no path
+  // reaches it", because a path now does.
   const doors = gateAnswerability(opts);
   const trouble = doors.filter((d) => d.verdict !== "answerable");
   // BOUNDED, the way `checkToolNames` bounds its suggestion list: a plane serving many gated

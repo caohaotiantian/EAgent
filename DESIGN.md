@@ -323,7 +323,7 @@ fails today; an item that cannot fail is a wish and gets cut* — was applied to
 | 9 · a rewind does not run the child's undo | the driver below, rebuilt and re-run | **still fails** — `charges [ 42 ]  refunds []` |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **still fails** — its `THE HOLE THIS DOES NOT CLOSE` pin is green, which is the item failing |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
-| 12 · the fork ledger's two DEBT rows | `node packages/core/src/cli.ts serve --identity-module ./oidc.mjs` and `--channels-module ./smtp.mjs` | **still fails** — both still `E_CONFIG_INVALID: unknown flag` |
+| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **PASSES — 15/15. Item 12 is DONE**, and the two `--*-module` flags are still `unknown flag` on purpose |
 | 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **still fails** — 4/4 green *including* the case that pins the two unreachable runs |
 
 **Two of those verdicts are worth stating as a method and not just a result.** Items 10 and 13
@@ -532,7 +532,7 @@ and the identical graph whose body came through `ResourceStore` giving `hermetic
 lands, `test/run/hermetic-names-the-live-bodies.test.ts`'s source census goes red on purpose and
 sends its author to two docstrings that currently promise the field is inert.
 
-### 12 · The fork ledger's two DEBT rows — the only item property 2 asks for
+### 12 · The fork ledger's two DEBT rows — DONE 2026-09-01, ledger 5 → 3
 
 Property 2's own text says shrinking `README.md`'s fork list is what the property MEANS in
 practice, and that the list moving the other way is the alarm. It has moved both ways: six, then
@@ -566,6 +566,29 @@ argv-only trust argument unchanged — **and that argument is the constraint, no
 day any of this becomes loadable from a config file, a resource ref or the data directory, a FILE
 decides what code a process holding `fs:write` runs, and the seam has to move behind a process
 boundary. Ledger 5 → 3, and the three that remain are bounds with reasons rather than debts.
+
+**LANDED, and the shape is the one prescribed above rather than a variation on it.** The factory is
+handed `{models, tools, channels, identity}`; there is no `--channels-module` and no
+`--identity-module`, and those two commands still exit 1 with `unknown flag` — which is the
+verdict row's second half and not an oversight, because a second flag would have to re-earn the
+argv-only trust argument this one is built on. What the widening buys, driven:
+
+    ext:    …/ext.mjs → no adapters, channel ops-email, identity proxy-header
+    who:    proxy-header
+    gates:  ops-email (notify-only)
+
+with no `--channels-file` and no `--identity-file` anywhere on that command line, and a gate raised
+on `ops-email` reaching the module's own `deliver`. Three refusals came with it, each the same
+shape — two things claiming one slot: two modules on one channel name, a module channel colliding
+with a `--channels-file` row, and a SECOND identity source (from another module or from
+`--identity-file`). The last is the one that matters: chaining two sources accepts the UNION of two
+credential sets, so it would be a widening no human asked for.
+
+Two banner lines were wrong in the same way and are fixed with it: `NO CALLBACK BASE URL` and
+`NO ANSWERABLE CHANNEL` both told an operator to edit a JSON key, which is a fix that cannot be
+applied to a channel with no row in a file. And `announce`'s claim that a non-enumerating identity
+source "could never fire" from this binary is now false — an `--extension-module` source reaches it,
+and the per-gate `CANNOT TELL` line is what reports it.
 
 ### 13 · A run past the scan ceiling is reached by no lap
 
