@@ -27,6 +27,7 @@ import {
   type IrreversibilityClass,
   type Posture,
   postureRank,
+  isHardToUndo,
 } from "../vocab.ts";
 import { CODES } from "../errors.ts";
 import { checkExpr, type Ty } from "./expr.ts";
@@ -2042,7 +2043,7 @@ function rule011And012ErrorPaths(
     // error edge just as much as a tool node that names one.
     const manifest = reachableToolNames(n)
       .map((name) => tools[name])
-      .find((m) => m !== undefined && (m.irreversibility === "irreversible" || m.irreversibility === "externally_visible"));
+      .find((m) => m !== undefined && isHardToUndo(m.irreversibility));
     if (manifest === undefined || n.unhandled === true) continue;
 
     const hasErrorEdge = (idx.outbound.get(n.id) ?? []).some((e) => e.kind === "error");
@@ -2144,7 +2145,7 @@ function rule011And012ErrorPaths(
     // rollback. It may still be the right answer — refunding a charge is externally
     // visible and is exactly what you want — so this is a warning that says a human
     // should be in the loop, not a refusal.
-    if (undo.irreversibility === "irreversible" || undo.irreversibility === "externally_visible") {
+    if (isHardToUndo(undo.irreversibility)) {
       d.push({
         severity: "warning",
         code: "GRAPH012_COMPENSATION_VISIBLE",

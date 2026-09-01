@@ -112,11 +112,14 @@ test("a node ceiling is narrower than a run ceiling and wins", () => {
   assert.equal(p.effectivePosture(req({ nodeId: "other" as NodeId })), "out");
 });
 
-test("clearing a ceiling restores the computed floor, and needs no authority", () => {
+test("a human raises a floor back through the door they lowered it through, and it is journaled", () => {
+  // This replaced a test for `clearCeiling`, which was deleted: it removed the ceiling from
+  // memory only, so a restart re-installed it at the LOWERED posture. `deescalate` to the
+  // strongest posture is the tightening path that survives a fold.
   const p = engine();
   p.deescalate(`run:${RUN}`, "on", "temporarily", HUMAN);
   assert.equal(p.effectivePosture(req({ irreversibility: "irreversible" })), "on");
-  p.clearCeiling(`run:${RUN}`);
+  p.deescalate(`run:${RUN}`, "in", "put it back", HUMAN);
   assert.equal(p.effectivePosture(req({ irreversibility: "irreversible" })), "in", "tightening is always allowed");
 });
 

@@ -262,14 +262,16 @@ const MAX_TIMER_MS = 2_147_483_647;
  * was considered and refused for the reason `postureRank` gives: these values arrive from the
  * append-only journal, and one bad event that throws poisons every later fold of that run.
  *
- * Five more sites still spell the pair out longhand (`graph/mutate.ts`, twice in
- * `graph/validate.ts`, `telemetry/spans.ts`, `run/engine.ts`); they are not converted because
- * `graph/` importing from `run/` inverts the layering, and that is the worse trade. They carry
- * the same inversion and are worth the same fix in their own layer.
+ * THE FOUR LONGHAND SITES ARE GONE, and so is the layering objection that kept them. This
+ * docstring used to end "they are not converted because `graph/` importing from `run/` inverts
+ * the layering, and that is the worse trade" — true, and answered by moving the predicate DOWN
+ * to `vocab.ts` rather than sideways. It lives there now, beside `CLASS_DEFAULT_POSTURE` and
+ * `CLASS_AUTO_RETRYABLE`, which are keyed on the same union; `graph/mutate.ts`,
+ * `graph/validate.ts` (twice) and `telemetry/spans.ts` call it. Re-exported here because
+ * `isHardToUndo` is a pinned public name and the pin is on the name, not on the file.
  */
-export function isHardToUndo(c: IrreversibilityClass): boolean {
-  return c !== "read_only" && c !== "reversible_write";
-}
+export { isHardToUndo } from "../vocab.ts";
+import { isHardToUndo } from "../vocab.ts";
 
 /**
  * The interruption window, refused rather than clamped — and refused in BOTH directions,
@@ -692,10 +694,24 @@ export class PolicyEngine {
     this.#spentWallMs = Math.max(this.#spentWallMs, state.spentWallMs ?? 0);
   }
 
-  /** Restore the computed floor by removing a human ceiling. Always allowed: it tightens. */
-  clearCeiling(scope: string): void {
-    this.#ceilings.delete(scope);
-  }
+  /*
+   * THERE IS NO `clearCeiling`, and its absence is the decision.
+   *
+   * It existed, with one caller — a test — and a docstring saying "Always allowed: it tightens."
+   * That is true of the call and false of the run. `#ceilings` is folded from exactly one event,
+   * `policy.deescalated` (`projection.ts` writes `p.ceilings[scope] = e.payload.to` and nothing
+   * anywhere removes a key), so a cleared ceiling was journaled nowhere and `restore` put it
+   * back on the next attach — AT THE LOWERED POSTURE. Tightening that a restart silently undoes
+   * is a loosening, which is the one direction this file may not fail, and it is `F.1`'s class
+   * (an in-memory field a decision reads, with no fold behind it) inside the object built to
+   * defend against it.
+   *
+   * The capability is not lost and never needed this method: `deescalate(scope, "in", …)` sets
+   * the ceiling to the strongest posture, is refused for a non-human, and is journaled — so the
+   * human who lowered a floor raises it back through the same door they lowered it through, and
+   * the journal can say so afterwards. Anyone who wants a true removal adds the event and the
+   * fold and the caller in one change, the rule `errors.ts` states for a code and its raiser.
+   */
 
   ceilingFor(scope: string): Posture | undefined {
     return this.#ceilings.get(scope);

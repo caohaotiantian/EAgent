@@ -297,6 +297,47 @@ test("a mutation adding only reversible work needs no gate", () => {
   assert.equal(r.requiresGate, false);
 });
 
+test("A CLASS THE VOCABULARY CANNOT READ GATES — the unreadable case is the strongest, not the weakest", () => {
+  // This gate read `=== "irreversible" || === "externally_visible"` — a positive list, so a
+  // class this binary cannot parse matched neither name and fell through as EASY. Measured
+  // before the fix, one mutation adding one tool node: `nuclear`, `REVERSIBLE_WRITE` and `""`
+  // all came back `requiresGate: false, gatedNodes: []`, while the two spelled correctly gated.
+  // A misspelled class was strictly LESS protected than a correct one, which is the inversion
+  // `isHardToUndo`'s docstring records; that predicate now lives in `vocab.ts` and this is one
+  // of its four callers.
+  const tools = (cls: string): Record<string, ToolManifestLite> => ({
+    ...TOOLS,
+    "odd.act": { name: "odd.act", version: "1.0", capabilities: ["net:send"], irreversibility: cls as never, idempotent: false },
+  });
+  const gate = (cls: string) =>
+    compileMutation({
+      base: compileBase(),
+      mutation: mutation({
+        addNodes: [
+          { id: n("odd"), type: "tool", reads: ["plan"], tool: { name: "odd.act", version: "1.0", args: {} }, unhandled: true },
+        ],
+        addEdges: [{ id: e("m0"), from: n("plan"), to: n("odd"), kind: "seq" }],
+      }),
+      budget: { consumedNodes: 0, expansion: compileBase().expansion },
+      resolver: resolver(),
+      tools: tools(cls),
+      tenantCapabilities: CAPS,
+    });
+
+  for (const cls of ["irreversible", "externally_visible", "nuclear", "REVERSIBLE_WRITE", ""]) {
+    const r = gate(cls);
+    assert.ok(r.ok, r.ok ? "" : r.error.message);
+    assert.equal(r.requiresGate, true, `irreversibility ${JSON.stringify(cls)} must gate`);
+    assert.deepEqual(r.gatedNodes, ["odd"]);
+  }
+  // And the two that must NOT gate, so this does not pass by gating everything.
+  for (const cls of ["read_only", "reversible_write"]) {
+    const r = gate(cls);
+    assert.ok(r.ok);
+    assert.equal(r.requiresGate, false, `${cls} is easy to undo and must not gate`);
+  }
+});
+
 // ── the region helper ────────────────────────────────────────────────────────
 
 test("descendantsOf walks the whole reachable region, cycles included", () => {

@@ -121,7 +121,7 @@ import { effectKey } from "../ids.ts";
 import type { EdgeId, NodeId, RunId, TaskId } from "../ids.ts";
 import { isEvent, type JournalEvent } from "../journal/events.ts";
 import type { GraphSpec } from "../graph/spec.ts";
-import type { Classification } from "../vocab.ts";
+import { isHardToUndo, type Classification, type IrreversibilityClass } from "../vocab.ts";
 
 export type SpanKind = "internal" | "server" | "client";
 export type SpanStatus = "unset" | "ok" | "error";
@@ -1857,8 +1857,7 @@ export function shouldExport(events: readonly JournalEvent[], policy: SamplingPo
         e.type === "policy.escalated" ||
         e.type === "budget.exhausted" ||
         (e.type === "tool.called" &&
-          ((e.payload as { irreversibility?: string }).irreversibility === "irreversible" ||
-            (e.payload as { irreversibility?: string }).irreversibility === "externally_visible"))
+          isHardToUndo((e.payload as { irreversibility?: IrreversibilityClass }).irreversibility as IrreversibilityClass))
       ) {
         return true;
       }

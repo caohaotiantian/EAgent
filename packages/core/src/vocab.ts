@@ -132,6 +132,33 @@ export const CLASS_DEFAULT_POSTURE: Readonly<Record<IrreversibilityClass, Postur
   externally_visible: "in",
 };
 
+/**
+ * Whether undoing this action needs a human — the NEGATIVE form, deliberately.
+ *
+ * "Hard unless it is one of the two easy ones", never "hard if it is one of the two hard ones".
+ * The positive form reads an allow-list in the loosening direction: a class the vocabulary
+ * cannot parse — a typo, a hostile value from a journal, a future member this binary predates —
+ * matches neither name and falls through as EASY. That made a misspelled class strictly LESS
+ * protected than a correctly spelled one, which inverts the rule this project does not bend:
+ * refusing is always allowed, loosening never is, and a guard that cannot decide fails closed.
+ *
+ * The two names here are exactly the two `CLASS_DEFAULT_POSTURE` puts below `in`, so adding a
+ * new EASY class costs an edit here — deliberate and visible — and adding a hard one costs none.
+ *
+ * IT LIVES IN `vocab.ts` RATHER THAN `run/policy.ts` because four of its five callers are in
+ * `graph/` and `telemetry/`, and `graph/` importing from `run/` inverts the layering. That
+ * objection is what kept those four spelled out longhand, carrying the inversion, after the
+ * fifth was fixed. The predicate belongs beside the maps it is keyed on, not beside one caller.
+ * `run/policy.ts` re-exports it, so the pinned public name does not move.
+ *
+ * Typed to the union, and every caller that reads a JOURNAL value passes something wider — that
+ * is the point, and `postureRank` gives the reason a fold must tighten rather than throw: one
+ * bad event that throws poisons every later fold of that run.
+ */
+export function isHardToUndo(c: IrreversibilityClass): boolean {
+  return c !== "read_only" && c !== "reversible_write";
+}
+
 /** Whether a class may ever be auto-retried without a human. */
 export const CLASS_AUTO_RETRYABLE: Readonly<Record<IrreversibilityClass, boolean>> = {
   read_only: true,

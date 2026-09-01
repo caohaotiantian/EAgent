@@ -23,6 +23,7 @@ import { compile, type CompileInput } from "./compile.ts";
 import { reachableToolNames } from "./spec.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
 import { indexGraph, type Diagnostic } from "./validate.ts";
+import { isHardToUndo } from "../vocab.ts";
 
 export interface GraphMutation {
   readonly addNodes: readonly NodeSpec[];
@@ -196,10 +197,10 @@ export function compileMutation(input: MutateInput): MutationResult {
       // `requiresGate: false` — the one case this rule calls non-negotiable.
       reachableToolNames(n).some((name) => {
         const manifest = input.tools[name];
-        return (
-          manifest !== undefined &&
-          (manifest.irreversibility === "irreversible" || manifest.irreversibility === "externally_visible")
-        );
+        // `isHardToUndo`, never the two names spelled out: the positive form falls through as
+        // EASY for a class this binary cannot read, which is the one direction a gate may not
+        // fail. A mutation is exactly where a hostile manifest arrives.
+        return manifest !== undefined && isHardToUndo(manifest.irreversibility);
       }),
     )
     .map((n) => n.id);
