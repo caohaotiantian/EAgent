@@ -356,19 +356,37 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
 Rollback RUNS: `run/compensation.ts` plans it, `Engine.#compensate` performs it in reverse-seq
 order through `#invokeTool`, journaled `compensation.recorded` in three states. What is left:
 
-- **A.30 · The four uncovered triggers and scopes.** `#edgesToTake` still has
-  `case "compensation": break;` — **deliberate**, because rollback is journal-driven (an effect
-  needs undoing whether or not an author drew an edge, and an edge names a NODE while a rollback
-  must name a CALL). The rest are gaps: the other three `run.failed` sites (an unmaterialised
-  fan-out, `E_OUTPUT_MISSING`, and the budget/fatal floor at the top of `advance`, which can fail
-  a run with tasks still leased); child runs, since `#uncompensatedIrreversible` follows
-  `subgraph.started` into them while the planner reads one journal;
-  `JoinNode.onBranchError: "compensate"`, still refused at compile by
-  `GRAPH008_COMPENSATE_UNIMPLEMENTED`; and a DETACHED run whose steps are all blocked, which
-  journals nothing because the `not_attempted` rows go through a `RunContext` that cannot be
-  rebuilt without the graph. **Closes**, each independently, when a trigger is wired with a
-  fixture that fails without it. **Whether an author should ALSO get a graph-level cleanup node on
-  failure is a design question, not a wiring gap** — §D.3.
+- **A.30 · What is still uncovered, after the run-failure sites and child runs were wired.**
+  `#edgesToTake` still has `case "compensation": break;` — **deliberate**, because rollback is
+  journal-driven (an effect needs undoing whether or not an author drew an edge, and an edge names
+  a NODE while a rollback must name a CALL); the arm now carries that argument where a reader
+  reaches it. **Closed since 2026-09-01:** every `run.failed` site compensates, because there is
+  now exactly one — `Engine.#failRun`, which all three exits of `#finish` call, so the
+  unmaterialised fan-out and `E_OUTPUT_MISSING` roll back for the same reason a failed task does;
+  and `#compensate` DESCENDS INTO CHILD RUNS, splicing each child's plan into the parent's reverse
+  walk at the seq of the parent's own `subgraph.started` (the only order across two journals the
+  journal can justify), rebuilding the child's context from the parent's frozen
+  `subgraphs[ref]`, and journaling `not_attempted` **in the child's journal** where it cannot.
+  `test/run/compensation-reaches-children.test.ts` fails without both halves.
+  **Still open:**
+  - **`JoinNode.onBranchError: "compensate"`**, refused at compile by
+    `GRAPH008_COMPENSATE_UNIMPLEMENTED`. What it would take is recorded at `#absorbedByJoin`:
+    a BRANCH-PATH scope the planner does not have (its only scope is `sinceSeq`, and branches
+    interleave in seq by construction — that is the planner's central claim, not an oversight);
+    a trigger in the failing Task's commit rather than at the barrier; and a fourth answer from
+    `#absorbedByJoin`, because a branch is contained only if its rollback actually cleaned up,
+    which `boolean` cannot say. The refusal deletes in the same change.
+  - **A DETACHED PARENT whose steps are all blocked** journals nothing, because the
+    `not_attempted` rows go through a `RunContext` that cannot be rebuilt without the graph. The
+    child-run case of this is now closed — `#logFor` writes the rows without a context — and the
+    same move would close the parent's, which is why this is smaller than it was.
+  - **§F.13 AT `#finish`**, which the collapse into `#failRun` makes easier to believe is fixed
+    and is not: a task LEASED BY ANOTHER WORKER is still producing while the rollback runs. Both
+    callers can be reached with one — the budget/fatal floor, and the drain path, which sees an
+    empty READY set when a peer holds every lease — and `ctx.abort` reaches only this process.
+    Closing it needs a way to fence a lease this engine does not hold.
+  **Whether an author should ALSO get a graph-level cleanup node on failure is a design question,
+  not a wiring gap** — §D.3.
 
 ### Two things that are NOT defects, written down so nobody "fixes" them
 

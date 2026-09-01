@@ -49,6 +49,7 @@ import {
   errorRecord,
   isEvent,
   type Actor,
+  type ErrorRecord,
   type HumanActor,
   type JournalEvent,
   type NewEvent,
@@ -428,9 +429,49 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_EFFECT_UNRECORDED,
 ]);
 
+/**
+ * How far down a run tree the two journal-walking descents will go.
+ *
+ * A BACKSTOP, NOT A POLICY. `expansion.maxDepth` already bounds nesting at compile time, so
+ * reaching this means the journal disagrees with the graph that produced it — and neither a
+ * rewind's refusal nor a rollback may become the one path in the engine that can recurse
+ * forever. Shared by `#uncompensatedIrreversible` and `#compensate` because they answer two
+ * halves of one question ("must we refuse to undo this?" and "undo it") over the same tree:
+ * two different constants would let the refusal see a call the rollback could not reach.
+ */
+const COMPENSATION_MAX_DEPTH = 16;
+
 interface Wave {
   readonly task: TaskRecord;
   readonly node: NodeSpec;
+}
+
+/**
+ * The `compensation.recorded` row for one decided step. ONE WRITER, two callers.
+ *
+ * `#compensate` writes it after dispatching and `#compensateChild` writes it for a child whose
+ * graph cannot be rebuilt, and those two rows have to be the same shape or an operator reading
+ * for `not_attempted` finds one kind of silence and not the other.
+ */
+function compensationRecord(
+  step: CompensationStep,
+  outcome: { readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string },
+  trigger: "run_failed" | "rewind",
+): NewEvent {
+  return {
+    type: "compensation.recorded",
+    payload: {
+      compensates: step.compensates,
+      compensatesSeq: step.seq,
+      tool: step.tool,
+      ...(step.undo === undefined ? {} : { undo: step.undo }),
+      outcome: outcome.outcome,
+      ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+      trigger,
+    },
+    actor: SYSTEM_ACTOR("compensator"),
+    ...(step.taskId === undefined ? {} : { taskId: step.taskId }),
+  };
 }
 
 /**
@@ -1101,9 +1142,8 @@ export class Engine {
    * `reachableToolNames` and judged it "not currently a hole" on the POSTURE argument, which is
    * sound and is about a different consumer; this one is a hole and was reproduced.
    *
-   * Depth-bounded and visited-checked. `expansion.maxDepth` already bounds nesting at compile,
-   * so the constant is a backstop against a journal that disagrees with the graph rather than a
-   * policy — a rewind must not become the one path that can recurse forever.
+   * Depth-bounded and visited-checked, on `COMPENSATION_MAX_DEPTH` — shared with `#compensate`,
+   * which walks the same tree to actually run the undos this refuses to skip.
    */
   async #uncompensatedIrreversible(
     events: AsyncIterable<JournalEvent>,
@@ -1111,7 +1151,7 @@ export class Engine {
     depth: number,
     seen: Set<RunId> = new Set([runId]),
   ): Promise<{ name: string; seq: number; irreversibility: string; runId: RunId } | undefined> {
-    if (depth > 16) return undefined;
+    if (depth > COMPENSATION_MAX_DEPTH) return undefined;
     const children: RunId[] = [];
     for await (const ev of events) {
       if (ev.type === "subgraph.started") {
@@ -1178,18 +1218,63 @@ export class Engine {
    * a rollback fired concurrently has no order at all. It also appends its record per step
    * rather than in one batch at the end, so a process that dies halfway leaves the steps it
    * finished settled: the resumed rollback re-plans from the journal and skips them.
+   *
+   * ── AND IT DESCENDS INTO CHILD RUNS ──────────────────────────────────────────
+   * `planCompensation` is handed ONE journal, and `subgraph.started`'s docstring says why that
+   * is not enough: it "is the only link between them, which is what keeps a parent's journal
+   * the size of the parent rather than of its whole tree". So an effect performed inside a
+   * delegated run was never undone, while `#uncompensatedIrreversible` — the REFUSAL half of
+   * the same feature, and the sibling consumer of the same blindness — has followed
+   * `subgraph.started` since T6. "We refuse to rewind past a child's charge" held and "we undo
+   * a child's charge" did not.
+   *
+   * THE ORDER ACROSS TWO JOURNALS IS THE PARENT'S `subgraph.started` SEQ. `seq` is a total
+   * order only WITHIN a journal, so a child's seqs and a parent's are not comparable at all —
+   * but the parent's own record of starting the child IS in the parent's order, and it is
+   * exactly where the whole child sat in the parent's sequence. So the child's plan is spliced
+   * into the parent's reverse walk at that point rather than appended after it. Doing children
+   * last would undo a call the parent made AFTER the delegation only once the delegation was
+   * already unwound, which is forward order with extra steps.
+   *
+   * SCOPED LIKE THE REFUSAL IS: a child is descended into when its `subgraph.started` is inside
+   * the range, and then its OWN journal is planned from seq 1 — the child ran entirely inside
+   * the window the parent is suppressing, so there is no boundary to carry down. That is
+   * verbatim what `#uncompensatedIrreversible` does, and the two answering differently about
+   * the same journal is the defect neither of them should be able to have.
+   *
+   * `seen` IS OVER RunIds AND THAT IS LOAD-BEARING. A visited-set over REFS would be a cycle
+   * guard that also skips descending — the shape that produced an order-dependent oversight
+   * floor in `#deadlineFor` — because one ref is legitimately delegated to many times. A child
+   * run id is `${parentRunId}~${taskId}`, derived and strictly nested, so two distinct
+   * delegations can never collide on one and a repeat is a real cycle rather than a second
+   * visit. The depth cap is the same backstop `#uncompensatedIrreversible` carries, for the
+   * same reason: `expansion.maxDepth` bounds nesting at compile, so this guards a journal that
+   * disagrees with the graph.
    */
   async #compensate(
     ctx: RunContext,
     p: RunProjection,
     trigger: "run_failed" | "rewind",
     sinceSeq = 0,
+    depth = 0,
+    seen: Set<RunId> = new Set([ctx.runId]),
   ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
     const events: JournalEvent[] = [];
     for await (const ev of ctx.log.read(1 as Seq)) events.push(ev);
     const plan = planCompensation({ events, tools: this.tools, sinceSeq });
+
+    const children: { readonly at: number; readonly runId: RunId; readonly ref: string }[] = [];
+    if (depth < COMPENSATION_MAX_DEPTH) {
+      for (const ev of events) {
+        if (!isEvent(ev, "subgraph.started") || ev.seq <= sinceSeq) continue;
+        if (seen.has(ev.payload.childRunId)) continue;
+        seen.add(ev.payload.childRunId);
+        children.push({ at: ev.seq, runId: ev.payload.childRunId, ref: ev.payload.ref });
+      }
+    }
+
     const tally = { compensated: 0, failed: 0, notAttempted: 0 };
-    if (plan.steps.length === 0) return tally;
+    if (plan.steps.length === 0 && children.length === 0) return tally;
 
     // ONE suppression-aware pass for every result the rollback needs, not one per step. This is
     // the same `last live wins` scan `#invokeTool` serves on, and it has to be: an undo built
@@ -1198,31 +1283,104 @@ export class Engine {
     const recorded =
       wanted.size === 0 ? new Map<string, unknown>() : await this.#completedEffects(ctx, (k) => wanted.has(k));
 
-    for (const step of plan.steps) {
+    // One descending walk over both — `plan.steps` is already reverse-seq and the children carry
+    // the parent seq they sit at, so this is a merge rather than a re-sort of anything.
+    const walk: { readonly at: number; readonly step?: CompensationStep; readonly child?: (typeof children)[number] }[] =
+      [...plan.steps.map((step) => ({ at: step.seq, step })), ...children.map((child) => ({ at: child.at, child }))].sort(
+        (a, b) => b.at - a.at,
+      );
+
+    for (const item of walk) {
+      if (item.child !== undefined) {
+        const sub = await this.#compensateChild(ctx, item.child, trigger, depth + 1, seen);
+        tally.compensated += sub.compensated;
+        tally.failed += sub.failed;
+        tally.notAttempted += sub.notAttempted;
+        continue;
+      }
+      const step = item.step!;
       const outcome = await this.#compensateOne(ctx, p, step, recorded);
       if (outcome.outcome === "compensated") tally.compensated++;
       else if (outcome.outcome === "failed") tally.failed++;
       else tally.notAttempted++;
-      await this.#serialize(() =>
-        ctx.log.append([
-          {
-            type: "compensation.recorded",
-            payload: {
-              compensates: step.compensates,
-              compensatesSeq: step.seq,
-              tool: step.tool,
-              ...(step.undo === undefined ? {} : { undo: step.undo }),
-              outcome: outcome.outcome,
-              ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
-              trigger,
-            },
-            actor: SYSTEM_ACTOR("compensator"),
-            ...(step.taskId === undefined ? {} : { taskId: step.taskId }),
-          },
-        ]),
-      );
+      await this.#serialize(() => ctx.log.append([compensationRecord(step, outcome, trigger)]));
     }
     return tally;
+  }
+
+  /**
+   * One child run's rollback, in the CHILD's journal, under the child's own context.
+   *
+   * DISPATCH IS THE HARD HALF, NOT PLANNING. Planning over the child's journal already yields
+   * the right steps; running one is a tool call, and a tool call needs the graph — which is not
+   * in the journal, only its hash. That is the same wall a detached `rewind` hits and answers
+   * with `attach(runId, graph)`. Here there is a better answer than asking the operator: the
+   * PARENT's compiled graph carries the frozen child spec at `subgraphs[ref]`, which is the
+   * same value `#startSubgraph` compiled the child from in the first place, so the context can
+   * be rebuilt from what this engine already holds — across a restart included, since the
+   * parent's graph is what `attach` handed back.
+   *
+   * AND WHERE IT CANNOT BE, THE STEPS ARE JOURNALED `not_attempted` IN THE CHILD'S JOURNAL.
+   * Three states, not two, is the rule this feature lives on, and "nobody even tried" is the
+   * fact a two-state design deletes. The child's log is the right one to say it in: it is the
+   * journal an operator reads to find out what happened to that run, and the parent's is
+   * deliberately not a copy of its tree. `#logFor` writes without a context for exactly this.
+   */
+  async #compensateChild(
+    parent: RunContext,
+    child: { readonly runId: RunId; readonly ref: string },
+    trigger: "run_failed" | "rewind",
+    depth: number,
+    seen: Set<RunId>,
+  ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
+    const none = { compensated: 0, failed: 0, notAttempted: 0 };
+    // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
+    // No journal means the child never started, so it did nothing that needs undoing.
+    const p = await this.projection(child.runId);
+    if (p === undefined) return none;
+
+    const ctx = this.#childContextFor(parent, child.runId, child.ref);
+    if (ctx !== undefined) return this.#compensate(ctx, p, trigger, 0, depth, seen);
+
+    const events: JournalEvent[] = [];
+    const log = this.#logFor(child.runId);
+    for await (const ev of log.read(1 as Seq)) events.push(ev);
+    const plan = planCompensation({ events, tools: this.tools });
+    if (plan.steps.length === 0) return none;
+    const why =
+      `the graph for child run ${child.runId} cannot be rebuilt from "${child.ref}", so this engine ` +
+      `cannot dispatch an undo in it — attach it and rewind, or the effect stands`;
+    for (const step of plan.steps) {
+      await this.#serialize(() =>
+        log.append([compensationRecord(step, { outcome: "not_attempted", reason: why }, trigger)]),
+      );
+    }
+    return { compensated: 0, failed: 0, notAttempted: plan.steps.length };
+  }
+
+  /**
+   * The child's `RunContext`, from what this engine already holds, or `undefined`.
+   *
+   * `#runs` first, because a live child context carries the policy engine that has been
+   * tightening all run and the abort signal the undo should honour. Rebuilding beside it would
+   * hand the rollback a fresh `PolicyEngine` at the deployment floor, which is the loosening
+   * direction — an escalation the child made would be gone.
+   *
+   * FAILS CLOSED. `#compileChild` can throw on a spec a newer binary no longer accepts, and a
+   * throw here would abort the whole rollback — including the parent steps that were about to
+   * run and the `not_attempted` rows the caller writes instead. So the answer is "no context",
+   * which is a fact the caller journals, rather than an exception nobody records.
+   */
+  #childContextFor(parent: RunContext, childRunId: RunId, ref: string): RunContext | undefined {
+    const live = this.#runs.get(childRunId);
+    if (live !== undefined) return live;
+    const spec = parent.graph.subgraphs?.[ref];
+    if (spec === undefined) return undefined;
+    try {
+      return this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -6688,6 +6846,23 @@ export class Engine {
     for (const e of ctx.index.outbound.get(w.node.id) ?? []) {
       switch (e.kind) {
         case "error":
+          break;
+        // A COMPENSATION EDGE IS NEVER TRAVERSED, AND THAT IS THE DESIGN — the one item of §A.30
+        // that must not be "fixed". Every other trigger in that entry has since been wired
+        // (`#failRun` on every exit that fails a run, `rewind`, and both of those down into child
+        // runs), so this arm now reads like the last one nobody got to. It is not.
+        //
+        // ROLLBACK IS JOURNAL-DRIVEN. An effect needs undoing because it HAPPENED, not because
+        // an author drew a line on a diagram — so making the undo conditional on an edge would
+        // mean a graph that forgot one silently keeps its writes, which is the loosening
+        // direction. And the two do not even denominate the same thing: an edge names a NODE,
+        // while a rollback must name a CALL. A node that called a tool three times has one
+        // outgoing edge and three things to undo, and `planCompensation` keys every step on the
+        // seq of the `tool.called` it reverses for exactly that reason.
+        //
+        // What the edge IS for is `graph/validate.ts`'s GRAPH012, which proves at compile time
+        // that a declared rollback exists and refuses one naming an unregistered undo. It is a
+        // DECLARATION the compiler checks, not a route the executor follows.
         case "compensation":
           break;
         case "loop": {
@@ -6826,6 +7001,30 @@ export class Engine {
       // `compensate` is refused at compile (GRAPH008_COMPENSATE_UNIMPLEMENTED), so it
       // cannot reach here. It is NOT aliased to `skip` — that alias is what let a graph
       // ask for a rollback and silently get a discard.
+      //
+      // WHAT WIRING IT WOULD TAKE, recorded here because this is the line a reader reaches
+      // when they ask why the word is still refused now that an executor exists. Three things,
+      // and the third is the one that makes it more than plumbing:
+      //
+      //  1. A BRANCH SCOPE THE PLANNER DOES NOT HAVE. `CompensationInput` scopes by `sinceSeq`,
+      //     a seq RANGE — and branches INTERLEAVE in seq by construction. That is not an
+      //     oversight to route around, it is the planner's central claim: `seq` is the only
+      //     order the journal can justify, so two concurrent branches are unwound interleaved.
+      //     A range therefore cannot express "this branch", and the scope has to become a
+      //     branch-path prefix over the recording `taskId`. That is `run/compensation.ts`.
+      //  2. A TRIGGER POINT EARLIER THAN THE BARRIER. By the time `#maybeFireJoin` counts the
+      //     failed branch, `#commit` has applied its writes, so the rollback belongs in the
+      //     commit of the failing Task — before the join is notified, not after it folds.
+      //  3. A FOURTH ANSWER FROM THIS METHOD. `skip` needs only "contained: yes". `compensate`
+      //     is contained ONLY IF THE ROLLBACK CLEANED UP: a branch whose undo came back
+      //     `failed` or `not_attempted` has left the run holding an effect nobody reversed, and
+      //     absorbing it would report partial evidence over a world nobody restored — which is
+      //     the same silent-discard this refusal exists to prevent, one layer down. So the
+      //     tally has to decide, and `boolean` is the wrong return type for that.
+      //
+      // The refusal and its implementation land together or not at all, so wiring this also
+      // deletes GRAPH008_COMPENSATE_UNIMPLEMENTED in `graph/validate.ts` and the case in
+      // `test/graph/compensation-honesty.test.ts` that pins it.
       if (mode === "skip") return true;
     }
     return false;
@@ -7085,23 +7284,12 @@ export class Engine {
         (t) => t.nodeId === plan.nodeId && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
       ).length;
       if (started < plan.width) {
-        await this.#serialize(() =>
-          ctx.log.append([
-            ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
-            {
-              type: "run.failed",
-              payload: {
-                error: {
-                  class: "internal",
-                  code: CODES.E_INTERNAL,
-                  message: `fan-out "${key}" planned ${plan.width} branches but only ${started} were materialised`,
-                  retryable: false,
-                },
-              },
-              actor: SYSTEM_ACTOR("executor"),
-            },
-          ]),
-        );
+        await this.#failRun(ctx, p, {
+          class: "internal",
+          code: CODES.E_INTERNAL,
+          message: `fan-out "${key}" planned ${plan.width} branches but only ${started} were materialised`,
+          retryable: false,
+        });
         return;
       }
     }
@@ -7114,35 +7302,15 @@ export class Engine {
     );
     if (failed.length > 0) {
       const first = failed[0]!;
-      // THE RUN IS ABOUT TO FAIL, SO ROLL BACK WHAT IT DID — before `run.failed`, because
-      // `run.failed` is terminal and `isTerminal(p.status)` is what every entry point checks
-      // before doing anything. A rollback appended after it would be work on a run the rest of
-      // the engine has agreed is over.
-      //
-      // THIS ARM ONLY, and that is a named limit rather than an oversight. It is the arm that
-      // means "a node failed and the graph declared no handler for it", which is the failure a
-      // compensation edge is written for. The other two `run.failed` sites in this method — an
-      // unmaterialised fan-out, and `E_OUTPUT_MISSING` — are Loom disagreeing with itself, and
-      // the budget/fatal floor at the top of `advance` fails a run that may still have leased
-      // tasks in flight; rolling back underneath a live task would race the thing it is undoing.
-      // Those are not compensated today. `TODO.md` §A.30 carries the gap.
-      await this.#compensate(ctx, p, "run_failed");
-      await this.#serialize(() =>
-        ctx.log.append([
-          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
-          {
-            type: "run.failed",
-            payload: {
-              error: first.error ?? {
-                class: "internal",
-                code: CODES.E_INTERNAL,
-                message: `task ${first.taskId} failed with no error edge`,
-                retryable: false,
-              },
-            },
-            actor: SYSTEM_ACTOR("executor"),
-          },
-        ]),
+      await this.#failRun(
+        ctx,
+        p,
+        first.error ?? {
+          class: "internal",
+          code: CODES.E_INTERNAL,
+          message: `task ${first.taskId} failed with no error edge`,
+          retryable: false,
+        },
       );
       return;
     }
@@ -7155,23 +7323,12 @@ export class Engine {
     const outputs = collectOutputs(p, ctx.graph.spec);
     const declared = ctx.graph.spec.outputs;
     if (declared.length > 0 && Object.keys(outputs).length === 0) {
-      await this.#serialize(() =>
-        ctx.log.append([
-          ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
-          {
-            type: "run.failed",
-            payload: {
-              error: {
-                class: "internal",
-                code: CODES.E_OUTPUT_MISSING,
-                message: `run finished without writing any of its declared outputs (${declared.join(", ")})`,
-                retryable: false,
-              },
-            },
-            actor: SYSTEM_ACTOR("executor"),
-          },
-        ]),
-      );
+      await this.#failRun(ctx, p, {
+        class: "internal",
+        code: CODES.E_OUTPUT_MISSING,
+        message: `run finished without writing any of its declared outputs (${declared.join(", ")})`,
+        retryable: false,
+      });
       return;
     }
 
@@ -7198,6 +7355,43 @@ export class Engine {
         signal: ctx.abort.signal,
       });
     }
+  }
+
+  /**
+   * THE ONLY PLACE A RUN FAILS, so the only place a rollback can be forgotten is nowhere.
+   *
+   * `#finish` had three `run.failed` appends and compensated on exactly ONE of them. The
+   * exemption was written down as a named limit — "this arm means a node failed and the graph
+   * declared no handler, which is the failure a compensation edge is written for; the other two
+   * are Loom disagreeing with itself" — and the argument does not survive being stated next to
+   * what compensation is for. A rollback is not about WHY the run ended; it is about what the
+   * run DID. An `E_OUTPUT_MISSING` run inserted the same rows as a run whose last node threw,
+   * and leaving them standing because the failure was the engine's fault rather than the
+   * graph's is the loosening `run/compensation.ts` spends its whole header refusing: a
+   * redundant undo shows up in the record as an attempt, an un-undone write shows up nowhere.
+   *
+   * COMPENSATION FIRST, THEN THE TERMINAL EVENT. `run.failed` is terminal and
+   * `isTerminal(p.status)` is what every entry point checks before doing anything, so a
+   * rollback appended after it is work on a run the rest of the engine has agreed is over.
+   *
+   * WHAT THIS DOES NOT FIX, said plainly because collapsing the three sites makes it easier to
+   * believe it did: a task LEASED BY ANOTHER WORKER is still producing while this rolls back.
+   * Both callers of `#finish` can be reached with one — the budget/fatal floor, and the drain
+   * path, which sees an empty READY set when a peer holds every lease — and `ctx.abort` reaches
+   * only this process. §F.13 ("a terminal operation is not final until every producer of the
+   * state it ends is stopped") is the shape, and closing it needs a way to fence a lease this
+   * engine does not hold, which is a different change. The window is bounded on this side at
+   * least: `#compensate` re-plans from the journal, so an effect that lands during the rollback
+   * is picked up by the next pass rather than by none.
+   */
+  async #failRun(ctx: RunContext, p: RunProjection, error: ErrorRecord): Promise<void> {
+    await this.#compensate(ctx, p, "run_failed");
+    await this.#serialize(() =>
+      ctx.log.append([
+        ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
+        { type: "run.failed", payload: { error }, actor: SYSTEM_ACTOR("executor") },
+      ]),
+    );
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
