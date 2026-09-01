@@ -32,7 +32,7 @@ import type { RunId, Seq } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 
 /** Irreversible and UNCOMPENSATED — the two facts the refusal keys on. */
 const CHARGE: ToolManifestLite = { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: false };
@@ -143,7 +143,7 @@ async function runThenRewind(via: "subgraph" | "tool", tool: string) {
 
   let refused: unknown;
   try {
-    await engine.rewind(runId, 1 as Seq, "operator asked to undo", OPERATOR);
+    await rewindWithPlan(engine, runId, 1 as Seq, "operator asked to undo");
   } catch (e) {
     refused = e;
   }

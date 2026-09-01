@@ -23,7 +23,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const NOW = 1_700_000_000_000;
@@ -77,7 +77,7 @@ test("REWINDING TO A NODE'S OWN CHECKPOINT RE-RUNS IT, and the output is redone"
   }
   assert.ok(atSeq !== undefined, "the node declared `checkpoint: \"before\"`");
 
-  const rewound = await r.engine.rewind(runId, atSeq as Seq, "operator asked", OPERATOR);
+  const rewound = await rewindWithPlan(r.engine, runId, atSeq as Seq, "operator asked");
   assert.deepEqual(
     Object.values(rewound.tasks).map((t) => t.state),
     ["ready"],
@@ -102,7 +102,7 @@ test("...and the auditor now catches the shape that was shipping", async () => {
   for await (const ev of r.store.read(runId, 1)) {
     if (ev.type === "checkpoint.created") atSeq = (ev.payload as { atSeq: number }).atSeq;
   }
-  await r.engine.rewind(runId, atSeq as Seq, "operator asked", OPERATOR);
+  await rewindWithPlan(r.engine, runId, atSeq as Seq, "operator asked");
   await r.engine.advance(runId);
 
   const events = [];

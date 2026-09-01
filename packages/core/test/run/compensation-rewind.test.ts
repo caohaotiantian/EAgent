@@ -24,7 +24,7 @@ import type { JournalEvent } from "../../src/journal/events.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { NEVER_READ, OPERATOR, rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const NOW = 1_700_000_000_000;
@@ -148,7 +148,7 @@ async function ran(): Promise<{
 
 test("A REWIND UNDOES THE EFFECTS IT HIDES, LAST FIRST", async () => {
   const r = await ran();
-  await r.engine.rewind(r.runId, r.before, "operator asked to redo from the top", OPERATOR);
+  await rewindWithPlan(r.engine, r.runId, r.before, "operator asked to redo from the top");
 
   assert.deepEqual(r.world.rows, [], "the rows the rewind hid are gone from the world, not merely from the fold");
   assert.deepEqual(r.world.undone, [2, 1], "reverse order — the last thing done is the first undone");
@@ -178,13 +178,13 @@ test("A REWIND UNDOES THE EFFECTS IT HIDES, LAST FIRST", async () => {
 
 test("A SECOND REWIND TO THE SAME BOUNDARY DOES NOT UNDO ANYTHING TWICE", async () => {
   const r = await ran();
-  await r.engine.rewind(r.runId, r.before, "first", OPERATOR);
+  await rewindWithPlan(r.engine, r.runId, r.before, "first");
   assert.deepEqual(r.world.undone, [2, 1]);
 
   // A rewind can itself be retried — an operator repeats it, or a process died partway and the
   // resumed one re-plans. `compensation.recorded` is keyed by the SEQ of the call it undoes, so
   // the journal is what remembers: a flag on the engine would survive this and not a restart.
-  await r.engine.rewind(r.runId, r.before, "again", OPERATOR);
+  await rewindWithPlan(r.engine, r.runId, r.before, "again");
   assert.deepEqual(r.world.undone, [2, 1], "the second rewind found both calls already settled");
 });
 
@@ -227,7 +227,7 @@ test("AN EFFECT NOTHING CAN UNDO IS STILL RECORDED, EVEN WHEN NO STEP DISPATCHES
   const call = evs.find((e) => e.type === "tool.called");
   assert.notEqual(call, undefined, "the note really was written");
 
-  await engine.rewind(runId, (call!.seq - 2) as Seq, "undo it if you can", OPERATOR);
+  await rewindWithPlan(engine, runId, (call!.seq - 2) as Seq, "undo it if you can");
 
   const recs = (await journal(store, runId)).filter((e) => e.type === "compensation.recorded");
   assert.equal(recs.length, 1, "one recorded call, one decision about it");
@@ -249,7 +249,7 @@ test("A DETACHED RUN IS REFUSED RATHER THAN CROSSED", async () => {
   // Bound to the SAME world: a different process shares the database, not a copy of it.
   const cold = engineOn(r.store, r.world);
   await assert.rejects(
-    () => cold.rewind(r.runId, r.before, "from a process that never ran it", OPERATOR),
+    () => rewindWithPlan(cold, r.runId, r.before, "from a process that never ran it"),
     (e: Error) => {
       assert.match(e.message, /holds no context/, "the message names the reason");
       assert.match(e.message, /attach\(runId, graph\)/, "and the fix");
@@ -262,7 +262,7 @@ test("A DETACHED RUN IS REFUSED RATHER THAN CROSSED", async () => {
   // ATTACHED, THE SAME CALL WORKS. The refusal is about a missing capability, not a policy — so
   // it must lift the moment the capability is there, or it is a wall rather than a door.
   cold.attach(r.runId, r.graph);
-  await cold.rewind(r.runId, r.before, "now it can", OPERATOR);
+  await rewindWithPlan(cold, r.runId, r.before, "now it can");
   assert.deepEqual(r.world.rows, [], "attach, then rewind, and the effects really are undone");
 });
 
@@ -293,7 +293,7 @@ test("ONLY A HUMAN MAY REWIND, WHETHER OR NOT THERE IS ANYTHING TO UNDO", async 
     return true;
   };
 
-  await assert.rejects(() => r.engine.rewind(r.runId, r.before, "a service token asked", service as never), refused);
+  await assert.rejects(() => r.engine.rewind(r.runId, r.before, "a service token asked", service as never, { planHash: NEVER_READ }), refused);
   // REFUSING UNDOES NOTHING, which is the same rule the `E_RESTORE_ILLEGAL` refusals above hold
   // to: unwinding half a run and then declining to rewind it leaves the operator worse off than
   // either answer alone. That is why the actor is the FIRST check and not the last.
@@ -305,15 +305,15 @@ test("ONLY A HUMAN MAY REWIND, WHETHER OR NOT THERE IS ANYTHING TO UNDO", async 
 
   // AND THE SAME REFUSAL WITH NOTHING TO UNDO. The boundary here is the journal's own head, so
   // the range `(atSeq, marker)` is empty and there is not one compensable effect inside it. The
-  // rule does not consult that, deliberately: `plannedUndo` is computed after four refusals and a
-  // full journal read, so a caller cannot know whether their rewind has undos until it has
-  // already run, and a rule conditioned on it is a rule nobody can follow.
+  // rule does not consult that, deliberately: the dispatch list is computed after four refusals
+  // and a full journal read of the whole run tree, so a caller cannot know whether their rewind
+  // has undos until it has already run, and a rule conditioned on it is a rule nobody can follow.
   const head = after[after.length - 1]!.seq;
-  await assert.rejects(() => r.engine.rewind(r.runId, head, "and nothing to undo", service as never), refused);
+  await assert.rejects(() => r.engine.rewind(r.runId, head, "and nothing to undo", service as never, { planHash: NEVER_READ }), refused);
 
   // THE CONTROL, and it is the whole argument: the only thing wrong with the call above is who
   // made it. The same empty-range rewind from a person is taken, marker and all.
-  await r.engine.rewind(r.runId, head, "a person asked for the same thing", OPERATOR);
+  await rewindWithPlan(r.engine, r.runId, head, "a person asked for the same thing");
   const marks = (await journal(r.store, r.runId)).filter((e) => e.type === "checkpoint.restored");
   assert.equal(marks.length, 1, "exactly the human's rewind is on the record");
   assert.equal(marks[0]!.actor.kind, "human");

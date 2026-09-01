@@ -489,6 +489,23 @@ system actor and checks nothing — so an undo inheriting "the operator already 
 be an automated path granting itself approval. Until that floor exists, refusing is the only
 answer oversight permits.
 
+**The floor now exists, in both halves, and the item is a step from closing — 2026-09-01.** A.34
+built the GATED half (`by: HumanActor`, no default, refused first) and A.35 the LOUD half:
+`Engine.planRewind(runId, atSeq, by)` returns the dispatch list plus a `planHash`, and
+`rewind(runId, atSeq, reason, by, {planHash})` refuses a hash that no longer matches what it would
+dispatch. So an operator has passed a floor *against the specific undos* rather than against the
+verb, which is precisely the precondition this paragraph said was missing. **What is left is A.8's
+own evidence, not this argument**: flipping `#compensateOne`'s `nodeApproved` for
+`trigger === "rewind"` still needs a fixture that drives a rollback whose undo policy answers
+`gate` and asserts the refusal, because today the whole suite is green with the guard flipped.
+
+**And the preview closed a hole this section's own framing hid.** `rewind` computed a preview over
+the rewound run's OWN journal while dispatching the tree walk described above, so on the delegated
+leg the two disagreed — measured, the parent-only plan was EMPTY while a `pay.refund` dispatched
+in the child — and the detached refusal built on that plan let a detached rewind of a
+fully-delegated run through, journaling nothing anywhere while the charge stood. One walk feeds
+both now; `packages/core/test/run/rewind-plan.test.ts` pins it.
+
 **Not in scope, and the reason is recorded so it is not re-litigated:** `#edgesToTake` still has
 `case "compensation": break;`. A rollback names a CALL and an edge names a NODE; traversing the
 edge would run a node, which is a different feature.

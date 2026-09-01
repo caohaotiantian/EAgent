@@ -39,7 +39,7 @@ import { RunLog } from "../../src/run/log.ts";
 import { openGates } from "../../src/run/projection.ts";
 import { FunctionRegistry } from "../../src/run/registry.ts";
 import { spansFrom } from "../../src/telemetry/spans.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -352,14 +352,14 @@ test("A REWIND ONTO THE BATCH RECEIPT IS REFUSED, LIKE ONE ONTO A MEMBER'S OWN D
   assert.equal(events.find((ev) => ev.seq === ((receipt.seq + 1) as Seq))?.type, "run.resumed", "the shape under test");
 
   await assert.rejects(
-    () => r.engine.rewind(runId, receipt.seq, "undo the batch", OPERATOR),
+    () => rewindWithPlan(r.engine, runId, receipt.seq, "undo the batch"),
     refused(CODES.E_RESTORE_ILLEGAL),
   );
 
   // …and the two coherent readings of what the operator asked for both still work: one
   // seq up keeps the whole decision, one seq down is refused by the member's own arm and
   // the message says where to go instead.
-  const kept = await r.engine.rewind(runId, (receipt.seq + 1) as Seq, "keep the decision", OPERATOR);
+  const kept = await rewindWithPlan(r.engine, runId, (receipt.seq + 1) as Seq, "keep the decision");
   assert.equal(openGates(kept).length, 0);
   for (const g of Object.values(kept.gates)) assert.equal(g.state, "decided", "every member's decision survived");
 });

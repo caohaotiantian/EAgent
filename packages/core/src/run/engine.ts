@@ -115,7 +115,15 @@ import {
 } from "./gates.ts";
 import { externalisableChannels } from "./externalise.ts";
 import { RunLog } from "./log.ts";
-import { BLOCK_REASON, attemptable, planCompensation, type CompensationStep } from "./compensation.ts";
+import {
+  BLOCK_REASON,
+  attemptable,
+  planCompensation,
+  type CompensationStep,
+  type RewindAuthorization,
+  type RewindPlan,
+  type RewindPlanStep,
+} from "./compensation.ts";
 import { PolicyEngine, classificationOf, isHardToUndo, type BudgetLimits, type PolicyActor, type PolicyEngineOptions } from "./policy.ts";
 import { HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, narrowToolDecision, runFilters, runObservers, type ErrorDecision, type GateView, type HookPoint, type NodeDecision, type PreToolState, type RegisteredHook } from "./hooks.ts";
 // Type-only: `replay.ts` constructs an Engine at runtime, so a value import here
@@ -447,11 +455,52 @@ interface Wave {
 }
 
 /**
- * The `compensation.recorded` row for one decided step. ONE WRITER, two callers.
+ * One decided step of a rollback, with everything the dispatcher needs and nothing it decides.
  *
- * `#compensate` writes it after dispatching and `#compensateChild` writes it for a child whose
- * graph cannot be rebuilt, and those two rows have to be the same shape or an operator reading
- * for `not_attempted` finds one kind of silence and not the other.
+ * NOT EXPORTED, and `RewindPlanStep` in `run/compensation.ts` is: this carries a live
+ * `RunContext` and a raw recorded result, which are process state rather than facts an operator
+ * can be shown or a hash can cover. `#rewindPlanOf` is the projection from this onto that, and
+ * keeping them two types is what stops a `RunContext` leaking into a public preview.
+ *
+ * `ctx` absent means THIS ENGINE CANNOT DISPATCH IT, and `undispatchable` then says why — the
+ * third of the three states, carried rather than inferred at the call site.
+ */
+interface RollbackWalkStep {
+  readonly runId: RunId;
+  readonly step: CompensationStep;
+  readonly ctx?: RunContext;
+  readonly p?: RunProjection;
+  /**
+   * The last live `effect.completed` result for `step.compensates`, whose `details` are the
+   * undo's arguments. The key is ABSENT when no such record exists, which is what lets a
+   * legitimately-`undefined` result be told apart from no result at all.
+   */
+  readonly result?: unknown;
+  readonly undispatchable?: string;
+}
+
+/**
+ * An undo's arguments, from the compensated call's recorded `ToolResult`.
+ *
+ * ONE READER, TWO CALLERS, which is the whole reason it is a function. `#compensateOne` builds
+ * the arguments it dispatches with and `#rewindPlanOf` digests the arguments it shows the
+ * operator; if those two disagreed by one coercion, the hash would bind the preview to something
+ * other than what runs. `tool.called` carries `argsShape` and `argsDigest` and never the values,
+ * so `details` is genuinely the only channel an undo's arguments can come from.
+ */
+function detailsOf(result: unknown): Record<string, unknown> {
+  const details = (result as { readonly details?: unknown } | undefined)?.details;
+  return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : {};
+}
+
+/**
+ * The `compensation.recorded` row for one decided step. ONE WRITER, AND NOW ONE CALLER.
+ *
+ * It was two: `#compensate` wrote the dispatched rows and `#compensateChild` wrote the rows for a
+ * child whose graph could not be rebuilt, and the two had to be the same shape or an operator
+ * reading for `not_attempted` would find one kind of silence and not the other. They drifted
+ * anyway — only one of them wrote `retryable` — which is the argument for `#dispatchRollback`
+ * being a single loop over a single planned walk rather than two methods that agree by review.
  */
 function compensationRecord(
   step: CompensationStep,
@@ -1008,6 +1057,17 @@ export class Engine {
   readonly #runs = new Map<RunId, RunContext>();
   /** Per-run advance chain. See `advance`. Self-evicting. */
   readonly #advancing = new Map<RunId, Promise<void>>();
+  /**
+   * The per-run rewind chain, `#advancing`'s sibling and for the identical reason.
+   *
+   * SEPARATE FROM `#advancing` rather than shared, and that is a choice with a cost. Sharing one
+   * map would also serialize a rewind against a concurrent `advance`, which is a real hazard —
+   * but `advance` is called from `rewind`'s own callers and from the HTTP route in the same
+   * breath, and a rewind that waits on an advance that waits on a lease is a deadlock this change
+   * has no evidence it needs. What IS measured is two rewinds racing each other, and that is what
+   * this closes. Rewind-against-advance stays open and is named here rather than implied.
+   */
+  readonly #rewinding = new Map<RunId, Promise<void>>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
   #commitChain: Promise<unknown> = Promise.resolve();
 
@@ -1261,11 +1321,69 @@ export class Engine {
     p: RunProjection,
     trigger: "run_failed" | "rewind",
     sinceSeq = 0,
-    depth = 0,
-    seen: Set<RunId> = new Set([ctx.runId]),
   ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
+    return this.#dispatchRollback(await this.#planRollback({ runId: ctx.runId, log: ctx.log, ctx, p, sinceSeq }), trigger);
+  }
+
+  /**
+   * THE WALK, DECIDED AND NOT PERFORMED — one function, two consumers.
+   *
+   * This is the split `run/compensation.ts` already makes for ONE journal, made a second time
+   * for the TREE. That module decides what a single log implies and performs nothing; this
+   * decides what a whole run tree implies — which journals, in which order, under which context —
+   * and still performs nothing. `#dispatchRollback` is the only thing below that acts.
+   *
+   * WHY IT IS EXTRACTED RATHER THAN COPIED FOR THE PREVIEW. `Engine.planRewind` has to show an
+   * operator the list `rewind` will dispatch, and the only version of that claim which is true by
+   * CONSTRUCTION is the one where both read the same function. The alternative was measured
+   * before this existed and it is why A.35 was written: `rewind` previewed
+   * `planCompensation(parent's own events)` and dispatched this walk, so on
+   * `rewind-through-subgraph`'s DELEGATED leg the preview had zero steps, its hash was the digest
+   * of `[]`, and a `pay.refund` was dispatched in the child. A second copy of the descent is the
+   * drift hazard, not the fix — the same sentence `rewind` already carried about its deleted
+   * pre-check, applied to the preview it was about to grow.
+   *
+   * IT RESOLVES CONTEXTS, WHICH IS WHY IT IS ASYNC AND NOT PURE. "Can this engine dispatch this
+   * step" is not a fact about the journal — it is a fact about what this process holds — and it
+   * is exactly the fact the preview must not omit, because "nothing to undo" and "an effect
+   * stands and nobody will try" are different answers. `#childContextFor` is asked here, once,
+   * and its answer travels with the step.
+   *
+   * `log`, `ctx` AND `resolveFrom` ARE THREE PARAMETERS BECAUSE THEY ARE THREE CAPABILITIES, and
+   * a run can hold any combination of them. READING a journal needs only a `RunLog`, which
+   * `#logFor` builds for any run id. DISPATCHING in THIS run needs the graph, the policy engine
+   * and the abort signal, which live on a `RunContext` this engine may not hold — `ctx` absent is
+   * the detached case, and it makes this run's own steps `undispatchable` rather than absent,
+   * which is the whole difference between "nothing to undo" and "an effect stands". RESOLVING A
+   * CHILD needs a compiled graph carrying `subgraphs[ref]`, and that is a THIRD thing: a child
+   * whose own context cannot be rebuilt still has grandchildren whose refs the PARENT's graph
+   * resolves, so `resolveFrom` keeps travelling down after `ctx` has stopped. Collapsing any two
+   * of these loses a case that is already tested: collapsing the first two made a detached rewind
+   * of a fully-delegated run report an EMPTY plan; collapsing the last two would leave a
+   * grandchild's effects standing with nothing in any journal saying so.
+   */
+  async #planRollback(input: {
+    readonly runId: RunId;
+    readonly log: RunLog;
+    /** The context this run's OWN steps would dispatch under. Absent means this engine cannot. */
+    readonly ctx?: RunContext;
+    readonly p: RunProjection;
+    readonly sinceSeq?: number;
+    readonly depth?: number;
+    readonly seen?: Set<RunId>;
+    /** The context a child `ref` is rebuilt from. Defaults to `ctx`; see the docstring. */
+    readonly resolveFrom?: RunContext;
+    /** Why this run's own steps cannot be dispatched. Read only when `ctx` is absent. */
+    readonly why?: string;
+  }): Promise<readonly RollbackWalkStep[]> {
+    const { runId, log, ctx, p } = input;
+    const sinceSeq = input.sinceSeq ?? 0;
+    const depth = input.depth ?? 0;
+    const seen = input.seen ?? new Set([runId]);
+    const resolveFrom = input.resolveFrom ?? ctx;
+
     const events: JournalEvent[] = [];
-    for await (const ev of ctx.log.read(1 as Seq)) events.push(ev);
+    for await (const ev of log.read(1 as Seq)) events.push(ev);
     const plan = planCompensation({ events, tools: this.tools, sinceSeq });
 
     const children: { readonly at: number; readonly runId: RunId; readonly ref: string }[] = [];
@@ -1278,43 +1396,55 @@ export class Engine {
       }
     }
 
-    const tally = { compensated: 0, failed: 0, notAttempted: 0 };
-    if (plan.steps.length === 0 && children.length === 0) return tally;
+    if (plan.steps.length === 0 && children.length === 0) return [];
 
     // ONE suppression-aware pass for every result the rollback needs, not one per step. This is
     // the same `last live wins` scan `#invokeTool` serves on, and it has to be: an undo built
     // from a result a rewind threw away would restore the state the operator rejected.
     const wanted = new Set(attemptable(plan).map((s) => s.compensates));
     const recorded =
-      wanted.size === 0 ? new Map<string, unknown>() : await this.#completedEffects(ctx, (k) => wanted.has(k));
+      wanted.size === 0 ? new Map<string, unknown>() : await this.#completedEffects({ log }, (k) => wanted.has(k));
 
     // One descending walk over both — `plan.steps` is already reverse-seq and the children carry
     // the parent seq they sit at, so this is a merge rather than a re-sort of anything.
-    const walk: { readonly at: number; readonly step?: CompensationStep; readonly child?: (typeof children)[number] }[] =
+    const merged: { readonly at: number; readonly step?: CompensationStep; readonly child?: (typeof children)[number] }[] =
       [...plan.steps.map((step) => ({ at: step.seq, step })), ...children.map((child) => ({ at: child.at, child }))].sort(
         (a, b) => b.at - a.at,
       );
 
-    for (const item of walk) {
+    // The reason a DETACHED run's own steps cannot be run, when the caller named none. Worded as
+    // the refusal `rewind` raises for exactly this case, because they are the same fact and an
+    // operator reading a plan and an operator reading a refusal must not have to work out that
+    // the two match.
+    const why =
+      input.why ??
+      `this engine holds no context for run ${runId}, so it cannot dispatch an undo in it — ` +
+        `call \`attach(runId, graph)\` first, or the effect stands`;
+
+    const out: RollbackWalkStep[] = [];
+    for (const item of merged) {
       if (item.child !== undefined) {
-        const sub = await this.#compensateChild(ctx, item.child, trigger, depth + 1, seen);
-        tally.compensated += sub.compensated;
-        tally.failed += sub.failed;
-        tally.notAttempted += sub.notAttempted;
+        // WHEN THERE IS NO CONTEXT TO RESOLVE A CHILD FROM, THE CHILD'S REASON IS THIS RUN'S.
+        // `#planRollbackChild`'s own message says the child's graph "cannot be rebuilt from
+        // <ref>", which is true but sends the operator to attach the CHILD — and the fix for a
+        // detached ancestor is to attach the ancestor. A reason that names the wrong run is
+        // worse than a generic one, so the ancestor's travels down.
+        out.push(...(await this.#planRollbackChild(resolveFrom, item.child, depth + 1, seen, resolveFrom === undefined ? why : undefined)));
         continue;
       }
       const step = item.step!;
-      const outcome = await this.#compensateOne(ctx, p, step, recorded);
-      if (outcome.outcome === "compensated") tally.compensated++;
-      else if (outcome.outcome === "failed") tally.failed++;
-      else tally.notAttempted++;
-      await this.#serialize(() => ctx.log.append([compensationRecord(step, outcome, trigger)]));
+      out.push({
+        runId,
+        step,
+        ...(ctx === undefined ? { undispatchable: why } : { ctx, p }),
+        ...(recorded.has(step.compensates) ? { result: recorded.get(step.compensates) } : {}),
+      });
     }
-    return tally;
+    return out;
   }
 
   /**
-   * One child run's rollback, in the CHILD's journal, under the child's own context.
+   * One child run's share of the walk, planned in the CHILD's journal.
    *
    * DISPATCH IS THE HARD HALF, NOT PLANNING. Planning over the child's journal already yields
    * the right steps; running one is a tool call, and a tool call needs the graph — which is not
@@ -1325,62 +1455,113 @@ export class Engine {
    * be rebuilt from what this engine already holds — across a restart included, since the
    * parent's graph is what `attach` handed back.
    *
-   * AND WHERE IT CANNOT BE, THE STEPS ARE JOURNALED `not_attempted` IN THE CHILD'S JOURNAL.
-   * Three states, not two, is the rule this feature lives on, and "nobody even tried" is the
-   * fact a two-state design deletes. The child's log is the right one to say it in: it is the
-   * journal an operator reads to find out what happened to that run, and the parent's is
-   * deliberately not a copy of its tree. `#logFor` writes without a context for exactly this.
+   * AND WHERE IT CANNOT BE, THE STEPS ARE CARRIED FORWARD `undispatchable` RATHER THAN DROPPED,
+   * so `#dispatchRollback` journals `not_attempted` in the CHILD's journal and `planRewind` shows
+   * the same three states to the operator BEFORE anything runs. Three states, not two, is the
+   * rule this feature lives on, and "nobody even tried" is the fact a two-state design deletes.
+   * The child's log is the right one to say it in: it is the journal an operator reads to find
+   * out what happened to that run, and the parent's is deliberately not a copy of its tree.
+   * `#logFor` writes without a context for exactly this.
+   *
+   * `sinceSeq` IS 0 FOR A CHILD, and that is `#uncompensatedIrreversible`'s rule verbatim: the
+   * child ran entirely inside the window the parent is suppressing, so there is no boundary to
+   * carry down. The two answering differently about the same journal is the defect neither of
+   * them should be able to have.
    */
-  async #compensateChild(
-    parent: RunContext,
+  async #planRollbackChild(
+    parent: RunContext | undefined,
     child: { readonly runId: RunId; readonly ref: string },
-    trigger: "run_failed" | "rewind",
     depth: number,
     seen: Set<RunId>,
-  ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
-    const none = { compensated: 0, failed: 0, notAttempted: 0 };
+    /** The ancestor's reason, when there was no context to resolve this child's ref from. */
+    inherited?: string,
+  ): Promise<readonly RollbackWalkStep[]> {
     // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
     // No journal means the child never started, so it did nothing that needs undoing.
     const p = await this.projection(child.runId);
-    if (p === undefined) return none;
+    if (p === undefined) return [];
 
-    const ctx = this.#childContextFor(parent, child.runId, child.ref);
-    if (ctx !== undefined) return this.#compensate(ctx, p, trigger, 0, depth, seen);
+    const ctx = parent === undefined ? undefined : this.#childContextFor(parent, child.runId, child.ref);
+    if (ctx !== undefined) {
+      return this.#planRollback({ runId: child.runId, log: ctx.log, ctx, p, depth, seen });
+    }
 
-    const events: JournalEvent[] = [];
-    const log = this.#logFor(child.runId);
-    for await (const ev of log.read(1 as Seq)) events.push(ev);
-    const plan = planCompensation({ events, tools: this.tools });
-    const why =
-      `the graph for child run ${child.runId} cannot be rebuilt from "${child.ref}", so this engine ` +
-      `cannot dispatch an undo in it — attach it and rewind, or the effect stands`;
-    for (const step of plan.steps) {
-      await this.#serialize(() =>
-        // `retryable: true` — this block is a fact about THIS PROCESS, not about the step. The
-        // reason string tells the operator to attach and rewind, and `planCompensation` settled
-        // the seq either way, so following that advice produced a zero-step plan and an effect
-        // that still stood. Structural blocks (no compensation declared, an unregistered undo)
-        // stay unretryable and still settle.
-        log.append([compensationRecord(step, { outcome: "not_attempted", reason: why, retryable: true }, trigger)]),
-      );
+    // EVERY step, not only the attemptable ones — `#dispatchRollback` journals all of them, which
+    // is what keeps the three states three on this path as well as on the dispatching one.
+    //
+    // AND IT DESCENDS ANYWAY, with `resolveFrom: parent` rather than stopping here. Returning
+    // after the child's own steps left a GRANDCHILD's effects standing with nothing in any
+    // journal saying so — the exact silence this method claims to have closed, closed one level
+    // deep only. Not being able to dispatch in the CHILD says nothing about the grandchild: it
+    // has its own journal, and its ref is looked up in the PARENT's compiled graph either way, so
+    // it may still be rebuildable. Measured before this, on a two-level fixture with the child's
+    // context forced absent: the grandchild's `db.insert` stood and no `compensation.recorded`
+    // existed anywhere for it. That is why `resolveFrom` outlives `ctx`.
+    return this.#planRollback({
+      runId: child.runId,
+      log: this.#logFor(child.runId),
+      p,
+      depth,
+      seen,
+      ...(parent === undefined ? {} : { resolveFrom: parent }),
+      why:
+        inherited ??
+        `the graph for child run ${child.runId} cannot be rebuilt from "${child.ref}", so this engine ` +
+          `cannot dispatch an undo in it — attach it and rewind, or the effect stands`,
+    });
+  }
+
+  /**
+   * PERFORM THE WALK. The only thing in this neighbourhood that acts.
+   *
+   * ONE WRITER PER OUTCOME, and one loop rather than two: a step this engine can dispatch runs
+   * through `#invokeTool` and is recorded in its own run's log; a step it cannot is recorded
+   * `not_attempted` in that same log with the reason the planner attached. Those used to be two
+   * loops in two methods and the shapes drifted — `#compensateChild` wrote a `retryable` row and
+   * `#compensate` did not, and a caller reading for one kind of silence found the other.
+   *
+   * `retryable: true` FOR AN UNDISPATCHABLE STEP — the row is a fact about THIS PROCESS, not
+   * about the step. The reason string tells the operator to attach and rewind, and
+   * `planCompensation` settles the seq either way, so following that advice would otherwise
+   * produce a zero-step plan and an effect that still stood.
+   *
+   * SEQUENTIAL, never `Promise.all`. The order is the feature — see `run/compensation.ts` — and a
+   * rollback fired concurrently has no order at all. It appends its record per step rather than
+   * in one batch at the end, so a process that dies halfway leaves the steps it finished settled:
+   * the resumed rollback re-plans from the journal and skips them.
+   */
+  async #dispatchRollback(
+    walk: readonly RollbackWalkStep[],
+    trigger: "run_failed" | "rewind",
+  ): Promise<{ readonly compensated: number; readonly failed: number; readonly notAttempted: number }> {
+    const tally = { compensated: 0, failed: 0, notAttempted: 0 };
+    // One writer per journal, so a run with several steps does not build a `RunLog` per append.
+    const logs = new Map<RunId, RunLog>();
+    const logFor = (runId: RunId, ctx?: RunContext): RunLog => {
+      if (ctx !== undefined) return ctx.log;
+      const held = logs.get(runId);
+      if (held !== undefined) return held;
+      const fresh = this.#logFor(runId);
+      logs.set(runId, fresh);
+      return fresh;
+    };
+
+    for (const item of walk) {
+      const outcome =
+        item.ctx === undefined || item.p === undefined
+          ? // The `??` is a type obligation, not a live branch: `#planRollbackChild` is the only
+            // producer of a context-less step and it always attaches a reason. A `not_attempted`
+            // row with no reason would collapse the three states back to two for whoever reads
+            // it, so the fallback says something true rather than leaving the field off.
+            ({ outcome: "not_attempted", reason: item.undispatchable ?? "this engine cannot dispatch an undo in this run", retryable: true } as const)
+          : await this.#compensateOne(item.ctx, item.p, item.step, item.result);
+      if (outcome.outcome === "compensated") tally.compensated++;
+      else if (outcome.outcome === "failed") tally.failed++;
+      else tally.notAttempted++;
+      const log = logFor(item.runId, item.ctx);
+      await this.#serialize(() => log.append([compensationRecord(item.step, outcome, trigger)]));
     }
-    let notAttempted = plan.steps.length;
-    // AND IT DESCENDS ANYWAY. Returning here journaled the child's own steps and stopped, so a
-    // GRANDCHILD's effects were left standing with nothing in any journal saying so — the exact
-    // silence this method's docstring claims to have closed, closed one level deep only. Not
-    // being able to dispatch in the child says nothing about the grandchild: it has its own
-    // journal and may well have its own rebuildable graph. Measured before this, on a two-level
-    // fixture with the child's context forced absent: the grandchild's `db.insert` stood and no
-    // `compensation.recorded` existed anywhere for it.
-    for (const ev of events) {
-      if (ev.type !== "subgraph.started") continue;
-      const grandchild = ev.payload.childRunId;
-      if (depth + 1 > COMPENSATION_MAX_DEPTH || seen.has(grandchild)) continue;
-      seen.add(grandchild);
-      const below = await this.#compensateChild(parent, { runId: grandchild, ref: ev.payload.ref }, trigger, depth + 1, seen);
-      notAttempted += below.compensated + below.failed + below.notAttempted;
-    }
-    return { compensated: 0, failed: 0, notAttempted };
+    return tally;
   }
 
   /**
@@ -1421,7 +1602,7 @@ export class Engine {
     ctx: RunContext,
     p: RunProjection,
     step: CompensationStep,
-    recorded: ReadonlyMap<string, unknown>,
+    result: unknown,
   ): Promise<{ readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string }> {
     if (step.undo === undefined) return { outcome: "not_attempted", reason: BLOCK_REASON[step.blocked ?? "no_compensation"](step) };
 
@@ -1439,15 +1620,13 @@ export class Engine {
       return { outcome: "not_attempted", reason: `compensation tool "${step.undo}" is not registered` };
     }
 
-    const result = recorded.get(step.compensates);
     if (result === undefined) {
       return {
         outcome: "not_attempted",
         reason: `no live \`effect.completed\` is recorded for ${step.compensates}, so the undo record ("details") does not exist`,
       };
     }
-    const details = (result as { readonly details?: unknown }).details;
-    const args = details !== null && typeof details === "object" ? (details as Record<string, unknown>) : {};
+    const args = detailsOf(result);
 
     // `step.seq` AS THE ORDINAL, which is what makes the key derived rather than merely stable.
     // The seq of the `tool.called` being undone is unique per append and recomputable from the
@@ -2737,10 +2916,13 @@ export class Engine {
    * UNCONDITIONALLY, NOT ONLY WHEN THERE IS SOMETHING TO UNDO — and this is the half worth
    * arguing rather than asserting. A rewind that dispatches nothing still suppresses events,
    * re-arms leases and changes what the run does next, so it is not the empty operation the
-   * "no undos" reading suggests. But the decisive reason is that `plannedUndo` is computed six
-   * screens below, AFTER four refusals and a full journal read: a caller cannot know whether
-   * their rewind has undos until it has already run. A rule conditioned on that is a rule
-   * nobody can follow, and a guard that cannot decide fails closed.
+   * "no undos" reading suggests. But the decisive reason is that the dispatch list is computed
+   * in `#rewindSerially`, AFTER four refusals and a full journal read of the whole run tree: a
+   * caller cannot know whether their rewind has undos until it has already run. A rule
+   * conditioned on that is a rule nobody can follow, and a guard that cannot decide fails closed.
+   * THE SAME ARGUMENT CARRIES A.35's `planHash`, which is why it is required unconditionally too
+   * — a stuck-lease recovery pays the handshake for an empty list, and paying it is cheaper than
+   * a rule whose precondition nobody can evaluate.
    *
    * IT IS `steer`'S SHAPE AND NOT `cancel`'S, and the two are not near-misses of each other.
    * `cancel` accepts an anonymous caller because refusing is always allowed — it stops a run
@@ -2748,19 +2930,104 @@ export class Engine {
    * back on a path the operator picked and erases the record in between, which is `steer`'s
    * kind of act with a larger blast radius.
    *
-   * WHAT "LOUD" STILL WANTS AND THIS DOES NOT GIVE IT — `TODO.md` A.35: the operator should see
-   * WHICH undos a rewind will dispatch BEFORE authorizing it. `plannedUndo`, one screen above
-   * the dispatch, IS that list — but it is computed after the point of no return in a single
-   * call, and this signature has no shape for handing it back and waiting. That is a two-phase
-   * rewind (`planRewind(runId, atSeq) -> plan`, then `rewind(runId, atSeq, reason, by, planHash)`
-   * refusing a stale hash) and it is deliberately not built here. So this method is the GATED
-   * half of that decision and none of the LOUD half.
+   * AND THE LOUD HALF IS `planRewind`, WHICH IS WHY THIS TAKES A FIFTH ARGUMENT. `TODO.md`
+   * A.35: the operator has to see WHICH undos a rewind will dispatch BEFORE authorizing it.
+   * `planRewind(runId, atSeq, by)` is that list and `auth.planHash` is the operator's answer to
+   * it; a hash that no longer matches what this call would dispatch is REFUSED. See `planRewind`
+   * for what the hash covers and why the preview could not be the old `plannedUndo`.
    */
-  async rewind(runId: RunId, atSeq: Seq, reason: string, by: HumanActor): Promise<RunProjection> {
+  async rewind(runId: RunId, atSeq: Seq, reason: string, by: HumanActor, auth: RewindAuthorization): Promise<RunProjection> {
+    // SERIALIZED PER RUN, and `#serialize` is not what does it. That queue orders journal
+    // APPENDS; two concurrent rewinds are two `check the hash, then dispatch` sequences
+    // interleaved between appends, which is the shape `advance` already carries a chain for
+    // ("it is not an execution lock, so two concurrent `advance` calls ... dispatched every one
+    // of them twice"). Measured on `rewind-through-subgraph`'s direct leg before this chain:
+    // `Promise.allSettled([rewind(runId,1,..), rewind(runId,1,..)])` fulfilled BOTH and wrote two
+    // `compensation.recorded` rows for one `compensatesSeq` — the same real-world undo dispatched
+    // twice off one authorization.
+    //
+    // THE HASH ALONE DOES NOT CLOSE THIS, and that is worth stating because it looks like it
+    // should. Both callers compute the same plan from the same journal, so both hashes match and
+    // both proceed; a check at the top of a method that is not serialized end-to-end says nothing
+    // about the second caller. With the chain, the second rewind re-plans AFTER the first has
+    // journaled its `compensation.recorded` rows, `planCompensation` settles those seqs, the plan
+    // is genuinely different, and the hash then refuses it — which is the correct answer and the
+    // one the operator can act on. Chain and hash close it together; neither does alone.
+    const prev = this.#rewinding.get(runId);
+    const run = (async () => {
+      if (prev !== undefined) await prev;
+      return this.#rewindSerially(runId, atSeq, reason, by, auth);
+    })();
+    // A never-rejecting handle, `advance`'s shape: a predecessor that threw must not reject its
+    // successor, and an unhandled rejection here would take the process down.
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#rewinding.set(runId, settled);
+    void settled.then(() => {
+      if (this.#rewinding.get(runId) === settled) this.#rewinding.delete(runId);
+    });
+    return run;
+  }
+
+  /**
+   * WHAT A REWIND WOULD UNDO, WITH THE HASH THAT BINDS IT. The LOUD half of `b90b137`'s fifth.
+   *
+   * A.34 gave `rewind` a human floor, so a person authorizes *a rewind*. They still could not
+   * see *what it would undo*, and the decision this closes asked for "loud, gated by the same
+   * oversight floor an irreversible action gets, and never silent".
+   *
+   * IT IS THE DISPATCHER'S OWN WALK, NOT A SECOND OPINION ABOUT IT. `rewind` used to compute a
+   * preview as `planCompensation` over the rewound run's OWN events while dispatching
+   * `#compensate`'s tree walk. Measured on `rewind-through-subgraph`'s DELEGATED leg: the
+   * parent-only plan was empty, its hash was the digest of `[]`, and a `pay.refund` was
+   * dispatched in the child. A preview that says "nothing to undo" over a charge about to be
+   * reversed is worse than no preview, so both callers consume `#planRollback` and "the two
+   * agree" is true by CONSTRUCTION rather than by a test that only ever exercises the
+   * non-delegated case.
+   *
+   * ── WHAT `planHash` COVERS, AND WHY EACH FIELD IS IN IT ──────────────────────
+   * `digest({runId, atSeq, attached, steps})`, each step
+   * `{runId, seq, compensates, tool, irreversibility, ok, undo | blocked, argsDigest?,
+   * undispatchable?}` in dispatch order.
+   *
+   *  - `seq` and `compensates`, because `run/compensation.ts` calls `seq` "the step's identity"
+   *    and two effects sharing a `tool -> undo` pair differ in nothing else. A `tool -> undo`
+   *    list is provably not enough.
+   *  - `undo | blocked`, because a registry that changed under the run turns a dispatch into a
+   *    block, and the operator authorized the first.
+   *  - `argsDigest`, because the undo's ARGUMENTS are not in the step at all: they are the
+   *    compensated call's recorded `details`, read through the suppression-aware
+   *    `#completedEffects` the dispatcher itself uses. A rewind to a different `atSeq` changes
+   *    what an unchanged step dispatches, and a hash over tool names calls those equal.
+   *  - `undispatchable` per step and `attached` for the run, because "this engine can no longer
+   *    run it" is a fact about the PROCESS rather than the journal, and a confirm after a restart
+   *    has to be refused rather than silently becoming a no-op. No journal-derived hash can catch
+   *    that, so it is in the hash's own header.
+   *
+   * IT RUNS EVERY REFUSAL `rewind` RUNS, through `#rewindRefusals`. A preview of a rewind that
+   * will be refused anyway is a plan the operator can never use, and handing them one is a
+   * different way of lying to them.
+   *
+   * A HUMAN ONLY, exactly as the rewind is. The plan enumerates a run's undoable real-world
+   * effects; gating the act while publishing the reconnaissance is not a floor. This is the read
+   * half of one verb, not a second verb.
+   */
+  async planRewind(runId: RunId, atSeq: Seq, by: HumanActor): Promise<RewindPlan> {
+    this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
+    const { p, live, ctx } = await this.#rewindRefusals(runId, atSeq);
+    const plan = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+    await this.#journalPlanShown(ctx, plan);
+    return plan;
+  }
+
+  /** The human floor `rewind` and `planRewind` share, so the two cannot drift on who may ask. */
+  #requireHumanRewind(runId: RunId, atSeq: Seq, by: HumanActor, verb: string): void {
     if (by.kind !== "human") {
       throw err.policy(
         CODES.E_HUMAN_APPROVAL_REQUIRED,
-        `rewinding run ${runId} dispatches real-world undos and suppresses the record of what it undid, decisions a human already made included; only a human may do that. ` +
+        `${verb} run ${runId} dispatches real-world undos and suppresses the record of what it undid, decisions a human already made included; only a human may do that. ` +
           // NAMES THE FLAG, because "authenticate as a person" is not actionable on a plane that
           // has no identity source at all — and the alternative below is deliberately NOT offered
           // as an equivalent. README sends an operator here to recover a STUCK LEASE, which a
@@ -2771,6 +3038,138 @@ export class Engine {
         { details: { runId, atSeq, actor: by } },
       );
     }
+  }
+
+  /**
+   * The walk, as a thing an operator can be shown and a hash can cover.
+   *
+   * `RollbackWalkStep` carries a live `RunContext` and a raw recorded result; neither can be
+   * serialized to an operator, and the second must not be — `details` is production data.
+   * `argsDigest` is what survives that: it binds the plan to WHAT gets undone without putting a
+   * value anywhere.
+   *
+   * A DETACHED RUN STILL GETS A PLAN, with no `ctx` handed to the walk. Every step of the run and
+   * of every run below it comes back `undispatchable` — which is the honest answer, and is exactly
+   * what `rewind`'s detached refusal reads.
+   */
+  async #rewindPlanOf(
+    runId: RunId,
+    atSeq: Seq,
+    p: RunProjection,
+    live: RunContext | undefined,
+    ctx: { readonly log: RunLog },
+  ): Promise<RewindPlan> {
+    const walk = await this.#planRollback({ runId, log: ctx.log, ...(live === undefined ? {} : { ctx: live }), p, sinceSeq: atSeq });
+    const steps: RewindPlanStep[] = walk.map((item) => ({
+      runId: String(item.runId),
+      seq: item.step.seq,
+      compensates: item.step.compensates,
+      tool: item.step.tool,
+      irreversibility: item.step.irreversibility,
+      ok: item.step.ok,
+      ...(item.step.undo === undefined ? {} : { undo: item.step.undo }),
+      ...(item.step.blocked === undefined ? {} : { blocked: item.step.blocked }),
+      // Only where an undo would actually be built. A step nothing will attempt has no arguments
+      // to bind, and `#compensateOne` reads `details` off the recorded result for the rest.
+      ...(item.result === undefined || item.step.undo === undefined ? {} : { argsDigest: digest(detailsOf(item.result)) }),
+      ...(item.undispatchable === undefined ? {} : { undispatchable: item.undispatchable }),
+    }));
+    const dispatch = steps.filter((s) => s.undo !== undefined && s.undispatchable === undefined).length;
+    const header = { runId: String(runId), atSeq: atSeq as number, attached: live !== undefined, steps };
+    return { ...header, dispatch, blocked: steps.length - dispatch, planHash: digest(header) };
+  }
+
+  /**
+   * PUT THE SHOWN PLAN ON THE RECORD, so the authorization is a journal fact and not a memory.
+   *
+   * THIS IS WHY A.35 IS (a) AND NOT AN INLINE CONFIRM CALLBACK. A callback's answer exists only
+   * in the process that held it, nothing folds behind it, and a restart between the question and
+   * the dispatch loses what the operator was shown — the first non-negotiable, and the class this
+   * repo has violated six times. Two calls with the plan on the log has none of that.
+   *
+   * ON `operator.command`, WHICH NEEDED NO NEW EVENT TYPE. Its payload is
+   * `{kind: string, args: Record<string, unknown>}` — deliberately open, already the audit home
+   * for what a person did to a run (`journal/audit.ts`), and already written by `cancel`,
+   * `pause`, `resume` and `steer`. A rewind was the one operator verb with no `operator.command`
+   * row of its own; it has two now, `rewind.plan` for what was shown and `rewind` for what was
+   * authorized. `run/projection.ts` folds only `kind: "steer"` and returns early for everything
+   * else, so an old binary folding a new journal is unaffected — which is what makes this
+   * additive rather than a change to the closed vocabulary in `journal/events.ts`.
+   *
+   * THE PLAN TEXT AND NOT ONLY THE HASH. The plan is NOT recomputable from the journal later: it
+   * depends on this process's `ToolRegistry` and on which child graphs could be rehydrated. A
+   * bare hash would certify a list nobody can reproduce, which is not an audit trail.
+   *
+   * IDEMPOTENT ON THE HASH, so a console that re-reads the plan every few seconds writes one row
+   * rather than one per poll. `planHash` already covers everything that could make two previews
+   * different, so "the last `rewind.plan` on this log carries this hash" is the exact condition
+   * under which a second row would say nothing new. Derived, never a nonce.
+   */
+  async #journalPlanShown(ctx: { readonly log: RunLog }, plan: RewindPlan): Promise<void> {
+    let last: string | undefined;
+    for await (const e of ctx.log.read(1 as Seq)) {
+      if (!isEvent(e, "operator.command") || e.payload.kind !== "rewind.plan") continue;
+      const hash = e.payload.args["planHash"];
+      if (typeof hash === "string") last = hash;
+    }
+    if (last === plan.planHash) return;
+    await this.#serialize(() =>
+      ctx.log.append([
+        {
+          type: "operator.command",
+          payload: {
+            kind: "rewind.plan",
+            args: { atSeq: plan.atSeq, planHash: plan.planHash, attached: plan.attached, dispatch: plan.dispatch, blocked: plan.blocked, steps: plan.steps },
+          },
+          actor: SYSTEM_ACTOR("operator"),
+        },
+      ]),
+    );
+  }
+
+  /**
+   * The plan a given hash was shown as, read back OUT OF THE JOURNAL, or `undefined`.
+   *
+   * What makes the stale-plan refusal able to name what CHANGED rather than only that something
+   * did. It reads raw rather than suppression-aware on purpose: a `rewind.plan` row written
+   * before a rewind lands inside the range `(atSeq, marker)` that rewind then suppresses, and a
+   * fold that hid it would make the second rewind unable to explain itself.
+   *
+   * A JOURNAL IS AN INPUT, not something this may assume well-formed — the same rule
+   * `run/projection.ts` states for `operator.command{steer}`. Every field is checked and a row it
+   * cannot read yields NO plan, which degrades the refusal's message and never its verdict.
+   */
+  async #planShownAs(runId: RunId, planHash: string): Promise<readonly RewindPlanStep[] | undefined> {
+    let found: readonly RewindPlanStep[] | undefined;
+    for await (const e of this.#store.read(runId, 1 as Seq)) {
+      if (!isEvent(e, "operator.command")) continue;
+      if (e.payload.kind !== "rewind.plan" && e.payload.kind !== "rewind") continue;
+      if (e.payload.args["planHash"] !== planHash) continue;
+      const steps = e.payload.args["steps"];
+      if (!Array.isArray(steps)) continue;
+      const parsed: RewindPlanStep[] = [];
+      for (const s of steps) {
+        if (s === null || typeof s !== "object") continue;
+        const row = s as Record<string, unknown>;
+        if (typeof row["runId"] !== "string" || typeof row["seq"] !== "number" || typeof row["tool"] !== "string") continue;
+        parsed.push(row as unknown as RewindPlanStep);
+      }
+      found = parsed;
+    }
+    return found;
+  }
+
+  /**
+   * Everything `rewind` refuses BEFORE it would undo anything, and `planRewind` refuses too.
+   *
+   * Extracted so the preview and the confirm cannot answer differently about the same boundary —
+   * "a rule enforced by convention at each call site is not a rule", the argument `#requireLive`
+   * already makes for `pause` and `resume`.
+   */
+  async #rewindRefusals(
+    runId: RunId,
+    atSeq: Seq,
+  ): Promise<{ readonly p: RunProjection; readonly live: RunContext | undefined; readonly ctx: { readonly log: RunLog } }> {
     // A rewind reads the log and appends a marker, and needs nothing else from a live
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
@@ -2993,14 +3392,83 @@ export class Engine {
       );
     }
 
-    // WHAT THE ROLLBACK WOULD DO, COMPUTED BEFORE ANYTHING IS DONE — and after the refusal
+    return { p, live, ctx };
+  }
+
+  /**
+   * The rewind itself, once the chain in `rewind` has this run to itself.
+   *
+   * Split from `rewind` for the same reason `#advanceSerially` is split from `advance`: the
+   * public method owns the per-run chain and nothing else, so the body below may assume it is
+   * alone on this run and a reader can see that assumption in one place.
+   */
+  async #rewindSerially(
+    runId: RunId,
+    atSeq: Seq,
+    reason: string,
+    by: HumanActor,
+    auth: RewindAuthorization,
+  ): Promise<RunProjection> {
+    this.#requireHumanRewind(runId, atSeq, by, "rewinding");
+    const { p, live, ctx } = await this.#rewindRefusals(runId, atSeq);
+
+    // WHAT THE ROLLBACK WOULD DO, COMPUTED BEFORE ANYTHING IS DONE — and after the refusals
     // above, deliberately. A rewind that is going to be refused must undo NOTHING: unwinding
     // half a run and then declining to rewind it leaves the operator worse off than either
     // answer alone, and they never asked for the half.
-    const preRewind: JournalEvent[] = [];
-    for await (const e of ctx.log.read(1 as Seq)) preRewind.push(e);
-    const plan = planCompensation({ events: preRewind, tools: this.tools, sinceSeq: atSeq });
-    const plannedUndo = attemptable(plan);
+    //
+    // AND IT IS THE SAME CALL `planRewind` MAKES, which is the whole of A.35. The list the
+    // operator authorized and the list about to be dispatched are one function's output read
+    // twice, so "they agree" is not a property a test has to establish — the only way they can
+    // differ is that the WORLD moved between the two reads, which is exactly what the hash below
+    // is for.
+    const current = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+
+    // THE PLAN THE OPERATOR SAW, OR NOTHING HAPPENS.
+    //
+    // A MISSING OR UNPARSEABLE HASH FAILS CLOSED — there is no "proceed anyway". `auth` is a
+    // required parameter with no default for the reason A.34's `by` has none: a default is how
+    // the last floor on this verb came to be checked nowhere, at 34 of 36 call sites.
+    //
+    // THE REFUSAL NAMES WHAT CHANGED, because "your plan is stale" is not something an operator
+    // can act on. The two sets are diffed by the step identity `run/compensation.ts` defines —
+    // `runId` plus `seq` — so the message says which effects appeared and which are gone, and a
+    // step that merely changed its undo, its arguments or its dispatchability shows up in both
+    // lists rather than in neither.
+    if (typeof auth?.planHash !== "string" || auth.planHash.length === 0) {
+      throw err.validation(
+        CODES.E_RESTORE_ILLEGAL,
+        `rewinding run ${runId} requires the \`planHash\` of a plan a person was shown: call \`planRewind(runId, ${atSeq}, by)\` and pass its \`planHash\`. ` +
+          `Refusing rather than proceeding, because an authorization for a list nobody saw is not one`,
+        { details: { runId, atSeq } },
+      );
+    }
+    if (auth.planHash !== current.planHash) {
+      const shown = (s: RewindPlanStep): string => `${s.runId}@${String(s.seq)} ${s.tool} -> ${s.undo ?? `(${s.blocked ?? "blocked"})`}`;
+      const previous = await this.#planShownAs(runId, auth.planHash);
+      const was = new Map((previous ?? []).map((s) => [`${s.runId}@${String(s.seq)}`, s]));
+      const now = new Map(current.steps.map((s) => [`${s.runId}@${String(s.seq)}`, s]));
+      const added = current.steps.filter((s) => !was.has(`${s.runId}@${String(s.seq)}`)).map(shown);
+      const removed = (previous ?? []).filter((s) => !now.has(`${s.runId}@${String(s.seq)}`)).map(shown);
+      const what =
+        previous === undefined
+          ? `this engine has no record of plan ${auth.planHash}, and what it would dispatch now is ${String(current.dispatch)} undo(s): ${current.steps.map(shown).join(", ") || "none"}`
+          : [
+              added.length === 0 ? undefined : `now also: ${added.join(", ")}`,
+              removed.length === 0 ? undefined : `no longer: ${removed.join(", ")}`,
+              added.length === 0 && removed.length === 0
+                ? `the same steps, changed: ${current.steps.map(shown).join(", ") || "none"}`
+                : undefined,
+            ]
+              .filter((x) => x !== undefined)
+              .join("; ");
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `the plan authorized for run ${runId} is not what a rewind to ${atSeq} would dispatch now — ${what}. ` +
+          `Call \`planRewind\` again and authorize what it returns`,
+        { details: { runId, atSeq, authorized: auth.planHash, current: current.planHash } },
+      );
+    }
 
     // UNDO WHAT THE REWIND IS ABOUT TO HIDE.
     //
@@ -3035,55 +3503,76 @@ export class Engine {
     // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
     // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
     // and the message says so.
-    if (plannedUndo.length > 0 && live === undefined) {
-      throw err.conflict(
-        CODES.E_RESTORE_ILLEGAL,
-        `cannot rewind to ${atSeq}: ${String(plannedUndo.length)} recorded effect(s) after it declare a ` +
-          `compensation (${[...new Set(plannedUndo.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}), and ` +
-          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
-          `rewinding without them would hide the record and leave the effects standing`,
-        { details: { runId, atSeq, pending: plannedUndo.length } },
-      );
-    }
-    // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES. The condition is `plan.steps`, not
-    // `plannedUndo`: a step nothing can undo still has to be JOURNALED as `not_attempted`, or the
-    // three states collapse back to two on this path while holding on the other. A rewind that
-    // crosses a `reversible_write` whose tool declares no compensation is exactly the case an
-    // operator has to be told about, and it is the case with no `attemptable` step in it.
-    //
-    // THE ONE REMAINING SILENCE, named rather than implied: a DETACHED run whose steps are all
-    // blocked journals nothing, because `#compensate` dispatches through `#invokeTool` and takes
-    // a `RunContext` it has no way to build. The refusal above does not cover it either — there
-    // is nothing to dispatch, so there is nothing to be unable to dispatch.
     //
     // AND THE QUESTION IS "IS THERE ANYTHING TO UNDO ANYWHERE UNDER THIS RUN", NOT "DOES THE
-    // PARENT HAVE A STEP OF ITS OWN". `plan` is `planCompensation` over the parent's OWN events,
-    // and a parent whose only work was DELEGATED has zero steps of its own — so the descent
-    // `#compensate` grew for exactly this case was never entered from a rewind, and the guard
-    // that was supposed to skip an empty rollback skipped every delegated one instead.
+    // PARENT HAVE A STEP OF ITS OWN". This refusal read `planCompensation` over the parent's OWN
+    // events, and a parent whose only work was DELEGATED has zero steps of its own — so a
+    // detached rewind of a fully-delegated run walked straight past it. Measured on
+    // `rewind-through-subgraph`'s delegated leg with `forget(runId)` first: the rewind was
+    // ACCEPTED, `charges` stood at `[42]`, and there was no `compensation.recorded` in the
+    // parent's journal or the child's saying so. "Nothing to undo" and "an effect stands and
+    // nobody will try" were the same answer, which is exactly the silence `b90b137`'s fifth
+    // decision forbids — and it is the same asymmetry `#uncompensatedIrreversible` closed for the
+    // REFUSAL half one screen above, arriving a third time in the same feature.
     //
-    // Measured on `rewind-through-subgraph`'s fixture, the same `pay.refundable` call in the two
-    // positions the file already contrasts: run it in the parent and the rewind journals a
-    // `compensation.recorded`; delegate it to a subgraph and the rewind wrote NOTHING, in any
-    // journal, with the charge standing and no row saying so. That is precisely the asymmetry
-    // `#uncompensatedIrreversible` closed for the REFUSAL half one screen above — "we refuse to
-    // rewind past a child's charge" held while "we undo a child's charge" did not — arriving a
-    // second time at the second half of the same feature.
+    // `current.steps` IS THE TREE, so the fix is to read the walk this method already computed
+    // rather than to grow a second descent here. `#planRollback` resolves a context per run, so a
+    // step it marks `undispatchable` under a detached parent is one no journal anywhere will
+    // record — which is the precise condition for refusing.
+    const unrunnable = current.steps.filter((s) => s.undo !== undefined && s.undispatchable !== undefined);
+    if (unrunnable.length > 0 && live === undefined) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(unrunnable.length)} recorded effect(s) after it declare a ` +
+          `compensation (${[...new Set(unrunnable.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}${
+            unrunnable.some((s) => s.runId !== String(runId)) ? `, including in child run(s) ${[...new Set(unrunnable.filter((s) => s.runId !== String(runId)).map((s) => s.runId))].join(", ")}` : ""
+          }), and ` +
+          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
+          `rewinding without them would hide the record and leave the effects standing`,
+        { details: { runId, atSeq, pending: unrunnable.length } },
+      );
+    }
+    // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES, once there is a context: a step nothing can
+    // undo still has to be JOURNALED as `not_attempted`, or the three states collapse back to two
+    // on this path while holding on the other. A rewind that crosses a `reversible_write` whose
+    // tool declares no compensation is exactly the case an operator has to be told about, and it
+    // is the case with no `attemptable` step in it.
     //
-    // `#compensate` is the only thing that can answer the tree-wide question, because answering
-    // it means walking the tree: it collects the `subgraph.started` events after `sinceSeq`
-    // itself, descends, and returns a zero tally when neither it nor any descendant has a step.
-    // So the pre-check is DELETED rather than widened — a second copy of the descent here is the
-    // drift hazard, not the fix.
+    // THE ONE REMAINING SILENCE, named rather than implied: a DETACHED run whose steps are ALL
+    // BLOCKED journals nothing, because dispatch goes through `#invokeTool` and takes a
+    // `RunContext` there is no way to build. The refusal above does not cover it — those steps
+    // have no `undo` to be unable to run. It is no longer invisible, because `planRewind` shows
+    // them to the operator before they authorize; it is still unwritten afterwards.
     if (live !== undefined) {
       await this.#compensate(live, (await this.projection(runId))!, "rewind", atSeq);
     }
 
+    // THE MARKER AND THE AUTHORIZATION, IN ONE APPEND, IN THAT ORDER.
+    //
+    // ONE APPEND because a marker without the authorization behind it is a rewind nobody can
+    // account for, and `RunLog.append` is the compare-and-swap that makes "both or neither" true.
+    //
+    // THE MARKER FIRST, which reads backwards and is deliberate. `suppressedRanges` hides
+    // `(atSeq, markerSeq)` exclusive at both ends, so anything appended BEFORE the marker and
+    // after `atSeq` — the `rewind.plan` rows `planRewind` wrote included — is hidden from every
+    // suppression-aware reader, `journal/audit.ts` among them. Putting the authorization above
+    // the marker is what keeps the one row that says WHO approved WHAT out of the range it
+    // authorized. The `rewind.plan` preview rows are inside it and that is the correct
+    // asymmetry: what was merely SHOWN belongs to the history being undone, and what was
+    // AUTHORIZED belongs to the run that comes after.
     await this.#serialize(() =>
       ctx.log.append([
         {
           type: "checkpoint.restored",
           payload: { checkpointId: `cp_${atSeq}` as never, mode: "rewind", atSeq, reason },
+          actor: by,
+        },
+        {
+          type: "operator.command",
+          payload: {
+            kind: "rewind",
+            args: { atSeq: atSeq as number, reason, planHash: current.planHash, attached: current.attached, dispatch: current.dispatch, blocked: current.blocked, steps: current.steps },
+          },
           actor: by,
         },
       ]),
@@ -4244,7 +4733,7 @@ export class Engine {
    * It is recomputed here rather than imported so this stays a single pass over the journal
    * with no second buffer of every event.
    */
-  async #completedEffects(ctx: RunContext, accept: (key: string) => boolean): Promise<Map<string, unknown>> {
+  async #completedEffects(ctx: { readonly log: RunLog }, accept: (key: string) => boolean): Promise<Map<string, unknown>> {
     const hits: { seq: number; key: string; result: unknown }[] = [];
     const undone: [number, number][] = [];
     for await (const e of ctx.log.read(1 as Seq)) {

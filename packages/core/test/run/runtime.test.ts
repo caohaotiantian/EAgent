@@ -17,7 +17,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { foldRun } from "../../src/run/projection.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { SKELETON_TOOLS, resolver } from "./skeleton.ts";
 
 /** A two-node graph: one tool node that can be made to fail, then a report. */
@@ -270,7 +270,7 @@ test("rewind hides events without editing history", async () => {
 
   // Rewind to just after the run started, before anything executed.
   const startedAt = before.find((e) => e.type === "run.started")!.seq;
-  const p = await r.engine.rewind(runId, startedAt, "operator undo", OPERATOR);
+  const p = await rewindWithPlan(r.engine, runId, startedAt, "operator undo");
 
   assert.equal(p.status, "running", "the completion is hidden");
   assert.deepEqual(p.channels["out"], undefined, "and so is the write");
@@ -285,7 +285,7 @@ test("rewind is itself recorded, so the undo is auditable", async () => {
   const graph = compileWith(retrySpec(undefined));
   const runId = await r.engine.submit({ graph, inputs: { seed: "s" } });
   await r.engine.advance(runId);
-  await r.engine.rewind(runId, 3, "wrong input", OPERATOR);
+  await rewindWithPlan(r.engine, runId, 3, "wrong input");
 
   const marker = (await eventsOf(r.store, runId)).find((e) => e.type === "checkpoint.restored");
   assert.ok(marker);
@@ -336,7 +336,7 @@ test("rewind refuses to undo past an irreversible action with no compensation", 
     idempotencyKey: "k",
   });
 
-  await assert.rejects(() => engine.rewind(runId, 1, "undo the charge", OPERATOR), /E_RESTORE_ILLEGAL|declares no compensation/);
+  await assert.rejects(() => rewindWithPlan(engine, runId, 1, "undo the charge"), /E_RESTORE_ILLEGAL|declares no compensation/);
 });
 
 // ── schema (regression) ──────────────────────────────────────────────────────

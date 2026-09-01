@@ -184,7 +184,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 
 import { SubscriberOverflowError, type EventBus } from "../bus.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
-import type { EdgeId, GateId, NodeId, RunId } from "../ids.ts";
+import type { EdgeId, GateId, NodeId, RunId, Seq } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
@@ -3090,6 +3090,50 @@ export class ControlPlane {
       },
 
       {
+        method: "GET",
+        pattern: /^\/runs\/([^/]+)\/rewind-plan$/,
+        /**
+         * WHAT A REWIND WOULD UNDO, BEFORE ANYBODY AUTHORIZES IT.
+         *
+         * ITS OWN ROUTE RATHER THAN AN EIGHTH `commands` VERB, and — unlike `/oversight` below —
+         * the reason IS the URL space rather than the journal: `commands` is a POST that acts,
+         * this is a read, and the two do not belong behind one method. It answers the question
+         * the `rewind` command's `planHash` asks, so the pair reads as one handshake.
+         *
+         * A GET THAT WRITES ONE ROW, which is the honest description and is why it is worth
+         * stating. `Engine.planRewind` journals `operator.command{kind:"rewind.plan"}` so the
+         * plan an operator was shown survives a restart — that is the half an inline confirm
+         * callback cannot have. The append is IDEMPOTENT on the plan hash, so a console polling
+         * this route writes once and not once per poll, which is what keeps a GET honest enough
+         * to stay a GET.
+         *
+         * A HUMAN, AND `ownsRun`. The engine refuses a non-human caller, so this is a 403 for a
+         * service token exactly as the `rewind` command is: gating the act while publishing the
+         * reconnaissance — here are the run's undoable real-world effects, keyed and named —
+         * would not be a floor. `ownsRun` for the same reason the command route asks it: being
+         * an approver on one gate is not a key to the run.
+         */
+        handle: async ({ res, params, url, auth }) => {
+          const runId = params[0] as RunId;
+          const who = mustAuth(auth);
+          const existing = await engine.projection(runId);
+          if (existing === undefined || !ownsRun(existing, who)) {
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
+          }
+          const raw = url.searchParams.get("atSeq");
+          const atSeq = raw === null ? Number.NaN : Number(raw);
+          if (!Number.isSafeInteger(atSeq)) {
+            throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, `"atSeq" must be an integer seq to rewind to, not ${raw === null ? "absent" : `"${raw}"`}`);
+          }
+          // The bind the `rewind` command makes, for the same reason: the plan's third state is
+          // "this engine cannot dispatch this", and a preview taken before the graph was bound
+          // would report a rewind as undispatchable that the command would then run.
+          await this.#bindFromIndex(runId);
+          send(res, 200, await engine.planRewind(runId, atSeq as Seq, commandActor(auth) as HumanActor));
+        },
+      },
+
+      {
         method: "POST",
         pattern: /^\/runs\/([^/]+)\/commands$/,
         // Being named an approver on a run's gate lets you ANSWER the gate; it must not let
@@ -3179,10 +3223,40 @@ export class ControlPlane {
               // A tightening is allowed and this one is required, but it is a behaviour an
               // operator meets in production, so the engine's refusal names both ways out:
               // authenticate as a person, or use `cancel`, which still accepts this caller.
+              //
+              // `planHash` IS THE OPERATOR'S ANSWER TO `GET /runs/:id/rewind-plan`, and a body
+              // without one is a 400 here rather than a defaulted call. The engine refuses it too
+              // — that check is the floor and this one is the error message: "rewind requires
+              // planHash" reaches a caller who typed the request, where the engine's refusal
+              // reaches a caller who wrote a program. Shape here, decision in the engine, which
+              // is the split `steer` above already draws.
+              //
+              // AND IT IS CHECKED ONLY FOR A HUMAN CALLER, which is a refusal ORDER rather than a
+              // weaker rule. `Engine.rewind` refuses a non-human FIRST and refuses a missing hash
+              // second; a 400 raised here ahead of both would answer "your body is malformed" to
+              // a service token whose real answer is 403, and it would lose the message that
+              // names `--identity-file`. Measured as exactly that regression: an anonymous plane's
+              // rewind returned 400 where the floor requires 403. The engine still refuses a
+              // missing hash from a human, so nothing is loosened by deferring.
+              const planHash: unknown = cmd["planHash"];
+              if ((by as HumanActor).kind === "human" && (typeof planHash !== "string" || planHash.length === 0)) {
+                throw err.validation(
+                  CODES.E_PROVIDER_BAD_REQUEST,
+                  `rewind requires "planHash": GET /runs/${runId}/rewind-plan?atSeq=${String(atSeq)} and send back the "planHash" it returns. ` +
+                    `A rewind dispatches real-world undos, and an authorization for a list nobody saw is not one`,
+                );
+              }
               send(
                 res,
                 200,
-                this.#summary(await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by as HumanActor)),
+                this.#summary(
+                  await engine.rewind(runId, atSeq, checkedReason(cmd["reason"], "operator"), by as HumanActor, {
+                    // A non-string reaches the engine as an empty hash, which the engine refuses.
+                    // Passing it through unchanged and letting the floor decide is the fail-closed
+                    // reading; coercing it to something plausible here would not be.
+                    planHash: typeof planHash === "string" ? planHash : "",
+                  }),
+                ),
               );
               return;
             }

@@ -25,7 +25,7 @@ import type { RunId, Seq } from "../../src/ids.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type MockScript, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 import { resolver } from "./skeleton.ts";
 
 
@@ -260,7 +260,7 @@ test("A REWIND THAT SUPPRESSED THE EFFECT GETS A FRESH CALL, not the recorded on
   const log = await events(r.store, runId);
   const startedAt = log.find((e) => e.type === "effect.started")!.seq;
 
-  const rewound = await r.engine.rewind(runId, (startedAt - 1) as Seq, "operator asked", OPERATOR);
+  const rewound = await rewindWithPlan(r.engine, runId, (startedAt - 1) as Seq, "operator asked");
   assert.deepEqual(rewound.startedEffects, [], "the rewind undid the effect, so the fold must no longer know the key");
 
   const again = await r.engine.advance(runId);
@@ -311,7 +311,7 @@ test("AFTER A REWIND AND A REDO, THE RETRY SERVES THE REDO'S RECORD — not the 
   assert.deepEqual(r.charges, [10], "pass one charged once and served the retry");
 
   const startedAt = (await events(r.store, runId)).find((e) => e.type === "effect.started")!.seq;
-  await r.engine.rewind(runId, (startedAt - 1) as Seq, "operator asked", OPERATOR);
+  await rewindWithPlan(r.engine, runId, (startedAt - 1) as Seq, "operator asked");
 
   const second = await driveToRest(r, runId);
   assert.equal(second.status, "succeeded", JSON.stringify(second.error ?? {}));

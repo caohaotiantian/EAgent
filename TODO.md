@@ -248,28 +248,55 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   for you). 36 test call sites, 32 of which relied on the default, now name a person.
   **Still open, and it is what gates the seventh argument at `engine.ts:1457`:** see **A.35**.
 
-- **A.35 · A rewind's authorization is blind — the operator cannot see WHICH undos they are
-  approving.** The decision is `b90b137`'s fifth — a compensation edge fires on rewind as well as
-  on run failure, so "an operator inspecting history can trigger real-world undo", which must be
-  "loud, gated by the same oversight floor an irreversible action gets, and never silent".
+- **A.35 · ~~A rewind's authorization is blind~~ — DONE 2026-09-01, and the plan it was written
+  from was wrong about its own premise.** The decision is `b90b137`'s fifth — a compensation edge
+  fires on rewind as well as on run failure, so "an operator inspecting history can trigger
+  real-world undo", which must be "loud, gated by the same oversight floor an irreversible action
+  gets, and never silent".
   **Cited by commit, because A.34 used to call it "§D.5" and that pointer is now wrong**: §D was
   renumbered to `D.1`–`D.5` and today's D.5 is the graph-scoped-durable-fact question. Same
   failure `CLAUDE.md` records for the journal-violation enumeration — a pointer into an
   enumeration is only as good as that enumeration's discipline about being renumbered.
-  A.34 delivered the GATED half; the LOUD half is not built. `plannedUndo` inside `Engine.rewind` IS the list the operator should see — it names every
-  `tool -> undo` pair the rewind will dispatch — but it is computed after the point of no return
-  in a single call, and the signature has no shape for handing it back and waiting.
-  **The shape this wants** is two-phase: `planRewind(runId, atSeq)` returning the plan plus a
-  hash of it, and `rewind(runId, atSeq, reason, by, planHash)` refusing a hash that no longer
-  matches what it would now dispatch — a stale plan is the failure this exists to prevent, since
-  the run can move between the two calls. Over HTTP that is a `GET`-shaped preview beside the
-  existing `POST /runs/:id/commands`. Deliberately NOT built in the lane that closed A.34's half,
-  because designing a two-phase rewind under a one-line-check task is how a seam gets guessed at.
-  **Closes when** an operator authorizing a rewind has seen its dispatch list, and a rewind whose
-  list changed under them is refused rather than run. **Only then** may the seventh argument at
-  `engine.ts:1457` flip for `trigger === "rewind"` — that argument is A.8's subject, and the
-  reason it may flip at all is that the operator will by then have passed a floor *against the
-  specific undos*, which is what A.34's human check alone still does not give.
+  **Built:** `planRewind(runId, atSeq, by) -> {steps, dispatch, blocked, attached, planHash}` and
+  `rewind(runId, atSeq, reason, by, {planHash})`, plus `GET /runs/:id/rewind-plan?atSeq=N` beside
+  the existing command route. Both halves need a human; the plan enumerates a run's undoable
+  effects, and gating the act while publishing the reconnaissance is not a floor.
+  **THE ROW'S OWN PREMISE WAS FALSE AND THAT IS THE LESSON.** This row said "`plannedUndo` inside
+  `Engine.rewind` IS the list the operator should see — it names every `tool -> undo` pair the
+  rewind will dispatch". It was not. `plannedUndo` was `planCompensation` over the rewound run's
+  OWN journal; the dispatcher was `#compensate`'s TREE walk, which splices each child run's plan
+  in at the parent's `subgraph.started` seq. Driven on `rewind-through-subgraph`'s delegated leg:
+  `plannedUndo = 0`, its hash the digest of `[]`, and one `pay.refund` dispatched in the CHILD.
+  Wrapping it would have shown an empty plan over a charge about to be reversed and hashed the
+  emptiness. So the walk was extracted (`#planRollback`) and both halves consume it, which makes
+  "the preview is the dispatch list" true by construction rather than by a test that only ever
+  exercises the non-delegated case. **A row that names a variable as the answer has usually not
+  checked which of two computations that variable is.**
+  **And the same false premise had already produced a live loosening:** the detached-rewind
+  refusal read `plannedUndo`, so a detached rewind of a fully-delegated run was ACCEPTED, wrote no
+  `compensation.recorded` in any journal, and left the charge standing — "nothing to undo" and "an
+  effect stands and nobody will try" were one answer. It reads the tree walk now and refuses.
+  **The hash does not close a concurrent second rewind and the chain does.** Two rewinds plan from
+  the same journal, so both hashes matched and both dispatched: measured, two
+  `compensation.recorded` rows for one `compensatesSeq`. `rewind` has a per-run chain now, the
+  shape `advance` has carried since `engine.ts:1941`; the second caller then re-plans after the
+  first settled its steps and the hash refuses it. **A check at the top of a method that is not
+  serialized end-to-end checks nothing about the second caller.**
+  **What the operator saw is journaled on `operator.command`** — `kind: "rewind.plan"` for what
+  was shown (idempotent on the hash, so polling writes one row) and `kind: "rewind"` for what was
+  authorized, appended AFTER the marker so the rewind cannot suppress its own authorization. No
+  new event type, so no `Kernel-seam:` and the census is still 10: the payload is
+  `{kind: string, args: Record<string, unknown>}`, deliberately open, and `run/projection.ts`
+  folds only `kind: "steer"`. The plan TEXT rides along with the hash because the plan is NOT
+  recomputable from the journal later — it depends on the process's `ToolRegistry` and on which
+  child graphs rehydrate — so a bare hash would certify a list nobody can reproduce.
+  **Residues, named rather than implied.** (1) The chain is `rewind`-against-`rewind` only; a
+  rewind concurrent with an `advance` is still unserialized, and sharing `#advancing` risks a
+  deadlock nothing has evidence for. (2) A DETACHED run whose steps are all BLOCKED still journals
+  nothing — the refusal has no `undo` to catch — though `planRewind` now shows those steps.
+  **A.8 is what is left**: the seventh argument at `#compensateOne` may now be *argued* for
+  `trigger === "rewind"`, because the operator has passed a floor against the specific undos. It
+  still needs its own fixture, since the whole suite is green with the guard flipped.
 
 - **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
   `engine.ts:1199` argues it at length — an undo that policy answers `gate` must be REFUSED, or

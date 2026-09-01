@@ -45,7 +45,7 @@ import { HumanGateBroker } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
 import type { GateRecord, RunProjection } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
-import { OPERATOR } from "./operator.ts";
+import { rewindWithPlan } from "./operator.ts";
 
 const n = (id: string): NodeId => id as NodeId;
 const e = (id: string): EdgeId => id as EdgeId;
@@ -583,7 +583,7 @@ test("REWINDING TO PRECISELY A REJECTION'S SEQ IS REFUSED", async () => {
 
   const decided = (await events(r.store, top)).find((ev) => ev.type === "gate.decided")!;
   await assert.rejects(
-    () => r.engine.rewind(top, decided.seq as Seq, "undo the refusal from exactly its own seq", OPERATOR),
+    () => rewindWithPlan(r.engine, top, decided.seq as Seq, "undo the refusal from exactly its own seq"),
     (err: unknown) => {
       assert.ok(isLoomError(err), String(err));
       assert.equal(err.code, CODES.E_RESTORE_ILLEGAL, err.message);
@@ -629,7 +629,7 @@ test("…and the same boundary on an APPROVAL is refused too, naming the two seq
   const { r, top, decidedSeq } = await approvedWithoutAdvancing();
 
   await assert.rejects(
-    () => r.engine.rewind(top, decidedSeq, "rewind to exactly the approval", OPERATOR),
+    () => rewindWithPlan(r.engine, top, decidedSeq, "rewind to exactly the approval"),
     (err: unknown) => {
       assert.ok(isLoomError(err), String(err));
       assert.equal(err.code, CODES.E_RESTORE_ILLEGAL, err.message);
@@ -653,7 +653,7 @@ test("…and both seqs the refusal names really do work", async () => {
   // are the two coherent readings, and between them they are why this is a refusal rather
   // than a permanent wedge.
   const keep = await approvedWithoutAdvancing();
-  const kept = await keep.r.engine.rewind(keep.top, (keep.decidedSeq + 1) as Seq, "keep the approval", OPERATOR);
+  const kept = await rewindWithPlan(keep.r.engine, keep.top, (keep.decidedSeq + 1) as Seq, "keep the approval");
   assert.equal(kept.status, "running", "the resume survived");
   assert.equal(
     Object.values(kept.gates).find((g) => g.state === "decided")?.decision,
@@ -662,7 +662,7 @@ test("…and both seqs the refusal names really do work", async () => {
   );
 
   const undo = await approvedWithoutAdvancing();
-  const reopened = await undo.r.engine.rewind(undo.top, (undo.decidedSeq - 1) as Seq, "ask again", OPERATOR);
+  const reopened = await rewindWithPlan(undo.r.engine, undo.top, (undo.decidedSeq - 1) as Seq, "ask again");
   assert.equal(reopened.status, "awaiting_gate");
   assert.equal((await undo.r.engine.openGates(undo.top)).length, 1, "THE GATE IS BACK IN THE HUMAN'S QUEUE");
   assert.deepEqual(keep.r.charges, []);
