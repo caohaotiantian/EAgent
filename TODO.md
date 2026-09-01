@@ -55,7 +55,7 @@ Counted off the rows, not remembered.
 
 | section | rows | the shape of it |
 |---|---|---|
-| §A | 33 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 27 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | unbuilt observability |
 | §D | 5 | decisions still owed, all of them narrow |
@@ -149,14 +149,6 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
 
 ### Oversight, and the places a floor is weaker than it reads
 
-- **A.7 · `reachableToolNames` does not descend into a subgraph.** `graph/spec.ts:1040-1051` reads
-  `node.tool`, `node.agent.tools` and `node.function.effects` — a `subgraph` node is therefore
-  classified `read_only` however irreversible its child is, and the capability ceiling, the
-  unknown-tool diagnostic and the oversight floor all read this one helper. Bounded in practice
-  because the child raises its own gates on its own nodes; unbounded as a claim about the parent.
-  **Closes when** the helper resolves a `subgraph` ref and folds the child's reachable set, or the
-  three readers stop treating its answer as total for that node type.
-
 - **A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests it.**
   `engine.ts:1153` argues it at length — an undo that policy answers `gate` must be REFUSED, or
   compensation becomes the back door that performs an irreversible action a gate would have
@@ -165,13 +157,6 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   would notice the deletion of is not yet a guard. **Closes when** a fixture drives a rollback
   whose undo tool policy answers `gate`, and asserts `compensation.recorded {failed}` rather than
   a performed undo.
-
-- **A.9 · A node declaring no `timeoutMs` hangs its task forever.** `#withNodeDeadline` returns
-  straight through, so an `agent` or `tool` node with no declared deadline has none — and a join
-  over such a branch therefore still waits forever. `graph/spec.ts:265` records it at the field.
-  This is the hole D.8's deletion explicitly did NOT close; it was moved here rather than
-  buried with the field. **Closes when** the compiler supplies a default node deadline, the way
-  it now supplies a default retry policy for provider-calling nodes.
 
 - **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
   covers synchronous execution only. The refusal is correct and is stated once at the seam
@@ -718,7 +703,9 @@ is the citation, and it is durable in a way a working-notes directory is not.
 **Answered by DELETION (a decision, not a shortfall).** `JoinNode.timeoutMs` and
 `E_JOIN_TIMEOUT` (`21be5ce`) — a barrier deadline's undecidable case has no journaled answer, and
 every branch already has an enforced bound at its own locus; the "waits forever" hole itself moved
-to §A.9 rather than going with the field. `FunctionNode.cpuBound` and
+to §A.9 rather than going with the field, **and §A.9 is now closed** — that argument was only true
+of a branch whose author had written a number, and a default node deadline is what made it true of
+every branch. `FunctionNode.cpuBound` and
 `GRAPH019_CPUBOUND_NO_EFFECT` (`aaa8e3b`) — measured 1.997x wall for two independent nodes and
 5.989x for four on 16 cores, exactly serial; work that needs a process goes out as a TOOL.
 `journal/retention.ts`, its 26-test suite and its 15 pinned exports (`d57c984`) — argued on
@@ -754,6 +741,19 @@ doors (`cc320d1`): `--extension-module` gives a provider on any wire and an in-p
 CLI-reachable seam, moving README's fork-required list from seven to five — **the first time that
 list has moved the right way.** Compensation runs. Payload externalisation runs. The evolution
 loop is closed end to end against a live provider.
+
+**Two floors that read as claims about a node and were claims about its declaration** (`f5a047e`,
+`02d3db0`). §A.9 — a node declaring no `timeoutMs` had NO deadline, measured as `Engine.advance`
+unsettled at 1,500 ms on one `tool` node and never going to settle; `NodePlan.timeoutMs` now
+carries an effective deadline for `agent`, `tool` and `evaluator`, the engine reads the PLAN, and
+`loom compile` prints it with `declared` or `default`. The commit names why each of the other five
+node types gets none. §A.7 — `reachableToolNames` does not descend, and it still does not: the
+descent is `reachableToolNamesThrough` in `graph/validate.ts`, folded into the parent's class
+floor, capability ceiling and mutation gate. **Billed honestly: it closed no oversight hole** — the
+child always gated on its own floor — what it bought is the parent's missing
+`policy.escalated{rule: mutation_introduced_irreversible}` record, a human asked before the child
+does reversible work, and an `E_CAP_DENIED` that was a run-time death becoming a compile
+diagnostic.
 
 **Fixed defects whose measurement is no longer needed to read the residue.** A gate decision that
 retried; every plane calling itself `worker-0`; the run clock's rotation cursor living in process
