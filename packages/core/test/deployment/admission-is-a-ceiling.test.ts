@@ -27,7 +27,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { controlPlaneOptions, parseArgs, runClockTick, RUN_CLOCK_SCAN_CEILING } from "../../src/cli.ts";
+import { controlPlaneOptions, parseArgs, runClockTick } from "../../src/cli.ts";
 import { ControlPlane, type ControlPlaneOptions } from "../../src/server/http.ts";
 import type { RunId } from "../../src/ids.ts";
 import { deployment, origin, publishGraph, refusing, speak, type Deployment } from "./harness.ts";
@@ -114,8 +114,8 @@ test("EVERY SUBMIT IS 202 EVEN WITH NOTHING DRIVING, AND THE CLOCK FINISHES THEM
     // this workspace holds only the journal.
     const ws = d.open();
     try {
-      const t = await runClockTick(ws, 200, 1, RUN_CLOCK_SCAN_CEILING, 1_000);
-      assert.equal(t.truncated, false);
+      const t = await runClockTick(ws, 200, 1, 1_000);
+      assert.equal(t.pages, 1, "sixty runs at a page of 200 is one page, so one tick sees every one of them");
       for (const runId of ids) {
         const p = (await ws.engine.projection(runId))!;
         assert.equal(p.status, "succeeded", `${runId} must reach a terminal state from the journal alone`);

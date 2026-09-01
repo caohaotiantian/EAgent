@@ -102,6 +102,43 @@ export interface RunFilter {
    * has all ten in view instead of whichever ten are newest.
    */
   readonly raisedAGate?: boolean;
+  /**
+   * Only runs strictly AFTER this one, in this listing's own order. A cursor, not a filter on
+   * a property of the run — which is why it is here anyway: it narrows what comes back and it
+   * has to be applied where the ORDER BY is, not by the caller afterwards.
+   *
+   * WHAT IT IS FOR. `listRuns` could only say "the newest N", so a caller wanting to reach past
+   * N had to ask for N + more and throw the prefix away. The run clock did exactly that, capped
+   * the ask at `RUN_CLOCK_SCAN_CEILING`, and a run past the cap was reached by no lap of any
+   * rotation — starvation with a number on it. With a cursor a caller TRAVERSES: one page of
+   * `limit`, then the next, in memory that does not grow with the journal, and no cap to be
+   * past. That is DESIGN item 13 and it is the whole reason this field exists.
+   *
+   * A KEYSET CURSOR AND DELIBERATELY NOT AN OFFSET, and the difference is not style. Runs are
+   * appended at the HEAD of a `run_id DESC` listing, so a submission that lands between two
+   * pages of an offset walk shifts every later row down by one and the walk SKIPS a run — the
+   * exact defect a paging clock exists to remove, reintroduced by the paging. A key is a
+   * position in the order rather than in the array: a run inserted above the cursor is simply
+   * not in this walk, and no row is skipped or served twice.
+   *
+   * EXCLUSIVE. The run named is not in the result, so `page.at(-1)!.runId` is the cursor for
+   * the next page and the two pages abut with nothing missing and nothing repeated. The
+   * inclusive reading is the off-by-one that makes a walk never terminate.
+   *
+   * **IT MUST NAME A RUN THIS SAME FILTER ADMITS, AND OTHERWISE THE LISTING REFUSES** with
+   * `E_RUN_NOT_FOUND`. Both halves of that are load-bearing:
+   *
+   *   - REFUSE RATHER THAN RESTART. The tempting alternative — an unknown cursor means "start
+   *     at the top" — turns a lost position into a silently truncated walk, which is the
+   *     starvation this field closes coming back wearing a cursor. A guard that cannot decide
+   *     where the caller was fails closed.
+   *   - "THIS SAME FILTER", not "this store". A cursor is a position in an ORDER, and the
+   *     order is what the other fields choose: `raisedAGate` sorts by the most recent
+   *     `gate.raised` and a run that never gated has no position in it at all. Resolving the
+   *     cursor inside the caller's own visible set also means a caller cannot use `after` to
+   *     probe whether ANOTHER principal's run exists — the refusal is the same either way.
+   */
+  readonly after?: RunId;
 }
 
 export interface StateStore {
@@ -129,6 +166,12 @@ export interface StateStore {
    * every one of the newest N belongs to somebody else, and a caller can infer other
    * principals' submission density by varying `limit` and watching how many of its own runs
    * survive.
+   *
+   * `filter.after` is the CURSOR, and it is applied in the same place for the same reason: it
+   * is a position in the ORDER BY, so a caller cannot express it by trimming the result. With
+   * it a listing is traversable — `limit` rows at a time, to the end, in memory that does not
+   * grow with the journal — which is what lets a scan be total instead of capped. Read the
+   * field for the exclusivity rule and for the refusal.
    */
   listRuns(limit?: number, filter?: RunFilter): Promise<readonly RunSummary[]>;
 
@@ -309,6 +352,28 @@ export function submitterOf(rows: readonly PreparedEvent[]): string | undefined 
 
 /** Matches `MAX_IDENTITY_FIELD` at the HTTP perimeter; the journal is the same journal. */
 const MAX_SUBJECT = 256;
+
+/**
+ * The refusal for a `RunFilter.after` that names no position in the caller's own listing.
+ *
+ * SHARED, for the reason `prepare` and `submitterOf` are shared: a divergence here is a
+ * divergence about whether a paging caller is told it lost its place, and the whole value of
+ * refusing is that every backend refuses the same way. `journal/conformance.ts` asks both.
+ *
+ * `E_RUN_NOT_FOUND` rather than a code of its own, and that is a decision rather than a
+ * shortcut: the fact is exactly "this listing has no such run", which is what that code already
+ * names, and it is the same fact whether the run was never journaled, belongs to a store this
+ * cursor did not come from, or is invisible under this filter. Collapsing the three is
+ * deliberate — a caller that could tell them apart could use `after` to probe for the existence
+ * of another principal's run, which is a thing the listing itself refuses to answer.
+ */
+export function cursorNotFound(after: RunId): never {
+  throw err.notFound(
+    CODES.E_RUN_NOT_FOUND,
+    `listRuns cursor ${after}: this listing has no such run, so there is no position to resume from`,
+    { details: { after } },
+  );
+}
 
 export function seqConflict(runId: RunId, expected: Seq, actual: Seq): never {
   throw err.conflict(

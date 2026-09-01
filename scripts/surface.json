@@ -383,6 +383,7 @@
   "createFunctionLoader",
   "createGraphCompiler",
   "createHookLoader",
+  "cursorNotFound",
   "dataFloorOf",
   "decodeBranch",
   "descendantsOf",

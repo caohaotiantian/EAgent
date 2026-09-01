@@ -32,7 +32,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { main, RUN_CLOCK_SCAN_CEILING, runClockTick } from "../../src/cli.ts";
+import { main, runClockTick } from "../../src/cli.ts";
 import { newRunId, type RunId, type TaskId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { deployment, fillRuns, publishGraph, quiet } from "./harness.ts";
@@ -64,7 +64,7 @@ test("A CLOCK WHOSE PROCESS RESTARTS BETWEEN EVERY TICK STILL REACHES THE OLDEST
     for (let boot = 0; boot < 4; boot++) {
       const w = d.open();
       try {
-        const tick = await runClockTick(w, LIMIT, boot * LAP, RUN_CLOCK_SCAN_CEILING, LAP);
+        const tick = await runClockTick(w, LIMIT, boot * LAP, LAP);
         for (const id of tick.visited) seen.add(id);
         if (reached < 0 && tick.visited.includes(oldest)) reached = boot;
       } finally {
@@ -90,7 +90,7 @@ test("THE CONTROL: A PLANE THAT STAYS UP IS NOT MADE WORSE BY THE FIX", async ()
     const oldest = (await fillRuns(ws.store, 250, 1_700_000_000_000))[0]!;
     let reached = -1;
     for (let tick = 0; tick < 4 && reached < 0; tick++) {
-      const t = await runClockTick(ws, LIMIT, tick * LAP, RUN_CLOCK_SCAN_CEILING, LAP);
+      const t = await runClockTick(ws, LIMIT, tick * LAP, LAP);
       assert.ok(t.visited.length <= LIMIT, `work per tick is still bounded by limit: ${t.visited.length}`);
       if (t.visited.includes(oldest)) reached = tick;
     }
@@ -119,8 +119,8 @@ test("TWO PLANES THAT NEVER SPOKE COMPUTE THE SAME WINDOW", async () => {
     const b = d.open();
     try {
       for (const at of [0, LAP, 7 * LAP]) {
-        const x = await runClockTick(a, LIMIT, at, RUN_CLOCK_SCAN_CEILING, LAP);
-        const y = await runClockTick(b, LIMIT, at, RUN_CLOCK_SCAN_CEILING, LAP);
+        const x = await runClockTick(a, LIMIT, at, LAP);
+        const y = await runClockTick(b, LIMIT, at, LAP);
         assert.deepEqual([...x.visited], [...y.visited], `two planes at the same instant must be looking at the same runs (t=${at})`);
       }
     } finally {
@@ -224,7 +224,7 @@ test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS IN VIEW FOREVER AND IS 
       assert.equal((await w.engine.projection(ready))?.tasks[TASK]?.state, "ready", "and the control's task folds back to `ready`");
 
       const driven: RunId[] = [];
-      const t = await runClockTick(w, LIMIT, 1_700_000_000_100, RUN_CLOCK_SCAN_CEILING, LAP, (runId) => void driven.push(runId));
+      const t = await runClockTick(w, LIMIT, 1_700_000_000_100, LAP, (runId: RunId) => void driven.push(runId));
 
       assert.ok(t.visited.includes(leased), "the stranded run IS in the clock's window — it is not a listing problem");
       assert.equal(driven.includes(leased), false, "and it is never driven: `due` wants a `ready` task and this one is leased for good");

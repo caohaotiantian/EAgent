@@ -267,12 +267,22 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   reports MERGED is not evidence the work arrived**; `git merge-base --is-ancestor <commit> loom`
   is, and it is one command per lane.
 
-- **A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual, and two planes duplicating one window — both want
-  the same cursor.** A run past 10,000 is reached by no lap and `RunClockTick.truncated` is the
-  only reason anyone knows; separately, two planes now AGREE on a window rather than dividing it,
-  which is correct and wasteful because they duplicate every fold. **Closes when** `StateStore`
-  grows `listRuns(after)` with a conformance test behind it — `runClockTick`'s own docstring names
-  it — and the rotation is then the thing to delete. §E.2's coordinator is the second half.
+- **A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual.** ~~A run past 10,000 is reached by no lap and
+  `RunClockTick.truncated` is the only reason anyone knows.~~ **CLOSED.** `StateStore.listRuns`
+  grew `RunFilter.after` — a keyset cursor, exclusive, refusing a cursor its own filter does not
+  admit — with four conformance cases behind it over both backends. `runClockTick` traverses in
+  pages of `limit` instead of indexing into a capped array, so no run is out of reach at any N;
+  `RUN_CLOCK_SCAN_CEILING`, `truncated`, `runClockWindow` and the ceiling banner are deleted, and
+  `run-clock-window.test.ts`'s pin of the two unreachable runs is now its opposite. The cost is
+  named rather than hidden: a tick reads `N` `run_head` rows where it read `min(N, 10 000)`, and
+  the fold budget is untouched at `limit`.
+
+  **THE HALF OF THIS ROW THAT WAS WRONG, and finding out is what building it bought.** It said two
+  planes duplicating one window "want the same cursor". They do not, and no cursor could have
+  served them: dividing one listing between two processes needs a fact that spans runs, and
+  `journal/store.ts`'s header is the standing argument for why this system has nowhere to keep
+  one. That half is **§E.2's coordinator** and nothing smaller. The duplication stays correct and
+  wasteful — every write compare-and-swaps on its seq, so the loser writes nothing.
 
 - ~~**A.16 · What else is process-local and unreconstructable?**~~ **CLOSED — the sweep is done
   and the set is named in `cli.ts`.** Ten long-lived mutable
@@ -838,7 +848,12 @@ paragraph was written, which is exactly the fact it exists to expose rather than
 - **E.2 · Partition assignment and cross-run fairness.** Deciding which runs a worker considers
   needs a coordinator, and half a coordinator is worse than none. **Still true and still unbuilt.**
   The sentence must stop implying nothing decides it: a silent newest-200-first starvation policy
-  had already shipped, and its remaining half is §A.15.
+  had already shipped. That starvation is now closed at the call site — §A.15 — and closing it is
+  what showed the REST of this row lands here and nowhere else: a cursor lets one plane traverse
+  the whole listing, and gives two planes no way to divide it. Both take the same page and pay the
+  same folds. Dividing needs a fact that spans runs, which `journal/store.ts` says the journal has
+  nowhere to hold, so the coordinator is not an optimisation of the clock — it is the missing
+  thing.
 - **E.3 · Automated candidate generation, canaries and auto-promotion.** "Under roughly thirty
   scored trajectories per cohort, any candidate is fitted to noise." The sample argument survives;
   **its premise did not** — the scorer was inverted and the cohort could not assemble until the

@@ -16,6 +16,7 @@ import {
   type RunFilter,
   type RunSummary,
   type StateStore,
+  cursorNotFound,
   fencingStale,
   prepare,
   seqConflict,
@@ -108,6 +109,7 @@ export class MemoryStateStore implements StateStore {
     const out: (RunSummary & { readonly gateTs?: number })[] = [];
     const mine = filter?.submittedByOrUnowned;
     const gated = filter?.raisedAGate === true;
+    const after = filter?.after;
     for (const [runId, log] of this.#runs) {
       if (log.events.length === 0) continue;
       // A SCAN, where SQLite has an index — and that asymmetry is fine rather than a gap.
@@ -140,7 +142,25 @@ export class MemoryStateStore implements StateStore {
     // is what was asked for, by run id otherwise.
     if (gated) out.sort((a, b) => (b.gateTs ?? 0) - (a.gateTs ?? 0) || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
     else out.sort((a, b) => (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0));
-    return out.slice(0, limit).map(({ gateTs: _drop, ...r }) => r);
+    // THE CURSOR IS AN INDEX INTO THE ORDER THAT WAS JUST PRODUCED, which is why it is applied
+    // here and not while scanning: `after` names a position in the ORDER, and under
+    // `raisedAGate` that order is by the most recent gate, not by run id. Finding the row in the
+    // sorted array is the one formulation that cannot disagree with the sort above it — the SQL
+    // store has to restate the ordering as a keyset predicate and could get that restatement
+    // wrong, and `journal/conformance.ts` asking both the same question is what would catch it.
+    //
+    // REFUSED WHEN THE CURSOR IS NOT IN THIS ARRAY, identically to the SQL store and via the
+    // same shared raiser: unknown run, another principal's run, or a run that never gated are
+    // one answer, and none of them is "start again from the newest page".
+    let from = 0;
+    if (after !== undefined) {
+      const at = out.findIndex((r) => r.runId === after);
+      if (at < 0) cursorNotFound(after);
+      // EXCLUSIVE — `at + 1`. The cursor row is the last row the caller already holds, so
+      // including it would serve one run twice per page and a two-page walk would not advance.
+      from = at + 1;
+    }
+    return out.slice(from, from + limit).map(({ gateTs: _drop, ...r }) => r);
   }
 
   close(): void {

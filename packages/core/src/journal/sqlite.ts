@@ -40,6 +40,7 @@ import {
   type RunFilter,
   type RunSummary,
   type StateStore,
+  cursorNotFound,
   fencingStale,
   prepare,
   seqConflict,
@@ -410,6 +411,44 @@ export class SqliteStateStore implements StateStore {
     // rather than by whatever the query planner returns.
     const gated = filter?.raisedAGate === true;
     const ownership = mine === undefined ? "" : " AND (h.submitted_by IS NULL OR h.submitted_by = ?)";
+    const own: (string | number)[] = mine === undefined ? [] : [mine];
+
+    // THE CURSOR IS RESOLVED BEFORE THE PAGE, AND IN THE CALLER'S OWN VISIBLE ORDER. Two things
+    // come out of that one lookup and both are required:
+    //
+    //   - ADMISSION. A cursor naming a run this filter would not have returned is refused, and
+    //     the same `WHERE` clause decides it — so "no such run", "not yours" and "never gated"
+    //     are one answer, which is what keeps `after` from being an existence oracle for runs a
+    //     caller may not list. Refusing is the point: silently serving the newest page instead
+    //     is a walk that never reaches the bottom, which is the defect the cursor exists to fix.
+    //   - THE SORT KEY. A keyset predicate compares against the ORDER BY, and the gated listing
+    //     orders by `MAX(gate.raised.ts)` — a value that is not in `run_head` at all. So the
+    //     lookup fetches the cursor's own `gate_ts` and the page compares against the same
+    //     `(gate_ts, run_id)` pair the ordering uses. Comparing on `run_id` alone there would
+    //     silently skip every run whose gate is older but whose id is newer.
+    let keyset = "";
+    const key: (string | number)[] = [];
+    const after = filter?.after;
+    if (after !== undefined) {
+      const anchor = this.#db
+        .prepare(
+          `SELECT h.run_id,
+                  (SELECT MAX(ts) FROM journal WHERE run_id = h.run_id AND type = 'gate.raised') AS gate_ts
+           FROM run_head h WHERE h.run_id = ?${ownership}`,
+        )
+        .get(String(after), ...own) as unknown as { run_id: string; gate_ts: number | null } | undefined;
+      if (anchor === undefined || (gated && anchor.gate_ts === null)) cursorNotFound(after);
+      // STRICTLY LESS THAN, never `<=`: the cursor row is the last row the caller already has,
+      // so an inclusive boundary serves it twice and a walk of two pages never advances.
+      if (gated) {
+        keyset = " AND (g.gate_ts < ? OR (g.gate_ts = ? AND h.run_id < ?))";
+        key.push(anchor!.gate_ts as number, anchor!.gate_ts as number, String(after));
+      } else {
+        keyset = " AND h.run_id < ?";
+        key.push(String(after));
+      }
+    }
+
     const rows = (
       gated
         ? this.#db
@@ -418,20 +457,17 @@ export class SqliteStateStore implements StateStore {
                FROM run_head h
                JOIN (SELECT run_id, MAX(ts) AS gate_ts FROM journal WHERE type = 'gate.raised' GROUP BY run_id) g
                  ON g.run_id = h.run_id
-               WHERE 1 = 1${ownership}
+               WHERE 1 = 1${ownership}${keyset}
                ORDER BY g.gate_ts DESC, h.run_id DESC LIMIT ?`,
             )
-            .all(...(mine === undefined ? [limit] : [mine, limit]))
-        : mine === undefined
-          ? this.#db
-              .prepare("SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head ORDER BY run_id DESC LIMIT ?")
-              .all(limit)
-          : this.#db
-              .prepare(
-                `SELECT run_id, head_seq, first_ts, last_ts, submitted_by FROM run_head
-                 WHERE submitted_by IS NULL OR submitted_by = ? ORDER BY run_id DESC LIMIT ?`,
-              )
-              .all(mine, limit)
+            .all(...own, ...key, limit)
+        : this.#db
+            .prepare(
+              `SELECT h.run_id, h.head_seq, h.first_ts, h.last_ts, h.submitted_by FROM run_head h
+               WHERE 1 = 1${ownership}${keyset}
+               ORDER BY h.run_id DESC LIMIT ?`,
+            )
+            .all(...own, ...key, limit)
     ) as unknown as readonly {
       run_id: string;
       head_seq: number;
