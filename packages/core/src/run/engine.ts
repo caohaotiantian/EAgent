@@ -4934,7 +4934,15 @@ export class Engine {
    * writes: "a check applied per-caller is a check that the next node type forgets."
    * `#runFunction` and `#runEvaluator`'s assertion arm are the two places a `FunctionBody` is
    * invoked, and every previous change to this contract — the seed, the clock, the outcome
-   * shape — landed at one of them a commit before the other.
+   * shape, and `take` — landed at one of them a commit before the other. FOUR, and the fourth
+   * is the one that says the pattern is not luck: `take` was validated by the shared
+   * `requireOutcome` and then read by only one caller for the whole life of the field.
+   *
+   * `ctx.effects` IS THE FIFTH AND IS STILL OPEN, deliberately — see TODO G.1. Not because an
+   * assertion body cannot receive them (measured: an in-process one awaits a host round trip
+   * exactly as a `function` body's does), but because the DECLARATION has nowhere to live:
+   * `ALLOWED_FIELDS.evaluator` refuses `effects` with `GRAPH020_UNKNOWN_FIELD`, so opening it
+   * is a schema change to a kernel file rather than a divergence to repair here.
    *
    * See `REBIND_DEADLINE` above for what the bound covers. Three cases end here:
    *   - a sandboxed body with a declared `timeoutMs` — recompiled, and TERMINATED at that number;
@@ -5188,7 +5196,24 @@ export class Engine {
       // function-body contract, and the first two each landed here a commit late.
       retryRequested(out, ev.ref, w.node.id);
       this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
-      return { status: "succeeded", writes: { ...(out.writes ?? {}) }, usage: { ...ZERO_USAGE } };
+      // AND `take`, WHICH IS THE FOURTH TIME. `requireOutcome` — the ONE validator both callers
+      // share — names `take` in the shape it prints and refuses it alongside `retry`, so an
+      // assertion body returning it is writing the contract as documented. This arm then dropped
+      // it and returned no `take` at all, which does not mean "no edges": it means EVERY outgoing
+      // edge fires. Measured on one body and two `seq` edges, one node type apart:
+      //
+      //     function node,  take: ["ea"]   ->  a = "A",  b = undefined
+      //     evaluator node, take: ["ea"]   ->  a = "A",  b = "B"
+      //
+      // So a pass/fail assertion asking for its pass edge also took its fail edge, silently —
+      // the same silent no-op this arm's `writes` comment above was written to close, one field
+      // over. `test/run/evaluator-body-contract.test.ts` drives both rows.
+      return {
+        status: "succeeded",
+        writes: { ...(out.writes ?? {}) },
+        usage: { ...ZERO_USAGE },
+        ...(out.take === undefined ? {} : { take: out.take as readonly EdgeId[] }),
+      };
     }
     // A rubric evaluator is one model call that must return a typed Verdict. Its
     // output is the primary NON-HUMAN signal the evolution loop scores on, so the

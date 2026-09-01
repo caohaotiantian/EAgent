@@ -1223,13 +1223,59 @@ anecdotes.
 
 Each traces to a decision in `DESIGN.md`.
 
-- **G.1 · Declared effects (D2) for `evaluator` bodies and the sandbox.** Done for `function`
-  nodes: `FunctionNode.effects` names the tools a body may invoke, `reachableToolNames` sees them,
-  and the body gets one bound invoker per name through `ctx.effects`. **Still open** for
-  evaluators and for sandboxed bodies — a resource-loaded body runs synchronously inside
-  `vm.runInContext` and cannot await, so `ctx.effects` is honestly absent there rather than
-  broken. Giving a sandboxed body effects means an async bridge, which is its own design and is
-  §A.10's prerequisite too.
+- **G.1 · Declared effects (D2) for `evaluator` bodies and the sandbox. THE ROW'S REASON WAS ONE
+  REASON DOING TWO JOBS, AND IT WAS ONLY EVER TRUE OF ONE OF THEM.** Done for `function` nodes:
+  `FunctionNode.effects` names the tools a body may invoke, `reachableToolNames` sees them, and
+  the body gets one bound invoker per name through `ctx.effects`.
+
+  This row used to say evaluators and sandboxed bodies were both open because "a resource-loaded
+  body runs synchronously inside `vm.runInContext` and cannot await, so `ctx.effects` is honestly
+  absent there rather than broken". Driven, 2026-09-02, that sentence is wrong twice:
+
+  - **It is the SANDBOX's reason and it applies to `function` nodes identically.** A `function`
+    node whose body is resource-loaded does not get effects either — and they are not "absent",
+    they are a THROWING STUB. `ARGUMENT_BRIDGE` builds one `E_EFFECT_UNAVAILABLE` thrower per
+    declared name; `test/resources/functions.test.ts` measures it. So the sandbox is a limit of
+    the REALM, not of the node type, and naming evaluators in the same breath hid that.
+  - **It is not the evaluator's reason at all.** An in-process assertion body AWAITS: measured in
+    `test/run/evaluator-body-contract.test.ts`, a body that `await`s a host round trip inside an
+    `evaluator{kind:"assertion"}` node completes and the run succeeds, exactly as under a
+    `function` node. `ctx.effects` is `undefined` there because nobody wired it, not because the
+    executor cannot.
+
+  **The real blocker is where the DECLARATION would live**, and it is a good one: `evaluator`
+  cannot say `effects` at all — `ALLOWED_FIELDS.evaluator` refuses it with
+  `GRAPH020_UNKNOWN_FIELD`, which is the correct fail-closed state and is pinned by that test.
+  Opening it is therefore a schema change to `graph/spec.ts` and a wiring change to
+  `run/engine.ts`, **both kernel files, under a `feat`** — so it costs a `Kernel-seam:` trailer
+  and is a maintainer's call, not a lane's. The change set, if it is ever spent:
+
+  - `EvaluatorNode.effects` + `ALLOWED_FIELDS.evaluator` + `reachableToolNames` reading
+    `node.evaluator?.effects` unconditionally, so the ceiling and floor apply on both arms even
+    if the refusal below is bypassed by a graph folded out of a journal;
+  - `validate.ts`'s `GRAPH003_MALFORMED` effects-shape check, today `n.type === "function"`,
+    widened — the shape is load-bearing for the same guard here as there;
+  - `#effectsFor` keyed off the node rather than `w.node.function`, and `#runEvaluator`'s
+    assertion arm passing the result, which is where the rest of that contract already lives;
+  - **`isExternal` MUST MOVE IN THE SAME COMMIT.** Its docstring trusts an `assertion` evaluator
+    on the stated ground that the arm "runs a function body with no `ctx.effects` bound at all".
+    That is true today and stops being true the moment this lands, and the hole it opens is the
+    laundering hole `declared-effects.test.ts` already names for `function`. The rule to copy is
+    `function`'s: untrusted unless `effects: []`, `Array.isArray` and not `.length`.
+  - **`kind: "rubric"` gets nothing, and should be REFUSED rather than accepted-and-inert.** A
+    rubric arm is one model call, and `effects` means *declared, never chosen at run time* — the
+    exact opposite of a model's tool set, which is `agent.tools`. `#runAgent` reads
+    `w.node.agent?.tools`, and an `evaluator` node has no `agent` block, so a rubric can reach
+    nothing whatever the field says.
+
+  The sandbox half stays open on its own terms: giving a sandboxed body real effects means an
+  async bridge, which is its own design and is §A.10's prerequisite. One fact that narrows its
+  shape — `functions.ts` derives `declaredEffects` from `callCtx.effects` and never from the node
+  type, so whatever the bridge ends up being, it serves both node types with no further edit.
+
+  **The one piece that was a defect landed 2026-09-02** — the assertion arm dropped a body's
+  `take`, so an assertion asking for one of two outgoing edges took both. Same file, same
+  measurement, `fix` not `feat`.
 - **G.2 · `Date` in the realm.** It stays absent, and **the reason changed**: not "no seed could
   make it reproducible" but "a frozen `Date` that silently never advances is more surprising than
   an absent one". Restoring it means binding the whole constructor to `ctx.now`. **Bind `Temporal`
