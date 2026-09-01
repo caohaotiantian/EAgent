@@ -170,16 +170,22 @@ const DEFAULT_NODE_TIMEOUT_MS = 600_000;
  *   - `evaluator` — its `rubric` arm delegates to `#runAgent`, so it inherits the first case
  *     whole. Given to the TYPE rather than to the arm because the `assertion` arm's other host,
  *     a hand-registered `FunctionBody`, is host code with no realm and no timeout either (A13).
+ *   - `function` — and this one was EXCLUDED first, on an argument that turned out to be false.
+ *     The argument was "a graph-reachable body cannot fail to settle", because `realm.ts` refuses
+ *     an `async` body at load and a returned thenable when it returns, leaving something `vm`'s
+ *     per-call timeout terminates. That is true of a body loaded THROUGH THE REALM and of nothing
+ *     else: `FunctionRegistry.register` refuses nothing, and it is one of the ten no-fork
+ *     extension points README names. Driven —
+ *       functions.register("function/hang@stable", async () => new Promise(() => {}));
+ *     on a `function` node declaring no `timeoutMs` — `STILL HANGING after 1500ms`, the identical
+ *     reproduction that opened this item for `tool`. The exclusion's own stated residue covered
+ *     only the SYNCHRONOUS half of a hand-registered body, where a deadline genuinely cannot help
+ *     because that body owns the event loop and the timer could not fire; the async half is
+ *     bounded by this default exactly as well as any other node's. Inert for realm-loaded bodies,
+ *     by the 30 s argument above, which is the reason it costs them nothing.
  *
- * THE FIVE WITHOUT ONE, each for its own reason and none of them "we forgot":
+ * THE FOUR WITHOUT ONE, each for its own reason and none of them "we forgot":
  *
- *   - `function` — a graph-reachable body cannot fail to settle. `realm.ts` refuses an `async`
- *     body at LOAD (`ASYNC_RULE`) and a returned thenable when it returns (`THENABLE_RULE`), and
- *     what is left is synchronous and TERMINATED by `vm`'s per-call timeout at the node's
- *     declared number or `FunctionLoaderOptions.callTimeoutMs`, default 30 s — which fires first
- *     in every case, so a default here would be inert. The residue is A13's hand-registered
- *     body, and for the synchronous half of it a deadline cannot help anyway: that body owns the
- *     event loop, so the `setTimeout` this default arms could not fire.
  *   - `router` — `#runRouter` evaluates declared expressions against the scope and returns. No
  *     await, no I/O.
  *   - `join` — `#dispatchBody` returns `{status: "succeeded"}` synchronously; a join's waiting
@@ -197,7 +203,9 @@ const DEFAULT_NODE_TIMEOUT_MS = 600_000;
  */
 function effectiveTimeout(n: NodeSpec): number | undefined {
   if (n.timeoutMs !== undefined) return n.timeoutMs;
-  return n.type === "agent" || n.type === "tool" || n.type === "evaluator" ? DEFAULT_NODE_TIMEOUT_MS : undefined;
+  return n.type === "agent" || n.type === "tool" || n.type === "evaluator" || n.type === "function"
+    ? DEFAULT_NODE_TIMEOUT_MS
+    : undefined;
 }
 
 export type CompileInput = Omit<ValidationContext, "depth" | "expanding">;

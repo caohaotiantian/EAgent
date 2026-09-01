@@ -88,26 +88,32 @@ test("EVERY NODE THAT CAN BLOCK CARRIES A DEADLINE, and the author's own always 
   assert.equal(ms("gather_signals"), 20_000, "a tool node's own 20s stands");
   assert.equal(ms("investigate"), 120_000, "and an agent node's own 120s is not raised to the default");
 
-  // Defaulted: the three types whose BODY can fail to settle — an agent awaits a provider stream
-  // no clock in this tree bounds, a tool awaits an extension's `execute`, and an evaluator's
-  // `rubric` arm is `#runAgent` again.
+  // Defaulted: the four types whose BODY can fail to settle — an agent awaits a provider stream
+  // no clock in this tree bounds, a tool awaits an extension's `execute`, an evaluator's `rubric`
+  // arm is `#runAgent` again, and a `function` body can be hand-registered.
   assert.equal(ms("hypothesise"), 600_000, "agent");
   assert.equal(ms("apply_remediation"), 600_000, "tool");
   assert.equal(ms("grade"), 600_000, "evaluator");
+  // `function` WAS EXCLUDED FIRST, on the argument that a graph-reachable body cannot fail to
+  // settle because the realm refuses an async body at load. True of a body loaded through the
+  // realm and of nothing else: `FunctionRegistry.register` refuses nothing, and it is one of the
+  // ten no-fork extension points. Driven — `register("function/hang@stable", async () => new
+  // Promise(() => {}))` on a node declaring no `timeoutMs` — `STILL HANGING after 1500ms`.
+  assert.equal(ms("write_report"), 600_000, "function — a hand-registered body has no realm");
 
-  // AND FOUR OF THE FIVE WITH NONE, each named — `compile.ts`'s `effectiveTimeout` says why for
+  // AND THREE OF THE FOUR WITH NONE, each named — `compile.ts`'s `effectiveTimeout` says why for
   // each. `human_gate` is the one that MUST stay absent: it has `slaMs` plus `onTimeout`, and a
-  // gate that expires because nobody wrote a number is oversight failing open. The fifth is
+  // gate that expires because nobody wrote a number is oversight failing open. The fourth is
   // `subgraph`, which this fixture has none of — `effectiveTimeout` says why it gets none too.
-  for (const id of ["correlate", "choose_path", "approve_remediation", "write_report"]) {
+  for (const id of ["correlate", "choose_path", "approve_remediation"]) {
     assert.equal(ms(id), undefined, `${id} must not be given one`);
   }
   assert.deepEqual(
     incidentTriage()
-      .nodes.filter((x) => ["correlate", "choose_path", "approve_remediation", "write_report"].includes(x.id))
+      .nodes.filter((x) => ["correlate", "choose_path", "approve_remediation"].includes(x.id))
       .map((x) => x.type)
       .sort(),
-    ["function", "human_gate", "join", "router"],
+    ["human_gate", "join", "router"],
     "the four ids above really are one of each excluded type",
   );
 });
@@ -174,6 +180,69 @@ test("…and the parent's capability CEILING descends with it", () => {
   assert.equal(d.length, 1, JSON.stringify(r.diagnostics));
   assert.match(d[0]!.message, /tool "k8s\.apply" used by subgraph "subgraph\/child@stable" under node "delegate"/);
   assert.equal(compile(delegatingTree(["k8s:write"])).ok, true, "declaring it is how you delegate it");
+});
+
+test("THE DESCENT DOES NOT DEPEND ON NODE ORDER — a floor that does is a floor that fails open half the time", () => {
+  // A bare visited-`Set` is a cycle guard that also skips DESCENDING. A ref first reached DEEP is
+  // marked seen, so a later, SHALLOWER path to it is skipped — and the subtree that only the
+  // shallower path had budget to reach is lost. Which happens depends on the order two sibling
+  // nodes are written in. `compile.ts`'s `resolveSubgraphs` records having measured and fixed the
+  // identical defect; `reachedAt` is its fix, and re-walking when a ref turns up shallower is what
+  // makes the answer order-independent. Here that answer is a capability ceiling.
+  //
+  // The shape, at `maxDepth: 3`. `c` holds the two siblings whose order is the only variable:
+  //     delegate -> c(1) -> [ viaP -> p(2) -> viaS -> s(3) -> viaT -> t(4 — over budget) ]
+  //                         [ viaS2 ------------> s(2) -> viaT -> t(3 — within budget) ]
+  // Reached through `p` first, `s` is walked at depth 3 and `t` is over budget; `s` is then
+  // marked seen, so the depth-2 path to it never runs and `t`'s `fs.write` is never seen.
+  const g = (name: string, nodes: readonly NodeSpec[]): GraphSpec => ({
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name, project: "test", version: 1 },
+    policy: { posture: "out", capabilities: [], expansion: { maxNodes: 32, maxDepth: 3, maxFanout: 2, maxLoopIterations: 1 } },
+    channels: { inp: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["inp"],
+    outputs: ["out"],
+    nodes: [...nodes],
+    edges: [],
+  });
+  const sub = (id: string, ref: string): NodeSpec => ({
+    id: id as NodeId,
+    type: "subgraph",
+    reads: ["inp"],
+    writes: ["out"],
+    subgraph: { ref, inputs: { inp: "inp" }, outputs: { out: "out" } },
+    unhandled: true,
+  });
+  const t = g("t", [
+    { id: "act" as NodeId, type: "tool", reads: ["inp"], writes: ["out"], tool: { name: "fs.write", version: "1.0", args: {} }, unhandled: true },
+  ]);
+  const sSpec = g("s", [sub("viaT", "subgraph/t@stable")]);
+  const p = g("p", [sub("viaS", "subgraph/s@stable")]);
+  const subgraphs = {
+    "subgraph/c@stable": g("c", []),
+    "subgraph/p@stable": p,
+    "subgraph/s@stable": sSpec,
+    "subgraph/t@stable": t,
+  };
+  const order = (nodes: readonly NodeSpec[]) =>
+    compile(
+      base(g("top", [sub("delegate", "subgraph/c@stable")]), {
+        resolver: stubResolver({ subgraphs: { ...subgraphs, "subgraph/c@stable": g("c", nodes) } }),
+        tenantCapabilities: ["fs:write"],
+      }),
+    );
+  const deepFirst = order([sub("viaP", "subgraph/p@stable"), sub("viaS2", "subgraph/s@stable")]);
+  const shallowFirst = order([sub("viaS2", "subgraph/s@stable"), sub("viaP", "subgraph/p@stable")]);
+  const refusals = (r: ReturnType<typeof compile>) =>
+    r.diagnostics.filter((x) => x.code === "GRAPH017_CAPABILITY_NOT_DECLARED").length;
+  assert.equal(
+    refusals(deepFirst),
+    refusals(shallowFirst),
+    `two orderings of ONE tree disagreed on the capability ceiling: deep-first ${String(refusals(deepFirst))} ` +
+      `refusal(s), shallow-first ${String(refusals(shallowFirst))}. The floor must not depend on node order.`,
+  );
+  assert.equal(refusals(shallowFirst) > 0, true, "the tree does reach `fs.write`, so BOTH orderings must refuse");
 });
 
 test("a system floor of `in` raises every node, and nothing can lower it", () => {

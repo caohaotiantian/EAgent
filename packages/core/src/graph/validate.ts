@@ -152,22 +152,37 @@ export function reachableToolNamesThrough(
   const root = node.subgraph?.ref;
   if (root === undefined) return out;
 
-  const seen = new Set<ResourceRef>();
+  // THE DEPTH EACH REF WAS REACHED AT, not merely whether it was seen — the same guard
+  // `compile.ts`'s `resolveSubgraphs` uses, and for the same measured reason. A bare visited-`Set`
+  // is a cycle guard that also skips DESCENDING, so a ref first reached AT the depth limit is
+  // never re-walked when a shallower path to it appears later in the node list. That makes the
+  // answer depend on the order two sibling nodes happen to be written in, and this one feeds an
+  // oversight floor: measured on two workspaces differing only in that order, one compiled `ok`
+  // and the other refused with `GRAPH017_CAPABILITY_NOT_DECLARED`. An order-sensitive floor is a
+  // floor that fails open half the time.
+  //
+  // `rule016Subgraphs` guards on the PATH (`expanding`) instead, which explores a diamond fully;
+  // it is cited nearby as the model for this walk and is NOT the same guard. Re-walking when a
+  // ref turns up shallower is what makes the answer independent of node order, which is the only
+  // version an oversight decision may rest on.
+  const reachedAt = new Map<ResourceRef, number>();
   const walk = (spec: GraphSpec, depth: number): void => {
     for (const n of spec.nodes) {
       for (const name of reachableToolNames(n)) if (!out.includes(name)) out.push(name);
       const ref = n.subgraph?.ref;
-      if (ref === undefined || seen.has(ref) || depth + 1 > maxDepth) continue;
+      if (ref === undefined || depth + 1 > maxDepth) continue;
+      const been = reachedAt.get(ref);
+      if (been !== undefined && been <= depth + 1) continue;
       const child = childSpec(ref);
       if (child === undefined) continue;
-      seen.add(ref);
+      reachedAt.set(ref, depth + 1);
       walk(child, depth + 1);
     }
   };
 
   const first = childSpec(root);
   if (first !== undefined) {
-    seen.add(root);
+    reachedAt.set(root, 1);
     walk(first, 1);
   }
   return out;

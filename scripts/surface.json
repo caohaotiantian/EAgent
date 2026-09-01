@@ -474,6 +474,7 @@
   "projectionDigest",
   "promotionCeiling",
   "reachableToolNames",
+  "reachableToolNamesThrough",
   "readSignals",
   "reconstructGraph",
   "redact",
