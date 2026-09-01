@@ -765,9 +765,36 @@ Each traces to a decision in `DESIGN.md`.
   the fix there is not symmetric — there is no `effects: []` equivalent, and marking every
   unclassified channel sensitive is the constant-gate failure that arm's docstring already
   refuses. Branch-coordinate scoping was built and reverted; see `DESIGN.md` D4.
-- **G.5 · Prompt text into the artifact hash (D7).** `graphHash` digests the spec, so a ref'd
-  prompt's text is not in it — **a prompt edit currently changes what a resumed run does,
-  silently.**
+- **G.5 · Prompt text is bound by the MANIFEST, not by the hash (D7). Closed 2026-09-01, and the
+  row as written was half stale.** `graphHash` is still `digest(spec)` and a ref'd prompt's text
+  is still not in it — that part was always true and is deliberate. What the row got wrong is the
+  conclusion: the text is bound anyway, by `RunGraph.resolutionManifest`, which pins every ref to
+  a CONTENT digest and is journaled on `run.compiled`. Reproduced through the shipped binary at
+  the top level: run a workspace graph to a gate, edit `resources/prompt/writer.md`, and
+  `loom approve` refuses — `E_GRAPH_MISMATCH: … matches run …'s spec, but the resources behind
+  its refs have changed since it was compiled`. Three doors check it (`Engine.#assertBound` on
+  gate decisions and on `advance`, and `replayRun`'s `refsBound`), and `RunGraph.documents`
+  freezes the bytes by value so `#documentFor` asks no resolver at run time.
+  **What was NOT bound, and is the half that was real: a SUBGRAPH's own refs.**
+  `resolveManifest` walked only the root spec while `resolveSubgraphs` walked children
+  recursively, so a parent naming `subgraph/child@stable` pinned that ref and nothing inside it —
+  the child's `prompt/…` and `function/…` were in neither the manifest nor `documents`, and
+  `Engine.#compileChild` (which runs during `advance`, while the parent's Task is executing) fell
+  through `frozenFirst` to the LIVE resolver. Reproduced in ONE process with no restart: a
+  promotion landing between `submit` and `advance` reached a running node, the model was sent the
+  edited prompt, and the run reported `succeeded` — nothing refused, because
+  `run.compiled.resolutionManifest` named only the subgraph ref. Fixed in `graph/compile.ts` by
+  walking the frozen child specs into the manifest; `frozenFirst` then serves them, so no engine
+  change was needed. `graphHash` is untouched **on purpose**: `cohortKeyOf` keys on it, so the run
+  is pinned and the cohort is not, and the evolution loop can still compare two runs of
+  `review-bench` across a prompt edit — which is the one candidate kind D6 defines self-improvement
+  as producing. Test: `test/resources/store.test.ts`, "THE PINNING RULE REACHES INTO A SUBGRAPH".
+  **Residue, both narrow and both pre-existing:** (a) `#assertBound` checks the manifest only when
+  the attached graph IS the compiled one, so a MUTATED run's successor carries no recorded manifest
+  to compare — the engine says so where the gap is, and mutation is unreachable from the binary
+  today; (b) `#compileChild`'s docstring still says a child's own refs "go to the live resolver on
+  every compile", which this change makes false for every child `resolveSubgraphs` collected — the
+  claim about `tools.manifests()` in the same paragraph is unaffected and still holds.
 - **G.6 · Proposed-API mechanism and a version pin (D5).** Both halves unbuilt: no proposed-API
   declaration file, no opt-in, no publish-time refusal for an extension that uses one, and no
   runtime version pin.
