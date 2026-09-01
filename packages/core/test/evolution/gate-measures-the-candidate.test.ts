@@ -42,6 +42,20 @@
  *    cannot decide fails closed.
  * 5. CONTROL for 4 — the SAME graph over such a recording still passes, since a same-graph
  *    replay has nothing that could have changed the request.
+ * 6. A candidate that simply DOES LESS is REFUSED. The `maxTurns 3 -> 1` row in the table above
+ *    survived the digest fix, and had to: the digest answers "did it ask the same thing?", and
+ *    lowering a ceiling asks the same thing FEWER TIMES. `reboundEffects` is empty by
+ *    construction there; `unservedEffects` is where the evidence was, already folded into
+ *    `report.match`, and `runCase` was not reading it.
+ *
+ * WHAT THIS FILE STILL CANNOT HOLD DOWN, said here because the header's table is the thing
+ * people read: the third row of the original defect — a candidate that lowers a node's
+ * `policy.budget` — is NOT closed, and the refusal was tried and measured rather than argued.
+ * See `unexercised` in `evolution/gate.ts` for the numbers; the short version is that
+ * `skeleton.ts`'s own `summarize` declares `budget.costUsd: 0.15`, both graphs the loop is
+ * driven on declare one, and the compiler tells authors to add them — so refusing every
+ * different-graph candidate that carries a budget also refuses control 3, which is the only
+ * candidate class this gate can judge.
  *
  * Offline and deterministic: the mock adapter, in-memory journals, an injected clock.
  */
@@ -287,3 +301,58 @@ test("CONTROL · the SAME graph over a digest-less recording still passes", asyn
   assert.equal(report.cases[0]!.replay.graph.match, true, "the premise: it is the recorded graph");
   assert.ok(report.cases[0]!.replay.unverifiedModelEffects.length > 0, "…and the digests really are missing");
 });
+
+/**
+ * The skeleton with `summarize`'s turn ceiling replaced.
+ *
+ * The candidate this file's header records as promoting: `maxTurns 3 -> 1`, passRate 1,
+ * cost 0.000435 against the baseline's 0.001125.
+ */
+function withMaxTurns(turns: number): RunGraph {
+  const base = skeletonSpec();
+  return compileSkeleton(
+    skeletonSpec({
+      nodes: base.nodes.map((nd) =>
+        nd.id === ("summarize" as NodeId) ? { ...nd, agent: { ...nd.agent!, maxTurns: turns } } : nd,
+      ),
+    }),
+  );
+}
+
+test("A CANDIDATE THAT SIMPLY DOES LESS IS REFUSED — the turns it skipped are the ones nobody asked about", async () => {
+  // THE SECOND HALF OF THIS FILE'S DEFECT, and the one `requestDigest` cannot answer. Lowering
+  // `agent.maxTurns` asks the SAME question on the turns it does take, so every digest matches
+  // and `reboundEffects` is empty by construction. The turns it does NOT take simply go
+  // unserved, and the gate scored the candidate on the part of the recording it bothered with.
+  // Measured on this fixture before the refusal existed: passRate 1 on both sides,
+  // `reboundEffects` [], and `gateCandidate` PROMOTE=true — one turn cheaper.
+  const h = harness();
+  const baselineGraph = withMaxTurns(3);
+  const ids: RunId[] = [];
+  for (let i = 0; i < 3; i++) ids.push(await recordRun(h, baselineGraph));
+  const suite = suiteOver(ids);
+
+  const baseline = await runEvalSuite({ store: h.store, suite, graph: baselineGraph, engine: engineOf(h) });
+  assert.equal(baseline.passRate, 1, "the control: the recording's own ceiling replays clean");
+
+  const candidateGraph = withMaxTurns(1);
+  const candidate = await runEvalSuite({ store: h.store, suite, graph: candidateGraph, engine: engineOf(h) });
+
+  // THE PREMISE, and it is what makes this case different from the prompt one: the requests
+  // that WERE made agreed. There is no rebound to find, so the digest cannot be the refusal.
+  assert.deepEqual(candidate.cases[0]!.replay.reboundEffects, [], "the turns it took asked what the recording asked");
+  assert.ok(
+    candidate.cases[0]!.replay.unservedEffects.length > 0,
+    "the premise on the other side: the recording holds turns this replay never asked for",
+  );
+  assert.ok(
+    candidate.totalCostUsd < baseline.totalCostUsd,
+    `and it comes out cheaper — ${candidate.totalCostUsd} vs ${baseline.totalCostUsd} — which is what the gate preferred`,
+  );
+
+  assert.equal(candidate.passRate, 0, `reasons ${JSON.stringify(candidate.cases[0]!.reasons)}`);
+  const reason = candidate.cases[0]!.reasons.find((r) => r.includes("never asked for"));
+  assert.ok(reason, `the refusal must name what happened; got ${JSON.stringify(candidate.cases[0]!.reasons)}`);
+  assert.equal(decide(baseline, candidate).promote, false, "and a candidate measured on half a recording does not promote");
+});
+

@@ -273,13 +273,52 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * fixture over an older corpus for no property gained. A DIFFERENT graph over an old recording
  * is the case that cannot be decided, and "when a guard cannot decide, it fails closed".
  *
- * WHAT THIS DOES NOT CATCH, so that nobody reads it as more than it is. A candidate that
- * lowers `agent.maxTurns` asks the same question on the turns it does take, so its turn-0
- * digest matches and only the later recorded turns go unserved — measured, it still promotes,
- * one turn cheaper. A candidate that lowers a node's `policy.budget` is invisible for a
- * different reason: replay has no adapter, so `estimateOf` is 0 and the ceiling is never
- * tested. Both are policy that replay does not exercise, and neither is a question a request
- * digest can answer.
+ * THREE REASONS NOW, AND THE THIRD IS THE ONE A DIGEST CANNOT ANSWER.
+ *
+ * `unservedEffects` names recorded calls the replay NEVER ASKED FOR. A candidate that lowers
+ * `agent.maxTurns` asks the same question on the turns it does take, so every digest matches
+ * and `reboundEffects` is empty BY CONSTRUCTION — there is no rebound to find, because the
+ * candidate did not ask a different question, it asked FEWER of them. Measured on the skeleton
+ * with `summarize`'s ceiling taken from 3 to 1, three cases, all eleven `gateCandidate` checks:
+ *
+ *     baseline (maxTurns 3)  -> passRate 1  cost 0.001125  reboundEffects []
+ *     candidate (maxTurns 1) -> passRate 1  cost 0.000435  reboundEffects []  PROMOTE=true
+ *
+ * The crippled candidate came out cheaper at an equal pass rate, so the gate preferred it —
+ * this file's own header records that row and it survived the digest fix, because the digest
+ * answers "did it ask the same thing?" and the question here is "did it ask at all?". The
+ * evidence was already in the report: `replayRun` folds unserved effects into `match` and says
+ * why, one type up. `runCase` simply did not read it.
+ *
+ * The direction is fail-closed rather than tuned: a case that skipped part of its recording
+ * measured part of a candidate, and a pass rate computed over the part it bothered with is not
+ * a certificate. A candidate that does MORE than the recording is untouched — it serves every
+ * recorded effect and adds its own.
+ *
+ * WHAT THIS STILL DOES NOT CATCH, so nobody reads it as more than it is. A candidate that lowers
+ * a node's `policy.budget` is invisible, and a REFUSAL WAS TRIED AND MEASURED RATHER THAN
+ * ARGUED. Replay reaches no adapter, so `Engine.#runAgent`'s `adapter?.estimateOf(shaped) ?? 0`
+ * makes the reservation zero: the ceiling is still compared against spend the task accumulated
+ * from the recording, but the reserve-worst-case half — the half that refuses a call BEFORE it
+ * is made — is never exercised. So a candidate that lowers a ceiling to just above the
+ * recording's spend replays clean here and would refuse on the first turn live.
+ *
+ * The obvious fail-closed answer is to refuse any different-graph candidate that declares a
+ * budget, and it costs far more than a refusal. `test/run/skeleton.ts`'s own `summarize` node
+ * declares `policy.budget.costUsd: 0.15`, and so does a node in each of the two graphs the loop
+ * is actually driven on — `examples/graphs/review-bench.json` and `examples/graphs/self-review.json`.
+ * The compiler's `GRAPH009_UNBOUNDED_NODE` tells authors to ADD that field to a spending node, so
+ * the set only grows. That refusal therefore turns off the offline gate for every well-formed
+ * graph, including this file's named CONTROL — "a candidate that changes a deterministic FUNCTION
+ * body still promotes", the only candidate class the gate can judge without spending a model
+ * call. A guard that cannot be satisfied is not strict, it is absent.
+ *
+ * The narrower refusal is not available either: the recording's SPEC is not in the journal
+ * (`run.compiled` carries node counts — TODO A.24), so nothing here can tell "the candidate
+ * lowered the ceiling" from "the candidate kept it and changed a body". `loom promote
+ * --against-cohort` sees it because it RUNS the candidate, and TODO A.23 closes on replay being
+ * able to serve an adapter's answers, which is A.1's seam. Until then this is a stated blind
+ * spot rather than a silent one.
  */
 function unexercised(report: ReplayReport): string[] {
   const out: string[] = [];
@@ -287,6 +326,16 @@ function unexercised(report: ReplayReport): string[] {
     out.push(
       `the recorded ${r.field} result for "${r.key}" was served to a different call — ` +
         `recorded ${r.recorded}, replayed ${r.replayed}, so this case measured the recording and not the candidate`,
+    );
+  }
+  if (report.unservedEffects.length > 0) {
+    out.push(
+      `${String(report.unservedEffects.length)} recorded effect(s) were never asked for by this replay ` +
+        `(${report.unservedEffects.slice(0, 3).join(", ")}) — the candidate did not ask a DIFFERENT question, it ` +
+        `asked fewer of them, so this case measured the part of the recording the candidate bothered with. A ` +
+        `pass rate over that part is not a certificate: lower a ceiling like agent.maxTurns and the skipped ` +
+        `turns simply go unserved, one turn cheaper at an equal pass rate. Re-record the corpus against this ` +
+        `candidate, or judge it live`,
     );
   }
   if (!report.graph.match && report.unverifiedModelEffects.length > 0) {
