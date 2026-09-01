@@ -97,14 +97,24 @@ function growableSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-/** The same graph a human WOULD have read, with the charge node authored into it. */
-function authoredSpec(): GraphSpec {
+/**
+ * The same graph a human WOULD have read, with the charge node authored into it.
+ *
+ * `readsPlan` names the OTHER axis, and it has to be a knob rather than a constant because the
+ * two axes answer differently. This file is about the mutation floor: a de-escalation covers the
+ * graph the human read and not a node a planner grew. Whether the charge READS the planner's
+ * output is an integrity question, and an `agent` node's writes are untrusted — a model's output
+ * is generated text whatever it was given — so a charge reading `plan` is held at `in` by E8
+ * however the graph was authored and whatever ceiling a human set. Both are true at once, and a
+ * control that conflated them would pass for the wrong reason.
+ */
+function authoredSpec(readsPlan: boolean): GraphSpec {
   const spec = growableSpec() as unknown as { nodes: unknown[]; edges: unknown[]; metadata: { name: string } };
   spec.metadata.name = "authored-charge";
   spec.nodes.push({
     id: n("pay"),
     type: "tool",
-    reads: ["plan"],
+    ...(readsPlan ? { reads: ["plan"] } : {}),
     writes: ["receipt"],
     tool: { name: "pay.charge", version: "1.0", args: {} },
     unhandled: true,
@@ -210,8 +220,14 @@ test("a run-scope de-escalation does not cover a node the mutation introduced", 
 test("a run-scope de-escalation still covers the graph the human actually read", async () => {
   // The negative control. Without this, the fix above is indistinguishable from
   // deleting `deescalate`, and an operator who cannot lower a posture stops trying.
+  //
+  // The charge does NOT read `plan` here, and that is the control being kept honest rather than
+  // weakened: `plan` is an `agent` node's write, so it is untrusted, and a charge reading it is
+  // held at `in` by the integrity floor no matter how the graph was authored. Leaving the read
+  // in would make this test pass or fail on the other axis and say nothing about the ceiling.
+  // The next test is that other axis, on the same graph one field apart.
   const r = rig(() => ({ text: JSON.stringify({ plan: {} }), finishReason: "stop" }));
-  const runId = await r.engine.submit({ graph: compile(authoredSpec()), inputs: { goal: "go" } });
+  const runId = await r.engine.submit({ graph: compile(authoredSpec(false)), inputs: { goal: "go" } });
   await r.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, let it run on-the-loop", {
     kind: "human",
     id: "u:alice",
@@ -224,6 +240,24 @@ test("a run-scope de-escalation still covers the graph the human actually read",
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.equal(raised, 0, "the human read this node; their ceiling covers it");
   assert.equal(r.charged(), 1);
+});
+
+test("an AUTHORED charge reading a planner's output is still held — the model is not trusted", async () => {
+  // The other axis, and the reason the control above drops the read. A human authored this node,
+  // a human read the graph, and a human lowered the ceiling to `on` — every mutation-floor
+  // condition is satisfied. It gates anyway, because `plan` is what a MODEL wrote and the money
+  // moves on it. An `agent` node has no `effects: []` to declare: its output is generated text
+  // whatever it was given, so there is no pure agent for a label to describe.
+  const r = rig(() => ({ text: JSON.stringify({ plan: {} }), finishReason: "stop" }));
+  const runId = await r.engine.submit({ graph: compile(authoredSpec(true)), inputs: { goal: "go" } });
+  await r.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, let it run on-the-loop", {
+    kind: "human",
+    id: "u:alice",
+  });
+
+  const p = await r.engine.advance(runId);
+  assert.equal(r.charged(), 0, "the money moved on a model's output under a lowered ceiling");
+  assert.equal(p.status, "awaiting_gate", `expected the integrity floor to hold the charge, got ${p.status}`);
 });
 
 test("AND THE RUN IS NOT DEAD-ENDED: the human answers the gate and the work proceeds", async () => {

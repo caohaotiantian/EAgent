@@ -166,7 +166,10 @@ async function alone(opts: { readsOwnWrite: boolean; upstream: "function" | "too
   const producer =
     opts.upstream === "tool"
       ? { id: "produce" as never, type: "tool" as const, writes: ["ledger"], tool: { name: "net.fetch", version: "1.0", args: {} } }
-      : { id: "produce" as never, type: "function" as const, writes: ["ledger"], function: { ref: "function/f@stable" } };
+      : // `effects: []` is the DECLARATION that this body has no way out, and it is load-bearing
+        // here: an unlabelled `function` is untrusted, so without the label `ledger` would be
+        // tainted by its producer and this test would gate for a reason that is not its subject.
+        { id: "produce" as never, type: "function" as const, writes: ["ledger"], function: { ref: "function/f@stable", effects: [] } };
 
   const graphSpec: GraphSpec = {
     apiVersion: "loom.dev/v1",
@@ -206,15 +209,16 @@ test("A NODE IS NOT TAINTED BY ITS OWN PENDING WRITE", async () => {
   // output is not evidence about its INPUT — the value it reads came from somewhere else. Left
   // in, the overlay would gate every read-modify-write node against itself, for no gain.
   //
-  // Upstream is a FUNCTION here so `ledger` is genuinely untainted when `settle` decides;
-  // with a tool upstream it would gate for the right reason and prove nothing about this one.
+  // Upstream is a DECLARED-PURE function here so `ledger` is genuinely untainted when `settle`
+  // decides; with a tool upstream it would gate for the right reason and prove nothing about
+  // this one, and with an unlabelled function it would gate for the right reason too.
   const r = await alone({ readsOwnWrite: true, upstream: "function" });
   assert.equal(r.status, "succeeded", "a node must not be gated by what it is about to write");
   assert.equal(r.ran, 1);
 });
 
 /** Producer and consumer as SIBLINGS — the same wave, which is the only place the filter acts. */
-async function siblings(upstream: "function" | "tool") {
+async function siblings(upstream: "pure" | "unlabelled" | "tool") {
   const ran: string[] = [];
   const now = (): number => 1_700_000_000_000;
   const store = new MemoryStateStore({ now });
@@ -230,7 +234,15 @@ async function siblings(upstream: "function" | "tool") {
   const producer =
     upstream === "tool"
       ? { id: "produce" as never, type: "tool" as const, writes: ["ledger"], tool: { name: "net.fetch", version: "1.0", args: {} } }
-      : { id: "produce" as never, type: "function" as const, writes: ["ledger"], function: { ref: "function/f@stable" } };
+      : {
+          id: "produce" as never,
+          type: "function" as const,
+          writes: ["ledger"],
+          // The only difference between the two function arms, and it is the whole subject:
+          // `effects: []` is the author declaring there is no way out of this body; omitting
+          // the field is the author declaring nothing.
+          function: { ref: "function/f@stable", ...(upstream === "pure" ? { effects: [] } : {}) },
+        };
 
   const graphSpec: GraphSpec = {
     apiVersion: "loom.dev/v1",
@@ -263,17 +275,24 @@ async function siblings(upstream: "function" | "tool") {
   return { status: p2.status, ran: ran.length };
 }
 
-test("ONLY EXTERNAL MEMBERS OF A WAVE TAINT — a function's output is not untrusted", async () => {
+test("ONLY DECLARED-PURE MEMBERS OF A WAVE DO NOT TAINT — the label is what buys it", async () => {
   // Producer and consumer are SIBLINGS here, which is the only arrangement where the filter can
   // act — with an ordering edge between them the consumer is alone in its wave and the overlay
   // is empty whatever the filter says. The first version of this test had the edge, and a
   // mutation removing the filter entirely left it green.
   //
-  // A `function` body is trusted code (assumption A13), so its writes taint nothing. Widening
-  // the overlay to every wave member would gate this run and every graph shaped like it.
-  const viaFunction = await siblings("function");
-  assert.equal(viaFunction.status, "succeeded", "a function's write must not taint its wave");
-  assert.equal(viaFunction.ran, 1);
+  // The filter is still a filter — `waveTaintFor` must not overlay every member's writes onto
+  // every sibling, or this run and every graph shaped like it gates. What changed is WHICH
+  // members it lets through. It used to be "a `function` body is trusted code (assumption A13)",
+  // so an author who declared nothing was trusted; it is now the author's own declaration, and
+  // the two function arms below are the same node one field apart.
+  const viaPure = await siblings("pure");
+  assert.equal(viaPure.status, "succeeded", "a DECLARED-PURE function's write must not taint its wave");
+  assert.equal(viaPure.ran, 1);
+
+  const viaUnlabelled = await siblings("unlabelled");
+  assert.equal(viaUnlabelled.status, "awaiting_gate", "an UNLABELLED function's write must taint its wave");
+  assert.equal(viaUnlabelled.ran, 0);
 
   const viaTool = await siblings("tool");
   assert.equal(viaTool.status, "awaiting_gate", "and a tool's write must — otherwise this test proves nothing");
