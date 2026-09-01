@@ -691,6 +691,20 @@ Each traces to a decision in `DESIGN.md`.
 
 ## H · Housekeeping
 
+- **H.0 · A delegating chain now raises one gate per level, and that was the maintainer's call.**
+  Closing A.7 means `top → mid → leaf` over an irreversible child asks a human three times where
+  it asked once. Put to the maintainer with the alternatives (gate only the outermost; revert to a
+  compile diagnostic only) and **decided: keep it.** The argument that carried it is consistency —
+  a non-subgraph graph already asks at every node that transitively reaches the tool, so the old
+  behaviour was the subgraph route being LOOSER, not the new one being stricter — plus the human
+  being asked BEFORE the child does reversible work rather than at the innermost irreversible
+  call. **What would reopen it:** an operator reporting that nested delegation is unusable in
+  practice. The mechanism to reach for then is one approval covering a chain, which needs a rule
+  for what happens when the chain's shape changes mid-run, and that is a new decision rather than
+  a tuning knob.
+
+
+
 - **H.1 · `bin/loom` is gitignored and goes stale on any source edit.** **The silence is fixed**:
   `scripts/binary-freshness.cjs` refuses when the sources beside the binary have moved, and it
   distinguishes "no sources" from "sources I cannot read" rather than passing on either. **Still
