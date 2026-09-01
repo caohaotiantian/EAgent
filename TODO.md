@@ -334,6 +334,19 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   10/10 green before and after. **Closes when** a sighting is reproduced. Until then the honest
   statement is that a helper invariant was repaired and the flake is unexplained.
 
+  **FIFTH SIGHTING, 2026-09-01, and it is the first one caught with its assertion.** In a full
+  `npm run check`, `cli.test.ts`'s "`loom serve` SAYS which perimeter it has, including the second
+  hole" failed on `assert.match(s.err, /NO CALLBACK BASE URL/)`. Not reproducible: that suite alone
+  is 35/35, and three consecutive full runs afterwards are 2728/2728. Driving the same workspace
+  through the binary by hand prints the line, so the banner is not conditional on anything the test
+  varies — what differed was that ~2,700 tests were spawning children in parallel around it.
+  **What this sighting adds, and it is the reason to write it down rather than re-run and move on:**
+  the failing assertion is on `s.err` AFTER `await s.stop()`, which resolves on `close` — the event
+  that fires once every stdio pipe has drained. So either that promise can resolve before stderr is
+  drained, or the child was killed before it wrote. Both are testable, and neither was on the list
+  of causes `5ebad55` considered; it repaired the STDOUT wait, and every sighting since has been on
+  STDERR.
+
 ### Guards over states nobody has constructed
 
 - **A.21 · `suite freeze`'s unresolved-gate exclusion is a guard over a state nobody has

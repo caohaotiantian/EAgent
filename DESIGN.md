@@ -660,6 +660,15 @@ coordinator and nothing smaller, and it is recorded there rather than behind a s
 reach it. The duplication remains correct and wasteful: every write compare-and-swaps on its seq,
 so the loser writes nothing.
 
+---
+
+## The record — items 1 to 8, all closed
+
+Everything from here to "Deliberately not sequenced" is history, kept verbatim and still numbered
+1–8 because `TODO.md` and the items themselves cite each other by number. It is not a plan and
+nothing in it is outstanding; each item's own text says what it cost and, where the estimate was
+wrong, what it got wrong. Two of them (2 and 5) have had one paragraph corrected since — each
+correction is marked where it sits and says what it replaces.
 
 ### 1 · Oversight correctness — this gates everything below it
 
