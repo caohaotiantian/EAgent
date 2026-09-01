@@ -234,22 +234,26 @@ test("THE PREVIEW IS THE LIST THAT DISPATCHES — INCLUDING WHEN THE WORK WAS DE
     assert.equal(rows[0]!.compensatesSeq, plan.steps[0]!.seq, `${via}: on the same effect, identified the same way`);
     assert.equal(rows[0]!.run, plan.steps[0]!.runId, `${via}: in the journal the plan said it would be`);
 
-    // AND WHAT ACTUALLY HAPPENED TO THE WORLD, which is the assertion this file was missing and
-    // the reason it gave A.8 no protection at all. Every check above passes whether the outcome
-    // is `compensated` or `failed` — a `compensation.recorded` row carries `undo` either way — so
-    // the suite would have stayed green if somebody flipped `#compensateOne`'s `nodeApproved` for
-    // `trigger === "rewind"`, which is precisely the change A.8 is about and precisely this path.
+    // AND WHAT ACTUALLY HAPPENED TO THE WORLD — the assertion this file exists for, because every
+    // check above passes whether the outcome is `compensated` or `failed`: a `compensation.recorded`
+    // row carries `undo` either way.
     //
-    // TODAY IT IS `failed` AND NO REFUND RUNS: `#invokeTool` gets `nodeApproved: false`, policy
-    // answers `gate`, and the undo is refused — "pay.refund is reversible_write and requires human
-    // approval this turn cannot request". That is the DESIGNED behaviour and it is why
-    // `RewindPlan.dispatch` is documented as "will be attempted" rather than "will run".
+    // A REWIND'S UNDO RUNS APPROVED, decided 2026-09-02. `#compensateOne` passes
+    // `nodeApproved: trigger === "rewind"`, so policy does not gate it and the refund reaches the
+    // world. The floor that earns this is upstream and is what changed: `rewind` takes a
+    // `HumanActor` refused first (A.34), and `planRewind` showed this operator this exact
+    // `tool -> undo` pair and bound it with a hash the rewind re-checks (A.35). So the approval
+    // is against THESE undos, not merely against the verb.
     //
-    // **This pair is the fixture A.8's row says does not exist.** It does now, and flipping that
-    // argument moves both of these — `refunds` to `[amount]` and the outcome to `compensated` —
-    // so the change A.8 contemplates can no longer land silently in either direction.
-    assert.deepEqual(r.refunds, [], `${via}: an undo policy refuses must not reach the world`);
-    assert.equal(rows[0]!.outcome, "failed", `${via}: and the refusal is journaled, not swallowed`);
+    // UNTIL 2026-09-02 THIS ASSERTED THE OPPOSITE, and both halves went red on the one-character
+    // change, in this file and in `rewind-through-subgraph.test.ts`. That is the fixture doing its
+    // job: the decision could not land silently in either direction. The arm below is the half
+    // that did NOT change and has no other guard.
+    // AGAINST THE LEG'S OWN CHARGE, not a literal: the two legs charge different amounts (21 and
+    // 42), and a hardcoded expectation passes on one and lies about the other. `charges` is
+    // asserted to be exactly one entry when the fixture is built, so this is a full round trip.
+    assert.deepEqual(r.refunds, r.charges, `${via}: the undo the operator authorized must reach the world`);
+    assert.equal(rows[0]!.outcome, "compensated", `${via}: and be journaled as having run`);
   }
 });
 

@@ -340,7 +340,18 @@ export function otlpTraceRequest(spans: readonly Span[], options: OtlpTraceReque
     // Rule 2, enforced rather than assumed. A `traceId` that is not 32 lowercase hex chars is
     // not a trace id, and shipping it produces a 200 followed by nothing being visible — the
     // failure mode this whole file's header opens with.
-    if (!isId(traceId, 32) || !isId(spanId, 16)) continue;
+    // A NAMELESS SPAN TAKES THE SAME EXIT AS A BAD ID, and it used to acquire a fallback name
+    // instead. That fallback was `"loom.span"` — a NINTH span name, minted in this file, when the
+    // taxonomy is nine names owned by `telemetry/spans.ts` and §D.2 answered "no ninth name".
+    // `registries.test.ts`'s "ONE FILE OWNS THE TELEMETRY VOCABULARY" caught it, which is what
+    // that guard is for: a vocabulary with two representations drifts, and the second
+    // representation here would have been invisible to everyone reading `spans.ts`.
+    //
+    // Dropping is also the honest answer on its own terms. This encoder's contract is that it
+    // emits what the fold produced; a span whose name it had to invent is one the fold did not
+    // produce, and shipping it under a name no collector query will match is worse than omitting
+    // it. Same reasoning as the id check on this line, which is why it is this line.
+    if (!isId(traceId, 32) || !isId(spanId, 16) || typeof s.name !== "string") continue;
     const links: OtlpJson[] = [];
     for (const l of s.links ?? []) {
       const enc = link(l, traceId);
@@ -359,7 +370,7 @@ export function otlpTraceRequest(spans: readonly Span[], options: OtlpTraceReque
     const span: Record<string, OtlpJson> = {
       traceId,
       spanId,
-      name: typeof s.name === "string" ? s.name : "loom.span",
+      name: s.name,
       kind: KIND_CODE[s.kind] ?? 0,
       startTimeUnixNano: nanos(s.startTime),
       endTimeUnixNano: nanos(s.endTime),

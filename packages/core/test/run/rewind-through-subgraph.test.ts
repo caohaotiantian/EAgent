@@ -189,7 +189,7 @@ test("...and the refusal is about COMPENSATION, not about subgraphs", async () =
   assert.equal(direct.refused, undefined, "and so is the same call in the parent — one rule, two places");
 });
 
-test("A REWIND IS NOT A HUMAN'S YES TO THE UNDO — THE STEP IS JOURNALED failed AND THE MONEY STAYS TAKEN", async () => {
+test("A REWIND IS A HUMAN'S YES TO THIS UNDO — THE CHILD'S ROLLBACK RUNS AND THE MONEY COMES BACK", async () => {
   // TWO CLAIMS, and the first is the reason the second could not be seen. The test above proves
   // the rewind is ALLOWED past a compensated child call; being allowed is not being undone.
   //
@@ -235,11 +235,9 @@ test("A REWIND IS NOT A HUMAN'S YES TO THE UNDO — THE STEP IS JOURNALED failed
 
   assert.deepEqual(delegated.records.map((r) => r.run), ["child"], "the child's own journal is where its rollback is recorded");
   assert.equal(delegated.records[0]!.undo, "pay.refund");
-  assert.equal(delegated.records[0]!.outcome, "failed", "an undo policy answers `gate` is refused, not performed");
-  assert.match(delegated.records[0]!.reason ?? "", /requires human approval/);
-
-  assert.deepEqual(delegated.refunds, [], "and nothing was given back");
-  assert.deepEqual(delegated.charges, [42], "the charge stands — the operator is told, not obeyed silently");
+  assert.equal(delegated.records[0]!.outcome, "compensated", "a rewind's undo runs approved, decided 2026-09-02");
+  assert.deepEqual(delegated.refunds, [42], "and the money comes back — the whole point of permitting the rewind");
+  assert.deepEqual(delegated.charges, [42], "the charge still happened; the rollback is what undid it");
 
   // THE CONTROL. `pay.refund` on a `tool` node, same engine options, same grant: the node's own
   // chain runs, it suspends on the gate, a human approves, and the tool executes. So the leg

@@ -1554,7 +1554,7 @@ export class Engine {
             // row with no reason would collapse the three states back to two for whoever reads
             // it, so the fallback says something true rather than leaving the field off.
             ({ outcome: "not_attempted", reason: item.undispatchable ?? "this engine cannot dispatch an undo in this run", retryable: true } as const)
-          : await this.#compensateOne(item.ctx, item.p, item.step, item.result);
+          : await this.#compensateOne(item.ctx, item.p, item.step, item.result, trigger);
       if (outcome.outcome === "compensated") tally.compensated++;
       else if (outcome.outcome === "failed") tally.failed++;
       else tally.notAttempted++;
@@ -1603,6 +1603,7 @@ export class Engine {
     p: RunProjection,
     step: CompensationStep,
     result: unknown,
+    trigger: "run_failed" | "rewind",
   ): Promise<{ readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string }> {
     if (step.undo === undefined) return { outcome: "not_attempted", reason: BLOCK_REASON[step.blocked ?? "no_compensation"](step) };
 
@@ -1633,7 +1634,24 @@ export class Engine {
     // journal alone, so a replay and a resumed rollback both land on the same key — and a
     // rewind-then-redo produces a NEW seq, so its fresh write gets its own undo rather than
     // being served the old one's.
-    const out = await this.#invokeTool(ctx, p, task, undo, args, step.seq, false, "compensate");
+    // `nodeApproved` IS THE TRIGGER, and the two triggers are not alike. Decided by the
+    // maintainer 2026-09-02, after A.34 and A.35 built the floor that made the question askable
+    // at all — this argument was `false` unconditionally until then, and the docstring above
+    // still carries the argument for that, kept because it is the argument this decision had to
+    // answer rather than one it made obsolete.
+    //
+    // `rewind` — TRUE. The operator is a verified human (`rewind` takes a `HumanActor`, refused
+    // first), they were SHOWN this exact `tool -> undo` pair by `planRewind`, and `rewind`
+    // refuses a plan hash that no longer matches what it would dispatch. So the approval is a
+    // floor against THESE UNDOS and not merely against the verb, which is precisely what the old
+    // objection — "a rollback is not a human's yes to anything" — was true about before A.35.
+    // Without that preview the flip would have been an automated path granting itself approval.
+    //
+    // `run_failed` — FALSE, unchanged, and it is the arm that keeps this from being a back door.
+    // Nothing human authorized a run's own failure, so its rollback may not approve itself; an
+    // undo whose class needs a person is refused and journaled `failed`, which is what
+    // `GRAPH012_COMPENSATION_VISIBLE` warns about at compile time.
+    const out = await this.#invokeTool(ctx, p, task, undo, args, step.seq, trigger === "rewind", "compensate");
     if (out.isError === true) {
       return { outcome: "failed", reason: `"${step.undo}" did not undo "${step.tool}": ${out.content}` };
     }

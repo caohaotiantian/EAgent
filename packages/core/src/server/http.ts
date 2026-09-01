@@ -195,7 +195,7 @@ import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
-import { spansFrom } from "../telemetry/spans.ts";
+import { OTLP_RUN_ID_ATTR, spansFrom } from "../telemetry/spans.ts";
 import { otlpTraceRequest } from "../telemetry/otlp.ts";
 import { layoutGraph } from "./layout.ts";
 import { CONSOLE_HTML } from "./console.ts";
@@ -3171,7 +3171,7 @@ export class ControlPlane {
             res,
             200,
             format === "otlp"
-              ? otlpTraceRequest(spans, { resourceAttributes: { "service.name": "loom", "loom.run_id": runId } })
+              ? otlpTraceRequest(spans, { resourceAttributes: { "service.name": "loom", [OTLP_RUN_ID_ATTR]: runId } })
               : { runId, traceId: spans[0]?.traceId, spans, truncated },
           );
         },

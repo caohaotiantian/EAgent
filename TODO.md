@@ -351,33 +351,26 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   and A.8's fixture, which this row's first draft said was still missing, exists as a side effect
   of the preview work. The decision is the whole of what is open.
 
-- **A.8 · ~~The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests
-  it.~~ THE FIXTURE EXISTS NOW; the DECISION is what is left.** `test/run/rewind-plan.test.ts`
-  asserts, on both the direct and the delegated leg, that a refused undo reaches neither the world
-  (`refunds` is empty) nor a false record (`compensation.recorded.outcome` is `failed`).
-  **Mutation-checked at `5ffc223`, by RUNNING it rather than by trusting the row that claimed
-  it:** flip `#compensateOne`'s `nodeApproved` from `false` to `true` in its `#invokeTool` call
-  and `rewind-plan.test.ts` goes 6/7 — `an undo policy refuses must not reach the world`,
-  `actual [21] expected []`. Restored, 7/7. Before the fixture the file asserted only
-  `undo === "pay.refund"`, which a row carries whatever its outcome — so the suite drove A.8's
-  exact path and would have stayed green through the flip.
-  **THE SAME FLIP IS `DESIGN.md` ITEM 9's WHOLE REMAINING CONTENT, which is the fact that stops
-  this being carried twice.** The same edit takes `rewind-through-subgraph.test.ts` to 2/3 —
-  *"an undo policy answers `gate` is refused, not performed"*, `actual 'compensated' expected
-  'failed'`. That assertion throws before the harness's `refunds` line, so `[42]` is not printed;
-  the step to item 9 is that `compensated` is returned only when `#invokeTool` comes back without
-  an error, and the harness pushes into `refunds` inside `pay.refund`'s own `execute` — so on the
-  delegated leg `compensated` means the refund RAN, which is item 9's
-  *Fails today* assertion coming TRUE. One flag, two pins, opposite directions:
-  item 9 says flip it, this row says not without an argument. **Neither can close without the
-  other, so the decision is recorded HERE and item 9 cites it.**
-  **What remains is not coverage, it is the question:** should a rewind's undos run with
-  `nodeApproved: true`? A.35 delivered the operator seeing and authorizing the specific list, which
-  is the floor that made the question askable at all. It is still not obviously yes: the human
-  authorized *this plan*, and `#compensateOne`'s own docstring argues the opposite — "a rollback is
-  not a human's yes to anything: the human, if there was one, approved the action being undone".
-  **Closes when** somebody decides that, with the argument written down; the fixture will hold
-  whichever way it goes, which is the whole reason to have built it first.
+- ~~**A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests
+  it.**~~ **DECIDED AND BUILT 2026-09-02: `nodeApproved: trigger === "rewind"`.**
+  The maintainer's answer, with the argument: a rewind's operator is a verified human (A.34) who
+  was SHOWN this exact `tool -> undo` pair and bound it with a hash the rewind re-checks (A.35), so
+  the approval is a floor against THESE UNDOS rather than against the verb — which is precisely
+  what `#compensateOne`'s old objection ("a rollback is not a human's yes to anything") was true
+  about before A.35 existed. A `run_failed` rollback keeps `false`: nothing human authorized a
+  run's own failure, and an automated path may not approve itself.
+  The fixture caught the change in both directions, which is why it was built first — the one
+  character turned two tests red across two files, and both now assert the money comes back.
+  **NAMED RESIDUE, and it is the arm with no guard.** One line carries both answers, so an edit
+  that dropped the condition — leaving an unconditional `true` — would keep every test green while
+  turning a run's own failure into a path that approves its own irreversible undos, which is the
+  back door `GRAPH012_COMPENSATION_VISIBLE` warns about at compile time. Nothing covers it today:
+  `compensation-fires.test.ts` drives the `run_failed` path but its undo (`db.delete`,
+  `reversible_write`) does not gate at that graph's posture, so it reads `compensated` either way.
+  **Closes when** a `run_failed` fixture exists whose undo policy WOULD gate — the rewind fixture's
+  posture is the one that produces it — and asserts `failed` plus "requires human approval". That
+  is a fixture, not a mechanism, and it was deliberately not half-built here.
+
 
 - **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
   covers synchronous execution only. The refusal is correct and is stated once at the seam

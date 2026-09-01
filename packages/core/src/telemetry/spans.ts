@@ -245,6 +245,17 @@ interface Open {
  * `endTime` at the last observed event and `status: "unset"` — an in-flight trace is
  * a normal thing to look at, not an error.
  */
+/**
+ * The resource attribute naming which run a span batch came from, for an OTLP export.
+ *
+ * HERE, AND NOT AT THE EXPORTER, because `registries.test.ts` holds one rule about this
+ * vocabulary: one file owns it. An attribute spelled in a second file is a name that can be
+ * spelled two ways, and the guard caught exactly that — `server/http.ts` minted `"loom.run_id"`
+ * of its own when the trace route was added. It is not a span NAME (the taxonomy is nine and §D.2
+ * answered "no ninth"), but it is telemetry vocabulary and the rule is about the vocabulary.
+ */
+export const OTLP_RUN_ID_ATTR = "loom.run_id";
+
 export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   if (events.length === 0) return [];
   // `digestOf` is `createHash().update(v, "utf8")`, which throws `ERR_INVALID_ARG_TYPE` for a
