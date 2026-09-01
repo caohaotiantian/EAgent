@@ -260,23 +260,31 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   the run, and an `open` gate suspends it, both excluded upstream — which is the argument for
   "unreachable" and is not the same as having shown it.
 
-- **A.22 · `loom score`'s `! N run(s) folded without their graph` line is a backstop with no
-  end-to-end test.** With the judged run refusing outright and the peers sharing its lookup, the
-  only route left to it is a peer that reached the same cohort key through `graph.mutated` while
-  its spec is looked up by `run.submitted`'s hash. Stated at the branch. **Closes when** that
-  fixture exists, or the branch is deleted as unreachable.
+- **A.22 · CLOSED — the branch is reachable, and its message was wrong.** The route was the one
+  stated: a peer that reached the cohort key through `graph.mutated` while its spec is looked up
+  by `run.submitted`'s hash. Driven, not argued — `compileMutation` builds a successor as
+  `{...spec, nodes: [...nodes, ...added]}`, so a graph that is a PREFIX of another compiles to
+  the other's hash exactly (`sha256:dd019089…` + one node = `sha256:bf1f5820…`), and a run of the
+  unpublished parent joins the published child's cohort. The fixture is in
+  `test/cli/evolution-score.test.ts`, and on its first firing it caught the note printing the
+  FOLDED hash — the successor, which is the judged run's own published graph — under "publish
+  those graphs". `Trajectory.authoredGraphHash` is the repair.
 
 ### The self-improvement loop — what it still cannot see
 
-- **A.23 · The OFFLINE promotion gate is blind to two candidate shapes, and a request digest
-  cannot answer either.** Lowering `agent.maxTurns` asks the SAME question on the turns it does
-  take, so its turn-0 digest matches and the later recorded turns simply go unserved — it
-  promotes, one turn cheaper. Lowering a node's `policy.budget` is invisible because replay has
-  no adapter, so `estimateOf` returns 0 and the ceiling is never tested (that is A.1's second
-  member seen from the gate's side). **`loom promote --against-cohort` sees both, and that is not
-  the same as closing this** — it is a different door with real money, a real provider, and a
-  verdict carrying `checksNotRun: ["8-determinism"]`. **Closes when** replay can serve an
-  adapter's answers, i.e. A.1's seam.
+- **A.23 · HALF CLOSED. The `maxTurns` shape is refused; the `policy.budget` one is not, and the
+  blanket refusal was measured rather than argued.** The turns half needed no new evidence: a
+  candidate that lowers `agent.maxTurns` leaves recorded effects UNSERVED, `ReplayReport` has
+  carried `unservedEffects` all along, and `unexercised` was not reading it. It now refuses, and
+  every control stays green including the function-body candidate. The budget half is worse than
+  unimplemented — the obvious fail-closed answer, refusing any different-graph candidate that
+  declares a budget, turns the gate off for every well-formed graph: `test/run/skeleton.ts`'s own
+  `summarize` declares `budget.costUsd: 0.15`, so do nodes in both `examples/graphs` the loop is
+  driven on, and `GRAPH009_UNBOUNDED_NODE` tells authors to add them. The narrower refusal is not
+  expressible either, because the recording's SPEC is not in the journal (A.24), so nothing can
+  tell "the candidate lowered the ceiling" from "it kept it and changed a body". **Closes when**
+  replay can serve an adapter's answers, i.e. A.1's seam. Stated with the numbers at
+  `unexercised`.
 
 - **A.24 · `run.compiled` carries node counts, not the spec.** `{graphHash, nodes, edges,
   resolutionManifest}` — so a trajectory's S1/S4/S5 depend on a file on disk, and `isGolden` reads
@@ -294,21 +302,28 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   answered: whether the kernel needs a graph-scoped durable fact, and whether that is one event
   type or a second keyspace.
 
-- **A.26 · The live decision rule is weak at small n.** `MIN_PAIRED_RUNS` is 6, argued from the
-  exact sign test (n = 4 tops out at p = 0.0625). At six pairs the t bound assumes roughly
-  symmetric differences and six observations cannot check that. Two strengthenings are unowned: a
-  Wilcoxon signed-rank bound (distribution-free, uses magnitudes; needs an exact null table, a
-  page of numerics under the zero-dependency rule) and repeated runs per input so within-input
-  model variance separates from between-graph difference. **Neither is required for the mechanism
-  to be honest** — the verdict journals `n`, `sd` and `signTestP` and a reader can disagree with
-  it. **Closes when** one of the two is built, or the current rule is defended in writing.
+- **A.26 · The Wilcoxon bound is built; the repeated-runs half is not.** It needed no table:
+  under the null the differences are sign-symmetric, so `W⁺ = Σ Zᵢ·i` with `Zᵢ` iid Bernoulli(½)
+  and its distribution is a subset-sum count over the ranks — twenty lines, and checked against
+  the published one-sided 0.05 table at n = 5…20 and 25 (seventeen exact agreements; the
+  eighteenth, n = 30, is the table being loose — `P(T ≤ 152) = 0.050199` against
+  `P(T ≤ 151) = 0.048051`). `L1-paired-improvement` now requires the t bound AND the
+  Hodges–Lehmann bound to clear 0, and each binds where the other does not. **What is left is the
+  second strengthening — repeated runs per input**, so within-input model variance separates from
+  between-graph difference; no statistic computed from one run per input can see it, and neither
+  bound removes the SYMMETRY assumption (the signed-rank null IS sign symmetry — what it removes
+  is normality). **Closes when** the mode can run an input more than once.
 
-- **A.27 · The live cost check divides TOTALS where D10.d says medians.** `3-cost` is
-  `Σcandidate / Σbaseline ≤ 1.1` in both modes. Pairing makes the median expressible and the CLI
-  computes and journals `medianCostRatio` — **reported, not gated**, because a pair whose baseline
-  cost $0 makes the ratio undefined and a check that sometimes has no answer is worse than one
-  clear rule. **Closes when** §D.4 decides whether the median gates and what an undefined pair
-  does to it.
+- **A.27 · CLOSED — the median gates in the LIVE mode; the replayed one still cannot express
+  one.** §D.4 is decided: a pair's ratio is `candidate / baseline` when the baseline spent
+  anything, 1 when neither side spent, and UNBOUNDED when a free input became a paid one — the
+  limit of the ratio, not a convention, and a median is an order statistic so it never does
+  arithmetic on it. That makes the rule total, which is what the "a check that sometimes has no
+  answer" objection was asking for; the old code met that objection by not gating at all, and the
+  reviewer's six-pairs-at-$0-baseline-and-$100-candidate fixture went from PROMOTE at "1.00×" to
+  `ran: false` to a refusal. The total is reported in the detail. `gateCandidate`'s `3-cost` is
+  untouched and still divides `EvalReport` totals, because that type has no median to divide —
+  see its docstring; closing THAT needs a `medianCostUsd` where `p95WallMs` already is.
 
 - **A.28 · A saturated outcome ranks cheapness.** Measured on five real runs sharing a cohort:
   every one had `outcome: 1`, `costNormalized` clamps at the cohort median, two ranked and three
@@ -317,9 +332,12 @@ named in one comment at `packages/core/src/run/engine.ts:4681-4695`.
   (`DECISION_VALUE.approve = 1` at weight 0.9), not S5, whose weight is 0.0. **A workflow whose
   only signal is human approval cannot rank its own runs.** The escape is a ground-truth signal
   and it is measured, not argued: `examples/graphs/review-bench.json` drives S1 to `k/n` and the
-  score then reads correctness rather than cheapness. **Closes when** either scoring refuses a
-  cohort whose outcome has no variance, or every workflow anybody scores carries an S1 — and the
-  first is a change to the metric, which is the harder and better one.
+  score then reads correctness rather than cheapness. **CLOSED by the first of the two:**
+  `CohortStats.outcomeSpread` measures the saturation and `isGolden` condition 2 refuses the rank
+  on it, so the verdict reads UNRANKABLE instead of crowning the cheapest run. The SCORES are
+  unchanged — the score was not what was wrong, the rank was — and `loom score` prints the
+  refusal at the terminal as well as journaling it in `goldenBlockers`. What cannot be fixed here
+  stands: a workflow whose only signal is human approval still cannot rank its own runs.
 
 - **A.29 · A suite frozen from a corpus is a REGRESSION FLOOR, not a claim of improvement.**
   `EvalCase.expect` can name a status, a channel VALUE, a cost and `noIrreversibleWithoutGate` —
@@ -519,9 +537,11 @@ Each row below states what a decision would settle. None is the implementer's to
   rollback. Compensation edges are a compile-time declaration by design (§A.30); this asks whether
   there should also be a node an author can point at.
 
-- **D.4 · Whether `medianCostRatio` GATES, and what an undefined pair does to it.** See §A.27.
-  D10.d says medians; the code computes the median and gates on totals, and reports the
-  divergence rather than hiding it.
+- **D.4 · ANSWERED: the median gates, and an undefined pair is UNBOUNDED rather than dropped.**
+  See §A.27 for the rule and `pairedCostRatio` in `evolution/live.ts` for the derivation. The
+  live mode gates on the median pair; the replayed one still divides totals because `EvalReport`
+  carries no median, and that divergence is now stated at both `3-cost` docstrings rather than
+  read as one rule implemented twice.
 
 - **D.5 · Whether the kernel needs a graph-scoped durable fact.** See §A.25. Two callers now
   borrow one coordinate — `operator.command` on the first case's run. The question is whether that
