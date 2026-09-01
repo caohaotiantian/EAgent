@@ -149,8 +149,12 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                              --as AUTHENTICATES NOBODY —
                                                              this verb is as strong as
                                                              shell access to the host
-  loom replay  <runId> --graph <graph.json|yaml>           replay and verify
-  loom trace   <runId> --graph <graph.json|yaml>           print the span tree
+  loom replay  <runId> [--graph <graph.json|yaml>]         replay and verify
+  loom trace   <runId> [--graph <graph.json|yaml>]         print the span tree
+               Both find the graph themselves: graphs/ is searched for the hash the
+               journal recorded, and the file it resolved to is named on stderr.
+               --graph names one outside graphs/ and is refused if its hash is not
+               the one the run compiled
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
   loom score   <runId>                       judge a finished run against its cohort, and
                                              journal the verdict as evolution.scored
@@ -3295,24 +3299,119 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * hook is only how it was found.
  *
  * So the failures come back with the index and the caller says them.
+ *
+ * AND THE FILE THAT SUPPLIED EACH HASH comes back too. A verb that resolves a graph the operator
+ * did not name has to be able to SAY which file it picked — `recordedGraph` prints it, and the
+ * refusal below it lists the candidates it rejected. A hash alone names nothing an operator can
+ * open.
  */
-function graphsByHash(ws: Workspace): { index: Map<string, RunGraph>; failed: readonly string[] } {
+function graphsByHash(ws: Workspace): { index: Map<string, RunGraph>; files: Map<string, string>; failed: readonly string[] } {
   const dir = join(ws.root, "graphs");
   const index = new Map<string, RunGraph>();
+  const files = new Map<string, string>();
   const failed: string[] = [];
-  if (!existsSync(dir)) return { index, failed };
+  if (!existsSync(dir)) return { index, files, failed };
   for (const file of readdirSync(dir).sort()) {
     if (!/\.(json|ya?ml)$/i.test(file)) continue;
     try {
       // `false`: every caller of this function is re-attaching a graph to a run that already
       // exists — the run clock, and the door an approver answers a gate through.
       const graph = loadGraph(ws, join(dir, file), false);
-      if (!index.has(graph.graphHash)) index.set(graph.graphHash, graph);
+      if (!index.has(graph.graphHash)) {
+        index.set(graph.graphHash, graph);
+        files.set(graph.graphHash, file);
+      }
     } catch (e) {
       failed.push(`${file}: ${(e as Error).message}`);
     }
   }
-  return { index, failed };
+  return { index, files, failed };
+}
+
+/**
+ * THE GRAPH A RUN RECORDED, FOUND RATHER THAN DEMANDED — one lookup, and the verbs share it.
+ *
+ * `RunGraph` is not journaled, only its hash is, so a fresh process has to be told or has to
+ * look. `approve` has looked since the `--graph` it demanded turned out to appear in no usage
+ * text and no error message; `audit` degrades to the rules it can check and names every skip.
+ * `replay` and `trace` went on demanding the flag, so a workspace that could APPROVE and AUDIT a
+ * run by id alone could not RE-EXECUTE it unless the operator remembered which file it ran —
+ * DESIGN item 14, reproduced through the binary as `E_CONFIG_INVALID: --graph needs a path`.
+ * This is `approve`'s search, extracted rather than copied: a second implementation of one
+ * lookup is TODO.md §F.2's drift shape.
+ *
+ * THREE ANSWERS, NOT TWO. "this workspace publishes no graph" and "it publishes graphs, none of
+ * them this run's" are different facts and the caller is told which, with the rejected
+ * candidates named. Conflating them is the absence-is-not-zero rule, and on `replay` the
+ * conflation is the expensive one: re-executing against a graph the run did not use reports
+ * `match: false` about the RUN when the replayer is what differed, which is the class
+ * `replay-fidelity` exists to keep out. So the search is by HASH and nothing else can win it.
+ *
+ * `--graph` STILL WINS WHEN GIVEN, and it is checked. It is how a graph living outside `graphs/`
+ * is named without publishing it — `loom score --graph` documents exactly that use, and refuses
+ * a file whose hash is not the run's for the reason above. Same rule here.
+ *
+ * THE CALLERS ARE `replay` AND `trace`, AND THAT IS THE WHOLE SET. `approve`, `steer` and
+ * `deescalate` share the lookup underneath — `graphsByHash` — and not this policy, because all
+ * three want a DIFFERENT answer to the same three cases: they attach and carry on when the hash
+ * is absent (a run with no `run.compiled` is refused by the engine underneath, with a better
+ * message than this one), `approve` re-arms the gate clock after attaching, and its refusal ends
+ * with gate advice (`loom cancel`, and why not `--reject`) that means nothing on a replay. One
+ * lookup, two policies over it, stated here so the next reader does not "unify" them.
+ */
+async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: string): Promise<RunGraph> {
+  const wanted = await ws.engine.compiledGraphHash(runId);
+  const named = (g: RunGraph): string => `${g.spec.metadata.name} v${String(g.spec.metadata.version)} (${g.graphHash})`;
+  if (args.flags["graph"] !== undefined) {
+    const file = requireFileFlag(args, "graph");
+    // `false` for the same reason `graphsByHash` passes it: this graph is being re-attached to a
+    // run that already exists, not introduced.
+    const g = loadGraph(ws, file, false);
+    if (wanted !== undefined && g.graphHash !== wanted) {
+      throw err.validation(
+        CODES.E_GRAPH_MISMATCH,
+        `--graph ${file} compiles to ${g.graphHash}, and run ${runId} compiled ${wanted}. ` +
+          `\`loom ${verb}\` re-reads that run's journal against the graph it is given, so a different graph ` +
+          `reports its own differences as the run's. A graph EDITED since the run no longer matches, which is ` +
+          `the point — this run executed the old bytes. Pass the file holding ${wanted}, or drop --graph and ` +
+          `let ${join(ws.root, "graphs")} be searched for it.`,
+        { details: { runId, ran: wanted, given: g.graphHash, file } },
+      );
+    }
+    process.stderr.write(`${verb}: graph ${named(g)} — from --graph ${file}\n`);
+    return g;
+  }
+  if (wanted === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `run ${runId} has no run.compiled event in this workspace, so nothing in its journal names the graph it ` +
+        `ran and there is no hash to search ${join(ws.root, "graphs")} for. Pass --graph <file> with the graph ` +
+        `this run ran.`,
+      { details: { runId } },
+    );
+  }
+  const { index, files, failed } = graphsByHash(ws);
+  const found = index.get(wanted);
+  if (found !== undefined) {
+    // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
+    // output an operator cannot check; `approve` and `audit` both name what they found.
+    process.stderr.write(`${verb}: graph ${named(found)} — the hash run ${runId} recorded, from graphs/${files.get(wanted) ?? "?"}\n`);
+    return found;
+  }
+  // ABSENCE IS NOT ZERO. An empty `graphs/` and a `graphs/` full of other people's graphs are
+  // different diagnoses with different fixes, so they get different sentences.
+  const others = [...index.values()].map((g) => `graphs/${files.get(g.graphHash) ?? "?"} ${named(g)}`);
+  throw err.notFound(
+    CODES.E_RUN_NOT_FOUND,
+    `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash. ` +
+      (others.length === 0
+        ? `That directory publishes no graph this process can compile`
+        : `It publishes ${String(others.length)}, and none is this run's — ${others.join("; ")}`) +
+      `${failed.length === 0 ? "" : ` (${String(failed.length)} would not compile — ${failed.join("; ")})`}. ` +
+      `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
+      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.`,
+    { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
+  );
 }
 
 function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
@@ -5146,7 +5245,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
 
       case "replay": {
         const runId = requirePositional(args, 0, "a runId") as RunId;
-        const graph = loadGraph(ws, requireFileFlag(args, "graph"));
+        // FOUND, NOT DEMANDED — see `recordedGraph`. `--graph` still wins and is still checked.
+        const graph = await recordedGraph(ws, args, runId, "replay");
         const report = await replayRun({
           store: ws.store,
           runId,
@@ -5189,7 +5289,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
 
       case "trace": {
         const runId = requirePositional(args, 0, "a runId") as RunId;
-        const graph = loadGraph(ws, requireFileFlag(args, "graph"));
+        // FOUND, NOT DEMANDED — see `recordedGraph`. Conformance is computed against this spec,
+        // so resolving the WRONG one would report the graph's differences as the run's.
+        const graph = await recordedGraph(ws, args, runId, "trace");
         const events = [];
         for await (const e of ws.store.read(runId, 1)) events.push(e);
         // THE PARENT'S OWN FOLD, KEPT — it is what conformance is computed over, at the bottom

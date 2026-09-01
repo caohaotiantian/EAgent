@@ -125,8 +125,8 @@ echo hello > input.txt
 
 loom compile graphs/copy.json                    # `ok`
 loom run     graphs/copy.json --input '{"source":"input.txt"}'
-loom replay  <runId> --graph graphs/copy.json   # verifies; touches nothing
-loom trace   <runId> --graph graphs/copy.json   # spans + graph conformance
+loom replay  <runId>                             # verifies; touches nothing
+loom trace   <runId>                             # spans + graph conformance
 loom serve                                       # console at http://127.0.0.1:8787
 ```
 
@@ -166,6 +166,21 @@ Three things that command does not do, and each was a real defect:
 - it will not run a graph other than the one the approver was shown, down to the bytes behind
   its `prompt/` and `subgraph/` refs;
 - `--as u:bob` is refused, because the gate names who may answer it.
+
+**The first of those is why `replay` and `trace` above carry no `--graph` either.** A run's
+journal records its graph's HASH, not its bytes, so a fresh process has to look — and `graphs/`
+is where it looks, for all four verbs. What it resolved is printed on stderr, naming the file:
+
+```
+replay: graph copy-file v1 (sha256:04e9ea2c…) — the hash run 01M1EW… recorded, from graphs/copy.json
+```
+
+`--graph` still wins when given, and is how a candidate living outside `graphs/` is named without
+publishing it (`loom score --graph` documents that use). It is checked against the journal either
+way: a file whose hash is not the one the run compiled is `E_GRAPH_MISMATCH`, never a replay whose
+`match: false` is really about the graph. And a workspace that publishes graphs, none of them this
+run's, is told so — with the ones it does publish named — rather than being told it publishes
+none.
 
 ## Examples that run
 
