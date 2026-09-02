@@ -7,6 +7,12 @@
  * graph that is wrong; it cannot propose one that weakens oversight, overcommits
  * budget, or races on a channel, because those are compile errors.
  *
+ * THE OVERSIGHT HALF OF THAT SENTENCE NAMES TWO MECHANISMS, and for a while it only had one.
+ * A posture cannot be lowered because section 4 recompiles against the running graph's own
+ * postures. But a posture is not the only thing oversight rests on: a `human_gate` protects a
+ * node by DOMINATING it, and a mutation that adds a second path to that node weakens oversight
+ * without touching a single posture. Section 2b is the other mechanism.
+ *
  * ADDITIVE ONLY. A mutation may add nodes and edges within the proposer's region. It
  * may not change or remove an existing node, edge, channel, or policy field.
  *
@@ -21,7 +27,7 @@ import { CODES, err, type LoomError } from "../errors.ts";
 import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
-import { indexGraph, reachableToolNamesThrough, type Diagnostic } from "./validate.ts";
+import { indexGraph, reachableToolNamesThrough, type Diagnostic, type GraphIndex } from "./validate.ts";
 import { isHardToUndo } from "../vocab.ts";
 
 export interface GraphMutation {
@@ -122,6 +128,11 @@ export function compileMutation(input: MutateInput): MutationResult {
   // Every added node must be reachable only THROUGH the proposing node. Otherwise a
   // mutation could graft work onto an unrelated part of the graph — including a part
   // that has already run, whose journal entries would then mean something different.
+  //
+  // THIS SECTION IS ABOUT THE ADDED NODES. The two clauses below cover an added `to` from a
+  // stranger, and an edge between two existing nodes. The third direction — an added `from`
+  // into an existing `to` — is not an error by itself, because the ordinary "do this too, then
+  // carry on" proposal has that shape; what it may not do is remove a dominator, which is 2b.
   const added = new Set(mutation.addNodes.map((n) => n.id));
   for (const e of mutation.addEdges) {
     const fromAdded = added.has(e.from);
@@ -141,6 +152,65 @@ export function compileMutation(input: MutateInput): MutationResult {
         code: "MUT003_NOT_DOMINATED",
         message: `edge "${e.id}" connects two EXISTING nodes; a mutation may only wire into what it adds`,
         at: { edgeId: e.id },
+      });
+    }
+  }
+
+  // ── 2b. no existing node loses a dominator ───────────────────────────────
+  //
+  // The rule above is about the ADDED nodes' region. It says nothing about the direction that
+  // matters most: an added `from` into an EXISTING `to`. That edge is a second path to a node
+  // somebody already reviewed, and because `seq` edges are OR-joined it is a path that skips
+  // whatever sat in front of the authored one. Driven end to end — an authored `human_gate` in
+  // front of a `reversible_write` tool, no operator action of any kind:
+  //
+  //     the authored graph, human REJECTS       -> failed, the tool never ran
+  //     one added node + one added edge into it -> failed, and the tool ran anyway
+  //
+  // A rejection RELEASES the grafted path rather than stopping it: an open gate suspends the
+  // whole run, and `gate.decided` carries an unconditional `run.resumed`.
+  //
+  // PROPOSER DOMINANCE IS NOT THE PREDICATE, and it was the first thing tried. The proposer of a
+  // mutation is almost always an ancestor of everything it could graft onto — in the graph above
+  // the proposer IS the entry node — so "the target must already be dominated by the proposer"
+  // is satisfied by the exploit and refuses nothing.
+  //
+  // What oversight actually depends on is DOMINANCE ITSELF: `gate` protects `pay` exactly while
+  // every path from an entry to `pay` runs through `gate`. So the rule is preservation. It admits
+  // the legitimate rejoin — an added branch re-entering below everything that dominated its
+  // target adds no path that skips anything — and refuses the graft, which is the whole of the
+  // difference between the two.
+  if (!diagnostics.some((d) => d.severity === "error")) {
+    const mergedForDominance: GraphSpec = {
+      ...spec,
+      nodes: [...spec.nodes, ...mutation.addNodes],
+      edges: [...spec.edges, ...mutation.addEdges],
+    };
+    const before = dominatorsOf(spec);
+    const after = dominatorsOf(mergedForDominance);
+    const mergedIndex = indexGraph(mergedForDominance);
+    for (const v of spec.nodes) {
+      const was = before.get(v.id);
+      const now = after.get(v.id);
+      if (was === undefined || now === undefined) continue;
+      const lost = [...was].find((d) => !now.has(d));
+      if (lost === undefined) continue;
+      // The edge to NAME, and the order matters: a graft is a CHAIN of added edges, and every
+      // one of them reaches the target. The edge worth pointing at is the one that crosses back
+      // into the existing graph, so the model reading the refusal is told where to move it —
+      // not the first hop of its own new branch.
+      const reaches = (e: EdgeSpec): boolean => e.to === v.id || forwardFrom(mergedIndex, [e.to]).has(v.id);
+      const culprit =
+        mutation.addEdges.find((e) => e.to === v.id) ??
+        mutation.addEdges.find((e) => !added.has(e.to) && reaches(e)) ??
+        mutation.addEdges.find(reaches);
+      diagnostics.push({
+        severity: "error",
+        code: "MUT003_DOMINATOR_LOST",
+        message:
+          `edge "${culprit?.id ?? mutation.addEdges[0]?.id ?? "(none)"}" gives "${v.id}" a path that does not pass through "${lost}"`,
+        at: culprit === undefined ? { nodeId: v.id } : { edgeId: culprit.id, nodeId: v.id },
+        fix: `route the edge into a node that "${lost}" already dominates, or through "${lost}" itself`,
       });
     }
   }
@@ -226,6 +296,68 @@ export function compileMutation(input: MutateInput): MutationResult {
     gatedNodes,
     addedNodes: mutation.addNodes.map((n) => n.id),
   };
+}
+
+/**
+ * Forward flow, walked once from a seed set.
+ *
+ * `compensation` is excluded because the executor never traverses one; `error` and `loop` are
+ * included because it does. Loop edges matter here rather than being a detail: a mutation that
+ * grafts a BACKWARD edge reaches a node the same way a forward one does, and dropping them from
+ * the walk would let that shape through the check below.
+ */
+function forwardFrom(idx: GraphIndex, seeds: Iterable<NodeId>): Set<NodeId> {
+  const seen = new Set<NodeId>();
+  const stack = [...seeds];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    for (const e of idx.outbound.get(id) ?? []) {
+      if (e.kind === "compensation" || seen.has(e.to)) continue;
+      seen.add(e.to);
+      stack.push(e.to);
+    }
+  }
+  return seen;
+}
+
+/**
+ * `dom(v)` for every node that runs: the nodes every path from an entry to `v` passes through.
+ *
+ * The ordinary iterative fixpoint — `dom(v) = {v} ∪ ⋂ dom(p)` over `v`'s predecessors, entries
+ * pinned to themselves — over the same edge set `forwardFrom` walks. A node no entry reaches is
+ * LEFT OUT rather than given the top element, because "unknown" and "everything dominates it"
+ * would otherwise be the same value, and the caller subtracts these sets.
+ */
+function dominatorsOf(spec: GraphSpec): Map<NodeId, Set<NodeId>> {
+  const idx = indexGraph(spec);
+  const entries = new Set(idx.entryNodes);
+  const live = forwardFrom(idx, entries);
+  for (const id of entries) live.add(id);
+  const nodes = spec.nodes.map((n) => n.id).filter((id) => live.has(id));
+  const dom = new Map<NodeId, Set<NodeId>>();
+  for (const id of nodes) dom.set(id, entries.has(id) ? new Set([id]) : new Set(nodes));
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const id of nodes) {
+      if (entries.has(id)) continue;
+      let next: Set<NodeId> | undefined;
+      for (const e of idx.inbound.get(id) ?? []) {
+        if (e.kind === "compensation") continue;
+        const d = dom.get(e.from);
+        if (d === undefined) continue;
+        if (next === undefined) next = new Set(d);
+        else for (const x of [...next]) if (!d.has(x)) next.delete(x);
+      }
+      const settled = next ?? new Set<NodeId>();
+      settled.add(id);
+      const current = dom.get(id)!;
+      if (current.size !== settled.size || [...settled].some((x) => !current.has(x))) {
+        dom.set(id, settled);
+        changed = true;
+      }
+    }
+  }
+  return dom;
 }
 
 /** Nodes reachable from a node, for a caller checking a proposer's region. */
