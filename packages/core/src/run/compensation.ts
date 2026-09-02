@@ -288,9 +288,11 @@ export interface RewindPlanStep {
    * WHY THE PLAN IS NOT BOUND WITHOUT IT. An undo's arguments are not in the step: they are the
    * compensated call's recorded `details`, read through a suppression-aware scan at dispatch
    * time. So two plans naming the same `tool -> undo` at the same seq can dispatch DIFFERENT
-   * undos, and a hash over the tool names alone would call them equal. Absent when no live
-   * `effect.completed` is recorded, which is exactly the case `#compensateOne` answers
-   * `not_attempted`.
+   * undos, and a hash over the tool names alone would call them equal. Absent when the journal
+   * carries no arguments to bind, which is exactly the pair of cases `#compensateOne` answers
+   * `not_attempted`: no live `effect.completed` at all, and one that exists and records no
+   * `details`. The second used to show `digest({})` here and dispatch an undo with `{}` — a
+   * preview and a dispatch that agreed with each other and with nothing that was recorded.
    */
   readonly argsDigest?: string;
   /**
