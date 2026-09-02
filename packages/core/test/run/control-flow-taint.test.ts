@@ -75,6 +75,25 @@
  *   - A FANOUT'S `as` BINDING, twice — live, and across a restart. A fan body reading its own item
  *     read the fetched page through a channel no node writes, so nothing tainted it.
  *
+ * ## AND FOUR MORE, WHERE TWO OF THE FOUR ARE THE GUARD POINTING BACK AT ITSELF
+ *
+ * The five above closed three holes and opened one, which is why the list below leads with the
+ * over-gating half rather than ending with it:
+ *
+ *   - A GRAPH WITH NO BRANCH IN IT. `fetch -> summarise -> charge`, one out-edge, a body whose
+ *     `take` names it — and the whole downstream control-tainted. An unconditional edge that
+ *     fired was always going to fire, so its region is empty; `controlRegion` decides that from
+ *     the TAKEN edges' kinds now, and this is the row that says so.
+ *   - AN OLD JOURNAL OF THAT GRAPH, resumed by a newer binary. Absent-as-true made every
+ *     pre-existing in-flight run of a branchless graph need a second human; the row above closes
+ *     it without the migration moving, and the branching journal still tightens.
+ *   - A FAN'S WIDTH, which is the one control decision that is a NUMBER. Which nodes it selected
+ *     is its BRANCH, bounded at the join — with the node below the join left alone, because that
+ *     one runs once at every width including zero.
+ *   - WHICH ERROR ARM FIRED, when `codes` had two candidates to filter. A failure picks one arm;
+ *     a code picks between two, and a node that read the page can fail with a code derived from
+ *     it. One error edge, and two catch-alls, both stay out — each with its own row.
+ *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
 
@@ -122,7 +141,9 @@ type Shape =
   | "lineargated"
   | "fanoutwidth"
   | "fanoutafter"
-  | "fanoutwidthgated";
+  | "fanoutwidthgated"
+  | "errcodes"
+  | "errcatchall";
 
 interface Options {
   /**
@@ -173,7 +194,9 @@ function spec(o: Options): GraphSpec {
     o.shape === "lineargated" ||
     o.shape === "fanoutwidth" ||
     o.shape === "fanoutafter" ||
-    o.shape === "fanoutwidthgated";
+    o.shape === "fanoutwidthgated" ||
+    o.shape === "errcodes" ||
+    o.shape === "errcatchall";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -299,6 +322,12 @@ function spec(o: Options): GraphSpec {
     }
   } else if (o.shape === "loopfallback") {
     // No other arm at all: the router's fallback IS the back-edge, so there is nothing to skip to.
+  } else if (o.shape === "errcodes" || o.shape === "errcatchall") {
+    // THE SAME FAILING NODE WITH TWO ERROR ARMS INSTEAD OF ONE, and the code it fails with
+    // derived from what it read. A body that returns `{retry}` raises `E_FUNCTION_UNAVAILABLE`;
+    // one that throws raises `E_INTERNAL`. Two arms, two codes, and content picks between them.
+    nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/codepick@stable", effects: [] } });
   } else if (o.shape === "failing") {
     nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
     nodes.push({ id: "alt", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
@@ -403,6 +432,13 @@ function spec(o: Options): GraphSpec {
     edges.push({ id: "toChosen", from: "route", to: "charge", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "skip", kind: "seq" });
     edges.push({ id: "again", from: "skip", to: "fetch", kind: "loop", maxIterations: 2, until: 'contains(note, "done")' });
+  } else if (o.shape === "errcodes" || o.shape === "errcatchall") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    // `errcatchall` is the same two arms with NEITHER declaring `codes`: both fire, so the code
+    // discriminated nothing and there is no choice to mark.
+    const coded = o.shape === "errcodes";
+    edges.push({ id: "errA", from: "decide", to: "charge", kind: "error", ...(coded ? { codes: ["E_FUNCTION_UNAVAILABLE"] } : {}) });
+    edges.push({ id: "errB", from: "decide", to: "skip", kind: "error", ...(coded ? { codes: ["E_INTERNAL"] } : {}) });
   } else if (o.shape === "failing") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     edges.push({ id: "toChosen", from: "decide", to: "skip", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
@@ -531,6 +567,13 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   functions.register("function/linear@stable", () => ({ writes: { note: "summary" }, take: ["e1"] }));
   functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
   // `fanoutafter`'s fan body: it contributes to the join and reads nothing untrusted.
+  // `errcodes`' deciding node. It never succeeds; what it decides is WHICH failure, and it
+  // decides it from whatever its node declared in `reads`.
+  functions.register("function/codepick@stable", (view) => {
+    const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
+    if (text.includes("PAY")) return { retry: { reason: "the page said so" } };
+    throw new Error("no pay");
+  });
   functions.register("function/part@stable", () => ({ writes: { parts: ["p"] } }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
@@ -1125,4 +1168,39 @@ test("THE FAN'S WIDTH SURVIVES A RESTART — the fold rebuilds a count another p
 
   assert.equal(second.charged(), 0, "a restart forgot the fan's width: the second process charged");
   assert.equal(after.status, "awaiting_gate", `expected the charge to gate in the second process, got ${after.status}`);
+});
+
+test("WHICH ERROR ARM FIRES IS A CHOICE WHEN `codes` DISCRIMINATED — a failure picks one, a code picks between two", async () => {
+  // `choiceOf` excludes `error` edges with "A FAILURE selected that arm, not content", and that
+  // is true exactly while an error edge is a catch-all. `#errorEdges` filters on
+  // `e.codes.includes(code)`, so a node that reads the fetched page and fails with a code
+  // DERIVED from it picks which of its arms runs — and one of them is the charge. `decide`
+  // returns `{retry}` (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and throws
+  // (`E_INTERNAL`) otherwise. Both halves say PAY, so both take the same arm; the only
+  // difference is whose text said it. Measured with every error edge out of the space:
+  //
+  //     the failure code comes from the fetched page -> succeeded, gates=0, charged=1
+  const dirty = await drive({ branchOn: "untrusted", shape: "errcodes" });
+  assert.equal(dirty.charged, 0, "injected text chose which error arm fired, and it was the charge");
+  assert.equal(dirty.status, "awaiting_gate", `expected a discriminated error arm to be a choice, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and the human whose ceiling no longer covers this action is asked");
+
+  // The paired half, so this is a claim about whose content chose: same node, same two arms,
+  // same code, same charge — the node just declares the run's own input.
+  const clean = await drive({ branchOn: "request", shape: "errcodes" });
+  assert.equal(clean.status, "succeeded", `a failure code derived from clean input must not gate: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every graph with two coded error edges and a fetch gates forever");
+  assert.equal(clean.charged, 1, "and the arm the author wrote for that code runs");
+});
+
+test("TWO CATCH-ALL ERROR ARMS DISCRIMINATED NOTHING — both fired, so nothing was chosen", async () => {
+  // The other side of the split, and the row that says the rule is "the code discriminated"
+  // rather than "the node has two error edges". Neither arm declares `codes`, so `#errorEdges`
+  // filters nothing and BOTH fire — the alternatives side is empty, every taken edge is an
+  // `error` edge that the failure alone selected, and `controlRegion` returns nothing. Without
+  // this row a reader would have to take the `choiceOf` docstring's word for it.
+  const dirty = await drive({ branchOn: "untrusted", shape: "errcatchall" });
+  assert.equal(dirty.status, "succeeded", `two catch-alls are not a choice: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "gating every node with two undeclared error arms is over-gating");
+  assert.equal(dirty.charged, 1, "and both arms run, which is what a catch-all is");
 });

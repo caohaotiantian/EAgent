@@ -9248,18 +9248,34 @@ interface Choice {
  *      `human_gate` redirect, or an operator `steer`. All three arrive as `outcome.take` and
  *      `#strayRoute` bounds them to the node's own outbound edges, which is what makes that
  *      set the space.
+ *   5. THE FAILURE CODE, when the node has more than one `error` edge and at least one declares
+ *      `codes`. `#errorEdges` filters on `e.codes.includes(code)`, so with two arms declared the
+ *      code is what says which one runs — and a node that read the fetched page can fail with a
+ *      code derived from it. One `function` node, two coded error arms, the charge on one of
+ *      them: it returns `{retry}` (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and
+ *      throws (`E_INTERNAL`) otherwise, so both halves take the same arm and only the channel
+ *      differs. Measured with every error edge out of the space — succeeded, gates=0, charged=1;
+ *      now awaiting_gate, gates=1, charged=0, and the clean half still succeeded/0/1.
+ *
+ *      ONE error edge stays out, which is the whole of the split: there was nothing to filter,
+ *      so the failure chose the arm and the code chose nothing. There is NO second predicate
+ *      asking whether any edge declares `codes`, and there was one until it was measured to do
+ *      nothing: an edge with no `codes` is a catch-all that always matches, so if two arms exist
+ *      and only one fired, the ones that did not fire were coded — the filter is where the
+ *      discrimination is recorded. Two catch-alls both fire, which leaves the alternatives side
+ *      empty and `controlRegion` returns nothing, and that row is pinned rather than reasoned.
  *
  * ## THE SET IT DOES NOT COVER, AND WHY EACH IS OUT
  *
- *   - `#errorEdges`. A FAILURE selected that arm, not content, and no special case says so:
- *     an error edge is in no choice space, so a failed commit's `taken` side is empty whatever
- *     it read and `controlRegion` returns nothing. Driven on a `function` node that reads the
- *     injected page, throws, and hands its `error` edge an irreversible charge — succeeded,
- *     gates=0, charged=1, where leaving the taken side as the whole `take` instead measures
- *     awaiting_gate, gates=1, charged=0. That is also why the sentence about a failed commit in
- *     `controlRegion` is now true: the version this replaced claimed a failed router's `take` is
- *     `[]`, which it is NOT when the router has an outbound `error` edge — `#commit` computes
- *     `take = this.#errorEdges(...)` for a failed outcome.
+ *   - `#errorEdges`, WHEN THE NODE HAS ONE. A failure selected that arm and content did not, so
+ *     a lone error edge is in no choice space: a failed commit's `taken` side comes out empty
+ *     whatever it read and `controlRegion` returns nothing. Driven on a `function` node that
+ *     reads the injected page, throws, and hands its `error` edge an irreversible charge —
+ *     succeeded, gates=0, charged=1, where leaving the taken side as the whole `take` instead
+ *     measures awaiting_gate, gates=1, charged=0. That is also why the sentence about a failed
+ *     commit in `controlRegion` is true: the version it replaced claimed a failed router's
+ *     `take` is `[]`, which it is NOT when the router has an outbound `error` edge — `#commit`
+ *     computes `take = this.#errorEdges(...)` for a failed outcome.
  *   - A `fanout` edge's WIDTH. A fan edge narrows no `take`, so it is in no choice space and this
  *     function has nothing to say about it — but the width IS a decision, and it is answered two
  *     functions up rather than left open. `applyFanoutTaint` puts the edge's `as` binding into
@@ -9343,7 +9359,14 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], pr
     }
     return { space, byTheNode: true };
   }
-  const outbound = (index.outbound.get(node.id) ?? []).filter((e) => e.kind !== "error" && e.kind !== "compensation");
+  const all = index.outbound.get(node.id) ?? [];
+  // A FAILURE PICKS ONE ARM; A CODE PICKS BETWEEN TWO. See the `#errorEdges` entry below for the
+  // split and its measurement.
+  const errorEdges = all.filter((e) => e.kind === "error");
+  if (errorEdges.length > 1 && errorEdges.some((e) => take.includes(e.id))) {
+    return { space: errorEdges, byTheNode: true };
+  }
+  const outbound = all.filter((e) => e.kind !== "error" && e.kind !== "compensation");
   const unconditional = outbound.filter((e) => e.kind !== "conditional" && e.kind !== "loop");
   const narrowed = producerSupplied || unconditional.length === 0;
   return narrowed
