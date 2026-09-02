@@ -93,9 +93,14 @@ Each of these was attempted and refused with a measurement, not skipped.
 - **`JoinNode.onBranchError: "compensate"`.** The planner scopes by seq *range* and branches
   interleave by construction, so the scope a compensation needs does not exist.
 - **Six of C.1's seven span names.** They need journal events that do not exist yet.
-- **The OTLP exporter is not wired to `cli.ts`.** `loom trace` still only prints, so a deployment
-  wires the exporter as a library embedder today. This is the one straightforwardly buildable item
-  on the list.
+- ~~**The OTLP exporter is not wired to `cli.ts`.** `loom trace` still only prints, so a
+  deployment wires the exporter as a library embedder today. This is the one straightforwardly
+  buildable item on the list.~~ **CLOSED by `9b5baac` and `141ab8a`** — `loom trace <runId> --otlp
+  <endpoint>` posts the fold. Struck rather than deleted, and struck rather than left: everything
+  above in this file is a measurement at `241e99f` and stays frozen, but this section is a
+  present-tense list of what is open, and a reader landing here first would otherwise be told to
+  build a thing that exists. `TODO.md` §C.4 carries what it cost, including five defects in the
+  exporter that only appeared once something called it.
 
 **Not on this list, and worth saying so:** the fork list has no debts left in it. It went 5 → 3
 when `--extension-module`'s object widened from `{models, tools}` to

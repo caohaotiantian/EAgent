@@ -6,7 +6,7 @@
  * a deployment that wanted a push had to embed the library. Driven at `c8bdf22`:
  *
  *     $ loom trace 01M1G0WR5AWX1JT4PX8R0Q7BS4 --otlp http://127.0.0.1:4318
- *     E_CONFIG_INVALID: unknown flag: --otlp.
+ *     E_CONFIG_INVALID: unknown flag: --otlp. … Run `loom help` for the list.
  *
  * THE TESTS COME IN TWO KINDS AND BOTH ARE HERE ON PURPOSE. The injected-`fetch` ones use
  * `main(argv, fetchImpl)` — the seam that already exists, whose docstring argues that "a mode
@@ -24,8 +24,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { main } from "../../src/cli.ts";
+import { exportTraceOverOtlp, main } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
+import type { RunId } from "../../src/ids.ts";
+import type { Span } from "../../src/telemetry/spans.ts";
 
 /** Built-in tools only, so nothing needs registering and no model is called. */
 const GRAPH = {
@@ -179,6 +181,8 @@ interface Sent {
   readonly headers: Record<string, string>;
   /** Header names exactly as they arrived — the only witness for one that `fetch` might drop. */
   readonly rawNames: readonly string[];
+  /** Name/value pairs as they arrived, for a name `IncomingMessage.headers` cannot represent. */
+  readonly rawPairs: readonly string[];
   readonly body: string;
 }
 
@@ -197,6 +201,7 @@ async function collector(reply: (n: number) => { status: number; body: string } 
         url: q.url ?? "",
         headers: q.headers as Record<string, string>,
         rawNames: q.rawHeaders.filter((_, i) => i % 2 === 0),
+        rawPairs: q.rawHeaders,
         body,
       });
       const r = reply(seen.length);
@@ -402,43 +407,73 @@ test("HEADERS COME FROM THE ENVIRONMENT, AND THERE IS NO FLAG THAT TAKES THEM", 
   }
 });
 
-test("A HEADER NAMED `__proto__` IS REFUSED, BECAUSE `fetch` CANNOT SEND IT", async () => {
-  // Two layers of the same defect, and the second is a fact about the platform.
+test("A HEADER NAMED `__proto__` IS SENT, IN THE ONE CASING `fetch` DOES NOT DROP", async () => {
+  // THREE LAYERS OF ONE DEFECT, AND I GOT THE THIRD WRONG BEFORE A REVIEW REFUTED IT.
   //
-  // The parser first accumulated into an object literal, where `out["__proto__"] = value` runs
-  // `Object.prototype`'s setter instead of creating a property — measured, `{}` afterwards is
-  // `{}`. That is fixed (a `Map` plus `Object.fromEntries`), and the first version of this test
-  // asserted the header then reached "the wire" by reading the object handed to a STUB fetch,
-  // one layer above the conversion that was still losing it. It passed; the collector received
-  // nothing of the kind.
+  // (1) The parser accumulated into an object literal, where `out["__proto__"] = value` runs
+  // `Object.prototype`'s setter and creates nothing — measured, `{}` afterwards is `{}`.
+  // (2) The first test of that fix read the object handed to a STUB fetch, one layer above the
+  // conversion that was still losing the header; it passed while the collector got nothing.
+  // (3) Measured at the wire, the header was still absent, and I concluded `fetch` cannot send
+  // the name AT ALL and made the CLI refuse it. THAT WAS FALSE, and generalised from one
+  // spelling. Driven across four:
   //
-  // Driven properly, against a loopback server printing `rawHeaders`: undici drops the name
-  // `__proto__` before the socket however the `Headers` is built — as a record, with `set`, or
-  // as an entries array — while `node:http` given the identical name carries it. So this binary
-  // CANNOT honour such a header, and the parser's contract is send-or-refuse. It refuses.
+  //     set("__proto__")     Headers iterator ["__proto__"]   wire:  (absent)
+  //     set("__PROTO__")     Headers iterator ["__proto__"]   wire:  __PROTO__
+  //     set("__Proto__")     Headers iterator ["__proto__"]   wire:  __Proto__
+  //     append("__proto__")                                   wire:  (absent)
   //
-  // `constructor` is the control: same prototype-name family, reaches the wire, not refused.
+  // undici drops only the exact lowercase spelling. RFC 9110 §5.1 makes field names
+  // case-insensitive, so `__PROTO__` is the same header to any conforming server — the exporter
+  // renames that one name, and the operator's header is delivered rather than refused.
+  //
+  // `constructor` is the control: same prototype-name family, never dropped, never renamed.
   const w = workspace();
   const c = await collector();
   try {
     const runId = await submit(w.dir);
-    await withEnv(HEADERS_ENV, "__proto__=sent-anyway,api-key=real", async () => {
-      const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
-      assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, String(e));
-      assert.match(e.message, /cannot send/);
-      assert.equal(c.seen.length, 0, "and nothing was POSTed, because the refusal precedes the read");
-    });
-
-    await withEnv(HEADERS_ENV, "constructor=also,api-key=real", async () => {
+    await withEnv(HEADERS_ENV, "__proto__=sent-anyway,constructor=also,api-key=real", async () => {
       const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
       assert.equal(r.code, 0, r.err);
-      const names = c.seen[0]!.rawNames.map((n) => n.toLowerCase());
-      assert.ok(names.includes("constructor"), `the control header did not reach the wire: ${names.join(", ")}`);
-      assert.equal(c.seen[0]!.headers["constructor"], "also");
-      assert.equal(c.seen[0]!.headers["api-key"], "real");
+      const names = c.seen[0]!.rawNames;
+      const lower = names.map((n) => n.toLowerCase());
+      assert.ok(lower.includes("__proto__"), `__proto__ never reached the wire: ${names.join(", ")}`);
+      // AND IT IS ON THE WIRE IN THE UPPERCASED SPELLING, which is the fix rather than an
+      // accident: the lowercase one is the only one undici drops.
+      assert.ok(names.includes("__PROTO__"), `expected the renamed spelling: ${names.join(", ")}`);
+      // THE VALUE READ OFF `rawHeaders`, not off `headers`: `IncomingMessage.headers` is a
+      // null-prototype object and reading `["__proto__"]` off one does not return what was sent.
+      // The raw pairs are the only unambiguous witness for this particular name.
+      const raw = c.seen[0]!.rawPairs;
+      const at = raw.findIndex((x, i) => i % 2 === 0 && x.toLowerCase() === "__proto__");
+      assert.notEqual(at, -1, raw.join(", "));
+      assert.equal(raw[at + 1], "sent-anyway");
+      assert.ok(lower.includes("constructor"), names.join(", "));
+      assert.equal(c.seen[0]!.headers["api-key"], "real", "and the ordinary header beside it is unaffected");
     });
   } finally {
     await c.close();
+    w.dispose();
+  }
+});
+
+test("TWO SPELLINGS OF ONE HEADER ARE A DUPLICATE, because HTTP field names are case-insensitive", async () => {
+  // The duplicate check was keyed on the raw spelling, so `api-key=FIRST,API-KEY=SECOND` passed
+  // it — and `Headers.set` then collapsed the two into one header carrying the LAST value. The
+  // earlier one was silently discarded, which is verbatim the outcome the refusal exists to
+  // prevent, and which this parser's docstring calls "a 401 from the collector that names
+  // nothing an operator can act on".
+  const w = workspace();
+  try {
+    const runId = await submit(w.dir);
+    await withEnv(HEADERS_ENV, "api-key=FIRSTVALUE,API-KEY=SECONDVALUE", async () => {
+      const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", "http://collector.invalid:4318"]);
+      assert.match(e.message, /repeats the key/);
+      assert.match(e.message, /case-insensitive/);
+      // AND NEITHER VALUE IS QUOTED.
+      assert.ok(!e.message.includes("FIRSTVALUE") && !e.message.includes("SECONDVALUE"), e.message);
+    });
+  } finally {
     w.dispose();
   }
 });
@@ -483,10 +518,22 @@ test("A MALFORMED OTEL_EXPORTER_OTLP_HEADERS REFUSES, AND NAMES NO VALUE", async
     const cases: readonly { readonly value: string; readonly says: RegExp }[] = [
       { value: "notakeyvalue", says: /is not `key=value`/ },
       { value: "api-key=a,,x=b", says: /entry 2 of 3 is empty/ },
-      { value: "bad key=v", says: /not a valid HTTP field name: "bad key"/ },
+      { value: "bad key=v", says: /not a valid HTTP field name \(it begins "bad key"\)/ },
       { value: "k=%zz", says: /not valid percent-encoding/ },
       { value: "k=one,k=two", says: /repeats the key "k"/ },
       { value: "k=line%0Ainjected", says: /control character/ },
+      // THE SPELLING THE REFUSAL NAMES, and until the value stopped being `.trim()`ed it was the
+      // one case that did NOT reach the check: a key read with `$(cat key)` keeps a trailing
+      // newline, and `String.trim()` ate it. The comment claimed a guard the code did not have.
+      { value: "k=abc\n", says: /control character/ },
+      // AND A KEY LONG ENOUGH TO BE A CREDENTIAL IS ELIDED. Which shapes actually reach this arm
+      // is narrower than it looks, and worth writing down: a paste with NO `=` is refused one
+      // check earlier by the "not `key=value`" arm, which quotes nothing; and a bare base64 blob
+      // with padding is ACCEPTED, because the base64 alphabet minus `/` is inside the HTTP token
+      // set. What lands here is a paste carrying a space or a colon before the first `=` — a
+      // whole `Basic <b64>` credential is the ordinary one — and everything before that `=` was
+      // quoted back by a message whose closing sentence promises it quotes no values.
+      { value: "Basic dXNlcjpwYXNzd29yZA=x", says: /it begins "Basic dX…"/ },
     ];
     for (const c of cases) {
       await withEnv(HEADERS_ENV, c.value, async () => {
@@ -495,7 +542,7 @@ test("A MALFORMED OTEL_EXPORTER_OTLP_HEADERS REFUSES, AND NAMES NO VALUE", async
         assert.match(e.message, c.says, c.value);
         // NEVER THE VALUE. A refusal is the text most likely to be pasted into a ticket, and
         // this variable's values are credentials by construction.
-        for (const leak of ["notakeyvalue", "one", "two", "%zz", "line", "injected"]) {
+        for (const leak of ["notakeyvalue", "one", "two", "%zz", "line", "injected", "dXNlcjpwYXNzd29yZA", "FIRSTVALUE"]) {
           if (!c.value.includes(leak)) continue;
           if (c.says.source.includes(leak)) continue;
           assert.ok(!e.message.includes(`"${leak}"`), `${c.value} quoted a value: ${e.message}`);
@@ -569,12 +616,24 @@ test("A VALUE THAT IS NOT AN http(s) URL IS REFUSED, AND IS NOT QUOTED BACK", as
     // concatenation: `http://h:4318/?a=b` would have POSTed to `http://h:4318/?a=b/v1/traces`,
     // a path the operator never named, and a permissive gateway answers 200 so it reads as
     // success. Same failure D1 deleted the environment fallback over, reachable through argv.
+    //
+    // AND USERINFO IS REFUSED FOR A DIFFERENT REASON, NAMED SEPARATELY: `fetch` will not build a
+    // request from a URL carrying one, so `https://<key>@collector` — the shape
+    // `endpointSecrets` itself calls the common case of a credential-bearing URL, so the shape an
+    // operator will try — used to pass validation and then fail as an opaque masked transport
+    // error with nothing naming the cause.
     for (const [ep, says] of [
       ["http://collector.invalid:4318/?tenant=acme", /carries a query string/],
       ["http://collector.invalid:4318/#frag", /carries a URL fragment/],
+      ["https://sk-live-abc123@collector.invalid:4318", /carries a username or password/],
+      ["https://user:sk-live-abc123@collector.invalid:4318", /carries a username or password/],
     ] as const) {
       const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", ep]);
       assert.match(e.message, says, ep);
+      // AND THE REFUSAL DOES NOT CARRY THE CREDENTIAL THE URL WAS HOLDING.
+      assert.ok(!e.message.includes("sk-live-abc123"), e.message);
+      // It points at where a credential does belong.
+      if (/username/.test(says.source)) assert.match(e.message, /OTEL_EXPORTER_OTLP_HEADERS/);
     }
 
     // AND THE VALUE THAT PASSED VALIDATION IS THE VALUE THAT IS SENT. `new URL` normalises
@@ -800,4 +859,80 @@ test("ONE RUN'S FAILURE DOES NOT HIDE THE OTHERS — every run gets its own line
   } finally {
     w.dispose();
   }
+});
+
+// ── the two arms `trace` cannot reach on its own ─────────────────────────────
+
+test("A SPENT WALK BUDGET IS `NOT SENT`, NOT A TIMEOUT AGAINST A HOST NOTHING CONTACTED", async () => {
+  // The shared deadline the fix round added was indistinguishable, on the operator's line, from a
+  // collector that accepted the connection and never answered: both aborts are
+  // `AbortSignal.timeout`, so `export` reports `reason: "timeout"` for each, byte-identically.
+  // Against a black-holed collector with 65 folds that meant one true timeout and SIXTY-FOUR
+  // lines asserting the named host timed out on requests that were never sent — the same false
+  // report the redirect arm of this feature exists to remove, inverted.
+  //
+  // Driven through the function rather than through `trace`, because the alternative is to wait
+  // out a sixty-second constant. `exportTraceOverOtlp` takes the budget for that reason.
+  const span = {
+    traceId: "a".repeat(32),
+    spanId: "b".repeat(16),
+    name: "loom.run",
+    kind: "internal",
+    startTime: 1,
+    endTime: 2,
+    attributes: {},
+    events: [],
+    links: [],
+    status: "ok",
+  } as unknown as Span;
+  const folds = [
+    { runId: "r1" as RunId, spans: [span] },
+    { runId: "r2" as RunId, spans: [span] },
+  ];
+  const errOut: string[] = [];
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: string) => (errOut.push(String(c)), true)) as typeof process.stderr.write;
+  let ok: boolean;
+  try {
+    ok = await exportTraceOverOtlp(folds, "http://collector.invalid:4318", undefined, () => Promise.resolve(ok200()), 0, AbortSignal.abort());
+  } finally {
+    process.stderr.write = realErr;
+  }
+  const lines = errOut.join("").split("\n").filter((l) => l.startsWith("otlp:"));
+  assert.equal(ok, false, "a walk that sent nothing did not do what was asked");
+  assert.equal(lines.length, 2, `both runs must still be reported:\n${errOut.join("")}`);
+  for (const l of lines) {
+    assert.match(l, /NOT SENT; this walk's export budget is spent/);
+    assert.doesNotMatch(l, /timeout/i, "a request that was never made did not time out against anything");
+  }
+});
+
+test("A FOLD WITH NO EXPORTABLE SPANS IS REPORTED AND IS NOT A FAILURE", async () => {
+  // `otlp.ts` returns `reason: "empty"` to distinguish "nothing to say" from "said it", so
+  // folding it into the exit code would erase the distinction the field exists to make. The arm
+  // is unreachable from `trace` — every run whose journal `recordedGraph` accepted folds to at
+  // least `loom.run` — which is why it is driven here and why an earlier draft of this suite
+  // claimed coverage it did not have.
+  const errOut: string[] = [];
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: string) => (errOut.push(String(c)), true)) as typeof process.stderr.write;
+  let ok: boolean;
+  let called = 0;
+  try {
+    ok = await exportTraceOverOtlp(
+      [{ runId: "r1" as RunId, spans: [] }],
+      "http://collector.invalid:4318",
+      undefined,
+      () => {
+        called += 1;
+        return Promise.resolve(ok200());
+      },
+      0,
+    );
+  } finally {
+    process.stderr.write = realErr;
+  }
+  assert.equal(ok, true, "nothing to send is not a failed export");
+  assert.equal(called, 0, "and no round trip was spent saying nothing");
+  assert.match(errOut.join(""), /nothing to export/);
 });

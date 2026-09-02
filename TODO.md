@@ -32,8 +32,8 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,796** — the
-nineteen cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
+**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,799** — the
+twenty-two cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
 package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
 which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
 census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
@@ -75,7 +75,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,796 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,799 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -1027,15 +1027,16 @@ is a better view of nothing.
   **Left undone and named — the SET is six, and this row used to name one of them.** The lane's
   own review (`.agent/finish-the-backlog/review-w11-otlp-exporter.md`) carried six findings
   against the file C.4 closes and only the first reached a document; the audit caught the
-  omission, and each was then re-checked BY RUNNING rather than by reading. Three were real and
-  are fixed:
+  omission, and each was then re-checked BY RUNNING rather than by reading. **FOUR are real and fixed** — it
+  said three until `--otlp` flipped residue 1, which is the summary-that-did-not-grow failure
+  this file names in §F.1 and `CLAUDE.md` names in its journal-authority bullet:
 
   1. **FIXED — `loom trace <runId> --otlp <endpoint>` posts the fold to a collector**, so the
      exporter has a caller in the binary and a deployment no longer embeds the library to get a
      push. Driven offline against a `node:http` collector on 127.0.0.1: `POST /v1/traces`,
      `service.name=loom loom.run_id=<runId>`, 9 spans, exit 0. Four decisions are worth more than
      the wiring and each is pinned by a test that goes red when it is reverted
-     (`test/cli/trace-otlp.test.ts`, 14/14, six mutations all CAUGHT):
+     (`test/cli/trace-otlp.test.ts`, 22/22 — the count below is the authoritative one):
      - **argv decides both whether to send and where.** No environment variable can make this
        command export. A bare `--otlp` was going to fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`
        and that arm was DELETED rather than guarded, for three measured reasons: `--otlp "$UNSET"`
@@ -1094,10 +1095,11 @@ is a better view of nothing.
      origin would have printed in plaintext the exact string the sibling line redacts. This row's
      own finding 5 is the register of somebody reaching the opposite false conclusion about the
      same function by reading the mask list instead of running it; both directions have now been
-     settled by running it. **Seventeen mutations, all CAUGHT**, one per decision that carries
-     weight — plus two coverage gaps stated in the source rather than papered over: the
-     `reason: "empty"` arm is unreachable from `trace` today, and the subgraph-bound report needs
-     65 child runs to exercise.
+     settled by running it. **Twenty-four mutations, all CAUGHT**, one per decision that carries
+     weight. Two arms `trace` cannot reach on its own — a spent walk budget and
+     `reason: "empty"` — are driven through `exportTraceOverOtlp`'s exported signature rather
+     than left as coverage confessions; **one gap remains and is stated in the source**, the
+     subgraph-bound report, which needs 65 child runs and has no seam to lower.
   2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
      is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
      `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a

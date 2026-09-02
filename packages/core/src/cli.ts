@@ -699,6 +699,15 @@ function otlpEndpoint(args: Args): string | undefined {
   // and the fix is the same shape — fail closed, and name the component rather than the value.
   if (parsed.search !== "") refuse("carries a query string, and `/v1/traces` is appended to the end of the value");
   if (parsed.hash !== "") refuse("carries a URL fragment, and `/v1/traces` is appended to the end of the value");
+  // USERINFO IS REFUSED HERE BECAUSE `fetch` REFUSES IT LATER, and later is an opaque masked
+  // transport error rather than a sentence naming the mistake. `https://<key>@collector` is the
+  // shape `endpointSecrets` names as the common case of a credential-bearing URL, so an operator
+  // will try it; without this arm they got `FAILED (transport) … [redacted]` and no way to tell
+  // that the URL form was the problem. Fail closed, name the component, never the value — and
+  // point at the place a credential does belong.
+  if (parsed.username !== "" || parsed.password !== "") {
+    refuse(`carries a username or password in the URL, which \`fetch\` will not build a request from — put the credential in ${OTLP_HEADERS_ENV} instead`);
+  }
   // THE PARSED FORM, NOT `raw`, so the string that passed validation is the string that is sent.
   // `new URL` normalises away surrounding whitespace and the exporter does not: `--otlp
   // "  http://h:4318  "` validated clean and then POSTed to `"  http://h:4318  /v1/traces"`,
@@ -761,28 +770,33 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
   const entries = raw.split(",");
   for (let i = 0; i < entries.length; i++) {
     const where = `entry ${String(i + 1)} of ${String(entries.length)}`;
-    const entry = entries[i]!.trim();
+    // SPACES AND TABS ONLY, for the reason the VALUE trim carries: OTel allows optional
+    // whitespace around a delimiter, and OWS is space and tab. `String.trim()` also eats `\\n`,
+    // so a key read with `$(cat key)` that kept its trailing newline had it removed HERE — one
+    // level above the value trim that was fixed first — and never reached the control-character
+    // check the refusal names. A newline is not OWS in any spelling of this format.
+    const entry = entries[i]!.replace(/^[ \t]+|[ \t]+$/g, "");
     // `listFlag`'s rule for `--egress a,,b`: an empty member means something the operator
     // cannot see, so it is refused rather than skipped.
     if (entry === "") refuse(where, "is empty, so a comma is doing nothing or is hiding a value that did not expand");
     const eq = entry.indexOf("=");
     if (eq <= 0) refuse(where, 'is not `key=value` (no "=", or nothing before it)');
     const key = entry.slice(0, eq).trim();
-    if (!HEADER_NAME.test(key)) refuse(where, `has a key that is not a valid HTTP field name: "${key}"`);
-    // `__proto__` IS REFUSED BECAUSE `fetch` CANNOT SEND IT, which is a fact about the platform
-    // rather than a rule this file invented. It is a syntactically valid HTTP field name and it
-    // passes the check above; driven on loopback against a server printing `rawHeaders`, undici
-    // drops that one name on the way to the socket however the `Headers` is constructed — as a
-    // record, with `set`, or as an entries array — while `node:http` carries it. There is
-    // therefore no way for this binary to honour such a header, and the two honest answers are
-    // send it or refuse it. `constructor` and every other prototype name DO reach the wire and
-    // are not refused, which is why this names one string and not a class.
-    if (key === "__proto__") {
-      refuse(where, 'names the header "__proto__", which this binary cannot send: `fetch` drops that one name before the socket');
+    // THE KEY IS ELIDED IN THIS ONE REFUSAL, because "the key" is whatever precedes the FIRST
+    // `=` — and when the operator's mistake is a MISSING `=`, that span is the whole entry, which
+    // is the credential. A message whose own closing sentence promises it quotes no values would
+    // have quoted one. Eight characters is enough to find the entry and not enough to be one.
+    if (!HEADER_NAME.test(key)) {
+      const shown = key.length <= 8 ? key : `${key.slice(0, 8)}…`;
+      refuse(where, `has a key that is not a valid HTTP field name (it begins "${shown}")`);
     }
     let value: string;
     try {
-      value = decodeURIComponent(entry.slice(eq + 1).trim());
+      // ONLY SPACES AND TABS, not \s. OTel's format allows optional whitespace around a value,
+      // but `String.trim()` also eats `\n` and `\r` — so the very case the refusal below names,
+      // a key read with `$(cat key)` that kept its trailing newline, was SILENTLY TRIMMED and
+      // never reached the check. The comment claimed a guard the code did not have.
+      value = decodeURIComponent(entry.slice(eq + 1).replace(/^[ \t]+|[ \t]+$/g, ""));
     } catch {
       refuse(where, `(key "${key}") has a value that is not valid percent-encoding`);
     }
@@ -793,8 +807,17 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
     if (/[\u0000-\u001f\u007f]/.test(value)) {
       refuse(where, `(key "${key}") has a value containing a control character — a trailing newline from $(cat …) is the usual cause`);
     }
-    if (out.has(key)) refuse(where, `repeats the key "${key}", and the earlier value would be silently discarded`);
-    out.set(key, value);
+    // CASE-INSENSITIVELY, because HTTP field names are. Keyed on the raw spelling this check
+    // passed for `api-key=FIRST,API-KEY=SECOND`, and `Headers.set` then collapsed the two into
+    // one header carrying the LAST value — the earlier one silently discarded, which is verbatim
+    // the outcome this refusal exists to prevent and which the docstring above calls "a 401 from
+    // the collector that names nothing an operator can act on". The map is keyed lowercase; the
+    // operator's own spelling is kept for the message.
+    const seen = key.toLowerCase();
+    if (out.has(seen)) {
+      refuse(where, `repeats the key "${key}" (HTTP field names are case-insensitive), and the earlier value would be silently discarded`);
+    }
+    out.set(seen, value);
   }
   return Object.fromEntries(out);
 }
@@ -810,7 +833,11 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
  * caller that writes them to a terminal.
  */
 function legible(text: string): string {
-  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+  // C0/C1 AND THE BIDI CONTROLS. The docstring's threat is "rewrite or hide that line", and a
+  // right-to-left override does exactly that without being an ANSI escape — driven, U+202E and
+  // U+2028 both survived the C0/C1 class into the rendered `otlp:` line. U+2028/2029 are line
+  // separators a terminal may break on, which forges a second line.
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, " ").trim();
 }
 
 function refuseRepeated(args: Args, name: string, consequence: string, remedy?: string): void {
@@ -6377,12 +6404,22 @@ const OTLP_EXPORT_DEADLINE_MS = 60_000;
  * rejected spans — is a failure, because an operator who asked for an export and did not get
  * one did not get what they asked for.
  */
-async function exportTraceOverOtlp(
+export async function exportTraceOverOtlp(
   folds: readonly { readonly runId: RunId; readonly spans: readonly Span[] }[],
   endpoint: string,
   headers: Record<string, string> | undefined,
   fetchImpl: HttpOptions["fetch"] | undefined,
   unread: number,
+  /**
+   * The walk's deadline, so a test can spend it without waiting a minute.
+   *
+   * `serveUntilInterrupt`'s seam and for its stated reason — "the test drives the failure with a
+   * `close()` that rejects". Two arms of this function are otherwise unreachable: a spent budget
+   * needs a black-holed collector and sixty seconds, and `reason: "empty"` needs a fold that
+   * encodes to no spans, which `trace` cannot produce. Exported for the same reason `parseArgs`
+   * and `controlPlaneOptions` are; `cli.ts` is not on the package's pinned public surface.
+   */
+  budget?: AbortSignal,
 ): Promise<boolean> {
   // Validated by `otlpEndpoint` before any journal was read, so the catch is unreachable from
   // the CLI; it is here because a fallback that cannot fail is the one worth having.
@@ -6397,9 +6434,24 @@ async function exportTraceOverOtlp(
   let ok = true;
   // See the header: one deadline for the whole walk, not one per run. Generous enough that a
   // working collector never sees it — 65 POSTs to a healthy collector is well under a second on
-  // loopback — and short enough that a black-holed one does not own the terminal.
-  const deadline = AbortSignal.timeout(OTLP_EXPORT_DEADLINE_MS);
+  // loopback — and short enough that a black-holed one does not own the terminal. Overridable
+  // through the `budget` parameter, which exists so a test can spend it without waiting a
+  // minute — and, until it did, this whole arm was pinned by nothing.
+  const deadline = budget ?? AbortSignal.timeout(OTLP_EXPORT_DEADLINE_MS);
   for (const fold of folds) {
+    // A SPENT BUDGET IS "NOT SENT", NOT "TIMED OUT AGAINST THIS HOST". Both aborts are
+    // `AbortSignal.timeout`, so the exporter cannot tell them apart — measured, the per-request
+    // timeout and the walk deadline produce byte-identical results. Without this arm a
+    // black-holed collector with 65 folds printed one true timeout and SIXTY-FOUR lines saying
+    // the named host timed out on requests that were never sent: the same false report the
+    // redirect arm of this feature exists to remove, inverted.
+    if (deadline.aborted) {
+      ok = false;
+      process.stderr.write(
+        `otlp: ${fold.runId} — NOT SENT; this walk's export budget is spent, and an earlier run's failure above is the diagnosis\n`,
+      );
+      continue;
+    }
     const exporter = new OtlpHttpExporter({
       endpoint,
       ...(headers === undefined ? {} : { headers }),
@@ -6429,15 +6481,14 @@ async function exportTraceOverOtlp(
       // `ok` is touched; an earlier draft cleared the flag first and then tried to restore it,
       // which made an empty fold fail the command.
       //
-      // **AND IT IS UNREACHABLE FROM `trace` TODAY, WHICH IS SAID HERE RATHER THAN CLAIMED AS
-      // TESTED.** `empty` needs a fold that encodes to zero spans: the parent's journal is
-      // non-empty (`recordedGraph` already resolved a `run.compiled` out of it), the walk skips
-      // any child whose journal reads empty, and `spansFrom` mints `loom.run` for anything that
-      // has a `run.submitted`. So no test drives this line — a mutation deleting it leaves the
-      // suite green, and that is a gap in coverage rather than a gap in the argument. It is kept
-      // because `OtlpExportResult` HAS the arm: a caller that treats "nothing to send" as a
-      // failure erases the distinction the field was added to make, and the next call site that
-      // can produce one should not have to rediscover that.
+      // **UNREACHABLE FROM `trace`, AND PINNED ANYWAY THROUGH THE SAME SEAM.** `empty` needs a
+      // fold that encodes to zero spans: the parent's journal is non-empty (`recordedGraph`
+      // already resolved a `run.compiled` out of it), the walk skips any child whose journal
+      // reads empty, and `spansFrom` mints `loom.run` for anything with a `run.submitted`. An
+      // earlier draft said "no test drives this line" and left it at that; the test now calls
+      // this function directly with an empty fold, which is what the exported signature is for.
+      // The arm is kept because `OtlpExportResult` HAS it: treating "nothing to send" as a
+      // failure erases the distinction the field was added to make.
       process.stderr.write(`otlp: ${fold.runId} — nothing to export; its journal folded to no spans\n`);
       continue;
     }

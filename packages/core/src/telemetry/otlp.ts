@@ -593,10 +593,17 @@ export class OtlpHttpExporter {
         // whitespace-separated word of 8 or more characters joins the list, which covers
         // `Bearer <key>`, `Basic <b64>` and `Token <key>`; `mask` already sorts longest-first, so
         // the whole value still wins where both appear. The 8 is a floor on the WORDS only —
-        // every value is masked whole whatever its length, so nothing that was covered before is
-        // uncovered now, and a word short enough to collide with ordinary prose would redact the
-        // sentence the mask exists to keep readable.
-        const values = Object.values(bag).filter((v) => typeof v === "string" && v !== "");
+        // **EIGHT IS A FLOOR ON THE WHOLE VALUE TOO, and the version without it was measured to
+        // eat the diagnosis.** `mask` is an unanchored substring replace, so a short header value
+        // matches inside ordinary text: with `x-tenant: 1`, a collector's 401 came back as
+        // `collector returned 40[redacted]: invalid api key for tenant [redacted]` — the mask ate
+        // the STATUS CODE. An 8-character value that is a substring of the hostname takes the
+        // hostname with it, contradicting the promise two screens up that the host is left
+        // legible. The residual is stated rather than hidden: a value under 8 characters is not
+        // masked, and such a value is not usefully a credential — an API key is not three
+        // characters, and destroying the only message an operator has to act on is the larger
+        // harm. The ENDPOINT-derived secrets keep no floor, because a URL is never that short.
+        const values = Object.values(bag).filter((v) => typeof v === "string" && v.length >= 8);
         secrets = [...secrets, ...values, ...values.flatMap((v) => v.split(/\s+/).filter((w) => w.length >= 8))];
       }
       const attrs = this.#opts.resourceAttributes;
@@ -604,28 +611,33 @@ export class OtlpHttpExporter {
       const scopeSpans = (payload.resourceSpans[0] as { scopeSpans: readonly { spans: readonly unknown[] }[] }).scopeSpans;
       count = scopeSpans[0]!.spans.length;
       if (count === 0) return { ok: false, spans: 0, reason: "empty", detail: "no exportable spans in this fold" };
-      // A `Headers` BUILT WITH `set`, NOT A RECORD SPREAD — and the honest reason is narrower
-      // than the one first written here, which was that it makes a header named `__proto__`
-      // reach the wire. IT DOES NOT, AND NOTHING DOES. Driven on loopback against a server
-      // printing `rawHeaders`:
+      // A `Headers` BUILT WITH `set`, NOT A RECORD SPREAD: it removes the plain-object
+      // intermediate entirely, so no inherited-key surprise can happen in `fetch`'s own
+      // record→`Headers` conversion — the class this tree has been bitten by twice already
+      // (`KIND_CODE["constructor"]` in this file, `out["__proto__"]` in the CLI's parser). And
+      // `set` rather than the array form because the array APPENDS: a caller passing their own
+      // `content-type` would get `application/json, theirs` instead of theirs, where the record
+      // spread was last-wins.
       //
-      //     Headers via set, iterator shows [["__proto__","S"],["constructor","also"],…]
-      //     wire:  host, connection, content-type, constructor, accept, …   ← no __proto__
-      //     entries-array form                                              ← no __proto__
-      //     node:http with the same name                                    ← __proto__ PRESENT
+      // **`__proto__` IS RENAMED TO `__PROTO__`, AND THE MEASUREMENT THAT PUT IT HERE IS ONE I
+      // GOT WRONG FIRST.** `undici` drops a header named `__proto__` before the socket — but
+      // only in the EXACT LOWERCASE spelling, which the first version of this comment did not
+      // check and then generalised from. Driven on loopback against a server printing
+      // `rawHeaders`, four spellings through the real `fetch`:
       //
-      // So `undici` drops that one name on the way to the socket however the `Headers` is built,
-      // while `node:http` carries it. `cli.ts` therefore REFUSES the name rather than pretending
-      // to send it — send-or-refuse, with sending measured impossible.
+      //     set("__proto__")   Headers iterator ["__proto__"]   wire:  (absent)
+      //     set("__PROTO__")   Headers iterator ["__proto__"]   wire:  __PROTO__
+      //     set("__Proto__")   Headers iterator ["__proto__"]   wire:  __Proto__
+      //     append("__proto__")                                 wire:  (absent)
       //
-      // What this form is actually worth: it removes the plain-object intermediate entirely, so
-      // no inherited-key surprise can happen in the conversion at all — the class this tree has
-      // already been bitten by twice (`KIND_CODE["constructor"]` here, `out["__proto__"]` in the
-      // CLI's parser). And `set` rather than the array form because the array APPENDS: a caller
-      // passing their own `content-type` would get `application/json, theirs` instead of theirs,
-      // where the record spread was last-wins.
+      // So the name IS deliverable, and refusing it — which is what the CLI did for one commit,
+      // on the strength of the one spelling I measured — refused a header this process can send.
+      // RFC 9110 §5.1 makes field names case-insensitive, so `__PROTO__` is the same header to
+      // any conforming server; the rename changes the bytes and not the meaning, which is a
+      // smaller lie than dropping it and a much smaller one than refusing it. Only the exact
+      // lowercase form is mapped, because every other casing already arrives.
       const headers = new Headers({ "content-type": "application/json" });
-      for (const [k, v] of Object.entries(this.#opts.headers ?? {})) headers.set(k, v);
+      for (const [k, v] of Object.entries(this.#opts.headers ?? {})) headers.set(k === "__proto__" ? "__PROTO__" : k, v);
       const raw: unknown = this.#opts.timeoutMs;
       // Bounded rather than defaulted, `WebhookChannel.#timeout`'s lesson: `AbortSignal.timeout`
       // keeps its delay in a 32-bit signed int and TRUNCATES, so `2 ** 31` is one millisecond
