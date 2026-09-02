@@ -21,56 +21,72 @@ still true and still open.
   A row with no closing condition is a row nobody owns, and it should be deleted with an argument
   instead of carried.
 
-`§Z` at the bottom is the register of what was closed 2026-08-25 → 2026-09-01 and must not be
+`§Z` at the bottom is the register of what was closed 2026-08-25 → 2026-09-02 and must not be
 re-fixed. It is short on purpose: the argument for each closure lives in the commit that made it,
-and the sha is the citation.
+and the sha is the citation. **The narrative version — what moved, which three published claims
+turned out false, and what is still open with the measurement that refused it — is
+`docs/backlog-close-2026-09-02.md`**, written because `DESIGN.md`'s live Sequence list is now
+empty and an empty roadmap is the moment the remaining work stops being self-describing.
 
 ---
 
 ## State — measured 2026-09-02, one command each
 
-**Every row here was RE-RUN at `4a70a4e`, and three of the seven had moved** — tests 2,746 → 2,774,
-exports 529 → 537, and source files 61 → 62 in the two rows that carry that number. All three are
-wave 11, and the tests came in from more than one commit, so they are named rather than
-apportioned — C.4's `otlp.test.ts` (16) and `trace-endpoint.test.ts` (5) are the largest block,
-with `0a8aa6d`'s `cli.test.ts` cases and `712bb89`'s `evaluator-body-contract.test.ts` beside
-them. A.8's own commit added no case — it RENAMED one and inverted two, which is why the count
-moved less than wave 11's commit list suggests. The new source file is
-`telemetry/otlp.ts`, and SEVEN of the eight new exports are its (`OtlpExportResult`, `OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`, `OtlpTraceRequestOptions`, `otlpTraceRequest`); the eighth, `OTLP_RUN_ID_ATTR`, is `telemetry/spans.ts`'s — put there deliberately by `552d999`, because that file owns the telemetry vocabulary and `registries.test.ts` enforces it. Attributing it to the exporter names the one file the commit took it away from. Kernel files, seams and the NUL census came back
-unchanged. A dated table is only as good as the last time somebody ran its commands, and the date
-is not the evidence; the command is. **The tests row is the one that moves on almost every commit,
-so read it as a floor rather than as an identity** — a re-run that comes back higher is the suite
-growing, and only a re-run that comes back LOWER or non-zero on `fail` is news.
+**Every row here was RE-RUN at `241e99f`, and three of the seven had moved** — tests 2,774 →
+2,777, exports 537 → 538, and nothing else. Kernel files, seams, source-file count (62) and the
+NUL census (5) came back unchanged.
+
+The three new cases and the one new export are all wave 12, and each is named rather than
+apportioned: `otlp.test.ts` gained the `Object.prototype`-key case, `trace-endpoint.test.ts`
+gained the truncation-attribute case, and `compensation-fires.test.ts` gained the `run_failed`
+arm that closes A.8's residue. The export is `OTLP_TRUNCATED_ATTR`, and it is
+`telemetry/spans.ts`'s for the same reason `OTLP_RUN_ID_ATTR` is — that file owns the `loom.*`
+vocabulary and `registries.test.ts` enforces it.
+
+Wave 11's own arithmetic, kept because the shape of the correction is the point: the new source
+file was `telemetry/otlp.ts`, and SEVEN of its eight new exports were its (`OtlpExportResult`,
+`OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`,
+`OtlpTraceRequestOptions`, `otlpTraceRequest`); the eighth, `OTLP_RUN_ID_ATTR`, was
+`telemetry/spans.ts`'s — put there deliberately by `552d999`. An earlier wording of this
+paragraph gave all eight to the exporter, which named the one file the commit had taken it away
+from.
+
+A dated table is only as good as the last time somebody ran its commands, and the date is not the
+evidence; the command is. **The tests row is the one that moves on almost every commit, so read it
+as a floor rather than as an identity** — a re-run that comes back higher is the suite growing,
+and only a re-run that comes back LOWER or non-zero on `fail` is news.
 
 **AND DO NOT CARRY THIS NUMBER INTO `README.md`'s Gates row, which says `2,300+` ON PURPOSE.**
 Tried at `5ffc223` and it went red twice, which is the pin working:
 `test/readme-gaps.test.ts` binds that row's text verbatim as a probe's `claims` string, AND
 asserts the stated floor is at or below what the suite declares — and its metric is
-`^test(` declarations, **2,645** at `4a70a4e`, not the 2,774 cases `node --test` executes, because
+`^test(` declarations, **2,648** at `241e99f`, not the 2,777 cases `node --test` executes, because
 a `test()` in a loop runs more than once. So `2,700+` is both a broken probe and an overstatement
 by the README's own measure. The floor is there so growth costs no doc edit; raising it to today's
 count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,774 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| pinned public exports | **537** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
+| tests | **2,777 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
 | source files in `packages/core/src` | **62** | `find packages/core/src -name '*.ts' \| wc -l` |
 | tracked files carrying a NUL byte | **5**, and **0** invalid UTF-8 | census over `git ls-files` — see §F.15 for why grep cannot count these |
 | wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
 
-**The seam census is 10 and it did NOT move in wave 11 — but the command this file published as
-its independent cross-check now disagrees with the guard, and that is the news.** Re-measured at
-`4a70a4e`: `node scripts/check-kernel.mjs` prints
+**The seam census is 10 and it did NOT move in waves 11 or 12 — but the command this file
+published as its independent cross-check disagrees with the guard, and that is the news.**
+Re-measured at `241e99f`: `node scripts/check-kernel.mjs` prints
 `kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
 out here because it moves with every commit including the one carrying this line, and a number
 that invalidates itself the moment it is written is not a measurement anybody can check. Ten is
 the field that must not move by accident. The two newest are `a8d62fb`
 (item 10's `quote` effect, which needed `journal/events.ts` and `run/replay.ts`) and `3762a0e`
 (item 13's `RunFilter.after`, which needed `journal/store.ts`), and nothing since has spent one:
-`552d999` was argued down to a `fix` (§F.19) and `7daa1e4` touched no kernel file.
+`552d999` was argued down to a `fix` (§F.19), `7daa1e4` touched no kernel file, and wave 12's
+three commits touched none either — the two `fix`/`test` ones are in `telemetry/`, `server/` and
+`test/`, and the third is documentation.
 **This paragraph said 8 across nine commits once**, and it said so while quoting a
 `check-kernel.mjs` line the guard does not print — the guard's real first line is the one pasted
 above. That is how a stale number survives a reader who checks: the quotation is the
@@ -1543,7 +1559,7 @@ Each traces to a decision in `DESIGN.md`.
 
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-01 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-02 — do not re-fix these
 
 The register. Each line names what closed and the commit carrying the argument; `git show <sha>`
 is the citation, and it is durable in a way a working-notes directory is not.

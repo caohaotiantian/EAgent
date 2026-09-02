@@ -151,6 +151,7 @@ scripts/           build and the three guards that are worth their cost:
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records: audit findings and backlog re-checks, with reproductions
+                   `backlog-close-2026-09-02.md` is the handoff for the 08-25 → 09-02 run
 .agent/<task>/     per-task working state (gitignored)
 ```
 
