@@ -1793,6 +1793,10 @@ export class Engine {
       // list it fans over, so `over` is tainted by the line above and the binding is an ordinary
       // tainted channel by the time anything else reads the set.
       applyFanoutTaint(ctx.tainted, ctx.index, ev.payload.take as readonly EdgeId[]);
+      // The fan's WIDTH, folded in the same position as the live path: after the binding, before
+      // the control-flow half. A restart that skipped this would mark fewer nodes than the
+      // original process, which is the loosening direction.
+      applyFanoutWidthTaint(ctx.controlTainted, ctx.tainted, ctx.index, node, ev.payload.take as readonly EdgeId[]);
       // E8's control-flow half. `take` is a durable field of this event, and the choice space
       // and region are derived from the graph, so a branch decision rebuilds exactly — which is
       // the whole reason the fact is recorded at the DECIDING NODE rather than re-derived at
@@ -7463,6 +7467,7 @@ export class Engine {
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
     applyFanoutTaint(ctx.tainted, ctx.index, take);
+    applyFanoutWidthTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take);
     applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take, takeSuppliedByProducer);
 
     if (outcome.status === "failed") {
@@ -9051,9 +9056,9 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
  * is called from `#restoreEvidence` as well as `#commit`, in the same order relative to
  * `applyTaint`: the commit that TAKES the fanout edge is the commit that wrote the list.
  *
- * This is the data-flow half of the fanout question and not the width half. How many branches a
- * tainted list opens is a count, `maxWidth` is its bound, and `choiceOf` says why a node set
- * cannot express it.
+ * This is the DATA half of the fanout question. The WIDTH half is `applyFanoutWidthTaint`, one
+ * function down: how many branches a tainted list opens is a count, but WHICH NODES that count
+ * selected is the fan's branch, and that is a node set.
  */
 function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonly EdgeId[]): void {
   for (const id of take) {
@@ -9061,6 +9066,58 @@ function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonl
     if (edge === undefined || edge.kind !== "fanout") continue;
     if (edge.over === undefined || !tainted.has(edge.over)) continue;
     tainted.add(edge.as ?? "item");
+  }
+}
+
+/**
+ * HOW WIDE A FAN IS, IS A DECISION — and the one control decision that is a NUMBER.
+ *
+ * `applyFanoutTaint` one function up closes the DATA half: a body reading its own item reads the
+ * fetched page. The width is the other half, and it is what decides whether the branch runs at
+ * all. A fan body that reads nothing untrusted still ran because an attacker's list said so, N
+ * times because the list was N long, and zero times if it was empty. Measured on one graph driven
+ * twice, the charge on the fan branch reading only the run's own input, under a human ceiling of
+ * `on` typed before any untrusted byte existed:
+ *
+ *     the list is built from the fetched page -> succeeded, gates=0, charged=2
+ *     the list is built from the run's input  -> succeeded, gates=0, charged=2
+ *
+ * `controlRegion` has nothing to say about this: the fan edge is not conditional, it is not
+ * narrowing a `take`, and a count is not a node set. What IS a node set is which nodes the
+ * decision selected, and for a fan that is its BRANCH — `fanBody`, bounded at the join.
+ *
+ * BOUNDED, AND THAT IS THE WHOLE OF IT. Marking `reachable(the fanout edge)` walks past the join
+ * to the end of the graph, which is the constant gate this axis exists to avoid; the node BELOW
+ * the join runs exactly once at every width including zero, so the width did not select it. Both
+ * halves are pinned: the fan body gates and the node under the join does not.
+ *
+ * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
+ * is called from `#restoreEvidence` as well as `#commit`, in the same position at both.
+ */
+function applyFanoutWidthTaint(
+  controlTainted: Map<NodeId, ControlTaint>,
+  tainted: ReadonlySet<string>,
+  index: GraphIndex,
+  node: NodeSpec,
+  take: readonly EdgeId[],
+): void {
+  for (const id of take) {
+    const edge = index.edgeById.get(id);
+    if (edge === undefined || edge.kind !== "fanout") continue;
+    // The same third source `choiceTainted` names: a node running only because an earlier tainted
+    // choice selected it is a node whose own decisions are that attacker's too, so the fan it
+    // plans carries the taint even when its list is clean.
+    const inherited = controlTainted.get(node.id);
+    const evidence =
+      inherited !== undefined
+        ? inherited.channels
+        : edge.over !== undefined && tainted.has(edge.over)
+          ? [edge.over]
+          : undefined;
+    if (evidence === undefined) continue;
+    for (const b of fanBody(index, edge)) {
+      if (!controlTainted.has(b)) controlTainted.set(b, { decidedBy: node.id, channels: evidence });
+    }
   }
 }
 
@@ -9203,12 +9260,13 @@ interface Choice {
  *     `controlRegion` is now true: the version this replaced claimed a failed router's `take` is
  *     `[]`, which it is NOT when the router has an outbound `error` edge — `#commit` computes
  *     `take = this.#errorEdges(...)` for a failed outcome.
- *   - A `fanout` edge's WIDTH. How many branches a fan expands into is not a node set, so this
- *     function has nothing to say about it and `maxWidth` remains the only bound on the count.
- *     What a tainted `over` DOES reach is handled one axis over: `applyFanoutTaint` puts the
- *     edge's `as` binding into `ctx.tainted`, so a fan body that reads its own item reads a
- *     tainted channel and E8's data-flow half fires. The sentence here used to say the node set
- *     is identical either way, which is false at width 0 — the branch nodes do not run at all.
+ *   - A `fanout` edge's WIDTH. A fan edge narrows no `take`, so it is in no choice space and this
+ *     function has nothing to say about it — but the width IS a decision, and it is answered two
+ *     functions up rather than left open. `applyFanoutTaint` puts the edge's `as` binding into
+ *     `ctx.tainted` so a fan body reading its own item reads a tainted channel, and
+ *     `applyFanoutWidthTaint` marks the fan BODY, bounded at the join, when `over` is tainted.
+ *     The sentence here used to say the node set is identical whatever the width, which is false
+ *     at width 0 — the branch nodes do not run at all.
  *   - A `compensation` edge. The executor never traverses one — `#edgesToTake` argues that at
  *     length.
  *   - HOW MANY TIMES a loop body runs, as a NUMBER. `controlRegion` is a node set and cannot

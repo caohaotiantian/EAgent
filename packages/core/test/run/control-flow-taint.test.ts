@@ -119,7 +119,10 @@ type Shape =
   | "fanoutbind"
   | "fanoutgated"
   | "linear"
-  | "lineargated";
+  | "lineargated"
+  | "fanoutwidth"
+  | "fanoutafter"
+  | "fanoutwidthgated";
 
 interface Options {
   /**
@@ -167,7 +170,10 @@ function spec(o: Options): GraphSpec {
     o.shape === "fanoutbind" ||
     o.shape === "fanoutgated" ||
     o.shape === "linear" ||
-    o.shape === "lineargated";
+    o.shape === "lineargated" ||
+    o.shape === "fanoutwidth" ||
+    o.shape === "fanoutafter" ||
+    o.shape === "fanoutwidthgated";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -187,7 +193,10 @@ function spec(o: Options): GraphSpec {
       reads: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["item"] : ["request"],
       // `parts` in the fanout shapes because the charge runs once per branch, and
       // GRAPH010_CONCURRENT_WRITE refuses `replace` for a node that runs in parallel.
-      writes: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["parts"] : ["receipt"],
+      writes:
+        o.shape === "fanoutbind" || o.shape === "fanoutgated" || o.shape === "fanoutwidth" || o.shape === "fanoutwidthgated"
+          ? ["parts"]
+          : ["receipt"],
       tool: { name: "pay.charge", version: "1.0", args: { amount: 500 } },
       unhandled: true,
     },
@@ -249,6 +258,30 @@ function spec(o: Options): GraphSpec {
     if (o.shape === "bodycondseqgated") {
       nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
     }
+  } else if (o.shape === "fanoutwidth" || o.shape === "fanoutafter" || o.shape === "fanoutwidthgated") {
+    // THE WIDTH, AND NOTHING ELSE. Nothing on the fan branch reads `item` or any other tainted
+    // channel: the only thing the fetched page decides is HOW MANY branches there are.
+    nodes.push({ id: "plan", type: "function", reads: [o.branchOn], writes: ["items"], function: { ref: "function/split@stable", effects: [] } });
+    if (o.shape === "fanoutafter") {
+      nodes.push({ id: "work", type: "function", reads: ["request"], writes: ["parts"], function: { ref: "function/part@stable", effects: [] } });
+    }
+    // The gated variant splits the run between the commit that PLANS the fan and the decision
+    // that would charge, so the two halves of the claim land in two different processes. The
+    // gate reads only the run's own input, exactly like the charge.
+    if (o.shape === "fanoutwidthgated") {
+      nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
+    }
+    nodes.push({
+      id: "j",
+      type: "join",
+      reads: ["parts"],
+      writes: ["parts"],
+      join: {
+        branches: [o.shape === "fanoutafter" ? "work" : o.shape === "fanoutwidthgated" ? "hold" : "charge"],
+        mode: "all",
+        onBranchError: "skip",
+      },
+    });
   } else if (o.shape === "fanoutbind" || o.shape === "fanoutgated") {
     nodes.push({ id: "plan", type: "function", reads: [o.branchOn], writes: ["items"], function: { ref: "function/split@stable", effects: [] } });
     nodes.push({
@@ -311,6 +344,22 @@ function spec(o: Options): GraphSpec {
     }
     edges.push({ id: "toOther", from: "decide", to: "skip", kind: "conditional", when: 'contains(request, "PAY")' });
     edges.push({ id: "toSink", from: "decide", to: "sink", kind: "seq" });
+  } else if (o.shape === "fanoutwidth") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "charge", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "charge", to: "j", kind: "join", branches: ["charge"] });
+  } else if (o.shape === "fanoutwidthgated") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "holdToCharge", from: "hold", to: "charge", kind: "seq" });
+    edges.push({ id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] });
+  } else if (o.shape === "fanoutafter") {
+    // The charge sits BELOW the join, so it runs exactly once whatever the width was. The width
+    // did not select it, and this is the shape that says the marked set stops at the join.
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "work", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "work", to: "j", kind: "join", branches: ["work"] });
+    edges.push({ id: "jToCharge", from: "j", to: "charge", kind: "seq" });
   } else if (o.shape === "fanoutbind") {
     edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
     edges.push({ id: "fan", from: "plan", to: "charge", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
@@ -416,7 +465,10 @@ function spec(o: Options): GraphSpec {
       parts: { type: "array", reduce: "append_ordered" },
     },
     inputs: ["request"],
-    outputs: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["parts"] : ["receipt"],
+    outputs:
+      o.shape === "fanoutbind" || o.shape === "fanoutgated" || o.shape === "fanoutwidth" || o.shape === "fanoutwidthgated"
+        ? ["parts"]
+        : ["receipt"],
     nodes,
     edges,
   } as unknown as GraphSpec;
@@ -478,6 +530,8 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   // is explicit about where it goes next, and a `take` no `#edgesToTake` result can be told from.
   functions.register("function/linear@stable", () => ({ writes: { note: "summary" }, take: ["e1"] }));
   functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
+  // `fanoutafter`'s fan body: it contributes to the join and reads nothing untrusted.
+  functions.register("function/part@stable", () => ({ writes: { parts: ["p"] } }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
     return { writes: { note: "decided" }, take: [text.includes("PAY") ? "toChosen" : "toOther"] };
@@ -1012,4 +1066,63 @@ test("A GRAPH WITH NO BRANCH IN IT MUST NOT GATE — an edge that always fires i
   const clean = await drive({ branchOn: "request", shape: "linear" });
   assert.equal(clean.status, "succeeded", `the clean half of a linear graph gated: ${clean.status}`);
   assert.equal(clean.charged, 1, "control");
+});
+
+test("HOW WIDE A FAN IS, IS A DECISION — and at width 0 it decides whether the action runs at all", async () => {
+  const dirty = await drive({ branchOn: "untrusted", shape: "fanoutwidth" });
+  assert.equal(dirty.charged, 0, "the fetched page decided how many times an irreversible action ran");
+  assert.equal(dirty.status, "awaiting_gate", `expected the fan's width to be a choice, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and the human whose ceiling no longer covers this action is asked");
+
+  const clean = await drive({ branchOn: "request", shape: "fanoutwidth" });
+  assert.equal(clean.status, "succeeded", `a fan over a clean list must not gate: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every fanout in a graph that also fetches gates forever");
+  assert.equal(clean.charged, 2, "and both branches the author authorised run");
+});
+
+test("THE MARKED FAN BODY STOPS AT THE JOIN — a node below it runs once whatever the width was", async () => {
+  const dirty = await drive({ branchOn: "untrusted", shape: "fanoutafter" });
+  assert.equal(dirty.status, "succeeded", `marking past the join is a constant gate: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "the charge below the join runs once at every width, so the width did not select it");
+  assert.equal(dirty.charged, 1, "and it runs");
+
+  const clean = await drive({ branchOn: "request", shape: "fanoutafter" });
+  assert.equal(clean.status, "succeeded", `control: ${clean.status}`);
+  assert.equal(clean.charged, 1, "control");
+});
+
+test("THE FAN'S WIDTH SURVIVES A RESTART — the fold rebuilds a count another process planned", async () => {
+  // The live path marks the fan body at the commit that TOOK the fanout edge; the fold has to
+  // reach the same set from the journal, or a restart marks fewer than the original process did.
+  // Nothing on this branch reads anything untrusted — the gate and the charge both read the run's
+  // own input — so the only thing carrying the taint is the width.
+  const store = new MemoryStateStore({ now: NOW });
+  const first = engineOver(store);
+  const graph = graphFor({ branchOn: "untrusted", shape: "fanoutwidthgated" });
+  const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+    kind: "human",
+    id: "u:alice",
+  });
+  const held = await first.engine.advance(runId);
+  assert.equal(held.status, "awaiting_gate", "precondition: the run stops on the gate inside the fan body");
+  assert.equal(first.charged(), 0, "precondition: nothing charged before the gate");
+
+  const second = engineOver(store);
+  await second.engine.attach(runId, graph);
+  let after = await second.engine.advance(runId);
+  for (let i = 0; i < 8; i++) {
+    const open = Object.values(after.gates).find((g) => g.nodeId === "hold" && g.state === "open");
+    if (open === undefined) break;
+    await second.engine.resolveGate(runId, {
+      gateId: open.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: `k${String(i)}`,
+    });
+    after = await second.engine.advance(runId);
+  }
+
+  assert.equal(second.charged(), 0, "a restart forgot the fan's width: the second process charged");
+  assert.equal(after.status, "awaiting_gate", `expected the charge to gate in the second process, got ${after.status}`);
 });
