@@ -474,7 +474,7 @@ those is folded in.
 | ~~**16**~~ | A.30 | **DONE `e639d2b`** | an `effect.completed` with no `details` dispatches its undo with `args = {}` and journals `outcome: "compensated"` **while the effect is still in the world** |
 | ~~**17**~~ | A.2 | **DONE `34a7f14`** | a refusal whose error RECORD varies by path replays with a different record and scores `match: true`. `compare()` grades the code and nothing about the record |
 | **18** | G.5(a) | **PINNED `8033198`** | after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs |
-| **19** | A.23 | `a23-assert.test.ts` | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
+| ~~**19**~~ | A.23 | **DONE `276e05c`** | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
 | **20** | B.2 | `b2-reserve.test.ts` | an outstanding reservation is invisible to the fold `GET /runs/:id` serves, and `task.started`'s absent appender makes a headline concurrency assertion compare 0 to 0 |
 | ~~**21**~~ | A.36 | **DONE `d9a8173`** | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
 | **22** | B.1 | `b1-strand.test.ts` | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
@@ -497,6 +497,14 @@ and do not hold, and `fix` may touch the kernel freely — which is what a kerne
 list**, the census would end it at 11, and a maintainer who thinks that is too fast should cut 20
 first — it is the only item here whose defect is a fold's blindness rather than a guard failing
 open.
+
+**WAVE 3 — the last item that needed no maintainer decision.** A.23’s budget half, whose own row
+said the obvious fail-closed answer was WORSE than unimplemented because it turns the gate off for
+every well-formed graph. The row’s stated blocker (the recording’s spec is not in the journal) is
+real and does not bind at `promote --suite`, which holds both specs already. The verifier then
+found a rename carrying a ceiling out of the comparison, a refusal naming a remedy that cannot
+lift it, and a fail-closed arm that let `null` through — all three fixed, one residual
+(`policy.expansion`) carried on the row.
 
 **WAVE 2, 2026-09-02 — four more lanes, and the wave that earned the verifiers their keep.** All
 four builders reported DONE or PARTIAL; all four verifiers reported NEEDS-WORK, and two of them

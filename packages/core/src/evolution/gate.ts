@@ -232,7 +232,20 @@ function movedCeilings(baseline: EvalReport, candidate: EvalReport): string[] {
   const out: string[] = [];
   for (const [scope, before] of Object.entries(baseline.budgets)) {
     const after = candidate.budgets[scope];
-    if (after === undefined) continue;
+    // A BASELINE SCOPE THE CANDIDATE LACKS IS A CAP THAT LEFT, not a scope to skip — and
+    // skipping it let a RENAME carry a ceiling out of the comparison entirely. Driven by a
+    // reviewer: baseline `node:a 0.15` against candidate `node:a2 15` — the same work under a
+    // new id, a hundredfold raise — and this check answered `pass: true`, `no spending ceiling
+    // moved`. The affirmative claim is the damage: silence would merely have been unhelpful.
+    // The candidate-only direction stays skipped and that asymmetry is deliberate: a scope only
+    // the CANDIDATE has is a node it ADDED, which is what `compileMutation` produces, and
+    // refusing those would refuse the loop's only mutation operator.
+    if (after === undefined) {
+      for (const d of BUDGET_DIMENSIONS) {
+        if (before[d] !== undefined) out.push(`${scope}.${d} declared ${String(before[d])} and this candidate has no such scope`);
+      }
+      continue;
+    }
     for (const d of BUDGET_DIMENSIONS) {
       const b = before[d];
       const a = after[d];
@@ -813,7 +826,13 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
   // straight and a test fixture that predated the field turned the whole verdict into a
   // `TypeError: Cannot convert undefined or null to object`. A guard that throws has not failed
   // closed, it has failed.
-  const stated = input.baseline.budgets !== undefined && input.candidate.budgets !== undefined;
+  // A SHAPE TEST, NOT AN `undefined` TEST. This read `!== undefined`, and `null` walked past it
+  // into `Object.entries(null)` — throwing the byte-identical `TypeError` this arm's own
+  // docstring quotes as the reason it exists. Both are equally unreachable from TypeScript and
+  // equally reachable from a hand-built report, so the argument for guarding one is the
+  // argument for guarding the other.
+  const shaped = (b: unknown): boolean => typeof b === "object" && b !== null;
+  const stated = shaped(input.baseline.budgets) && shaped(input.candidate.budgets);
   const moved = stated ? movedCeilings(input.baseline, input.candidate) : [];
   checks.push({
     id: "11-budget-exercised",
@@ -821,11 +840,11 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
     detail: !stated
       ? "a report did not say what ceilings its graph declares, so no ceiling could be compared — a guard that cannot decide fails closed"
       : moved.length === 0
-        ? `no spending ceiling moved (${String(Object.keys(input.baseline.budgets).length)} scope(s) compared)`
+        ? `no spending ceiling moved (${String(Object.keys(input.baseline.budgets).length)} baseline scope(s))`
         : `${String(moved.length)} spending ceiling(s) moved and this corpus exercised none of them — ${moved.join("; ")}. ` +
           `A replayed suite makes no provider calls, so it spends the RECORDING's money: a ceiling it never crosses is ` +
-          `one no recording can vouch for, and a ceiling it does cross fails the case instead. Re-record the corpus ` +
-          `against this candidate, or judge it live with loom promote --against-cohort <runId>`,
+          `one no recording can vouch for, and a ceiling it does cross fails the case instead. Judge it live with ` +
+          `loom promote --against-cohort <runId>`,
   });
 
   return { promote: checks.every((x) => x.pass), checks };

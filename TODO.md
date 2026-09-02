@@ -32,7 +32,7 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again after wave 2, and ONE of the seven moved: tests 2,777 → 2,844.** The `--otlp`
+**Re-run again after wave 3, and ONE of the seven moved: tests 2,777 → 2,851.** The `--otlp`
 work added the twenty-seven cases of `test/cli/trace-otlp.test.ts`; wave 1 added the rest across
 `test/server/child-run-by-url.test.ts`, `test/run/child-run-callback-url.test.ts`,
 `test/run/undo-args-must-be-recorded.test.ts`, `test/cli/verb-flags.test.ts`,
@@ -81,7 +81,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,844 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,851 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -204,7 +204,7 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 36 | 20 | 16 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 36 | 21 | 15 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
@@ -214,7 +214,7 @@ can be wrong without being falsifiable.
 | §H | 5 | 3 | 2 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
+A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
 **§H** H.2, H.3, H.4.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
@@ -719,8 +719,33 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 ### The self-improvement loop — what it still cannot see
 
-- **A.23 · HALF CLOSED. The `maxTurns` shape is refused; the `policy.budget` one is not, and the
-  blanket refusal was measured rather than argued.** The turns half needed no new evidence: a
+- ~~**A.23 · HALF CLOSED. The `maxTurns` shape is refused; the `policy.budget` one is not.**~~
+  **CLOSED by `276e05c`, and the ROW’S STATED BLOCKER TURNED OUT NOT TO BIND.** It said the
+  narrower refusal is "not expressible either, because the recording’s SPEC is not in the journal
+  (A.24)". A.24 is real and it does not bind AT THIS DOOR: `promote --suite` compiles a
+  `--baseline` and a candidate and hands both to `runEvalSuite`, so both specs are already in
+  hand. `EvalReport.budgets` projects each graph’s stated ceilings by scope, and the thirteenth
+  check `11-budget-exercised` refuses a candidate that MOVED a ceiling the replayed corpus never
+  crossed — the unearned certificate. A replayed suite makes no provider calls, so it spends the
+  RECORDING’s money; a ceiling it does cross fails the case on the existing `unservedEffects`
+  reason instead, which is why there is no evidence branch. **cli.ts needed no patch.**
+  **THE NAIVE ANSWER THIS ROW REFUSED IS STILL REFUSED**, and the two sets are named at the check:
+  a candidate whose budgets EQUAL the baseline’s passes however many it declares — `skeleton.ts`’s
+  `summarize`, both graphs the loop actually runs on, every graph that took
+  `GRAPH009_UNBOUNDED_NODE`’s advice — and a candidate that ADDS a node with its own budget passes,
+  which is exactly what `compileMutation` produces. Only a MOVED ceiling at a shared scope refuses.
+  **The reviewer found three defects in it and all three are fixed:** a renamed node carried its
+  ceiling out of the comparison entirely and the check then claimed "no spending ceiling moved"
+  (baseline-only scopes are now reported as a cap that left); the refusal named "re-record the
+  corpus" as a remedy, which cannot lift it because the check is a pure function of the two SPECS;
+  and the fail-closed arm tested `undefined` and let `null` reach `Object.entries`, throwing the
+  byte-identical error its own docstring cites as its reason for existing.
+  **RESIDUAL, carried rather than hidden:** `GraphPolicy.expansion` is a ceiling of the same class
+  (`maxNodes`, `maxDepth`, `maxFanout`, `maxLoopIterations`, enforced by `MUT004_EXPANSION_EXHAUSTED`)
+  and is NOT compared — driven, a candidate raising all four 100× promotes. **Closes fully when**
+  `expansion` joins the projection under the `graph` scope, or when somebody argues it is not a
+  spending ceiling and writes that at the check.
+  ORIGINAL TEXT: the blanket refusal was measured rather than argued.** The turns half needed no new evidence: a
   candidate that lowers `agent.maxTurns` leaves recorded effects UNSERVED, `ReplayReport` has
   carried `unservedEffects` all along, and `unexercised` was not reading it. It now refuses, and
   every control stays green including the function-body candidate. The budget half is worse than

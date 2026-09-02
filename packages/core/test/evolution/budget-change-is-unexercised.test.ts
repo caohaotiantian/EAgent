@@ -35,10 +35,16 @@
  * 3. CONTROL — a changed deterministic `function` body still promotes. This is the only candidate
  *    class the offline gate can judge without spending a model call, and it is what the blanket
  *    refusal would have cost.
- * 4. CONTROL — a candidate that ADDS a scope carrying its own budget is not refused. That is the
- *    shape `graph/mutate.ts` produces, so the loop's own operator still gets through.
- * 5. A report that does not state its ceilings at all is REFUSED rather than thrown on. The first
- *    version threw, and a `TypeError` out of `gateCandidate` is not a guard failing closed.
+ * 4. THE ASYMMETRY IN `movedCeilings`, both halves, because each is the other's justification.
+ *    CONTROL — a scope only the CANDIDATE has is not a moved ceiling: that is the shape
+ *    `graph/mutate.ts` produces, so the loop's own operator still gets through. REFUSAL — a scope
+ *    only the BASELINE has is a cap that LEFT. Skipping that one let a RENAME carry a ceiling out
+ *    of the comparison, and the check answered `pass: true, no spending ceiling moved` about a
+ *    hundredfold raise. The affirmative claim is the damage; silence would only have been unhelpful.
+ * 5. A report that does not state its ceilings at all is REFUSED rather than thrown on — for
+ *    `undefined` AND for `null`, on either side. The first version threw, and a `TypeError` out of
+ *    `gateCandidate` is not a guard failing closed. The guard that replaced it tested `!==
+ *    undefined` and let `null` throw the byte-identical error, which is why the test is a shape.
  * 6. THE MEASUREMENT BEHIND THE MISSING EVIDENCE BRANCH: a ceiling the corpus DOES cross fails
  *    the case, so "exercised and still passing" is an empty set and there is no branch to write.
  *
@@ -232,7 +238,11 @@ test("CONTROL · a candidate that changes a deterministic FUNCTION body still pr
 
   const v = decide(baseline, candidate);
   assert.equal(v.checks.find((c) => c.id === "11-budget-exercised")!.pass, true);
-  assert.match(v.checks.find((c) => c.id === "11-budget-exercised")!.detail, /no spending ceiling moved \(7 scope\(s\) compared\)/);
+  // "BASELINE SCOPE(S)", not "compared". The count is `Object.keys(baseline.budgets).length`,
+  // and it read "7 scope(s) compared" while `movedCeilings` had skipped any scope the candidate
+  // lacked — so the number was read as coverage and was not. Renaming it was cheaper than
+  // computing a second one, and the fix for the skipping itself is the rename arm below.
+  assert.match(v.checks.find((c) => c.id === "11-budget-exercised")!.detail, /no spending ceiling moved \(7 baseline scope\(s\)\)/);
   assert.equal(v.promote, true, JSON.stringify(v.checks.filter((c) => !c.pass)));
 });
 
@@ -275,21 +285,122 @@ test("CONTROL · a scope the candidate ADDED is not a moved ceiling — which is
     added.checks.find((c) => c.id === "11-budget-exercised")!.detail,
     /node:a\.tokens was unbounded and this candidate caps it at 500/,
   );
+
+  // THIS LENIENCY IS ONE HALF OF AN ASYMMETRY AND IS ONLY DEFENSIBLE AS ONE. The other half —
+  // a scope only the BASELINE has, which is refused — is the rename arm directly below. Read
+  // them together before "simplifying" either: making the two directions agree in the tolerant
+  // direction restores the escape this file's next test names, and making them agree in the
+  // strict direction refuses `compileMutation`'s output, which is the paragraph above.
 });
 
-test("A REPORT THAT DOES NOT STATE ITS CEILINGS IS REFUSED, not crashed through", () => {
+test("A RENAMED NODE USED TO CARRY ITS CEILING OUT OF THE COMPARISON — the affirmative claim was the damage", () => {
+  // THE DEFECT, DRIVEN BY THE REVIEWER WHO FOUND IT. `movedCeilings` walks the BASELINE's scopes
+  // and looks each up in the candidate; the missing case used to be `if (after === undefined)
+  // continue`. So a candidate that renames a node AND raises its ceiling in the same edit put the
+  // moved ceiling at a key the loop never asks about, and BOTH scopes fell through the two
+  // skips — the old one under `node:a`, the new one because a candidate-only scope is skipped by
+  // design. Nothing was compared, and the check did not go quiet about it: it reported
+  //
+  //     11 pass = true   detail: no spending ceiling moved (3 scope(s) compared)
+  //
+  // on a hundredfold RAISE. A silent gap would merely have been unhelpful; this one issued a
+  // certificate. The count in that sentence is why the CONTROL above now asserts "baseline
+  // scope(s)" instead — 3 scopes were enumerated and 2 of them were compared.
+  const baseline = { graph: { costUsd: 1 }, "node:a": { costUsd: 0.15 }, "node:b": { costUsd: 0.15 } };
+  // The same work under a new id, at 100× the ceiling. `node:b` is the untouched control that
+  // keeps this from passing for the trivial reason that everything moved.
+  const renamed = { graph: { costUsd: 1 }, "node:a2": { costUsd: 15 }, "node:b": { costUsd: 0.15 } };
+
+  const v = decide(report(baseline), report(renamed));
+  const c = v.checks.find((x) => x.id === "11-budget-exercised")!;
+  assert.equal(c.pass, false);
+  assert.equal(v.promote, false, JSON.stringify(v.checks.filter((x) => !x.pass)));
+  assert.deepEqual(
+    v.checks.filter((x) => !x.pass).map((x) => x.id),
+    ["11-budget-exercised"],
+    "and it is still the only check that can see it — a rename is not a cost, a posture or a prompt",
+  );
+  assert.match(
+    c.detail,
+    /node:a\.costUsd declared 0\.15 and this candidate has no such scope/,
+    "the refusal names the scope that LEFT, the dimension, and the number it declared",
+  );
+  // THE AFFIRMATIVE CLAIM IS GONE, asserted directly rather than inferred from `pass: false`,
+  // because the sentence is what a promoter reads.
+  assert.doesNotMatch(c.detail, /no spending ceiling moved/);
+
+  // AND THE OTHER HALF OF THE ASYMMETRY, pinned in the one fixture where both directions occur
+  // at once: `node:a2` is a scope only the candidate has, so it contributes NOTHING — not a
+  // second finding, not a mention. Exactly one ceiling is reported, and it is the one that left.
+  // If a future edit makes the two directions symmetric, this count goes to 2 and this line
+  // fails before the CONTROL above does.
+  assert.match(c.detail, /^1 spending ceiling\(s\) moved and this corpus exercised none of them/);
+  assert.doesNotMatch(c.detail, /node:a2/, "the added scope is not itself a finding — that is compileMutation's shape");
+
+  // A RENAME THAT KEEPS THE NUMBER IS STILL REFUSED, so the refusal is about the scope leaving
+  // and not about the 100×. The gate cannot tell "renamed" from "deleted" — nothing in an
+  // `EvalReport` carries identity across a rename — and between "refuse a rename that moved
+  // nothing" and "certify a rename that moved everything", only the first fails closed.
+  const same = decide(report(baseline), report({ graph: { costUsd: 1 }, "node:a2": { costUsd: 0.15 }, "node:b": { costUsd: 0.15 } }));
+  assert.equal(same.checks.find((x) => x.id === "11-budget-exercised")!.pass, false);
+
+  // A node that carried NO ceiling can be renamed freely: `budgetsOf` states every node as a
+  // scope, with an empty map when the author declared nothing, and an empty map has no
+  // dimension to report as gone. So the refusal is scoped to caps that actually existed.
+  const unbounded = { graph: { costUsd: 1 }, "node:a": { costUsd: 0.15 }, "node:plain": {} };
+  const vu = decide(report(unbounded), report({ graph: { costUsd: 1 }, "node:a": { costUsd: 0.15 }, "node:plain2": {} }));
+  assert.equal(vu.checks.find((x) => x.id === "11-budget-exercised")!.pass, true);
+  assert.equal(vu.promote, true, JSON.stringify(vu.checks.filter((x) => !x.pass)));
+});
+
+test("A REPORT THAT DOES NOT STATE ITS CEILINGS IS REFUSED, not crashed through — `undefined` AND `null`, on either side", () => {
   // `budgets` is required by the type, so this is only reachable from JavaScript or from a
   // hand-built report — and it WAS reached: the first version of the check read
   // `Object.entries(baseline.budgets)` straight, and `gate.test.ts`'s `nothing()` fixture, which
   // predates the field and casts, turned the whole verdict into
   // `TypeError: Cannot convert undefined or null to object`. A guard that throws has not failed
   // closed; the caller gets no verdict at all rather than a refusal.
+  //
+  // THE GUARD THAT REPLACED IT DEFENDED ONE OF THE TWO VALUES IN ITS OWN QUOTED ERROR MESSAGE.
+  // It read `baseline.budgets !== undefined && candidate.budgets !== undefined`, so a `null`
+  // walked straight past it. Both directions were run against that form rather than reasoned
+  // about, and they do NOT throw the same thing:
+  //
+  //     baseline null   TypeError: Cannot convert undefined or null to object   (Object.entries)
+  //     candidate null  TypeError: Cannot read properties of null (reading 'graph')
+  //
+  // The first is byte-identical to the string quoted six lines above — the very error this arm
+  // exists because of, reachable again through the guard written to stop it. The second is a
+  // different message from a different line, which is the point of running both: a fixture that
+  // only covered `baseline` would have "proved" a claim about `Object.entries` that the other
+  // direction does not satisfy. `null` and `undefined` are equally unreachable from TypeScript
+  // and equally reachable from the hand-built report that already reached one of them, so the
+  // argument for guarding one is the argument for guarding the other; only a shape test
+  // (`typeof x === "object" && x !== null`) makes that argument once instead of twice.
+  //
+  // BOTH SIDES, because the guard is a conjunction and a conjunction with one live half is not a
+  // guard — a `stated` that only ever looked at `baseline` would pass three of these five.
   const { budgets: _absent, ...withoutBudgets } = report({});
-  const v = decide(report({}), withoutBudgets as EvalReport);
-  const c = v.checks.find((x) => x.id === "11-budget-exercised")!;
-  assert.equal(c.pass, false);
-  assert.match(c.detail, /a guard that cannot decide fails closed/);
-  assert.equal(v.promote, false);
+  const missing = withoutBudgets as EvalReport;
+  const nulled = report(null as unknown as EvalReport["budgets"]);
+  const ok = report({ graph: { costUsd: 1 } });
+
+  const cases: readonly (readonly [string, EvalReport, EvalReport])[] = [
+    ["candidate has no `budgets` at all", ok, missing],
+    ["baseline has no `budgets` at all", missing, ok],
+    ["baseline states `budgets: null`", nulled, ok],
+    ["candidate states `budgets: null`", ok, nulled],
+    ["neither states one", nulled, missing],
+  ];
+  for (const [label, baseline, candidate] of cases) {
+    // `decide` must RETURN. A throw here is the defect itself, and it reads as an errored test
+    // rather than a failed assertion, so the label is what tells the two apart.
+    const v = decide(baseline, candidate);
+    const c = v.checks.find((x) => x.id === "11-budget-exercised")!;
+    assert.equal(c.pass, false, label);
+    assert.match(c.detail, /a guard that cannot decide fails closed/, label);
+    assert.equal(v.promote, false, label);
+  }
 });
 
 test("WHY THERE IS NO EVIDENCE BRANCH — a ceiling the corpus DOES cross fails the case instead", async () => {
