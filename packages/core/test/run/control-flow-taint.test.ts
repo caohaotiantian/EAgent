@@ -117,7 +117,8 @@ type Shape =
   | "bodycondseq"
   | "bodycondseqgated"
   | "fanoutbind"
-  | "fanoutgated";
+  | "fanoutgated"
+  | "linear";
 
 interface Options {
   /**
@@ -163,7 +164,8 @@ function spec(o: Options): GraphSpec {
     o.shape === "bodycondseq" ||
     o.shape === "bodycondseqgated" ||
     o.shape === "fanoutbind" ||
-    o.shape === "fanoutgated";
+    o.shape === "fanoutgated" ||
+    o.shape === "linear";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -202,7 +204,18 @@ function spec(o: Options): GraphSpec {
   // nothing to do with what is being measured here. The three new shapes need the same thing for
   // the same reason: none of their two arms is a pair of ROUTER cases, so the compiler is right
   // that both could write.
-  if (o.shape === "only") {
+  if (o.shape === "linear") {
+    // NO BRANCH ANYWHERE. One out-edge, and the body names it — which is byte-identical to the
+    // `take` `#edgesToTake` produces from no take at all. The ordinary "fetch a page, summarise
+    // it, act" graph, and the shape that says what this axis must NOT do.
+    nodes.push({
+      id: "summarise",
+      type: "function",
+      reads: [o.branchOn],
+      writes: ["note"],
+      function: { ref: "function/linear@stable", effects: [] },
+    });
+  } else if (o.shape === "only") {
     // ONE conditional out-edge and no sibling at all — the smallest branch a graph can express,
     // and the arm of `choiceOf` whose docstring calls itself load-bearing (`unconditional` is
     // empty, so `narrowed` is true and the node's own reads are evidence).
@@ -264,7 +277,10 @@ function spec(o: Options): GraphSpec {
   }
   const edges: unknown[] = routerless ? [] : [{ id: "e0", from: "fetch", to: "route", kind: "seq" }];
 
-  if (o.shape === "only") {
+  if (o.shape === "linear") {
+    edges.push({ id: "e0", from: "fetch", to: "summarise", kind: "seq" });
+    edges.push({ id: "e1", from: "summarise", to: "charge", kind: "seq" });
+  } else if (o.shape === "only") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
   } else if (o.shape === "loopuntil") {
@@ -446,6 +462,9 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   });
   // The fanout shapes' list producer. The WIDTH is the same in both halves — what differs is
   // whether the node that produced the list had read the fetched page.
+  // The `linear` shape's node. It summarises and names its ONE out-edge: an ordinary body that
+  // is explicit about where it goes next, and a `take` no `#edgesToTake` result can be told from.
+  functions.register("function/linear@stable", () => ({ writes: { note: "summary" }, take: ["e1"] }));
   functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
@@ -905,3 +924,28 @@ test("A JOURNAL OLDER THAN THE RECORDED BIT FAILS CLOSED", async () => {
   assert.equal(asFalse, 1, "the control did not charge, so the arm above is not measuring the bit");
 });
 
+
+test("A GRAPH WITH NO BRANCH IN IT MUST NOT GATE — an edge that always fires is not a choice", async () => {
+  // THREE NODES AND ONE OUT-EDGE. `fetch` writes the page, `summarise` reads it, `charge` acts.
+  // `summarise`'s body returns `take: ["e1"]`, which is byte-identical to what `#edgesToTake`
+  // produces from no take at all — so a rule that reads "a producer supplied a take" as "a
+  // producer chose" gates the whole downstream of the most ordinary graph there is. Measured
+  // with `narrowed = producerSupplied || unconditional.length === 0` and no test at all on the
+  // TAKEN side:
+  //
+  //     three nodes, one out-edge, nothing conditional -> awaiting_gate, gates=1, charged=0
+  //
+  // An unconditional edge that fired was always going to fire, so its region is empty. That is
+  // what separates this from `only` and `loopuntil` below, where the edge that fired COULD have
+  // not fired and the alternative was that nothing ran.
+  const dirty = await drive({ branchOn: "untrusted", shape: "linear" });
+  assert.equal(dirty.status, "succeeded", `a linear graph has no branch to gate: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "gating a graph with no branch in it is a constant gate on every ordinary graph");
+  assert.equal(dirty.charged, 1, "and the action the human lowered the ceiling for runs");
+
+  // The paired half, which here is the control rather than the claim: nothing about this shape
+  // gates either way, and the pair is what says the row above is not measuring the read.
+  const clean = await drive({ branchOn: "request", shape: "linear" });
+  assert.equal(clean.status, "succeeded", `the clean half of a linear graph gated: ${clean.status}`);
+  assert.equal(clean.charged, 1, "control");
+});

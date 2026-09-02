@@ -9102,12 +9102,14 @@ interface ControlTaint {
  * clamps a hard-to-undo action and nothing else, so a region full of reads costs no gate at all.
  *
  * Widening the key from `router` to `choice` does NOT widen the marked set for an ordinary
- * node, and the reason is the space rather than a special case: a node with no conditional,
- * loop or producer-supplied edges has an empty choice space and returns before any of this
- * runs. The sentence that used to stand beside it — "a node whose every outbound edge fired
- * has an empty alternatives side" — was offered as a second reason, and it was the sentence
- * that produced a bug: an empty alternatives side subtracts nothing, and `controlRegion` now
- * says so.
+ * node, and it takes BOTH of the two reasons below to keep that true — the version that kept
+ * only the first gated a three-node linear graph:
+ *
+ *   1. A node with no conditional, loop or producer-supplied edges has an empty choice space and
+ *      returns before any of this runs.
+ *   2. A node whose every out-edge fired, and whose out-edges are UNCONDITIONAL, chose nothing —
+ *      the edges were always going to fire. `controlRegion` is where that is decided, and it
+ *      decides it from the taken edges' kinds rather than from the emptiness of the other side.
  *
  * Monotonic and never cleared, exactly like `applyTaint`, so folding forward from seq 1
  * reaches the state the live process held. First writer wins, so a node selected by two
@@ -9125,7 +9127,7 @@ function applyControlTaint(
   if (choice.space.length === 0) return;
   const evidence = choiceTainted(controlTainted, tainted, node, choice);
   if (evidence === undefined) return;
-  for (const id of controlRegion(index, choice.space, take)) {
+  for (const id of controlRegion(index, choice.space, take, node.type === "router")) {
     if (!controlTainted.has(id)) controlTainted.set(id, { decidedBy: node.id, channels: evidence });
   }
 }
@@ -9328,28 +9330,46 @@ function choiceTainted(
  * node, whose `take` is its `error` edges, and the degenerate router whose only case names its
  * own fallback.
  *
- * ## AN EMPTY ALTERNATIVES SIDE SUBTRACTS NOTHING; IT DOES NOT EMPTY THE REGION
+ * ## AN EMPTY ALTERNATIVES SIDE, AND THE TEST THAT DECIDES WHAT IT MEANS
  *
- * This guard clause once read `taken.length === 0 || alternatives.length === 0`, and the second
- * half answered "every edge in the space fired" with "nothing was chosen". `reachable([])` is
- * already the empty set, so the subtraction needs no such case: when nothing was left untaken the
- * region is `reachable(taken)`, which is what "the alternative was that nothing ran" selects.
- * Three shapes reached that clause and marked nothing, measured one at a time on the same
- * injected page, the same `pay.charge` reading only clean channels, and the same human
- * de-escalation to `on`:
+ * When nothing in the space was left untaken there was no arm to go down INSTEAD, so the only
+ * alternative the decision could have had is "nothing ran". Whether that was an alternative at
+ * all is a question about the TAKEN edges, and it has two answers:
  *
- *     one `conditional` out-edge and no sibling  -> succeeded, gates=0, charged=1
- *     a `loop` edge alone in the space           -> succeeded, gates=0, charged=3
- *     a router that fires every edge it declared -> nothing subtracted, so nothing marked
+ *   - A `conditional` or `loop` edge that fired COULD have not fired: its expression could have
+ *     come out the other way, and then nothing past it would have run. So the region is
+ *     `reachable(taken)`. A router is the same case one level up — a different case could have
+ *     been selected.
+ *   - AN UNCONDITIONAL EDGE THAT FIRED WAS ALWAYS GOING TO FIRE. Nothing was chosen, the
+ *     alternative does not exist, and the region is empty.
+ *
+ * This clause once read `taken.length === 0 || alternatives.length === 0` and gave the first
+ * answer's shapes the second answer; then it read `taken.length === 0` alone and gave the second
+ * answer's shapes the first. Both directions were measured end to end on the same injected page,
+ * the same `pay.charge` reading only clean channels, and the same human de-escalation to `on`
+ * typed before any untrusted byte existed:
+ *
+ *     one `conditional` out-edge and no sibling    -> succeeded, gates=0, charged=1     (too few)
+ *     a `loop` edge alone in the space             -> succeeded, gates=0, charged=3     (too few)
+ *     fetch -> summarise -> charge, one `seq` edge -> awaiting_gate, gates=1, charged=0 (too many)
+ *
+ * The third row is a graph with NO BRANCH IN IT: three nodes, one out-edge, and a body whose
+ * `take` names that edge — byte-identical to what `#edgesToTake` produces from no take at all.
+ * A guard that gates that gates every ordinary graph, which is the shape this axis exists to
+ * avoid. `test/run/control-flow-taint.test.ts` pins all three.
  *
  * The loop row is why the docstring below no longer says a loop's `until` contributes evidence
  * only when the space holds another edge: taking the back-edge selects the cycle body, and NOT
  * taking it is a real alternative that reaches nothing.
  *
- * The residual is the router row read the other way: a router that takes every edge it declared
- * now marks `reachable(all of them)` with nothing subtracted, which can be most of a graph. That
- * is over-marking in the fail-closed direction, and E8 clamps only hard-to-undo actions, so it
- * costs a gate exactly where one is arguably owed.
+ * The residual is the router: one that takes every edge it declared marks `reachable(all of
+ * them)` with nothing subtracted, which can be most of a graph. Measured on a single case whose
+ * `take` names both of the router's edges — succeeded/gates=0/charged=1 before, awaiting_gate/
+ * gates=1/charged=0 now. Narrowing the alternatives side to "the edges the other cases and the
+ * fallback would have taken" was measured against this shape and changes nothing: with one case
+ * and a fallback the router also took, that set is empty too. It is over-marking in the
+ * fail-closed direction, and E8 clamps only hard-to-undo actions, so it costs a gate where one
+ * is arguably owed.
  *
  * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS THE FIX
  *
@@ -9379,14 +9399,29 @@ function choiceTainted(
  * is a DECLARATION the compiler checks rather than a route the executor follows — `#edgesToTake`
  * argues that at length.
  */
-function controlRegion(index: GraphIndex, space: readonly EdgeSpec[], take: readonly EdgeId[]): ReadonlySet<NodeId> {
+function controlRegion(
+  index: GraphIndex,
+  space: readonly EdgeSpec[],
+  take: readonly EdgeId[],
+  isRouter: boolean,
+): ReadonlySet<NodeId> {
   const chosen = new Set<EdgeId>(take);
-  const taken: EdgeId[] = [];
+  const taken: EdgeSpec[] = [];
   const alternatives: EdgeId[] = [];
-  for (const e of space) (chosen.has(e.id) ? taken : alternatives).push(e.id);
+  for (const e of space) {
+    if (chosen.has(e.id)) taken.push(e);
+    else alternatives.push(e.id);
+  }
   if (taken.length === 0) return new Set<NodeId>();
+  if (alternatives.length === 0 && !isRouter && !taken.some((e) => e.kind === "conditional" || e.kind === "loop")) {
+    return new Set<NodeId>();
+  }
 
-  const selected = reachableFromEdges(index, taken, true);
+  const selected = reachableFromEdges(
+    index,
+    taken.map((e) => e.id),
+    true,
+  );
   for (const id of reachableFromEdges(index, alternatives, false)) selected.delete(id);
   return selected;
 }
