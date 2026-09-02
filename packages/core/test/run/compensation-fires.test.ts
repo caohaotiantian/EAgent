@@ -326,3 +326,130 @@ test("A ROLLBACK RESUMED AFTER A CRASH DOES NOT UNDO ITS OWN UNDOS", () => {
     `only the original action is a candidate: ${JSON.stringify(plan.steps.map((s) => s.tool))}`,
   );
 });
+
+/**
+ * THE `run_failed` ARM OF `nodeApproved`, which nothing exercised.
+ *
+ * `#dispatchRollback` passes `trigger === "rewind"` as `nodeApproved`, and the comment above it
+ * calls the `run_failed` arm "what keeps this from being a back door": nothing human authorized
+ * a run's own failure, so its rollback may not approve itself. That arm had no test — replacing
+ * the expression with an unconditional `true` left the whole tree at 2776/0, because every undo
+ * in this file is a `reversible_write` and so never reaches the gate at all.
+ *
+ * The missing piece was an undo the policy actually stops. `GRAPH012_COMPENSATION_VISIBLE` warns
+ * about exactly this shape at compile time rather than refusing it, so the graph is legal and the
+ * question is what happens at run time.
+ */
+test("a run's own failure does not approve an undo that needs a human", async () => {
+  const world = { rows: [] as number[], purged: [] as number[] };
+  const tools = new ToolRegistry();
+  tools.register({
+    name: "db.insert",
+    version: "1.0",
+    description: "insert a row",
+    capabilities: [],
+    irreversibility: "reversible_write",
+    idempotent: true,
+    compensation: { tool: "db.purge" },
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    execute: (args) => {
+      const row = Number(args["row"]);
+      world.rows.push(row);
+      return { content: "inserted", details: { row }, writes: { out: { row } } };
+    },
+  } as ToolDefinition);
+  tools.register({
+    name: "db.purge",
+    version: "1.0",
+    description: "an undo that is itself irreversible — the shape GRAPH012 warns about",
+    capabilities: [],
+    irreversibility: "irreversible",
+    idempotent: true,
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    execute: (args) => {
+      world.purged.push(Number(args["row"]));
+      return { content: "purged" };
+    },
+  } as ToolDefinition);
+  tools.register({
+    name: "boom",
+    version: "1.0",
+    description: "always fails",
+    capabilities: [],
+    irreversibility: "read_only",
+    idempotent: true,
+    parameters: { type: "object" },
+    execute: () => {
+      throw Object.assign(new Error("boom"), { code: "E_PROVIDER_UNAVAILABLE", class: "unavailable", retryable: false });
+    },
+  } as ToolDefinition);
+
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 1 } },
+  });
+
+  const node = (id: string, name: string, args: Record<string, unknown>): unknown => ({
+    id,
+    type: "tool",
+    reads: ["seed"],
+    writes: ["out"],
+    tool: { name, version: "1.0", args },
+    retry: { maxAttempts: 1 },
+  });
+  const graph = compileOrThrow({
+    spec: {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "rollback-gated", project: "comp", version: 1 },
+      policy: { posture: "out", expansion: { maxNodes: 8, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+      inputs: ["seed"],
+      outputs: ["out"],
+      nodes: [node("ins", "db.insert", { row: 7 }), node("bad", "boom", {})],
+      edges: [{ id: "e1", from: "ins", to: "bad", kind: "seq" }],
+    } as unknown as GraphSpec,
+    resolver: resolver(),
+    tools: {},
+    tenantCapabilities: [],
+  });
+
+  const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+  for (let i = 0; i < 12; i++) {
+    const p = await engine.advance(runId);
+    if (p.status === "succeeded" || p.status === "failed") break;
+  }
+  const events: JournalEvent[] = [];
+  for await (const e of store.read(runId, 1 as Seq)) events.push(e);
+
+  // The row was written and the rollback was attempted — this is not a test that passes because
+  // nothing happened.
+  assert.deepEqual(world.rows, [7], "the write under compensation did not happen");
+  const recs = records(events);
+  assert.equal(recs.length, 1, "the rollback was not attempted at all");
+  assert.equal(recs[0]!.trigger, "run_failed");
+
+  // And it was REFUSED rather than performed. This is the assertion the unconditional `true`
+  // breaks: with it, `db.purge` runs and `world.purged` is `[7]`.
+  assert.equal(recs[0]!.outcome, "failed", "a run's own failure approved an irreversible undo");
+  assert.deepEqual(world.purged, [], "an irreversible undo ran with no human anywhere in the chain");
+
+  // The refusal is in the journal, not only in a string handed back to a caller — an operator
+  // reading the trace afterwards is the person this is for.
+  const denied = events.filter(
+    (e) => e.type === "policy.decided" && (e.payload as { effect?: string }).effect === "deny",
+  );
+  assert.ok(denied.length > 0, "the refusal was never journaled");
+  assert.match(
+    JSON.stringify(denied),
+    /needs a human/,
+    "the journaled reason does not say a human was needed",
+  );
+});

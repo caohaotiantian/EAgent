@@ -386,15 +386,21 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   run's own failure, and an automated path may not approve itself.
   The fixture caught the change in both directions, which is why it was built first — the one
   character turned two tests red across two files, and both now assert the money comes back.
-  **NAMED RESIDUE, and it is the arm with no guard.** One line carries both answers, so an edit
-  that dropped the condition — leaving an unconditional `true` — would keep every test green while
-  turning a run's own failure into a path that approves its own irreversible undos, which is the
-  back door `GRAPH012_COMPENSATION_VISIBLE` warns about at compile time. Nothing covers it today:
-  `compensation-fires.test.ts` drives the `run_failed` path but its undo (`db.delete`,
-  `reversible_write`) does not gate at that graph's posture, so it reads `compensated` either way.
-  **Closes when** a `run_failed` fixture exists whose undo policy WOULD gate — the rewind fixture's
-  posture is the one that produces it — and asserts `failed` plus "requires human approval". That
-  is a fixture, not a mechanism, and it was deliberately not half-built here.
+  **RESIDUE CLOSED 2026-09-02, and the claim was true.** The row said an edit dropping the
+  condition — leaving an unconditional `true` — would keep every test green while turning a run's
+  own failure into a path that approves its own irreversible undos. That had been asserted on a
+  READ; the close wave said so explicitly, having been unable to run it. Run now: replacing
+  `trigger === "rewind"` with `true` left the whole tree at **2776 pass / 0 fail**. The diagnosis
+  was exact — every undo in `compensation-fires.test.ts` is a `reversible_write`, so none reaches
+  the gate and all of them read `compensated` either way.
+  The fixture the row specified now exists in the same file ("a run's own failure does not approve
+  an undo that needs a human"): `db.insert` compensates with `db.purge`, which is itself
+  `irreversible` — the shape `GRAPH012_COMPENSATION_VISIBLE` warns about rather than refuses, so
+  the graph is legal and the question is what the runtime does. It asserts the write happened, the
+  rollback was attempted with `trigger: "run_failed"`, the outcome is `failed`, `world.purged` is
+  empty, and the refusal reached the JOURNAL as a `policy.decided` deny saying a human was needed
+  — not merely a string handed back to a caller. Mutation-checked in both directions: the
+  unconditional `true` now fails it with "a run's own failure approved an irreversible undo".
 
 
 - **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
