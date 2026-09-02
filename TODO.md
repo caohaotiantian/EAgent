@@ -1770,11 +1770,57 @@ Each traces to a decision in `DESIGN.md`.
 
 
 
-- **H.1 · `bin/loom` is gitignored and goes stale on any source edit.** **The silence is fixed**:
-  `scripts/binary-freshness.cjs` refuses when the sources beside the binary have moved, and it
-  distinguishes "no sources" from "sources I cannot read" rather than passing on either. **Still
-  open:** nothing rebuilds the binary automatically, so the standing condition remains — after a
-  source edit, `npm run build:binary` before trusting `bin/loom`.
+- ~~**H.1 · `bin/loom` is gitignored and goes stale on any source edit.**~~
+  **CLOSED — but not the way the row asked, and the measurement that redirected it is the point.**
+  The row's remaining half was "nothing rebuilds the binary automatically". That half is now a
+  **documented operating condition rather than open work**: under the framing answer §D's header
+  records — single machine, single tenant, the maintainer's own workflows, one operator — a rebuild
+  is a command a person runs, and a daemon watching the tree is ceremony for an audience of one. It is stated where an operator meets it, in `README.md`'s
+  install block, not only here.
+
+  **What was actually open was something else, and it took a measurement to see.** The fix the row
+  credits — `binary-freshness.cjs`, a guard that rides INSIDE the artifact — has a hole no guard of
+  that shape can close about itself: **a binary built before the guard existed does not carry it,
+  and cannot say so.** Measured 2026-09-02 on the maintainer's checkout, four commands:
+
+  ```
+  stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' bin/loom                      2026-08-25 13:52:23
+  find packages/core/src -name '*.ts' -newer bin/loom | wc -l        48   (of 62)
+  /usr/bin/grep -ac 'THIS BINARY IS STALE' bin/loom                  0
+  ./bin/loom --help >/dev/null; echo $?                              0
+  ```
+
+  Eight days and 48 files behind, exit 0, silent — because the guard shipped on 2026-08-28, three
+  days after that binary was built, and `.github/workflows/ci.yml` never built the binary, so
+  nothing outside a human's hands ever produced one to look at.
+
+  **What already covered what, named rather than waved at.** The two freshness suites stamp a fake
+  `bin/loom.cjs` with `banner(stampFor(root))` — they prove the CHECK decides correctly.
+  `readme-gaps.test.ts`'s "THE BUILD ACTUALLY BAKES IT IN" greps `build-binary.mjs`'s TEXT for
+  `binary-freshness.cjs`, `.banner(` and `banner: {` — it proves the wiring is written down. **The
+  artifact was the hole, and a source grep cannot close it.** Driven here: `build-binary.mjs`
+  edited to compute `freshness.banner(stamp)` into a variable and inject `bannerText.slice(0, 0)`,
+  so every string that grep requires is still present. `readme-gaps.test.ts` — 22 pass, 0 fail,
+  including that probe. The build printed its success line, *"it refuses to run once
+  packages/core/src moves"*. `/usr/bin/grep -ac 'THIS BINARY IS STALE' bin/loom` returned **0**.
+  The build's own success line is a claim about the artifact that nothing checked.
+
+  **What shipped:** `scripts/verify-binary.mjs`, which drives the produced artifact through the
+  guard's four cases — CURRENT (runs), STALE (refuses, exit 1), OVERRIDE (`LOOM_STALE_BINARY=allow`
+  runs it and still prints the report), SHIPPED (no sources beside it, runs silently) — plus a
+  `binary` job in CI that runs `npm run build:binary` then the verifier. Against a binary built
+  from this tree all four hold; against the 08-25 binary **CURRENT and SHIPPED pass and STALE and
+  OVERRIDE fail**, which is precisely why nobody noticed for eight days: the two cases a guardless
+  binary satisfies are the two anybody exercises by accident.
+
+  **Not in `npm run check`, deliberately** — `binary-freshness.cjs`'s own header argues that gate
+  down ("both people were running the binary directly, hours after the last check"), and it is
+  right. A separate CI job blocks nothing `check` does. Cost measured on this machine: `tsc` 2s,
+  bundle + SEA + inject 5s, verify 4s.
+
+  **What would reopen it:** more than one operator, or a published binary. Both make "the person
+  who edits the sources is the person who rebuilds" stop being true, and the answer then is a
+  release step that stamps and uploads, not a watcher.
 - ~~**H.2 · The 2026-08-29 renumber broke FOURTEEN in-tree citations of this file.**~~
   **CLOSED — thirteen by `814e283`, and a fourteenth its own command could not see.** Kept, not deleted, because the TABLE is
   the thing a future renumber needs and the command at the end of it is the cheap half of the

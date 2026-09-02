@@ -68,6 +68,23 @@ export PATH="$PWD/bin:$PATH"          # `loom` is not published; the binary IS t
 loom serve                            # console + API on :8787, from an empty directory
 ```
 
+**`bin/loom` is a photograph of `packages/core/src`, and nothing rebuilds it for you.** That is a
+decision, not an omission: one machine, one operator, so the rebuild is a command you run rather
+than a daemon watching your tree. What stands in for the daemon is a refusal — the binary
+re-hashes the sources beside it before any application code runs and exits non-zero once they have
+moved, naming what changed. So the standing condition is: **after editing `packages/core/src`, run
+`npm run build:binary` before trusting `bin/loom`.** `LOOM_STALE_BINARY=allow` runs a stale one
+anyway and still prints the report — the bar is that nobody drives a stale binary without being
+told, not that nobody drives one. A copy with no sources beside it, which is every copy anyone
+installs, has nothing to be behind and says nothing.
+
+That refusal ships *inside* the binary, which means a binary built before it existed cannot tell
+you it is missing — that is how the `bin/loom` in this repo once answered `--help` with exit 0
+while eight days and 48 source files behind. The check that lives outside the artifact is
+`node scripts/verify-binary.mjs [path]`: it drives a built binary through all four cases (current,
+stale, overridden, no-sources) and fails the two a guardless binary passes silently. CI builds the
+binary and runs it on every commit.
+
 ## What works today
 
 | | |

@@ -22,9 +22,49 @@ jobs:
       # machine, and CI is where its cost is paid rather than where its value is.
       - run: npm run typecheck
       - run: npm test
-      # The only automatic enforcement of invariant 1. `build:binary`'s esbuild metafile
-      # backstop is NOT run here — it needs the SEA toolchain and ~115 MB of output — so
-      # this script is on its own, which is why it grew a third check for the loads a
-      # parser cannot read (createRequire, computed import(), require).
+      # Invariant 1's enforcement in this job. `build:binary`'s esbuild metafile backstop
+      # runs in the `binary` job below rather than here, so this script is no longer alone
+      # — but it stays the one that runs on every commit without a SEA toolchain, which is
+      # why it grew a third check for the loads a parser cannot read (createRequire,
+      # computed import(), require).
       - run: node scripts/check-zero-dep.mjs
       - run: node scripts/check-surface.mjs
+
+  # WHY THIS JOB EXISTS, and why it is a job rather than a step in `check`.
+  #
+  # `bin/loom` is gitignored and nothing rebuilt it: on 2026-09-02 the binary on the
+  # maintainer's own machine was built 2026-08-25 13:52, with 48 of 62 `packages/core/src`
+  # files newer than it, and it answered `--help` with exit 0. It did not warn, because the
+  # freshness guard that would have warned shipped three days AFTER it was built —
+  # `grep -ac 'THIS BINARY IS STALE' bin/loom` returned 0. A guard that rides inside the
+  # artifact cannot report its own absence, so the build that injects it has to be exercised
+  # by something outside. Nothing was: this workflow never built the binary at all.
+  #
+  # `verify-binary.mjs` drives the produced artifact through the guard's four cases (current,
+  # stale, overridden, shipped-without-sources). Run against that 08-25 binary it fails two of
+  # them; against a binary built from this tree it passes all four. It also puts the esbuild
+  # metafile backstop — the one that fails if third-party code ever reaches the bundle — on a
+  # machine that runs it every commit.
+  #
+  # SEPARATE JOB because `npm run check` must not get slower: the binary is ~115 MB of output
+  # and the guard's own header argues against a check-time staleness gate. This runs in
+  # parallel with `check` and blocks nothing it does. Measured on the maintainer's machine,
+  # 2026-09-02: `tsc` 2s, bundle+SEA+inject 5s, verify 4s.
+  #
+  # The artifact is NOT uploaded. Building it proves it is reproducible from a known tree and
+  # that the guard survives the build; publishing 115 MB per commit is a distribution decision
+  # nobody has asked for.
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # `build:binary` and not `build-binary.mjs`: the script alone does not compile, and a
+      # binary bundled from a stale `dist` would certify sources it does not contain. The
+      # script refuses that case rather than trusting the caller — see `distIsBehindSources`.
+      - run: npm run build:binary
+      - run: node scripts/verify-binary.mjs
