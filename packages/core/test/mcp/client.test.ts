@@ -20,7 +20,7 @@ import { join } from "node:path";
 
 import { McpClient, createBoundedLineReader } from "../../src/mcp/client.ts";
 import { mcpToolName, mcpTools } from "../../src/mcp/tools.ts";
-import { openWorkspace, parseArgs, readMcpServers, startMcp } from "../../src/cli.ts";
+import { openWorkspace, parseArgs, readMcpServers, startMcp, type ConnectedMcpServer } from "../../src/cli.ts";
 import { compile } from "../../src/graph/compile.ts";
 
 function serverFile(body: string): { path: string; cleanup: () => void } {
@@ -120,6 +120,9 @@ test("EVERY MCP TOOL IS irreversible, so an unknown tool gates rather than guess
     // picks its names to defeat, and trusting a self-declared class lets the party being
     // governed choose its own governance.
     assert.equal(tool!.irreversibility, "irreversible");
+    // AND IT IS THE PARAMETER DEFAULT, not a constant: `mcpTools` takes the class as an argument
+    // now, and a caller who passes nothing gets what every caller got before the parameter
+    // existed. The declared half lives in `irreversibility.test.ts`.
     assert.equal(tool!.idempotent, false);
     // One capability per SERVER: "this graph may use the demo server" is a decision an
     // operator can actually make.
@@ -324,12 +327,15 @@ test("A GRAPH COMPILES AGAINST A DISCOVERED MCP TOOL — the ordering that keeps
   // registered after it returns is a tool whose capability nobody holds — which is exactly what
   // shipped: `mcp:demo` was absent from both `tenantCapabilities` and the engine's grant, and a
   // graph naming an MCP tool failed to COMPILE with GRAPH017_CAPABILITY_NOT_GRANTED.
-  let clients: readonly McpClient[] = [];
+  let clients: readonly ConnectedMcpServer[] = [];
   clients = await startMcp(readMcpServers(cfg));
   const ws = openWorkspace(parseArgs(["compile", "--workspace", d]), process.env, undefined, clients);
   try {
     const manifests = ws.engine.tools.manifests();
     assert.ok(mcpToolName("demo", "echo") in manifests, "the discovered tool must be registered before any compile");
+    // THE DEFAULT, THROUGH THE WHOLE CLI PATH. The file above declares no `irreversibility`, and
+    // `test/mcp/irreversibility.test.ts` is the pair that shows the declared one arriving here
+    // instead — and that the run this default produces actually stops.
     assert.equal(manifests[mcpToolName("demo", "echo")]!.irreversibility, "irreversible");
 
     // AND A GRAPH THAT USES IT COMPILES. This test asserted only that the tool APPEARED in the
@@ -360,7 +366,7 @@ test("A GRAPH COMPILES AGAINST A DISCOVERED MCP TOOL — the ordering that keeps
       `a graph naming an MCP tool must compile: ${(r.diagnostics ?? []).map((x) => `${x.code}: ${x.message}`).join("; ")}`,
     );
   } finally {
-    for (const c of clients) c.close();
+    for (const c of clients) c.client.close();
     ws.close();
     rmSync(d, { recursive: true, force: true });
     s.cleanup();
