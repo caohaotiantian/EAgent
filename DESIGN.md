@@ -534,7 +534,7 @@ happens. Driven, one `subgraph` node whose child charges `pay.refundable` (irrev
 It passes now; the `Fails today` form is dropped rather than kept, because a closed item with a
 present-tense failure is the drift this table's own header warns about.
 
-**RE-RUN 2026-09-01 AND IT STILL FAILS, but the cause has moved and the item is now narrower than
+**RE-RUN 2026-09-01 AND IT STILL FAILED, but the cause has moved and the item is now narrower than
 what it was written against.** The driver was rebuilt from `rewind-through-subgraph.test.ts`'s own
 harness with a refund recorder added, and printed:
 

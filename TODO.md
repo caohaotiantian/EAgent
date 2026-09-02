@@ -36,9 +36,7 @@ apportioned — C.4's `otlp.test.ts` (16) and `trace-endpoint.test.ts` (5) are t
 with `0a8aa6d`'s `cli.test.ts` cases and `712bb89`'s `evaluator-body-contract.test.ts` beside
 them. A.8's own commit added no case — it RENAMED one and inverted two, which is why the count
 moved less than wave 11's commit list suggests. The new source file is
-`telemetry/otlp.ts`, and the eight exports are its (`OTLP_RUN_ID_ATTR`, `OtlpExportResult`,
-`OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`,
-`OtlpTraceRequestOptions`, `otlpTraceRequest`). Kernel files, seams and the NUL census came back
+`telemetry/otlp.ts`, and SEVEN of the eight new exports are its (`OtlpExportResult`, `OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`, `OtlpTraceRequestOptions`, `otlpTraceRequest`); the eighth, `OTLP_RUN_ID_ATTR`, is `telemetry/spans.ts`'s — put there deliberately by `552d999`, because that file owns the telemetry vocabulary and `registries.test.ts` enforces it. Attributing it to the exporter names the one file the commit took it away from. Kernel files, seams and the NUL census came back
 unchanged. A dated table is only as good as the last time somebody ran its commands, and the date
 is not the evidence; the command is. **The tests row is the one that moves on almost every commit,
 so read it as a floor rather than as an identity** — a re-run that comes back higher is the suite
@@ -984,10 +982,54 @@ is a better view of nothing.
   redactor and never reads a `JournalEvent` (a credential in the journal is absent from the POST
   body); the ids need no conversion, since `spans.ts` already mints 32- and 16-char lowercase
   hex, which is exactly OTLP's two widths; and `export` never throws, whatever the collector or
-  the options bag does. Driven: `test/telemetry/otlp.test.ts` 16/16,
-  `test/server/trace-endpoint.test.ts` 5/5.
-  **Left undone and named:** nothing calls the exporter from `cli.ts` yet — `loom trace` still
-  only prints — so a deployment wires it as a library embedder today.
+  the options bag does. Driven: `test/telemetry/otlp.test.ts` 17/17,
+  `test/server/trace-endpoint.test.ts` 6/6.
+
+  **Left undone and named — the SET is six, and this row used to name one of them.** The lane's
+  own review (`.agent/finish-the-backlog/review-w11-otlp-exporter.md`) carried six findings
+  against the file C.4 closes and only the first reached a document; the audit caught the
+  omission, and each was then re-checked BY RUNNING rather than by reading. Three were real and
+  are fixed:
+
+  1. **Still open** — nothing calls the exporter from `cli.ts` yet; `loom trace` still only
+     prints, so a deployment wires it as a library embedder today.
+  2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
+     is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
+     `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a
+     function-valued key) and `kind: "__proto__"` shipped `kind: {}` — an object where OTLP
+     requires an integer enum, which is the worse one because it survives JSON and a collector
+     rejects the batch over it. This is the dominant defect class (a lookup answering its
+     undecidable case with an inherited value) reached through the guard meant to stop it, and it
+     mattered because `otlpTraceRequest`'s contract is TOTAL OVER ITS INPUT and names hand-built
+     arrays as the reason. `codeOf` consults the map only via `Object.hasOwn`. Mutation-checked:
+     restoring the `??` form fails the new test 16/17.
+  3. **FIXED — `?format=otlp` silently dropped the `truncated` flag.** The route's docstring
+     promises the response says `truncated: true` "so nobody reads a partial waterfall as a
+     finished one"; the `spans` branch kept that and the `otlp` branch did not, because
+     `ExportTraceServiceRequest` has no body field for it. It is now the resource attribute
+     `OTLP_TRUNCATED_ATTR` (`loom.trace.truncated`), declared in `telemetry/spans.ts` because
+     that file owns the `loom.*` vocabulary and `registries.test.ts` enforces it — the same rule
+     that caught `server/http.ts` minting its own `"loom.run_id"`. Emitted ONLY when true: an
+     absent attribute and `false` say the same thing to a collector.
+  4. **FIXED, and it was a test defect rather than a behaviour one — the credential mask was
+     dead.** Replacing `mask`'s body with `return text;` left `otlp.test.ts` 16/16, because
+     neither stub ever put the secret in the message it threw: the 400 body is
+     `invalid span: traceId "abc"` and the transport stub threw a bare `"fetch failed"`. The stub
+     now throws what real `fetch` throws — it quotes the URL, credential and all — and the same
+     mutation is 16/17.
+  5. **NOT A DEFECT, and the review had it backwards.** The review said `endpointSecrets` pushes
+     `u.origin` into the mask list so the hostname IS masked, contradicting its own docstring
+     ("the HOSTNAME is deliberately left legible"). Driven against the real exporter on three
+     message shapes, the docstring is TRUE: `origin` is `https://collector.internal:4318`, not
+     the bare host, so `getaddrinfo ENOTFOUND collector.internal` survives verbatim while the
+     full URL form — the one that carries the credential — is masked. That is the intended split
+     and it now has an assertion (finding 4's test pins both directions). **Recorded because the
+     review reached a false conclusion by reading the mask LIST instead of running the mask**,
+     which is this repo's standing rule stated as a defect.
+  6. **Judged not worth a change.** `otlpTraceRequest`'s "TOTAL OVER ITS INPUT" was called false
+     for three hand-built inputs; two of the three were finding 2 and are fixed. The third is
+     that a `Symbol`-keyed attribute bag is silently dropped rather than reported, which is what
+     "a span that fails is DROPPED, not throwing and not repaired" already promises.
 
 - ~~**C.5 · The span taxonomy was NOT grown for subgraphs: a subgraph renders as `loom.tool`.**~~
   **CLOSED by `aaa4a9a`, and NOT by adding a name — §D.2 was answered "no ninth name".** The
@@ -1237,7 +1279,7 @@ anecdotes.
     `graph/compile.ts`, `run/hooks.ts`, `journal/events.ts`) — and five had already gone stale
     exactly as predicted: `spans.ts:798` and `:993` both land on unrelated comments,
     `replay.ts:640` is 28 lines short of the `shadow` store it named, `cli.ts:2408` is 339 short
-    of `readMcpServers`, and `hooks.ts:89` names a path with no file at it at all. All sixteen are
+    of `readMcpServers`, and `hooks.ts:89` was two lines short of the `HookContext` docstring it named and landed on a closing brace — and it named no directory, so a reader could not tell which `hooks.ts` was meant. An earlier wording of THIS sentence said the path had no file at all; `packages/core/src/run/hooks.ts` exists and has a line 89. That is §F.18's own failure mode committed inside §F.18. All sixteen are
     symbols now. **A claim about a SET checked by a grep over one MEMBER of it is the
     same defect as a stale line number**: it fails silently, by looking checked.
     **The invariant, restated with its exemptions named so it is falsifiable:** every remaining

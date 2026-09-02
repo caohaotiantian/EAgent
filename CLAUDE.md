@@ -39,8 +39,11 @@ runs the test: a `feat` commit touching one of them fails the gate unless it car
 it is what a kernel is for. That trailer is the escape hatch and also the ledger:
 the guard's own output lists every seam ever declared, with its reason, and that count is not a
 number anyone can quietly reset. Read it there and nowhere else: `git log --grep='^Kernel-seam:'`
-is NOT the ledger — it matches prose about the trailer as readily as the trailer, and today it
-overcounts by one for exactly that reason.
+is NOT the ledger — it matches prose ABOUT the trailer as readily as the trailer itself, so it
+inflates precisely when somebody documents how the ledger works. Nor is git's own trailer
+parser (`%(trailers:key=Kernel-seam,valueonly)`) the fix: it reads only the final paragraph,
+so it MISSES every commit that put the line mid-body, and undercounts. Three commands, three
+answers; only the guard reads the declarations themselves.
 
 The list says nothing about whether `engine.ts` should be split — see its header for three
 arguments against. `check-surface.mjs` pins the exported NAME SET and nothing else, so it reports
