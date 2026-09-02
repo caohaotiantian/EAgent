@@ -487,10 +487,27 @@ interface RollbackWalkStep {
  * operator; if those two disagreed by one coercion, the hash would bind the preview to something
  * other than what runs. `tool.called` carries `argsShape` and `argsDigest` and never the values,
  * so `details` is genuinely the only channel an undo's arguments can come from.
+ *
+ * `undefined` MEANS "THE JOURNAL DOES NOT CARRY THEM", AND IT USED TO MEAN `{}`. That coercion
+ * was the last fail-open in this neighbourhood: `ToolResult.details` is optional and typed
+ * `unknown` on the way back out of the journal, so a tool that recorded no undo record — every
+ * tool that declares a `compensation` and never writes one, which nothing in the graph, the
+ * registry or `GRAPH012` requires it to — reached `#invokeTool` with `args = {}`. Measured on a
+ * two-node graph whose `db.insert` returns `{content, writes}` and no `details`: `db.delete` was
+ * invoked with `{}`, deleted nothing, returned `"deleted"`, and the run journaled
+ * `compensation.recorded{outcome: "compensated"}` over a row still sitting in the world. An undo
+ * dispatched with arguments nobody recorded is not a refusal and is not an undo; it is a guess
+ * that lands in the operator's evidence as a fact.
+ *
+ * SO THE DISCRIMINATION IS PRESENCE, NOT EMPTINESS, and `details: {}` is deliberately still
+ * arguments. A recorded empty object is a tool SAYING its undo takes none — `fs.restore` needs
+ * `{path, previous}`, but an undo can legitimately need nothing — and the journal reconstructs
+ * `{}` exactly. What it cannot reconstruct is an absent key, a `null`, or a non-object, and
+ * those three are the ones that now come back `undefined` for `#compensateOne` to refuse.
  */
-function detailsOf(result: unknown): Record<string, unknown> {
+function detailsOf(result: unknown): Record<string, unknown> | undefined {
   const details = (result as { readonly details?: unknown } | undefined)?.details;
-  return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : {};
+  return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
 }
 
 /**
@@ -1627,7 +1644,26 @@ export class Engine {
         reason: `no live \`effect.completed\` is recorded for ${step.compensates}, so the undo record ("details") does not exist`,
       };
     }
+    // THE SAME REFUSAL, ONE STEP LATER, AND IT IS THE ARM THAT WAS MISSING. A result that EXISTS
+    // and carries no `details` is not a weaker version of the case above — it is the same fact,
+    // "the arguments this undo needs are not in the journal", arriving through the other door.
+    // It read `args = {}` and dispatched, so the operator's record said `compensated` about an
+    // effect still standing in the world. Refusing is always allowed; loosening never is, and a
+    // guard that cannot reconstruct what it would undo has to fail closed rather than undo
+    // something else. `not_attempted` and NOT `failed`: nothing was attempted, and the two states
+    // send a reader to different places — `failed` says the undo tool ran and did not work.
+    // NOT `retryable`: the recorded result is what it is on every future pass, so this settles in
+    // `planCompensation` exactly like its structural neighbours, and a rewind after it re-plans
+    // to zero steps rather than looping on a record that will never grow a `details`.
     const args = detailsOf(result);
+    if (args === undefined) {
+      return {
+        outcome: "not_attempted",
+        reason:
+          `the recorded result for ${step.compensates} carries no \`details\`, so the arguments "${step.undo}" ` +
+          `would undo "${step.tool}" with are not in the journal — this ${step.irreversibility} effect stands`,
+      };
+    }
 
     // `step.seq` AS THE ORDINAL, which is what makes the key derived rather than merely stable.
     // The seq of the `tool.called` being undone is unique per append and recomputable from the
@@ -3078,20 +3114,26 @@ export class Engine {
     ctx: { readonly log: RunLog },
   ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
     const walk = await this.#planRollback({ runId, log: ctx.log, ...(live === undefined ? {} : { ctx: live }), p, sinceSeq: atSeq });
-    const steps: RewindPlanStep[] = walk.map((item) => ({
-      runId: String(item.runId),
-      seq: item.step.seq,
-      compensates: item.step.compensates,
-      tool: item.step.tool,
-      irreversibility: item.step.irreversibility,
-      ok: item.step.ok,
-      ...(item.step.undo === undefined ? {} : { undo: item.step.undo }),
-      ...(item.step.blocked === undefined ? {} : { blocked: item.step.blocked }),
-      // Only where an undo would actually be built. A step nothing will attempt has no arguments
-      // to bind, and `#compensateOne` reads `details` off the recorded result for the rest.
-      ...(item.result === undefined || item.step.undo === undefined ? {} : { argsDigest: digest(detailsOf(item.result)) }),
-      ...(item.undispatchable === undefined ? {} : { undispatchable: item.undispatchable }),
-    }));
+    const steps: RewindPlanStep[] = walk.map((item) => {
+      // Only where an undo would actually be built, and `detailsOf` is asked rather than
+      // second-guessed: it returns `undefined` for exactly the results `#compensateOne` refuses
+      // to dispatch on, so "this step shows an `argsDigest`" and "this step will be attempted"
+      // stay the same sentence. Computing the digest of a coerced `{}` here would have bound the
+      // operator's hash to arguments that were never recorded and an undo that must not run.
+      const args = item.step.undo === undefined ? undefined : detailsOf(item.result);
+      return {
+        runId: String(item.runId),
+        seq: item.step.seq,
+        compensates: item.step.compensates,
+        tool: item.step.tool,
+        irreversibility: item.step.irreversibility,
+        ok: item.step.ok,
+        ...(item.step.undo === undefined ? {} : { undo: item.step.undo }),
+        ...(item.step.blocked === undefined ? {} : { blocked: item.step.blocked }),
+        ...(args === undefined ? {} : { argsDigest: digest(args) }),
+        ...(item.undispatchable === undefined ? {} : { undispatchable: item.undispatchable }),
+      };
+    });
     const dispatch = steps.filter((s) => s.undo !== undefined && s.undispatchable === undefined).length;
     const header = { runId: String(runId), atSeq: atSeq as number, attached: live !== undefined, steps };
     return { plan: { ...header, dispatch, blocked: steps.length - dispatch, planHash: digest(header) }, walk };
