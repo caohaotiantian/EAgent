@@ -3087,9 +3087,10 @@ export class ControlPlane {
         // 404 means "no such run", never "not yours" — so a caller cannot use this route to
         // learn that a run exists.
         handle: async ({ res, params, auth }) => {
-          const p = await engine.projection(params[0] as RunId);
+          const runId = runIdIn(params[0]!);
+          const p = await engine.projection(runId);
           if (p === undefined || !ownsRun(p, mustAuth(auth))) {
-            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${params[0]} not found`);
+            throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
           }
           send(res, 200, this.#summary(p));
         },
@@ -3129,15 +3130,16 @@ export class ControlPlane {
          * with a second GET on `/runs/<childRunId>/trace`, which keeps each fetch's
          * authorization scoped to one run instead of silently widening it to every descendant.
          *
-         * **THAT SECOND GET CANNOT BE MADE TODAY, AND SAYING SO IS THE POINT.** A child run id
-         * is `${parent}~${nodeId@branchPath#iteration}`, so it contains a `#` — and this
-         * route's capture is `([^/]+)` read straight out of `params[0]`, never through
-         * `safeDecode`, which the channel segment two screens down does use. A percent-encoded
-         * `%23` therefore never becomes a `#`, and the run is unreachable by URL while `GET
-         * /runs` happily lists it. `TODO.md` §A.36 carries it: the fix is one helper call on
-         * three routes, and it changes what URLs an authenticated plane accepts, which is its
-         * own decision rather than a rider on the CLI's exporter. So a subgraph's child trace
-         * reaches a collector today through `loom trace --otlp` and not through this door.
+         * **THAT SECOND GET HAS TO BE PERCENT-ENCODED, AND UNTIL §A.36 IT COULD NOT BE MADE
+         * AT ALL.** A child run id is `${parent}~${nodeId@branchPath#iteration}`, so it
+         * carries `@` and `#`, and this route's capture used to be `([^/]+)` read straight out
+         * of `params[0]` — so `%23` never became `#`, the store held no such key, and the run
+         * was unreachable by URL while `GET /runs` listed it by its real id. Every run-id
+         * capture on this plane now resolves through `runIdIn`, which is `safeDecode`; that
+         * helper's docstring names the nine routes and argues why decoding widens no
+         * authorization. `curl -G --data-urlencode` or one `encodeURIComponent` builds the
+         * link, and `test/server/child-run-by-url.test.ts` fetches a real child's trace that
+         * way. `TODO.md` §A.36 was the row; it said "three routes" and the grep said nine.
          *
          * `loom trace` SPLICES WHAT IT RENDERS AND DOES NOT SPLICE WHAT IT EXPORTS, and the
          * split is this route's rule applied twice rather than an inconsistency. A terminal
@@ -3164,7 +3166,7 @@ export class ControlPlane {
          * `truncated: true` so nobody reads a partial waterfall as a finished one.
          */
         handle: async ({ res, params, url, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           // 404 means "no such run", never "not yours" — the sibling routes' rule, and a
           // trace is reconnaissance about a run's whole shape, so it is not a weaker one.
           const p = await engine.projection(runId);
@@ -3229,7 +3231,7 @@ export class ControlPlane {
          * an approver on one gate is not a key to the run.
          */
         handle: async ({ res, params, url, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           const who = mustAuth(auth);
           const existing = await engine.projection(runId);
           if (existing === undefined || !ownsRun(existing, who)) {
@@ -3255,7 +3257,7 @@ export class ControlPlane {
         // you cancel somebody else's run, so this route asks `ownsRun` — owner, unowned, or
         // operator — and never the wider gate rule.
         handle: async ({ res, params, body, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           const who = mustAuth(auth);
           const existing = await engine.projection(runId);
           if (existing === undefined || !ownsRun(existing, who)) {
@@ -3411,7 +3413,7 @@ export class ControlPlane {
          * never allowed to fall back to the run's owner.
          */
         handle: async ({ res, params, body, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           const who = mustAuth(auth);
           const existing = await engine.projection(runId);
           if (existing === undefined || !ownsRun(existing, who)) {
@@ -3454,7 +3456,7 @@ export class ControlPlane {
         method: "GET",
         pattern: /^\/runs\/([^/]+)\/gates$/,
         handle: async ({ res, params, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           const who = mustAuth(auth);
           const p = await engine.projection(runId);
           if (p === undefined || !mayReachGates(p, who)) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} not found`);
@@ -3544,7 +3546,7 @@ export class ControlPlane {
         method: "POST",
         pattern: /^\/runs\/([^/]+)\/gates\/([^/]+)$/,
         handle: async ({ req, res, params, body, auth }) => {
-          const runId = params[0] as RunId;
+          const runId = runIdIn(params[0]!);
           const gateId = params[1] as GateId;
           // A DOOR PRE-FILTER, NOT THE AUTHORIZATION. `HumanGateBroker.#authorize` is the
           // one chain, for this door and the four others, and it would refuse a decision this
@@ -3625,7 +3627,7 @@ export class ControlPlane {
                 // `raw()` and not `body()`: the signature is over the bytes as sent, and
                 // re-serializing a parsed object would verify a string nobody signed.
                 const out = await this.#callbacks!.handle({
-                  runId: params[0] as RunId,
+                  runId: runIdIn(params[0]!),
                   channel: safeDecode(params[1]!),
                   body: await raw(),
                   headers: headerMap(req),
@@ -3853,7 +3855,7 @@ export class ControlPlane {
    */
   async #streamEvents(ctx: RequestContext): Promise<void> {
     const { res, req, params } = ctx;
-    const runId = params[0] as RunId;
+    const runId = runIdIn(params[0]!);
     const bus = this.#bus;
 
     // EXISTENCE AND OWNERSHIP, CHECKED TOGETHER AND BEFORE THE 200.
@@ -4187,6 +4189,66 @@ function safeDecode(segment: string): string {
   } catch {
     return segment;
   }
+}
+
+/**
+ * The run id out of a `([^/]+)` capture — percent-decoded, on every route that takes one.
+ *
+ * IT EXISTS BECAUSE A CHILD RUN WAS LISTED AND UNREACHABLE. `Engine`'s subgraph node mints
+ * `${parent}~${task.taskId}` and a `TaskId` is `nodeId@branchPath#iteration`, so a delegated
+ * run's id contains `@` and `#` — both of which `encodeURIComponent` escapes. Read raw, the
+ * capture stayed `…~delegate%40root%230`, no store held that key, and every by-id route
+ * answered `E_RUN_NOT_FOUND` for a run `GET /runs` had just listed by its real id. Measured
+ * before the fix: parent trace 200, child trace 404, child summary 404, both ids present in
+ * the list body. `TODO.md` §A.36 says "three routes"; the count is NINE — the route table
+ * holds sixteen patterns and nine of them capture a run id — and being wrong by six is why
+ * this is a named helper rather than a call site somebody remembers to copy.
+ * `/usr/bin/grep -ac 'runIdIn(params\[0\]!)' server/http.ts` answers 9.
+ *
+ * THE NINE, so the claim is checkable rather than "all of them": `GET /runs/:id`,
+ * `GET /runs/:id/events` (via `#streamEvents`, which reads `params[0]` itself),
+ * `GET /runs/:id/trace`, `GET /runs/:id/rewind-plan`, `POST /runs/:id/commands`,
+ * `POST /runs/:id/oversight`, `GET /runs/:id/gates`, `POST /runs/:id/gates/:gateId`, and
+ * `POST /runs/:id/callbacks/:channel`.
+ *
+ * IT DOES NOT WIDEN AUTHORIZATION, and that is the question worth answering rather than
+ * asserting, because "the plane accepts more URLs than it did" is true:
+ *
+ *  - **Routing is unaffected.** `#dispatch` matches `url.pathname` — the RAW path — against
+ *    the patterns, and decoding happens inside the handler after the match. Measured against
+ *    a `node:http` server: `/runs/a%2Fb/trace` arrives with `pathname` still
+ *    `/runs/a%2Fb/trace`, so `^\/runs\/([^/]+)\/trace$` captures `a%2Fb`, and
+ *    `/runs/a%2Fb%2Ftrace` matches that pattern NOT AT ALL rather than becoming a third
+ *    segment. A `%2F` therefore cannot move a request to a different route or past
+ *    `#requiresBearer`, whose callback carve-out tests the same raw pathname. The set of
+ *    unauthenticated requests is byte-for-byte the set it was.
+ *  - **Ownership is read off the RUN, never off the URL.** `ownsRun` and `mayReachGates` take
+ *    the projection this id resolved to and compare it against the credential. Decoding
+ *    changes WHICH run is found; it cannot change who may see the one that is. A caller who
+ *    percent-encodes somebody else's run id gets the same 404 they got before, from the same
+ *    check — and it is still 404 and not 403, so the door is not an existence oracle either.
+ *  - **A child run is not a back door into its parent.** It is a run in its own right with
+ *    its own `submittedBy` — copied from the parent's context — so `ownsRun` gives the
+ *    parent's owner their own delegation and nobody else's.
+ *  - **Aliasing is harmless.** `/runs/abc` and `/runs/%61%62%63` now name one run. They
+ *    resolve to one projection, so one ownership answer; the only id that reaches the journal
+ *    or an idempotency key is the decoded one.
+ *  - **A run id is a store KEY, never a path.** `MemoryStateStore` is a `Map` and
+ *    `SqliteStateStore` binds it as a parameter, so a decoded `/` or `..` is a lookup that
+ *    misses, not traversal.
+ *
+ * `safeDecode` AND NOT `decodeURIComponent`, for the reason stated there: `%zz` throws
+ * `URIError`, the dispatcher would call that a bug in Loom, and on the callback route the
+ * sender is unauthenticated. Falling back to the undecoded segment turns a stranger's
+ * nonsense into the 404 it deserves.
+ *
+ * THE GATE ID CAPTURE IS DELIBERATELY LEFT RAW. `newGateId` is `gate_${ulid()}` — Crockford
+ * base32, and nothing `encodeURIComponent` touches — so decoding it would be a no-op that
+ * implies a shape gate ids do not have. The same goes for `/graphs/by-hash/:hash`, which is
+ * hex.
+ */
+function runIdIn(segment: string): RunId {
+  return safeDecode(segment) as RunId;
 }
 
 /** All headers, flattened. A channel needs the pair it signs with, and names vary. */
