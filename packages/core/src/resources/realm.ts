@@ -964,8 +964,11 @@ export function carryRealmBrand<T>(from: unknown, to: T): T {
  *     TypeError: Cannot perform 'IsArray' on a proxy that has been revoked
  *
  * out of `Array.isArray`, and `Object.getPrototypeOf` and `Object.entries` throw on the same
- * value one line later. `redact.ts`, `run/delivery.ts` and `telemetry/spans.ts` each carry a
- * private `isList` for exactly this. A self-referential return is the same class through a
+ * value one line later. **`run/delivery.ts` and `telemetry/spans.ts` each carry a private guard
+ * for exactly this — `isArrayValue` and `isList` — and `redact.ts` does NOT, which this sentence
+ * claimed for months and `TODO.md` §A.19 copied.** Measured 2026-09-02: a grep for either name
+ * over `security/redact.ts` returns nothing, and its four `Array.isArray` sites are ordinary. Two
+ * files, named, rather than three asserted. A self-referential return is the same class through a
  * different door: `{o.self = o}` from a hook body exhausted the stack, measured,
  * `RangeError: Maximum call stack size exceeded`. Neither reached a caller as anything naming
  * the resource that produced it.

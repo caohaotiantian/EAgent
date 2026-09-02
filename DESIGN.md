@@ -330,7 +330,7 @@ replay divergence is terminal **for the recorded-effect path** only, which was i
 
 ---
 
-## The live list — written 2026-08-29 as items 9 to 13; item 14 added 2026-09-01; EMPTY since 2026-09-02
+## The live list — items 9 to 14 are CLOSED below; items 15 to 28 were opened 2026-09-02 by a survey
 
 **STATUS AT `4a70a4e`, arrived at by RUNNING all six commands rather than by reading the diffs
 that landed between.** The rule this list is written under — *every item names a command that
@@ -429,38 +429,74 @@ as a `fix` and cost nothing, and items 10 and 13 have since landed as `a8d62fb` 
 one trailer each, touching exactly the two files named above. The method produced a number that
 survived contact — three predictions, three hits.*
 
-### What follows item 14 — STILL NOTHING, and one of the three leftovers is now gone
+### What follows item 14 — FOURTEEN ITEMS, and the list is live again
 
-**This section's rule is that an item names a command which FAILS TODAY; finding one is itself a
-measurement, and no pass has produced an ITEM.** Re-checked 2026-09-02 at `4a70a4e`: all six items above
-pass, and no candidate for a fifteenth was reproduced through the shipped binary. **An entry
-written without a run would be the thing this section exists to refuse**, so the honest state is
-an empty list and it is written as one.
+**This section's rule is that an item names a command which FAILS TODAY, and for five passes no
+pass produced one.** That was written up each time as a measurement rather than as a gap in
+effort, and it was honest every time — but it was also the same method each time: re-run the
+six items already on the list and look for a fifteenth while doing it. On 2026-09-02 a different
+method was tried, and it is the method rather than the result that is worth recording.
 
-**AND THE ONE THING THAT LOOKED LIKE A FIFTEENTH IS THE REASON THIS PARAGRAPH EXISTS.** C.4's
-residue was closed by a build — `loom trace <runId> --otlp <endpoint>` now posts to a collector —
-and the change was reached by driving `loom trace <id> --otlp <ep>` at `c8bdf22` and getting:
+**SEVEN AGENTS AUDITED ALL 46 OPEN BACKLOG ROWS IN PARALLEL, each required to paste a command it
+had actually run.** `docs/backlog-survey-2026-09-02.md` is the record. Fourteen rows produced a
+failing command; thirteen are blocked on a named thing; sixteen are refused with a measurement;
+three turned out FALSE at HEAD and are corrections rather than work. **The live list is therefore
+not empty, and never should have been — what was empty was the search.**
 
-    E_CONFIG_INVALID: unknown flag: --otlp. A flag this binary does not understand is IGNORED
-    unless it is refused here — and for --token, ignored means the control plane authenticates
-    nobody. Run `loom help` for the list.
+**The bar was set high on purpose, and the reason is a mistake made earlier the same day.** The
+`--otlp` work was reached by driving `loom trace <id> --otlp <ep>` and getting
+`unknown flag: --otlp`, and the first draft of that change called this "a command that fails" and
+proposed it as item 15. It is not: that transcript is manufacturable for every unbuilt thing in
+this corpus — `--gzip`, `--sample`, any §E row — so admitting it turns this section's rule into a
+counterexample generator and the roadmap stops discriminating between a gap and a wish. Every
+item below names a behaviour that is WRONG or MISSING through the shipped binary or the library
+surface, not a flag table's opinion about a spelling.
 
-**That is a command that fails, and it is NOT an item, and the difference is the whole content of
-this section's rule.** An unknown-flag refusal is manufacturable for every unbuilt thing in the
-corpus — `--gzip`, `--sample`, any §E deferred row produces the identical transcript — so
-admitting it would turn "names a command that FAILS TODAY" into a counterexample generator and
-this section would stop discriminating between a gap and a wish. What the transcript actually
-shows is that the capability was operator-unreachable, which is a smaller and true claim. **The
-list therefore stayed empty while the work landed**, which is the correct behaviour of a rule and
-not a failure of one.
+**THE ORDER IS THE PROJECT'S OWN RULE, restated because it is the only thing that makes a list
+like this an argument rather than a preference: SILENT-AND-WRONG OUTRANKS LOUD-AND-MISSING.**
+Items 15–20 are all oversight or replay failing open — the runtime reaches a question it cannot
+answer, answers it with the passing value, and the operator's evidence says the run is fine.
+Items 21–28 announce themselves: a 404, a stall, a refusal, a stale binary.
 
-What is left over is not roadmap-shaped, and `TODO.md` is where each of the **two** remaining
-lives with its own closing condition: A.8's (one line carries both triggers' answers and only the
-`rewind` arm has a fixture), and G.1's (opening `EvaluatorNode.effects` is a schema change to two
-kernel files under a `feat`, so it is a seam a maintainer spends, not a lane). Neither is a
-command that fails; each is a named condition that would close a row. C.4's was the third and is
-struck — and it cost the kernel nothing, exactly as its own row predicted: `cli.ts` is not one of
-the ten, so the census is still **10 files, 10 declared seams**.
+| # | row | fails today | what is silently wrong |
+|---|---|---|---|
+| **15** | A.18 | `a18-assert.test.ts` | a router that read an INJECTED channel steers an irreversible action reading only clean channels, and under a human ceiling of `on` that action runs with **zero gates**. Control-flow taint is not tracked at all |
+| **16** | A.30 | `a30b.test.ts` | an `effect.completed` with no `details` dispatches its undo with `args = {}` and journals `outcome: "compensated"` **while the effect is still in the world** |
+| **17** | A.2 | `a2-fail.test.ts` | a refusal whose error RECORD varies by path replays with a different record and scores `match: true`. `compare()` grades the code and nothing about the record |
+| **18** | G.5(a) | `g5.test.ts` | after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs |
+| **19** | A.23 | `a23-assert.test.ts` | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
+| **20** | B.2 | `b2-reserve.test.ts` | an outstanding reservation is invisible to the fold `GET /runs/:id` serves, and `task.started`'s absent appender makes a headline concurrency assertion compare 0 to 0 |
+| **21** | A.36 | `a36.test.ts` | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
+| **22** | B.1 | `b1-strand.test.ts` | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
+| **23** | A.13 | `a13-fail.test.ts` | `loom run` counts its own laps instead of the run's progress, so it abandons a run still journaling progress well inside the bound its graph declared |
+| **24** | A.29 | `a29.test.ts` | a frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN deterministic verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression |
+| **25** | D.1 | `loom run --mcp-file <typo>` | `readMcpServers` silently drops every key it does not know, so a per-server `irreversibility` — and a typo'd `envAllow` — vanish without a word |
+| **26** | H.4 | `loom trace <id> --port 9999 --token sekret --suite x` | three flags accepted and ignored on a verb that reads none of them, while `--otlp` is the single verb-scoped exception. A verb→flag table lands only in `cli.ts` |
+| **27** | H.3 | `grep -anE 'THREE\|three' graph/compile.ts` | two clauses say three where the code tests four — and the row itself undercounted its own survivor set |
+| **28** | H.1 | `./bin/loom --help` | the committed binary is 48 source files stale AND predates the freshness guard, so it answers `--help` with exit 0 — the exact 2026-08-28 failure that guard's docstring cites as its reason for existing |
+
+**WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** **FIVE** of the
+fourteen touch a pinned file, and they are named rather than counted: 15 (A.18), 16 (A.30),
+17 (A.2), 18 (G.5) and 20 (B.2). *An earlier draft of this paragraph said six and then listed
+five, having counted G.5's compile half as a sixth item when it is the same item — which is the
+uncheckable-count failure `TODO.md`'s second rule exists for, committed inside the paragraph that
+exists to make the price checkable.* **Four of the five are `fix`es of guards that already exist
+and do not hold, and `fix` may touch the kernel freely — which is what a kernel is for.** The one that is NOT a fix is item 20: giving
+`budget.reserved` and `task.started` an appender is a new durable fact, so it is a `feat` on
+`journal/events.ts` and costs one `Kernel-seam:` trailer. **One trailer is the price of this
+list**, the census would end it at 11, and a maintainer who thinks that is too fast should cut 20
+first — it is the only item here whose defect is a fold's blindness rather than a guard failing
+open.
+
+### What is left over, and is not roadmap-shaped
+
+Thirteen rows are blocked on a named thing and sixteen are refused with a measurement; the survey
+carries both tables with their blockers and their reasons. **The two blockers that recur are worth
+naming here, because they are design questions rather than work:** a durable fact the journal has
+no vocabulary for (A.11's "the request may have reached the source", C.1's six span names, C.3's
+scheduler decision, E.2's cross-run coordinate), and a decision only the maintainer can make
+(D.3's graph-level cleanup node, D.5's promotion coordinate, G.1's `EvaluatorNode.effects` schema).
+Neither becomes an item by being wanted.
 
 **14 · `loom replay` and `loom trace` refuse a run whose graph the workspace already holds — CLOSED
 by `0a8aa6d`.** The failure this item was written from, driven at `5ffc223` in a workspace built

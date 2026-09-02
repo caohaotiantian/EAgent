@@ -163,9 +163,22 @@ the capability was operator-unreachable, which is a different and smaller claim.
 
 ## What is still open, by section
 
+**EVERY OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
+`docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
+required to paste a command it had actually run: **14 BUILDABLE** (a command fails at
+`9f81f77`), **13 OPEN-HARD** (blocked on a named thing), **16 REFUSED** (with a measurement),
+**3 STALE** (the row own claim is false). The fourteen are now `DESIGN.md`s live Sequence,
+items 15-28, ordered by this project rule that silent-and-wrong outranks loud-and-missing.
+
+**The verdicts are NOT copied into the rows below.** A per-row verdict here would be a second
+copy of a fact whose first copy is dated and reproducible, and the second copy is the one that
+rots - this file most-repeated finding about itself. What the survey changed IN this file is
+the three false rows, and only those.
+
+
 **Recounted 2026-09-02 by running the grep, not by arithmetic on the previous number** — which is
-the only method that has ever produced a right answer here. **Re-run again when `--otlp` added
-§H.4 and §A.36: two cells moved** (§H 4 → 5 rows, 3 → 4 open; §A 34 → 35 rows, 19 → 20 open),
+the only method that has ever produced a right answer here. **Re-run again when `--otlp` added §H.4 and §A.36, and again when the
+2026-09-02 survey struck A.15: three cells moved** (§H 4 → 5 rows, 3 → 4 open; §A 34 → 35 rows, 19 → 20 open),
 and the struck column did not, because both new rows are open. The member enumeration below is therefore unchanged, which is a fact the greps produced
 rather than one anybody assumed. Every column below comes from one of
 these three commands, and a reader who does not believe a cell should run them rather than argue:
@@ -188,7 +201,7 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 35 | 15 | 20 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 35 | 16 | 19 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
@@ -198,7 +211,7 @@ can be wrong without being falsifiable.
 | §H | 5 | 1 | 4 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.8, A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.5; **§D** D.2, D.4;
+A.8, A.14, A.15, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.5; **§D** D.2, D.4;
 **§H** H.2.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
@@ -478,8 +491,15 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   reports MERGED is not evidence the work arrived**; `git merge-base --is-ancestor <commit> loom`
   is, and it is one command per lane.
 
-- **A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual.** ~~A run past 10,000 is reached by no lap and
-  `RunClockTick.truncated` is the only reason anyone knows.~~ **CLOSED.** `StateStore.listRuns`
+- ~~**A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual** — a run past 10,000 reached by no lap, with
+  `RunClockTick.truncated` the only reason anyone knows.~~ **CLOSED, AND THE ROW WAS THE LAST
+  THING STILL SAYING OTHERWISE.** It carried its own closure in prose while its id did not obey
+  this file's struck-row convention (`- ~~**A.N`), so every recount since has counted it open —
+  and it nested a second `~~` inside the first, which is why no reader noticed. **Same defect
+  A.34 and A.35 had**, recorded beside them, and it survived that recount because the fix was
+  applied to those two rows rather than to the way rows are checked. Re-run 2026-09-02:
+  `node --test packages/core/test/deployment/run-clock-window.test.ts` → 6 pass, 0 fail, and
+  `RUN_CLOCK_SCAN_CEILING` has no declaration left in `src/`. `StateStore.listRuns`
   grew `RunFilter.after` — a keyset cursor, exclusive, refusing a cursor its own filter does not
   admit — with four conformance cases behind it over both backends. `runClockTick` traverses in
   pages of `limit` instead of indexing into a capped array, so no run is out of reach at any N;
@@ -541,7 +561,24 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   is a boundary rather than a hole, but an unexamined one. **Closes when** somebody drives a
   hostile-content router and either finds the escape or writes down what the two bounds prove.
 
-- **A.19 · Partial reads of untrusted values remain in "~25 files", and that count fails this
+- **A.19 · CORRECTED 2026-09-02 BY RUNNING IT: the one runnable claim in this row is FALSE, and
+  the row's own escape hatch is now the close.** It said three files each carry a private array
+  guard. There are **two** — `telemetry/spans.ts`'s `isList` and `run/delivery.ts`'s
+  `isArrayValue`. `security/redact.ts` defines neither: a grep for either name over that file
+  returns nothing, and its four `Array.isArray` sites are ordinary. **The number came from
+  `resources/realm.ts`'s own docstring**, which names the same three files, so the stale claim
+  had two homes and this row was the copy. That sentence is corrected in the same commit.
+
+  **The headline is unfalsifiable as written, and that is the finding rather than a detail.**
+  "~25 files" names no predicate, so it cannot be re-derived: `/usr/bin/grep -arl 'Array\.isArray'
+  packages/core/src | wc -l` gives **31** files and 250 occurrences, which is a different set
+  measured a different way and is evidence neither for nor against 25. This file's second rule —
+  *name the set a claim covers* — refuses a row shaped like this, and the row said so itself.
+  **Closes by deletion with the argument above, OR by naming the predicate** (which read counts
+  as a partial read of an untrusted value?) and re-deriving the set from it. Until one of those
+  happens it is a row nobody can check, which is the thing it warns about.
+
+  ORIGINAL TEXT, kept because the shape of the error is the lesson: Partial reads of untrusted values remain in "~25 files", and that count fails this
   file's own §F.8.** A revoked `Proxy` throws on `Array.isArray`; three files were swept, the
   rest were not, and there are now three private copies of the same guard under three different
   names. **The number is not enumerable as stated and nobody has re-derived it.** **Closes when**
@@ -1263,7 +1300,7 @@ declaration rather than "its own definition", and six docstrings, five in `cli.t
 `engine.ts`. An earlier wording here said "its own definition and four docstring mentions" and
 miscounted both halves, and the correction to it first said the construction grep returns ZERO,
 which is also wrong for the same reason — a claim about a grep has to be run, not reasoned. See §B.1) — and E.5's
-fork-list membership, where `README.md` still names **a reducer** among the five things that need
+fork-list membership, where `README.md` still names **a reducer** among the three things that need
 a fork. **A reason nobody has re-run in a week is still the best evidence there is for these, and
 it is not the same as a measurement taken now.** The gap has widened by four days since this
 paragraph was written, which is exactly the fact it exists to expose rather than to excuse.
@@ -1294,7 +1331,7 @@ paragraph was written, which is exactly the fact it exists to expose rather than
   from a journaled draw, a clock bound to a journaled task boundary, `Date` and `Intl` absent, an
   embedder `globals` seam that refuses a governed name). A user-authored reducer would run under
   exactly the machinery that was not there when the deferral was written, and a closed reducer set
-  is one of the five things README says still needs a fork.
+  is one of the three things README says still needs a fork (**it said five until 2026-09-02**; `README.md` has said three since the ledger went 5 -> 3 on 2026-09-01, and this section own closing paragraph said three while TWO of its sentences said five - this one and the preamble is fork-list line - so it contradicted itself in both directions at once. Both are corrected; the closing paragraph is historical statement that it went five to three on 2026-09-01 is about a transition and stays).
 - **E.6 · Free-form agent chatter.** "Makes termination unprovable and replay quadratic."
   **Unverifiable**: there is no chatter to replay, so "replay quadratic" has no measurable
   referent. The precondition holds; the reason names nothing that can be checked.
