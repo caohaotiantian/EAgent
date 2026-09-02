@@ -341,7 +341,16 @@ export interface RewindPlan {
    * count is simply upstream of the policy decision rather than downstream of it.
    */
   readonly dispatch: number;
-  /** Steps nothing will attempt, for either reason — `blocked` or `undispatchable`. */
+  /**
+   * Steps nothing will attempt — for any of THREE reasons, and this said "either" until the
+   * third one landed.
+   *
+   * `blocked` and `undispatchable` are fields ON the step, so a reader can see why. The third is
+   * an ABSENCE: a step whose `effect.completed` carried no `details` has no `argsDigest`, and
+   * since the undo-args refusal its undo is not dispatched — so it is counted here while
+   * carrying neither field. That is worth knowing before trusting a step's own flags to explain
+   * this number; `planRewind`'s filter is where all three are applied together.
+   */
   readonly blocked: number;
   /** Whether this engine holds a context for the run at all. Part of what `planHash` covers. */
   readonly attached: boolean;
