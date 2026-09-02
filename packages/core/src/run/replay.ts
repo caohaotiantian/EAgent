@@ -39,6 +39,11 @@
  * nobody asks for moves no channel — so `unservedEffects` counts against `match` rather
  * than being reported beside it. See `ReplayReport.match`.
  *
+ * AND "AGREED" INCLUDES WHAT A REFUSAL SAID. `compare` weighs the terminal error's MESSAGE as
+ * well as its code, because a refusal that keeps its classification and changes its sentence is
+ * two different claims about why a run stopped, and it used to score `match: true`. The one
+ * difference it forgives is a minted id — see `withoutMintedIds`, which names the set.
+ *
  * WHAT CANNOT BE REPLAYED FAITHFULLY is documented in D9.5 and is honest: secrets
  * (never journaled, so re-resolved), redacted fields (serve a token), forked runs
  * with modified inputs (they re-execute for real), and effects whose outcome was
@@ -359,6 +364,7 @@ export interface ReplayFrame {
     | "gate.decided"
     | "run.completed"
     | "run.failed"
+    | "run.message"
     | "graph.bound"
     | "effect.rebound"
     | "effect.unserved";
@@ -1216,9 +1222,9 @@ function compare(original: RunProjection, replayed: RunProjection, effects: Repl
   // faithful reproduction. `loom replay`'s exit code and `evolution/gate.ts`'s promotion decision
   // both read this verdict.
   //
-  // THE CODE AND NOT THE MESSAGE. A message carries numbers that legitimately differ between a
-  // recording and its replay (`spent`, `estimated`, an adapter name), so comparing it would
-  // report divergence for runs that agree; the code is the classification the run reached.
+  // THE CODE, AND THEN THE MESSAGE IN ITS OWN FRAME — see `run.message` below. This used to be
+  // the code ALONE, and the argument for that was measured and is now false; the frame that
+  // replaces it says why.
   //
   // `(no code)` is a failed projection with no `error` — a journal fragment, or a `run.failed`
   // written by hand. It compares as itself rather than matching everything, which is the same
@@ -1232,7 +1238,91 @@ function compare(original: RunProjection, replayed: RunProjection, effects: Repl
     actual: why(replayed),
   });
 
+  // WHAT THE REFUSAL SAID, AND NOT ONLY WHICH REFUSAL IT WAS. The frame above grades the error
+  // CODE, which catches a refusal that became a DIFFERENT refusal and misses one that kept its
+  // classification and changed its sentence. That second shape is not hypothetical: the provider
+  // refusal at `engine.ts`'s `framedProvider === ""` opened with `model adapter "<name>"` live
+  // and `the recorded turn` in replay — same code, same status, same channels, two different
+  // sentences, `match: true` throughout. The wording there was made path-independent; this frame
+  // is the general answer, because the next such message will not be that one.
+  //
+  // THE STANDING OBJECTION, AND WHY IT NO LONGER HOLDS. This file argued against a message frame
+  // on the grounds that "a message carries numbers that legitimately differ between a recording
+  // and its replay (`spent`, `estimated`, an adapter name)". Every one of those three was true
+  // when it was written and none of them is true now, which is the whole reason this frame is
+  // affordable:
+  //   * `spent` and `estimated` — A.1 put the adapter's own answers on the journal as a `quote`
+  //     effect, so a replay reserves the recorded number rather than a floor. Driven at HEAD in
+  //     `replay-fidelity.test.ts` on a node `budget.tokens: 500`: LIVE and REPLAY both say
+  //     `1041 estimated for this turn`, and the same file drives the node-`costUsd` and
+  //     run-`runTokens` refusals to the same byte-identical pair.
+  //   * an adapter name — it moved OFF the text and onto `details.adapter`, which is exactly
+  //     where a value that legitimately differs by path belongs.
+  //
+  // AND THE MESSAGE, NOT THE `details`. `details` is where the path-dependent values live by
+  // design — `details.adapter` is the adapter's name live and `null` in a replay, because a
+  // replay reaches no adapter and has nothing to ask. Grading it would report divergence for a
+  // run that agreed, which is the failure mode this frame must not have; grading the sentence
+  // catches the same class without it. A future value that must be compared should be spelled
+  // into the message, or given a frame that states its own tolerance.
+  //
+  // ONE TOLERANCE, AND IT IS THE ONE THE GATE FRAME ABOVE ALREADY STATES: a MINTED id differs
+  // between two runs by construction, so `withoutMintedIds` blanks them before the compare. The
+  // gate frame says it in prose — "ids are minted per run and always differ" — and a replayed
+  // run that expires a gate puts that id straight into the sentence: measured, the two
+  // `replay-expired-gate.test.ts` cases produced
+  //     expected  gate "gate_01HF7YAT00X9AFK8WE6241HDJT" expired with no decision
+  //     actual    gate "gate_01M1GE37R4N1H5S4NMS7JP4SR9" expired with no decision
+  // which is a faithful replay reported as a divergence. The set it covers is exactly `ids.ts`'s
+  // three mints and nothing else — a bare `ulid()` (a RunId), `gate_` + one, `cp_` + one — all
+  // three of which are 26 Crockford base32 characters, and a `TaskId` is DERIVED and so is left
+  // alone on purpose: `nodeId@branchPath#iteration` is the same string in both runs and a
+  // difference in it is a real divergence.
+  //
+  // `(no message)` for a `failed` projection with no `error`, and for the same reason `(no code)`
+  // exists one frame up: it compares as itself rather than matching everything.
+  //
+  // Emitted only when a refusal is in evidence on EITHER side. A pair of completed runs has no
+  // message to grade, and a frame that is always `match: true` teaches its reader to skip the
+  // whole family.
+  if (original.status === "failed" || replayed.status === "failed") {
+    const said = (p: RunProjection): string =>
+      p.status === "failed" ? withoutMintedIds(p.error?.message ?? "(no message)") : `(${p.status}, no error)`;
+    frames.push({
+      seq: seq++,
+      kind: "run.message",
+      match: said(original) === said(replayed),
+      expected: said(original),
+      actual: said(replayed),
+    });
+  }
+
   return frames;
+}
+
+/**
+ * A message with its MINTED ids blanked — the one difference a faithful replay is allowed.
+ *
+ * Everything else a refusal says is either the same in both runs or a real divergence. An id is
+ * neither: `ids.ts` mints three of them at random — a bare ULID (`RunId`), `gate_` + a ULID, and
+ * `cp_` + a ULID — and a replay runs into its own shadow journal, so those three CANNOT agree and
+ * a comparison that demands they do reports every gated run as broken. `compare`'s gate frame has
+ * always known this and states it as prose; this is the same rule applied to the text.
+ *
+ * The pattern is 26 Crockford base32 characters (no I, L, O or U — see `B32`), not delimited by
+ * another id character, which is what makes it match the ULID inside `gate_…` without eating the
+ * prefix. Deliberately NOT anchored to the three prefixes: a bare RunId carries none, and
+ * enumerating prefixes here would silently stop covering a fourth mint the day one is added.
+ *
+ * WHAT IT COSTS, stated rather than hidden: a divergence whose ONLY difference is a minted id is
+ * invisible to this frame. That is not a hole this frame opened — such a difference is invisible
+ * to every other frame in `compare` too, for the same reason, and a run's own id is not a fact
+ * about the run. A `TaskId` is the case that matters and it is untouched: it is DERIVED
+ * (`nodeId@branchPath#iteration`), so it is identical across runs and a difference in one is a
+ * genuine divergence this frame still reports.
+ */
+function withoutMintedIds(message: string): string {
+  return message.replace(/(?<![0-9A-Z])[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}(?![0-9A-Z])/g, "<minted-id>");
 }
 
 function canonicalEqual(a: unknown, b: unknown): boolean {

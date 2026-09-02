@@ -136,6 +136,21 @@ test("A RUN WHOSE GATE EXPIRED REPLAYS — the clock is an answer too", async ()
   assert.equal(report.replayed.status, "failed", "the replay reaches the same end, by the same route");
   assert.equal(Object.values(report.replayed.gates)[0]?.state, "expired");
   assert.deepEqual(h.fired, [], "a replay of a refusal must not perform the thing that was refused");
+
+  // AND THIS IS THE RUN THAT PAYS FOR `compare()`'s ONE TOLERANCE. The refusal names the gate, and
+  // a gate id is minted per run — `gate "gate_01HF7YAT00X9AFK8WE6241HDJT"` in the recording,
+  // `gate "gate_01M1GE37R4N1H5S4NMS7JP4SR9"` in the replay — so the `run.message` frame blanks
+  // minted ids before it compares. Without that this faithful replay reports a divergence, which
+  // is measured: it is what the frame did to both cases in this file when it first landed.
+  const said = report.frames.find((f) => f.kind === "run.message");
+  assert.ok(said !== undefined, "a failed run is graded on what it said");
+  assert.match(said.expected ?? "", /^gate "gate_<minted-id>" expired with no decision$/, said.expected);
+  assert.equal(said.actual, said.expected, "the same sentence about the same expiry, one id apart");
+  assert.notEqual(
+    Object.values(recorded.gates)[0]?.gateId,
+    Object.values(report.replayed.gates)[0]?.gateId,
+    "and the two ids really do differ, or the tolerance above is untested",
+  );
 });
 
 test("A REPLAY MUST NOT PAGE ANYBODY — an audit has no business reaching a human", async () => {
