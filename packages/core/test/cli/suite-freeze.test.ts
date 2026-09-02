@@ -123,10 +123,6 @@ async function corpus(runs: number, opts: { score: boolean }): Promise<Fixture> 
   // A "candidate" that drops the FIRST item: it fixes nothing and breaks the odd-length runs the
   // baseline got right — exactly the runs the corpus called golden.
   fn("pick-v3", `(view) => ({ writes: { picked: (view.get("items") ?? []).slice(1) } })`);
-  // THE A.29 CANDIDATE: it keeps every item and REORDERS them. The graph's own verifier asserts
-  // `picked.length === items.length` and nothing else, so every run of it is certified `pass` —
-  // and every byte of `picked` differs from the recording.
-  fn("pick-v4", `(view) => ({ writes: { picked: (view.get("items") ?? []).slice().reverse() } })`);
   fn(
     "check",
     `(view) => {
@@ -140,7 +136,6 @@ async function corpus(runs: number, opts: { score: boolean }): Promise<Fixture> 
   // directory as the promoted set.
   writeFileSync(join(dir, "better.json"), JSON.stringify(spec("function/pick-v2@stable")));
   writeFileSync(join(dir, "worse.json"), JSON.stringify(spec("function/pick-v3@stable")));
-  writeFileSync(join(dir, "reordered.json"), JSON.stringify(spec("function/pick-v4@stable")));
 
   const ids: string[] = [];
   for (let n = 1; n <= runs; n++) {
@@ -263,16 +258,6 @@ test("A GOLDEN CASE PINS THE WORK CHANNEL — NEVER THE GRADER'S, NEVER THE INPU
     assert.equal("items" in (kase.expect.channels ?? {}), false, "an input channel asserts nothing about a candidate");
     assert.equal(kase.expect.status, "succeeded");
     assert.equal(kase.expect.noIrreversibleWithoutGate, true, "the one expectation that is an invariant, not an output");
-    // AND THE THREE-AXIS PIN, BESIDE THE BYTE PIN AND NOT INSTEAD OF IT. `check` is an
-    // `assertion` evaluator reading one graph input (`items`) and one produced channel
-    // (`picked`), which is the shape `verificationPin` mints a pin for; `picked` stays in
-    // `channels` above, and it is `runCase` that stops comparing it while the pin holds.
-    const pins = kase.expect.verifiedBy;
-    assert.equal(pins?.length, 1, `case ${kase.id} carries no verification pin`);
-    assert.equal(pins![0]!.nodeId, "check");
-    assert.equal(pins![0]!.verdict.pass, true, "a golden case's own verifier said pass, or it would not be pinned");
-    assert.deepEqual(Object.keys(pins![0]!.fed), ["items"], "axis 3 pins the input the recording served the grader");
-    assert.deepEqual([...pins![0]!.certifies], ["picked"], "exactly one produced channel — VerifierPin condition 7");
   }
 
   // THE COST, STATED AS A MEASUREMENT. An expectation taken from what the baseline PRODUCED
@@ -283,73 +268,7 @@ test("A GOLDEN CASE PINS THE WORK CHANNEL — NEVER THE GRADER'S, NEVER THE INPU
   for (const kase of rest) {
     assert.equal(kase.expect.channels, undefined, `case ${kase.id} must pin no output the corpus did not certify`);
     assert.equal(kase.expect.status, "succeeded");
-    // NO BYTE PIN, SO NOTHING TO WAIVE — and a pin on a case with no `channels` would be a new
-    // refusal rather than a lifted one. The non-golden half is exactly the case it always was.
-    assert.equal(kase.expect.verifiedBy, undefined, `case ${kase.id} has no expectation for a pin to lift`);
   }
-});
-
-// ---------------------------------------------------------------------------
-// 2b · TODO A.29 — the byte pin's false negative, through the shipped verbs
-// ---------------------------------------------------------------------------
-
-/**
- * A CANDIDATE THE GRAPH'S OWN VERIFIER CERTIFIES IS NO LONGER A REGRESSION.
- *
- * This is the row's own reproduction, and before `freezeSuite` called `verificationPin` it was
- * RED: `1-must-pass FAILED — 4 must-pass failures` and `2-non-inferior FAILED — Δ -33.3pp` over
- * a candidate every one of whose runs the graph certified `pass`. Both halves are driven here —
- * the candidate that reorders and is certified must PROMOTE, and the one that drops an item and
- * is NOT certified must still be refused, which is what says the floor was narrowed rather than
- * removed.
- */
-test("A.29 · A CANDIDATE THE GRAPH'S OWN VERIFIER CERTIFIES PROMOTES; ONE IT REFUSES IS STILL REFUSED", async () => {
-  const c = await scoredCorpus();
-  const suiteFile = join(c.dir, "a29-floor.json");
-  const f = await freeze(c.dir, c.ids[0]!, suiteFile, ["--cases", "12"]);
-  assert.equal(f.code, 0, f.err);
-  const summary = JSON.parse(f.out) as { mustPass: number; withChannelExpectations: number; withVerifierPin: number };
-  // THE FREEZE ITSELF SAYS IT, so an operator reading the summary can see how much of the exam
-  // is a byte comparison and how much the graph's own verifier stands behind.
-  assert.equal(summary.withVerifierPin, summary.mustPass, "every golden case here can carry a pin");
-  assert.ok(summary.withVerifierPin > 0);
-  assert.equal(summary.withChannelExpectations, summary.mustPass, "…and the byte pin is still there beside it");
-
-  const promote = async (graph: string) => {
-    const r = await cli([
-      "promote", join(c.dir, graph),
-      "--baseline", join(c.dir, "graphs", "pick.json"),
-      "--suite", suiteFile,
-      "--proposed-by", "an-optimiser",
-      "--workspace", c.dir,
-    ]);
-    return JSON.parse(r.out.slice(r.out.indexOf("{"))) as {
-      promote: boolean;
-      candidate: { passRate: number };
-      checks: { id: string; pass: boolean; detail?: string }[];
-    };
-  };
-
-  const reordered = await promote("reordered.json");
-  assert.equal(
-    reordered.promote,
-    true,
-    `A.29: a candidate the verifier says is never worse must not be refused by a byte pin — ${JSON.stringify(reordered.checks.filter((x) => !x.pass))}`,
-  );
-  assert.equal(reordered.checks.find((x) => x.id === "1-must-pass")!.pass, true);
-  assert.equal(reordered.candidate.passRate, 1);
-
-  // THE CONTROL, and it is what makes the promotion above mean anything. `pick-v3` drops an item,
-  // so the SAME verifier says `pass: false` on it — axis 2 fails, the pin waives nothing, and the
-  // byte pin the case always had refuses it.
-  const worse = await promote("worse.json");
-  assert.equal(worse.promote, false);
-  assert.equal(worse.checks.find((x) => x.id === "1-must-pass")!.pass, false);
-
-  console.log(
-    `A.29 through the verbs: withVerifierPin ${String(summary.withVerifierPin)} of ${String(summary.mustPass)} golden(s)  ` +
-      `| reordered promote=${String(reordered.promote)}  | worse promote=${String(worse.promote)}`,
-  );
 });
 
 // ---------------------------------------------------------------------------

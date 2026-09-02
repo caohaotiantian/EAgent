@@ -93,7 +93,7 @@ import {
   promotionCeiling,
   scoreTrajectory,
 } from "./evolution/score.ts";
-import { gateCandidate, runEvalSuite, verificationPin, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
+import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
 import { gateCandidateLive, MIN_PAIRED_RUNS, pairedCostRatio, type LivePair, type Unmeasured } from "./evolution/live.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
@@ -7426,27 +7426,6 @@ const MIN_SUITE_CASES = 6;
  * - the graph's declared `inputs`. Replay serves those from the recording, so pinning one
  *   asserts nothing about the candidate and only inflates the case.
  *
- * 4. `verifiedBy` — **the three-axis pin, on the golden cases that can carry one, and it is the
- *    only thing here that makes (3) cheaper rather than more expensive.** It names the
- *    evaluator that graded the recording, the verdict it wrote, and the digests of the channels
- *    the recording served it from outside the graph; `runCase` then stops comparing the ONE
- *    channel that verifier read and the graph produced. So a candidate that changes the work
- *    channel in a way the graph's own definition of correct does not care about is no longer a
- *    must-pass failure — which is TODO A.29, and the false negative it names is a measurement
- *    rather than a story: re-driven through these verbs with this line deleted, a candidate that
- *    reorders the work channel and that the graph certifies `pass` on every run gets
- *    `1-must-pass FAILED — 4 must-pass failures` (all four goldens of twelve cases) and
- *    `2-non-inferior FAILED — pass rate 66.7% vs baseline 100.0% (Δ -33.3pp)`. With it, it
- *    promotes. `test/cli/suite-freeze.test.ts`'s `A.29 ·` case is the standing half.
- *
- *    **It never widens (3).** The pin is written BESIDE `channels`, never instead of it, so a
- *    channel no verifier reads keeps its byte pin; a pin that fails at check time waives
- *    nothing; and `verificationPin` returns nothing at all — leaving the case byte-identical to
- *    what this verb wrote before it existed — for a rubric grader, for a verifier that said no,
- *    for one that read no graph input, and for one that reads MORE THAN ONE channel the graph
- *    produced, which is the fixture-plus-work topology where the candidate would own both sides
- *    of the comparison. `VerifierPin` carries the five things the pin therefore cannot catch.
- *
  * WHAT THIS SUITE THEREFORE CANNOT DO, said out loud: it cannot show a candidate a POSITIVE
  * delta. Every expectation it can write is "keep doing this", so the best a candidate can score
  * is the baseline's own pass rate, and `gateCandidate` promotes on a tie because it is a
@@ -7604,15 +7583,6 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       unresolvedGate++;
       continue;
     }
-    // THE THREE-AXIS PIN, BESIDE THE ARTIFACT PIN AND NEVER INSTEAD OF IT — see `VerifierPin`.
-    // The pin does not replace `channels`; it names the ONE channel the graph's own verifier
-    // certified, and `runCase` stops comparing that one byte for byte. Every other pinned
-    // channel keeps the floor it has today, which is the half a reader has to see before
-    // believing this is not a loosening: `note` in the reference topology is read by nobody and
-    // is still refused. `undefined` — no assertion evaluator, a rubric, a verifier that said no,
-    // a verifier reading no input, or one reading more than one produced channel — leaves the
-    // case exactly the case this verb wrote before the pin existed.
-    const pins = sc.golden && projection !== undefined ? verificationPin(graph, projection) : undefined;
     eligible.push({
       runId,
       score: sc.score,
@@ -7623,7 +7593,6 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
         // does not have to check which ones do.
         noIrreversibleWithoutGate: true,
         ...(sc.golden && Object.keys(pinned).length > 0 ? { channels: pinned } : {}),
-        ...(pins === undefined ? {} : { verifiedBy: pins }),
       },
     });
   }
@@ -7710,10 +7679,6 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     mustPass: goldens,
     caseRunIds: suite.cases.map((c) => c.runId),
     withChannelExpectations: suite.cases.filter((c) => c.expect.channels !== undefined).length,
-    // COUNTED BESIDE ITS NEIGHBOUR, because the two together say how much of this exam is a byte
-    // comparison and how much of it the graph's own verifier stands behind. A freeze where this
-    // is 0 is one where every golden keeps the whole artifact pinned — the floor A.29 is about.
-    withVerifierPin: suite.cases.filter((c) => c.expect.verifiedBy !== undefined).length,
     considered: eligible.length,
     unjudged,
     excludedForWeights,
