@@ -458,20 +458,30 @@ Items 15–20 are all oversight or replay failing open — the runtime reaches a
 answer, answers it with the passing value, and the operator's evidence says the run is fine.
 Items 21–28 announce themselves: a 404, a stall, a refusal, a stale binary.
 
+**WAVE 1 CLOSED FOUR OF THESE AND HALF OF A FIFTH, 2026-09-02** — three builders in isolated
+worktrees, each paired with an adversarial verifier that reviewed only that lane's diff. All three
+lanes came back DONE and all three verifiers came back NEEDS-WORK, which is the pairing earning
+its cost: between them they found a route-pattern count off by one inside the paragraph arguing
+counts must be right, a rewind preview that over-reported by one after the fix that made it
+over-report, an emitted callback URL that made the fix in the door useless, a USAGE sentence
+contradicting its own source about `--channels-file`, two unexercised guards, and `--__proto__`
+accepted in silence by both flag guards because `parseArgs` used an object literal. Every one of
+those is folded in.
+
 | # | row | fails today | what is silently wrong |
 |---|---|---|---|
 | **15** | A.18 | `a18-assert.test.ts` | a router that read an INJECTED channel steers an irreversible action reading only clean channels, and under a human ceiling of `on` that action runs with **zero gates**. Control-flow taint is not tracked at all |
-| **16** | A.30 | `a30b.test.ts` | an `effect.completed` with no `details` dispatches its undo with `args = {}` and journals `outcome: "compensated"` **while the effect is still in the world** |
+| ~~**16**~~ | A.30 | **DONE `e639d2b`** | an `effect.completed` with no `details` dispatches its undo with `args = {}` and journals `outcome: "compensated"` **while the effect is still in the world** |
 | **17** | A.2 | `a2-fail.test.ts` | a refusal whose error RECORD varies by path replays with a different record and scores `match: true`. `compare()` grades the code and nothing about the record |
 | **18** | G.5(a) | `g5.test.ts` | after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs |
 | **19** | A.23 | `a23-assert.test.ts` | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
 | **20** | B.2 | `b2-reserve.test.ts` | an outstanding reservation is invisible to the fold `GET /runs/:id` serves, and `task.started`'s absent appender makes a headline concurrency assertion compare 0 to 0 |
-| **21** | A.36 | `a36.test.ts` | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
+| ~~**21**~~ | A.36 | **DONE `d9a8173`** | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
 | **22** | B.1 | `b1-strand.test.ts` | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
-| **23** | A.13 | `a13-fail.test.ts` | `loom run` counts its own laps instead of the run's progress, so it abandons a run still journaling progress well inside the bound its graph declared |
+| ~~**23**~~ | A.13 | **DONE `96a03bf`** | `loom run` counts its own laps instead of the run's progress, so it abandons a run still journaling progress well inside the bound its graph declared |
 | **24** | A.29 | `a29.test.ts` | a frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN deterministic verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression |
-| **25** | D.1 | `loom run --mcp-file <typo>` | `readMcpServers` silently drops every key it does not know, so a per-server `irreversibility` — and a typo'd `envAllow` — vanish without a word |
-| **26** | H.4 | `loom trace <id> --port 9999 --token sekret --suite x` | three flags accepted and ignored on a verb that reads none of them, while `--otlp` is the single verb-scoped exception. A verb→flag table lands only in `cli.ts` |
+| **25** | D.1 | **HALF DONE `96a03bf`** | `readMcpServers` silently drops every key it does not know, so a per-server `irreversibility` — and a typo'd `envAllow` — vanish without a word |
+| ~~**26**~~ | H.4 | **DONE `96a03bf`** | three flags accepted and ignored on a verb that reads none of them, while `--otlp` is the single verb-scoped exception. A verb→flag table lands only in `cli.ts` |
 | **27** | H.3 | `grep -anE 'THREE\|three' graph/compile.ts` | two clauses say three where the code tests four — and the row itself undercounted its own survivor set |
 | **28** | H.1 | `./bin/loom --help` | the committed binary is 48 source files stale AND predates the freshness guard, so it answers `--help` with exit 0 — the exact 2026-08-28 failure that guard's docstring cites as its reason for existing |
 
@@ -487,6 +497,15 @@ and do not hold, and `fix` may touch the kernel freely — which is what a kerne
 list**, the census would end it at 11, and a maintainer who thinks that is too fast should cut 20
 first — it is the only item here whose defect is a fold's blindness rather than a guard failing
 open.
+
+**WHAT WAVE 1 ADDED TO THE LIST RATHER THAN TAKING OFF IT.** Two rows, both found by a verifier
+rather than by a builder, and both the same shape — a fix that is right in itself leaving a second
+half nobody had looked at. `TODO.md` §A.37: a compensation refused for missing arguments settles
+its seq, so an operator who reads that honest refusal and runs `rewind` to put it right gets a
+zero-step plan and an ACCEPTED rewind that suppresses the record while the effect stands. And the
+delivery half of A.36, which was fixed in the same wave once a verifier noticed that the door
+learning to decode did not help while the only producer of the URL still emitted a raw `#`.
+**A wave that closes N items and opens zero is a wave nobody looked hard at.**
 
 ### What is left over, and is not roadmap-shaped
 

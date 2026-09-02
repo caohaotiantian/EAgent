@@ -4201,7 +4201,8 @@ function safeDecode(segment: string): string {
  * answered `E_RUN_NOT_FOUND` for a run `GET /runs` had just listed by its real id. Measured
  * before the fix: parent trace 200, child trace 404, child summary 404, both ids present in
  * the list body. `TODO.md` §A.36 says "three routes"; the count is NINE — the route table
- * holds sixteen patterns and nine of them capture a run id — and being wrong by six is why
+ * holds SEVENTEEN patterns (`/usr/bin/grep -ac '^\s*pattern:' packages/core/src/server/http.ts`)
+ * and nine of them capture a run id — and being wrong by six is why
  * this is a named helper rather than a call site somebody remembers to copy.
  * `/usr/bin/grep -ac 'runIdIn(params\[0\]!)' server/http.ts` answers 9.
  *

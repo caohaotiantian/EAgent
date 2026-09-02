@@ -27,18 +27,40 @@
  * Measured on this workspace: 69 `task.retry_scheduled` events and 288 journal events for the
  * one run, in about 2.4 s.
  *
+ * ## And the arm that MUST fire, which nothing here used to reach
+ *
+ * `driveToRest` keeps a second bound, `MAX_STALLED_ADVANCES`, for the opposite shape: a run that
+ * is `running` with a retry pending and appends NOTHING when advanced. That is not a slow run,
+ * it is a run this process cannot move, and looping on it forever is the hang the CLI must never
+ * become. The test above drives only the arm that must not fire, so the backstop was pinned by
+ * nothing at all: replacing `stalled = p.seq > before ? 0 : stalled + 1` with `stalled = 0` — so
+ * the counter can never reach its ceiling and the give-up is dead code — left every test in the
+ * repository green, 2825 of them.
+ *
+ * IT IS UNREACHABLE THROUGH THE CLI, which is why the second test below calls `driveToRest`
+ * directly with a stub engine instead of building a graph. There is no `function` body, no
+ * retry policy and no argv that makes a real `Engine.advance` return `running` with a pending
+ * `retryAfter` and no journal write: the engine either appends something or stops handing back
+ * that shape. Driving it needs an `advance` that lies, and that is a parameter rather than a
+ * fork because `driveToRest` takes the workspace — the same coupling `serveUntilInterrupt`
+ * documents for a `close()` that rejects.
+ *
  * OFFLINE AND DETERMINISTIC: a `function` node, no model, no socket. It reads a clock only in the
- * sense that the backoff is real time — 69 × 30 ms — and asserts on no duration.
+ * sense that the backoff is real time — 69 × 30 ms — and asserts on no duration. The second test
+ * reads one too, for a `retryAfter` two milliseconds out, and asserts on no duration either: what
+ * it counts is ADVANCES.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
+import { driveToRest, main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { isEvent, type JournalEvent } from "../../src/journal/events.ts";
 import type { RunId } from "../../src/ids.ts";
+import type { RunProjection } from "../../src/run/projection.ts";
 
 /** More than `MAX_BACKOFF_WAITS` was, so the old bound is genuinely crossed. */
 const ATTEMPTS = 70;
@@ -131,4 +153,98 @@ test("A RUN INSIDE ITS DECLARED maxAttempts IS NOT ABANDONED FOR TAKING MORE THA
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── the other bound: a run this process cannot move ──────────────────────────
+
+/**
+ * `MAX_STALLED_ADVANCES`, read out of the source rather than restated here.
+ *
+ * The assertion below is "exactly this many advances", so a copy of the number would turn a
+ * changed ceiling into a red test about the wrong thing — and, worse, a number nudged to match
+ * a regression would read as a legitimate edit. `KNOWN_FLAGS` is held to the same rule two
+ * directories over, for the same reason.
+ */
+const MAX_STALLED_ADVANCES = ((): number => {
+  const src = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
+  const m = /const MAX_STALLED_ADVANCES = (\d+);/.exec(src);
+  assert.ok(m, "MAX_STALLED_ADVANCES moved or was renamed — this test reads it from the source on purpose");
+  return Number(m[1]!);
+})();
+
+/**
+ * A projection in the ONE shape that makes `driveToRest` wait: `running`, with a `ready` task
+ * carrying a `retryAfter`.
+ *
+ * CAST RATHER THAN BUILT WHOLE, and the cast is the honest move here rather than a shortcut.
+ * `driveToRest` reads exactly three things off a projection — `status`, `tasks` and `seq` — and
+ * a full `RunProjection` literal would put thirty fields in this file that the function under
+ * test never looks at, every one of them a thing to keep in step with a type for no reason. If
+ * a fourth field is ever read, this stub stops satisfying the loop and the test says so by
+ * hanging into its own runaway guard rather than by passing quietly.
+ */
+function stalledAt(seq: number, wake: number): RunProjection {
+  return {
+    status: "running",
+    seq,
+    tasks: { "a@root#0": { state: "ready", retryAfter: wake } },
+  } as unknown as RunProjection;
+}
+
+test("A RUN THAT APPENDS NOTHING IS GIVEN UP ON AFTER MAX_STALLED_ADVANCES, not looped on forever", async () => {
+  // TWO MILLISECONDS OUT, once. The loop sleeps `wake - Date.now()` each lap, so the first lap
+  // waits ~2 ms and every lap after it waits zero — the wake instant is fixed and already past.
+  // Nothing below asserts on how long that took; the measurement is the ADVANCE COUNT.
+  const wake = Date.now() + 2;
+  // `seq` NEVER MOVES, which is the whole premise: the engine keeps answering, and every answer
+  // says the journal is where it was. That is the state `stalled` counts.
+  const FROZEN_SEQ = 41;
+  const RUN = "01HF7Q9K2M3N4P5R6S7T8V9W0X" as RunId;
+
+  let advances = 0;
+  const ws = {
+    engine: {
+      advance: (runId: RunId): Promise<RunProjection> => {
+        assert.equal(runId, RUN, "the loop must keep advancing the run it was given");
+        advances++;
+        // A RUNAWAY GUARD, so the mutation this test exists to catch goes RED instead of
+        // hanging. `stalled = 0` makes the `while` unbounded, and a test that hangs under its
+        // own mutation is worse than one that passes — `known-flags.test.ts` says the same
+        // thing about driving refusals through `compile` rather than `serve`.
+        assert.ok(advances <= MAX_STALLED_ADVANCES * 4, `driveToRest did not stop: ${advances} advances and counting`);
+        return Promise.resolve(stalledAt(FROZEN_SEQ, wake));
+      },
+    },
+  } as unknown as Parameters<typeof driveToRest>[0];
+
+  const err: string[] = [];
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: string) => (err.push(String(c)), true)) as typeof process.stderr.write;
+  let p: RunProjection;
+  try {
+    p = await driveToRest(ws, RUN, stalledAt(FROZEN_SEQ, wake));
+  } finally {
+    process.stderr.write = realErr;
+  }
+
+  // 1 · IT RETURNED. Reaching this line at all is the assertion — the loop's exit condition is
+  // the only thing that can produce it, and `stalled = 0` produces nothing but more advances.
+  //
+  // 2 · EXACTLY THE CEILING, neither more nor fewer. `stalled` starts at 0 and rises by one per
+  // lap that appends nothing, so the ceiling is hit on the Nth advance and not the N+1th; an
+  // off-by-one in either direction is a different number here.
+  assert.equal(advances, MAX_STALLED_ADVANCES, `the backstop fired after ${advances} advances, not ${MAX_STALLED_ADVANCES}`);
+
+  // 3 · AND IT SAID SO. Handing back a `running` run in silence is the outcome that made §A.13
+  // a bug in the first place: the operator sees `"status": "running"` and no reason for it.
+  assert.match(
+    err.join(""),
+    new RegExp(`^! run ${RUN} appended nothing to its journal across ${MAX_STALLED_ADVANCES} advances while a retry was pending`),
+    `the give-up was silent: ${JSON.stringify(err.join(""))}`,
+  );
+
+  // 4 · The projection handed back is the last one the engine gave, unchanged — this loop
+  // reports, it does not decide. `loom run`'s exit code is computed from the status downstream.
+  assert.equal(p.status, "running");
+  assert.equal(p.seq, FROZEN_SEQ);
 });

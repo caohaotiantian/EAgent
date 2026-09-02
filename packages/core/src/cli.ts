@@ -316,9 +316,12 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     envAllow is a server started with an empty environment.
 
   A FLAG A VERB DOES NOT READ IS REFUSED, not ignored — --port on a run, --token on a
-  trace, --suite on a score. The flags above are read by the verb they are listed under;
-  this bottom block is read by every verb, except --as, which is read by every verb that
-  journals a decision under it.
+  trace, --suite on a score. The flags above are read by the verb they are listed under,
+  with TWO EXCEPTIONS THAT ARE NAMED RATHER THAN LEFT TO BE DISCOVERED: --channels-file is
+  printed under loom serve because that is where an operator meets it, and is read by every
+  verb — a gate raised by loom run reaches a human through the same rows. And --as sits in
+  this bottom block but is read only by the verbs that journal a decision under it.
+  Everything else in this bottom block is read by every verb.
 `;
 
 /**
@@ -542,7 +545,13 @@ function assertKnownFlags(args: Args): void {
 
 export function parseArgs(argv: readonly string[]): Args {
   const positional: string[] = [];
-  const flags: Record<string, string | true> = {};
+  // A NULL-PROTOTYPE BAG, because `flags["__proto__"] = value` on an object literal runs
+  // `Object.prototype`'s setter and stores NOTHING — so `--__proto__ x` was accepted in silence
+  // by BOTH `assertKnownFlags` and `refuseFlagsThisVerbDoesNotRead`, which iterate
+  // `Object.keys` and never see the name. Harmless in itself (the value is discarded) and a
+  // hole in two guards whose whole job is that no flag is accepted in silence. Same defect,
+  // same fix, as the `OTEL_EXPORTER_OTLP_HEADERS` parser one screen down.
+  const flags: Record<string, string | true> = Object.create(null) as Record<string, string | true>;
   // WHICH NAMES WERE SEEN TWICE, recorded here because this is the only place that can see it:
   // `flags` overwrites, so by the time any caller reads it the earlier value is gone and no
   // caller can tell an override from a loss. `Args.repeated` says why one flag cares.
@@ -3629,10 +3638,30 @@ const MAX_STALLED_ADVANCES = 8;
  * no third one of its own. Its backstop fires on a run that is not moving — see
  * `MAX_STALLED_ADVANCES` — not on a run that is moving slowly, because a run appending an
  * attempt per lap is a run the engine is still bounding, and giving up on it here reports a
- * `running` run that would have finished. It reports rather than looping in either case: a
- * command that hangs is indistinguishable from one that is working.
+ * `running` run that would have finished.
+ *
+ * **IT REPORTS ON THE FIRST CASE AND NOT THE SECOND, and an earlier draft of this paragraph
+ * claimed both.** A run that is NOT MOVING hits the backstop and this returns with a line
+ * saying so. A run that IS moving slowly runs for as long as the bounds its author declared
+ * allow, however long that is — `validate.ts` accepts any integer `maxAttempts >= 1` with no
+ * ceiling, and `initialMs`/`maxMs` are the author's too — so this loop can block for an
+ * arbitrarily long time by design. That is the trade: giving up on a run the engine is still
+ * bounding would report a `running` run that would have finished, and this command's job is
+ * to say what happened rather than to invent a deadline the graph did not declare.
+ *
+ * EXPORTED FOR THE TEST, on `serveUntilInterrupt`'s precedent — "the test drives the failure
+ * with a `close()` that rejects". The backstop arm is unreachable through `loom run`: it needs
+ * an `advance` that returns `running` with a pending retry and appends nothing, and every real
+ * engine either moves `seq` or stops returning that shape. `run-progress-bound.test.ts` drove
+ * the arm that must NOT fire for a wave and the arm that must — the eight-lap give-up and its
+ * stderr line — was exercised by nothing: replacing `stalled = p.seq > before ? 0 : stalled + 1`
+ * with `stalled = 0`, so the counter can never reach the ceiling, left all 2825 tests green.
+ * Taking the workspace as a parameter is the whole coupling, so a stub engine is enough.
+ * `cli.ts` is not on the pinned surface — `scripts/surface.json` pins `index.ts`'s exports and
+ * `index.ts` re-exports nothing from here — so this costs no surface change, exactly as
+ * `parseArgs`, `serveUntilInterrupt` and `exportTraceOverOtlp` already do.
  */
-async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): Promise<RunProjection> {
+export async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): Promise<RunProjection> {
   let p = first;
   let stalled = 0;
   while (stalled < MAX_STALLED_ADVANCES) {

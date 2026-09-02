@@ -1646,11 +1646,17 @@ export class SignedWebhookChannel extends WebhookChannel {
    * echoed beside the URL so a receiver keying several Loom deployments by channel name
    * does not have to parse it back out of a path.
    *
-   * The channel segment is percent-encoded and the run segment is not, which mirrors the
-   * route rather than guessing at it: `ControlPlane` decodes the channel and reads the run
-   * verbatim. A `RunId` is a ULID, so encoding it would be the identity function anyway;
-   * doing it would encode a disagreement with the route into a URL nobody reads until it
-   * fails to match.
+   * BOTH SEGMENTS ARE PERCENT-ENCODED, and this comment used to say the run one was not —
+   * on two grounds that were both true when written and are both false now.
+   *
+   * It said `ControlPlane` "reads the run verbatim": it decodes it, since the fix for §A.36.
+   * And it said "a `RunId` is a ULID, so encoding it would be the identity function anyway":
+   * a ROOT run id is, but a subgraph's child is `${parent}~${nodeId@branchPath#iteration}`,
+   * which carries a `#`. So this method was handing out a URL that any client truncates at
+   * the fragment, and a delegated run's gate callback was unreachable end to end — the door
+   * being fixed did not fix it, because the only in-tree producer of the URL is here.
+   *
+   * The two halves have to agree, and now they do: this encodes, the route decodes.
    */
   protected override callbackFor(
     runId: unknown,
@@ -1658,7 +1664,7 @@ export class SignedWebhookChannel extends WebhookChannel {
     const base = this.#callbackBase;
     if (base === undefined) return undefined;
     return {
-      url: `${base}/runs/${String(runId)}/callbacks/${encodeURIComponent(this.name)}`,
+      url: `${base}/runs/${encodeURIComponent(String(runId))}/callbacks/${encodeURIComponent(this.name)}`,
       channel: this.name,
       signature: {
         scheme: "hmac-sha256",

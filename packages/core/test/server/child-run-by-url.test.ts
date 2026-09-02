@@ -9,7 +9,7 @@
  * on the unfixed tree: `GET /runs` 200 with both ids in the body, parent trace 200, child
  * trace 404, child summary 404.
  *
- * THREE PROPERTIES, because the fix is a decode and a decode is exactly the kind of change
+ * FOUR PROPERTIES, because the fix is a decode and a decode is exactly the kind of change
  * that can buy reachability with authorization:
  *
  *  1. **The child is reachable.** Its trace and its summary answer 200 for its owner, and the
@@ -20,13 +20,36 @@
  *     `ownsRun` check the parent uses, so decoding did not turn a percent-encoded id into a
  *     key to somebody else's delegation.
  *  3. **Every by-id route decodes, not just the one the row named.** The row said three; the
- *     grep said nine. This drives the child id through each of the eight that take a
- *     credential and asserts none of them answers `E_RUN_NOT_FOUND` — several answer other
+ *     grep said nine. Eight of the nine take a credential; this drives the child id through
+ *     each of them and asserts none answers `E_RUN_NOT_FOUND` — several answer other
  *     refusals (a bad body, a missing `atSeq`), and that is the point: a route that got as
  *     far as validating its own input resolved the id.
+ *  4. **The ninth decodes too**, and it is the one no credential opens:
+ *     `POST /runs/:id/callbacks/:channel`. Arm 3 cannot reach it — it is registered only when
+ *     the plane was built with a `GateDispatcher` — so it was the one run-id capture in the
+ *     file with no test at all. MEASURED, on the tree as it stands otherwise: reverting that
+ *     single line to `params[0]! as RunId` left all 2821 tests green.
+ *
+ * WHY ARM 4 SIGNS ITS BODY, when arm 3's whole device is that a garbage body is enough. On the
+ * credentialed routes the id is resolved before the body is looked at, so any refusal that is
+ * not "no such run" proves the decode. On this route the order is inverted by design:
+ * `GateCallbackRouter.handle` checks the channel and then the SIGNATURE first, and both of
+ * those live in `PERIMETER_REJECTIONS` — they throw having read nothing, which is exactly what
+ * keeps an unauthenticated endpoint from being an oracle. So an unsigned POST answers
+ * `E_GATE_NOT_AUTHORIZED` whether or not the id decodes, and the obvious probe is blind to this
+ * defect. A VALID signature over a body naming a DIFFERENT run reaches step 3 — where the run
+ * is looked up — and then step 4, the run-mismatch check. Undecoded, the lookup misses and the
+ * answer is 404 `E_GATE_NOT_FOUND`; decoded, the mismatch check fires and the answer is 400
+ * `E_PROVIDER_BAD_REQUEST`. Note the code: this route's "no such run" is spelled
+ * `E_GATE_NOT_FOUND`, because the router has its own taxonomy (`callbackRejection`) and never
+ * raises `E_RUN_NOT_FOUND` — asserting on that string here would have been a test that cannot
+ * fail. The parent id, which needs no encoding, is driven through the same probe as the
+ * control: it must answer 400 as well, or the discriminator is measuring something other than
+ * the decode.
  *
  * Offline: a loopback `node:http` server, a `MemoryStateStore`, and a `function` node for the
- * leaf's work. No clock is read.
+ * leaf's work. The channel is a `SignedWebhookChannel` whose `url` is never fetched — only its
+ * `sign` and `parseCallback` run, both pure. No clock is read.
  */
 
 import test from "node:test";
@@ -39,6 +62,7 @@ import type { ResourceResolver } from "../../src/graph/validate.ts";
 import type { NodeId, RunId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { GateDispatcher, SignedWebhookChannel } from "../../src/run/delivery.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { BearerTokenIdentity, ControlPlane } from "../../src/server/http.ts";
@@ -47,6 +71,8 @@ const NOW = 1_700_000_000_000;
 const LEAF_REF = "graph/leaf@stable";
 const OWNER_TOKEN = "owner-t0ken";
 const STRANGER_TOKEN = "stranger-t0ken";
+const CALLBACK_CHANNEL = "slack";
+const CALLBACK_SECRET = "callback-s3cret";
 
 const n = (id: string): NodeId => id as NodeId;
 
@@ -99,6 +125,8 @@ interface Rig {
   base: string;
   parentRunId: RunId;
   childRunId: RunId;
+  /** The dispatcher's one channel, so arm 4 can produce the signature the perimeter wants. */
+  channel: SignedWebhookChannel;
   close: () => Promise<void>;
 }
 
@@ -138,12 +166,18 @@ async function rig(): Promise<Rig> {
   assert.ok(started !== undefined, "the parent must have journaled subgraph.started");
   const childRunId = (started as Extract<JournalEvent, { type: "subgraph.started" }>).payload.childRunId;
 
+  // WIRED, and that is what makes the ninth route exist at all: `ControlPlane` registers
+  // `POST /runs/:id/callbacks/:channel` only when it was handed a dispatcher, so the three
+  // arms above ran against a plane that had sixteen routes and this one runs against
+  // seventeen. The `url` is never fetched — nothing in this file calls `deliver`.
+  const channel = new SignedWebhookChannel({ name: CALLBACK_CHANNEL, url: "https://hooks.invalid/unused", callbackSecret: CALLBACK_SECRET });
   const plane = new ControlPlane({
     engine,
     store,
     bus,
     graphs: { top: graph },
     now,
+    dispatcher: new GateDispatcher({ channels: [channel] }),
     identity: new BearerTokenIdentity({
       subjects: [
         { token: OWNER_TOKEN, subject: "owner", kind: "human" },
@@ -152,7 +186,7 @@ async function rig(): Promise<Rig> {
     }),
   });
   const { port } = await plane.listen(0);
-  return { base: `http://127.0.0.1:${port}`, parentRunId, childRunId, close: () => plane.close() };
+  return { base: `http://127.0.0.1:${port}`, parentRunId, childRunId, channel, close: () => plane.close() };
 }
 
 const as = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}` });
@@ -243,6 +277,51 @@ test("A.36: every credentialed by-id route resolves the escaped child id", async
     const events = await fetch(`${r.base}/runs/${enc}/events`, { headers: as(OWNER_TOKEN), signal: ac.signal });
     assert.equal(events.status, 200, "GET /runs/:id/events must resolve the escaped child id");
     ac.abort();
+  } finally {
+    await r.close();
+  }
+});
+
+test("A.36: the ninth by-id route — the unauthenticated callback — resolves the escaped child id too", async () => {
+  const r = await rig();
+  try {
+    // A body the perimeter will pass and step 4 will refuse: correctly signed, and naming a
+    // run that is not the one in the URL. `runId` here is the CALLER'S claim, which is the
+    // half of the comparison the URL is checked against.
+    const body = JSON.stringify({
+      runId: "r_somewhere_else",
+      gateId: "gate_01HF00000000000000000000",
+      actor: "owner",
+      decision: { kind: "approve" },
+    });
+    const ts = String(Math.floor(NOW / 1000));
+    const post = async (idSegment: string): Promise<{ status: number; code: string; reason: unknown }> => {
+      const res = await fetch(`${r.base}/runs/${idSegment}/callbacks/${CALLBACK_CHANNEL}`, {
+        method: "POST",
+        // NO `authorization` HEADER, deliberately. `#requiresBearer` carves this route out
+        // when a dispatcher exists, and sending a credential would test a different door.
+        headers: { "content-type": "application/json", "x-loom-timestamp": ts, "x-loom-signature": r.channel.sign(body, ts) },
+        body,
+      });
+      const payload = (await res.json()) as { error: { code: string; details?: { reason?: unknown } } };
+      return { status: res.status, code: payload.error.code, reason: payload.error.details?.reason };
+    };
+
+    // THE CONTROL, on an id that needs no encoding. If this does not reach the mismatch
+    // check, the child's answer below proves nothing about decoding.
+    const parent = await post(encodeURIComponent(r.parentRunId));
+    assert.equal(parent.status, 400, `parent callback: ${JSON.stringify(parent)}`);
+    assert.equal(parent.code, "E_PROVIDER_BAD_REQUEST");
+    assert.equal(parent.reason, "run_mismatch");
+
+    // THE MEASUREMENT. Undecoded, `#engine.projection` is asked for a run named `…%23…`,
+    // finds nothing, and the router answers `not_found` before the body's claim is ever
+    // compared — 404, with the reason token that says so.
+    const child = await post(encodeURIComponent(r.childRunId));
+    assert.notEqual(child.reason, "not_found", `the callback route still cannot resolve the escaped child id: ${JSON.stringify(child)}`);
+    assert.equal(child.status, 400, `child callback: ${JSON.stringify(child)}`);
+    assert.equal(child.code, "E_PROVIDER_BAD_REQUEST");
+    assert.equal(child.reason, "run_mismatch");
   } finally {
     await r.close();
   }

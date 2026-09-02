@@ -32,8 +32,11 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,804** — the
-twenty-seven cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
+**Re-run again after wave 1, and ONE of the seven moved: tests 2,777 → 2,827.** The `--otlp`
+work added the twenty-seven cases of `test/cli/trace-otlp.test.ts`; wave 1 added the rest across
+`test/server/child-run-by-url.test.ts`, `test/run/child-run-callback-url.test.ts`,
+`test/run/undo-args-must-be-recorded.test.ts`, `test/cli/verb-flags.test.ts`,
+`test/cli/mcp-file-fields.test.ts` and `test/cli/run-progress-bound.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
 package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
 which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
 census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
@@ -78,7 +81,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,804 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,827 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -201,18 +204,18 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 35 | 16 | 19 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 36 | 18 | 18 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
-| §H | 5 | 1 | 4 | housekeeping |
+| §H | 5 | 2 | 3 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.8, A.14, A.15, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.5; **§D** D.2, D.4;
-**§H** H.2.
+A.8, A.13, A.14, A.15, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
+**§H** H.2, H.4.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
@@ -472,10 +475,15 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 ### Bounds and backpressure
 
-- **A.13 · `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s**, so a wide
-  fan-out of rate-limited tasks can exhaust the CLI's patience. It reports rather than hangs,
-  which is why it ships. **Closes when** the CLI waits on a journal predicate rather than a wait
-  count.
+- ~~**A.13 · `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s**, so a wide
+  fan-out of rate-limited tasks can exhaust the CLI's patience.~~ **CLOSED by `96a03bf`, on the
+  condition this row set: the CLI now waits on a JOURNAL PREDICATE rather than a wait count.**
+  `MAX_BACKOFF_WAITS` is deleted. `driveToRest` returns when the run reaches rest, and its only
+  backstop fires on a run that is NOT MOVING — `seq` unchanged across `MAX_STALLED_ADVANCES`
+  advances — because `seq` moves iff something durable was written, for every decision the
+  engine takes. A run that IS moving now runs to the bounds its author declared, however long
+  that is; that is the trade, and `driveToRest`'s docstring states it rather than implying the
+  backstop covers both cases (an earlier draft of that paragraph claimed it did).
 
 - ~~**A.14 · `run.submitted.inputs` is the last inline copy of a payload.**~~ **CLOSED**
   (`6d830d7`, `eba2a63`). The stated blocker — "`submit` cannot reach a payload store" — was
@@ -848,8 +856,8 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
   **Whether an author should ALSO get a graph-level cleanup node on failure is a design question,
   not a wiring gap** — §D.3.
 
-- **A.36 · A SUBGRAPH'S CHILD RUN IS UNREACHABLE BY URL ON THE CONTROL PLANE, and the route's
-  own docstring sends a reader there.** A child run id is `${parent}~${nodeId@branchPath#iteration}`
+- ~~**A.36 · A SUBGRAPH'S CHILD RUN IS UNREACHABLE BY URL ON THE CONTROL PLANE, and the route's
+  own docstring sends a reader there.**~~ **CLOSED by `d9a8173`.** A child run id is `${parent}~${nodeId@branchPath#iteration}`
   and therefore contains a `#`. Every `/runs/([^/]+)/…` route reads `params[0]` raw — the channel
   segment two screens below `GET /runs/:id/trace` goes through `safeDecode`, and the run-id
   captures do not — so `%23` never becomes `#` and the request never reaches the handler, while
@@ -858,10 +866,38 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
   run `README.md`'s "three doors, one encoder" is two. Pre-existing, and the line asserting the
   follow-up GET is one the `--otlp` change rewrote, so `server/http.ts` now states the gap where
   it lives rather than promising a URL that cannot be built.
-  **Closes when** the three run-id captures resolve through `safeDecode` and a test fetches a
-  child run's trace by its percent-encoded id. **Not done with `--otlp`** deliberately: it
-  changes which URLs an authenticated plane accepts, which is a decision about the plane and not
-  a rider on the CLI's exporter.
+  **THE ROW SAID THREE CAPTURES AND THERE ARE NINE, which is why the closure is worth more than
+  the row.** `/usr/bin/grep -ac 'runIdIn(params\[0\]!)' packages/core/src/server/http.ts` answers
+  9: the summary, the event stream (read inside `#streamEvents`, not in the route table), the
+  trace, the rewind plan, commands, oversight, gates, a gate decision, and the callback. Fixing
+  the three this row named would have closed the row and left the defect in six places.
+  The blast radius was measured rather than argued, and the argument is in `runIdIn`'s
+  docstring: routing does not move (the pattern matches the RAW pathname, so no `%2F` can reach
+  a different route or past `#requiresBearer`), `ownsRun` still reads the RUN and never the URL
+  (a second principal gets 404 — not 403 — on the child, so the door is not an existence oracle
+  for delegated runs), and a run id is a store KEY bound as a parameter, so a decoded `/` or
+  `..` is a lookup that misses rather than traversal. `test/server/child-run-by-url.test.ts`.
+  **The half nobody had noticed, fixed in the same wave:** `run/delivery.ts`'s `callbackFor`
+  built the webhook URL with the run id RAW, on a comment that said a `RunId` is a ULID so
+  encoding would be the identity function. It is not, for a child. So the door learning to
+  decode would not have helped: the only in-tree producer of that URL was emitting one every
+  client truncates at the `#`. Both halves now agree — the emitter encodes, the route decodes —
+  and the comment that asserted otherwise is corrected where it lived.
+
+- **A.37 · A COMPENSATION REFUSED FOR MISSING ARGUMENTS IS THE LAST WORD, and the operator's
+  obvious next move quietly makes it worse.** `e639d2b` stopped `#compensateOne` dispatching an
+  undo with `args = {}` when `effect.completed` carried no `details`, and journals
+  `outcome: "not_attempted"` instead of a false `"compensated"` — the right refusal, and it
+  settles the seq. **But `planCompensation` skips settled seqs**
+  (`compensation.ts`, `if (e.payload.retryable !== true) settled.add(...)`), so an operator who
+  reads that honest reason and then runs `rewind` to put it right gets a ZERO-STEP plan and a
+  rewind that is ACCEPTED — suppressing the `effect.completed` while the effect is still in the
+  world. Not a regression: the pre-fix path settled the seq too, and lied about why. Found by
+  the wave-1 verifier for that lane, not by the lane.
+  **Closes when** the rewind refusal (`#uncompensatedIrreversible`) reads the same fact the
+  plan does — a step the plan already knows cannot be dispatched — rather than permitting the
+  rewind because the tool merely DECLARES a compensation. That is the same fact the `dispatch`
+  count now reads, so the seam exists; what is missing is the refusal consulting it.
 
 ### Two things that are NOT defects, written down so nobody "fixes" them
 
@@ -1231,8 +1267,13 @@ three of them resolved to *do not build*.
 
 Each row below states what a decision would settle. None is the implementer's to answer alone.
 
-- **D.1 · Per-server `irreversibility` on `--mcp-file`, and the unknown-key refusal
-  `readMcpServers` lacks.** `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
+- **D.1 · Per-server `irreversibility` on `--mcp-file`. HALF CLOSED by `96a03bf`: the unknown-key
+  refusal landed and the DECISION did not.** `readMcpServers` now refuses a field nothing reads,
+  the way `readModels` does - so a miscased `envallow` is a refusal naming the key rather than a
+  server started with an empty environment, which was the silent half. What remains is the part
+  no test can settle: whether an operator may declare a per-server irreversibility class at all,
+  which is a decision about who gets to lower a gate and therefore a maintainer call. The
+  original row, whose argument is the case FOR making it: `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
   on every tool from every MCP server, so **every MCP tool gates** — and `cli.ts`'s `readMcpServers`
   validates exactly `name`, `command`, `args` and `envAllow` and then builds its result from those
   four keys, with no unknown-field refusal anywhere, so an operator writing a per-server class
@@ -1686,8 +1727,12 @@ Each traces to a decision in `DESIGN.md`.
   — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
   into enumerations.
 
-- **H.4 · `--otlp` is the only verb-scoped flag on this CLI, and the asymmetry is tracked
-  rather than argued away.** `assertKnownFlags` gates the flag NAME set and nothing gates which
+- ~~**H.4 · `--otlp` is the only verb-scoped flag on this CLI, and the asymmetry is tracked
+  rather than argued away.**~~ **CLOSED by `96a03bf`, on the condition this row set: a verb -> flag
+  applicability table now exists, so a flag on a verb that does not read it is REFUSED rather than
+  ignored, and `refuseOtlpOutsideTrace` is one row of that table rather than a one-off. The
+  general form was built rather than the exception being defended, which is the outcome this row
+  said it wanted.** The original argument, kept because it is why the exception was made first: `assertKnownFlags` gates the flag NAME set and nothing gates which
   verb may read a flag, so every other flag is accepted everywhere: driven at `c8bdf22`,
   `loom trace <runId> --port 9999 --token sekret --suite x` is accepted and fails only for the
   run id. `refuseOtlpOutsideTrace` makes `--otlp` the exception, on the ground that it is the

@@ -122,6 +122,67 @@ test("...including a flag that differs only in CASE, which reads as correct", as
   }
 });
 
+test("...and `--__proto__`, which BOTH guards used to iterate straight past", async () => {
+  // NOT A PROTOTYPE-POLLUTION BUG — the opposite, and that is what made it invisible.
+  // `parseArgs` accumulated into an object literal, so `flags["__proto__"] = "x"` did not
+  // create a property at all: it invoked `Object.prototype`'s `__proto__` SETTER, which
+  // refuses a string and stores nothing. The value was discarded, the object was unchanged,
+  // and no prototype was polluted.
+  //
+  // What it cost is the thing this file exists for. `assertKnownFlags` and
+  // `refuseFlagsThisVerbDoesNotRead` both enumerate with `Object.keys`, and a name that was
+  // never stored is a name neither of them can see — so `--__proto__ x` was the one argv this
+  // binary ACCEPTED IN SILENCE, through two guards whose entire job is that it does not.
+  // Measured with the object literal restored:
+  //
+  //     loom compile nope.json --__proto__ x --workspace <tmp>
+  //       → E_CONFIG_INVALID "cannot read the graph file …/nope.json: ENOENT"
+  //
+  // NOTE THE CODE, because it is why the predicate below tests the MESSAGE as well. The flag
+  // refusal and `compile`'s own missing-file failure are both `E_CONFIG_INVALID`, so an
+  // `assert.rejects` that only checked the code would have passed on a binary that never
+  // looked at the flag — the same trap "THE SECURITY CASE" below already documents for
+  // `--tokne`.
+  //
+  // `Object.create(null)` is the fix, and it is the same one the `OTEL_EXPORTER_OTLP_HEADERS`
+  // parser one screen down in `cli.ts` already carried.
+  const w = workspace();
+  try {
+    // THE PREMISE BOTH GUARDS SHARE, asserted directly: the parser now surfaces the name to
+    // an enumeration. Only the first guard can be driven to fire — `__proto__` is not in
+    // `KNOWN_FLAGS`, so it can never reach the verb-scoped one — and this is what says the
+    // second guard's input changed too.
+    const parsed = parseArgs(["compile", "nope.json", "--__proto__", "x"]);
+    assert.deepEqual(Object.keys(parsed.flags), ["__proto__"], "the name must be an OWN key, not a setter call");
+    assert.equal(parsed.flags["__proto__"], "x");
+    assert.equal(Object.getPrototypeOf(parsed.flags), null, "a flag bag with a prototype has methods for flag names");
+
+    await assert.rejects(
+      () => cli(["compile", "nope.json", "--__proto__", "x", "--workspace", w.dir]),
+      (e: unknown) =>
+        isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag/.test(e.message) && e.message.includes("--__proto__"),
+      "--__proto__ must be refused BY NAME, before compile fails for its own missing-file reason",
+    );
+
+    // AND ORDINARY FLAGS STILL PARSE — both spellings, because the null-prototype bag is on
+    // the write path of each. A fix that quietly broke `--name=value` would be a worse defect
+    // than the silence it replaced.
+    const ordinary = parseArgs(["serve", "--token", "s3cret", "--port=9090", "--workspace", w.dir, "--otlp"]);
+    assert.equal(ordinary.command, "serve");
+    assert.equal(ordinary.flags["token"], "s3cret");
+    assert.equal(ordinary.flags["port"], "9090");
+    assert.equal(ordinary.flags["otlp"], true, "a valueless trailing flag is still `true`");
+    const ws = openWorkspace(parseArgs(["serve", "--workspace", w.dir]));
+    try {
+      assert.equal(controlPlaneOptions(ws, ordinary).token, "s3cret", "the flag map still reaches the code that reads it");
+    } finally {
+      ws.close();
+    }
+  } finally {
+    w.dispose();
+  }
+});
+
 test("THE SECURITY CASE: a typo'd --token no longer opens the plane", async () => {
   // What the refusal is actually for. Before it, this pair produced two different planes from
   // two argv that read the same to an operator scanning `ps`.

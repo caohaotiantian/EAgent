@@ -315,12 +315,20 @@ export interface RewindPlan {
    * Steps this engine will ATTEMPT an undo tool for — **not** steps whose undo is certain to run.
    *
    * THE DISTINCTION IS NOT PEDANTRY, and getting it wrong is how this preview over-promises in
-   * exactly the direction it exists to prevent. `#compensateOne` dispatches through `#invokeTool`
-   * with `nodeApproved: false`, always — a rollback is not a human's yes to anything, the human
-   * approved the action being UNDONE — so `PolicyEngine.decide` can still answer `gate`, and that
-   * answer is a refusal journaled `compensation.recorded{outcome: "failed"}`. Measured on both
-   * legs of `rewind-plan.test.ts`'s own fixture: `dispatch=1`, `refunds=[]`, outcome `failed`,
-   * *"pay.refund is reversible_write and requires human approval this turn cannot request"*.
+   * exactly the direction it exists to prevent. `#compensateOne` dispatches through
+   * `#invokeTool` with `nodeApproved: trigger === "rewind"` — **and this paragraph said
+   * `false`, always, for as long as that was true.** `552d999` changed it: a REWIND's undo
+   * runs approved, because A.34 and A.35 together made its operator a verified human who was
+   * SHOWN that exact undo list and bound it with a hash; a RUN FAILURE's rollback still
+   * refuses, which is the asymmetry that decision rests on. So `PolicyEngine.decide` can still
+   * answer `gate` on the failure leg, and that answer is journaled
+   * `compensation.recorded{outcome: "failed"}`.
+   *
+   * **The transcript that used to be here is deleted rather than adjusted**: it claimed
+   * `dispatch=1, refunds=[], outcome failed` "on both legs of `rewind-plan.test.ts`'s own
+   * fixture", and that fixture now asserts the opposite on the rewind leg — `refunds` equals
+   * `charges` and the row reads `compensated`. A quotation is the strongest-looking evidence
+   * on a page, and this one outlived the commit that falsified it.
    *
    * WHY THIS IS NOT PREDICTED HERE, which is a choice rather than an omission. The refusal
    * depends on `effectivePosture` — the run's ceiling and taint as well as the undo's class — so

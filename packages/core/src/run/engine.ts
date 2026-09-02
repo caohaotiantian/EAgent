@@ -3134,7 +3134,14 @@ export class Engine {
         ...(item.undispatchable === undefined ? {} : { undispatchable: item.undispatchable }),
       };
     });
-    const dispatch = steps.filter((s) => s.undo !== undefined && s.undispatchable === undefined).length;
+    // READS THE SAME FACT THE STEP DOES, which it did not until the undo-args refusal landed.
+    // A step whose `effect.completed` carried no `details` has no `argsDigest`, and its undo is
+    // now REFUSED rather than dispatched with `{}` — but this count still said it would be
+    // attempted, so the operator's preview promised one more rollback than the rewind performs
+    // and `blocked` under-counted by the same one. The comment above already said "this step
+    // shows an `argsDigest`" and "this step will be attempted" are the same sentence; this is
+    // the line that makes that true.
+    const dispatch = steps.filter((s) => s.undo !== undefined && s.undispatchable === undefined && s.argsDigest !== undefined).length;
     const header = { runId: String(runId), atSeq: atSeq as number, attached: live !== undefined, steps };
     return { plan: { ...header, dispatch, blocked: steps.length - dispatch, planHash: digest(header) }, walk };
   }
