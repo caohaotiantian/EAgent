@@ -81,7 +81,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,851 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,865 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -211,11 +211,11 @@ can be wrong without being falsifiable.
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
-| §H | 5 | 3 | 2 | housekeeping |
+| §H | 5 | 4 | 1 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
 A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.1, D.2, D.4;
-**§H** H.2, H.3, H.4.
+**§H** H.1, H.2, H.3, H.4.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
@@ -1149,7 +1149,45 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
 Mechanism that exists in the schema or the types and executes nowhere — each a place a reader
 believes a feature is present. This section was thirteen rows and is two.
 
-- **B.1 · `LeasedScheduler` has zero callers in `src/`.** `run/scheduler.ts` implements two of the
+- **B.1 · `LeasedScheduler` has zero callers in `src/`. ANSWERED 2026-09-02: NEITHER of the two
+  options this row offers is right, and the third one is what is already true.**
+  The row says "either plug it in or delete it. Both are decisions and neither is the current
+  state." That framing assumes the only two states are CLI-wired or gone. It is a false
+  dichotomy, and **this project has already made the other call twice**: the fork ledger went
+  5 → 3 when `DeliveryChannel`/`GateDispatcher` and `IdentitySource`/`startControlPlane` turned
+  out to be "pinned public types a library embedder always reached, so those two were never
+  bounds, only debts". `LeasedScheduler` is the same shape and the measurement is the same.
+
+  **Driven rather than read** — an embedder reaches it from the package root today:
+
+      import { Engine, LeasedScheduler, MemoryStateStore, InProcessEventBus } from "@loom/core";
+      const sched = new LeasedScheduler({ leaseMs: 30_000, now: () => 1_700_000_000_000 });
+      new Engine({ store, bus, scheduler: sched });   // accepted
+
+  `index.ts` re-exports `run/scheduler.ts`; `EngineOptions.scheduler?: Scheduler` is the seam;
+  `LeasedScheduler` and `LeasedSchedulerOptions` are BOTH on the pinned public surface, so
+  deleting them is a breaking change by `check-surface.mjs`'s own rule ("REMOVAL IS BREAKING");
+  and four suites exercise it — `run/scheduler.test.ts`, `run/contention.test.ts`,
+  `deployment/two-planes.test.ts`, `deployment/run-clock-survives-restart.test.ts`. It is not
+  dead code. It is a library capability the single-tenant CLI deliberately does not use,
+  which is exactly what §D.2's answer — one machine, one tenant, one `loom serve`, one
+  operator — implies the CLI should do.
+
+  **So the row is reclassified rather than actioned**, and the honest state is: built, public,
+  tested, reachable by an embedder, and not wired into the CLI on purpose. What remains open is
+  NOT this class — it is the price the row itself found and which stands regardless: a plane
+  that dies between `task.leased` and `task.committed` strands that run permanently under
+  `InProcessScheduler`, because reclaiming needs a lease DEADLINE and the CLI's scheduler has
+  none. **That is the real item**, and it is about `loom serve`'s recovery story, not about
+  whether a class has callers.
+  **Closes when** either the CLI grows a way to survive its own death mid-lease (which may or
+  may not be `LeasedScheduler` — a single-process deadline would also do it), or somebody
+  argues that a stranded run is an acceptable outcome for one operator on one machine and
+  writes that here. **A recommendation to delete this was made and withdrawn on the evidence
+  above**, which is recorded because the deletion would have removed two pinned exports and a
+  working capability to close a row that was miscategorised.
+
+  ORIGINAL TEXT: `LeasedScheduler` has zero callers in `src/`. `run/scheduler.ts` implements two of the
   three distributed behaviours its own docstring names — skip live leases, reclaim expired ones —
   with contention tests exercising them against folded journals for two workers. `cli.ts` never
   names a Scheduler, so `loom serve` always runs `InProcessScheduler`; the only mentions outside

@@ -477,7 +477,7 @@ those is folded in.
 | ~~**19**~~ | A.23 | **DONE `276e05c`** | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
 | **20** | B.2 | `b2-reserve.test.ts` | an outstanding reservation is invisible to the fold `GET /runs/:id` serves, and `task.started`'s absent appender makes a headline concurrency assertion compare 0 to 0 |
 | ~~**21**~~ | A.36 | **DONE `d9a8173`** | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
-| **22** | B.1 | `b1-strand.test.ts` | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
+| **22** | B.1 | **RECLASSIFIED — see B.1** | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
 | ~~**23**~~ | A.13 | **DONE `96a03bf`** | `loom run` counts its own laps instead of the run's progress, so it abandons a run still journaling progress well inside the bound its graph declared |
 | **24** | A.29 | **REFUSED — see A.29** | a frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN deterministic verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression |
 | **25** | D.1 | **HALF DONE `96a03bf`** | `readMcpServers` silently drops every key it does not know, so a per-server `irreversibility` — and a typo'd `envAllow` — vanish without a word |
