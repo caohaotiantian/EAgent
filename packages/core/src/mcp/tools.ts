@@ -3,30 +3,43 @@
  *
  * `ToolDefinition` needs three things an MCP server does not provide and cannot be asked
  * for: `version`, `idempotent`, and `irreversibility`. The last is the one that matters,
- * because that class — not a config file — decides the default oversight posture (D7.6), and
- * `tools/list` says nothing about whether a tool reads a file or wires money.
+ * because that class is the sole input to the default oversight posture (D7.6) — nothing else
+ * sets a posture, so whatever sets the class sets the gate — and `tools/list` says nothing
+ * about whether a tool reads a file or wires money.
  *
- * SO EVERY MCP TOOL IS `irreversible`, WHICH MEANS EVERY MCP TOOL GATES.
+ * SO EVERY MCP TOOL IS `irreversible` UNLESS AN OPERATOR SAID OTHERWISE, AND THE DEFAULT GATES.
  *
- * That is not conservatism for its own sake. The alternatives are worse in a specific way:
- * guessing from the tool's NAME is a heuristic a hostile server picks its names to defeat,
- * and trusting a self-declared class lets the party being governed choose its own governance.
- * `irreversible` is the honest answer to "we do not know", and the whole oversight ladder is
- * built so that "we do not know" resolves to asking a human.
+ * That default is not conservatism for its own sake. The two ways to compute a class are worse
+ * in a specific way: guessing from the tool's NAME is a heuristic a hostile server picks its
+ * names to defeat, and reading a class the server ADVERTISES lets the party being governed
+ * choose its own governance. `irreversible` is the honest answer to "we do not know", and the
+ * whole oversight ladder is built so that "we do not know" resolves to asking a human.
  *
  * The consequence is worth stating plainly rather than discovering: an agent node that can
  * reach an MCP tool has a posture floor of `in`, so it cannot run one unattended. BOTH node
  * types are approvable — this used to say a graph wanting unattended MCP use had to put the
  * call on a `tool` node "rather than inside an agent turn", and that stopped being true: an
  * agent node now gates at the NODE, before the model runs, and carries the approval through the
- * turn. Neither runs an MCP tool without a human; both can be answered. An operator who knows a particular server is
- * read-only can say so by declaring the manifest themselves; there is deliberately no flag
- * that says "trust every server".
+ * turn. Neither runs an MCP tool without a human; both can be answered.
+ *
+ * THE ONE WAY THE DEFAULT MOVES IS A HUMAN TYPING IT, and `irreversibility` is a PARAMETER here
+ * rather than anything this file can read off `client`. That placement is the guard: there is no
+ * expression in this module that could reach `tools/list`'s reply and turn it into a class, so
+ * the refusal above ("a self-declared class lets the party being governed choose its own
+ * governance") is enforced by the absence of a path and not by a comment. The only caller that
+ * passes a second argument is `cli.ts`'s registration loop, which gets it from `readMcpServers`,
+ * which gets it from the file named on ARGV — the argument for why THAT is a human is written at
+ * `MCP_SERVER_FIELDS`, because it is a decision about oversight and not about MCP.
+ *
+ * PER SERVER, NEVER PER TOOL, which is the same line `capabilities` already draws below: an
+ * operator can decide "the docs server only reads", and cannot decide anything true about a list
+ * of tool names the server rewrites between two `tools/list` calls.
  */
 
 import { CODES, err } from "../errors.ts";
 import type { JSONSchema } from "../schema.ts";
 import type { ToolDefinition, ToolResult } from "../run/registry.ts";
+import type { IrreversibilityClass } from "../vocab.ts";
 import type { McpClient } from "./client.ts";
 
 /**
@@ -68,8 +81,15 @@ function renderContent(result: McpCallResult): string {
  * `reachableToolNames`, computed at compile time — so a tool registered after the compile is
  * a tool the floor never saw, which is invariant 5 defeated by ordering rather than by
  * argument. `ToolRegistry.seal()` exists to make that ordering enforceable.
+ *
+ * `irreversibility` DEFAULTS RATHER THAN BEING REQUIRED, and the default is the strict one. A
+ * caller that says nothing gets what every caller got before the parameter existed, so an
+ * embedder who never updates their call site cannot be loosened by an upgrade.
  */
-export function mcpTools(client: McpClient): readonly ToolDefinition[] {
+export function mcpTools(
+  client: McpClient,
+  irreversibility: IrreversibilityClass = "irreversible",
+): readonly ToolDefinition[] {
   return client.tools.map((spec): ToolDefinition => {
     const name = mcpToolName(client.name, spec.name);
     return {
@@ -81,7 +101,12 @@ export function mcpTools(client: McpClient): readonly ToolDefinition[] {
       // github's create_issue" is a decision about a list they did not write and that the
       // server can change under them.
       capabilities: [`mcp:${client.name}`],
-      irreversibility: "irreversible",
+      irreversibility,
+      // NOT DERIVED FROM THE CLASS, and `read_only` does not make it true. `idempotent` is a
+      // claim about calling the same tool twice, which no `tools/list` entry makes and no
+      // operator declaring a SERVER is in a position to make about tools they did not write.
+      // `CLASS_AUTO_RETRYABLE` already lets a `read_only` tool be retried without this, so
+      // leaving it false costs nothing an operator asked for.
       idempotent: false,
       // A server may advertise no schema at all. An empty object schema accepts anything,
       // which is honest: the server validates, and pretending to validate here would mean

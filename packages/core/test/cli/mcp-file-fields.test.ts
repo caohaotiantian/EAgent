@@ -8,10 +8,14 @@
  *     {"servers":[{"name":"docs","command":"node","envallow":["PATH"],"irreversibility":"safe"}]}
  *     readMcpServers(file) -> [{"name":"docs","command":"node"}]
  *
- * — exit 0, nothing on stderr, and two operator fields gone. `TODO.md` §D.1 records both halves
- * and says only this half is in scope: the refusal. `irreversibility` itself is a decision nobody
- * has taken — `mcp/tools.ts` hardcodes `irreversibility: "irreversible"` on every MCP tool — and
- * accepting the spelling would advertise a capability the binary does not have.
+ * — exit 0, nothing on stderr, and two operator fields gone.
+ *
+ * `irreversibility` IS NOW A FIELD RATHER THAN A REFUSAL, which is §D.1's other half taken: the
+ * argument for why a file named on argv may lower an oversight class is written at
+ * `MCP_SERVER_FIELDS`, and the behaviour it buys is driven end-to-end in
+ * `test/mcp/irreversibility.test.ts`. What THIS file keeps is the reader's own contract: the four
+ * members are the only accepted values, anything else is refused rather than rounded down to the
+ * strict default, and absence is still absence.
  *
  * ## Why the miscased key is the worse half
  *
@@ -64,18 +68,53 @@ test("A MISCASED envAllow IS REFUSED, where it used to be silently dropped", () 
   assert.match(e.message, /servers\[0\]/, "and which row it was in");
 });
 
-test("PER-SERVER irreversibility IS REFUSED RATHER THAN ACCEPTED AND IGNORED", () => {
-  // The §D.1 field. Refusing it is not implementing it — it is declining to accept a spelling
-  // that would leave an operator believing they had lowered an oversight class when every MCP
-  // tool still gates. The decision that would make it real is recorded there, not here.
+test("AN irreversibility OUTSIDE THE VOCABULARY IS REFUSED, and the refusal names every member", () => {
+  // `"safe"` is not a class this binary has, and the tempting handling is to round it to the
+  // strict default — which is fail-closed and therefore feels free. It is not free: it hides the
+  // typo, and the operator who wrote it walks away believing they lowered something. Refusing is
+  // always allowed; a silent no-op is what the whole `onlyKeys` family exists to stop.
   const e = refusalFor({ servers: [{ name: "docs", command: "node", envAllow: ["PATH"], irreversibility: "safe" }] });
   assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, String(e));
-  assert.match(e.message, /"irreversibility"/);
+  assert.match(e.message, /servers\[0\]\.irreversibility/, "and which row it was in");
+  // NAMES ITS MEMBERS. A refusal that says "invalid class" has told the operator they are wrong
+  // and nothing else, and the four names are read off `CLASS_DEFAULT_POSTURE` rather than retyped
+  // in `cli.ts`, so a fifth member of the union would appear here without an edit.
+  for (const member of ["read_only", "reversible_write", "irreversible", "externally_visible"]) {
+    assert.match(e.message, new RegExp(member), `the refusal must name ${member}`);
+  }
+  // AND SAYS WHAT SILENCE MEANS, because the operator reading this refusal is deciding whether to
+  // delete the key or fix it, and those have different consequences.
+  assert.match(e.message, /omitting it means\s+irreversible/);
+});
+
+test("A NON-STRING irreversibility IS REFUSED TOO — `true` is not a class", () => {
+  // The shape a hand-edited JSON file actually produces. `Array.includes` on a boolean is false,
+  // so this arm costs nothing to hold, but a reader should not have to derive that.
+  for (const bad of [true, 3, null, ["read_only"], { class: "read_only" }]) {
+    const e = refusalFor({ servers: [{ name: "docs", command: "node", irreversibility: bad }] });
+    assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, `${JSON.stringify(bad)}: ${String(e)}`);
+    assert.match(e.message, /servers\[0\]\.irreversibility/);
+  }
+});
+
+test("ALL FOUR MEMBERS ARE ACCEPTED, and each arrives on the row it was written on", () => {
+  // The half that matters more than the refusal, and the reason it is written as a loop over the
+  // whole vocabulary: a validator that accepts `read_only` and rejects `externally_visible` is a
+  // validator nobody notices is wrong until an operator declares the one that tightens.
+  for (const member of ["read_only", "reversible_write", "irreversible", "externally_visible"] as const) {
+    assert.deepEqual(
+      withFile({ servers: [{ name: "docs", command: "node", irreversibility: member }] }, (path) => readMcpServers(path)),
+      [{ name: "docs", command: "node", irreversibility: member }],
+      `${member} must survive the reader`,
+    );
+  }
 });
 
 test("BOTH KEYS AT ONCE ARE NAMED IN ONE REFUSAL", () => {
-  const e = refusalFor({ servers: [{ name: "docs", command: "node", envallow: ["PATH"], irreversibility: "safe" }] });
-  assert.match(e.message, /"envallow", "irreversibility"/, "an operator fixing one at a time is an operator running this twice");
+  // `irreversability` — the misspelling the new field creates, and the one that would otherwise
+  // be the silent half all over again: a server the operator believes is read_only, gating.
+  const e = refusalFor({ servers: [{ name: "docs", command: "node", envallow: ["PATH"], irreversability: "read_only" }] });
+  assert.match(e.message, /"envallow", "irreversability"/, "an operator fixing one at a time is an operator running this twice");
   // AND THE MESSAGE SAYS NOTHING ABOUT ADAPTERS. `onlyKeys` is shared with `readModels`, and its
   // sentence used to end "changed nothing about the adapter this row built" and cite an unknown
   // `"provider"` — two claims about a subsystem an mcp file does not configure.
@@ -92,9 +131,12 @@ test("THE CONTROL: the four fields this reader does read are still accepted, and
   );
   assert.deepEqual(servers, [{ name: "docs", command: "node", args: ["-e", ""], envAllow: ["PATH", "HOME"] }]);
 
-  // And a row that declares only what is required is still a legal row — the optional two are
-  // absent rather than refused.
-  assert.deepEqual(withFile({ servers: [{ name: "docs", command: "node" }] }, (path) => readMcpServers(path)), [
-    { name: "docs", command: "node" },
-  ]);
+  // And a row that declares only what is required is still a legal row — the optional three are
+  // absent rather than refused. THE ABSENT `irreversibility` IS THE POINT: this reader does not
+  // fill it in, so nothing downstream can mistake a default this file wrote for a declaration an
+  // operator made. `startMcp` applies the default, once, and `test/mcp/irreversibility.test.ts`
+  // is what shows the run it produces still stopping.
+  const bare = withFile({ servers: [{ name: "docs", command: "node" }] }, (path) => readMcpServers(path));
+  assert.deepEqual(bare, [{ name: "docs", command: "node" }]);
+  assert.ok(!("irreversibility" in bare[0]!), "silence must stay silence, not become a written default");
 });

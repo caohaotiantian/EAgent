@@ -62,7 +62,14 @@ import {
   type IdentitySource,
 } from "./server/http.ts";
 import { CODES, err } from "./errors.ts";
-import { isSyntheticSubject, POSTURES, type Disposable as LoomDisposable, type Posture } from "./vocab.ts";
+import {
+  CLASS_DEFAULT_POSTURE,
+  isSyntheticSubject,
+  POSTURES,
+  type Disposable as LoomDisposable,
+  type IrreversibilityClass,
+  type Posture,
+} from "./vocab.ts";
 import { foldRun, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
@@ -309,9 +316,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     command is not even found — "spawn npx ENOENT". This example carried
                     no envAllow and could not start.
                     Connected BEFORE any graph compiles, so discovered tools are inside the
-                    posture floor. EVERY MCP tool is irreversible and therefore gates:
-                    tools/list cannot say whether a tool reads a file or wires money, and
-                    guessing from its name is a heuristic a hostile server defeats.
+                    posture floor. EVERY MCP tool is irreversible, AND THEREFORE GATES, UNLESS
+                    ITS OWN SERVER ROW SAYS OTHERWISE: tools/list cannot say whether a tool
+                    reads a file or wires money, and guessing from its name is a heuristic a
+                    hostile server defeats. A row may add "irreversibility" — read_only,
+                    reversible_write, irreversible or externally_visible — to declare what YOU
+                    know about that server. It applies to every tool that server offers, it is
+                    never read from the server itself, the default with no such key is
+                    irreversible, and lowering it prints "! MCP OVERSIGHT LOWERED" at boot.
                     A key nothing on this list reads is REFUSED, not dropped: a miscased
                     envAllow is a server started with an empty environment.
 
@@ -1157,8 +1169,13 @@ export function openWorkspace(
    * absent from both `tenantCapabilities` and the engine's grant: a graph naming an MCP tool
    * failed to COMPILE, and W8's claim to have unbricked MCP was false. Reproduced against a real
    * stdio server by a reviewer.
+   *
+   * THE CLASS TRAVELS WITH THE CLIENT rather than beside it. `startMcp` pairs each connected
+   * server with the class its `--mcp-file` row declared, so this function cannot look one up by
+   * name and cannot get the pairing wrong — the alternative shape, a `Map<string, class>` passed
+   * alongside, is one where a renamed server silently falls back to the default.
    */
-  mcp: readonly McpClient[] = [],
+  mcp: readonly ConnectedMcpServer[] = [],
   /**
    * What `--extension-module` registered, loaded in `main` BEFORE this function is called.
    *
@@ -1383,7 +1400,13 @@ export function openWorkspace(
   // ONE DERIVATION, USED HERE AND BY THE COMPILER — see `capabilitiesOf`.
   // MCP TOOLS BEFORE THE GRANT IS DERIVED. Connecting the server IS the grant — that is W8's
   // whole argument — and it only holds if the registration happens first.
-  for (const client of mcp) for (const t of mcpTools(client)) tools.register(t);
+  //
+  // THE SECOND ARGUMENT IS THE ONLY PATH TO A LOWERED MCP GATE IN THIS BINARY, and it reaches
+  // here from a `--mcp-file` row and from nowhere else. See `MCP_SERVER_FIELDS` for why a file
+  // named on argv is allowed to do that when `loadExtensionModules` says a file may not.
+  for (const { client, irreversibility } of mcp) {
+    for (const t of mcpTools(client, irreversibility)) tools.register(t);
+  }
 
   const granted = capabilitiesOf(tools, grantFlag(args));
   // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS, so a malformed ceiling is a process that
@@ -3162,15 +3185,85 @@ function readSpec(file: string): GraphSpec {
  * `spawn npx ENOENT` two layers away from the lowercase `a` that caused it — the exact failure
  * this reader's own refusal message already spends three lines warning about.
  *
- * `irreversibility` IS DELIBERATELY NOT HERE, on the same footing as `ADAPTER_FIELDS`' `headers`
- * and `PRICE_FIELDS`' `cacheRead`: accepting the spelling would advertise a capability this
- * binary does not have. `mcp/tools.ts` hardcodes `irreversibility: "irreversible"` on every tool
- * from every server, and whether an operator may lower an oversight class from a config file is
- * an open decision — `TODO.md` §D.1 — not one a field list gets to make by listing a name. Until
- * that decision is taken, an operator who writes it is told it changed nothing, which is the
- * true statement; today they are told nothing and their tools gate anyway.
+ * `irreversibility` IS NOW ON THIS LIST, and it is the only field in this file that can make the
+ * binary do LESS oversight than it did before. `CLAUDE.md` is explicit that a human may lower a
+ * posture and no automated path may, so the field owes an argument and not just a validator.
+ * Four parts, and the fourth is a condition rather than a caveat.
+ *
+ * 1 · THIS FILE IS ALREADY THE ARBITRARY-CODE DOOR, so the field grants nothing new. A row here
+ * names `command` and `args`, and `startMcp` SPAWNS them — against no program allow-list, and
+ * without `--allow-exec`, which is the flag that bounds the only OTHER child this binary starts.
+ * Driven on 2026-09-02: `loom run --mcp-file …` with no `--allow-exec` anywhere spawned the
+ * configured command and registered its tools. The same row names `envAllow`, which selects out
+ * of THIS process's environment, the one holding provider API keys. Whoever can write this file
+ * can already run a program of their choosing with the operator's credentials and have whatever
+ * it calls itself registered as a tool.
+ * `"irreversibility": "read_only"` is strictly weaker than the `"command": "/bin/sh"` the same
+ * row could always have said, and a door is not opened by a key that reaches less far than the
+ * door standing open beside it.
+ *
+ * 2 · `loadExtensionModules`' RULE IS ABOUT THE PATH, AND THIS PATH IS ARGV. That rule reads "a
+ * path read out of a FILE would let a FILE decide who may approve", and the thing it forbids is
+ * transitive: a file the RUNTIME produced naming what to trust. Here `requireFileFlag` reads the
+ * path off `Args`; `Args` comes from `parseArgs`, which has exactly ONE caller in `src/` — `main`
+ * — whose own only `src/` caller is `main(process.argv.slice(2))` at the foot of this file. So
+ * there is no path by which a value the runtime computed becomes this flag: the operator who
+ * typed it chose this file, which is exactly the standing `--extension-module` has, and that one
+ * hands a module the whole `ToolRegistry`.
+ *
+ * 3 · WHAT STAYS CLOSED IS THE SERVER'S CLAIM ABOUT ITSELF, and it is closed structurally rather
+ * than by this paragraph: `mcpTools` takes the class as a PARAMETER and contains no expression
+ * that reads `spec` or `client` for one, so `tools/list` cannot reach it. Neither can a model or
+ * a graph: no journal event, no tool result and no channel value is on the path from anywhere to
+ * `ToolDefinition.irreversibility`. Inferring the class from a server's advertised metadata was
+ * refused in writing at `TODO.md` §D.1 and is still refused.
+ *
+ * 4 · AND ALL THREE ASSUME ONE OPERATOR. The person who wrote the mcp file and the person who
+ * ran the binary are the same person here by deployment decision — single machine, single
+ * tenant — and part 1 inverts the moment they are not: a file somebody else wrote is not the
+ * operator's own hand, and then this field IS a stranger lowering a gate. That is the condition
+ * to re-check before this binary grows a second operator, and it is why the class is per SERVER
+ * and never per tool: the blast radius of a wrong declaration is one server an operator named.
+ *
+ * The default is unchanged and is `irreversible`, in `mcpTools`' own parameter default rather
+ * than at a call site — so a deployment that upgrades without touching its mcp file gates
+ * exactly where it gated before. `test/mcp/irreversibility.test.ts` is the pair that pins it:
+ * the CONTROL half asserts `awaiting_gate` from a file with no such key.
  */
-const MCP_SERVER_FIELDS: readonly string[] = ["name", "command", "args", "envAllow"];
+const MCP_SERVER_FIELDS: readonly string[] = ["name", "command", "args", "envAllow", "irreversibility"];
+
+/**
+ * The four classes a row may name, READ OFF THE VOCABULARY rather than retyped.
+ *
+ * `CLASS_DEFAULT_POSTURE` is a `Record` over the whole union, so this list cannot drift from the
+ * members `IrreversibilityClass` actually has — a fifth class added to `vocab.ts` is accepted
+ * here on the same commit, and the refusal below names it without anybody editing this file.
+ */
+const IRREVERSIBILITY_CLASSES = Object.keys(CLASS_DEFAULT_POSTURE) as readonly IrreversibilityClass[];
+
+/**
+ * One validated `--mcp-file` row: what `McpClient` needs, plus what the OPERATOR declared about it.
+ *
+ * Separate from `McpClientOptions` on purpose. `McpClient` never reads `irreversibility` — it is
+ * not a fact about talking to the server, it is a fact about how this deployment governs it — and
+ * putting it on the client's options type would have added a field to a pinned public interface
+ * that the class it configures ignores.
+ */
+export interface McpServerConfig extends McpClientOptions {
+  readonly irreversibility?: IrreversibilityClass;
+}
+
+/**
+ * A connected server, paired with the class its row declared — defaulted, so callers cannot omit it.
+ *
+ * The pairing is the point. `openWorkspace` registers tools from this array, and the shape it
+ * would otherwise be handed — clients plus a lookup keyed by server name — is one where a miss
+ * returns the default silently. Here there is no miss to have.
+ */
+export interface ConnectedMcpServer {
+  readonly client: McpClient;
+  readonly irreversibility: IrreversibilityClass;
+}
 
 /**
  * `--mcp-file` — which MCP servers to connect, and under what name.
@@ -3183,7 +3276,7 @@ const MCP_SERVER_FIELDS: readonly string[] = ["name", "command", "args", "envAll
  * booting anyway produces a deployment that looks configured and whose every MCP call fails
  * with "unknown tool".
  */
-export function readMcpServers(file: string): readonly McpClientOptions[] {
+export function readMcpServers(file: string): readonly McpServerConfig[] {
   const path = resolve(file);
   let parsed: unknown;
   try {
@@ -3208,7 +3301,7 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
     );
   }
   const seen = new Set<string>();
-  return rows.map((raw, i): McpClientOptions => {
+  return rows.map((raw, i): McpServerConfig => {
     const where = `servers[${String(i)}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
@@ -3233,13 +3326,55 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
     if (envAllow !== undefined && (!Array.isArray(envAllow) || envAllow.some((a) => typeof a !== "string"))) {
       refuse(`${where}.envAllow must be an array of variable NAMES`);
     }
+    // A VALUE OUTSIDE THE VOCABULARY IS REFUSED, NOT ROUNDED TO THE DEFAULT. Rounding is the
+    // tempting move because the default is the strict one and so the rounding is fail-closed —
+    // but it hides the typo that produced it, and the operator who wrote `read-only` walks away
+    // believing they lowered something. Refusing is always allowed; a silent no-op is not.
+    const irreversibility = row["irreversibility"];
+    if (irreversibility !== undefined && !IRREVERSIBILITY_CLASSES.includes(irreversibility as IrreversibilityClass)) {
+      refuse(
+        `${where}.irreversibility must be one of ${IRREVERSIBILITY_CLASSES.join(", ")} — it is the ` +
+          `oversight class EVERY tool this server offers is registered with, and omitting it means ` +
+          `irreversible, which gates`,
+      );
+    }
     return {
       name,
       command,
       ...(args === undefined ? {} : { args: args as readonly string[] }),
       ...(envAllow === undefined ? {} : { envAllow: envAllow as readonly string[] }),
+      ...(irreversibility === undefined ? {} : { irreversibility: irreversibility as IrreversibilityClass }),
     };
   });
+}
+
+/**
+ * What the boot output says about a `--mcp-file` row that lowered a gate.
+ *
+ * SEPARATE FROM THE WRITE, for the reason `execWarnings` is: the decision worth checking is WHICH
+ * rows are named, and a test that wants it otherwise has to drive a process and read its stderr.
+ * It is written from `main` rather than from `announce`, which is the one way it differs from
+ * `execWarnings` and is deliberate — `announce` runs on `serve` only, and a lowered class matters
+ * most on `loom run`, where there is no plane and no banner and the gate that does not fire is
+ * the only thing an operator would otherwise have noticed.
+ *
+ * A ROW THAT SAYS `irreversible` OUT LOUD IS NOT NAMED HERE. It changed nothing, and a warning
+ * that fires on a no-op is a warning operators learn to skip — `MAX_BANNER_GATES` is the same
+ * argument applied to a different line.
+ */
+export function mcpLoweringWarnings(servers: readonly McpServerConfig[]): readonly string[] {
+  const lowered = servers.filter(
+    (srv): srv is McpServerConfig & { readonly irreversibility: IrreversibilityClass } =>
+      srv.irreversibility !== undefined && srv.irreversibility !== "irreversible",
+  );
+  if (lowered.length === 0) return [];
+  return [
+    `! MCP OVERSIGHT LOWERED BY --mcp-file — ` +
+      `${lowered.map((srv) => `${srv.name}: ${srv.irreversibility} (posture floor ${CLASS_DEFAULT_POSTURE[srv.irreversibility]})`).join("; ")}\n` +
+      `  Every tool those servers offer is registered at that class instead of irreversible, so a\n` +
+      `  node reaching one may run with no human. This is the only place a config file lowers a\n` +
+      `  gate in this binary, and it is your declaration about the server, not the server's.\n`,
+  ];
 }
 
 /**
@@ -3254,14 +3389,14 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
  * A server that fails to start is fatal, not skipped. Skipping produces a run whose graph
  * compiled against tools that are not there, which fails later and further away.
  */
-export async function startMcp(servers: readonly McpClientOptions[]): Promise<readonly McpClient[]> {
-  const clients: McpClient[] = [];
+export async function startMcp(servers: readonly McpServerConfig[]): Promise<readonly ConnectedMcpServer[]> {
+  const clients: ConnectedMcpServer[] = [];
   for (const opts of servers) {
     const client = new McpClient(opts);
     try {
       await client.start();
     } catch (e) {
-      for (const c of clients) c.close();
+      for (const c of clients) c.client.close();
       client.close();
       // ENOENT WITH NO `PATH` IS ALMOST ALWAYS THE ENV, NOT THE COMMAND — and "spawn npx
       // ENOENT" points an operator at their command, which is usually fine. The child gets only
@@ -3281,7 +3416,10 @@ export async function startMcp(servers: readonly McpClientOptions[]): Promise<re
             : ""),
       );
     }
-    clients.push(client);
+    // THE DEFAULT IS APPLIED HERE, ONCE, so no later reader has to remember it. `mcpTools` holds
+    // the same default in its own parameter, which is belt and braces on purpose: an embedder who
+    // never calls this function still cannot be loosened by omission.
+    clients.push({ client, irreversibility: opts.irreversibility ?? "irreversible" });
   }
   return clients;
 }
@@ -5392,7 +5530,10 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
   // parameter.
-  const mcp = args.flags["mcp-file"] === undefined ? [] : await startMcp(readMcpServers(requireFileFlag(args, "mcp-file")));
+  const mcpServers = args.flags["mcp-file"] === undefined ? [] : readMcpServers(requireFileFlag(args, "mcp-file"));
+  // BEFORE THE CONNECT, so an operator sees what they declared even when a server fails to start.
+  for (const line of mcpLoweringWarnings(mcpServers)) process.stderr.write(line);
+  const mcp = mcpServers.length === 0 ? [] : await startMcp(mcpServers);
   // BEFORE THE WORKSPACE, for the reason `mcp` is and one reason more: `openWorkspace` reads
   // `--models-file` on its first line, and a `routes` row may name an adapter an extension
   // module registered. `await import()` is why this cannot happen inside that function.
@@ -6548,7 +6689,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   } finally {
     // Children first: a server left running outlives the process that spawned it, and a
     // stdio server holds the pipe open, so `loom run` would not exit.
-    for (const c of mcp) c.close();
+    for (const c of mcp) c.client.close();
     ws.close();
   }
 }

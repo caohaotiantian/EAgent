@@ -207,14 +207,14 @@ can be wrong without being falsifiable.
 | §A | 36 | 21 | 15 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
+| §D | 5 | 3 | 2 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
 | §H | 5 | 3 | 2 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
+A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.1, D.2, D.4;
 **§H** H.2, H.3, H.4.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
@@ -1332,8 +1332,9 @@ is a better view of nothing.
 ## D · Decisions still owed
 
 **§D's re-check table carried 22 rows (`D.0`–`D.21`); five remain, renumbered `D.1`–`D.5`, and
-of those five only THREE are still owed — `D.1`, `D.3`, `D.5`.** `D.4` was answered by
-`50f7c03` and `D.2` by `aaa4a9a`; both are struck below and kept, because a decision's argument is
+of those five only TWO are still owed — `D.3`, `D.5`.** `D.4` was answered by
+`50f7c03`, `D.2` by `aaa4a9a` and `D.1` by the commit that added `irreversibility` to
+`MCP_SERVER_FIELDS`; all three are struck below and kept, because a decision's argument is
 the thing a future reader needs and deleting the row deletes it.
 Twelve were answered on 2026-08-28 and are in §Z with the commit that executed each — the rest had
 already closed before this session. **The surviving five do NOT keep their old numbers**, which is
@@ -1345,13 +1346,26 @@ three of them resolved to *do not build*.
 
 Each row below states what a decision would settle. None is the implementer's to answer alone.
 
-- **D.1 · Per-server `irreversibility` on `--mcp-file`. HALF CLOSED by `96a03bf`: the unknown-key
-  refusal landed and the DECISION did not.** `readMcpServers` now refuses a field nothing reads,
-  the way `readModels` does - so a miscased `envallow` is a refusal naming the key rather than a
-  server started with an empty environment, which was the silent half. What remains is the part
-  no test can settle: whether an operator may declare a per-server irreversibility class at all,
-  which is a decision about who gets to lower a gate and therefore a maintainer call. The
-  original row, whose argument is the case FOR making it: `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
+- ~~**D.1 · Per-server `irreversibility` on `--mcp-file`.**~~ **ANSWERED: yes, an operator may,
+  and the argument is written at `MCP_SERVER_FIELDS` rather than here.** Four parts, and the
+  load-bearing one is that this file is ALREADY the arbitrary-code door: a row names `command`
+  and `args` and `startMcp` spawns them with no allow-list, and names `envAllow`, which selects
+  out of the process holding provider API keys — so `"irreversibility":"read_only"` is strictly
+  weaker than the `"command":"/bin/sh"` the same row could always have said. The rule it had to
+  clear is `loadExtensionModules`', and that rule is about the PATH: the path here comes from
+  `requireFileFlag` off `Args`, `Args` from `parseArgs`, `parseArgs` from
+  `main(process.argv.slice(2))`, and nothing in `src/` writes an mcp file or synthesises argv.
+  What stayed closed is the server's claim about ITSELF — `mcpTools` takes the class as a
+  parameter and has no expression reaching `tools/list` — so the thing being governed still does
+  not write its own governance. **The condition, recorded because it is not a caveat:** all of it
+  assumes the writer of the mcp file and the runner of the binary are one person. At a second
+  operator the argument inverts and the field must be taken away. Driven end to end, same graph,
+  same server, one key apart: no key → `awaiting_gate`, `tools/call` reached 0 times; with
+  `"irreversibility":"read_only"` → `succeeded`, reached 1 time, and `! MCP OVERSIGHT LOWERED BY
+  --mcp-file — demo: read_only (posture floor out)` on stderr.
+  `test/mcp/irreversibility.test.ts` is that pair, and its CONTROL is the half that matters.
+  The unknown-key half had landed earlier, at `96a03bf`. The original row, whose argument is the
+  case FOR making it: `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
   on every tool from every MCP server, so **every MCP tool gates** — and `cli.ts`'s `readMcpServers`
   validates exactly `name`, `command`, `args` and `envAllow` and then builds its result from those
   four keys, with no unknown-field refusal anywhere, so an operator writing a per-server class
@@ -1372,6 +1386,8 @@ Each row below states what a decision would settle. None is the implementer's to
   mcp file" stop being the same person. **Dissent, recorded:** filing rather than building is how
   findings die, and a §D item nobody picks up is functionally the silence that gave §B thirteen
   entries. If this is still open at the next re-check, filing it was the wrong call.
+  (It was not: the shape above is what shipped, unchanged, including the CONTROL and the
+  outright refusal — and the dissent is the reason it shipped at all.)
 
 - ~~**D.2 · A ninth span name for a subgraph.**~~ **ANSWERED: no ninth name.** The question was
   whether the span taxonomy is a closed vocabulary. It is, and the decision landed with the code
