@@ -147,9 +147,10 @@ function effectiveRetry(n: NodeSpec): RetryPolicy | undefined {
  * makes this a BACKSTOP rather than a policy — it can only fire where a request has already
  * outlived the deadline its own SDK would have applied, which is exactly the case this tree has.
  *
- * ONE NUMBER FOR ALL THREE TYPES, deliberately. A per-type figure would imply a precision nobody
- * here has measured; this is the difference between "fails eventually" and "never", not a tuning
- * knob. An author who wants a real bound writes one, and `NodeSpec.timeoutMs` always wins.
+ * ONE NUMBER FOR `agent`, `tool`, `evaluator` AND `function` ALIKE, deliberately. A per-type
+ * figure would imply a precision nobody here has measured; this is the difference between "fails
+ * eventually" and "never", not a tuning knob. An author who wants a real bound writes one, and
+ * `NodeSpec.timeoutMs` always wins.
  *
  * IT IS AN OUTER BOUND, not the only one. A tool with its own clock still fires first
  * (`mcp/client.ts` at 30 s, `sandbox/subprocess.ts`'s required `timeoutMs`), and so does a
@@ -158,11 +159,21 @@ function effectiveRetry(n: NodeSpec): RetryPolicy | undefined {
 const DEFAULT_NODE_TIMEOUT_MS = 600_000;
 
 /**
- * The node types that get a default deadline, and why the other four do not.
+ * The node types that get a default deadline, and why `router`, `join`, `human_gate` and
+ * `subgraph` do not.
  *
- * THE SET IS `agent`, `tool`, `evaluator`, `function`. Read off `Engine.#dispatchBody`, which is the only
- * thing `#withNodeDeadline` wraps — so the question is not "can this node type take a long time"
- * but "can its BODY fail to settle", and only these three can:
+ * EVERY CLAIM BELOW NAMES ITS MEMBERS AND NONE OF THEM COUNTS. Not a style preference — it is
+ * what this docstring was corrected for twice and stayed wrong through. `function` joined the set
+ * and the prose saying "three" was fixed where a reader looks first, at the headline and at the
+ * "why the other N do not" line, while "only these three can" — mid-sentence, directly above
+ * bullets naming `agent`, `tool`, `evaluator` and `function` — survived both passes. A count is a
+ * second, unlinked statement of a fact the enumeration beside it already carries, so it rots
+ * alone and silently; a name cannot. `test/graph/deadline-set-is-named-not-counted.test.ts` holds
+ * this region to that rule and to the set the compiler actually applies.
+ *
+ * THE SET IS `agent`, `tool`, `evaluator`, `function`. Read off `Engine.#dispatchBody`, which is
+ * the only thing `#withNodeDeadline` wraps — so the question is not "can this node type take a
+ * long time" but "can its BODY fail to settle", and only those can:
  *
  *   - `agent` — `#runAgent` awaits a provider stream that no clock in this tree bounds.
  *   - `tool` — `#runToolNode` awaits an extension's `execute`. The case `node-timeout.test.ts`
@@ -184,7 +195,8 @@ const DEFAULT_NODE_TIMEOUT_MS = 600_000;
  *     bounded by this default exactly as well as any other node's. Inert for realm-loaded bodies,
  *     by the 30 s argument above, which is the reason it costs them nothing.
  *
- * THE FOUR WITHOUT ONE, each for its own reason and none of them "we forgot":
+ * `router`, `join`, `human_gate` AND `subgraph` GET NONE, each for its own reason and none of
+ * them "we forgot":
  *
  *   - `router` — `#runRouter` evaluates declared expressions against the scope and returns. No
  *     await, no I/O.
