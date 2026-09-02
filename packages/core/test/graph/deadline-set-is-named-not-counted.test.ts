@@ -157,7 +157,13 @@ test("AND NEITHER SET IS REFERRED TO BY A COUNT — the failure mode H.3 was ope
   // not matched. `one` is out for a different reason, measured rather than assumed: it fired on
   // "IT IS AN OUTER BOUND, not the only one", where the word is a pronoun and not a count, and a
   // set of one is not a shape this docstring can take.
-  const counted = [...prose.matchAll(/\b(all|these|those|the|other|only)\s+(two|three|four|five|six|seven|eight)\b/gi)];
+  // ANY BARE NUMBER-WORD, not a determiner followed by one. The first version of this guard
+  // matched six determiners, so `and exactly three can:` — a stale count sitting directly above
+  // the four bullets, which is §H.3's defect verbatim — passed it green. Driven by a reviewer
+  // who substituted that phrasing and watched the suite stay green. The region survives the
+  // wider rule because every number-word left in it is inside quotes, and quotes are masked
+  // above: this docstring QUOTES the counts it is warning about, and quoting is not counting.
+  const counted = [...prose.matchAll(/\b(two|three|four|five|six|seven|eight)\b/gi)];
   assert.deepEqual(
     counted.map((m) => m[0]),
     [],

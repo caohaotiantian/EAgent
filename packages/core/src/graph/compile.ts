@@ -162,14 +162,19 @@ const DEFAULT_NODE_TIMEOUT_MS = 600_000;
  * The node types that get a default deadline, and why `router`, `join`, `human_gate` and
  * `subgraph` do not.
  *
- * EVERY CLAIM BELOW NAMES ITS MEMBERS AND NONE OF THEM COUNTS. Not a style preference — it is
- * what this docstring was corrected for twice and stayed wrong through. `function` joined the set
- * and the prose saying "three" was fixed where a reader looks first, at the headline and at the
- * "why the other N do not" line, while "only these three can" — mid-sentence, directly above
- * bullets naming `agent`, `tool`, `evaluator` and `function` — survived both passes. A count is a
- * second, unlinked statement of a fact the enumeration beside it already carries, so it rots
- * alone and silently; a name cannot. `test/graph/deadline-set-is-named-not-counted.test.ts` holds
- * this region to that rule and to the set the compiler actually applies.
+ * EVERY CLAIM BELOW NAMES ITS MEMBERS AND NONE OF THEM COUNTS. Not a style preference, and the
+ * history is worth getting right because an earlier version of THIS paragraph got it wrong —
+ * it said the prose saying "three" had been "fixed where a reader looks first, at the headline
+ * and at the 'why the other N do not' line", and a reviewer checked the commits. `f5a047e`
+ * introduced this docstring correct, back before `function` was in the set. `ff4888d` added it to the CODE
+ * and corrected only the get-none heading. `6af4a02` corrected the complement count and the
+ * naming of the set. **No prose clause saying "three" was ever fixed by either pass** —
+ * BOTH survived, which is exactly the pair §H.3's survey grep returned. So the lesson is not
+ * "a count survives one careless pass"; it is that a count is a second, unlinked statement of a
+ * fact the enumeration beside it already carries, and nobody updating the enumeration has any
+ * reason to look for it. A name cannot rot that way.
+ * `test/graph/deadline-set-is-named-not-counted.test.ts` holds this region to that rule and to
+ * the set the compiler actually applies.
  *
  * THE SET IS `agent`, `tool`, `evaluator`, `function`. Read off `Engine.#dispatchBody`, which is
  * the only thing `#withNodeDeadline` wraps — so the question is not "can this node type take a

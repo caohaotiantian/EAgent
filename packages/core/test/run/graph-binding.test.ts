@@ -404,7 +404,12 @@ test("A MUTATED RUN'S SUCCESSOR IS DECIDED WITHOUT CHECKING THE RESOURCES BEHIND
         actor: alice,
         idempotencyKey: "ctl-approve",
       }),
-    (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH,
+    // THE AXIS, NOT JUST THE CODE. `#assertBound` raises `E_GRAPH_MISMATCH` for `differs: "spec"`
+    // AND for `differs: "resources"`, and this control attaches a graph whose folded hash is the
+    // successor's — so a spec-axis refusal is a live alternative explanation for a green
+    // assertion here, and the whole weight of the recorded finding rests on this control proving
+    // the RESOURCE check runs. Asserting the code alone could not tell the two apart.
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH && (e.details as { differs?: string }).differs === "resources",
     "the same moved resources ARE refused when the attached graph is the compiled one",
   );
 });

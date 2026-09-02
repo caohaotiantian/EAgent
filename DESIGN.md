@@ -470,19 +470,19 @@ those is folded in.
 
 | # | row | fails today | what is silently wrong |
 |---|---|---|---|
-| **15** | A.18 | `a18-assert.test.ts` | a router that read an INJECTED channel steers an irreversible action reading only clean channels, and under a human ceiling of `on` that action runs with **zero gates**. Control-flow taint is not tracked at all |
+| ~~**15**~~ | A.18 | **DONE `b2f4002`+** | a router that read an INJECTED channel steers an irreversible action reading only clean channels, and under a human ceiling of `on` that action runs with **zero gates**. Control-flow taint is not tracked at all |
 | ~~**16**~~ | A.30 | **DONE `e639d2b`** | an `effect.completed` with no `details` dispatches its undo with `args = {}` and journals `outcome: "compensated"` **while the effect is still in the world** |
-| **17** | A.2 | `a2-fail.test.ts` | a refusal whose error RECORD varies by path replays with a different record and scores `match: true`. `compare()` grades the code and nothing about the record |
-| **18** | G.5(a) | `g5.test.ts` | after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs |
+| ~~**17**~~ | A.2 | **DONE `34a7f14`** | a refusal whose error RECORD varies by path replays with a different record and scores `match: true`. `compare()` grades the code and nothing about the record |
+| **18** | G.5(a) | **PINNED `8033198`** | after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs |
 | **19** | A.23 | `a23-assert.test.ts` | a ceiling lowered 15× replays clean with zero reasons — an unearned certificate. The row's stated blocker does not bind at the `promote --suite` door, where the baseline's spec is already compared node by node |
 | **20** | B.2 | `b2-reserve.test.ts` | an outstanding reservation is invisible to the fold `GET /runs/:id` serves, and `task.started`'s absent appender makes a headline concurrency assertion compare 0 to 0 |
 | ~~**21**~~ | A.36 | **DONE `d9a8173`** | a subgraph's child run is LISTED by `GET /runs` and 404s on every by-id route: the captures never go through `safeDecode` and a child id always contains a `#` |
 | **22** | B.1 | `b1-strand.test.ts` | `LeasedScheduler` has zero constructors in `src/`, so a task whose holder died stays `leased` forever — and the seam that would reclaim it already returns the right answer |
 | ~~**23**~~ | A.13 | **DONE `96a03bf`** | `loom run` counts its own laps instead of the run's progress, so it abandons a run still journaling progress well inside the bound its graph declared |
-| **24** | A.29 | `a29.test.ts` | a frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN deterministic verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression |
+| **24** | A.29 | **REFUSED — see A.29** | a frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN deterministic verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression |
 | **25** | D.1 | **HALF DONE `96a03bf`** | `readMcpServers` silently drops every key it does not know, so a per-server `irreversibility` — and a typo'd `envAllow` — vanish without a word |
 | ~~**26**~~ | H.4 | **DONE `96a03bf`** | three flags accepted and ignored on a verb that reads none of them, while `--otlp` is the single verb-scoped exception. A verb→flag table lands only in `cli.ts` |
-| **27** | H.3 | `grep -anE 'THREE\|three' graph/compile.ts` | two clauses say three where the code tests four — and the row itself undercounted its own survivor set |
+| ~~**27**~~ | H.3 | **DONE `e8c2fb5`** | two clauses say three where the code tests four — and the row itself undercounted its own survivor set |
 | **28** | H.1 | `./bin/loom --help` | the committed binary is 48 source files stale AND predates the freshness guard, so it answers `--help` with exit 0 — the exact 2026-08-28 failure that guard's docstring cites as its reason for existing |
 
 **WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** **FIVE** of the
@@ -497,6 +497,19 @@ and do not hold, and `fix` may touch the kernel freely — which is what a kerne
 list**, the census would end it at 11, and a maintainer who thinks that is too fast should cut 20
 first — it is the only item here whose defect is a fold's blindness rather than a guard failing
 open.
+
+**WAVE 2, 2026-09-02 — four more lanes, and the wave that earned the verifiers their keep.** All
+four builders reported DONE or PARTIAL; all four verifiers reported NEEDS-WORK, and two of them
+BLOCKING. The taint guard (item 15) shipped keyed on `node.type === "router"` while a router is
+not the only way this engine chooses a branch from channel data — a reviewer drove the identical
+attack with the router deleted, three ways — and its alternatives walk followed `loop` edges,
+which run backward, so one edge on the arm not taken emptied the region and switched the guard
+off silently. Both closed before the merge; the guard is now keyed on the CHOICE and names its
+covered set. **And one lane was NOT merged**: item 24's answer to A.29 was measured strictly
+weaker than what it replaced — it pins who the verifier is and what it said, not what fed it, so
+a candidate that rewrites the channel the evaluator reads makes the grader certify garbage and
+the case passes. A self-improvement loop gameable by the thing it measures is the one failure
+§3 names, so the branch was refused and the row carries the measurement.
 
 **WHAT WAVE 1 ADDED TO THE LIST RATHER THAN TAKING OFF IT.** Two rows, both found by a verifier
 rather than by a builder, and both the same shape — a fix that is right in itself leaving a second
@@ -744,7 +757,9 @@ THIS CLOSES` and asserts the refusal, which is the assertion this section said w
 **The `match: true` half was fixed too, and it had to be**: `compare()` weighed `status` alone,
 so a replay that failed for an unrelated reason scored green. It now weighs the error code,
 and the frame reads `expected failed:E_BUDGET_EXHAUSTED, got failed:E_REPLAY_DIVERGENCE`. The
-MESSAGE is still not graded — that is TODO A.2, and it is untouched.
+MESSAGE IS GRADED NOW — TODO A.2, closed by `34a7f14` — with one tolerance stated at the frame:
+minted ids are normalised out, because a replay mints its own and a difference there is not a
+divergence. `details` is still ungraded, deliberately: it is where path-dependent values live.
 
 **What is left, and it is confined to old journals.** A recording written before the `quote`
 effect has no row to serve. It falls back to `ceiling ?? 0`, which is a LOWER bound: such a

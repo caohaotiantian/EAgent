@@ -32,7 +32,7 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again after wave 1, and ONE of the seven moved: tests 2,777 → 2,827.** The `--otlp`
+**Re-run again after wave 2, and ONE of the seven moved: tests 2,777 → 2,844.** The `--otlp`
 work added the twenty-seven cases of `test/cli/trace-otlp.test.ts`; wave 1 added the rest across
 `test/server/child-run-by-url.test.ts`, `test/run/child-run-callback-url.test.ts`,
 `test/run/undo-args-must-be-recorded.test.ts`, `test/cli/verb-flags.test.ts`,
@@ -81,7 +81,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,827 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,844 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -204,18 +204,18 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 36 | 18 | 18 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 36 | 20 | 16 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
-| §H | 5 | 2 | 3 | housekeeping |
+| §H | 5 | 3 | 2 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.8, A.13, A.14, A.15, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
-**§H** H.2, H.4.
+A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.2, D.4;
+**§H** H.2, H.3, H.4.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
@@ -265,7 +265,23 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   `ceiling ?? 0` lower bound: they can fail to reproduce a refusal and can never invent one. That
   residual is pinned in the same file and now ANNOUNCES itself through the code frame.
 
-- **A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**
+- ~~**A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**~~
+  **CLOSED by `34a7f14`.** `compare()` gains a `run.message` frame that grades the terminal
+  error's MESSAGE, emitted only when a refusal is in evidence on either side — a completed pair
+  has no sentence to weigh, and a frame that is always green teaches its reader to skip the
+  family. It folds into `match` like every other frame, so a divergence reaches `cli.ts`'s exit
+  code and `evolution/gate.ts`'s `identicalToRecording`: terminal and loud, per §G.3.
+  **THE STANDING OBJECTION WAS TESTED RATHER THAN INHERITED.** `run/replay.ts` argued against a
+  message frame because "a message carries numbers that legitimately differ between a recording
+  and its replay (`spent`, `estimated`, an adapter name)". Driven on the named counter-example —
+  a node budget of 500 tokens — LIVE and REPLAY print byte-identical sentences, because A.1 put
+  the quote effect in the journal and the adapter name moved off the text. The objection was
+  true when written and the commit that made it false never came back to it.
+  **Residual, deliberate and named:** `details` is NOT graded. That is where path-dependent
+  values live by design, so a difference confined to `details` still replays green — which is
+  the case the survey originally reproduced (`adapter: "wrapper"` vs `adapter: null`). The
+  MESSAGE was the half that reaches a human.
+  ORIGINAL TEXT: A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.
   **The instance is fixed; the class is not.** The provider refusal opened with
   `model adapter "<name>"` live and `the recorded turn` in replay, because `adapter` is undefined
   under replay — same code, same status, different text, and `match: true` throughout. The wording
@@ -564,7 +580,25 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 ### Boundaries that are unexamined rather than broken
 
-- **A.18 · A branch choice made from untrusted content raises nothing.** Bounded twice — a router
+- ~~**A.18 · A branch choice made from untrusted content raises nothing.**~~ **CLOSED by
+  `b2f4002` and the round that followed it.** Control taint is folded at the deciding commit:
+  the CONTROL REGION is `reachable(edges taken) \ reachable(the arms it could have taken
+  instead)`, and `PolicyEngine` reads it as escalation evidence that a human ceiling of `on`
+  cannot clamp. It is not a constant gate — the region ends where the branches rejoin, is empty
+  for a node whose arms lead to the same place, and E8 clamps hard-to-undo actions only, so a
+  region full of reads costs nothing.
+  **THE GUARD SHIPPED WITH FOUR BYPASSES AND A REVIEWER FOUND THEM, which is the part worth
+  keeping.** It was keyed on `node.type === "router"`, and a router is not the only way this
+  engine chooses a branch from channel data: a `conditional` edge's `when` is evaluated for
+  every non-router source, a `loop` edge's `until` likewise, and a `function`/`evaluator` body
+  can return a `take` outright. Each was DRIVEN with the router deleted and each charged
+  unwatched. Separately, the alternatives walk followed `loop` edges — which run BACKWARD — so
+  one loop edge on the arm the router did NOT take swallowed the router, the taken arm and the
+  irreversible node, emptying the region and switching the guard off in silence.
+  It is now keyed on the CHOICE rather than the node type, and the covered set is NAMED at
+  `choiceOf` — four mechanisms in, five out with a reason each. Ten tests, six mutations, each
+  caught by exactly one.
+  ORIGINAL TEXT: A branch choice made from untrusted content raises nothing.** Bounded twice — a router
   is confined to edges the author declared, and every target re-decides at full strictness — so it
   is a boundary rather than a hole, but an unexamined one. **Closes when** somebody drives a
   hostile-content router and either finds the escape or writes down what the two bounds prove.
@@ -778,7 +812,26 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   refusal at the terminal as well as journaling it in `goldenBlockers`. What cannot be fixed here
   stands: a workflow whose only signal is human approval still cannot rank its own runs.
 
-- **A.29 · A suite frozen from a corpus is a REGRESSION FLOOR, not a claim of improvement.**
+- **A.29 · STILL OPEN, and a wave-2 lane's answer was REFUSED on a measurement — which is worth
+  more than the row's original text.** The defect reproduces: a frozen golden case pins the
+  whole work channel verbatim, so a candidate whose every run the graph's OWN deterministic
+  verifier certifies as `pass` is refused by `1-must-pass` and reported as a 33.3pp regression.
+  The lane proposed pinning `verifiedBy` — the verifier's declaration digest, its body digest,
+  and that it said `pass` — instead of the artifact.
+  **It is STRICTLY WEAKER, and the lane's own docstring claimed otherwise.** It pins WHO the
+  verifier is and WHAT IT SAID, and nothing pins WHAT FED IT. A candidate that leaves the
+  evaluator node byte-identical and instead rewrites the channel the evaluator READS makes the
+  grader certify garbage, and the case passes. Driven on the same 30-run corpus, same selection,
+  same pin, with one candidate whose body narrows both the graded channel and its own input:
+  `byChannels: mustPassFailures 10, promote false` against `byVerifier: mustPassFailures 0,
+  passRate 1`. A self-improvement loop that can be gamed by the thing it measures is the one
+  failure `CLAUDE.md` §3 names, so trading a false negative for that false positive is not a
+  trade this row accepts. The branch was NOT merged.
+  **What the lane did establish, and it is the useful half:** the axis a pin has to cover is
+  three-wide — who the verifier is, what it said, AND what fed it — and the third is the one
+  nobody had named. **Closes when** a pin covers all three, or when somebody argues that the
+  artifact pin's false negatives are cheaper than any weaker floor and writes that here.
+  ORIGINAL TEXT: A suite frozen from a corpus is a REGRESSION FLOOR, not a claim of improvement.**
   `EvalCase.expect` can name a status, a channel VALUE, a cost and `noIrreversibleWithoutGate` —
   every one of which describes what already happened, so an expectation derived from a recording
   can only say *keep doing this*. Measured: the good candidate promotes over the frozen suite at
@@ -1744,7 +1797,20 @@ Each traces to a decision in `DESIGN.md`.
   VERB, both of which read them. **Closes when** either a verb→flag applicability table exists
   (which would also catch `--token` on `trace`, the same class with a smaller consequence), or
   somebody argues that egress is the only case worth the guard and writes that down here instead.
-- **H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four. TWO OF THE
+- ~~**H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four.**~~
+  **CLOSED by `e8c2fb5`, and THE ROW UNDERCOUNTED ITS OWN SURVIVOR SET** — it named one
+  surviving clause and the grep found two. Four count-claims in the region now name their
+  members instead. `test/graph/deadline-set-is-named-not-counted.test.ts` pins the two bullet
+  enumerations to the sets the compiler actually applies (parsing the `NodeType` union out of
+  `graph/spec.ts`, so a ninth node type fails there rather than landing on neither side) and
+  refuses a count of either set outside quoted text.
+  **The guard did not enforce its own rule until a reviewer drove it.** It matched six
+  determiners followed by a number-word, so `and exactly three can:` — a stale count sitting
+  directly above the four bullets, which is this row's defect verbatim — passed it green.
+  Measured both ways: with the determiner form that phrasing gives 2 pass / 0 fail, with any
+  bare number-word it fails. Quoted spans stay exempt, because the docstring QUOTES the counts
+  it is warning about and quoting is not counting.
+  ORIGINAL TEXT: TWO OF THE
   THREE ARE FIXED; ONE IS NOT, and the survivor is the one no summary line carries.** Found while
   re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy §F.8. The
   two headline numbers now read four — `graph/compile.ts`'s `effectiveTimeout` docstring says
