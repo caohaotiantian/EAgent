@@ -9227,6 +9227,25 @@ interface Choice {
  * inference would keep the hole for exactly the runs nobody can re-run. Absent-as-true
  * over-marks an old journal, so a replayed old run can gate where the original process did not —
  * the tightening direction, which is the one permitted.
+ *
+ * WHAT THAT COSTS, MEASURED CROSS-BINARY RATHER THAN ARGUED. Process 1 on an extracted a638e7d
+ * tree and process 2 on this one, over ONE sqlite file, so nothing was hand-stripped — the old
+ * binary simply never wrote the field. Two graphs, both stopped on an authored `human_gate`
+ * between the deciding commit and the charge:
+ *
+ *     graph            a638e7d -> a638e7d       a638e7d -> here
+ *     no branch at all  succeeded    1 gate     succeeded     1 gate
+ *     branches on the   succeeded    1 gate     awaiting_gate 2 gates
+ *       fetched page
+ *
+ * The first row used to read `awaiting_gate, 2 gates` too, and that is what made absent-as-true
+ * expensive: EVERY pre-existing in-flight run of every graph with a node reading fetched content
+ * upstream of a hard-to-undo action needed a second human to resume, branch or no branch. What
+ * closed it is not a migration change but `controlRegion`: "a producer chose" now has to name an
+ * edge that could have not fired before it selects anything, so a branchless graph reaches the
+ * same answer whichever way the absent bit is read. The residual is the second row, where the
+ * run really did branch on the injected page and the extra gate is the tightening this default
+ * exists for. `test/run/control-flow-taint.test.ts` pins both rows.
  */
 function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], producerSupplied: boolean): Choice {
   if (node.type === "router") {

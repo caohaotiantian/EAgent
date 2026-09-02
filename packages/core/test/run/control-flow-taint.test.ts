@@ -118,7 +118,8 @@ type Shape =
   | "bodycondseqgated"
   | "fanoutbind"
   | "fanoutgated"
-  | "linear";
+  | "linear"
+  | "lineargated";
 
 interface Options {
   /**
@@ -165,7 +166,8 @@ function spec(o: Options): GraphSpec {
     o.shape === "bodycondseqgated" ||
     o.shape === "fanoutbind" ||
     o.shape === "fanoutgated" ||
-    o.shape === "linear";
+    o.shape === "linear" ||
+    o.shape === "lineargated";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -204,7 +206,7 @@ function spec(o: Options): GraphSpec {
   // nothing to do with what is being measured here. The three new shapes need the same thing for
   // the same reason: none of their two arms is a pair of ROUTER cases, so the compiler is right
   // that both could write.
-  if (o.shape === "linear") {
+  if (o.shape === "linear" || o.shape === "lineargated") {
     // NO BRANCH ANYWHERE. One out-edge, and the body names it — which is byte-identical to the
     // `take` `#edgesToTake` produces from no take at all. The ordinary "fetch a page, summarise
     // it, act" graph, and the shape that says what this axis must NOT do.
@@ -215,6 +217,11 @@ function spec(o: Options): GraphSpec {
       writes: ["note"],
       function: { ref: "function/linear@stable", effects: [] },
     });
+    // The gated variant stops the run between the body's commit and the charge's decision, so a
+    // journal one binary wrote is resumed by another — which is what the migration arm needs.
+    if (o.shape === "lineargated") {
+      nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
+    }
   } else if (o.shape === "only") {
     // ONE conditional out-edge and no sibling at all — the smallest branch a graph can express,
     // and the arm of `choiceOf` whose docstring calls itself load-bearing (`unconditional` is
@@ -277,9 +284,14 @@ function spec(o: Options): GraphSpec {
   }
   const edges: unknown[] = routerless ? [] : [{ id: "e0", from: "fetch", to: "route", kind: "seq" }];
 
-  if (o.shape === "linear") {
+  if (o.shape === "linear" || o.shape === "lineargated") {
     edges.push({ id: "e0", from: "fetch", to: "summarise", kind: "seq" });
-    edges.push({ id: "e1", from: "summarise", to: "charge", kind: "seq" });
+    if (o.shape === "lineargated") {
+      edges.push({ id: "e1", from: "summarise", to: "hold", kind: "seq" });
+      edges.push({ id: "holdToCharge", from: "hold", to: "charge", kind: "seq" });
+    } else {
+      edges.push({ id: "e1", from: "summarise", to: "charge", kind: "seq" });
+    }
   } else if (o.shape === "only") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
@@ -882,10 +894,10 @@ test("A JOURNAL OLDER THAN THE RECORDED BIT FAILS CLOSED", async () => {
   //
   // The journal is aged in place after the first process has written it, so the graph, the page
   // and the body's route are all identical to the arm above — the only difference is one key.
-  const run = async (age: (payload: Record<string, unknown>) => void): Promise<number> => {
+  const run = async (shape: Shape, age: (payload: Record<string, unknown>) => void): Promise<number> => {
     const store = new MemoryStateStore({ now: NOW });
     const first = engineOver(store);
-    const graph = graphFor({ branchOn: "untrusted", shape: "bodycondseqgated" });
+    const graph = graphFor({ branchOn: "untrusted", shape });
     const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
     await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
       kind: "human",
@@ -911,17 +923,69 @@ test("A JOURNAL OLDER THAN THE RECORDED BIT FAILS CLOSED", async () => {
     return second.charged();
   };
 
-  const older = await run((payload) => {
+  const older = await run("bodycondseqgated", (payload) => {
     delete payload["takeSuppliedByProducer"];
   });
   assert.equal(older, 0, "a journal with no bit was read as `no producer chose`, and the charge ran");
 
   // The discriminating half: the same journal with the bit present and FALSE charges, which is
   // what absent-as-false would have done to every run written before the field existed.
-  const asFalse = await run((payload) => {
+  const asFalse = await run("bodycondseqgated", (payload) => {
     payload["takeSuppliedByProducer"] = false;
   });
   assert.equal(asFalse, 1, "the control did not charge, so the arm above is not measuring the bit");
+});
+
+test("AN OLD JOURNAL WITH NO BRANCH IN IT STILL RESUMES — failing closed is not stalling every run", async () => {
+  // WHAT ABSENT-AS-TRUE COSTS, on the graph that has nothing to fail closed ABOUT. The arm above
+  // aged a journal whose graph branches on the fetched page, where an extra gate on resume is the
+  // tightening the default is chosen for. This is the other shape: `fetch -> summarise -> hold ->
+  // charge`, one out-edge per node and no condition anywhere. Reading the absent bit as TRUE says
+  // "a producer chose", and with `controlRegion` reading only the emptiness of the alternatives
+  // side that made every pre-existing in-flight run of every branchless graph need a second human
+  // to resume. Measured cross-binary — process 1 on an extracted a638e7d tree, process 2 on this
+  // one, over ONE sqlite file, so no key was ever hand-stripped:
+  //
+  //     a638e7d -> a638e7d  -> succeeded,     gates=1, charged=1
+  //     a638e7d -> 27a0ca9  -> awaiting_gate, gates=2, charged=0
+  //     a638e7d -> HEAD     -> succeeded,     gates=1, charged=1
+  //
+  // The bit is still read as TRUE and the row still says so: what changed is that "a producer
+  // chose" now has to name an edge that could have not fired before it selects anything.
+  //
+  // Deleting the key here rather than running two binaries is exact for THIS graph, and that is
+  // measured too: dumping both journals of the run above and diffing them, the only difference
+  // between what a638e7d wrote and what this tree writes is `takeSuppliedByProducer` on the two
+  // `task.committed` rows.
+  const store = new MemoryStateStore({ now: NOW });
+  const first = engineOver(store);
+  const graph = graphFor({ branchOn: "untrusted", shape: "lineargated" });
+  const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+    kind: "human",
+    id: "u:alice",
+  });
+  const held = await first.engine.advance(runId);
+  assert.equal(held.status, "awaiting_gate", "precondition: the run stops on the authored gate");
+  for await (const ev of store.read(runId, 1)) {
+    if (ev.type === "task.committed") delete (ev.payload as unknown as Record<string, unknown>)["takeSuppliedByProducer"];
+  }
+  const holdGate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+  assert.ok(holdGate !== undefined, "precondition: the authored gate is open");
+
+  const second = engineOver(store);
+  await second.engine.attach(runId, graph);
+  await second.engine.resolveGate(runId, {
+    gateId: holdGate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+  const after = await second.engine.advance(runId);
+
+  assert.equal(after.status, "succeeded", `an old journal of a branchless graph stalled on resume: ${after.status}`);
+  assert.equal(Object.keys(after.gates).length, 1, "the authored gate and no second one");
+  assert.equal(second.charged(), 1, "and the action the human already approved runs");
 });
 
 
