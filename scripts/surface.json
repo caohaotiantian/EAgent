@@ -354,6 +354,7 @@
   "UsageRecord",
   "ValidationContext",
   "ValidationResult",
+  "VerifierPin",
   "Violation",
   "WebhookChannel",
   "WebhookChannelOptions",
@@ -535,6 +536,7 @@
   "validateGraph",
   "validateGraphSpecFunction",
   "validateSuite",
+  "verificationPin",
   "viewFor",
   "withResolved"
 ]

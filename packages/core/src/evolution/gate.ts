@@ -20,12 +20,13 @@
  *
  */
 
-import { sameContent } from "../canonical.ts";
+import { digest, sameContent, type Digest } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { RunId } from "../ids.ts";
 import type { StateStore } from "../journal/store.ts";
-import type { Budget, RunGraph } from "../graph/spec.ts";
+import type { Budget, NodeSpec, RunGraph } from "../graph/spec.ts";
 import type { EngineOptions } from "../run/engine.ts";
+import type { RunProjection } from "../run/projection.ts";
 import { replayRun, type ReplayReport } from "../run/replay.ts";
 
 export interface EvalCase {
@@ -60,7 +61,101 @@ export interface EvalCase {
      * assert, and it is the only thing this flag asserts.
      */
     readonly identicalToRecording?: boolean;
+    /**
+     * The deterministic verifiers this recording's own graph ran, pinned on three axes — and
+     * the channels they read, which `channels` above therefore stops comparing byte for byte.
+     *
+     * See `VerifierPin`. Empty or absent means the case has no such pin and `channels` is the
+     * whole contract, which is what every suite frozen before this field existed carries.
+     */
+    readonly verifiedBy?: readonly VerifierPin[];
   };
+}
+
+/**
+ * WHO VERIFIED THIS CASE, WHAT IT SAID, AND WHAT FED IT — the three axes a floor has to cover
+ * before it can stop pinning an artifact verbatim.
+ *
+ * ## THE DEFECT THIS REPLACES, AND THE ONE ANSWER ALREADY REFUSED
+ *
+ * A frozen golden case pins the whole work channel verbatim, so a candidate whose every run the
+ * graph's OWN deterministic verifier certifies as `pass` is refused. Driven at `90f1156` through
+ * the shipped binary — 30 runs of a two-node graph (`pick` writes `picked` from `items`; `check`
+ * is an `assertion` evaluator asserting `picked.length === items.length`), `loom score` on each,
+ * `loom suite freeze --cases 12`, then `loom promote` on a candidate that fixes an off-by-one
+ * AND reverses the order:
+ *
+ *     a golden case's expect: {"status":"succeeded","noIrreversibleWithoutGate":true,
+ *                              "channels":{"picked":["doc-4-0","doc-4-1","doc-4-2"]}}
+ *     1-must-pass    FAILED — 4 must-pass failures, which is all four goldens of the twelve cases
+ *     2-non-inferior FAILED — pass rate 66.7% vs baseline 100.0% (Δ -33.3pp)
+ *     promote false
+ *
+ * The first answer to that was to pin the verifier's declaration digest, its body digest, and
+ * that it said `pass`. **It was refused, and the refusal is the reason this type has a third
+ * field.** Those two axes say WHO graded and WHAT IT SAID; nothing says WHAT FED IT. A candidate
+ * that leaves the evaluator node byte-identical and instead rewrites the channel the evaluator
+ * READS makes the grader certify garbage, and the case passes. The measurement is in
+ * `test/evolution/verifier-pin.test.ts`, which drives that exact candidate.
+ *
+ * ## THE THREE AXES
+ *
+ * - `verifier` — WHO. A digest over the evaluator node's declaration (id, type, sorted reads and
+ *   writes, kind, ref, threshold) AND over the digest of the body that ref resolves to in the
+ *   candidate's own `resolutionManifest`. Rewriting either the declaration or the body breaks it.
+ * - `verdict` — WHAT IT SAID. The channel the recording's verifier wrote its verdict to, and the
+ *   `pass` it carried. Read off the evaluator TASK's own `writes`, never off the run's final
+ *   channel state, so a later node that overwrites the verdict channel cannot answer for it.
+ * - `fed` — WHAT FED IT. Every channel the verifier declares it reads that the RECORDING sourced
+ *   from OUTSIDE the graph — a declared `inputs` channel, which replay serves from the
+ *   recording — mapped to the digest of the value it was served. This is the axis that makes the
+ *   grader's own input non-negotiable while leaving the graded artifact free.
+ *
+ * `certifies` is the consequence: the verifier's remaining reads, the ones the graph PRODUCED.
+ * Those are the channels `runCase` stops comparing byte for byte, because they are the thing
+ * under test and the verifier is what judges them.
+ *
+ * ## WHAT THIS PIN CAN NO LONGER CATCH — every pin trades something
+ *
+ * 1. **The exam is now exactly as strong as the graph's own assertion body, on the channels that
+ *    body reads.** The byte pin caught a rewritten artifact by accident; nothing replaces that.
+ *    In the graph above the assertion only compares LENGTHS, so a candidate that returns the
+ *    right number of wrong documents now promotes — and that is the correct reading, not a hole
+ *    being papered over: the graph declared what "correct" means and this is it. A suite author
+ *    who wants more pinned writes a stronger assertion body, which is a change to the graph and
+ *    not to the gate.
+ * 2. **A channel no verifier reads keeps its byte pin.** `certifies` is the verifier's declared
+ *    reads and nothing transitive, so a candidate that legitimately rewrites a channel the
+ *    grader never sees is still refused — driven, on a candidate that makes the honest reorder
+ *    AND edits an ungraded `note`, by `A CHANNEL NO VERIFIER READS KEEPS ITS BYTE PIN` in that
+ *    test file. Narrowing it would mean walking provenance, and a floor that guesses which
+ *    upstream rewrites were harmless is the loosening this row already refused once.
+ * 3. **Axis 3 compares the run's FINAL value for a `fed` channel**, because `RunProjection`
+ *    carries no per-task ordering of channel state and there is no cheap way to ask what the
+ *    verifier was served at the moment it ran. Two consequences follow from that line of code,
+ *    and both were taken deliberately: a candidate that rewrites a `fed` channel to a
+ *    byte-identical value is invisible, and one that overwrites a `fed` channel only AFTER the
+ *    verifier ran is refused although the verifier saw the clean value. The second is the
+ *    fail-closed direction, which is the one this repo takes when a guard cannot decide.
+ * 4. **`rubric` evaluators are never pinned.** A rubric is a model call, replay serves the
+ *    recorded answer, and "the judge said pass" over a replayed judgment certifies nothing about
+ *    the candidate. `verificationPin` skips them, so a graph whose only grader is a rubric keeps
+ *    the byte pin entirely.
+ */
+export interface VerifierPin {
+  /** The evaluator node in the recording's graph. The candidate must still have it. */
+  readonly nodeId: string;
+  /** AXIS 1 — WHO. See the type docstring. */
+  readonly verifier: Digest;
+  /** AXIS 2 — WHAT IT SAID. */
+  readonly verdict: { readonly channel: string; readonly pass: boolean };
+  /** AXIS 3 — WHAT FED IT. Channel → digest of the value the recording served the verifier. */
+  readonly fed: Readonly<Record<string, Digest>>;
+  /**
+   * The verifier's reads that the graph PRODUCED — the channels this pin lifts the byte
+   * comparison from. Sorted.
+   */
+  readonly certifies: readonly string[];
 }
 
 export interface EvalSuite {
@@ -281,7 +376,22 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
   if (c.expect.status !== undefined && p.status !== c.expect.status) {
     reasons.push(`status ${p.status}, expected ${c.expect.status}`);
   }
+  // THE THREE-AXIS PIN, BEFORE THE ARTIFACT PIN, because it decides which of the artifact
+  // pin's channels are still compared. See `VerifierPin` for the axes and for the four things
+  // this stops catching.
+  // A channel a HOLDING pin certifies is not compared byte for byte — that waiver is the whole
+  // repair. A pin that FAILED waives nothing: its verifier is not one whose word can stand in
+  // for the recording, so the case falls back to the floor it had, and both reasons are
+  // reported. The waiver is therefore driven by this run's own answer and never by `certifies`
+  // read straight out of the suite file, because a broken pin's claims are not evidence.
+  const certified = new Set<string>();
+  for (const pin of c.expect.verifiedBy ?? []) {
+    const failures = verifierPinFailures(pin, opts.graph, p);
+    for (const r of failures) reasons.push(r);
+    if (failures.length === 0) for (const ch of pin.certifies) certified.add(ch);
+  }
   for (const [channel, want] of Object.entries(c.expect.channels ?? {})) {
+    if (certified.has(channel)) continue;
     // `sameContent`, not `JSON.stringify` — which is KEY-ORDER SENSITIVE, while
     // `EvalCase.expect.channels` says one line up that it is "compared by canonical form".
     // Measured: two suites naming the same expected verdict with `{pass, score}` and
@@ -507,6 +617,204 @@ function ungatedActions(report: ReplayReport): string[] {
   }
 
   return [...found].sort();
+}
+
+// ---------------------------------------------------------------------------
+// The verification pin — see `VerifierPin` for the three axes and what they cost
+// ---------------------------------------------------------------------------
+
+/**
+ * A channel's content digest, or `undefined` when there is nothing to digest.
+ *
+ * `canonicalize` REFUSES `undefined` — it is not representable — and the one time this file
+ * reached it without a guard, an absent channel turned a case failure into `E_INTERNAL:
+ * CanonicalizationError` out of the whole `promote` verb, killing the promotion instead of
+ * refusing it (see the note at the `expect.channels` loop, which was found by running the live
+ * demo). The `catch` is the same argument one step further out: a value this build cannot
+ * canonicalise is a fact about the value, and the caller wants a refusal, not a stack trace.
+ */
+function channelDigest(value: unknown): Digest | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return digest(value);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * AXIS 1, computed the same way on both sides of the comparison.
+ *
+ * The DECLARATION and the BODY, and neither alone is enough. The declaration alone lets a
+ * candidate keep the node and swap the assertion's bytes; the body alone lets it keep the bytes
+ * and re-point `reads` at something that trivially satisfies them. `reads` and `writes` are
+ * sorted because a spec author's list order is not a fact about the verifier, and a pin that
+ * broke on it would refuse a reformatted graph.
+ *
+ * `undefined` when the ref resolves to nothing in this graph's frozen manifest. That is a
+ * refusal, not a default: a body this graph cannot name the digest of is one nobody can say is
+ * the same body, and "when a guard cannot decide, it fails closed" — at freeze it means no pin
+ * is written (the byte pin stays), at check it means the case fails.
+ */
+function verifierIdentity(graph: RunGraph, node: NodeSpec): Digest | undefined {
+  const ev = node.evaluator;
+  if (ev === undefined) return undefined;
+  const resolved = graph.resolutionManifest.find((r) => r.ref === ev.ref);
+  if (resolved === undefined) return undefined;
+  return digest({
+    id: node.id,
+    type: node.type,
+    reads: [...(node.reads ?? [])].sort(),
+    writes: [...(node.writes ?? [])].sort(),
+    kind: ev.kind,
+    ref: ev.ref,
+    threshold: ev.threshold,
+    body: resolved.digest,
+  });
+}
+
+/**
+ * The channel an evaluator wrote its verdict to, and what it said.
+ *
+ * THE SAME SHAPE RULE `trajectory.ts`'s `firstVerdict` USES — sorted key order, first value that
+ * is an object carrying `pass` or `score` — and deliberately a second, private copy rather than
+ * an export. The two answer different questions: that one folds a SCORE out of a journal and may
+ * see a `{$payload}` handle where a value should be, this one names a CHANNEL that a later
+ * replay must produce. Sharing the function would mean sharing a return type across the two, and
+ * the only thing they actually share is a convention about verdict shape, which is stated in
+ * `VERDICT_SCHEMA` and enforced by the engine.
+ *
+ * Reads a TASK's `writes`, never the run's channel state — see `VerifierPin.verdict`.
+ */
+function verdictIn(writes: Readonly<Record<string, unknown>>): { channel: string; pass: boolean } | undefined {
+  for (const channel of Object.keys(writes).sort()) {
+    const v = writes[channel];
+    if (v !== null && typeof v === "object" && ("pass" in v || "score" in v)) {
+      return { channel, pass: (v as { pass?: unknown }).pass === true };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build the three-axis pin for one recording, or `undefined` when this recording cannot carry
+ * one and the byte pin must stand.
+ *
+ * CALLED AT FREEZE, WITH THE COHORT'S OWN GRAPH AND THE RECORDING'S PROJECTION — the two things
+ * `loom suite freeze` already holds when it decides a case's `expect` block. It is a pure
+ * function of those two so that the same code can be driven from a test without the CLI, and so
+ * that nothing here reads a clock or a store.
+ *
+ * SIX CONDITIONS, AND EVERY ONE OF THEM SKIPS THE NODE RATHER THAN WEAKENING THE PIN. A node
+ * that fails any of them contributes no pin and certifies no channel, so its reads keep the byte
+ * comparison they had. If no node survives, the answer is `undefined` and the case is exactly
+ * the case it was before this existed.
+ *
+ *   1. the node is an `evaluator` whose `kind` is `assertion` — see `VerifierPin` note 4;
+ *   2. its ref resolves in the graph's frozen manifest, so axis 1 can be computed;
+ *   3. at least one Task for it SUCCEEDED and its own `writes` carry a verdict;
+ *   4. every succeeded Task for it said `pass: true` — a verifier that said no, or that
+ *      disagreed with itself across a fan-out, certifies nothing;
+ *   5. at least one declared read is a graph INPUT. Without one, axis 3 is empty and the pin
+ *      degenerates to the WHO+WHAT-IT-SAID pair that was refused;
+ *   6. no Task in the recording wrote any of those input channels, and every one of them holds a
+ *      value this build can digest. The pinned value is the run's FINAL value, so a recording
+ *      that overwrote its own input mid-run would pin a value the verifier may never have been
+ *      served — and `channelDigest` says why the second half is a skip and not a throw.
+ */
+export function verificationPin(graph: RunGraph, run: RunProjection): readonly VerifierPin[] | undefined {
+  const inputs = new Set<string>(graph.spec.inputs);
+  const writtenByAnyTask = new Set<string>();
+  for (const t of Object.values(run.tasks)) for (const ch of Object.keys(t.writes)) writtenByAnyTask.add(ch);
+
+  const pins: VerifierPin[] = [];
+  for (const node of graph.spec.nodes) {
+    if (node.type !== "evaluator" || node.evaluator?.kind !== "assertion") continue; // 1
+    const verifier = verifierIdentity(graph, node); // 2
+    if (verifier === undefined) continue;
+
+    const tasks = Object.values(run.tasks).filter((t) => t.nodeId === node.id && t.state === "succeeded");
+    if (tasks.length === 0) continue; // 3
+    const said = tasks.map((t) => verdictIn(t.writes));
+    if (said.some((v) => v === undefined)) continue; // 3
+    const verdicts = said as { channel: string; pass: boolean }[];
+    if (!verdicts.every((v) => v.pass && v.channel === verdicts[0]!.channel)) continue; // 4
+
+    const reads = node.reads ?? [];
+    const served = reads.filter((c) => inputs.has(c)).sort();
+    if (served.length === 0) continue; // 5
+    if (served.some((c) => writtenByAnyTask.has(c))) continue; // 6
+
+    const fed: Record<string, Digest> = {};
+    for (const c of served) {
+      const d = channelDigest(run.channels[c]);
+      if (d === undefined) break;
+      fed[c] = d;
+    }
+    if (Object.keys(fed).length !== served.length) continue; // a value nothing can digest
+    pins.push({
+      nodeId: node.id,
+      verifier,
+      verdict: { channel: verdicts[0]!.channel, pass: true },
+      fed,
+      certifies: reads.filter((c) => !inputs.has(c)).sort(),
+    });
+  }
+  return pins.length === 0 ? undefined : pins;
+}
+
+/**
+ * Check one pin against a replay, most-specific reason first. Empty means the pin holds.
+ *
+ * THE THREE AXES ARE CHECKED IN THE ORDER A READER NEEDS THEM, and axis 3 is checked even when
+ * axis 1 already failed, because "you swapped the grader AND rewrote its input" is two facts and
+ * a promotion argument that names one of them invites the other to be tried next.
+ *
+ * Axis 3 resolves the pinned channels against the replay by NAME, and does not ask the candidate
+ * whether it still calls them inputs. That asymmetry is the point: a candidate that demotes the
+ * grader's ground truth from an input to something a node computes is exactly the game, and a
+ * check that recomputed the input set from the candidate's own spec would let it re-classify its
+ * way out.
+ */
+function verifierPinFailures(pin: VerifierPin, graph: RunGraph, p: RunProjection): string[] {
+  const out: string[] = [];
+  const node = graph.spec.nodes.find((n) => n.id === pin.nodeId);
+  if (node === undefined) {
+    return [`the verifier "${pin.nodeId}" that certified this case is not in this candidate`];
+  }
+  const identity = verifierIdentity(graph, node);
+  if (identity === undefined) {
+    out.push(`the verifier "${pin.nodeId}" names a body this candidate's manifest cannot resolve, so nothing can say it is the same verifier`);
+  } else if (identity !== pin.verifier) {
+    out.push(`the verifier "${pin.nodeId}" is not the one that certified this case — its declaration or its body changed`);
+  }
+
+  for (const [channel, want] of Object.entries(pin.fed)) {
+    const got = channelDigest(p.channels[channel]);
+    if (got === undefined) {
+      out.push(`channel "${channel}" feeds the verifier "${pin.nodeId}" and this run has no value for it`);
+      continue;
+    }
+    if (got !== want) {
+      out.push(`this candidate rewrote channel "${channel}", which is what FED the verifier "${pin.nodeId}" — a grader handed a different question is not a grader`);
+    }
+  }
+
+  const tasks = Object.values(p.tasks).filter((t) => t.nodeId === pin.nodeId);
+  const succeeded = tasks.filter((t) => t.state === "succeeded");
+  if (succeeded.length === 0) {
+    out.push(`the verifier "${pin.nodeId}" did not succeed in this run, so it certified nothing`);
+    return out;
+  }
+  for (const t of succeeded) {
+    const v = t.writes[pin.verdict.channel];
+    if (v === undefined) {
+      out.push(`the verifier "${pin.nodeId}" wrote no "${pin.verdict.channel}" on task "${t.taskId}"`);
+    } else if ((v as { pass?: unknown }).pass !== pin.verdict.pass) {
+      out.push(`the verifier "${pin.nodeId}" said pass=${String((v as { pass?: unknown }).pass)} on task "${t.taskId}", and it said ${String(pin.verdict.pass)} on the recording`);
+    }
+  }
+  return out;
 }
 
 export function validateSuite(suite: EvalSuite): { suiteValid: boolean; suiteIssues: string[] } {
