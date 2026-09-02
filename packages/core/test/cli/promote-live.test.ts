@@ -402,14 +402,23 @@ test("EVERY input the candidate ran on came out of a recording, and argv could n
     );
 
     // AND THERE IS NO DOOR FOR ONE. `--input` is `loom run`'s flag; it is not read by this verb,
-    // and the inputs above prove it was not consulted — but a reader should be able to see that
-    // supplying one changes nothing rather than take it on faith.
-    const withInput = await cli(liveArgs(w.dir, w.runIds[0]!, ["--runs", "6", "--input", JSON.stringify({ question: "a question I chose" })]));
-    const d2 = decisionOf(withInput.out);
-    const ran2 = await recordedInputs(w.dir, d2.pairs!.map((p) => p.candidateRunId as RunId));
-    for (const v of ran2.values()) {
-      assert.doesNotMatch(v, /a question I chose/, "an input named at promotion time must not reach the candidate");
+    // and the inputs above prove it was not consulted — but a reader should be able to see what
+    // happens to somebody who tries rather than take it on faith.
+    //
+    // THIS ASSERTION USED TO BE THAT THE FLAG WAS IGNORED, and the flag is now REFUSED: `--input`
+    // is not in `loom promote`'s row of `VERB_FLAGS`, so the door closes before the exam is
+    // assembled rather than after. Ignoring it was already the freeze property holding — the
+    // recordings above are the proof of that — but an operator who typed it learnt nothing,
+    // which is exactly the class §H.4 was opened for. The strictly stronger statement is that
+    // the attempt does not run at all.
+    let refused: unknown;
+    try {
+      await cli(liveArgs(w.dir, w.runIds[0]!, ["--runs", "6", "--input", JSON.stringify({ question: "a question I chose" })]));
+    } catch (e) {
+      refused = e;
     }
+    assert.ok(isLoomError(refused) && refused.code === CODES.E_CONFIG_INVALID, `an input named at promotion time must be refused: ${String(refused)}`);
+    assert.match(refused.message, /--input is read by `loom run` and by no other verb/);
   } finally {
     w.dispose();
   }
