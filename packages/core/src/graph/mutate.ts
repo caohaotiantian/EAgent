@@ -175,11 +175,28 @@ export function compileMutation(input: MutateInput): MutationResult {
   // the proposer IS the entry node — so "the target must already be dominated by the proposer"
   // is satisfied by the exploit and refuses nothing.
   //
-  // What oversight actually depends on is DOMINANCE ITSELF: `gate` protects `pay` exactly while
-  // every path from an entry to `pay` runs through `gate`. So the rule is preservation. It admits
-  // the legitimate rejoin — an added branch re-entering below everything that dominated its
-  // target adds no path that skips anything — and refuses the graft, which is the whole of the
+  // What oversight actually depends on is DOMINANCE ITSELF: `gate` protects `pay` while every
+  // path from an entry to `pay` runs through `gate`. So the rule is preservation. It admits the
+  // legitimate rejoin — an added branch re-entering below everything that dominated its target
+  // adds no path that skips anything — and refuses the graft, which is the whole of the
   // difference between the two.
+  //
+  // DOMINANCE IS NECESSARY AND IT IS NOT SUFFICIENT, and this comment said "exactly while" until
+  // the counterexample was driven. Static dominance is a claim about PATHS; whether the
+  // dominating node RUNS is a claim about the run, and the two come apart at a fan-out of width
+  // zero. `Engine.#fireEmptyJoin` schedules the join directly when a fan plans no branches, so
+  // every node on the branch is passed over — a `human_gate` among them — while every path from
+  // an entry to the node below the join still runs through it. Measured, one graph driven twice
+  // with a `reversible_write` tool below the join:
+  //
+  //     the fetched page yields two items -> awaiting_gate, gates=1, wrote=0
+  //     the fetched page yields none      -> succeeded,     gates=0, wrote=1
+  //
+  // That is `test/run/empty-fanout-oversight.test.ts`, and E12 `fanout_skipped_gate` is the
+  // answer to it — at the engine, because the width is a runtime value and no compile-time rule
+  // over the spec can see it. What this rule owns is the STATIC half: a mutation may not remove a
+  // dominator. Preserving it does not promise the dominator ran; it promises the mutation did not
+  // remove the only thing that could.
   if (!diagnostics.some((d) => d.severity === "error")) {
     const mergedForDominance: GraphSpec = {
       ...spec,
@@ -321,7 +338,9 @@ function forwardFrom(idx: GraphIndex, seeds: Iterable<NodeId>): Set<NodeId> {
 }
 
 /**
- * `dom(v)` for every node that runs: the nodes every path from an entry to `v` passes through.
+ * `dom(v)` for every node an entry REACHES: the nodes every path from an entry to `v` passes
+ * through. Reaches, not runs — a node this map calls live may still not execute (a fan-out of
+ * width zero skips its whole branch), which is why the caller's rule is stated as a static one.
  *
  * The ordinary iterative fixpoint — `dom(v) = {v} ∪ ⋂ dom(p)` over `v`'s predecessors, entries
  * pinned to themselves — over the same edge set `forwardFrom` walks. A node no entry reaches is

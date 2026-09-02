@@ -8190,14 +8190,40 @@ export class Engine {
    * The join runs at the PARENT branch with no contributions, which is exactly what an
    * empty fold means: `findings` stays at its initial value and the verdict downstream
    * reads "no evidence" rather than the graph quietly stopping.
+   *
+   * AND IT SKIPS EVERY NODE ON THE BRANCH, WHICH IS HOW IT DELETED A HUMAN GATE. The width of a
+   * fan is a runtime value — usually one a tool fetched — so this is the one way a node that
+   * STATICALLY dominates an action does not run in front of it. Measured on one graph driven
+   * twice, the only difference being what the fetched page said, with a `reversible_write` tool
+   * below the join whose only oversight was the authored gate on the branch:
+   *
+   *     the page yields two items -> awaiting_gate, gates=1, wrote=0
+   *     the page yields none      -> succeeded,     gates=0, wrote=1
+   *
+   * So a skipped `human_gate` escalates the JOIN — the node that releases the downstream the
+   * gate stood in front of — to `in`, and somebody is asked once. Not a refusal: an empty fan is
+   * a legitimate shape and this method exists for it, so the run continues on approval. Not the
+   * whole graph either: an empty fan whose branch holds nothing unskippable fires its join
+   * exactly as before, which is the alert-with-no-pods case above and the half
+   * `test/run/empty-fanout-oversight.test.ts` pins alongside the exploit.
+   *
+   * THE UNSKIPPABLE SET IS ONE MEMBER, `human_gate`, and it is named rather than counted: of the
+   * eight `NodeType`s it is the only one whose whole purpose is that a person acts before the
+   * run goes on. A `tool` or an `agent` on a skipped branch did not happen either, but nothing
+   * about the graph promised it would — the fan's width is what says how many times it runs, and
+   * zero is a width.
    */
   #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
     const events: NewEvent[] = [];
+    const skipped = [...fanBody(ctx.index, fanout)].filter((id) => ctx.index.byId.get(id)?.type === "human_gate");
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
       const id = makeTaskId(e.to, parent, 0);
       if (events.some((x) => x.taskId === id)) continue;
+      if (skipped.length > 0) {
+        this.#escalate(ctx, "fanout_skipped_gate", e.to, { edgeId: fanout.id, skipped });
+      }
       events.push({
         type: "task.ready",
         payload: { nodeId: e.to, branchPath: encodeBranch(parent), edgesIn: [e.id] },
@@ -9443,6 +9469,35 @@ function controlRegion(
   );
   for (const id of reachableFromEdges(index, alternatives, false)) selected.delete(id);
   return selected;
+}
+
+/**
+ * The nodes that run ON one branch of a fan-out: `e.to`, and everything forward of it up to the
+ * join that collapses the branch back.
+ *
+ * The bound is what makes this usable at all. `reachableFromEdges` has no stop at the join, so a
+ * fan body walked with it is "everything downstream of the fan" — the constant-gate shape two
+ * other axes in this file refuse in writing. A `join` edge, and any node of type `join`, is the
+ * branch's EXIT: the node it points at runs at the PARENT coordinate, so it is outside the body
+ * by construction. Both tests are here because GRAPH021 requires a join node downstream of every
+ * fan-out but does not require the edge reaching it to be of kind `join`.
+ *
+ * Everything else is followed, `loop` edges included: a cycle inside a fan body is a branch that
+ * retries, and over-approximating the body is the direction that marks MORE.
+ */
+function fanBody(index: GraphIndex, fanout: EdgeSpec): Set<NodeId> {
+  const seen = new Set<NodeId>([fanout.to]);
+  const queue: NodeId[] = [fanout.to];
+  for (let i = 0; i < queue.length; i++) {
+    for (const e of index.outbound.get(queue[i]!) ?? []) {
+      if (e.kind === "join" || e.kind === "compensation") continue;
+      if (index.byId.get(e.to)?.type === "join") continue;
+      if (seen.has(e.to)) continue;
+      seen.add(e.to);
+      queue.push(e.to);
+    }
+  }
+  return seen;
 }
 
 /**

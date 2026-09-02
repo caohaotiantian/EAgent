@@ -1,8 +1,8 @@
 /**
- * The automatic escalation decision table (E1–E10).
+ * The automatic escalation decision table.
  *
  * This is where "oversight is a topology property" stops being a slogan. A graph author
- * declares a posture once; these ten rules raise it at run time, from evidence the
+ * declares a posture once; the rules below raise it at run time, from evidence the
  * author could not have had — a verdict that came back weak, a tool sequence nobody has
  * seen before, a run costing three times what its cohort costs.
  *
@@ -37,7 +37,8 @@ export type EscalationRuleId =
   | "anomaly"
   | "taint"
   | "operator"
-  | "mutation_introduced_irreversible";
+  | "mutation_introduced_irreversible"
+  | "fanout_skipped_gate";
 
 export interface EscalationRule {
   readonly id: EscalationRuleId;
@@ -125,6 +126,28 @@ export const ESCALATION_RULES: Readonly<Record<EscalationRuleId, EscalationRule>
     to: "in",
     scope: "node",
     why: "a runtime graph mutation added a hard-to-undo node",
+  },
+  /**
+   * E12 — A FAN-OUT OF WIDTH ZERO SKIPPED AN AUTHORED `human_gate`.
+   *
+   * E12 AND NOT E11: D7.7 reserves E11 for provider fall-through, which `providers/fallback.ts`
+   * still names in its `onFallback` docstring and which nothing here builds. Reusing the number
+   * would put two different rules behind one `code` in the one table an operator looks a journal
+   * entry up in.
+   *
+   * The width of a fan is a runtime value, usually one a tool fetched, so it is the one way a
+   * node that STATICALLY dominates an action does not run in front of it: `#fireEmptyJoin`
+   * schedules the join directly and every node on the branch — the gate included — is passed
+   * over. Nothing is wrong with the barrier; what is missing is the human. The escalation lands
+   * on the JOIN, which is the node that releases the downstream the gate was in front of, so
+   * somebody is asked exactly once and the run continues on approval rather than failing.
+   */
+  fanout_skipped_gate: {
+    id: "fanout_skipped_gate",
+    code: "E12",
+    to: "in",
+    scope: "node",
+    why: "a fan-out planned zero branches, skipping a human gate the graph declared on the branch",
   },
 };
 
