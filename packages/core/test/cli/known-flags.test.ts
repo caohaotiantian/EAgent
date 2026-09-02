@@ -170,6 +170,16 @@ test("`loom help` still works, and every real flag is accepted", async () => {
     // a flag from KNOWN_FLAGS also drops it from the loop, so the mutation that does exactly
     // that left this green. USAGE is the operator-facing promise and is the right contract to
     // hold the refusal to.
+    //
+    // WHAT `compile` NOW ANSWERS FOR A VERB-SCOPED FLAG, and why the loop still means something.
+    // `VERB_FLAGS` refuses a flag the verb does not read, so `compile --port 9999` is a refusal
+    // that NAMES `loom serve`. That is still not "unknown flag" — this loop's actual claim — and
+    // it is a stronger reachability statement than the old one: the flag is known AND the binary
+    // says which verb reads it. Driving each flag through that verb instead is not an option
+    // here: for `--port`, `--token`, `--host`, `--identity-file`, `--sweep-ms` and
+    // `--max-runs-in-flight` that verb is `serve`, which BINDS A SOCKET, and this file's own
+    // `cli` helper exists because a test that starts a server instead of failing is worse than
+    // no test. `verb-flags.test.ts` holds the table to what each case block reads.
     for (const flag of advertised()) {
       if (flag === "help") continue;
       await assert.rejects(

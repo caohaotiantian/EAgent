@@ -312,6 +312,13 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     posture floor. EVERY MCP tool is irreversible and therefore gates:
                     tools/list cannot say whether a tool reads a file or wires money, and
                     guessing from its name is a heuristic a hostile server defeats.
+                    A key nothing on this list reads is REFUSED, not dropped: a miscased
+                    envAllow is a server started with an empty environment.
+
+  A FLAG A VERB DOES NOT READ IS REFUSED, not ignored — --port on a run, --token on a
+  trace, --suite on a score. The flags above are read by the verb they are listed under;
+  this bottom block is read by every verb, except --as, which is read by every verb that
+  journals a decision under it.
 `;
 
 /**
@@ -572,36 +579,133 @@ export function parseArgs(argv: readonly string[]): Args {
 }
 
 /**
- * `--otlp` IS READ BY `trace` AND BY NO OTHER VERB, so every other verb REFUSES it.
+ * FLAGS EVERY VERB READS, so no row below has to repeat them.
  *
- * **THIS IS A NEW RULE ON THIS CLI AND SAYING SO IS HALF THE POINT.** No other flag here is
- * verb-scoped: driven at `c8bdf22`, `loom trace <runId> --port 9999 --token sekret --suite x`
- * is accepted and fails only for the run id. `refuseRepeated`'s neighbour in `promote` looks
- * like a precedent and is not — that one refuses `--baseline`/`--suite` inside ONE VERB whose
- * other mode reads them, which is a mode refusal rather than a verb one.
- *
- * The ground for making `--otlp` the first is that it is the only flag whose silent no-op is an
- * EGRESS THAT DID NOT HAPPEN. Every other misplaced flag costs an operator a wrong assumption
- * about configuration; this one costs them a collector that never heard from this process while
- * they believe a trace is in it — the same shape `--extension-module`'s repeat refusal exists
- * for ("a deployment the operator believes is extended and is not"), and the same shape
- * `assertKnownFlags` exists for one screen up.
- *
- * The general form — a verb→flag table, which would also catch `--token` on `trace` — is
- * deliberately NOT built here, and `TODO.md` §H.4 carries the asymmetry so that this function
- * is not read as precedent for a rule nobody wrote down.
- *
- * THE MESSAGE MUST NOT CONTAIN "unknown flag": `known-flags.test.ts` drives every advertised
- * flag through `compile` and asserts the refusal it gets is not that one, which is how it
- * proves an advertised flag is reachable.
+ * Membership here is not a judgement about which flags are "general". It is a statement about
+ * WHERE THEY ARE READ: every name on this list is consulted by `openWorkspace` or by `main`
+ * itself, both of which run before the switch dispatches, so every verb reads them by
+ * construction. `--channels-file` is the one that looks misplaced and is not — `openWorkspace`
+ * builds the gate dispatcher for every verb, so a `loom run` that suspends on a gate delivers
+ * through it exactly as `loom serve` does.
  */
-function refuseOtlpOutsideTrace(args: Args): void {
-  if (args.flags["otlp"] === undefined || args.command === "trace") return;
+const GLOBAL_FLAGS: readonly string[] = [
+  "allow-exec",
+  "budget-tokens",
+  "budget-usd",
+  "budget-wall-ms",
+  "channels-file",
+  "data-dir",
+  "egress",
+  "exec-env",
+  "extension-module",
+  "grant",
+  "help",
+  "max-parallelism",
+  "mcp-file",
+  "models-file",
+  "workspace",
+];
+
+/**
+ * WHICH VERB READS WHICH FLAG — the applicability table `TODO.md` §H.4 asks for, and the thing
+ * `refuseOtlpOutsideTrace` was a single hand-written row of.
+ *
+ * **WHAT WAS WRONG.** `assertKnownFlags` gates the flag NAME set and nothing gated which verb
+ * may read one, so every flag was accepted everywhere and quietly did nothing. Driven at
+ * `0c3c486`, `loom trace <runId> --port 9999 --token sekret --suite x` was accepted and failed
+ * only for the run id — three flags, three no-ops, no word about any of them. That is the same
+ * class `assertKnownFlags` exists for one screen up, reached by a different route: a flag the
+ * operator believes is configuring this command and is not.
+ *
+ * `--otlp` was made the one exception on the ground that its silent no-op is an EGRESS THAT DID
+ * NOT HAPPEN, and that ground was narrow and deliberately not generalised, because the general
+ * form is this table and nobody had written it. It is written now, and `--otlp` is one row of it
+ * — the consequence sentence it earned is kept, as `FLAG_CONSEQUENCE`, because "exported
+ * nothing" is a truer thing to tell an operator than "did nothing".
+ *
+ * **HOW THE ROWS WERE ARRIVED AT, and why they are not a taste judgement.** Each row is the set
+ * of flags that verb's `case` block actually reaches — directly through `args.flags[…]`, or
+ * through the closure of the helpers it calls — minus `GLOBAL_FLAGS`. That is a mechanical
+ * property of the source, and `test/cli/verb-flags.test.ts` recomputes it from the source and
+ * asserts this table equals it, verb by verb, the way `known-flags.test.ts` holds `KNOWN_FLAGS`
+ * to `USAGE` and to the code's readers. A hand-kept table that drifts is how a refusal starts
+ * rejecting a flag the command really does read, which is worse than the bug it fixes.
+ *
+ * `pause` and `resume` share a case block, so they share a row.
+ *
+ * A COMMAND NOT LISTED HERE IS NOT CHECKED — an unknown verb is a better message than a lecture
+ * about a flag on a verb that does not exist, and `main`'s `default` arm prints it.
+ */
+const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  compile: [],
+  serve: ["host", "identity-file", "max-runs-in-flight", "port", "sweep-ms", "token"],
+  run: ["as", "budget", "input"],
+  gates: [],
+  approve: ["as", "graph", "reject"],
+  cancel: ["as", "reason"],
+  pause: ["as", "reason"],
+  resume: ["as", "reason"],
+  steer: ["as", "node", "reason", "take"],
+  deescalate: ["as", "scope", "to", "why"],
+  replay: ["graph"],
+  trace: ["graph", "otlp"],
+  audit: ["graph"],
+  score: ["bucket", "graph"],
+  cohort: [],
+  suite: ["as", "bucket", "cases", "cohort", "out"],
+  promote: ["against-cohort", "as", "baseline", "bucket", "budget", "proposed-by", "runs", "suite"],
+};
+
+/**
+ * What a misplaced flag would have COST, for the flags where "nothing" understates it.
+ *
+ * Empty for almost every flag on purpose: the general consequence is that a value configured
+ * nothing, and inventing a specific sentence per flag would be forty claims nobody measured.
+ * `--otlp` has one because it was measured — see `otlpEndpoint` and `TODO.md` §H.4 — and because
+ * an export that did not happen is the one no-op an operator cannot see from the outside.
+ */
+const FLAG_CONSEQUENCE: Readonly<Record<string, string>> = {
+  otlp:
+    "exported nothing, which leaves an operator believing a trace reached their collector while the " +
+    "collector never heard from this process. Run `loom trace <runId> --otlp <endpoint>`.",
+};
+
+/**
+ * Refuse a flag this verb does not read, naming the verbs that do.
+ *
+ * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
+ * message for a name nothing reads anywhere, and this one would otherwise answer a typo with a
+ * list of verbs that do not have it either.
+ *
+ * NAMING THE READERS rather than saying "not valid here", for `onlyKeys`' reason: a refusal that
+ * says an operator is wrong without saying what right looks like has spent their attention and
+ * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
+ * command they were reaching for.
+ */
+function refuseFlagsThisVerbDoesNotRead(args: Args): void {
+  const applies = VERB_FLAGS[args.command];
+  if (applies === undefined) return;
+  const offenders = Object.keys(args.flags)
+    .filter((f) => !GLOBAL_FLAGS.includes(f) && !applies.includes(f))
+    .sort();
+  if (offenders.length === 0) return;
+  const readers = (f: string): string => {
+    const verbs = Object.keys(VERB_FLAGS)
+      .filter((v) => VERB_FLAGS[v]!.includes(f))
+      .sort();
+    // FAIL CLOSED AND SAY SO. A known flag in no row is a table that lost one, and claiming it
+    // is "read by nothing" would be a guess; this sentence is true either way.
+    return verbs.length === 0 ? "read by no verb this binary dispatches" : `read by ${verbs.map((v) => `\`loom ${v}\``).join(", ")}`;
+  };
   throw err.validation(
     CODES.E_CONFIG_INVALID,
-    `--otlp is read by \`loom trace\` and by no other verb. \`loom ${args.command}\` would have accepted it ` +
-      `and exported nothing, which leaves an operator believing a trace reached their collector while the ` +
-      `collector never heard from this process. Run \`loom trace <runId> --otlp <endpoint>\`.`,
+    offenders
+      .map(
+        (f) =>
+          `--${f} is ${readers(f)} and by no other verb. \`loom ${args.command}\` would have accepted it and ` +
+          (FLAG_CONSEQUENCE[f] ?? "done nothing with it, leaving an operator believing this command was configured by it."),
+      )
+      .join(" "),
   );
 }
 
@@ -2201,15 +2305,22 @@ const PRICE_FIELDS: readonly string[] = ["input", "output"];
  * closed set: a refusal that says "unknown field" and stops has told the operator they are
  * wrong without telling them what right looks like. There is no undecidable case here — a
  * key is in the set or it is not — and no arm in which an unread key is kept.
+ *
+ * THE MESSAGE NAMES NO ROW SHAPE, and it used to name one. Both sentences below were written
+ * when `readModels` was the only caller: they said the unread key "changed nothing about the
+ * adapter this row built" and cited an unknown `"provider"` as the precedent. `readMcpServers`
+ * is the fifth shape through here and builds no adapter and reads no `provider`, so a
+ * miscased `envallow` was refused with two sentences about a subsystem the operator had not
+ * configured. A message shared by five call sites can only say what all five are true of.
  */
 function onlyKeys(row: Record<string, unknown>, allowed: readonly string[], where: string, refuse: (why: string) => never): void {
   const unknown = Object.keys(row).filter((k) => !allowed.includes(k));
   if (unknown.length === 0) return;
   refuse(
     `${where} declares ${unknown.map((k) => JSON.stringify(k)).join(", ")}, which ${unknown.length === 1 ? "is a field" : "are fields"} ` +
-      `nothing reads — so ${unknown.length === 1 ? "its value" : "their values"} changed nothing about the adapter this row built. ` +
-      `This row may declare: ${allowed.join(", ")}. A field read by nothing is refused rather than ignored, for the reason an ` +
-      `unknown "provider" is: a skipped field is a deployment that boots looking configured.`,
+      `nothing reads — so ${unknown.length === 1 ? "its value" : "their values"} changed nothing about what this row configures. ` +
+      `This row may declare: ${allowed.join(", ")}. A field read by nothing is refused rather than ignored, and not merely ` +
+      `dropped: a skipped field is a deployment that boots looking configured.`,
   );
 }
 
@@ -3026,6 +3137,33 @@ function readSpec(file: string): GraphSpec {
 }
 
 /**
+ * The ONLY fields a `--mcp-file` server row may declare — the fifth row shape `onlyKeys` guards,
+ * beside the four `readModels` brings (adapter, route, tier, price).
+ *
+ * WHY THIS EXISTS AT ALL is `readModels`' argument word for word: a key arrives with its reader,
+ * and before this list `readMcpServers` validated exactly these four names and then BUILT ITS
+ * RESULT FROM THEM, so every other key was dropped without a word. Driven at `0c3c486`, on
+ * `{"servers":[{"name":"docs","command":"node","envallow":["PATH"],"irreversibility":"safe"}]}`:
+ *
+ *     readMcpServers(file) -> [{"name":"docs","command":"node"}]
+ *
+ * — both operator fields gone, exit 0, nothing on stderr. The miscased one is the worse half and
+ * the reason a typo guard belongs here rather than only in USAGE: `envAllow` is the whole child
+ * environment, so `envallow` is a server that starts with an EMPTY environment and dies on
+ * `spawn npx ENOENT` two layers away from the lowercase `a` that caused it — the exact failure
+ * this reader's own refusal message already spends three lines warning about.
+ *
+ * `irreversibility` IS DELIBERATELY NOT HERE, on the same footing as `ADAPTER_FIELDS`' `headers`
+ * and `PRICE_FIELDS`' `cacheRead`: accepting the spelling would advertise a capability this
+ * binary does not have. `mcp/tools.ts` hardcodes `irreversibility: "irreversible"` on every tool
+ * from every server, and whether an operator may lower an oversight class from a config file is
+ * an open decision — `TODO.md` §D.1 — not one a field list gets to make by listing a name. Until
+ * that decision is taken, an operator who writes it is told it changed nothing, which is the
+ * true statement; today they are told nothing and their tools gate anyway.
+ */
+const MCP_SERVER_FIELDS: readonly string[] = ["name", "command", "args", "envAllow"];
+
+/**
  * `--mcp-file` — which MCP servers to connect, and under what name.
  *
  * A file rather than a flag, for the reason `--models-file` is one: a server entry carries a
@@ -3065,6 +3203,9 @@ export function readMcpServers(file: string): readonly McpClientOptions[] {
     const where = `servers[${String(i)}]`;
     const row = raw as Record<string, unknown> | null;
     if (typeof row !== "object" || row === null || Array.isArray(row)) refuse(`${where} is not an object`);
+    // BEFORE the field checks, so a row that is wrong in two ways is diagnosed at the key that
+    // was never going to be read rather than at the value of one that was.
+    onlyKeys(row, MCP_SERVER_FIELDS, where, refuse);
     const name = row["name"];
     const command = row["command"];
     if (typeof name !== "string" || !/^[A-Za-z0-9_-]+$/.test(name)) {
@@ -3439,8 +3580,32 @@ function printTimeoutPlan(graph: RunGraph): void {
   }
 }
 
-/** How many times `loom run` will wait out a backoff before giving up and saying so. */
-const MAX_BACKOFF_WAITS = 64;
+/**
+ * How many CONSECUTIVE advances that append NOTHING to the journal `loom run` sits through
+ * before it gives up and says so.
+ *
+ * IT IS NOT A LAP COUNT, and that swap is the whole of A.13. The bound here used to be
+ * `MAX_BACKOFF_WAITS = 64` — how many times this loop would wait at all — so the CLI's own
+ * patience, not the run's, decided when a run was abandoned. Measured on a graph declaring
+ * `retry: { maxAttempts: 70, backoff: "fixed", initialMs: 30 }` against a body that returns
+ * `{ retry }` every time: the run was abandoned `running` on the 65th wait with
+ * `! run … was still retrying after 64 waits`, while its journal was appending an attempt and
+ * a `task.retry_scheduled` per lap and the engine was honouring exactly the bound the AUTHOR
+ * declared. A deferral can be up to 60 s, so the same ceiling is reachable in an hour by a
+ * rate-limited run that never failed at all.
+ *
+ * What the loop is really guarding against is a run THIS PROCESS CANNOT MOVE, and the fold
+ * already answers that question without counting anything: `RunProjection.seq` is the seq of
+ * the last event folded, so an advance that left it where it was appended nothing and changed
+ * nothing. That is the predicate `TODO.md` §A.13 asks for, and it is one a restart reaches the
+ * same answer on because it is read off the journal rather than off this loop.
+ *
+ * EIGHT rather than one, because one stalled advance is not yet evidence: a timer that reaches
+ * `retryAfter` a tick early leaves the engine with nothing due, and that costs a lap and no
+ * more. Eight consecutive ones cost eight laps of a run that is not moving, which is cheap,
+ * and every one of them is bounded below by a real `retryAfter` wait or is instant.
+ */
+const MAX_STALLED_ADVANCES = 8;
 
 /**
  * Advance until the run reaches a terminal state, a gate, or stops making progress.
@@ -3458,13 +3623,19 @@ const MAX_BACKOFF_WAITS = 64;
  * not charged to the policy (see `Engine.#retryDecision`). A rate-limited run therefore waits
  * here for longer than it used to, and that time is the same time the transport used to spend
  * asleep inside `advance` holding a worker slot; the difference is that it is now visible, and
- * Ctrl-C reaches it. The cap is a backstop against a graph whose retries never exhaust, and it
- * reports rather than looping — a command that hangs is indistinguishable from one that is
- * working.
+ * Ctrl-C reaches it.
+ *
+ * THOSE TWO BOUNDS ARE THE ONES THAT DECIDE WHEN THIS RETURNS, and this loop deliberately adds
+ * no third one of its own. Its backstop fires on a run that is not moving — see
+ * `MAX_STALLED_ADVANCES` — not on a run that is moving slowly, because a run appending an
+ * attempt per lap is a run the engine is still bounding, and giving up on it here reports a
+ * `running` run that would have finished. It reports rather than looping in either case: a
+ * command that hangs is indistinguishable from one that is working.
  */
 async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): Promise<RunProjection> {
   let p = first;
-  for (let waited = 0; waited < MAX_BACKOFF_WAITS; waited++) {
+  let stalled = 0;
+  while (stalled < MAX_STALLED_ADVANCES) {
     if (p.status !== "running") return p;
     const wake = (Object.values(p.tasks) as TaskRecord[])
       .filter((t) => t.state === "ready" && t.retryAfter !== undefined)
@@ -3473,9 +3644,17 @@ async function driveToRest(ws: Workspace, runId: RunId, first: RunProjection): P
     // and saying so beats spinning on `advance`.
     if (wake === undefined) return p;
     await new Promise((r) => setTimeout(r, Math.max(0, wake - Date.now())));
+    const before = p.seq;
     p = await ws.engine.advance(runId);
+    // THE ONLY EVIDENCE OF PROGRESS THIS LOOP TRUSTS. Not the task's attempt count and not the
+    // wake instant moving: both are projections of the journal, and reading one of them here
+    // would make this bound depend on which FIELD a future retry decision happens to touch.
+    // `seq` moves iff something durable was written, for every decision the engine takes.
+    stalled = p.seq > before ? 0 : stalled + 1;
   }
-  process.stderr.write(`! run ${runId} was still retrying after ${MAX_BACKOFF_WAITS} waits; giving up on it here\n`);
+  process.stderr.write(
+    `! run ${runId} appended nothing to its journal across ${MAX_STALLED_ADVANCES} advances while a retry was pending; giving up on it here\n`,
+  );
   return p;
 }
 
@@ -5177,8 +5356,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   }
   // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
   assertKnownFlags(args);
-  // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
-  refuseOtlpOutsideTrace(args);
+  // AFTER `assertKnownFlags`, so a MISSPELLED flag is answered by the list of flags rather than
+  // by a list of verbs that do not read it either.
+  refuseFlagsThisVerbDoesNotRead(args);
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
@@ -5591,8 +5771,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         //
         // A REPEAT IS REFUSED for `--extension-module`'s reason and it is the same shape one step
         // over: flags here are last-wins, so two `--otlp` values name two collectors and export
-        // to one, which is the "believes they exported and did not" that `refuseOtlpOutsideTrace`
-        // exists for.
+        // to one, which is the "believes they exported and did not" that `VERB_FLAGS`' own
+        // `--otlp` row exists for.
         refuseRepeated(
           args,
           "otlp",
