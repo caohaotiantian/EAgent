@@ -32,9 +32,17 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Every row here was RE-RUN at `241e99f`, and three of the seven had moved** — tests 2,774 →
-2,777, exports 537 → 538, and nothing else. Kernel files, seams, source-file count (62) and the
-NUL census (5) came back unchanged.
+**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,791**, the
+fourteen cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
+package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
+which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
+census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
+this change wrote two regexes containing literal control bytes, one of them a NUL, which would
+have made `cli.ts` the sixth and would have been invisible to every grep in this file.
+
+The previous re-run, at `241e99f`, kept for the shape of it: **three of the seven had moved** —
+tests 2,774 → 2,777, exports 537 → 538, and nothing else. Kernel files, seams, source-file count
+(62) and the NUL census (5) came back unchanged.
 
 The three new cases and the one new export are all wave 12, and each is named rather than
 apportioned: `otlp.test.ts` gained the `Object.prototype`-key case, `trace-endpoint.test.ts`
@@ -67,7 +75,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,777 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,791 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -139,15 +147,24 @@ it stays where it is.
 **`DESIGN.md`'s live list is therefore EMPTY, and no replacement is invented here.** That section's
 rule is that an item names a command which FAILS today; finding one is a measurement, and nothing
 in this pass produced one. The nearest candidates are already rows below rather than roadmap items:
-C.4's named residue (nothing calls the OTLP exporter from `cli.ts`), A.8's (a `run_failed` fixture
-whose undo would actually gate), and G.1's schema change, which is a maintainer's seam to spend.
+A.8's (a `run_failed` fixture whose undo would actually gate) and G.1's schema change, which is a
+maintainer's seam to spend. **C.4's residue was the third and it is CLOSED** — `loom trace --otlp`
+posts to a collector, so nothing in this file still says the exporter has no caller. Its closure
+also settled what the refusal it was reached through is WORTH: `loom trace <id> --otlp <ep>`
+answering `unknown flag` is NOT "a command that fails" in `DESIGN.md`'s sense, because that
+sentence is manufacturable for every unbuilt thing in this corpus — `--gzip`, `--sample`, any §E
+row — and a rule that admits a counterexample generator has stopped discriminating. It is evidence
+the capability was operator-unreachable, which is a different and smaller claim.
 
 ---
 
 ## What is still open, by section
 
 **Recounted 2026-09-02 by running the grep, not by arithmetic on the previous number** — which is
-the only method that has ever produced a right answer here. Every column below comes from one of
+the only method that has ever produced a right answer here. **Re-run again when `--otlp` added
+§H.4: one cell moved** (§H 4 → 5 rows, 3 → 4 open), and the struck column did not, because H.4 is
+open. The member enumeration below is therefore unchanged, which is a fact the greps produced
+rather than one anybody assumed. Every column below comes from one of
 these three commands, and a reader who does not believe a cell should run them rather than argue:
 
 ```bash
@@ -175,7 +192,7 @@ can be wrong without being falsifiable.
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
-| §H | 4 | 1 | 3 | housekeeping |
+| §H | 5 | 1 | 4 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
 A.8, A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.5; **§D** D.2, D.4;
@@ -1013,8 +1030,47 @@ is a better view of nothing.
   omission, and each was then re-checked BY RUNNING rather than by reading. Three were real and
   are fixed:
 
-  1. **Still open** — nothing calls the exporter from `cli.ts` yet; `loom trace` still only
-     prints, so a deployment wires it as a library embedder today.
+  1. **FIXED — `loom trace <runId> --otlp <endpoint>` posts the fold to a collector**, so the
+     exporter has a caller in the binary and a deployment no longer embeds the library to get a
+     push. Driven offline against a `node:http` collector on 127.0.0.1: `POST /v1/traces`,
+     `service.name=loom loom.run_id=<runId>`, 9 spans, exit 0. Four decisions are worth more than
+     the wiring and each is pinned by a test that goes red when it is reverted
+     (`test/cli/trace-otlp.test.ts`, 14/14, six mutations all CAUGHT):
+     - **argv decides both whether to send and where.** No environment variable can make this
+       command export. A bare `--otlp` was going to fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`
+       and that arm was DELETED rather than guarded, for three measured reasons: `--otlp "$UNSET"`
+       arrives as the empty string and would have become an export to whatever env named; the two
+       OTel endpoint variables have different append contracts and `OtlpHttpExporter` applies one
+       of them to both (`https://vendor.example/otlp/traces` → `…/traces/v1/traces`); and a shell
+       that happens to export the standard variable is not an operator asking for egress.
+     - **One request per RUN, unspliced.** `spliceSubgraph` rewrites the child's `traceId` onto
+       the parent's, so exporting what the terminal renders would put the same child spans on the
+       wire under a different id than `GET /runs/<child>/trace?format=otlp` answers. Unspliced,
+       the parent's `SpanLink.traceId` is `digest(childRunId)` — byte-identical to the child's
+       own — so the collector performs the join. **That is `SpanLink.traceId`'s consumer outside
+       the in-process splice**, which is the thing this row was opened for.
+     - **The credential is an environment variable and there is no flag that takes one**
+       (`OTEL_EXPORTER_OTLP_HEADERS`), because a key on argv is readable out of `ps` — the finding
+       `KNOWN_FLAGS` already records about `--token`. A malformed entry refuses, and no refusal
+       on this path quotes a value.
+     - **Exit 1 now means "did not conform OR did not export"**, and `cli.ts`'s own exit-code
+       docstring — which enumerates the meaning verb by verb — grew the member in the same commit.
+       `reason: "empty"` is excluded: `otlp.ts` returns it to distinguish "nothing to say" from
+       "said it", and folding it in would erase the distinction the field exists to make.
+
+     **Two defects in the exporter were found BY WIRING IT, and both are this change's**, because
+     this is the first caller in the binary that hands it a credential. `#secrets` was
+     `endpointSecrets(base)` alone while `OtlpExporterOptions.headers` says in its own docstring
+     that it is where the API key goes — driven, a stub throwing a message containing the header
+     value returned `detail: "… auth=Bearer sk-SECRET"` verbatim, and a collector echoing the
+     header in a 4xx body reaches the same place. The header values are now in the mask list and
+     `partialSuccess.errorMessage` goes through the same `mask` as `detail`. **And the CLI prints
+     the collector's HOST, not its origin** — measured, `endpointSecrets` masks the
+     scheme-qualified origin and leaves the bare hostname legible, so printing the origin would
+     have printed in plaintext the exact string the sibling line redacts. This row's own finding 5
+     is the register of somebody reaching the opposite false conclusion about the same function by
+     reading the mask list instead of running it; both directions have now been settled by running
+     it.
   2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
      is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
      `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a
@@ -1543,6 +1599,19 @@ Each traces to a decision in `DESIGN.md`.
   — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
   into enumerations.
 
+- **H.4 · `--otlp` is the only verb-scoped flag on this CLI, and the asymmetry is tracked
+  rather than argued away.** `assertKnownFlags` gates the flag NAME set and nothing gates which
+  verb may read a flag, so every other flag is accepted everywhere: driven at `c8bdf22`,
+  `loom trace <runId> --port 9999 --token sekret --suite x` is accepted and fails only for the
+  run id. `refuseOtlpOutsideTrace` makes `--otlp` the exception, on the ground that it is the
+  only flag whose silent no-op is an EGRESS THAT DID NOT HAPPEN — an operator believing a trace
+  reached their collector while the collector never heard from the process. That ground is narrow
+  and it is deliberately not generalised. **The precedent this row exists to refuse:** the first
+  draft of that function cited `promote`'s "THE REPLAYED MODE'S FLAGS ARE REFUSED RATHER THAN
+  IGNORED" as one, and it is not — that refuses `--baseline`/`--suite` between two MODES OF ONE
+  VERB, both of which read them. **Closes when** either a verb→flag applicability table exists
+  (which would also catch `--token` on `trace`, the same class with a smaller consequence), or
+  somebody argues that egress is the only case worth the guard and writes that down here instead.
 - **H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four. TWO OF THE
   THREE ARE FIXED; ONE IS NOT, and the survivor is the one no summary line carries.** Found while
   re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy §F.8. The

@@ -70,7 +70,8 @@ import { HookRegistry } from "./run/hooks.ts";
 import { FallbackAdapter } from "./providers/fallback.ts";
 import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
-import { childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph } from "./telemetry/spans.ts";
+import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph, type Span } from "./telemetry/spans.ts";
+import { OtlpHttpExporter } from "./telemetry/otlp.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, shapeOf } from "./canonical.ts";
@@ -151,10 +152,22 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                              shell access to the host
   loom replay  <runId> [--graph <graph.json|yaml>]         replay and verify
   loom trace   <runId> [--graph <graph.json|yaml>]         print the span tree
+               [--otlp <http://host:port>]                 …and POST it to a collector
                Both find the graph themselves: graphs/ is searched for the hash the
                journal recorded, and the file it resolved to is named on stderr.
                --graph names one outside graphs/ and is refused if its hash is not
                the one the run compiled
+               --otlp is the collector's base URL and it MUST be given a value: no
+               environment variable can make this command send, because a shell that
+               happens to export one is not an operator asking for egress. It is read
+               by trace and by no other verb, which refuses it rather than accepting
+               it and exporting nothing. A CREDENTIAL NEVER GOES ON ARGV, where every
+               user on the box can read it out of ps: set OTEL_EXPORTER_OTLP_HEADERS
+               to "k=v,k2=v2" (values percent-encoded) and they are sent on every
+               POST. A trace that follows subgraphs sends ONE REQUEST PER RUN, each
+               under its own traceId, so the collector performs the join the terminal
+               performs in process. Exit 1 then means the run did not conform to its
+               graph OR the export did not complete, and the stderr lines say which
   loom audit   <runId> [--graph <file>]      read the journal back and check it holds together
   loom score   <runId>                       judge a finished run against its cohort, and
                                              journal the verdict as evolution.scored
@@ -472,6 +485,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "mcp-file",
   "models-file",
   "node",
+  "otlp",
   "out",
   "port",
   "proposed-by",
@@ -578,6 +592,174 @@ export function parseArgs(argv: readonly string[]): Args {
  * one on the CLI where repetition means something other than what it means everywhere else — a
  * rule that has to be remembered per flag. The comma form is named in the refusal.
  */
+/**
+ * `--otlp` IS READ BY `trace` AND BY NO OTHER VERB, so every other verb REFUSES it.
+ *
+ * **THIS IS A NEW RULE ON THIS CLI AND SAYING SO IS HALF THE POINT.** No other flag here is
+ * verb-scoped: driven at `c8bdf22`, `loom trace <runId> --port 9999 --token sekret --suite x`
+ * is accepted and fails only for the run id. `refuseRepeated`'s neighbour in `promote` looks
+ * like a precedent and is not — that one refuses `--baseline`/`--suite` inside ONE VERB whose
+ * other mode reads them, which is a mode refusal rather than a verb one.
+ *
+ * The ground for making `--otlp` the first is that it is the only flag whose silent no-op is an
+ * EGRESS THAT DID NOT HAPPEN. Every other misplaced flag costs an operator a wrong assumption
+ * about configuration; this one costs them a collector that never heard from this process while
+ * they believe a trace is in it — the same shape `--extension-module`'s repeat refusal exists
+ * for ("a deployment the operator believes is extended and is not"), and the same shape
+ * `assertKnownFlags` exists for one screen up.
+ *
+ * The general form — a verb→flag table, which would also catch `--token` on `trace` — is
+ * deliberately NOT built here, and `TODO.md` §H.4 carries the asymmetry so that this function
+ * is not read as precedent for a rule nobody wrote down.
+ *
+ * THE MESSAGE MUST NOT CONTAIN "unknown flag": `known-flags.test.ts` drives every advertised
+ * flag through `compile` and asserts the refusal it gets is not that one, which is how it
+ * proves an advertised flag is reachable.
+ */
+function refuseOtlpOutsideTrace(args: Args): void {
+  if (args.flags["otlp"] === undefined || args.command === "trace") return;
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `--otlp is read by \`loom trace\` and by no other verb. \`loom ${args.command}\` would have accepted it ` +
+      `and exported nothing, which leaves an operator believing a trace reached their collector while the ` +
+      `collector never heard from this process. Run \`loom trace <runId> --otlp <endpoint>\`.`,
+  );
+}
+
+/**
+ * The collector's base URL, or `undefined` when this invocation is not exporting.
+ *
+ * **ARGV DECIDES BOTH WHETHER TO SEND AND WHERE, and the environment supplies neither.** An
+ * earlier draft let a bare `--otlp` fall back to `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and then
+ * `OTEL_EXPORTER_OTLP_ENDPOINT`, on the reasoning that an operator's endpoint usually already
+ * lives there. Three measurements killed it and the deletion is worth more than the guards
+ * would have been:
+ *
+ *   - `--otlp "$MY_COLLECTOR"` with the variable unset arrives as the EMPTY STRING, and the
+ *     natural implementation turns that into an export to whatever the environment names —
+ *     the destination chosen by env while argv named a different one, with the credential
+ *     attached. That is precisely the outcome the fallback's own rule was written to prevent.
+ *   - The two OTel variables have DIFFERENT CONTRACTS. The base one is appended to; the
+ *     signal-specific one is used verbatim. `OtlpHttpExporter` appends `/v1/traces` to
+ *     anything not already ending in it, so `https://vendor.example/otlp/traces` becomes
+ *     `https://vendor.example/otlp/traces/v1/traces` — a path the operator never named, on a
+ *     host they did, carrying their key.
+ *   - A shell that happens to export the standard variable is not an operator asking for
+ *     egress.
+ *
+ * So the flag takes a value, and a bare `--otlp` or `--otlp=` is refused naming the variable
+ * an operator can paste from. One arm instead of four, and stricter.
+ *
+ * THE REFUSALS DO NOT ECHO THE VALUE. This is the one flag on this CLI whose value is
+ * routinely a credential (`https://<key>@collector`, or a vendor path segment that is one), and
+ * a refusal is the place a bad value is most likely to be copied into a ticket.
+ */
+function otlpEndpoint(args: Args): string | undefined {
+  const raw = args.flags["otlp"];
+  if (raw === undefined) return undefined;
+  const refuse: (why: string) => never = (why) => {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--otlp ${why}. It takes the collector's base URL and nothing else can supply one — e.g. ` +
+        `--otlp http://127.0.0.1:4318, or --otlp "$OTEL_EXPORTER_OTLP_ENDPOINT" if you keep it there. ` +
+        `Nothing in the environment can make this command send on its own.`,
+    );
+  };
+  if (raw === true) refuse("was given with no value at all");
+  if (raw.trim() === "") refuse("was given an empty value, which is what an unset shell variable expands to");
+  const parsed = ((): URL => {
+    try {
+      return new URL(raw);
+    } catch {
+      // NOT QUOTED BACK. A string that does not parse is usually a typo and occasionally a
+      // pasted credential, and this function cannot tell which.
+      return refuse("did not parse as a URL (the value is not repeated here, because it is the field a credential lives in)");
+    }
+  })();
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    refuse(`names the "${parsed.protocol}" scheme, and OTLP/HTTP is http or https`);
+  }
+  return raw;
+}
+
+/** Where a collector's credentials come from, and the only place they may. */
+const OTLP_HEADERS_ENV = "OTEL_EXPORTER_OTLP_HEADERS";
+
+/** An HTTP field name, per RFC 9110's `token`. Node refuses anything else, late and unhelpfully. */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+/**
+ * `OTEL_EXPORTER_OTLP_HEADERS`, parsed — and it is an ENVIRONMENT VARIABLE ON PURPOSE.
+ *
+ * A collector credential passed as a flag sits in `ps` for every user on the box. `KNOWN_FLAGS`
+ * already carries this project's finding on that class, written about `--token`: "a security
+ * bug rather than an ergonomic gap". So there is no `--otlp-headers`, there will not be one,
+ * and the name here is the one OTel already specifies — an operator's existing configuration
+ * works with no translation.
+ *
+ * A MALFORMED ENTRY REFUSES rather than being dropped, which is `readModels`' and
+ * `readIdentities`' trade for their reason: a silently-dropped authorization header is a 401
+ * from the collector that names nothing an operator can act on, hours later, in a log.
+ *
+ * AND NO REFUSAL NAMES A VALUE — only the entry's position and, where it is well-formed
+ * enough to have one, its key. The whole point of this function is that the values are secrets.
+ */
+function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<string, string> | undefined {
+  const raw = env[OTLP_HEADERS_ENV];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const refuse: (which: string, why: string) => never = (which, why) => {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${OTLP_HEADERS_ENV} ${which} ${why}. The format is a comma-separated list of key=value pairs with the ` +
+        `values percent-encoded, e.g. "api-key=abc123,x-tenant=acme". No value is quoted back in this message: ` +
+        `the whole reason this is an environment variable and not a flag is that its values are credentials.`,
+    );
+  };
+  const out: Record<string, string> = {};
+  const entries = raw.split(",");
+  for (let i = 0; i < entries.length; i++) {
+    const where = `entry ${String(i + 1)} of ${String(entries.length)}`;
+    const entry = entries[i]!.trim();
+    // `listFlag`'s rule for `--egress a,,b`: an empty member means something the operator
+    // cannot see, so it is refused rather than skipped.
+    if (entry === "") refuse(where, "is empty, so a comma is doing nothing or is hiding a value that did not expand");
+    const eq = entry.indexOf("=");
+    if (eq <= 0) refuse(where, 'is not `key=value` (no "=", or nothing before it)');
+    const key = entry.slice(0, eq).trim();
+    if (!HEADER_NAME.test(key)) refuse(where, `has a key that is not a valid HTTP field name: "${key}"`);
+    let value: string;
+    try {
+      value = decodeURIComponent(entry.slice(eq + 1).trim());
+    } catch {
+      refuse(where, `(key "${key}") has a value that is not valid percent-encoding`);
+    }
+    // REFUSED HERE RATHER THAN BY `Headers.append`, which throws a `TypeError` QUOTING THE
+    // WHOLE VALUE — the shape that put a credential into an error message before the exporter
+    // learned to mask its own headers. A key read with `$(cat key)` keeping its newline is the
+    // spelling this actually catches.
+    if (/[\u0000-\u001f\u007f]/.test(value)) {
+      refuse(where, `(key "${key}") has a value containing a control character — a trailing newline from $(cat …) is the usual cause`);
+    }
+    if (Object.hasOwn(out, key)) refuse(where, `repeats the key "${key}", and the earlier value would be silently discarded`);
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Text a COLLECTOR chose, made safe to put in front of an operator.
+ *
+ * `detail` and `partialSuccess.errorMessage` are the two strings on this path that come from
+ * outside the trust boundary, and both land on the line explaining a non-zero exit. Control
+ * characters in one let a broken — or hostile — collector rewrite or hide that line with ANSI
+ * escapes. The exporter has already masked both against the endpoint and the header values;
+ * this is the rendering half of the same rule, and it belongs here because this is the only
+ * caller that writes them to a terminal.
+ */
+function legible(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+}
+
 function refuseRepeated(args: Args, name: string, consequence: string): void {
   if (!args.repeated.has(name)) return;
   throw err.validation(
@@ -4812,9 +4994,11 @@ function announce(
  *
  * **1, and the argument against the alternatives is the content of this decision.**
  * `main`'s vocabulary is already fixed: 0 is "what you asked for happened" (`run`
- * succeeded, `replay` matched, `trace` conformed), 1 is "it did not", 2 is "there is no
- * such command", and the entry point at the bottom of this file exits 1 for any thrown
- * error. A shutdown that left a socket bound is "it did not". **130** — the 128 + SIGINT
+ * succeeded, `replay` matched, `trace` conformed AND — when `--otlp` was given — exported),
+ * 1 is "it did not", 2 is "there is no such command", and the entry point at the bottom of
+ * this file exits 1 for any thrown error. The `trace` clause grew a member when `--otlp`
+ * landed, and it is spelled out here rather than left implied: this parenthetical is an
+ * enumeration, and an enumeration is only as good as its discipline about growing. A shutdown that left a socket bound is "it did not". **130** — the 128 + SIGINT
  * convention — is wrong twice over: it is equally true of the SUCCESSFUL Ctrl-C, so it
  * cannot tell the two apart, and it would make every clean stop look like a crash to a
  * supervisor that treats non-zero as one.
@@ -4884,6 +5068,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
   assertKnownFlags(args);
   // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
+  refuseOtlpOutsideTrace(args);
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
@@ -5289,6 +5474,12 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
 
       case "trace": {
         const runId = requirePositional(args, 0, "a runId") as RunId;
+        // BOTH RESOLVED BEFORE ANYTHING IS READ, so a mistyped endpoint or a malformed header
+        // list costs a refusal rather than a graph lookup and a journal walk. The headers are
+        // only consulted when an endpoint was given: an operator with `OTEL_EXPORTER_OTLP_HEADERS`
+        // exported in their shell must not have a plain `loom trace` start refusing over it.
+        const otlpTo = otlpEndpoint(args);
+        const otlpWith = otlpTo === undefined ? undefined : otlpHeaders(process.env);
         // FOUND, NOT DEMANDED — see `recordedGraph`. Conformance is computed against this spec,
         // so resolving the WRONG one would report the graph's differences as the run's.
         const graph = await recordedGraph(ws, args, runId, "trace");
@@ -5315,6 +5506,12 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // holds; past it the remaining children keep their links and lose their spliced interior,
         // which is the same picture this command gave before it could follow one at all.
         let spans = own;
+        // EACH RUN'S OWN FOLD, KEPT ALONGSIDE THE SPLICE. The render wants one tree; the export
+        // wants one trace per run, because `spliceSubgraph` rewrites a child's `traceId` onto
+        // the parent's and the collector must see the id the child's own trace carries. Both
+        // come out of the same walk, so the export can never cover a different set of runs than
+        // the picture on screen.
+        const folds: { readonly runId: RunId; readonly spans: readonly Span[] }[] = [{ runId, spans: own }];
         const visited = new Set<string>([runId]);
         const queue = [...childRunIdsOf(own)];
         while (queue.length > 0 && visited.size <= MAX_TRACED_SUBGRAPHS) {
@@ -5329,9 +5526,14 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           // not here.
           if (childEvents.length === 0) continue;
           const childSpans = spansFrom(childEvents);
+          folds.push({ runId: child as RunId, spans: childSpans });
           spans = spliceSubgraph(spans, childSpans);
           queue.push(...childRunIdsOf(childSpans));
         }
+        // WHAT THE BOUND ACTUALLY DROPPED, and `queue.length` is not it: the loop shifts ids it
+        // has already visited and skips them, so a queue holding only duplicates means nothing
+        // was lost. Only an id still unvisited is a run this command did not read.
+        const unreadChildren = new Set(queue.filter((id) => !visited.has(id))).size;
         // A TREE IS WALKED, NOT INFERRED FROM ARRAY ORDER. Two defects lived in one line here,
         // `const depth = s.parentSpanId === undefined ? 0 : 1`, and the second was hidden by the
         // first.
@@ -5400,11 +5602,21 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // Anything a cycle kept out of the walk is still printed, because a renderer that silently
         // drops a span is worse than one that prints it flat.
         for (const sp of spans) if (!seen.has(sp.spanId)) emit(sp, 0);
+        // AFTER THE TREE AND BEFORE CONFORMANCE. The operator gets the picture whatever the
+        // collector does, and a run that does NOT conform is precisely the one worth having in
+        // a collector — so the export does not wait on the verdict, and neither verdict
+        // suppresses the other.
+        const exported = otlpTo === undefined ? true : await exportTraceOverOtlp(folds, otlpTo, otlpWith, fetchImpl, unreadChildren);
         // `own`, NOT `spans` — see the note above the splice. A child is a different graph, and
         // `--graph` names one.
         const conformance = conformsToGraph(reconstructGraph(own), graph.spec, graph.graphHash);
         process.stdout.write(`\nconformance: ${conformance.ok ? "ok" : JSON.stringify(conformance)}\n`);
-        return conformance.ok ? 0 : 1;
+        // TWO WAYS TO FAIL, ONE CODE, AND THE STDERR LINES SAY WHICH. `main`'s vocabulary has
+        // three members and 2 is taken by "there is no such command", so an export that did not
+        // complete is 1 for the same reason a run that did not conform is: the operator asked
+        // for both and one of them did not happen. `serveUntilInterrupt`'s docstring carries
+        // the enumeration and names this member.
+        return conformance.ok && exported ? 0 : 1;
       }
 
       // READ THE JOURNAL BACK. `trace` answers "what happened"; this answers "does the record
@@ -6019,6 +6231,115 @@ const COHORT_SCAN_LIMIT = 500;
  * can type — which is exactly the picture this command gave when it could not follow one at all.
  */
 const MAX_TRACED_SUBGRAPHS = 64;
+
+/**
+ * POST what `loom trace` just read to an OTLP/HTTP collector — the PUSH half of TODO §C.4.
+ *
+ * `telemetry/otlp.ts` has been able to do this for a wave and had no caller in the binary, so
+ * a deployment that wanted trace export had to embed the library. `GET /runs/:id/trace` was the
+ * pull half; this is the other one, and they share the encoder so a collector cannot be told
+ * two different stories about one span.
+ *
+ * **ONE REQUEST PER RUN, UNSPLICED, AND THAT IS THE WHOLE DESIGN DECISION.** The renderer above
+ * splices a subgraph's child into the parent's tree because a terminal has no collector to do
+ * the join. A collector does — `spansFrom` mints the parent's `SpanLink.traceId` as
+ * `digest(childRunId)`, byte-identical to the traceId the child's OWN fold mints — so the
+ * export hands over each run's own trace and lets the collector walk the link. Exporting the
+ * spliced array instead would be actively wrong rather than merely redundant: `spliceSubgraph`
+ * REWRITES the child's `traceId` to the parent's, so the same child spans would arrive under a
+ * different id than `GET /runs/<child>/trace?format=otlp` answers for them, and the two doors
+ * would disagree about the identity of one span.
+ *
+ * ONE EXPORTER PER RUN, TOO, and that is not an oversight: `resourceAttributes` is on the
+ * exporter's CONSTRUCTOR, so a single merged payload — which `OtlpTracePayload`'s docstring
+ * correctly says the `resourceSpans` array is for — could carry only one `loom.run_id`. A
+ * payload without it differs from what the pull route answers for that run, which is the drift
+ * this whole arrangement exists to avoid. The cost is up to 65 sequential POSTs with no
+ * atomicity, so EVERY RUN'S OUTCOME GETS ITS OWN LINE and a partial export is diagnosable
+ * rather than one number.
+ *
+ * WHAT IS ON THE LINE, AND WHY IT IS THE HOST AND NOT THE URL. `endpointSecrets` puts the full
+ * href, the ORIGIN, `origin+pathname`, the userinfo and the query in the exporter's mask list —
+ * driven, an unreachable `http://collector.internal:4318` yields
+ * `detail: "TypeError: fetch failed to [redacted]v1/traces (ENOTFOUND collector.internal)"`. So
+ * the scheme-qualified origin is masked and the BARE HOSTNAME is what survives, which is what
+ * that file means by "the HOSTNAME is deliberately left legible". Printing the origin here
+ * would print in plaintext the exact string the sibling line redacts, and the two lines
+ * together would reconstruct it by adjacency. The residual is real and is not denied: a vendor
+ * endpoint whose subdomain IS the key is exposed by the host as much as by the origin, and no
+ * split of a URL fixes that.
+ *
+ * `empty` IS NOT A FAILURE. `otlp.ts` returns it to distinguish "nothing to say" from "said
+ * it", and folding it into the exit code would erase the distinction the field exists to make.
+ * Everything else — a status, a transport error, a timeout, and a 200 whose `partialSuccess`
+ * rejected spans — is a failure, because an operator who asked for an export and did not get
+ * one did not get what they asked for.
+ */
+async function exportTraceOverOtlp(
+  folds: readonly { readonly runId: RunId; readonly spans: readonly Span[] }[],
+  endpoint: string,
+  headers: Record<string, string> | undefined,
+  fetchImpl: HttpOptions["fetch"] | undefined,
+  unread: number,
+): Promise<boolean> {
+  // Validated by `otlpEndpoint` before any journal was read, so the catch is unreachable from
+  // the CLI; it is here because a fallback that cannot fail is the one worth having.
+  const where = ((): string => {
+    try {
+      const h = new URL(endpoint).host;
+      return h === "" ? "the configured collector" : h;
+    } catch {
+      return "the configured collector";
+    }
+  })();
+  let ok = true;
+  for (const fold of folds) {
+    const exporter = new OtlpHttpExporter({
+      endpoint,
+      ...(headers === undefined ? {} : { headers }),
+      ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }),
+      // IMPORTED, NEVER SPELLED. `registries.test.ts` makes any `loom.*` literal outside
+      // `telemetry/spans.ts` a failure, and it has already caught `server/http.ts` minting its
+      // own `"loom.run_id"`. `service.name` is not set here on purpose: the encoder defaults it
+      // to `loom`, and a second spelling of a default is a second thing that can drift.
+      resourceAttributes: { [OTLP_RUN_ID_ATTR]: fold.runId },
+    });
+    const result = await exporter.export(fold.spans);
+    if (result.ok) {
+      if (result.rejected === 0) {
+        process.stderr.write(`otlp: ${fold.runId} — ${String(result.spans)} span(s) sent to ${where}\n`);
+      } else {
+        ok = false;
+        process.stderr.write(
+          `otlp: ${fold.runId} — ${where} ACCEPTED THE REQUEST AND REJECTED ${String(result.rejected)} of ` +
+            `${String(result.spans)} span(s)${result.message === undefined ? "" : `: ${legible(result.message)}`}\n`,
+        );
+      }
+      continue;
+    }
+    if (result.reason === "empty") {
+      // Not a failure — see the header. Reported anyway, because "I sent nothing" and "I sent
+      // it" must not look the same to whoever is watching the pipeline. This arm returns BEFORE
+      // `ok` is touched; an earlier draft cleared the flag first and then tried to restore it,
+      // which made an empty fold fail the command.
+      process.stderr.write(`otlp: ${fold.runId} — nothing to export; its journal folded to no spans\n`);
+      continue;
+    }
+    ok = false;
+    process.stderr.write(`otlp: ${fold.runId} — FAILED (${result.reason}) against ${where}: ${legible(result.detail)}\n`);
+  }
+  if (unread > 0) {
+    // A SILENT CAP ON AN EXPORT IS WORSE THAN ONE ON A RENDER. The renderer can afford to stop
+    // at `MAX_TRACED_SUBGRAPHS` quietly: the links and the child run ids are still on the
+    // printed lines, so the reader can type the next command. A collector that is simply
+    // missing those runs looks exactly like a run that had no subgraphs.
+    process.stderr.write(
+      `otlp: ${String(unread)} child run(s) were not read and therefore not exported — \`loom trace\` follows at most ` +
+        `${String(MAX_TRACED_SUBGRAPHS)} of them per invocation. Their ids are on the tree above; each is its own \`loom trace\`.\n`,
+    );
+  }
+  return ok;
+}
 
 /** The whole journal of one run, in order. Every read side here starts with this. */
 async function journalOf(ws: Workspace, runId: RunId): Promise<JournalEvent[]> {

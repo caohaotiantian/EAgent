@@ -84,7 +84,7 @@ loom serve                            # console + API on :8787, from an empty di
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
 | **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (the exported NAME SET, enumerated in `scripts/surface.json`) and the kernel file list (`scripts/kernel.json`). One package, and it has no runtime dependencies to audit |
 | **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted). A rewind's undos run APPROVED, because `rewind` takes a human actor and refuses a plan hash that no longer matches what it would dispatch; a run's own failure does not, because no automated path may approve itself |
-| **Tracing out** | `loom trace <runId>` renders the span tree in a terminal, and `GET /runs/:id/trace` on a `loom serve` plane answers the same fold as JSON — or, with `?format=otlp`, as an OTLP/HTTP JSON `ExportTraceServiceRequest` a collector ingests directly. Hand-rolled, so the zero-dependency rule still holds. There is no push yet: nothing in the CLI posts to a collector, so a deployment that wants export wires `OtlpHttpExporter` as a library embedder |
+| **Tracing out** | Three doors, one encoder. `loom trace <runId>` renders the span tree in a terminal; `loom trace <runId> --otlp <endpoint>` POSTs it to a collector; and `GET /runs/:id/trace` on a `loom serve` plane answers the same fold as JSON — or, with `?format=otlp`, as an OTLP/HTTP JSON `ExportTraceServiceRequest` a collector ingests directly. Hand-rolled, so the zero-dependency rule still holds. **The push takes its endpoint from argv and its credentials from `OTEL_EXPORTER_OTLP_HEADERS`**, never the reverse: no environment variable can make `loom trace` send, because a shell that happens to export one is not an operator asking for egress, and a key passed as a flag is readable out of `ps`. A run whose trace follows subgraphs sends **one request per run**, each under its own `traceId`, so the collector performs the join `loom trace` performs in process — which is what `SpanLink.traceId` is for |
 
 ## What does not work yet
 
@@ -128,6 +128,7 @@ loom compile graphs/copy.json                    # `ok`
 loom run     graphs/copy.json --input '{"source":"input.txt"}'
 loom replay  <runId>                             # verifies; touches nothing
 loom trace   <runId>                             # spans + graph conformance
+loom trace   <runId> --otlp http://host:4318     # …and POST them to a collector
 loom serve                                       # console at http://127.0.0.1:8787
 ```
 

@@ -429,13 +429,21 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
       const http = SRC("server/http.ts");
       assert.match(http, /\\\/trace\$/, "the plane must route GET /runs/:id/trace");
       assert.match(http, /otlpTraceRequest/, "…and `?format=otlp` must answer from that same encoder");
-      // THE ROW ALSO CLAIMS A GAP — no push from the CLI — and a gap row must fail when the gap
-      // closes, or the README quietly understates. `loom trace` prints; it does not export.
-      assert.doesNotMatch(
-        SRC("cli.ts"),
-        /OtlpHttpExporter/,
-        "the CLI now exports to a collector — delete `There is no push yet` from the README row",
-      );
+      // THIS ASSERTION IS THE OPPOSITE OF THE ONE IT REPLACES, AND THAT IS THE POINT OF THE
+      // GATE. It used to read `assert.doesNotMatch(SRC("cli.ts"), /OtlpHttpExporter/, "the CLI
+      // now exports to a collector — delete `There is no push yet` from the README row")`,
+      // because the row claimed a GAP and a gap row must fail when the gap closes. The gap
+      // closed; the row now claims a push, so the probe holds the push. A row that changed
+      // direction with nothing changing direction beneath it would be the exact rot this file
+      // exists to catch.
+      //
+      // ANCHORED ON THE CONSTRUCTION, not on the bare name: a comment mentioning the class
+      // would satisfy `/OtlpHttpExporter/`, and the claim is that the CLI BUILDS one.
+      assert.match(SRC("cli.ts"), /new OtlpHttpExporter\(/, "the README says `loom trace --otlp` posts to a collector; the CLI must construct the exporter");
+      // …and the flag the row names must actually be one the binary understands. `--otlp` in
+      // KNOWN_FLAGS is what makes the sentence reachable rather than aspirational; the whole
+      // set is gated against USAGE and the code's readers by `cli/known-flags.test.ts`.
+      assert.match(SRC("cli.ts"), /"otlp",/, "the README names `--otlp`, so KNOWN_FLAGS must carry it");
     },
   },
   {

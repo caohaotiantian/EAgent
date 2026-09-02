@@ -7,6 +7,13 @@
  * in-process splice. That is a telemetry system that cannot be observed, which is the same
  * kind of not-a-product this repo keeps catching itself building.
  *
+ * BOTH HALVES OF THAT NOW HAVE A CALLER IN THE BINARY, and the second one took a wave longer
+ * than the first. `GET /runs/:id/trace?format=otlp` was the pull; `loom trace --otlp <endpoint>`
+ * is the push, and until it landed this file's exporter had no caller at all outside a library
+ * embedder's own wiring. `SpanLink.traceId`'s second consumer arrived with it: the CLI exports
+ * ONE REQUEST PER RUN rather than the spliced tree it renders, so a parent's link crosses to
+ * the child's own trace and the COLLECTOR performs the join.
+ *
  * WHAT THIS TARGETS, NAMED SO A READER CAN CHECK IT AGAINST THE SPEC RATHER THAN AGAINST MY
  * MEMORY: **OTLP/HTTP with the JSON encoding**, `ExportTraceServiceRequest` from
  * `opentelemetry/proto/collector/trace/v1/trace_service.proto` — the stable `v1` shape
@@ -323,10 +330,16 @@ function link(l: SpanLink, fallbackTraceId: string): OtlpJson | undefined {
  * the caller to remember. Everything else the caller supplies rides along untouched —
  * `deployment.environment`, `service.version`, a k8s pod name.
  *
- * THESE ARE NOT REDACTED AND DO NOT NEED TO BE, which is worth stating because it is the one
- * place in this file where an attribute does not come through `spansFrom`. They are the
- * DEPLOYMENT's own description of itself, written in a config file by the same person
- * configuring the collector; nothing here is derived from a run, a journal or a person.
+ * THESE ARE NOT REDACTED, which is worth stating because it is the one place in this file
+ * where an attribute does not come through `spansFrom`. Mostly they are the DEPLOYMENT's own
+ * description of itself, written in a config file by the same person configuring the
+ * collector. **THE EXCEPTION IS NAMED RATHER THAN GLOSSED, because this docstring used to say
+ * "nothing here is derived from a run" and both of the callers in this tree pass something
+ * that is:** `server/http.ts` and `cli.ts` each put `OTLP_RUN_ID_ATTR` in this bag. It needs
+ * no redaction because a run id is a ULID — it identifies a run and not a person, and it is
+ * already on every span as `loom.run_id` — and the same holds for `OTLP_TRUNCATED_ATTR`, a
+ * boolean about the fold. What must NOT arrive here is anything read out of a journal
+ * payload: that road goes through `spansFrom`'s redactor or it does not go.
  */
 function resource(attrs: Readonly<Record<string, unknown>> | undefined): OtlpJson {
   const bag: Record<string, unknown> = { "service.name": "loom", ...(attrs ?? {}) };
@@ -439,13 +452,29 @@ export interface OtlpExporterOptions {
    * base and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is the full path — reach the same place.
    */
   readonly endpoint: string;
-  /** Sent on every POST. This is where a vendor's API key goes. */
+  /**
+   * Sent on every POST. This is where a vendor's API key goes.
+   *
+   * AND BECAUSE IT IS, THE VALUES JOIN `endpointSecrets`' MASK LIST — see `export`. The
+   * endpoint used to be the whole of what this class refused to quote back, while the field
+   * documented right here as holding the API key was quoted verbatim by two reachable paths.
+   */
   readonly headers?: Readonly<Record<string, string>>;
   readonly timeoutMs?: number;
   /** Resource attributes for every payload this exporter sends. */
   readonly resourceAttributes?: Readonly<Record<string, unknown>>;
-  /** Injected for tests; defaults to the global. */
-  readonly fetch?: typeof globalThis.fetch;
+  /**
+   * Injected for tests; defaults to the global.
+   *
+   * DECLARED AS THE SHAPE THIS CLASS CALLS, not as `typeof globalThis.fetch`. The wider
+   * spelling is the one a reader reaches for and it excludes the injection seam this repo
+   * already has: `HttpOptions["fetch"]` — what `main(argv, fetchImpl)` threads through
+   * `cli.ts` — takes a `string` URL, and a function taking `string` is NOT assignable to one
+   * declared to take `RequestInfo | URL`. Narrowing to the one call below is strictly more
+   * permissive (everything assignable to the global's type is still assignable here) and it
+   * is the honest description: this class calls `fetch` with a string and a full init, once.
+   */
+  readonly fetch?: (input: string, init: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -540,7 +569,24 @@ export class OtlpHttpExporter {
    */
   async export(spans: readonly Span[], signal?: AbortSignal): Promise<OtlpExportResult> {
     let count = 0;
+    // THE HEADER VALUES ARE SECRETS TOO, and until this line they were not treated as any.
+    // `#secrets` was `endpointSecrets(base)` alone while `OtlpExporterOptions.headers` says in
+    // its own docstring that it is where the API key goes. Two paths quoted it back verbatim,
+    // both driven with a loopback collector: a gateway that echoes the auth header in its 4xx
+    // body reaches `detail` through the `!res.ok` branch, and a value Node refuses — a key read
+    // with `$(cat key)` keeps its newline — makes `Headers.append` throw a `TypeError` QUOTING
+    // THE WHOLE VALUE, which the catch below then masked against the endpoint only.
+    //
+    // COLLECTED HERE AND NOT IN THE CONSTRUCTOR, for the reason stated above this method:
+    // `opts.headers` is the deployment's bag, so reading it is a property read a getter can
+    // throw from, and nothing may run above the try. First statement inside it, so every later
+    // line — including the catch, through `secrets` — has the full list.
+    let secrets = this.#secrets;
     try {
+      const headers = this.#opts.headers;
+      if (headers !== undefined) {
+        secrets = [...secrets, ...Object.values(headers).filter((v) => typeof v === "string" && v !== "")];
+      }
       const attrs = this.#opts.resourceAttributes;
       const payload = otlpTraceRequest(spans, attrs === undefined ? {} : { resourceAttributes: attrs });
       const scopeSpans = (payload.resourceSpans[0] as { scopeSpans: readonly { spans: readonly unknown[] }[] }).scopeSpans;
@@ -568,7 +614,7 @@ export class OtlpHttpExporter {
           ok: false,
           spans: count,
           reason: "status",
-          detail: mask(`collector returned ${res.status}${body.trim() === "" ? "" : `: ${body.trim().slice(0, 512)}`}`, this.#secrets),
+          detail: mask(`collector returned ${res.status}${body.trim() === "" ? "" : `: ${body.trim().slice(0, 512)}`}`, secrets),
         };
       }
       // OTLP's partial success: a 200 whose body carries `partialSuccess.rejectedSpans > 0`
@@ -585,7 +631,11 @@ export class OtlpHttpExporter {
           const n = Number((ps as { rejectedSpans?: unknown }).rejectedSpans ?? 0);
           rejected = Number.isFinite(n) && n > 0 ? n : 0;
           const m: unknown = (ps as { errorMessage?: unknown }).errorMessage;
-          if (typeof m === "string" && m !== "") message = m.slice(0, 512);
+          // MASKED LIKE `detail`, and it was not. Both fields carry text the COLLECTOR chose,
+          // both end up in front of an operator, and a collector that echoes the request URL
+          // into `errorMessage` re-prints the credential-bearing endpoint that the sibling
+          // field one branch up redacts. One rule for third-party text, not two.
+          if (typeof m === "string" && m !== "") message = mask(m.slice(0, 512), secrets);
         }
       } catch {
         // Not JSON. The 200 stands.
@@ -597,7 +647,7 @@ export class OtlpHttpExporter {
         ok: false,
         spans: count,
         reason: timedOut ? "timeout" : "transport",
-        detail: mask(e instanceof Error ? `${e.name}: ${e.message}` : String(e), this.#secrets),
+        detail: mask(e instanceof Error ? `${e.name}: ${e.message}` : String(e), secrets),
       };
     }
   }

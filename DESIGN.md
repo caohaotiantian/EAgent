@@ -429,21 +429,38 @@ as a `fix` and cost nothing, and items 10 and 13 have since landed as `a8d62fb` 
 one trailer each, touching exactly the two files named above. The method produced a number that
 survived contact — three predictions, three hits.*
 
-### What follows item 14 — NOTHING YET, and that is a measurement rather than a gap in effort
+### What follows item 14 — STILL NOTHING, and one of the three leftovers is now gone
 
 **This section's rule is that an item names a command which FAILS TODAY; finding one is itself a
-measurement, and this pass did not find one.** Re-checked 2026-09-02 at `4a70a4e`: all six items
-above pass, and no candidate for a fifteenth was reproduced through the shipped binary. **An entry
+measurement, and no pass has found one.** Re-checked 2026-09-02 at `4a70a4e`: all six items above
+pass, and no candidate for a fifteenth was reproduced through the shipped binary. **An entry
 written without a run would be the thing this section exists to refuse**, so the honest state is
 an empty list and it is written as one.
 
-What is left over is not roadmap-shaped, and `TODO.md` is where each of the three lives with its
-own closing condition: C.4's residue (the OTLP exporter exists and is reachable at
-`GET /runs/:id/trace?format=otlp`, but nothing calls it from `cli.ts`), A.8's (one line carries
-both triggers' answers and only the `rewind` arm has a fixture), and G.1's (opening
-`EvaluatorNode.effects` is a schema change to two kernel files under a `feat`, so it is a seam a
-maintainer spends, not a lane). None of the three is a command that fails; each is a named
-condition that would close a row.
+**AND THE ONE THING THAT LOOKED LIKE A FIFTEENTH IS THE REASON THIS PARAGRAPH EXISTS.** C.4's
+residue was closed by a build — `loom trace <runId> --otlp <endpoint>` now posts to a collector —
+and the change was reached by driving `loom trace <id> --otlp <ep>` at `c8bdf22` and getting:
+
+    E_CONFIG_INVALID: unknown flag: --otlp. A flag this binary does not understand is IGNORED
+    unless it is refused here — and for --token, ignored means the control plane authenticates
+    nobody. Run `loom help` for the list.
+
+**That is a command that fails, and it is NOT an item, and the difference is the whole content of
+this section's rule.** An unknown-flag refusal is manufacturable for every unbuilt thing in the
+corpus — `--gzip`, `--sample`, any §E deferred row produces the identical transcript — so
+admitting it would turn "names a command that FAILS TODAY" into a counterexample generator and
+this section would stop discriminating between a gap and a wish. What the transcript actually
+shows is that the capability was operator-unreachable, which is a smaller and true claim. **The
+list therefore stayed empty while the work landed**, which is the correct behaviour of a rule and
+not a failure of one.
+
+What is left over is not roadmap-shaped, and `TODO.md` is where each of the **two** remaining
+lives with its own closing condition: A.8's (one line carries both triggers' answers and only the
+`rewind` arm has a fixture), and G.1's (opening `EvaluatorNode.effects` is a schema change to two
+kernel files under a `feat`, so it is a seam a maintainer spends, not a lane). Neither is a
+command that fails; each is a named condition that would close a row. C.4's was the third and is
+struck — and it cost the kernel nothing, exactly as its own row predicted: `cli.ts` is not one of
+the ten, so the census is still **10 files, 10 declared seams**.
 
 **14 · `loom replay` and `loom trace` refuse a run whose graph the workspace already holds — CLOSED
 by `0a8aa6d`.** The failure this item was written from, driven at `5ffc223` in a workspace built

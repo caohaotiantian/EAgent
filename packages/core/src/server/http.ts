@@ -3125,10 +3125,18 @@ export class ControlPlane {
          * IT DOES NOT SPLICE SUBGRAPHS, AND THAT IS THE DESIGN. A child run is its own trace
          * (`traceId` is `digest(runId)`), and `spansFrom` already mints a cross-trace
          * `SpanLink` for it — which under `format=otlp` is a real OTLP `Link{traceId, spanId}`
-         * a collector resolves by itself. `loom trace` splices because a terminal has no
-         * collector to do the join; a caller here follows the link with a second GET on
+         * a collector resolves by itself. A caller here follows the link with a second GET on
          * `/runs/<childRunId>/trace`, which also keeps each fetch's authorization scoped to
          * one run instead of silently widening it to every descendant.
+         *
+         * `loom trace` SPLICES WHAT IT RENDERS AND DOES NOT SPLICE WHAT IT EXPORTS, and the
+         * split is this route's rule applied twice rather than an inconsistency. A terminal
+         * has no collector to do the join, so the picture is spliced; `--otlp` does have one,
+         * so it sends one request per run and lets the collector walk the link. It could not
+         * do otherwise even if it wanted to: `spliceSubgraph` REWRITES the child's `traceId`
+         * onto the parent's, so a spliced export would put the same child spans on the wire
+         * under a different id than this route answers for them — two doors disagreeing about
+         * the identity of one span, which is what sharing one encoder exists to prevent.
          *
          * REDACTION IS THE FOLD'S, NOT THIS FILE'S, and the difference from the five
          * projection routes is worth stating because it looks like an omission. Those routes
