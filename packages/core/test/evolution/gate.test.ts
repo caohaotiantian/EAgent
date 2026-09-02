@@ -292,6 +292,12 @@ function report(over: Partial<EvalReport> = {}): EvalReport {
     p95WallMs: 100,
     suiteValid: true,
     suiteIssues: [],
+    // `{}` rather than a fixture: these are synthetic reports about no graph at all, so the
+    // honest projection of "the graph declares nothing" is an empty scope map. Both sides of
+    // `baseInput` get it, so `11-budget-exercised` finds nothing moved — which is the right
+    // answer for two reports that share a (non-existent) graph, and keeps every criterion in
+    // this file about the criterion it names.
+    budgets: {},
     ...over,
   };
 }
@@ -355,7 +361,7 @@ test("a malformed suite certifies nothing, so it blocks promotion too", () => {
 
 test("every criterion reports a readable detail, pass or fail", () => {
   const v = gateCandidate({ ...baseInput, candidate: report() });
-  assert.equal(v.checks.length, 12);
+  assert.equal(v.checks.length, 13);
   for (const c of v.checks) assert.ok(c.detail.length > 0, c.id);
 });
 
@@ -467,7 +473,8 @@ test("a HUMAN-WRITTEN suite has a different lineage by construction, not a missi
 test("a candidate that passed NOTHING is refused, however badly the baseline did", () => {
   const nothing = (o: Partial<EvalReport> = {}): EvalReport =>
     ({ suite: "s", suiteVersion: 1, suiteFrozenAt: 1_000, cases: [], passed: 0, total: 3, passRate: 0,
-       mustPassFailures: [], totalCostUsd: 0.001, p95WallMs: 10, suiteValid: true, suiteIssues: [], ...o }) as EvalReport;
+       mustPassFailures: [], totalCostUsd: 0.001, p95WallMs: 10, suiteValid: true, suiteIssues: [],
+       budgets: {}, ...o }) as EvalReport;
 
   const tie = gateCandidate({ ...baseInput, baseline: nothing(), candidate: nothing() });
   assert.equal(tie.promote, false, "0 of 3 is not a promotion, even against a baseline that also managed 0");

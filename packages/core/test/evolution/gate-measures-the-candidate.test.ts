@@ -48,14 +48,18 @@
  *    construction there; `unservedEffects` is where the evidence was, already folded into
  *    `report.match`, and `runCase` was not reading it.
  *
- * WHAT THIS FILE STILL CANNOT HOLD DOWN, said here because the header's table is the thing
- * people read: the third row of the original defect — a candidate that lowers a node's
- * `policy.budget` — is NOT closed, and the refusal was tried and measured rather than argued.
- * See `unexercised` in `evolution/gate.ts` for the numbers; the short version is that
- * `skeleton.ts`'s own `summarize` declares `budget.costUsd: 0.15`, both graphs the loop is
- * driven on declare one, and the compiler tells authors to add them — so refusing every
- * different-graph candidate that carries a budget also refuses control 3, which is the only
- * candidate class this gate can judge.
+ * WHAT THIS FILE CANNOT HOLD DOWN AND WHERE THAT NOW LIVES, said here because the header's table
+ * is the thing people read: the third row of the original defect — a candidate that lowers a
+ * node's `policy.budget` — is not refusable by anything in THIS file, and the blanket answer was
+ * tried and measured rather than argued. `skeleton.ts`'s own `summarize` declares
+ * `budget.costUsd: 0.15`, both graphs the loop is driven on declare one, and the compiler tells
+ * authors to add them, so refusing every different-graph candidate that CARRIES a budget also
+ * refuses control 3 above — the only candidate class this gate can judge.
+ *
+ * It is closed one door up instead, on the diff of two graphs rather than on one replay:
+ * `EvalReport.budgets` carries each graph's ceilings and `gateCandidate`'s `11-budget-exercised`
+ * refuses a candidate that MOVED one at a scope the baseline also has. Declaring is not moving,
+ * so control 3 still promotes. See `test/evolution/budget-change-is-unexercised.test.ts`.
  *
  * Offline and deterministic: the mock adapter, in-memory journals, an injected clock.
  */

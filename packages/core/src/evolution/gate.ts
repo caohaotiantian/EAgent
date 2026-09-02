@@ -24,7 +24,7 @@ import { sameContent } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
 import type { RunId } from "../ids.ts";
 import type { StateStore } from "../journal/store.ts";
-import type { RunGraph } from "../graph/spec.ts";
+import type { Budget, RunGraph } from "../graph/spec.ts";
 import type { EngineOptions } from "../run/engine.ts";
 import { replayRun, type ReplayReport } from "../run/replay.ts";
 
@@ -118,6 +118,31 @@ export interface EvalReport {
   /** Whether the suite itself is well-formed. A weak suite certifies nothing. */
   readonly suiteValid: boolean;
   readonly suiteIssues: readonly string[];
+  /**
+   * Every spending ceiling the graph this report was produced against declares.
+   *
+   * WHY A PROJECTION OF THE GRAPH RIDES ON A REPORT OF THE RUNS. `gateCandidate` is a pure
+   * function of two `EvalReport`s and stays one — no store, no clock, no graph. The question
+   * `11-budget-exercised` has to answer is "did this candidate MOVE a ceiling", which is a
+   * question about two SPECS, and TODO A.23 read that as blocked because "the recording's spec
+   * is not in the journal". It is not blocked at THIS door: `loom promote --suite` compiles a
+   * `--baseline` and a candidate and hands each to `runEvalSuite`, so both specs are in hand
+   * already. Each report carries the ceilings of the graph it ran against and the diff happens
+   * where the two reports meet — nothing at the call site changed to get it.
+   *
+   * Keys are `"graph"` for `spec.policy.budget` and `"node:<id>"` for each of `spec.nodes`.
+   * The inner keys are the `Budget` dimensions the author actually stated — `costUsd`,
+   * `tokens`, `wallMs` — and are absent when they stated none. A scope with no budget at all
+   * is still PRESENT, with an empty map, which is what lets a node that exists in both graphs
+   * be told from one the candidate added.
+   *
+   * NOT COVERED, named rather than implied: the child specs frozen into `RunGraph.subgraphs`.
+   * A ceiling moved inside a delegated graph, or a `subgraph.ref` re-pointed at a child with
+   * different ceilings, is invisible to this map. That is a real hole, left open because
+   * nothing in this tree drove one — `graph/mutate.ts` only ever ADDS nodes, so the loop's own
+   * operator cannot reach it, and a hand-authored candidate that edits a child graph can.
+   */
+  readonly budgets: Readonly<Record<string, Readonly<Record<string, number>>>>;
 }
 
 export interface EvalOptions {
@@ -165,7 +190,59 @@ export async function runEvalSuite(opts: EvalOptions): Promise<EvalReport> {
     p95WallMs: wall.length === 0 ? 0 : wall[Math.min(wall.length - 1, Math.floor(wall.length * 0.95))]!,
     suiteValid,
     suiteIssues,
+    budgets: budgetsOf(opts.graph),
   };
+}
+
+/**
+ * The three dimensions a `Budget` can state, as the closed set the diff walks.
+ *
+ * Named rather than derived from `Object.keys` of the two objects, so a dimension added to
+ * `Budget` and forgotten here is a typecheck failure at `budgetsOf` rather than a ceiling
+ * that silently stops being compared.
+ */
+const BUDGET_DIMENSIONS = ["costUsd", "tokens", "wallMs"] as const;
+
+/** `EvalReport.budgets` for one graph — see that field for the key shape and what it omits. */
+function budgetsOf(graph: RunGraph): Record<string, Record<string, number>> {
+  const stated = (b: Budget | undefined): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const d of BUDGET_DIMENSIONS) {
+      const v = b?.[d];
+      if (v !== undefined) out[d] = v;
+    }
+    return out;
+  };
+  const out: Record<string, Record<string, number>> = { graph: stated(graph.spec.policy?.budget) };
+  for (const node of graph.spec.nodes) out[`node:${String(node.id)}`] = stated(node.policy?.budget);
+  return out;
+}
+
+/**
+ * Every ceiling the candidate moved at a scope the BASELINE also has, in English.
+ *
+ * Iterating the baseline's scopes is the whole of the "does not become a constant gate"
+ * argument. A scope present only in the candidate is a node the candidate ADDED, and
+ * `compileMutation` — the loop's only mutation operator — produces exactly that:
+ * `{...spec, nodes: [...nodes, ...added]}`. Added nodes carry their own budgets, and
+ * `GRAPH009_UNBOUNDED_NODE` tells their author to give them one. Comparing only shared scopes
+ * means every graph the loop can propose still promotes.
+ */
+function movedCeilings(baseline: EvalReport, candidate: EvalReport): string[] {
+  const out: string[] = [];
+  for (const [scope, before] of Object.entries(baseline.budgets)) {
+    const after = candidate.budgets[scope];
+    if (after === undefined) continue;
+    for (const d of BUDGET_DIMENSIONS) {
+      const b = before[d];
+      const a = after[d];
+      if (b === a) continue;
+      if (b === undefined) out.push(`${scope}.${d} was unbounded and this candidate caps it at ${String(a)}`);
+      else if (a === undefined) out.push(`${scope}.${d} was capped at ${String(b)} and this candidate removes the cap`);
+      else out.push(`${scope}.${d} ${String(b)} → ${String(a)}`);
+    }
+  }
+  return out;
 }
 
 async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
@@ -328,13 +405,19 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
  * body still promotes", the only candidate class the gate can judge without spending a model
  * call. A guard that cannot be satisfied is not strict, it is absent.
  *
- * The narrower refusal is still not available: the recording's SPEC is not in the journal
- * (`run.compiled` carries node counts — TODO A.24), so nothing here can tell "the candidate
- * lowered the ceiling" from "the candidate kept it and changed a body". `loom promote
- * --against-cohort` sees it because it RUNS the candidate. A.1's seam — replay serving the
- * adapter's answers — has landed, which is what turned the paragraph above from a blind spot into
- * a refusal; whether that is enough to close TODO A.23's budget half has not been measured here,
- * and this file claims only the two rows it drove.
+ * THE NARROWER REFUSAL IS NOW AVAILABLE, AND IT IS NOT IN THIS FUNCTION. The blocker this
+ * paragraph used to state — the recording's SPEC is not in the journal (`run.compiled` carries
+ * node counts, TODO A.24) — is true, and it does not bind at the door that matters. `runCase`
+ * holds one graph and can never tell "the candidate lowered the ceiling" from "it kept it and
+ * changed a body"; `gateCandidate` holds TWO REPORTS, and `loom promote --suite` produced them
+ * from a `--baseline` graph and a candidate graph it compiled itself. `EvalReport.budgets`
+ * carries each graph's ceilings and `11-budget-exercised` diffs them there. Nothing needed the
+ * journal, and nothing at the call site changed.
+ *
+ * So the residual above is closed for the case it names — a ceiling lowered to somewhere ABOVE
+ * the recording's quote is refused by `11-budget-exercised`, not here — and this function keeps
+ * exactly the three per-case reasons it drove. What remains open is stated at that check: the
+ * child specs in `RunGraph.subgraphs` are not diffed.
  */
 function unexercised(report: ReplayReport): string[] {
   const out: string[] = [];
@@ -497,15 +580,20 @@ export interface PromotionVerdict {
 }
 
 /**
- * ELEVEN checks, all of which must hold. Count the entries of the `checks` array this
+ * THIRTEEN checks, all of which must hold. Count the entries of the `checks` array this
  * function returns, not this sentence: it said "eight" for three waves while the body
- * pushed eleven, until `99-DOD.md` row 8 had to name the discrepancy as a defect. No grep
- * is offered here on purpose — every pattern that finds the pushes also finds itself.
+ * pushed eleven, until `99-DOD.md` row 8 had to name the discrepancy as a defect — and then
+ * it said "eleven" while the body pushed TWELVE, which is how it stood until `11-budget-
+ * exercised` landed. `test/cli/promote.test.ts` is the only thing that has ever caught this:
+ * it asserts the reported length. No grep is offered here on purpose — every pattern that
+ * finds the pushes also finds itself.
  *
  * They are D10.d's eight (`1-must-pass` … `8-determinism`), plus `0-suite`, which gates
- * the exam rather than the student, plus the two suite-provenance rules that replaced
- * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`). The ids
- * carry the numbering; the push order does not.
+ * the exam rather than the student, plus `2a-candidate-earned-it`, the absolute floor under
+ * `2-non-inferior`'s ratio, plus the two suite-provenance rules that replaced
+ * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`), plus
+ * `11-budget-exercised`, which refuses a ceiling this corpus never reached. The ids carry
+ * the numbering; the push order does not.
  *
  * THREE OF THE EIGHT ARE WEAKER THAN D10.d ONCE READ AS ENGLISH, and the table in
  * 06-EVOLUTION.md now says so rather than this file quietly disagreeing with it.
@@ -671,6 +759,73 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
         : separateLineage
           ? "suite and candidate come from different lineages"
           : `both generated by "${String(input.proposedBy)}" — a shared lineage converges the exam on what the candidate already does`,
+  });
+
+  // ── the ceiling the replayed corpus cannot vouch for ───────────────────────
+  //
+  // THE DEFECT, DRIVEN ON THE WALKING SKELETON BEFORE THIS CHECK EXISTED. `summarize` declares
+  // `policy.budget.costUsd: 0.15`; a candidate that lowers it to 0.01 — a 15× tightening — is a
+  // different graph, and it replayed CLEAN: `passRate 1`, `mustPassFailures []`, `reasons []`,
+  // every one of the twelve checks green, PROMOTE. The corpus spends $0.001125, so the new
+  // ceiling was never within reach of anything the replay did. Nothing measured the one thing
+  // that changed, and `gateCandidate` said "at least as good" about it anyway.
+  //
+  // THE SET REFUSED, and it is not "declares a budget" — that answer was tried and measured in
+  // TODO A.23, and refusing every well-formed graph is a gate switched off, not a gate.
+  // Refused here: a candidate that MOVES a stated ceiling at a scope the baseline also has —
+  // the graph's own `policy.budget`, or a node present in BOTH graphs. All four directions
+  // count, and the two nobody had noticed are the loosening ones: raising a ceiling, and
+  // deleting one outright. `3-cost` cannot see either, because it divides REPLAYED totals and
+  // a replay is served from the recording, so a candidate that multiplies every ceiling by 100
+  // reports the baseline's own cost to the penny.
+  //
+  // THE SET STILL LET THROUGH, named because that is what makes this a check rather than an
+  // off switch — every one of these is a real candidate class and every one still promotes:
+  //   · a candidate whose budgets equal the baseline's, however many it declares. That is
+  //     `test/run/skeleton.ts`'s `summarize`, both graphs the loop is driven on
+  //     (`examples/graphs/review-bench.json`, `examples/graphs/self-review.json`), and every
+  //     graph that took `GRAPH009_UNBOUNDED_NODE`'s advice. Declaring is not moving.
+  //   · a candidate that ADDS a node carrying its own budget — a scope the baseline does not
+  //     have. This is exactly the shape `graph/mutate.ts` produces, so the loop's own operator
+  //     is untouched.
+  //   · the named CONTROL, a changed deterministic `function` body — the one candidate class
+  //     this gate can judge without spending a model call.
+  //   · a prompt, profile, skill, posture, edge or retry change, none of which is a ceiling.
+  //
+  // WHY THE CHECK ASKS ABOUT THE DIFF AND NOT ABOUT EVIDENCE OF THE CEILING BINDING, which is
+  // the shape a reader will expect after `unexercised`'s three reasons. Because the
+  // exercised-and-still-passing set is EMPTY, and that is a fact about this engine rather than
+  // a simplification: `run/engine.ts` refuses a crossed ceiling with `E_BUDGET_EXHAUSTED`, and
+  // `gate` and `degrade` are compile errors (`GRAPH003_BUDGET_ACTION_UNSUPPORTED`), so the only
+  // action is `fail`. A run that fails at a ceiling never asks for the recorded effects past
+  // it, so `unexercised`'s `unservedEffects` reason already refuses that case. Driven on the
+  // same fixture: `costUsd 0.15 → 0.0005` gives `passRate 0`, `status failed`, and 22 unserved
+  // effects. So a moved ceiling is either crossed — already refused, one reason up — or
+  // unexercised, and there is no third outcome for a case to have earned. Writing an evidence
+  // branch would have been writing a branch nothing can reach.
+  //
+  // THE HOLE IS IN `EvalReport.budgets`, NOT HERE: subgraph child specs are not compared. See
+  // that field.
+  //
+  // AND A REPORT THAT DOES NOT STATE ITS CEILINGS IS REFUSED, not crashed through. `budgets` is
+  // required by the type, so this arm is only reachable from JavaScript or from a hand-built
+  // report — and it was reachable: the first version read `Object.entries(baseline.budgets)`
+  // straight and a test fixture that predated the field turned the whole verdict into a
+  // `TypeError: Cannot convert undefined or null to object`. A guard that throws has not failed
+  // closed, it has failed.
+  const stated = input.baseline.budgets !== undefined && input.candidate.budgets !== undefined;
+  const moved = stated ? movedCeilings(input.baseline, input.candidate) : [];
+  checks.push({
+    id: "11-budget-exercised",
+    pass: stated && moved.length === 0,
+    detail: !stated
+      ? "a report did not say what ceilings its graph declares, so no ceiling could be compared — a guard that cannot decide fails closed"
+      : moved.length === 0
+        ? `no spending ceiling moved (${String(Object.keys(input.baseline.budgets).length)} scope(s) compared)`
+        : `${String(moved.length)} spending ceiling(s) moved and this corpus exercised none of them — ${moved.join("; ")}. ` +
+          `A replayed suite makes no provider calls, so it spends the RECORDING's money: a ceiling it never crosses is ` +
+          `one no recording can vouch for, and a ceiling it does cross fails the case instead. Re-record the corpus ` +
+          `against this candidate, or judge it live with loom promote --against-cohort <runId>`,
   });
 
   return { promote: checks.every((x) => x.pass), checks };

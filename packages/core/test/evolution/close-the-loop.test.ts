@@ -274,7 +274,7 @@ test("A CANDIDATE IS PROMOTED OVER THAT COHORT, BECAUSE IT MEASURABLY BEAT THE B
     deterministic: sameOutcome(candidate, await runEvalSuite({ store: b.store, suite, graph: candidateGraph, engine: b.engineOpts })),
   });
   assert.equal(verdict.promote, true, JSON.stringify(verdict.checks.filter((x) => !x.pass)));
-  assert.equal(verdict.checks.length, 12);
+  assert.equal(verdict.checks.length, 13);
   assert.equal(verdict.checks.every((x) => x.pass), true);
 });
 
