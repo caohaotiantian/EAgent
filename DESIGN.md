@@ -100,7 +100,8 @@ enumeration's own discipline about growing** — which is why both files are now
 `CLAUDE.md` and `TODO.md` §F.1 state the split rather than a single address. **The other stale
 half of this paragraph is now FIXED and is recorded as such rather than left standing:** it said
 member #3 (accumulated spend) had regressed one layer down because the projection the restore arm
-reads did not fold `model.called`. It does — `run/projection.ts:1019` — and the fix is in
+reads did not fold `model.called`. It does — the `isEvent(e, "model.called")` arm of
+`run/projection.ts`'s fold — and the fix is in
 `TODO.md` §Z's list of defects whose measurement is no longer needed to read the residue.
 
 ### D3 · The clock is bound to the journal, not recorded
@@ -192,7 +193,8 @@ effect*, so editing it silently corrupts a resumed run.
 **AS SHIPPED, THE MECHANISM IS NOT THE ONE THIS SECTION ORIGINALLY NAMED, and the difference is
 load-bearing rather than pedantic.** This paragraph used to end "prompt text and tool-description
 text go into the artifact hash"; they do not, and were never going to. `graphHash` is
-`digest(spec)` (`compile.ts:351`) and a ref'd prompt's text is not in the spec. The binding is
+`digest(spec)` — `compile.ts` sets `graphHash: digest(spec)` where it builds the `RunGraph` — and
+a ref'd prompt's text is not in the spec. The binding is
 `RunGraph.resolutionManifest`, which pins every ref to a CONTENT digest and is journaled on
 `run.compiled`; three doors check it (`Engine.#assertBound` on gate decisions and on `advance`,
 and `replayRun`'s `refsBound`), and `RunGraph.documents` freezes the bytes by value. Driven by
@@ -278,15 +280,14 @@ thinking. `TODO.md` carries what is known to be open; the next Sequence gets wri
 something in there has been reproduced through the binary rather than argued for.
 
 **THE RULE HELD FOR ITEMS 9–14, and it is the only thing that makes a list like this worth reading.**
-Every one names a command that FAILS at this commit, each was RUN and its failure pasted in, and
-an item whose command passes gets cut rather than reworded. **Applied to the list itself:
-IT IS TWO ITEMS — 9 and 14.** Items 10, 11, 12 and 13's first half have all landed and are marked
-DONE. Item 9 is still red and what is left of it is a DECISION rather than a build (`TODO.md`
-§A.8). Item 14 was added in the same commit that closed the others and its command fails today, so
-by this section's own rule it is a live item like any other.
-**An earlier version of this paragraph said ONE, and said it in the commit that added the second** —
-the count and the thing counted moved together, which is why the sentence now names the members
-instead of totalling them. The status table at the head of the
+Every one named a command that FAILED when it was written, each was RUN and its failure pasted in,
+and an item whose command passes gets cut rather than reworded. **Applied to the list itself, on
+2026-09-02: IT IS ZERO ITEMS.** All six commands pass — re-run one at a time, verdicts in the
+table below — so by this section's own rule none of them is an item any more.
+**An earlier version of this paragraph said ONE, and said it in the commit that added the second;
+the next said TWO, and item 14 closed the day after** — the count and the thing counted keep
+moving together, which is why the sentence names its members and their commands instead of
+carrying a total forward. The status table at the head of the
 live list carries the commands and their verdicts. Four candidates were cut that way
 while this list was being written: `loom suite freeze --cohort` (already shipped — see item 5),
 the trajectory fold's blindness to externalised writes (fixed at `7d627b4`), the D.7.6 provider
@@ -329,17 +330,19 @@ replay divergence is terminal **for the recorded-effect path** only, which was i
 
 ---
 
-## The live list — written 2026-08-29 as items 9 to 13; item 14 added 2026-09-01
+## The live list — written 2026-08-29 as items 9 to 13; item 14 added 2026-09-01; EMPTY since 2026-09-02
 
-**STATUS AT `5ffc223`, arrived at by RUNNING all five commands rather than by reading the diffs
+**STATUS AT `4a70a4e`, arrived at by RUNNING all six commands rather than by reading the diffs
 that landed between.** The rule this list is written under — *every item names a command that
-fails today; an item that cannot fail is a wish and gets cut* — was applied to itself. All five
-verdicts below are unchanged from the previous re-run; **only item 9's REASON moved, and it has
-now moved three times without the item closing**, which is the fact §9 is about.
+fails today; an item that cannot fail is a wish and gets cut* — was applied to itself, and by that
+rule **there is no live list any more: all six items pass, so none of them can fail and none of
+them is an item.** Re-run 2026-09-02, every verdict below reproduces unchanged. Item 9 was the last
+one open; its REASON had moved three times without the item closing, and what finally closed it
+was a maintainer's DECISION rather than a build (`552d999`, and `TODO.md` §A.8 owns the residue).
 
 | item | command re-run | verdict |
 |---|---|---|
-| 14 · replay and trace demand a graph the workspace holds | `node --test packages/core/test/cli/cli.test.ts` | **PASSES — 38/38. Item 14 is DONE** |
+| 14 · replay and trace demand a graph the workspace holds | `node --test packages/core/test/cli/cli.test.ts` | **PASSES — 38/38. Item 14 is DONE**, and re-driven through the binary in this section's own workspace: `loom replay <id>` with no `--graph` prints the resolved file on stderr and answers `{"match": true, "hermetic": true}` |
 | 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **PASSES — 3/3. Item 9 is DONE**, by a DECISION rather than a build: `nodeApproved: trigger === "rewind"` |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **PASSES — 13/13. Item 10 is DONE** — the pin was renamed `THE HOLE THIS CLOSES` and asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **PASSES — 13/13. Item 11 is DONE** |
@@ -351,9 +354,10 @@ The row `10 · still fails` was written in `8e98d6c`; `a8d62fb` headed §10 **DO
 commits ago and the row did not move, so for nine commits this document said both. `TODO.md` then
 copied the table's half and said items 9, 10, 12 and 13 all fail — a third copy, wrong for three
 of the four. **A summary table that names a command but is not re-run is a second copy of a fact,
-and the second copy is the one that rots.** Every row above was re-run 2026-09-01; where a count
-moved because the suite grew since, the row says so rather than leaving a reader to discover it by
-disagreeing.
+and the second copy is the one that rots.** Every row above was re-run 2026-09-02 and all six
+counts — 38, 3, 13, 13, 18, 6 — came back identical to the previous re-run's, so this pass changed
+no verdict in the table. The corrections it did produce are in the two paragraphs below, about the
+seam census rather than about any item.
 
 **The method behind those verdicts is worth stating, and it is now items 9 and 10 that show it.**
 When this table was first written, items 10 and 13 "failed" by way of a test that PASSED: each had
@@ -376,13 +380,19 @@ which moves with every commit — the SEAM count is the number that must not mov
 Item 11 predicted it would cost nothing because it is a `fix` of a guard that already exists, and
 it cost nothing. The price of what remained was two trailers, for items 10 and 13.
 
-**BOTH WERE SPENT, AS PREDICTED, AND THE CENSUS IS 10.** Re-measured 2026-09-01 at `e8d59c4`:
+**BOTH WERE SPENT, AS PREDICTED, AND THE CENSUS IS 10.** Re-measured 2026-09-02 at `4a70a4e`:
 `kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
-out because it moves with every commit including this one, and `git log
---grep='^Kernel-seam:' --oneline | wc -l` agrees on the ten. `a8d62fb` is item 10's (`quote` needed
+out because it moves with every commit including this one. `a8d62fb` is item 10's (`quote` needed
 `journal/events.ts` and `run/replay.ts`); `3762a0e` is item 13's (`RunFilter.after` needed
 `journal/store.ts`). The estimate was right about the count AND about which two items would pay
 it, which is the only reason this paragraph is kept rather than replaced.
+**What this paragraph used to add — that `git log --grep='^Kernel-seam:' --oneline | wc -l`
+"agrees on the ten" — is now FALSE and is deleted rather than adjusted.** That grep returns 11:
+the eleventh is `2a9eda8`, a `docs:` commit spending no seam, whose body wraps the words *"it
+costs a Kernel-seam: trailer"* onto a line start. A grep for a trailer matches prose ABOUT the
+trailer. `TODO.md`'s State section carries the full measurement, including why git's own
+`%(trailers:key=Kernel-seam)` parser is not the fallback either (it sees 6 of the 10).
+**`node scripts/check-kernel.mjs` is the census and there is no second opinion.**
 
 **THE ORDERING ARGUMENT, because "what the three properties need" has to be an argument and not a
 preference.** Items 9, 10 and 11 are one defect class wearing three costumes, and it is the class
@@ -397,8 +407,9 @@ loud-and-missing**, and that is the whole ordering.
 
 **WHAT IT COSTS THE KERNEL, stated up front rather than discovered in review.** The seam census
 was **8** when this was written and is **10** now, which is exactly what the rest of this
-paragraph predicted it would become. Measured 2026-09-01 at `e8d59c4`:
-`git log --grep='^Kernel-seam:' --oneline | wc -l` says 10, and `node scripts/check-kernel.mjs`
+paragraph predicted it would become — and it is still 10 after wave 11, because `552d999` was
+argued down to a `fix` rather than labelled past the guard (`TODO.md` §F.19). Measured 2026-09-02
+at `4a70a4e`: `node scripts/check-kernel.mjs`
 prints `kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` and then
 lists every one with its reason. `<N>` is written out rather than transcribed: it moves with every
 commit including the one carrying this sentence, so a copy of it is stale before the commit lands.
@@ -418,18 +429,25 @@ as a `fix` and cost nothing, and items 10 and 13 have since landed as `a8d62fb` 
 one trailer each, touching exactly the two files named above. The method produced a number that
 survived contact — three predictions, three hits.*
 
-### What follows item 9
+### What follows item 14 — NOTHING YET, and that is a measurement rather than a gap in effort
 
-**This is written under the same rule and it is deliberately SHORT: one candidate, driven, with
-its failure pasted.** A Sequence is not a wish-list, and the honest state at `5ffc223` is that
-three of the five items have fully landed (10, 11, 12), a fourth's first half has (13), the fifth
-is a decision somebody has to make rather than code somebody has to write (9), and exactly one
-further gap has been reproduced through the shipped binary rather than argued for. **A second
-entry written without a run would be the thing this section exists to refuse.**
+**This section's rule is that an item names a command which FAILS TODAY; finding one is itself a
+measurement, and this pass did not find one.** Re-checked 2026-09-02 at `4a70a4e`: all six items
+above pass, and no candidate for a fifteenth was reproduced through the shipped binary. **An entry
+written without a run would be the thing this section exists to refuse**, so the honest state is
+an empty list and it is written as one.
 
-**14 · `loom replay` and `loom trace` refuse a run whose graph the workspace already holds.**
-Driven at `5ffc223` in a workspace built from `README.md`'s own "Try it" block — `graphs/copy.json`
-published, the run submitted from it and `succeeded`:
+What is left over is not roadmap-shaped, and `TODO.md` is where each of the three lives with its
+own closing condition: C.4's residue (the OTLP exporter exists and is reachable at
+`GET /runs/:id/trace?format=otlp`, but nothing calls it from `cli.ts`), A.8's (one line carries
+both triggers' answers and only the `rewind` arm has a fixture), and G.1's (opening
+`EvaluatorNode.effects` is a schema change to two kernel files under a `feat`, so it is a seam a
+maintainer spends, not a lane). None of the three is a command that fails; each is a named
+condition that would close a row.
+
+**14 · `loom replay` and `loom trace` refuse a run whose graph the workspace already holds — CLOSED
+by `0a8aa6d`.** The failure this item was written from, driven at `5ffc223` in a workspace built
+from `README.md`'s own "Try it" block:
 
     $ loom replay 01M1EQVE8FB7K9D4DV051GHX5B
     E_CONFIG_INVALID: --graph needs a path, and none was given.
@@ -437,7 +455,25 @@ published, the run submitted from it and `succeeded`:
     $ loom trace 01M1EQVE8FB7K9D4DV051GHX5B
     E_CONFIG_INVALID: --graph needs a path, and none was given.
 
-*Fails today:* either of those two commands, in a workspace publishing the graph the run recorded.
+Re-driven 2026-09-02 in the same workspace, on a run submitted from `graphs/copy.json`:
+
+    $ loom replay 01M1FW5FWYDJN4EMTDJE1R7ZNG
+    replay: graph copy-file v1 (sha256:04e9ea2c…) — the hash run 01M1FW5FWYDJN4EMTDJE1R7ZNG
+      recorded, from graphs/copy.json
+    { "match": true, "hermetic": true }
+
+    $ loom trace 01M1FW5FWYDJN4EMTDJE1R7ZNG
+    trace: graph copy-file v1 (sha256:04e9ea2c…) — … from graphs/copy.json
+    loom.run [ok] 7ms
+      loom.task read root [ok] 5ms  …
+    conformance: ok
+
+**There are THREE answers, not two, which is what kept this from being a one-line fix.** A graph
+resolved is named on stderr; a workspace publishing graphs none of which is this run's is told so
+with the ones it does publish listed; a workspace publishing nothing compilable is told that
+instead. And `--graph` still wins when given — now CHECKED against the journal, so a file whose
+hash the run did not compile is `E_GRAPH_MISMATCH` rather than a `match: false` that is really
+about the graph.
 
 **THE SEAM ALREADY EXISTS, WHICH IS WHY THIS IS A GAP AND NOT A DESIGN QUESTION.** Two other verbs
 in the same workspace answer the same question without being told:
@@ -462,7 +498,17 @@ performs; `journal/events.ts` needs no field, because `run.compiled.graphHash` i
 SPEC in the journal rather than its hash — and this item is deliberately not that: it reuses the
 workspace as the store, which is what the other two verbs do.
 
-### 9 · A rewind is permitted BECAUSE a compensation exists, then does not run it
+### 9 · ~~A rewind is permitted BECAUSE a compensation exists, then does not run it~~ — **DONE 2026-09-02**
+
+**CLOSED BY A DECISION, NOT A BUILD.** `552d999` made `#compensateOne` pass
+`nodeApproved: trigger === "rewind"` — one existing argument, one new value — and the two pins
+below flipped together: `rewind-through-subgraph.test.ts`'s third case now asserts the child's
+rollback RUNS and the money comes back, and `rewind-plan.test.ts`'s companion moved with it. Both
+suites re-run 2026-09-02: 3/3 and green. **Everything below this paragraph is the record of how
+this item's cause was replaced three times before the answer turned out not to be a cause at
+all**, and it is kept because each replacement was found by mutating rather
+than by reading — which is the method, not the anecdote. The residue is `TODO.md` §A.8's, and the
+label argument (`fix`, not `feat`, over a kernel file) is §F.19's.
 
 The sharpest of the three, because the refusal that guards it works. `Engine.rewind` descends into
 child runs — `rewind-through-subgraph.test.ts` proves it, and refuses `E_RESTORE_ILLEGAL` when a
@@ -484,7 +530,9 @@ happens. Driven, one `subgraph` node whose child charges `pay.refundable` (irrev
       + []
       - [ 42 ]
 
-*Fails today:* that assertion — a rewind across a `subgraph` node runs the child's declared undo.
+*Failed then:* that assertion — a rewind across a `subgraph` node runs the child's declared undo.
+It passes now; the `Fails today` form is dropped rather than kept, because a closed item with a
+present-tense failure is the drift this table's own header warns about.
 
 **RE-RUN 2026-09-01 AND IT STILL FAILS, but the cause has moved and the item is now narrower than
 what it was written against.** The driver was rebuilt from `rewind-through-subgraph.test.ts`'s own
@@ -587,8 +635,10 @@ without the other. This item has now had its cause replaced THREE times — the 
 (fixed), the missing approval floor (built), the missing fixture (exists) — and each replacement
 was found by mutating rather than by reading the previous one. **What is left is not a mechanism.
 It is a decision, it is written down once, in `TODO.md` §A.8, and this section cites it rather
-than restating it.** It stays on the live list only because its assertion is still red, which is
-the rule; the moment §A.8 is answered either way, this item is a record and not a roadmap entry.
+than restating it.** That sentence used to end "it stays on the live list only because its
+assertion is still red; the moment §A.8 is answered either way, this item is a record and not a
+roadmap entry" — and that is exactly what happened on 2026-09-02, which is why the heading above
+now reads DONE.
 
 **And the preview closed a hole this section's own framing hid.** `rewind` computed a preview over
 the rewound run's OWN journal while dispatching the tree walk described above, so on the delegated
@@ -924,7 +974,8 @@ bodies and does not hold at the edges: `ctx.now()` does not reproduce (two repla
 run return different values, tracking the wall clock — the shadow run appends its own
 `task.leased` stamped by the live clock), `loom replay`
 builds its engine with no hooks so a hooked run replays a different program, and hook bodies get
-the real unseeded `Math.random()` while `hooks.ts:89` claims they get no randomness.
+the real unseeded `Math.random()` while `run/hooks.ts`'s `HookContext` docstring ("No clock and
+no randomness") claims they get none.
 
 *Fails today:* two replays of one run returning the same `ctx.now()`.
 
@@ -1150,8 +1201,8 @@ API. Neither is buildable today and the reason is measured, not aesthetic:
   want preserved, so the event would be written by every run and read by nothing — the shape
   `run.cancelled.forced` had, which was written once as the literal `false`, read by nothing and
   named by no document. **That field is now GONE rather than merely decided-for-deletion**, and
-  the correction matters because the example was doing the arguing: `run.cancelled`'s payload at
-  `journal/events.ts:165` is `{clean, unknownEffects}` and nothing in that file spells `forced`.
+  the correction matters because the example was doing the arguing: `run.cancelled`'s payload in
+  `journal/events.ts` is `{clean, unknownEffects}` and nothing in that file spells `forced`.
   Its neighbour `clean` is the field that survived, because an operator does ask what it answers.
   A decision is not a diff, and this sentence describing the field as pending outlived the diff
   that executed it.

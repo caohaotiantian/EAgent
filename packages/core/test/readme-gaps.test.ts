@@ -416,6 +416,29 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
     },
   },
   {
+    row: "Tracing out",
+    claims: "as an OTLP/HTTP JSON `ExportTraceServiceRequest` a collector ingests directly",
+    probe: () => {
+      // BOTH HALVES, because the row claims a pull endpoint AND an encoder, and either could
+      // land without the other — that is exactly how `SpanLink.traceId` sat with no consumer.
+      // Driven end to end by `test/telemetry/otlp.test.ts` and `test/server/trace-endpoint.test.ts`;
+      // this is the cheap check that the README row still describes the shipped shape.
+      const otlp = SRC("telemetry/otlp.ts");
+      assert.match(otlp, /resourceSpans/, "the encoder must emit OTLP's `resourceSpans` envelope");
+      assert.match(otlp, /\/v1\/traces/, "…and the exporter must POST to the collector's traces path");
+      const http = SRC("server/http.ts");
+      assert.match(http, /\\\/trace\$/, "the plane must route GET /runs/:id/trace");
+      assert.match(http, /otlpTraceRequest/, "…and `?format=otlp` must answer from that same encoder");
+      // THE ROW ALSO CLAIMS A GAP — no push from the CLI — and a gap row must fail when the gap
+      // closes, or the README quietly understates. `loom trace` prints; it does not export.
+      assert.doesNotMatch(
+        SRC("cli.ts"),
+        /OtlpHttpExporter/,
+        "the CLI now exports to a collector — delete `There is no push yet` from the README row",
+      );
+    },
+  },
+  {
     row: "Gates",
     claims: "2,300+ tests",
     probe: () => {
