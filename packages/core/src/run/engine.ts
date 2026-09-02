@@ -1788,6 +1788,11 @@ export class Engine {
         ev.payload.external === undefined ? ev.payload.writes : { ...ev.payload.writes, ...ev.payload.external };
       applyTaint(ctx.tainted, node, written);
       applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
+      // The fan binding, folded after `applyTaint` and before the control-flow half exactly as
+      // the live path folds it: the commit that TAKES a fanout edge is the commit that wrote the
+      // list it fans over, so `over` is tainted by the line above and the binding is an ordinary
+      // tainted channel by the time anything else reads the set.
+      applyFanoutTaint(ctx.tainted, ctx.index, ev.payload.take as readonly EdgeId[]);
       // E8's control-flow half. `take` is a durable field of this event, and the choice space
       // and region are derived from the graph, so a branch decision rebuilds exactly — which is
       // the whole reason the fact is recorded at the DECIDING NODE rather than re-derived at
@@ -1795,7 +1800,18 @@ export class Engine {
       // matches the live path: `applyControlTaint` reads `ctx.tainted`, and a node that tainted
       // nothing itself cannot change its own answer. Every commit is offered, not just a
       // router's, because `choiceOf` names three more ways a `take` comes out narrowed.
-      applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, node, ev.payload.take as readonly EdgeId[]);
+      // `?? true` IS THE MIGRATION, and it is the only default that fails closed. A journal
+      // written before `takeSuppliedByProducer` existed cannot say who chose; absent-as-false
+      // would reproduce the defect that field closed on every old run and do it across a
+      // RESTART. See `choiceOf` for the argument and what absent-as-true costs.
+      applyControlTaint(
+        ctx.controlTainted,
+        ctx.tainted,
+        ctx.index,
+        node,
+        ev.payload.take as readonly EdgeId[],
+        ev.payload.takeSuppliedByProducer ?? true,
+      );
     }
   }
 
@@ -7382,7 +7398,14 @@ export class Engine {
             },
             {
               type: "task.committed",
-              payload: { status: "failed", writes: {}, take: [], usage: outcome.usage, attempt: w.task.attempt + 1 },
+              payload: {
+                status: "failed",
+                writes: {},
+                take: [],
+                takeSuppliedByProducer: false,
+                usage: outcome.usage,
+                attempt: w.task.attempt + 1,
+              },
               actor: SYSTEM_ACTOR("executor"),
               taskId: w.task.taskId,
             },
@@ -7419,6 +7442,12 @@ export class Engine {
       });
     }
     const take = outcome.status === "failed" ? this.#errorEdges(ctx, w, outcome.error?.code) : this.#edgesToTake(ctx, p, w, outcome);
+    // WHO CHOSE, recorded rather than inferred. A `function`/`evaluator` body, a `human_gate`
+    // redirect and an operator `steer` all arrive as `outcome.take`, and `choiceOf` used to
+    // guess between them and edge-expression narrowing by looking at edge kinds — a guess that
+    // is wrong whenever the producer's take includes the node's unconditional edges. A FAILED
+    // commit's take is `#errorEdges`, which no producer wrote.
+    const takeSuppliedByProducer = outcome.status !== "failed" && outcome.take !== undefined;
 
     // E8'S CONTROL-FLOW HALF, FOLDED HERE AND NOT IN `#recordEvidence`, WHICH IS WHERE EVERY
     // OTHER PIECE OF THIS RUN'S ESCALATION EVIDENCE IS FOLDED. The reason is one line up:
@@ -7433,7 +7462,8 @@ export class Engine {
     // restart switches off silently — five of those, then a sixth. This is the first piece of
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
-    applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take);
+    applyFanoutTaint(ctx.tainted, ctx.index, take);
+    applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take, takeSuppliedByProducer);
 
     if (outcome.status === "failed") {
       events.push({
@@ -7470,6 +7500,9 @@ export class Engine {
         status: outcome.status === "failed" ? "failed" : "succeeded",
         writes: committed.values,
         take,
+        // WRITTEN ON EVERY COMMIT, true or false, so that ABSENT means one thing only: a journal
+        // older than the field. `#restoreEvidence` folds absent as `true`.
+        takeSuppliedByProducer,
         usage: outcome.usage,
         attempt: w.task.attempt + 1,
         ...(committed.external === undefined ? {} : { external: committed.external }),
@@ -8976,6 +9009,35 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
 
+/**
+ * A FAN'S PER-BRANCH BINDING CARRIES THE LIST'S TAINT, and nothing carried it before.
+ *
+ * `applyTaint` taints channels a node WROTE. A fanout edge's `as` binding is not written by any
+ * node: `#activate` puts `{ channel: e.as ?? "item", value: item }` straight into the branch's
+ * bindings, so the ordinary way a fan body sees its element — `reads: ["item"]` — read attacker
+ * bytes with `ctx.tainted` silent. Two graphs one word apart, same fetched page, same
+ * `pay.charge`, same human de-escalation to `on`:
+ *
+ *     the body reads `items` (the list channel)  -> awaiting_gate, gates=1, charged=0
+ *     the body reads `item`  (the same bytes)    -> succeeded,     gates=0, charged=2
+ *
+ * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
+ * is called from `#restoreEvidence` as well as `#commit`, in the same order relative to
+ * `applyTaint`: the commit that TAKES the fanout edge is the commit that wrote the list.
+ *
+ * This is the data-flow half of the fanout question and not the width half. How many branches a
+ * tainted list opens is a count, `maxWidth` is its bound, and `choiceOf` says why a node set
+ * cannot express it.
+ */
+function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonly EdgeId[]): void {
+  for (const id of take) {
+    const edge = index.edgeById.get(id);
+    if (edge === undefined || edge.kind !== "fanout") continue;
+    if (edge.over === undefined || !tainted.has(edge.over)) continue;
+    tainted.add(edge.as ?? "item");
+  }
+}
+
 /** Why a node is control-tainted: whose choice selected it, and what that choice had read. */
 interface ControlTaint {
   /**
@@ -9040,9 +9102,12 @@ interface ControlTaint {
  * clamps a hard-to-undo action and nothing else, so a region full of reads costs no gate at all.
  *
  * Widening the key from `router` to `choice` does NOT widen the marked set for an ordinary
- * node, and the reason is the subtraction rather than a special case: a node whose every
- * outbound edge fired has an empty alternatives side, and a node with no conditional, loop or
- * producer-narrowed edges has an empty choice space and returns before any of this runs.
+ * node, and the reason is the space rather than a special case: a node with no conditional,
+ * loop or producer-supplied edges has an empty choice space and returns before any of this
+ * runs. The sentence that used to stand beside it — "a node whose every outbound edge fired
+ * has an empty alternatives side" — was offered as a second reason, and it was the sentence
+ * that produced a bug: an empty alternatives side subtracts nothing, and `controlRegion` now
+ * says so.
  *
  * Monotonic and never cleared, exactly like `applyTaint`, so folding forward from seq 1
  * reaches the state the live process held. First writer wins, so a node selected by two
@@ -9054,8 +9119,9 @@ function applyControlTaint(
   index: GraphIndex,
   node: NodeSpec,
   take: readonly EdgeId[],
+  producerSupplied: boolean,
 ): void {
-  const choice = choiceOf(index, node, take);
+  const choice = choiceOf(index, node, take, producerSupplied);
   if (choice.space.length === 0) return;
   const evidence = choiceTainted(controlTainted, tainted, node, choice);
   if (evidence === undefined) return;
@@ -9069,7 +9135,7 @@ interface Choice {
   /** Every edge the decision could have taken, taken or not. Empty when it picked among nothing. */
   readonly space: readonly EdgeSpec[];
   /**
-   * True when the DECIDING NODE supplied the choice — a router, or a producer-narrowed `take`.
+   * True when the DECIDING NODE supplied the choice — a router, or a `take` a producer wrote.
    * It is what makes `observedChannels(node)` evidence in `choiceTainted`, and it is false for a
    * take that only edge expressions narrowed, where the node's own reads decided nothing.
    */
@@ -9109,42 +9175,58 @@ interface Choice {
  *     `controlRegion` is now true: the version this replaced claimed a failed router's `take` is
  *     `[]`, which it is NOT when the router has an outbound `error` edge — `#commit` computes
  *     `take = this.#errorEdges(...)` for a failed outcome.
- *   - A `fanout` edge's `over`. It decides the WIDTH of a fan, and every branch runs the SAME
- *     nodes, so the node set is identical either way and the region is empty by construction.
- *     An attacker choosing how many times a body runs is a real question and a different one;
- *     `maxWidth` is its bound.
+ *   - A `fanout` edge's WIDTH. How many branches a fan expands into is not a node set, so this
+ *     function has nothing to say about it and `maxWidth` remains the only bound on the count.
+ *     What a tainted `over` DOES reach is handled one axis over: `applyFanoutTaint` puts the
+ *     edge's `as` binding into `ctx.tainted`, so a fan body that reads its own item reads a
+ *     tainted channel and E8's data-flow half fires. The sentence here used to say the node set
+ *     is identical either way, which is false at width 0 — the branch nodes do not run at all.
  *   - A `compensation` edge. The executor never traverses one — `#edgesToTake` argues that at
  *     length.
- *   - HOW MANY TIMES a loop body runs. `controlRegion` is a node SET and cannot express an
- *     iteration count, so a loop edge alone in a space marks nothing: taking it leaves the
- *     alternatives side empty, and not taking it leaves the taken side empty. Its `until`
- *     contributes evidence only when the space holds another edge as well.
- *   - Which of the four producers wrote a `take`. The journal records the `take` and not who
- *     chose it, so a human's redirect and a body's route are one case here. That OVER-marks a
- *     human decision, which is the fail-closed direction and costs a gate only when the node
- *     also READ untrusted content and its take was narrowed.
+ *   - HOW MANY TIMES a loop body runs, as a NUMBER. `controlRegion` is a node set and cannot
+ *     express an iteration count. What it can express is WHICH NODES the decision to go round
+ *     again selected, and that is now what it returns: a loop edge alone in a space leaves the
+ *     alternatives side empty, and an empty alternatives side subtracts nothing rather than
+ *     emptying the region — see `controlRegion`. The first pass is the graph an author wrote and
+ *     nothing marks it, because the deciding node commits only after the body has run once.
+ *   - WHICH of the four producers wrote a `take`. The journal records THAT one did — see below —
+ *     and not which, so a human's redirect and a body's route are one case here. That OVER-marks
+ *     a human decision, which is the fail-closed direction and costs a gate only when the node
+ *     also READ untrusted content.
  *
- * ## WHY `narrowed` IS COMPUTED THE WAY IT IS
+ * ## WHO CHOSE IS RECORDED, NOT INFERRED
  *
- * `#edgesToTake` takes an unconditional edge — anything that is not `conditional`, `loop`,
- * `error` or `compensation` — ALWAYS. So an unconditional edge missing from `take` is proof a
- * producer supplied it, and an unconditional edge present is proof one did not.
+ * `producerSupplied` is `task.committed.takeSuppliedByProducer` — a durable bit the commit that
+ * computed the `take` also wrote. It used to be inferred from edge kinds instead: `#edgesToTake`
+ * takes an unconditional edge ALWAYS, so an unconditional edge missing from `take` was read as
+ * proof a producer supplied it — and an unconditional edge PRESENT was read as proof none did.
+ * The second half is false. A producer take that includes the node's unconditional edges is
+ * indistinguishable from no producer take at all, so the ordinary body — always continue to my
+ * sink, AND pick an arm — switched the evidence off. Measured on one graph with one edge of
+ * difference, the charge reading only the clean channel in both:
  *
- * A node whose outbound edges are ALL conditional or loop admits no such proof either way, and
- * it falls to the fail-closed side: `byTheNode` true, so the node's own reads count as evidence
- * alongside the edge expressions. That arm is load-bearing rather than defensive. Measured on a
- * `function` node with two `conditional` out-edges whose `when` reads only the clean channel,
- * routing from the injected page with its body — the one shape where nothing in the graph says
- * who chose:
+ *     every out-edge `conditional`, body returns `take` -> awaiting_gate, gates=1, charged=0
+ *     the same body plus ONE `seq` edge it also takes   -> succeeded,     gates=0, charged=1
  *
- *     `byTheNode` from the space's edge kinds -> succeeded,     gates=0, charged=1
- *     `byTheNode` from `narrowed`             -> awaiting_gate, gates=1, charged=0
+ * All four producers the list above names arrive as `outcome.take` and none is distinguishable
+ * in the journal, so the recorded bit covers a `human_gate` redirect and an operator `steer` as
+ * well as a body.
  *
- * The cost is over-marking a node that READ untrusted content and branched on something clean,
- * when every one of its outbound edges is conditional. That is a pure branch node, the region
- * subtraction still bounds it to the arm, and the alternative is the row above.
+ * A NODE WHOSE OUT-EDGES ARE ALL CONDITIONAL OR LOOP STILL FALLS TO THE FAIL-CLOSED SIDE even
+ * when no producer chose, and that arm is kept: there the take came from the edge expressions,
+ * and if those read nothing tainted while the node did, the node is the only place the decision
+ * could have come from. The cost is over-marking a pure branch node that read untrusted content
+ * and branched on something clean; the region subtraction still bounds it to the arm.
+ *
+ * A JOURNAL WRITTEN BEFORE THE BIT EXISTED reads `undefined`, and `#restoreEvidence` folds that
+ * as TRUE. An old journal cannot say who chose, and a guard that cannot decide fails closed.
+ * Reading absent as `false` would reproduce the row above on every old run and do it ACROSS A
+ * RESTART, which is the failure class this file already carries six of; reading it as the old
+ * inference would keep the hole for exactly the runs nobody can re-run. Absent-as-true
+ * over-marks an old journal, so a replayed old run can gate where the original process did not —
+ * the tightening direction, which is the one permitted.
  */
-function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): Choice {
+function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], producerSupplied: boolean): Choice {
   if (node.type === "router") {
     const ids = new Set<EdgeId>();
     for (const c of node.router?.cases ?? []) for (const id of c.take) ids.add(id as EdgeId);
@@ -9158,8 +9240,7 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): C
   }
   const outbound = (index.outbound.get(node.id) ?? []).filter((e) => e.kind !== "error" && e.kind !== "compensation");
   const unconditional = outbound.filter((e) => e.kind !== "conditional" && e.kind !== "loop");
-  const chosen = new Set<EdgeId>(take);
-  const narrowed = unconditional.length === 0 || unconditional.some((e) => !chosen.has(e.id));
+  const narrowed = producerSupplied || unconditional.length === 0;
   return narrowed
     ? { space: outbound, byTheNode: true }
     : { space: outbound.filter((e) => e.kind === "conditional" || e.kind === "loop"), byTheNode: false };
@@ -9247,6 +9328,29 @@ function choiceTainted(
  * node, whose `take` is its `error` edges, and the degenerate router whose only case names its
  * own fallback.
  *
+ * ## AN EMPTY ALTERNATIVES SIDE SUBTRACTS NOTHING; IT DOES NOT EMPTY THE REGION
+ *
+ * This guard clause once read `taken.length === 0 || alternatives.length === 0`, and the second
+ * half answered "every edge in the space fired" with "nothing was chosen". `reachable([])` is
+ * already the empty set, so the subtraction needs no such case: when nothing was left untaken the
+ * region is `reachable(taken)`, which is what "the alternative was that nothing ran" selects.
+ * Three shapes reached that clause and marked nothing, measured one at a time on the same
+ * injected page, the same `pay.charge` reading only clean channels, and the same human
+ * de-escalation to `on`:
+ *
+ *     one `conditional` out-edge and no sibling  -> succeeded, gates=0, charged=1
+ *     a `loop` edge alone in the space           -> succeeded, gates=0, charged=3
+ *     a router that fires every edge it declared -> nothing subtracted, so nothing marked
+ *
+ * The loop row is why the docstring below no longer says a loop's `until` contributes evidence
+ * only when the space holds another edge: taking the back-edge selects the cycle body, and NOT
+ * taking it is a real alternative that reaches nothing.
+ *
+ * The residual is the router row read the other way: a router that takes every edge it declared
+ * now marks `reachable(all of them)` with nothing subtracted, which can be most of a graph. That
+ * is over-marking in the fail-closed direction, and E8 clamps only hard-to-undo actions, so it
+ * costs a gate exactly where one is arguably owed.
+ *
  * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS THE FIX
  *
  * This walk once followed every edge kind except `compensation` on both sides, and the sentence
@@ -9280,7 +9384,7 @@ function controlRegion(index: GraphIndex, space: readonly EdgeSpec[], take: read
   const taken: EdgeId[] = [];
   const alternatives: EdgeId[] = [];
   for (const e of space) (chosen.has(e.id) ? taken : alternatives).push(e.id);
-  if (taken.length === 0 || alternatives.length === 0) return new Set<NodeId>();
+  if (taken.length === 0) return new Set<NodeId>();
 
   const selected = reachableFromEdges(index, taken, true);
   for (const id of reachableFromEdges(index, alternatives, false)) selected.delete(id);

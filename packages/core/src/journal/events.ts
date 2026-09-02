@@ -212,6 +212,22 @@ export interface EventPayloads {
     readonly status: TaskStatus;
     readonly writes: Readonly<Record<string, unknown>>;
     readonly take: readonly string[];
+    /**
+     * WHO CHOSE this `take` — a producer, or the edge expressions.
+     *
+     * A `function`/`evaluator` body, a `human_gate` redirect and an operator `steer` all reach
+     * `#commit` as `outcome.take`, and the executor filters it into the `take` above. Nothing in
+     * the filtered list says which of the two happened, and `applyControlTaint` needs to know: a
+     * take a producer wrote makes the node's own reads evidence, and one the edge `when`s
+     * narrowed does not. It used to be inferred from edge kinds, and the inference was wrong in
+     * one direction — see `choiceOf` for the measurement.
+     *
+     * DECLARED here rather than derived for the same reason `external` is: the fold may not
+     * decide it by looking at the value, because the filtered take is identical either way.
+     * Written on every commit, so ABSENT means only "a journal older than this field", which
+     * `#restoreEvidence` folds as `true` — a run that cannot say who chose fails closed.
+     */
+    readonly takeSuppliedByProducer?: boolean;
     readonly usage: UsageRecord;
     readonly attempt: number;
     /**

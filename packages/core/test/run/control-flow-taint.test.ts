@@ -17,7 +17,7 @@
  * decision an attacker wrote. That is a live prompt-injection path to an irreversible action,
  * and it is what `ctx.controlTainted` closes.
  *
- * ## WHAT THIS FILE HAS TO PROVE, AND WHY IT IS TEN TESTS AND NOT ONE
+ * ## WHAT THIS FILE HAS TO PROVE, AND WHY IT IS NOT ONE TEST
  *
  * A guard that fires is half the claim. The other half is that it does NOT fire everywhere,
  * because "mark everything under any router" would gate most branches of most graphs, and an
@@ -59,6 +59,22 @@
  *     "router" to "any node" put every node's `error` arm within reach of being marked, and
  *     this is the test that keeps it out.
  *
+ * ## AND FIVE MORE, EACH DRIVEN THROUGH THE ENGINE WITH A CHARGE COUNTER FIRST
+ *
+ * The rule above was right and its arithmetic answered three of its own undecidable cases with
+ * the passing value. Each of these charged a real card under a human ceiling of `on` set before
+ * any untrusted byte existed, and each carries its before/after in a comment:
+ *
+ *   - ONE CONDITIONAL OUT-EDGE. The smallest branch a graph can express marked nothing, because
+ *     "every edge in the space fired" was read as "nothing was chosen".
+ *   - A LOOP-ONLY SPACE. Injected text decided how many times an irreversible node ran, through
+ *     the same empty-alternatives arithmetic.
+ *   - ONE `seq` EDGE THE BODY ALSO TAKES. Who chose was INFERRED from edge kinds, and the ordinary
+ *     "continue to my sink, and pick an arm" body defeated the inference. It is recorded now, so
+ *     there is also an arm for a journal written before the record existed.
+ *   - A FANOUT'S `as` BINDING, twice — live, and across a restart. A fan body reading its own item
+ *     read the fetched page through a channel no node writes, so nothing tainted it.
+ *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
 
@@ -85,7 +101,23 @@ const MANIFESTS = {
   "pay.charge": { irreversibility: "irreversible", capabilities: ["pay:charge"], idempotent: false },
 } as never;
 
-type Shape = "select" | "converge" | "gated" | "nested" | "conditional" | "body" | "loopback" | "loopfallback" | "failing" | "bodycond";
+type Shape =
+  | "select"
+  | "converge"
+  | "gated"
+  | "nested"
+  | "conditional"
+  | "body"
+  | "loopback"
+  | "loopfallback"
+  | "failing"
+  | "bodycond"
+  | "only"
+  | "loopuntil"
+  | "bodycondseq"
+  | "bodycondseqgated"
+  | "fanoutbind"
+  | "fanoutgated";
 
 interface Options {
   /**
@@ -122,7 +154,16 @@ function spec(o: Options): GraphSpec {
   // The shapes that have no router: something else narrows the `take` instead — an edge
   // condition, a body, or a failure.
   const routerless =
-    o.shape === "conditional" || o.shape === "body" || o.shape === "bodycond" || o.shape === "failing";
+    o.shape === "conditional" ||
+    o.shape === "body" ||
+    o.shape === "bodycond" ||
+    o.shape === "failing" ||
+    o.shape === "only" ||
+    o.shape === "loopuntil" ||
+    o.shape === "bodycondseq" ||
+    o.shape === "bodycondseqgated" ||
+    o.shape === "fanoutbind" ||
+    o.shape === "fanoutgated";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -136,8 +177,13 @@ function spec(o: Options): GraphSpec {
     {
       id: "charge",
       type: "tool",
-      reads: ["request"],
-      writes: ["receipt"],
+      // `item` is the fanout edge's `as` BINDING, never a channel any node writes. It is the
+      // ordinary way a fan body sees its own element, and it is the read the two fanout shapes
+      // below are about.
+      reads: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["item"] : ["request"],
+      // `parts` in the fanout shapes because the charge runs once per branch, and
+      // GRAPH010_CONCURRENT_WRITE refuses `replace` for a node that runs in parallel.
+      writes: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["parts"] : ["receipt"],
       tool: { name: "pay.charge", version: "1.0", args: { amount: 500 } },
       unhandled: true,
     },
@@ -156,7 +202,49 @@ function spec(o: Options): GraphSpec {
   // nothing to do with what is being measured here. The three new shapes need the same thing for
   // the same reason: none of their two arms is a pair of ROUTER cases, so the compiler is right
   // that both could write.
-  if (o.shape === "loopfallback") {
+  if (o.shape === "only") {
+    // ONE conditional out-edge and no sibling at all — the smallest branch a graph can express,
+    // and the arm of `choiceOf` whose docstring calls itself load-bearing (`unconditional` is
+    // empty, so `narrowed` is true and the node's own reads are evidence).
+    nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+  } else if (o.shape === "loopuntil") {
+    // The cycle is `charge -> tail -> charge`. GRAPH006_STUCK_LOOP requires a node INSIDE the
+    // cycle to be able to change the stop condition, so `tail` writes the channel `until` reads.
+    nodes.push({
+      id: "tail",
+      type: "function",
+      reads: [o.branchOn, "note"],
+      writes: ["note"],
+      function: { ref: "function/tail@stable", effects: [] },
+    });
+  } else if (o.shape === "bodycondseq" || o.shape === "bodycondseqgated") {
+    // GRAPH004 makes a node declare every channel its outbound expressions reference, and both
+    // `when`s here read the CLEAN channel — so the dirty half declares two and the clean one.
+    const reads = o.branchOn === "request" ? ["request"] : [o.branchOn, "request"];
+    nodes.push({ id: "decide", type: "function", reads, writes: ["note"], function: { ref: "function/pickseq@stable", effects: [] } });
+    nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+    nodes.push({ id: "sink", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    // The gated variant stops the run between the body's commit and the charge's decision, so
+    // the two halves of the migration claim land in two different processes.
+    if (o.shape === "bodycondseqgated") {
+      nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
+    }
+  } else if (o.shape === "fanoutbind" || o.shape === "fanoutgated") {
+    nodes.push({ id: "plan", type: "function", reads: [o.branchOn], writes: ["items"], function: { ref: "function/split@stable", effects: [] } });
+    nodes.push({
+      id: "j",
+      type: "join",
+      reads: ["parts"],
+      writes: ["parts"],
+      join: { branches: [o.shape === "fanoutgated" ? "hold" : "charge"], mode: "all", onBranchError: "skip" },
+    });
+    if (o.shape === "fanoutgated") {
+      // A gate on a PARALLEL arm, so the run suspends between the commit that takes the fanout
+      // edge and the decision that would charge. That split is what puts the two halves of the
+      // claim in two different processes.
+      nodes.push({ id: "hold", type: "human_gate", reads: ["item"], humanGate: { ref: "oversight/hold@stable" } });
+    }
+  } else if (o.shape === "loopfallback") {
     // No other arm at all: the router's fallback IS the back-edge, so there is nothing to skip to.
   } else if (o.shape === "failing") {
     nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
@@ -176,7 +264,35 @@ function spec(o: Options): GraphSpec {
   }
   const edges: unknown[] = routerless ? [] : [{ id: "e0", from: "fetch", to: "route", kind: "seq" }];
 
-  if (o.shape === "conditional") {
+  if (o.shape === "only") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
+  } else if (o.shape === "loopuntil") {
+    edges.push({ id: "e0", from: "fetch", to: "charge", kind: "seq" });
+    edges.push({ id: "e1", from: "charge", to: "tail", kind: "seq" });
+    edges.push({ id: "again", from: "tail", to: "charge", kind: "loop", maxIterations: 3, until: 'contains(note, "STOP")' });
+  } else if (o.shape === "bodycondseq" || o.shape === "bodycondseqgated") {
+    // The `bodycond` graph plus ONE `seq` edge the body ALSO takes. `toChosen`'s `when` is FALSE
+    // and clean, so the charge runs only because the body named its edge.
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    if (o.shape === "bodycondseqgated") {
+      edges.push({ id: "toChosen", from: "decide", to: "hold", kind: "conditional", when: 'contains(request, "NOPE")' });
+      edges.push({ id: "holdToCharge", from: "hold", to: "charge", kind: "seq" });
+    } else {
+      edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: 'contains(request, "NOPE")' });
+    }
+    edges.push({ id: "toOther", from: "decide", to: "skip", kind: "conditional", when: 'contains(request, "PAY")' });
+    edges.push({ id: "toSink", from: "decide", to: "sink", kind: "seq" });
+  } else if (o.shape === "fanoutbind") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "charge", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "charge", to: "j", kind: "join", branches: ["charge"] });
+  } else if (o.shape === "fanoutgated") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "holdToCharge", from: "hold", to: "charge", kind: "seq" });
+    edges.push({ id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] });
+  } else if (o.shape === "conditional") {
     // NO ROUTER AT ALL. `#edgesToTake` evaluates a `conditional` edge's `when` against the whole
     // channel scope for every non-router source node — the `if (w.node.type === "router") break;`
     // guard there exists precisely because conditionals are otherwise evaluated for everyone.
@@ -265,9 +381,14 @@ function spec(o: Options): GraphSpec {
       merged: { type: "object", reduce: "replace" },
       note: { type: "string", reduce: "replace" },
       receipt: { type: "object", reduce: "replace" },
+      // The two fanout shapes only. `items` is the list a fan is taken over; `item` is the
+      // per-branch binding the edge's `as` names.
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
     },
     inputs: ["request"],
-    outputs: ["receipt"],
+    outputs: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["parts"] : ["receipt"],
     nodes,
     edges,
   } as unknown as GraphSpec;
@@ -310,6 +431,22 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   functions.register("function/boom@stable", () => {
     throw new Error("the body failed");
   });
+  // The `loopuntil` shape's deciding node. Neither the injected page nor the run's own input
+  // says STOP, so the loop runs to its bound in both halves — what differs is whether the
+  // channel `until` reads is one a tainted read produced.
+  functions.register("function/tail@stable", (view) => {
+    const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
+    return { writes: { note: text.includes("STOP") ? "STOP" : "GO" } };
+  });
+  // The `bodycondseq` shape's deciding node: it names its unconditional edge AND an arm, which
+  // is the ordinary "always continue to my sink, and also pick" body.
+  functions.register("function/pickseq@stable", (view) => {
+    const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
+    return { writes: { note: "decided" }, take: ["toSink", text.includes("PAY") ? "toChosen" : "toOther"] };
+  });
+  // The fanout shapes' list producer. The WIDTH is the same in both halves — what differs is
+  // whether the node that produced the list had read the fetched page.
+  functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
     return { writes: { note: "decided" }, take: [text.includes("PAY") ? "toChosen" : "toOther"] };
@@ -581,3 +718,190 @@ test("THE HARD FLOOR READS THE BRANCH DECISION — `PolicyEngine` alone, with no
     `the reason must say which of the two happened: ${chosen.reasons.join(" | ")}`,
   );
 });
+
+test("ONE CONDITIONAL OUT-EDGE IS STILL A CHOICE — an empty alternatives side is not an empty region", async () => {
+  // The smallest branch a graph can express: one node, one `conditional` out-edge, no sibling.
+  // `controlRegion` used to answer "every edge in the space fired" with "nothing was chosen" and
+  // return the empty set, so the arm `choiceOf`'s docstring calls load-bearing marked nothing.
+  // Measured with the `alternatives.length === 0` half of the early return still there:
+  //
+  //     one conditional out-edge, branching on the fetched page -> succeeded, gates=0, charged=1
+  //
+  // `reachable([])` is already the empty set, so the subtraction needs no special case: with the
+  // clause gone the region is `reachable(taken)`, which is what "the alternative was that nothing
+  // ran" actually selects.
+  const dirty = await drive({ branchOn: "untrusted", shape: "only" });
+  assert.equal(dirty.charged, 0, "the charge ran: injected text made the one edge to it fire");
+  assert.equal(dirty.status, "awaiting_gate", `expected E8's floor to hold the charge, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and the human whose ceiling no longer covers this action is asked");
+
+  // The paired half: the same one edge, tested against the run's own input.
+  const clean = await drive({ branchOn: "request", shape: "only" });
+  assert.equal(clean.status, "succeeded", `a clean one-armed branch must not gate: ${clean.status}`);
+  assert.equal(clean.charged, 1, "or every graph with a single conditional edge and a fetch gates forever");
+});
+
+test("HOW MANY TIMES A LOOP BODY RUNS IS A CHOICE — a loop-only space is not an empty region", async () => {
+  // The cycle is `charge -> tail -> charge`, and `tail` reads the fetched page and writes the
+  // channel the loop's `until` tests. GRAPH006_STUCK_LOOP forces that shape — an `until` may only
+  // read a channel a node inside the cycle writes — so any cycle whose body touches fetched
+  // content has an attacker-influenced exit condition by construction.
+  //
+  // `tail`'s only out-edge is the loop, so the space is one edge: taking it left the alternatives
+  // side empty and the region came back empty. Measured before the early return lost that half:
+  //
+  //     page says neither STOP nor GO -> succeeded, gates=0, charged=3
+  //
+  // The first charge is the graph an author wrote and it still runs. Every later one is the
+  // attacker's decision, and that is where the gate lands.
+  const dirty = await drive({ branchOn: "untrusted", shape: "loopuntil" });
+  assert.equal(dirty.charged, 1, "the injected page decided how many times an irreversible action ran");
+  assert.equal(dirty.status, "awaiting_gate", `expected the second iteration to gate, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and the human is asked before the extra charge, not after it");
+
+  // The paired half: the same cycle, the same three iterations, with `tail` declaring the run's
+  // own input instead of the page. Nothing untrusted decided the count, so nothing gates.
+  const clean = await drive({ branchOn: "request", shape: "loopuntil" });
+  assert.equal(clean.status, "succeeded", `a loop whose exit was decided from clean input gated: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every loop in a graph that also fetches gates forever");
+  assert.equal(clean.charged, 3, "and the iterations the author authorised all run");
+});
+
+test("ONE `seq` EDGE THE BODY ALSO TAKES DOES NOT MAKE THE BODY INNOCENT", async () => {
+  // The `bodycond` graph plus one `seq` edge to a sink, which is what an ordinary body does:
+  // always continue to my sink, AND pick an arm. `toChosen`'s `when` is FALSE and reads only the
+  // clean channel, so the charge runs for exactly one reason — the body named its edge.
+  //
+  // `narrowed` used to infer WHO CHOSE from edge kinds: an unconditional edge missing from `take`
+  // was read as proof a producer supplied it, and one present as proof none did. The second half
+  // is false, and the false half is the one that switches the guard off. Measured with the
+  // inference in place:
+  //
+  //     every out-edge conditional (the `bodycond` shape) -> awaiting_gate, gates=1, charged=0
+  //     the same body plus ONE `seq` edge it also takes   -> succeeded,     gates=0, charged=1
+  //
+  // The commit now records whether the take came from a producer, so the two rows agree.
+  const dirty = await drive({ branchOn: "untrusted", shape: "bodycondseq" });
+  assert.equal(dirty.charged, 0, "one extra `seq` edge switched off the arm that reads the body's own reads");
+  assert.equal(dirty.status, "awaiting_gate", `expected the body's route to be evidence, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and the human whose ceiling no longer covers this action is asked");
+
+  // The paired half: the same body, the same three edges, the same `take` — the node just
+  // declares the run's own input.
+  const clean = await drive({ branchOn: "request", shape: "bodycondseq" });
+  assert.equal(clean.status, "succeeded", `a body routing on the run's own input must not gate: ${clean.status}`);
+  assert.equal(clean.charged, 1, "or every function node with a sink edge and a fetch gates forever");
+});
+
+test("A FANOUT'S `as` BINDING CARRIES THE LIST'S TAINT — reading the item is reading the page", async () => {
+  // A fan body reads its own element, which is the ordinary way a fanout is used. The element
+  // arrives as the edge's `as` BINDING and lands in `p.bindings`, never through a node's writes,
+  // so `applyTaint` — which taints only channels a node WROTE — never saw it. Two graphs one word
+  // apart, measured before the binding was tainted:
+  //
+  //     charge reads `items` (the tainted list)   -> awaiting_gate, gates=1, charged=0
+  //     charge reads `item`  (the same bytes)     -> succeeded,     gates=0, charged=2
+  const dirty = await drive({ branchOn: "untrusted", shape: "fanoutbind" });
+  assert.equal(dirty.charged, 0, "the fan body read the fetched page through its binding and charged per element");
+  assert.equal(dirty.status, "awaiting_gate", `expected the binding to carry the list's taint, got ${dirty.status}`);
+
+  // The paired half: the same fan, the same width, the same binding — the list was built from the
+  // run's own input, so nothing untrusted reached the item.
+  const clean = await drive({ branchOn: "request", shape: "fanoutbind" });
+  assert.equal(clean.status, "succeeded", `a fan over a clean list must not gate: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every fanout in a graph that also fetches gates forever");
+  assert.equal(clean.charged, 2, "and both branches the author authorised run");
+});
+
+test("THE BINDING'S TAINT SURVIVES A RESTART — the fold rebuilds a fan another process planned", async () => {
+  // The live path taints `item` at the commit that TOOK the fanout edge; the fold has to reach the
+  // same set from the journal, or a restart marks fewer than the original process did. A
+  // `human_gate` inside the fan body splits the run: the first engine commits the fanout and stops
+  // on the gate, the second engine is the one that decides the charge.
+  const store = new MemoryStateStore({ now: NOW });
+  const first = engineOver(store);
+  const graph = graphFor({ branchOn: "untrusted", shape: "fanoutgated" });
+  const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+    kind: "human",
+    id: "u:alice",
+  });
+  const held = await first.engine.advance(runId);
+  assert.equal(held.status, "awaiting_gate", "precondition: the run stops on the gate inside the fan body");
+  assert.equal(first.charged(), 0, "precondition: nothing charged before the gate");
+  const holdGate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+  assert.ok(holdGate !== undefined, "precondition: the gate in the fan body is open");
+
+  // A second Engine over the same store, with no memory of the first.
+  // Every branch raises its own copy of the authored gate and each one suspends the run, so they
+  // are approved in turn until the only thing that could still be holding the run is the charge.
+  const second = engineOver(store);
+  await second.engine.attach(runId, graph);
+  let after = await second.engine.advance(runId);
+  for (let i = 0; i < 8; i++) {
+    const open = Object.values(after.gates).find((g) => g.nodeId === "hold" && g.state === "open");
+    if (open === undefined) break;
+    await second.engine.resolveGate(runId, {
+      gateId: open.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: `k${String(i)}`,
+    });
+    after = await second.engine.advance(runId);
+  }
+
+  assert.equal(second.charged(), 0, "a restart forgot the fan's binding: the second process charged where the first would have gated");
+  assert.equal(after.status, "awaiting_gate", `expected the charge to gate in the second process, got ${after.status}`);
+});
+
+test("A JOURNAL OLDER THAN THE RECORDED BIT FAILS CLOSED", async () => {
+  // `takeSuppliedByProducer` is absent from every `task.committed` written before it existed, and
+  // `#restoreEvidence` reads absent as TRUE. Absent-as-false would reproduce the defect the field
+  // closes on every old run and do it across a restart; absent-as-the-old-inference would keep the
+  // hole for exactly the runs nobody can re-run. Absent-as-true over-marks an old journal, which
+  // is the tightening direction and the only one permitted.
+  //
+  // The journal is aged in place after the first process has written it, so the graph, the page
+  // and the body's route are all identical to the arm above — the only difference is one key.
+  const run = async (age: (payload: Record<string, unknown>) => void): Promise<number> => {
+    const store = new MemoryStateStore({ now: NOW });
+    const first = engineOver(store);
+    const graph = graphFor({ branchOn: "untrusted", shape: "bodycondseqgated" });
+    const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+    await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+      kind: "human",
+      id: "u:alice",
+    });
+    const held = await first.engine.advance(runId);
+    assert.equal(held.status, "awaiting_gate", "precondition: the run stops on the human gate");
+    for await (const ev of store.read(runId, 1)) {
+      if (ev.type === "task.committed") age(ev.payload as unknown as Record<string, unknown>);
+    }
+    const holdGate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+    assert.ok(holdGate !== undefined, "precondition: the gate on the chosen arm is open");
+
+    const second = engineOver(store);
+    await second.engine.attach(runId, graph);
+    await second.engine.resolveGate(runId, {
+      gateId: holdGate.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: "k1",
+    });
+    await second.engine.advance(runId);
+    return second.charged();
+  };
+
+  const older = await run((payload) => {
+    delete payload["takeSuppliedByProducer"];
+  });
+  assert.equal(older, 0, "a journal with no bit was read as `no producer chose`, and the charge ran");
+
+  // The discriminating half: the same journal with the bit present and FALSE charges, which is
+  // what absent-as-false would have done to every run written before the field existed.
+  const asFalse = await run((payload) => {
+    payload["takeSuppliedByProducer"] = false;
+  });
+  assert.equal(asFalse, 1, "the control did not charge, so the arm above is not measuring the bit");
+});
+
