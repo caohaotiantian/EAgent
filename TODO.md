@@ -1043,14 +1043,38 @@ believes a feature is present. This section was thirteen rows and is two.
   where that lives.** So "delete it" is no longer free: it deletes the only design in the tree
   for a crash-stranded task.
 
-- **B.2 · Five event types have no appender**, each pinned in `test/registries.test.ts` with a
+- **B.2 · THREE event types have no appender**, each pinned in `test/registries.test.ts` with a
   written reason and a `blockedOn` file list, and a test that goes red the moment the reason stops
-  holding. The members: **`budget.reserved`, `budget.settled`, `task.skipped`, `channel.written`,
-  `task.started`**. `budget.reserved` is the one that matters — `PolicyEngine.reserve` holds the
-  reservation in memory, so a crashed worker's reservation is unrecoverable by folding, which is
-  the first non-negotiable again. **The error-code half of this row is CLOSED**: the unraised set
-  is now asserted as the EMPTY set (`registries.test.ts:145-149`), not a pinned list with
-  excuses. **Closes when** each type is wired or deleted, per its own row's decision.
+  holding. The members: **`task.skipped`** (wire, behind the join's branch-error accounting),
+  **`channel.written`** and **`task.started`** (both delete).
+
+  **THE TWO THAT MATTERED ARE WIRED.** `budget.reserved` and `budget.settled` were the pair
+  decided `wire`, for the first non-negotiable: `PolicyEngine.reserve` held the reservation in
+  memory, so an operator reading `GET /runs/:id` mid-flight saw committed spend and not money
+  already promised, and a crashed worker's reservation was unrecoverable by folding. Measured on
+  a paused adapter before and after — folded `reservedUsd` **0 → 0.001048** against a settled cost
+  of 0.000027 — in `test/run/budget-reservation-is-durable.test.ts`, which also drives a SECOND
+  `Engine` over the same store to show the number is in the log and not in the object. The
+  appenders are at the engine's own `ctx.policy.reserve`/`settle` call sites; `projection.ts`
+  needed no change, because it had folded both since before either had a writer.
+  `journal/audit.ts`'s `budget.reservation-is-settled` — one of the two rules that file's own
+  header says were deleted for being rules over events nothing writes, "they come back when the
+  events do" — is back, and the `todo` ratchet in `test/journal/audit-coverage.test.ts` forced
+  that rather than permitted it: the cap is five todos and the list was AT five, so there was no
+  way to defer the rule and keep the tree green. Cost: one `Kernel-seam:`
+  trailer, the ledger's eleventh.
+
+  **`task.started`'s DEFECT IS CLOSED WITHOUT ITS DELETION.** The row's price was a silent false
+  negative: `test/run/advance-reentrancy.test.ts` filtered the journal for a type nothing appends,
+  so its headline assertion — every Task starts once — compared **0 to 0** on a run that leases
+  seven times. It reads `task.leased`, keyed `taskId#attempt` (a retry legitimately re-leases the
+  same id), and the mutation that deletes `Engine.advance`'s `#advancing` chain now fails it
+  `10 !== 7` where before the headline passed and only the side-effect assertion caught it. The
+  deletion itself still waits on `test/scale.test.ts`, which is the remaining `blockedOn` entry.
+
+  **The error-code half of this row is CLOSED**: the unraised set is asserted as the EMPTY set
+  (`registries.test.ts`), not a pinned list with excuses. **Closes when** each of the three left
+  is wired or deleted, per its own row's decision.
 
 ---
 
@@ -1140,8 +1164,13 @@ is a better view of nothing.
 
   **Eight are not in the journal at all**, each for a stated reason, and a span attribute carrying
   a guess is worse than an absent one: `node.type` (only on `task.started`, which has no writer —
-  §B.2); `budget.cost_usd` (the ceiling is never journaled; `budget.reserved`/`budget.settled`
-  have no writer either); `reducers` (`channel.written` has no writer, and `state.reduced` carries
+  §B.2); `budget.cost_usd` (the ceiling is never journaled — and the second half of this clause,
+  "`budget.reserved`/`budget.settled` have no writer either", STOPPED BEING TRUE when §B.2 wired
+  both. The attribute is still not derivable for the reason that survives: `budget.reserved`
+  carries `remainingUsd` only when a dollar ceiling exists, so `spent + reserved + remaining`
+  reconstructs the ceiling on exactly the runs that declared one and reconstructs nothing on the
+  rest — an attribute present on some runs and absent on others is a worse answer than an absent
+  one. Re-measure before moving this row); `reducers` (`channel.written` has no writer, and `state.reduced` carries
   channels rather than reducers); `trigger.kind` (nothing journals a trigger —
   `run.submitted.submittedBy.kind` is WHO, and relabelling it is a different fact under a
   documented name); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never

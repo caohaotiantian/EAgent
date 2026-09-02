@@ -5714,6 +5714,48 @@ export class Engine {
         }
 
         reservation = ctx.policy.reserve(`node:${w.node.id}`, estimateUsd, estimateTokensForTurn);
+        // AND THE PROMISE IS DURABLE BEFORE THE CALL IS MADE, which is the whole reason the
+        // append is here and not batched into the `effect.started` twenty lines down.
+        // `PolicyEngine` held this number in memory alone, so between `reserve` and `settle`
+        // the run had an amount that was committed — `reserve` refuses against
+        // `spent + reserved`, `nearLimit` fires on it — and reconstructible from nothing.
+        // `projection.ts` has folded `budget.reserved` into `RunProjection.reservedUsd` since
+        // before there was a writer, and `server/http.ts` serves that field on
+        // `GET /runs/:id`, so an operator watching a run with calls in flight was shown `0`
+        // promised against a real outstanding debit. Measured mid-flight on a paused adapter:
+        // folded `reservedUsd` 0 before this line existed, 0.001 after.
+        //
+        // ORDER IS LOAD-BEARING IN ONE DIRECTION ONLY. If the append throws, the in-memory
+        // reservation is held and the throw leaves this turn through the catch below, which
+        // re-raises anything that is not `E_BUDGET_EXHAUSTED` — the run fails and the process
+        // that holds the orphaned number is the one that dies with it. The other order —
+        // append, then reserve — would put a promise in the journal that no engine ever made.
+        await this.#serialize(() =>
+          ctx.log.append(
+            [
+              {
+                type: "budget.reserved",
+                payload: {
+                  scope: `node:${w.node.id}`,
+                  amountUsd: estimateUsd,
+                  // DROPPED WHEN THERE IS NO DOLLAR CEILING, for the reason
+                  // `#checkBudgetWarning` gives one field over: `remainingUsd` is `Infinity`
+                  // with no `runUsd` set and `canonicalize` refuses a non-finite number on the
+                  // durable write path.
+                  ...(Number.isFinite(ctx.policy.remainingUsd) ? { remainingUsd: Number(ctx.policy.remainingUsd.toFixed(6)) } : {}),
+                  // BEFORE `#checkBudgetWarning`, and it is the same predicate that method
+                  // reads. E2 escalates once per run; this row says whether THIS reservation
+                  // was taken over the line, which is a different question and the one an
+                  // auditor asks of the reservation that broke the ceiling.
+                  warn: ctx.policy.nearLimit,
+                },
+                actor: SYSTEM_ACTOR("policy"),
+                taskId: w.task.taskId,
+              },
+            ],
+            { taskId: w.task.taskId },
+          ),
+        );
         // Checked at RESERVE as well as at commit. Under reserve-worst-case, committed
         // exposure peaks at the reservation and falls back when `settle` credits the
         // real cost — so a check only at commit sees the trough and never fires. "80%
@@ -5832,7 +5874,20 @@ export class Engine {
         const le = toLoomError(e);
         await this.#serialize(() =>
           ctx.log.append(
-            [{ type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId }],
+            [
+              { type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId },
+              // THE FAILED CALL RELEASES ITS PROMISE AT ZERO, and it is in the SAME batch as
+              // the failure rather than a second append: the two are one fact, and a crash
+              // between them would leave the fold holding a reservation for a call the journal
+              // already says died. `actualUsd: 0` is `settle`'s bare-number arm — "this cost
+              // nothing" — not an unknown.
+              {
+                type: "budget.settled",
+                payload: { scope: `node:${w.node.id}`, reservedUsd: reservation.amountUsd, actualUsd: 0 },
+                actor: SYSTEM_ACTOR("policy"),
+                taskId: w.task.taskId,
+              },
+            ],
             { taskId: w.task.taskId },
           ),
         );
@@ -5848,6 +5903,29 @@ export class Engine {
       // recorded turn, which is what keeps the node ceiling and `excessUsage` reading the same
       // numbers on attempt 2 that they read on attempt 1.
       ctx.policy.settle(reservation, servedTurn === undefined ? turnUsage : 0);
+      // AND THE RELEASE IS DURABLE TOO, or the fold holds the promise for the life of the run.
+      // `reservedUsd` is what comes OFF — the amount `reserve` debited, read back off the
+      // reservation rather than recomputed, because `estimateUsd` is scoped to the try above and
+      // a second derivation is a second chance to disagree. `actualUsd` is what goes ON, and it
+      // is the same tri-state the line above settles: a served turn cost nothing THIS time, so
+      // the run's spend is not billed twice for one call.
+      await this.#serialize(() =>
+        ctx.log.append(
+          [
+            {
+              type: "budget.settled",
+              payload: {
+                scope: `node:${w.node.id}`,
+                reservedUsd: reservation.amountUsd,
+                actualUsd: servedTurn === undefined ? turnUsage.costUsd : 0,
+              },
+              actor: SYSTEM_ACTOR("policy"),
+              taskId: w.task.taskId,
+            },
+          ],
+          { taskId: w.task.taskId },
+        ),
+      );
       usage = addUsage(usage, turnUsage);
 
       // `postModel` — BEFORE the append, so the journal records what the filter produced and
