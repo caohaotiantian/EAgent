@@ -37,8 +37,10 @@ below true, and an extension must depend on it and cannot replace it*. `scripts/
 runs the test: a `feat` commit touching one of them fails the gate unless it carries a
 `Kernel-seam:` trailer saying which seam was missing. `fix` may touch the kernel freely — fixing
 it is what a kernel is for. That trailer is the escape hatch and also the ledger:
-`git log --grep='^Kernel-seam:'` is the running count of every time the kernel absorbed a feature,
-and it is not a number anyone can quietly reset.
+the guard's own output lists every seam ever declared, with its reason, and that count is not a
+number anyone can quietly reset. Read it there and nowhere else: `git log --grep='^Kernel-seam:'`
+is NOT the ledger — it matches prose about the trailer as readily as the trailer, and today it
+overcounts by one for exactly that reason.
 
 The list says nothing about whether `engine.ts` should be split — see its header for three
 arguments against. `check-surface.mjs` pins the exported NAME SET and nothing else, so it reports

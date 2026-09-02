@@ -27,87 +27,112 @@ and the sha is the citation.
 
 ---
 
-## State — measured 2026-09-01, one command each
+## State — measured 2026-09-02, one command each
 
-**Every row here was RE-RUN at `5ffc223`, and one of the seven had moved** — tests 2,733 → 2,746
-as A.34's and A.35's cases landed. Exports, kernel files, seams, source files and the NUL census
-all came back unchanged. A dated table is only as good as the last time somebody ran its commands,
-and the date is not the evidence; the command is. **The tests row is the one that moves on almost
-every commit, so read it as a floor rather than as an identity** — a re-run that comes back higher
-is the suite growing, and only a re-run that comes back LOWER or non-zero on `fail` is news.
+**Every row here was RE-RUN at `4a70a4e`, and three of the seven had moved** — tests 2,746 → 2,774,
+exports 529 → 537, and source files 61 → 62 in the two rows that carry that number. All three are
+wave 11, and the tests came in from more than one commit, so they are named rather than
+apportioned — C.4's `otlp.test.ts` (16) and `trace-endpoint.test.ts` (5) are the largest block,
+with `0a8aa6d`'s `cli.test.ts` cases and `712bb89`'s `evaluator-body-contract.test.ts` beside
+them. A.8's own commit added no case — it RENAMED one and inverted two, which is why the count
+moved less than wave 11's commit list suggests. The new source file is
+`telemetry/otlp.ts`, and the eight exports are its (`OTLP_RUN_ID_ATTR`, `OtlpExportResult`,
+`OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`,
+`OtlpTraceRequestOptions`, `otlpTraceRequest`). Kernel files, seams and the NUL census came back
+unchanged. A dated table is only as good as the last time somebody ran its commands, and the date
+is not the evidence; the command is. **The tests row is the one that moves on almost every commit,
+so read it as a floor rather than as an identity** — a re-run that comes back higher is the suite
+growing, and only a re-run that comes back LOWER or non-zero on `fail` is news.
 
 **AND DO NOT CARRY THIS NUMBER INTO `README.md`'s Gates row, which says `2,300+` ON PURPOSE.**
 Tried at `5ffc223` and it went red twice, which is the pin working:
 `test/readme-gaps.test.ts` binds that row's text verbatim as a probe's `claims` string, AND
 asserts the stated floor is at or below what the suite declares — and its metric is
-`^test(` declarations, **2,617**, not the 2,746 cases `node --test` executes, because a `test()`
-in a loop runs more than once. So `2,700+` is both a broken probe and an overstatement by the
-README's own measure. The floor is there so growth costs no doc edit; raising it to today's count
-is the edit it was designed to make unnecessary.
+`^test(` declarations, **2,645** at `4a70a4e`, not the 2,774 cases `node --test` executes, because
+a `test()` in a loop runs more than once. So `2,700+` is both a broken probe and an overstatement
+by the README's own measure. The floor is there so growth costs no doc edit; raising it to today's
+count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,746 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| pinned public exports | **529** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
+| tests | **2,774 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| pinned public exports | **537** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
-| zero runtime deps | green, **61 source files** | `node scripts/check-zero-dep.mjs` |
-| source files in `packages/core/src` | **61** | `find packages/core/src -name '*.ts' \| wc -l` |
+| zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
+| source files in `packages/core/src` | **62** | `find packages/core/src -name '*.ts' \| wc -l` |
 | tracked files carrying a NUL byte | **5**, and **0** invalid UTF-8 | census over `git ls-files` — see §F.15 for why grep cannot count these |
 | wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
 
-**The seam census is 10, and it MOVED — which is what this row exists to make impossible to
-miss.** Re-measured at `e8d59c4`: `node scripts/check-kernel.mjs` prints
+**The seam census is 10 and it did NOT move in wave 11 — but the command this file published as
+its independent cross-check now disagrees with the guard, and that is the news.** Re-measured at
+`4a70a4e`: `node scripts/check-kernel.mjs` prints
 `kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
 out here because it moves with every commit including the one carrying this line, and a number
 that invalidates itself the moment it is written is not a measurement anybody can check. Ten is
-the field that must not move by accident, and `git log --grep='^Kernel-seam:' --oneline | wc -l`
-agrees with it independently. The two newest are `a8d62fb`
+the field that must not move by accident. The two newest are `a8d62fb`
 (item 10's `quote` effect, which needed `journal/events.ts` and `run/replay.ts`) and `3762a0e`
-(item 13's `RunFilter.after`, which needed `journal/store.ts`) — both approved before they were
-spent, and both are ancestors of `e8d59c4` with nine commits after them. **This paragraph said 8
-across all nine**, and it said so while quoting a `check-kernel.mjs` line the guard does not
-print — the guard's real first line is the one pasted above. That is how a stale number survives a
-reader who checks: the quotation is the strongest-looking evidence on the page and it was the
-invented part. Paste the guard's output or cite nothing.
-`git log --grep='^Kernel-seam:'` is the ledger and it is not a number anyone can quietly reset.
+(item 13's `RunFilter.after`, which needed `journal/store.ts`), and nothing since has spent one:
+`552d999` was argued down to a `fix` (§F.19) and `7daa1e4` touched no kernel file.
+**This paragraph said 8 across nine commits once**, and it said so while quoting a
+`check-kernel.mjs` line the guard does not print — the guard's real first line is the one pasted
+above. That is how a stale number survives a reader who checks: the quotation is the
+strongest-looking evidence on the page and it was the invented part. Paste the guard's output or
+cite nothing.
 
-**The roadmap's items 9–13 are FOUR CLOSED AND ONE OPEN, re-run at `5ffc223`, one command each.**
-All five verdicts below reproduce unchanged from the previous re-run; only item 9's *reason* has
-moved, and it has now moved three times without the item closing. Each row was RUN rather than
-transcribed from `DESIGN.md`'s verdict table, which is the discipline that caught the last drift:
-**the two documents had drifted in OPPOSITE directions and DESIGN had also drifted from itself**,
-recording item 10 as "still fails" while item 10's own section was headed **DONE 2026-09-01**.
+**AND THE CROSS-CHECK IS NOT A CROSS-CHECK, measured 2026-09-02.** This file and `DESIGN.md` both
+said `git log --grep='^Kernel-seam:' --oneline | wc -l` "agrees with it independently". It returns
+**11**. The eleventh is `2a9eda8`, a `docs:` commit that spends no seam and touches no kernel file:
+its body says *"…both kernel, under a feat, so it costs a Kernel-seam: trailer and is a
+maintainer's call"*, and the line wrap put `Kernel-seam:` at a line start. **A grep for a trailer
+matches PROSE ABOUT the trailer**, so the ledger inflates whenever somebody writes down how the
+ledger works — which is a thing this project does constantly. Nor is git's own parser the
+fallback: `%(trailers:key=Kernel-seam,valueonly)` finds only **6** of the ten, because four
+(`3762a0e`, `97a53a1`, `d0ca421`, `dcdb3f1`) put the line mid-body rather than in the final
+trailer block, where git requires it. So the three commands give 10, 11 and 6.
+**`node scripts/check-kernel.mjs` is the census and there is no second opinion** — it is the only
+one of the three that applies the actual rule, `feat` ∧ touches-a-pinned-file ∧ declares a seam,
+and the other two apply one third of it each. The ledger is still not a number anyone can quietly
+reset; what is gone is the claim that a one-line grep audits it.
+
+**The roadmap's items 9–14 are ALL CLOSED, re-run at `4a70a4e`, one command each.** Item 9 was
+the last one open and it closed by a DECISION rather than a build (§A.8); item 14 closed by
+`0a8aa6d`. Each row below was RUN rather than transcribed from `DESIGN.md`'s verdict table, which
+is the discipline that caught the last drift: **the two documents had drifted in OPPOSITE
+directions and DESIGN had also drifted from itself**, recording item 10 as "still fails" while
+item 10's own section was headed **DONE 2026-09-01**.
 
 | item | command | measured |
 |---|---|---|
-| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass — still OPEN, and it is now §A.8's DECISION rather than any missing mechanism.** The green is the residual: the third case pins `charges [42] refunds []`. The reason it used to give — "it closes when the rewind door grows an approval floor" — is spent: A.34 built the gated half and A.35 the loud one. Measured at `5ffc223` by flipping `#compensateOne`'s `nodeApproved` to `true`: this suite goes 2/3 (`compensated` where `failed` is pinned) **and** `rewind-plan.test.ts` goes 6/7 (`refunds [21]` where `[]` is pinned), and item 9's own *Fails today* assertion becomes TRUE — one edit, both pins, one question. See §A.8 |
+| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass. DONE** — and the pin was TURNED OVER rather than left green: the third case used to assert `charges [42] refunds []` and now asserts the child's rollback runs and the money comes back. `rewind-plan.test.ts`'s companion pin flipped in the same commit, `552d999`, on one character |
 | 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **13 pass. DONE** — the pin was renamed `THE HOLE THIS CLOSES` and now asserts the refusal |
 | 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **13 pass. DONE** |
-| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **18 pass. DONE** — 15 when `DESIGN.md` measured it; three banner cases landed since |
-| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **6 pass. First half DONE** — 5 when `DESIGN.md` measured it. The second half (two planes dividing one listing) is §E.2's coordinator and is not a cursor |
+| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **18 pass. DONE** |
+| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **6 pass. First half DONE.** The second half (two planes dividing one listing) is §E.2's coordinator and is not a cursor |
+| 14 · `replay`/`trace` demand a graph the workspace holds | `node --test packages/core/test/cli/cli.test.ts` | **38 pass. DONE**, and driven through the binary from `README.md`'s own "Try it" workspace: `loom replay <id>` with no `--graph` answers `{"match": true, "hermetic": true}` after printing the file it resolved on stderr |
 
-Of the three backlog rows those items pointed at, one is still live — **and it is no longer the
-row this paragraph named.** Item 9's home was **§A.30**, whose sub-bullet stated the cause as
-`rewind`'s parent-only entry condition; that condition is DELETED and the descent is entered, so
-§A.30's copy was the third statement of item 9 and the only one still asserting a cause that is
-gone. It now points at **§A.8**, which owns what is actually left: the decision. Item 10's
-**§A.1** is already struck FIXED and item 13's **§A.15** already reads CLOSED, each carrying only
-the residual its closure did not cover. **Item 12 has no row, deliberately:** its subject is
-`README.md`'s fork ledger, whose two DEBT rows it closes, and §E's closing paragraph is explicit
-that the ledger is not re-enumerated here.
+Of the three backlog rows those items pointed at, none is still live. Item 9's home was **§A.30**,
+whose sub-bullet stated the cause as `rewind`'s parent-only entry condition; that condition is
+DELETED and the descent is entered, so §A.30's copy was the third statement of item 9 and the only
+one still asserting a cause that is gone. It moved to **§A.8**, which owned what was actually left
+— the decision — and §A.8 is now struck. Item 10's **§A.1** is struck FIXED and item 13's **§A.15**
+reads CLOSED, each carrying only the residual its closure did not cover. **Items 12 and 14 have no
+row, deliberately:** item 12's subject is `README.md`'s fork ledger, whose two DEBT rows it closes,
+and §E's closing paragraph is explicit that the ledger is not re-enumerated here; item 14 was a CLI
+gap driven through the binary, and a second copy of a driven failure is the copy that rots. §A.24
+is the different and harder question — putting the SPEC in the journal rather than its hash — and
+it stays where it is.
 
-**`DESIGN.md` added an item 14 at `5ffc223` — `loom replay` and `loom trace` refuse a run whose
-graph the workspace already publishes, while `approve` and `audit` in the same workspace do not.
-It gets no row here either, and for the same reason item 12 gets none:** it is a CLI gap driven
-through the binary, its reproduction is the two refusals pasted in that section, and a second copy
-of a driven failure is the copy that rots. §A.24 is the different and harder question — putting
-the SPEC in the journal rather than its hash — and it stays where it is.
+**`DESIGN.md`'s live list is therefore EMPTY, and no replacement is invented here.** That section's
+rule is that an item names a command which FAILS today; finding one is a measurement, and nothing
+in this pass produced one. The nearest candidates are already rows below rather than roadmap items:
+C.4's named residue (nothing calls the OTLP exporter from `cli.ts`), A.8's (a `run_failed` fixture
+whose undo would actually gate), and G.1's schema change, which is a maintainer's seam to spend.
 
 ---
 
 ## What is still open, by section
 
-**Recounted 2026-09-01 by running the grep, not by arithmetic on the previous number** — which is
+**Recounted 2026-09-02 by running the grep, not by arithmetic on the previous number** — which is
 the only method that has ever produced a right answer here. Every column below comes from one of
 these three commands, and a reader who does not believe a cell should run them rather than argue:
 
@@ -129,17 +154,18 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 34 | 14 | 20 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 34 | 15 | 19 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
-| §C | 5 | 1 | 4 | unbuilt observability |
+| §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
-| §F | 18 | — | — | properties to preserve, not history to honour; nothing here is "open" |
+| §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
 | §H | 4 | 1 | 3 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.5; **§D** D.2, D.4; **§H** H.2.
+A.8, A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.5; **§D** D.2, D.4;
+**§H** H.2.
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
@@ -235,7 +261,8 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
 
 - **A.6 · A pass-through value with a two-faced `then` getter still crosses the realm boundary,
   and it is left open deliberately.** The thenable refusal now lives once at the seam in
-  `resources/realm.ts`, covers both loaders, and `realm.ts:541-573` enumerates what it does NOT
+  `resources/realm.ts`, covers both loaders, and its
+  `WHAT IT STILL DOES NOT CATCH — TWO MEMBERS` heading enumerates what it does NOT
   catch as two members rather than one — which matters, because **the `Map` case (member 1) IS
   caught**, by the canonicalizer refusing a `Map` at all. The survivor is member 2: `rebuild`
   returns a value as-is whenever its prototype's constructor is not named `Object`, i.e. every
@@ -584,7 +611,8 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   **both** of the graphs the loop is actually driven on — `examples/graphs/review-bench.json` and
   `examples/graphs/self-review.json`, two `costUsd` occurrences each — while
   `GRAPH009_UNBOUNDED_NODE` tells authors to ADD that field to any spending node
-  (`graph/validate.ts:1962`, and `evolution/gate.ts:310` says so where the refusal would go).
+  (`graph/validate.ts`'s `GRAPH009_UNBOUNDED_NODE`, and `evolution/gate.ts`'s `unexercised`
+  docstring says so where the refusal would go).
   **So "refuse a candidate whose policy the offline gate cannot exercise" is not free: it turns
   the offline gate into a refuse-everything gate for every well-formed graph.** That is the
   measurement, and it is the reason this half is carried rather than attempted again.
@@ -644,7 +672,8 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   of 6 — the permissive side — so at an even count THREE pairs could go from a $0 baseline to a
   paying candidate and `3-cost` still passed: driven, `3 × $0 → $100` plus `3 × $1 → $1` reported
   `median pair cost ratio 1.00x` and PROMOTED while its own passing line printed
-  `totals 303.000000 vs 3.000000`. The upper median (`Math.floor(length / 2)`, `live.ts:435`) is
+  `totals 303.000000 vs 3.000000`. The upper median (`Math.floor(length / 2)`, in
+  `pairedCostRatio`) is
   what makes "half the pairs went from free to paid" refuse. A check closed at 6-of-6 and open at
   3-of-6 is not a check, and only an even-count fixture could show it.
 
@@ -872,7 +901,7 @@ is a better view of nothing.
   - **`loom.context.assemble`** — `run/context.ts` assembles and journals nothing.
   - **`loom.replay`** — the gap is TWO deep, not one. `replayRun` submits a shadow run through
     the ordinary `engine.submit`, so its journal carries no marker; and the shadow lives in a
-    fresh `MemoryStateStore` (replay.ts:640) that dies with the call, so there is no durable
+    fresh `MemoryStateStore` (`replayRun`'s `shadow`) that dies with the call, so there is no durable
     replay journal to fold at all. Needs an optional `replayOf: RunId` on `run.submitted` —
     which has optional-field precedent in `submittedBy` — plus a durable shadow store.
   - **`loom.scheduler.tick`** — C.3, and a design gap rather than a wiring one: there is no
@@ -921,7 +950,7 @@ is a better view of nothing.
   **The grep this row was previously re-verified with was itself an undercount, which is why the
   eleven must be counted two ways.** `/usr/bin/grep -ac '"<attr>"'` returns 0 for `capability` at
   HEAD even though it IS set, because `spans.ts` writes it as a bare identifier (`capability:`,
-  `spans.ts:798`). Counting both spellings —
+  on the `policy.decided` arm). Counting both spellings —
   `/usr/bin/grep -aoE '"(budget\.cost_usd|…|gate\.batched)"|(^|[^.\w"])(capability|reducers|trigger|source)\s*:' packages/core/src/telemetry/spans.ts`
   — returns exactly three today: `capability:`, `"gate.batched"`, `"tool.attempt"`. The control
   that proves the grep discriminates rather than failing silently is still
@@ -969,7 +998,8 @@ is a better view of nothing.
   and its NEGATION, and `!modelish` is not `tool` — so `subgraph` and `random` both landed on
   `loom.tool` for the same reason. Three arms fix all of it: `model|summarize → loom.model`,
   `tool|compensate → loom.tool`, `subgraph|random → loom.effect`. `subgraph.started` now opens
-  `loom.effect` at `spans.ts:993`, and the two literals that can name that span agree by
+  `loom.effect` in `spansFrom`'s `isEvent(e, "subgraph.started")` arm, and the two literals that
+  can name that span agree by
   construction because `start` is a no-op on an open id — if they disagreed, a span's name would
   depend on which events a read happened to contain. Driven:
   `test/telemetry/subgraph-trace-driven.test.ts`, 2/2, selecting the span by
@@ -995,8 +1025,8 @@ three of them resolved to *do not build*.
 Each row below states what a decision would settle. None is the implementer's to answer alone.
 
 - **D.1 · Per-server `irreversibility` on `--mcp-file`, and the unknown-key refusal
-  `readMcpServers` lacks.** `mcp/tools.ts:84` hardcodes `irreversibility: "irreversible"` on every
-  tool from every MCP server, so **every MCP tool gates** — and `readMcpServers` (`cli.ts:2408`)
+  `readMcpServers` lacks.** `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
+  on every tool from every MCP server, so **every MCP tool gates** — and `cli.ts`'s `readMcpServers`
   validates exactly `name`, `command`, `args` and `envAllow` and then builds its result from those
   four keys, with no unknown-field refusal anywhere, so an operator writing a per-server class
   today is silently ignored. That is the same defect class `GRAPH020_UNKNOWN_FIELD` exists to
@@ -1056,8 +1086,8 @@ of these on 2026-08-26.
 **Vintage, stated rather than implied: every reason below was last tested by running on
 2026-08-25/26, not on 2026-09-01.** The two facts re-checked today are E.1's — `LeasedScheduler`
 still has no construction site anywhere in `src/`
-(`/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` returns ONE line — `cli.ts:572`,
-the docstring asserting it appears zero times — and that self-reference is the whole result: no
+(`/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` returns ONE line — in `cli.ts`, the
+docstring asserting it appears zero times — and that self-reference is the whole result: no
 construction site exists. The bare name returns ten: four in `run/scheduler.ts`, which is its
 declaration rather than "its own definition", and six docstrings, five in `cli.ts` and one in
 `engine.ts`. An earlier wording here said "its own definition and four docstring mentions" and
@@ -1141,7 +1171,9 @@ anecdotes.
 3. **A guard's permissive branch is where the surprise lives.** Refusals attract tests; the arm
    that lets something through does not.
 4. **Mutation-test every guard.** A test whose expected value could also come from a fallback path
-   is a tautology waiting to be discovered. §A.8 is the live instance in this file.
+   is a tautology waiting to be discovered. §A.8's NAMED RESIDUE is the live instance in this
+   file: the row itself is struck, and what it left behind is one line carrying two answers with
+   only one of them under a test.
 5. **Driving beats sweeping.** Every wave that found real defects found them by running a new
    shape of thing. Sweeps derived from the last finding mostly find nothing, because in a
    disciplined codebase most findings are exceptions rather than instances of a class.
@@ -1194,21 +1226,57 @@ anecdotes.
     eight distinct line numbers, and all eight were stale** — every one landed on an unrelated
     comment. `:1457` (the `nodeApproved` argument) is at 1636; `:2980` (a condition that has since
     been DELETED) is mid-docstring; `:7412` (`#failRun`) is at 8116. They were replaced by symbol
-    names in the same commit as this entry. **The invariant, stated instead of a count:** no
-    line-numbered citation into `src/` remains anywhere in these two files. Every surviving match
-    of that grep is one of three non-citations — this entry's own example, §A.34's mention of the
-    *pattern* `engine.ts:NNNN`, and §H.2's historical `engine.ts:7096`, which is the exception
-    below. **None is a pointer, which is what makes this rule checkable rather than merely
-    stated.**
-    An earlier draft of this sentence said the grep "returns exactly two lines". It returns
+    names in the same commit as this entry.
+    **AND THE INVARIANT THAT FOLLOWED WAS WRONG THE DAY IT WAS WRITTEN, for the reason this entry
+    is about.** It said "no line-numbered citation into `src/` remains anywhere in these two
+    files", and it inferred that from a grep for **`engine.ts` alone**. Widened on 2026-09-02 to
+    `/usr/bin/grep -aon '[a-zA-Z_/-]*\.ts:[0-9][0-9]*' TODO.md DESIGN.md`, **sixteen** more turned
+    up — twelve in this file (`realm.ts`, `graph/validate.ts`, `evolution/gate.ts`,
+    `evolution/live.ts`, `run/replay.ts`, `telemetry/spans.ts` twice, `mcp/tools.ts`, `cli.ts`
+    twice, `graph/compile.ts` twice) and four in `DESIGN.md` (`run/projection.ts`,
+    `graph/compile.ts`, `run/hooks.ts`, `journal/events.ts`) — and five had already gone stale
+    exactly as predicted: `spans.ts:798` and `:993` both land on unrelated comments,
+    `replay.ts:640` is 28 lines short of the `shadow` store it named, `cli.ts:2408` is 339 short
+    of `readMcpServers`, and `hooks.ts:89` names a path with no file at it at all. All sixteen are
+    symbols now. **A claim about a SET checked by a grep over one MEMBER of it is the
+    same defect as a stale line number**: it fails silently, by looking checked.
+    **The invariant, restated with its exemptions named so it is falsifiable:** every remaining
+    match of that widened grep is one of exactly two kinds — a path under `test/` (§A.23's
+    `skeleton.ts:73`, and the `test.ts:N`s in §B.2, §F.1, §H.2 and `DESIGN.md`'s D2), or a record
+    of what a pointer
+    USED TO BE, which is this paragraph's own five examples plus §H.2's historical
+    `engine.ts:7096`, the exception below. **Not one is a live pointer into `src/`, which is what
+    makes this rule checkable rather than merely stated.** (§A.34 also names the *pattern*
+    `engine.ts:NNNN`; it has no digits, so the widened grep does not see it and it is listed here
+    only so a reader who greps for `engine.ts` is not surprised by a fourth hit.)
+    An earlier draft of this sentence said the narrow grep "returns exactly two lines". It returns
     three, and the third is THIS ENTRY — the line describing the grep matches it. That is
     §F.9 ("a self-describing claim has no fixed point") broken by the row asserting §F.18, which
-    is the second time this session a rule was violated by the paragraph stating it. State the
+    is the second time that session a rule was violated by the paragraph stating it. State the
     invariant; never total the matches of a grep inside the text the grep searches. A symbol is greppable, survives every edit above it,
     and fails LOUDLY when it is renamed; a line number into a nine-thousand-line file goes stale
     on the next commit and fails SILENTLY, by pointing at something plausible. One exception, and
     §H.2's own rows are it: a citation that records what a pointer *was* is the one use a stale
     number is correct for.
+19. **The kernel guard's job is to force a question, and "relabel until it passes" is the failure
+    it exists to catch.** §A.8's change was first committed `feat(run)`, and
+    `scripts/check-kernel.mjs` refused it because it touches `run/engine.ts`. Two answers were
+    available and only one of them is honest: take a `Kernel-seam:` trailer, or argue the label.
+    It was re-committed as `fix(run)` — `552d999` — with the argument IN THE BODY rather than
+    assumed, and the argument is checkable: **no mechanism is added** (`nodeApproved` was already
+    a parameter of `#invokeTool`, and `trigger` was already a parameter of `#dispatchRollback`,
+    the caller — `git show 552d999^:packages/core/src/run/engine.ts` shows both), **no vocabulary
+    is added** (no journal event, no schema field, nothing a fold must learn), and it RESTORES a
+    property the code already claimed. What changed is which value an existing parameter carries.
+    A seam trailer would have recorded a debt that does not exist, and the ledger is only worth
+    reading if every entry in it is real.
+    **The tell that separates this from the failure, and it is the part to copy:** the argument
+    was written down where the guard's own ledger can be audited against it, and it names what
+    would falsify it. Had `#compensateOne` needed a new parameter *threaded from a new place*, or
+    a new `effect.started.kind`, the honest answer would have been the trailer and this row would
+    say the census is 11. **A `fix` label that cannot survive being spelled out in the commit body
+    is a `feat` wearing a disguise**, and the guard cannot tell the two apart — only the argument
+    can, which is why the guard demands one rather than deciding.
 
 ---
 
@@ -1411,15 +1479,19 @@ Each traces to a decision in `DESIGN.md`.
   — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
   into enumerations.
 
-- **H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four.** Found
-  while re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy
-  §F.8. `graph/compile.ts:163` says "**THE SET IS `agent`, `tool`, `evaluator`**" and "why the
-  other **five** do not"; the bullets below it describe four members (`function` is the fourth,
-  added by `ff4888d`) and the next heading says "**THE FOUR** WITHOUT ONE". The CODE is right —
-  `effectiveTimeout` at `compile.ts:206` tests all four — so nothing is mis-executed; what is
-  wrong is the two summary numbers, which are the only part of a 45-line comment a hurried reader
-  takes away. **Closes when** both read four, and the fix is two words. Recorded rather than done
-  because this lane owns `TODO.md` and `DESIGN.md` and not `src/`.
+- **H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four. TWO OF THE
+  THREE ARE FIXED; ONE IS NOT, and the survivor is the one no summary line carries.** Found while
+  re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy §F.8. The
+  two headline numbers now read four — `graph/compile.ts`'s `effectiveTimeout` docstring says
+  "THE SET IS `agent`, `tool`, `evaluator`, `function`" and "why the other four do not", against
+  the "three"/"five" this row was opened for. **What is still wrong is mid-sentence:** the same
+  opening paragraph ends "so the question is not … but *can its BODY fail to settle*, and only
+  **these three** can", immediately above four bullets. The CODE was always right — the function
+  tests all four types — so nothing is mis-executed. **Closes when** that clause reads four, and
+  the fix is one word. Recorded rather than done because this lane owns `TODO.md` and `DESIGN.md`
+  and not `src/`. **The lesson is why a partial correction is worth a row of its own:** the two
+  loud numbers were the ones a reader checks and the ones somebody fixed; the quiet one inside a
+  sentence survived, and it is the one that still contradicts the bullets beneath it.
 
 ---
 

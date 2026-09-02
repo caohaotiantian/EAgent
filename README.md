@@ -83,7 +83,8 @@ loom serve                            # console + API on :8787, from an empty di
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
 | **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (the exported NAME SET, enumerated in `scripts/surface.json`) and the kernel file list (`scripts/kernel.json`). One package, and it has no runtime dependencies to audit |
-| **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted) |
+| **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted). A rewind's undos run APPROVED, because `rewind` takes a human actor and refuses a plan hash that no longer matches what it would dispatch; a run's own failure does not, because no automated path may approve itself |
+| **Tracing out** | `loom trace <runId>` renders the span tree in a terminal, and `GET /runs/:id/trace` on a `loom serve` plane answers the same fold as JSON — or, with `?format=otlp`, as an OTLP/HTTP JSON `ExportTraceServiceRequest` a collector ingests directly. Hand-rolled, so the zero-dependency rule still holds. There is no push yet: nothing in the CLI posts to a collector, so a deployment that wants export wires `OtlpHttpExporter` as a library embedder |
 
 ## What does not work yet
 
