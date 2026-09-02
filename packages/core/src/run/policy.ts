@@ -46,6 +46,33 @@ export interface PolicyRequest {
   /** True when any channel this action reads was written from untrusted tool output. */
   readonly tainted?: boolean;
   /**
+   * True when a `router` chose this action's branch from untrusted content.
+   *
+   * The control-flow axis of what `tainted` does for data flow, and the reason it is a separate
+   * field is that it is a separate FACT: this action may read nothing untrusted at all, and
+   * still only be running because injected text picked the branch it sits on. `tainted` answers
+   * "what did it read"; a request that folded the two would make the reason an operator reads
+   * — and every audit built on those reasons — say the wrong one of the two.
+   *
+   * It earns the same hard floor for the same argument, which is the only argument this file
+   * makes about ceilings: a de-escalation is a judgement about what the human could SEE when
+   * they made it, and a branch that untrusted content selected afterwards is not in the graph
+   * they read. So `on` no longer covers it and they are asked again. Nothing here can lower a
+   * posture; a request that omits this field is exactly the request that existed before it.
+   *
+   * WHAT THIS FIELD IS FOR, PRECISELY, because inside the engine it is the second of two
+   * mechanisms and never the first. `Engine.#decide` fires E8 on the same evidence and
+   * escalates `node:<runId>/<nodeId>` to `in`, and an escalation is unclampable, so a run
+   * driven by the engine gates there before this floor is consulted. This is the floor an
+   * EMBEDDER gets: `PolicyEngine` is public and `decide` is its door, and a caller authorizing
+   * an action without reimplementing E8 must still be unable to lower a branch that untrusted
+   * content chose. `tainted` and `carriesSecret` are in the same position for the same reason;
+   * leaving the third of three out is the asymmetry that produces the next bug.
+   * `test/run/control-flow-taint.test.ts` drives this door with no Engine around it for exactly
+   * that reason — with one, the escalation answers first and this line is never reached.
+   */
+  readonly controlTainted?: boolean;
+  /**
    * True when a channel this action reads carries secret data it was not DECLARED to hold.
    *
    * Separate from `dataClassification` on purpose, and the difference is what a human could see.
@@ -486,6 +513,9 @@ export class PolicyEngine {
     if (req.tainted === true && isHardToUndo(req.irreversibility)) {
       reasons.push(`tainted input feeding an ${req.irreversibility} action (E8)`);
     }
+    if (req.controlTainted === true && isHardToUndo(req.irreversibility)) {
+      reasons.push(`a branch chosen from untrusted content selected this ${req.irreversibility} action (E8)`);
+    }
     const posture = this.effectivePosture(req);
     reasons.push(`effective posture ${posture}`);
 
@@ -512,7 +542,7 @@ export class PolicyEngine {
    * |---------------------------------|-----------|-----|
    * | `#systemFloor`                  | yes | the deployment default the graph they read ran under. `deescalate` already demands a human, a justification and three deny-list checks; the hard floor below stops it reaching `out` for hard-to-undo work. |
    * | `CLASS_DEFAULT_POSTURE[irrev.]` | yes | the tool's own class, written in the graph. This is the term de-escalation EXISTS for — an irreversible action always computes to `in`, so without clamping it "let this run on-the-loop" could never be said and the intervention window could never fire. |
-   * | `dataFloor` (declared)          | yes | `dataClassification` comes from the channel declarations in that same graph. Its unseen twin, `carriesSecret`, is not a term here — it raises the hard floor instead. See below. |
+   * | `dataFloor` (declared)          | yes | `dataClassification` comes from the channel declarations in that same graph. Its two unseen twins, `carriesSecret` and `controlTainted`, are not terms here — they raise the hard floor instead, with `tainted`. See below. |
    * | `req.declaredPosture`           | yes | the graph author's own compile-time fold. Read. |
    * | `#escalations` `run:<runId>`    | **no** | see below |
    * | `#escalations` `node:<runId>/<nodeId>` | **no** | see below |
@@ -596,7 +626,17 @@ export class PolicyEngine {
     // one dropped the sink from `in` to `on`, no gate was raised, and the tool received the
     // plaintext. The declared classification stays clampable — it is in the graph the human saw —
     // and only the flow they could not see holds the floor at `in`.
-    const unseen = req.tainted === true || req.carriesSecret === true;
+    // AND A BRANCH UNTRUSTED CONTENT CHOSE, which is the third member of this set and was
+    // missing. The two above ask what the action READ; this asks whether it is running at all
+    // because injected text picked its branch — a `router` on an untrusted channel selecting
+    // an irreversible node whose own reads are clean. Measured before the rule existed at all:
+    // two graphs one read apart, same injected string, same ceiling of `on`; the one whose
+    // charge read the untrusted channel gated, and the one where a router merely CHOSE it
+    // charged, with zero gates. Same floor as the other two and for the identical reason — a
+    // branch selected after the human spoke is not in the graph they read, so their judgement
+    // does not cover it. See the field's own docstring for why this line is the embedder's
+    // floor rather than the engine's gate.
+    const unseen = req.tainted === true || req.carriesSecret === true || req.controlTainted === true;
     const clamped = isHardToUndo(req.irreversibility) ? maxPosture(ceiling, unseen ? "in" : "on") : ceiling;
 
     const lowered = postureRank(clamped) < postureRank(clampable) ? clamped : clampable;
