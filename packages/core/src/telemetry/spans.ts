@@ -256,6 +256,21 @@ interface Open {
  */
 export const OTLP_RUN_ID_ATTR = "loom.run_id";
 
+/**
+ * The resource attribute saying the fold this batch came from was over a PREFIX of the journal.
+ *
+ * Here for the same reason as `OTLP_RUN_ID_ATTR` — one file owns the `loom.*` vocabulary — and
+ * present at all because `?format=otlp` had no way to say it. The trace route bounds its fold at
+ * `MAX_TRACE_EVENTS` and its docstring promises the response says `truncated: true` "so nobody
+ * reads a partial waterfall as a finished one"; the `spans` branch kept that promise and the
+ * `otlp` branch silently dropped it, because `ExportTraceServiceRequest` has no field for it.
+ * A resource attribute is where OTLP puts a fact about the batch rather than about a span.
+ *
+ * ONLY EMITTED WHEN TRUE. An absent attribute and `false` mean the same thing to a collector,
+ * and the honest signal is the one that appears exactly when there is something to say.
+ */
+export const OTLP_TRUNCATED_ATTR = "loom.trace.truncated";
+
 export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
   if (events.length === 0) return [];
   // `digestOf` is `createHash().update(v, "utf8")`, which throws `ERR_INVALID_ARG_TYPE` for a

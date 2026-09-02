@@ -215,6 +215,7 @@
   "NodeType",
   "OBSERVER_POINTS",
   "OTLP_RUN_ID_ATTR",
+  "OTLP_TRUNCATED_ATTR",
   "OpenAIAdapter",
   "OpenAIOptions",
   "OtlpExportResult",

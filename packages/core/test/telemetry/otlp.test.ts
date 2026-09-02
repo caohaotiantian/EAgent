@@ -418,7 +418,11 @@ test("EXPORTING NEVER THROWS — an unreachable collector, a hostile options bag
     await new OtlpHttpExporter({
       endpoint: "https://svc:hunter2@collector.internal:4318",
       fetch: (() => {
-        throw new TypeError("fetch failed");
+        // The message REAL `fetch` produces — it quotes the URL it was handed, credential and
+        // all. The stub used to throw a bare "fetch failed", which meant the credential
+        // assertion below could not fail: replacing `mask`'s body with `return text` left this
+        // whole suite green. A redactor nothing exercises is a redactor nobody can rely on.
+        throw new TypeError("request to https://svc:hunter2@collector.internal:4318/v1/traces failed, reason: getaddrinfo ENOTFOUND collector.internal");
       }) as unknown as typeof globalThis.fetch,
     }).export(spans),
   );
@@ -440,7 +444,14 @@ test("EXPORTING NEVER THROWS — an unreachable collector, a hostile options bag
   assert.equal(results[0]!.ok, false);
   assert.equal(results[0]!.ok === false && results[0]!.reason, "transport");
   // And the credential in the endpoint is not in the message `fetch` quoted back at us.
-  assert.equal(results[0]!.ok === false && results[0]!.detail.includes("hunter2"), false);
+  const d0 = results[0]!.ok === false ? results[0]!.detail : "";
+  assert.equal(d0.includes("hunter2"), false, "a collector credential reached a string the caller journals");
+  assert.equal(d0.includes("[redacted]"), true, "the URL was masked rather than the message being dropped");
+  // The HOSTNAME survives, which is `endpointSecrets`'s stated intent and worth pinning: the
+  // mask list holds `origin` and `href`, not the bare host, so `ENOTFOUND collector.internal`
+  // stays readable. That is what an operator diagnoses a dead collector with, and a host is
+  // not a secret.
+  assert.equal(d0.includes("ENOTFOUND collector.internal"), true, "the mask ate the diagnosis along with the secret");
   // A throwing `timeoutMs` is caught, not propagated — the export fails, the process does not.
   assert.equal(results[1]!.ok, false);
 });
@@ -457,4 +468,29 @@ test("a caller's AbortSignal stops the POST, and that is a result rather than a 
   const res = await new OtlpHttpExporter({ endpoint: "http://c:4318", fetch: fetchThatHonoursAbort }).export(spansFrom(fixtureJournal()), ctl.signal);
   assert.equal(res.ok, false);
   assert.equal(res.ok === false && res.reason, "timeout", "an abort and a timeout are the same fact to a caller: nothing was sent");
+});
+
+test("an Object.prototype key is not a span kind, and the fallback fires", () => {
+  // `otlpTraceRequest`'s contract is TOTAL OVER ITS INPUT and names hand-built arrays as the
+  // reason, so `kind` is a `SpanKind` only by declaration. `KIND_CODE["constructor"]` is a
+  // function, not undefined, so the old `?? 0` never fired: `JSON.stringify` then dropped the
+  // function-valued `kind` entirely, and `"__proto__"` shipped `kind: {}` — an object where OTLP
+  // requires an integer enum. Both reach the wire as this file's opening failure mode, a 200
+  // followed by nothing being visible.
+  const base = { name: "n", startTime: 1, endTime: 2, attributes: {}, traceId: "a".repeat(32), spanId: "b".repeat(16) };
+  const first = (kind: string, status: string): Record<string, unknown> => {
+    const payload = otlpTraceRequest([{ ...base, kind, status }] as never, {});
+    return JSON.parse(JSON.stringify(payload)).resourceSpans[0].scopeSpans[0].spans[0] as Record<string, unknown>;
+  };
+  for (const key of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    // Read AFTER the wire encoding, because that is where the inherited value did its damage:
+    // a function-valued `kind` simply vanishes from the JSON rather than arriving wrong.
+    const span = first(key, key);
+    assert.equal(span["kind"], 0, `kind fell back for ${key}`);
+    assert.deepEqual(span["status"], { code: 0 }, `status fell back for ${key}`);
+  }
+  // A real kind is untouched.
+  const good = first("client", "error");
+  assert.equal(good["kind"], 3);
+  assert.deepEqual(good["status"], { code: 2 });
 });

@@ -118,6 +118,29 @@ const SCOPE_NAME = "@loom/core/telemetry";
 const KIND_CODE: Readonly<Record<SpanKind, number>> = { internal: 1, server: 2, client: 3 };
 const STATUS_CODE: Readonly<Record<SpanStatus, number>> = { unset: 0, ok: 1, error: 2 };
 
+/**
+ * `map[key] ?? fallback`, for a key this file does not get to assume the type of.
+ *
+ * The plain form is wrong here and the type system cannot say so. `otlpTraceRequest`'s
+ * contract is TOTAL OVER ITS INPUT and it names hand-built arrays as the reason, so `s.kind`
+ * is a `SpanKind` only by declaration. On an `Object.prototype` key it is not even undefined:
+ * `KIND_CODE["constructor"]` is a FUNCTION, `??` therefore does not fire, and the fallback
+ * that exists for precisely this case is skipped. Measured on the three shapes that reach the
+ * wire: `kind: "constructor"` serialized to a span with NO `kind` field, because
+ * `JSON.stringify` drops a function-valued key; `kind: "__proto__"` serialized to `kind: {}`,
+ * an object where OTLP requires an integer enum, which is the worse one because it survives
+ * JSON and a collector rejects the batch over it. Both are this file's own opening failure
+ * mode — a 200 followed by nothing being visible — reached through the guard meant to stop it.
+ *
+ * `hasOwn` is the whole fix: consult the map only where the map actually spoke, and otherwise
+ * take the fallback. Failing to the fallback is the closed direction here — an unknown kind is
+ * `internal`(0)/`unset`(0), which is what the enum's own default means.
+ */
+function codeOf(map: Readonly<Record<string, number>>, key: unknown, fallback: number): number {
+  const own = typeof key === "string" && Object.hasOwn(map, key) ? map[key] : undefined;
+  return own ?? fallback;
+}
+
 /** Lowercase hex of exactly `n` chars, and not all zeroes — OTLP calls an all-zero id invalid. */
 function isId(v: unknown, n: number): v is string {
   if (typeof v !== "string" || v.length !== n) return false;
@@ -371,7 +394,7 @@ export function otlpTraceRequest(spans: readonly Span[], options: OtlpTraceReque
       traceId,
       spanId,
       name: s.name,
-      kind: KIND_CODE[s.kind] ?? 0,
+      kind: codeOf(KIND_CODE, s.kind, 0),
       startTimeUnixNano: nanos(s.startTime),
       endTimeUnixNano: nanos(s.endTime),
       attributes: keyValues(s.attributes, 1),
@@ -381,7 +404,7 @@ export function otlpTraceRequest(spans: readonly Span[], options: OtlpTraceReque
       droppedAttributesCount: 0,
       droppedEventsCount: 0,
       droppedLinksCount: 0,
-      status: { code: STATUS_CODE[s.status] ?? 0 },
+      status: { code: codeOf(STATUS_CODE, s.status, 0) },
     };
     // ABSENT, NOT EMPTY, for a root span. `parentSpanId: ""` is what the proto's default
     // encodes to and several collectors read a present-but-empty parent as a broken reference

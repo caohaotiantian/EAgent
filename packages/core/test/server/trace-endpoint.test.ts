@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 
 import { BearerTokenIdentity, ControlPlane, type IdentitySource } from "../../src/server/http.ts";
 import { otlpTraceRequest } from "../../src/telemetry/otlp.ts";
+import { OTLP_RUN_ID_ATTR, OTLP_TRUNCATED_ATTR } from "../../src/telemetry/spans.ts";
 import { spansFrom, type Span } from "../../src/telemetry/spans.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import type { RunId, Seq } from "../../src/ids.ts";
@@ -191,6 +192,35 @@ test("SOMEBODY ELSE'S TRACE IS A 404, indistinguishable from a run that does not
     const forTheirs = await said(theirs, runId);
     assert.deepEqual(forTheirs, await said(absent, "01JDOESNOTEXIST000000000000"));
     assert.deepEqual(forTheirs, { class: "not_found", code: "E_RUN_NOT_FOUND", message: "run <id> not found", retryable: false });
+  } finally {
+    await r.close();
+  }
+});
+
+test("truncation is a fact about the batch, and OTLP says it as a resource attribute", async () => {
+  const r = await rig();
+  try {
+    const runId = await submit(r);
+    // The `spans` branch has always carried `truncated`; the `otlp` branch dropped it, because
+    // `ExportTraceServiceRequest` has no body field for it — so the route's own docstring
+    // ("nobody reads a partial waterfall as a finished one") held on one of its two branches.
+    // A resource attribute is where OTLP puts a fact about the batch.
+    const otlp = (await (await fetch(`${r.base}/runs/${runId}/trace?format=otlp`, { headers: auth })).json()) as {
+      resourceSpans: { resource: { attributes: { key: string }[] } }[];
+    };
+    const keys = otlp.resourceSpans[0]!.resource.attributes.map((a) => a.key);
+    assert.ok(keys.includes(OTLP_RUN_ID_ATTR), "the run id attribute is still there");
+
+    // ABSENT, not `false`, for a complete fold — the contract on the constant. This run is well
+    // under `MAX_TRACE_EVENTS`, and the `spans` branch agrees:
+    const plain = (await (await fetch(`${r.base}/runs/${runId}/trace`, { headers: auth })).json()) as { truncated: boolean };
+    assert.equal(plain.truncated, false);
+    assert.equal(keys.includes(OTLP_TRUNCATED_ATTR), false, "an absent attribute and false say the same thing");
+
+    // The name is spelled once, in the file that owns the `loom.*` vocabulary, and this pins it
+    // against a second spelling appearing at the route — the defect `registries.test.ts` caught
+    // for `loom.run_id`.
+    assert.equal(OTLP_TRUNCATED_ATTR, "loom.trace.truncated");
   } finally {
     await r.close();
   }
