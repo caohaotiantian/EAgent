@@ -21,9 +21,16 @@
  * the authored one is the second of two layers. For `read_only` and `reversible_write` the
  * authored gate is the ONLY oversight there is, and that is the case this has to hold for.
  *
- * The rule is dominator preservation, and the end-to-end arm is the one that matters: the
- * compile-level checks that existed covered two of the three edge directions, and covering two
- * of three is how this arrived.
+ * The rule is preservation of the dominators that CARRY OVERSIGHT, and the narrowing is not a
+ * detail. Keyed on dominance alone it refused a four-node chain of plain `function` nodes — no
+ * gate, no tool, posture `out` — proposing "also do this lookup, then carry on into the node I
+ * already lead to", which is the canonical expansion and the shape a mutation exists for. The
+ * last test here is that chain; the one before it is the admit half with something actually
+ * spanned, replacing a version that rejoined at the proposer's own successor and therefore lost
+ * no dominator at all.
+ *
+ * The end-to-end arm is the one that matters: the compile-level checks that existed covered two
+ * of the three edge directions, and covering two of three is how this arrived.
  */
 
 import test from "node:test";
@@ -189,6 +196,37 @@ async function driveAndReject(mutate: boolean): Promise<{ wrote: number; status:
   return { wrote: wrote(), status: after.status };
 }
 
+/** Four plain `function` nodes and nothing else: no gate, no tool, and the graph posture `out`. */
+function plainChain(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "plain-chain", project: "test", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 }, capabilities: [] },
+    channels: {
+      goal: { type: "string", reduce: "replace" },
+      a1: { type: "string", reduce: "replace" },
+      b1: { type: "string", reduce: "replace" },
+      c1: { type: "string", reduce: "replace" },
+      d1: { type: "string", reduce: "replace" },
+      x1: { type: "string", reduce: "replace" },
+    },
+    inputs: ["goal"],
+    outputs: ["d1"],
+    nodes: [
+      { id: n("a"), type: "function", reads: ["goal"], writes: ["a1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("b"), type: "function", reads: ["a1"], writes: ["b1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("c"), type: "function", reads: ["b1"], writes: ["c1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("d"), type: "function", reads: ["c1"], writes: ["d1"], function: { ref: "function/noop@stable", effects: [] } },
+    ],
+    edges: [
+      { id: e("a0"), from: n("a"), to: n("b"), kind: "seq" },
+      { id: e("a1e"), from: n("b"), to: n("c"), kind: "seq" },
+      { id: e("a2"), from: n("c"), to: n("d"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
 test("THE HUMAN REJECTED AND THE TOOL DID NOT RUN — a graft may not route around an authored gate", async () => {
   const grafted = await driveAndReject(true);
   assert.equal(grafted.wrote, 0, "the human said no and the tool ran anyway, through an edge the model added");
@@ -224,21 +262,26 @@ test("THE REFUSAL NAMES THE DOMINATOR THAT WOULD HAVE BEEN LOST", () => {
   assert.match(lost.message, /\bm1\b/, "…and the edge that did it");
 });
 
-test("A BRANCH THAT REJOINS BELOW EVERYTHING THAT DOMINATED THE TARGET IS STILL ALLOWED", () => {
-  // The rule is preservation, not "no added edge may touch an existing node". An added branch
-  // that leaves the proposer and re-enters at a node the gate ALREADY dominates takes nothing
-  // out of the gate's region, and refusing it would make the ordinary "do this too, then carry
-  // on" proposal impossible — which is the shape a mutation exists for.
+test("A REJOIN THAT SPANS AN ORDINARY NODE IS STILL ALLOWED — the rule is about oversight, not dominance", () => {
+  // THE ADMIT HALF, AND IT HAS TO SPAN SOMETHING. The version this replaces rejoined at the
+  // proposer's own immediate successor, where NO dominator is lost at all — the only rejoin a
+  // preserve-every-dominator rule admits — so it passed while that rule refused the canonical
+  // expansion. Here `pay -> extra -> after` skips `mid`, so `mid` really does leave `after`'s
+  // dominator set, and `mid` is a plain `function` at posture `out` that protects nothing.
+  //
+  // Measured with the rule keyed on dominance alone:
+  //
+  //     pay -> mid -> after, add pay -> extra -> after  -> MUT003_DOMINATOR_LOST, lost "mid"
   const spec = authoredSpec() as unknown as { nodes: unknown[]; edges: unknown[] };
-  spec.nodes.push({ id: n("after"), type: "function", reads: ["goal"], writes: ["note"], function: { ref: "function/noop@stable", effects: [] } });
-  spec.edges.push({ id: e("a2"), from: n("pay"), to: n("after"), kind: "seq" });
+  spec.nodes.push({ id: n("mid"), type: "function", reads: ["goal"], writes: ["note"], function: { ref: "function/noop@stable", effects: [] } });
+  spec.nodes.push({ id: n("after"), type: "function", reads: ["goal"], function: { ref: "function/noop@stable", effects: [] } });
+  spec.edges.push({ id: e("a2"), from: n("pay"), to: n("mid"), kind: "seq" });
+  spec.edges.push({ id: e("a3"), from: n("mid"), to: n("after"), kind: "seq" });
 
   const r = compileMutation({
     base: compile(spec as unknown as GraphSpec),
     mutation: {
       addNodes: [{ id: n("extra"), type: "function", reads: ["goal"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec],
-      // `pay` dominates `after`, and so does `gate`; the rejoin adds no path that skips either,
-      // because reaching `extra` at all means having gone through `pay`.
       addEdges: [
         { id: e("m0"), from: n("pay"), to: n("extra"), kind: "seq" } as unknown as EdgeSpec,
         { id: e("m1"), from: n("extra"), to: n("after"), kind: "seq" } as unknown as EdgeSpec,
@@ -258,4 +301,58 @@ test("A BRANCH THAT REJOINS BELOW EVERYTHING THAT DOMINATED THE TARGET IS STILL 
     `a legitimate rejoin was refused: ${r.diagnostics.map((d) => d.message).join(" | ")}`,
   );
   assert.equal(r.ok, true, `the rejoin did not compile: ${r.ok ? "" : r.error.message}`);
+
+  // AND THE GATE IS STILL THE BAR. The same graph, the same proposer, one edge moved: the rejoin
+  // now lands on `pay` itself, which `gate` dominates and `extra` does not. Nothing about the
+  // shape changed — only whether the dominator the edge removes is the one carrying oversight.
+  const g = compileMutation({
+    base: compile(spec as unknown as GraphSpec),
+    mutation: {
+      addNodes: [{ id: n("extra"), type: "function", reads: ["goal"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec],
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("extra"), kind: "seq" } as unknown as EdgeSpec,
+        { id: e("m1"), from: n("extra"), to: n("pay"), kind: "seq" } as unknown as EdgeSpec,
+      ],
+      proposedBy: "t1" as TaskId,
+      proposedByNode: n("plan"),
+    },
+    budget: { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } },
+    resolver: resolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  const lost = g.diagnostics.find((d) => d.code === "MUT003_DOMINATOR_LOST");
+  assert.ok(lost !== undefined, `the graft around the gate compiled: ${g.diagnostics.map((d) => d.code).join(", ") || "(none)"}`);
+  assert.match(lost.message, /\bgate\b/, "…and it is the gate that was named");
+});
+
+test("A PLAIN CHAIN ADMITS THE CANONICAL EXPANSION — no gate, no tool, posture out", () => {
+  // The regression this rule shipped, in its smallest form: four plain `function` nodes and a
+  // proposal that adds a lookup and carries on into the node the proposer already leads to.
+  // There is no oversight anywhere in this graph — no `human_gate`, no tool, and the graph
+  // posture is `out` — so there is nothing a second path could route around.
+  const r = compileMutation({
+    base: compileOrThrow({ spec: plainChain(), resolver: resolver(), tools: {}, tenantCapabilities: [] }),
+    mutation: {
+      addNodes: [
+        { id: n("lookup"), type: "function", reads: ["a1"], writes: ["x1"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec,
+      ],
+      addEdges: [
+        { id: e("m0"), from: n("a"), to: n("lookup"), kind: "seq" } as unknown as EdgeSpec,
+        { id: e("m1"), from: n("lookup"), to: n("c"), kind: "seq" } as unknown as EdgeSpec,
+      ],
+      proposedBy: "t1" as TaskId,
+      proposedByNode: n("a"),
+    },
+    budget: { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } },
+    resolver: resolver(),
+    tools: {},
+    tenantCapabilities: [],
+  });
+  assert.equal(
+    r.diagnostics.filter((d) => d.code === "MUT003_DOMINATOR_LOST").length,
+    0,
+    `the canonical expansion was refused: ${r.diagnostics.map((d) => d.message).join(" | ")}`,
+  );
+  assert.equal(r.ok, true, `the expansion did not compile: ${r.ok ? "" : r.error.message}`);
 });

@@ -8207,10 +8207,23 @@ export class Engine {
    *
    * So a skipped `human_gate` escalates the JOIN — the node that releases the downstream the
    * gate stood in front of — to `in`, and somebody is asked once. Not a refusal: an empty fan is
-   * a legitimate shape and this method exists for it, so the run continues on approval. Not the
-   * whole graph either: an empty fan whose branch holds nothing unskippable fires its join
-   * exactly as before, which is the alert-with-no-pods case above and the half
-   * `test/run/empty-fanout-oversight.test.ts` pins alongside the exploit.
+   * a legitimate shape and this method exists for it, so the run continues on approval.
+   *
+   * AND ONLY WHEN THE WIDTH WAS THE ATTACKER'S. The bound this docstring used to state was "an
+   * empty fan whose branch holds nothing unskippable fires its join exactly as before, which is
+   * the alert-with-no-pods case" — and the alert-with-no-pods workflow is precisely the one with
+   * a gate on its branch, so the sentence bounded the cost over a different population from the
+   * one paying it. Measured on the ordinary shape, "for each flagged item, ask a person" over a
+   * list the run's own INPUT produced, with `fetch` still running and `untrusted` still tainted:
+   *
+   *     the list is built from the input, nothing flagged -> awaiting_gate, gates=1  (before)
+   *     the list is built from the input, nothing flagged -> succeeded,     gates=0  (now)
+   *     the list is built from the fetched page, empty    -> awaiting_gate, gates=1  (both)
+   *
+   * The predicate is `fanout.over` being tainted, which is the one `applyFanoutWidthTaint`
+   * already computes for the same edge — a width nothing untrusted produced was chosen by the
+   * run's own data, and skipping a branch on the strength of it is what the graph asked for.
+   * `test/run/empty-fanout-oversight.test.ts` pins all three rows.
    *
    * THE UNSKIPPABLE SET IS ONE MEMBER, `human_gate`, and it is named rather than counted: of the
    * eight `NodeType`s it is the only one whose whole purpose is that a person acts before the
@@ -8220,7 +8233,13 @@ export class Engine {
    */
   #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
     const events: NewEvent[] = [];
-    const skipped = [...fanBody(ctx.index, fanout)].filter((id) => ctx.index.byId.get(id)?.type === "human_gate");
+    // WHOSE WIDTH IT WAS is the predicate, and `applyFanoutWidthTaint` computes the same one two
+    // functions on: a fan over a list nothing untrusted produced was emptied by the run's own
+    // data, and that is not an attack on the gate.
+    const attackerWidth = fanout.over !== undefined && ctx.tainted.has(fanout.over);
+    const skipped = attackerWidth
+      ? [...fanBody(ctx.index, fanout)].filter((id) => ctx.index.byId.get(id)?.type === "human_gate")
+      : [];
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
@@ -9084,12 +9103,18 @@ function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonl
  *
  * `controlRegion` has nothing to say about this: the fan edge is not conditional, it is not
  * narrowing a `take`, and a count is not a node set. What IS a node set is which nodes the
- * decision selected, and for a fan that is its BRANCH — `fanBody`, bounded at the join.
+ * decision selected, and for a fan that is its BRANCH — `fanBody`, bounded at the fan's own
+ * compiled depth.
  *
- * BOUNDED, AND THAT IS THE WHOLE OF IT. Marking `reachable(the fanout edge)` walks past the join
- * to the end of the graph, which is the constant gate this axis exists to avoid; the node BELOW
- * the join runs exactly once at every width including zero, so the width did not select it. Both
- * halves are pinned: the fan body gates and the node under the join does not.
+ * BOUNDED, AND THAT IS THE WHOLE OF IT. Marking `reachable(the fanout edge)` walks to the end of
+ * the graph, which is the constant gate this axis exists to avoid; the node BELOW the exit join
+ * runs exactly once at every width including zero, so the width did not select it. Both halves
+ * are pinned: the fan body gates and the node under the join does not.
+ *
+ * THE EXIT JOIN ITSELF IS IN, and `fanBody` argues that at length. It runs once at every width
+ * too, so the width did not select its EXECUTION — but the width is exactly what its FOLD saw,
+ * and at width 0 the folded channel is never written at all, so a join branching on that channel
+ * branches on a value an attacker chose by suppressing every write to it.
  *
  * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
  * is called from `#restoreEvidence` as well as `#commit`, in the same position at both.
@@ -9220,9 +9245,23 @@ interface Choice {
   /** Every edge the decision could have taken, taken or not. Empty when it picked among nothing. */
   readonly space: readonly EdgeSpec[];
   /**
-   * True when the DECIDING NODE supplied the choice — a router, or a `take` a producer wrote.
-   * It is what makes `observedChannels(node)` evidence in `choiceTainted`, and it is false for a
+   * True when the DECIDING NODE supplied the choice — a router, or a `take` a producer wrote. It
+   * is what makes `observedChannels(node)` evidence in `choiceTainted`, and it is false for a
    * take that only edge expressions narrowed, where the node's own reads decided nothing.
+   *
+   * IT IS NOT `narrowed`, and it was for one round. Having no unconditional out-edge widens the
+   * SPACE — not taking the arm means nothing runs, so the arm is a real choice — and says nothing
+   * about who picked. Tying the two together made a node that merely READ the fetched page supply
+   * its own reads as evidence for a decision an edge `when` made from the run's own input:
+   * "summarise the page, then branch on a clean flag", which `choiceTainted` names verbatim as
+   * the constant gate this axis exists to avoid. Measured, one `conditional` out-edge, no
+   * producer, the `when` reading only `request`:
+   *
+   *     `decide` reads the page -> awaiting_gate, gates=1, charged=0   (byTheNode = narrowed)
+   *     `decide` reads the page -> succeeded,     gates=0, charged=1   (byTheNode = producer)
+   *
+   * `only` and `loopuntil` stay marked through the split, because there the expression itself
+   * references the tainted channel and `choiceTainted` reads expressions on its own.
    */
   readonly byTheNode: boolean;
 }
@@ -9248,34 +9287,50 @@ interface Choice {
  *      `human_gate` redirect, or an operator `steer`. All three arrive as `outcome.take` and
  *      `#strayRoute` bounds them to the node's own outbound edges, which is what makes that
  *      set the space.
- *   5. THE FAILURE CODE, when the node has more than one `error` edge and at least one declares
- *      `codes`. `#errorEdges` filters on `e.codes.includes(code)`, so with two arms declared the
- *      code is what says which one runs — and a node that read the fetched page can fail with a
- *      code derived from it. One `function` node, two coded error arms, the charge on one of
- *      them: it returns `{retry}` (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and
- *      throws (`E_INTERNAL`) otherwise, so both halves take the same arm and only the channel
- *      differs. Measured with every error edge out of the space — succeeded, gates=0, charged=1;
- *      now awaiting_gate, gates=1, charged=0, and the clean half still succeeded/0/1.
- *
- *      ONE error edge stays out, which is the whole of the split: there was nothing to filter,
- *      so the failure chose the arm and the code chose nothing. There is NO second predicate
- *      asking whether any edge declares `codes`, and there was one until it was measured to do
- *      nothing: an edge with no `codes` is a catch-all that always matches, so if two arms exist
- *      and only one fired, the ones that did not fire were coded — the filter is where the
- *      discrimination is recorded. Two catch-alls both fire, which leaves the alternatives side
- *      empty and `controlRegion` returns nothing, and that row is pinned rather than reasoned.
+ *   (There is no fifth. A failure code was one for a round; see the `#errorEdges` entry below
+ *   for the four measurements that took it out again.)
  *
  * ## THE SET IT DOES NOT COVER, AND WHY EACH IS OUT
  *
- *   - `#errorEdges`, WHEN THE NODE HAS ONE. A failure selected that arm and content did not, so
- *     a lone error edge is in no choice space: a failed commit's `taken` side comes out empty
- *     whatever it read and `controlRegion` returns nothing. Driven on a `function` node that
- *     reads the injected page, throws, and hands its `error` edge an irreversible charge —
- *     succeeded, gates=0, charged=1, where leaving the taken side as the whole `take` instead
- *     measures awaiting_gate, gates=1, charged=0. That is also why the sentence about a failed
- *     commit in `controlRegion` is true: the version it replaced claimed a failed router's
- *     `take` is `[]`, which it is NOT when the router has an outbound `error` edge — `#commit`
- *     computes `take = this.#errorEdges(...)` for a failed outcome.
+ *   - `#errorEdges`, ALL OF THEM. A failure selected the arm and content did not, so an error
+ *     edge is in no choice space: a failed commit's `taken` side comes out empty whatever it read
+ *     and `controlRegion` returns nothing. Driven on a `function` node that reads the injected
+ *     page, throws, and hands its `error` edge an irreversible charge — succeeded, gates=0,
+ *     charged=1, where leaving the taken side as the whole `take` instead measures awaiting_gate,
+ *     gates=1, charged=0. That is also why the sentence about a failed commit in `controlRegion`
+ *     is true: the version it replaced claimed a failed router's `take` is `[]`, which it is NOT
+ *     when the router has an outbound `error` edge — `#commit` computes
+ *     `take = this.#errorEdges(...)` for a failed outcome.
+ *
+ *     THE FAILURE CODE WAS IN THE SPACE FOR A ROUND, AND THE ARM COUNT WAS THE PREDICATE. It is
+ *     out again, and the reason is that nothing in the journal separates the two populations the
+ *     count was standing in for. Four graphs, all driven twice — the deciding node reading the
+ *     fetched page, then the run's own input — with an irreversible charge on one arm:
+ *
+ *       two coded arms, the body picks the code from what it read
+ *                                   dirty awaiting_gate 1 gate | clean succeeded 0
+ *       two coded arms, the body ALWAYS throws the same code
+ *                                   dirty awaiting_gate 1 gate | clean succeeded 0
+ *       two catch-all arms          dirty succeeded      0     | clean succeeded 0
+ *       ONE coded arm, no catch-all dirty succeeded      0     | clean succeeded 0
+ *
+ *     Rows one and two are the same journal: the same node type, the same two coded arms, the
+ *     same tainted read, one arm fired. What differs is a counterfactual INSIDE the body — would
+ *     it have produced a different code on different content — and the engine never sees a body.
+ *     So the rule gated ordinary error handling ("on parse failure do A, on timeout do B", above
+ *     a recovery that undoes something) on every failure, content-derived or not. Row four is the
+ *     other end: with ONE `codes`-restricted arm the code decides whether the recovery runs AT
+ *     ALL, and the count let that through. Wrong in both directions, and no predicate over the
+ *     journal separates row one from row two — "at least one arm declares `codes`" fixes row four
+ *     and leaves row two gating.
+ *
+ *     WHAT A LATER ATTEMPT WOULD NEED, so this is not re-derived from scratch: a durable record
+ *     of whether the failure was PRODUCER-SUPPLIED. A `function` body that throws always raises
+ *     `E_INTERNAL` and cannot pick; the only way one picks between two codes is returning
+ *     `{retry}`, which is a value the body computed. That bit is not in `task.committed` today,
+ *     and it is thin — it says nothing about a parse that failed BECAUSE the page was malformed,
+ *     which is content choosing the arm through a throw. `test/run/control-flow-taint.test.ts`
+ *     pins all four rows, including the one this leaves open.
  *   - A `fanout` edge's WIDTH. A fan edge narrows no `take`, so it is in no choice space and this
  *     function has nothing to say about it — but the width IS a decision, and it is answered two
  *     functions up rather than left open. `applyFanoutTaint` puts the edge's `as` binding into
@@ -9314,11 +9369,12 @@ interface Choice {
  * in the journal, so the recorded bit covers a `human_gate` redirect and an operator `steer` as
  * well as a body.
  *
- * A NODE WHOSE OUT-EDGES ARE ALL CONDITIONAL OR LOOP STILL FALLS TO THE FAIL-CLOSED SIDE even
- * when no producer chose, and that arm is kept: there the take came from the edge expressions,
- * and if those read nothing tainted while the node did, the node is the only place the decision
- * could have come from. The cost is over-marking a pure branch node that read untrusted content
- * and branched on something clean; the region subtraction still bounds it to the arm.
+ * A NODE WHOSE OUT-EDGES ARE ALL CONDITIONAL OR LOOP gets the WIDE SPACE and not the node's own
+ * reads as evidence, and the two used to move together. The wide space is right: every one of
+ * those edges could have not fired, so all of them are what this commit picked among. The
+ * evidence is not — the take came from the edge expressions, `choiceTainted` reads those
+ * expressions itself, and if they read nothing tainted then nothing tainted narrowed the take.
+ * See `Choice.byTheNode` for the graph that measured it.
  *
  * A JOURNAL WRITTEN BEFORE THE BIT EXISTED reads `undefined`, and `#restoreEvidence` folds that
  * as TRUE. An old journal cannot say who chose, and a guard that cannot decide fails closed.
@@ -9328,24 +9384,35 @@ interface Choice {
  * over-marks an old journal, so a replayed old run can gate where the original process did not —
  * the tightening direction, which is the one permitted.
  *
- * WHAT THAT COSTS, MEASURED CROSS-BINARY RATHER THAN ARGUED. Process 1 on an extracted a638e7d
- * tree and process 2 on this one, over ONE sqlite file, so nothing was hand-stripped — the old
- * binary simply never wrote the field. Two graphs, both stopped on an authored `human_gate`
- * between the deciding commit and the charge:
+ * WHAT THAT COSTS, MEASURED RATHER THAN ARGUED. One journal, written by this binary and then
+ * AGED IN PLACE by deleting the one key, so the only difference between the two columns is the
+ * field itself — a cross-binary run over one sqlite file measures the same thing and adds every
+ * other difference between two trees to it. Three graphs, each stopped on an authored
+ * `human_gate` between the deciding commit and the charge, resumed by approving that gate:
  *
- *     graph            a638e7d -> a638e7d       a638e7d -> here
- *     no branch at all  succeeded    1 gate     succeeded     1 gate
- *     branches on the   succeeded    1 gate     awaiting_gate 2 gates
- *       fetched page
+ *     graph                              bit present        bit absent
+ *     no branch at all                   1 gate, charged 1  1 gate, charged 1
+ *     one `seq` taken, one `conditional` 1 gate, charged 1  2 gates, charged 0
+ *       sibling untaken, its `when`
+ *       reading only the run's input
+ *     a producer chose on the page       2 gates, charged 0 2 gates, charged 0
  *
- * The first row used to read `awaiting_gate, 2 gates` too, and that is what made absent-as-true
- * expensive: EVERY pre-existing in-flight run of every graph with a node reading fetched content
- * upstream of a hard-to-undo action needed a second human to resume, branch or no branch. What
- * closed it is not a migration change but `controlRegion`: "a producer chose" now has to name an
- * edge that could have not fired before it selects anything, so a branchless graph reaches the
- * same answer whichever way the absent bit is read. The residual is the second row, where the
- * run really did branch on the injected page and the extra gate is the tightening this default
- * exists for. `test/run/control-flow-taint.test.ts` pins both rows.
+ * THE MIDDLE ROW IS WHAT THIS DEFAULT COSTS, and this table asserted the opposite of it for a
+ * round: it claimed the columns differ only for a graph that "branches on the fetched page". They
+ * do not. `controlRegion`'s taken-side kind test — the thing that keeps the first row cheap —
+ * only runs when the alternatives side is EMPTY, and one untaken sibling makes it non-empty. So
+ * any pre-existing in-flight run whose deciding node read fetched content and left one
+ * conditional sibling untaken needs a second human to resume, however clean that sibling's `when`
+ * was.
+ *
+ * IT IS KEPT ANYWAY, and the alternative was measured before it was refused. Reading absent as
+ * "a producer chose only where the node has no unconditional out-edge" removes the middle row and
+ * REOPENS the third for old journals: `bodycondseqgated` has an unconditional edge, so that
+ * reading makes an old journal charge where the field's whole purpose is that it does not. That
+ * is a loosening, across a restart, for exactly the runs nobody can re-run — the failure class
+ * this codebase already carries six of. A one-time extra human on in-flight runs is the cheaper
+ * side of that trade, and it is bounded: it costs nothing for any run this binary started.
+ * `test/run/control-flow-taint.test.ts` pins all three rows in both columns.
  */
 function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], producerSupplied: boolean): Choice {
   if (node.type === "router") {
@@ -9360,18 +9427,19 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], pr
     return { space, byTheNode: true };
   }
   const all = index.outbound.get(node.id) ?? [];
-  // A FAILURE PICKS ONE ARM; A CODE PICKS BETWEEN TWO. See the `#errorEdges` entry below for the
-  // split and its measurement.
-  const errorEdges = all.filter((e) => e.kind === "error");
-  if (errorEdges.length > 1 && errorEdges.some((e) => take.includes(e.id))) {
-    return { space: errorEdges, byTheNode: true };
-  }
+  // EVERY `error` EDGE IS OUT OF THE SPACE, and the version that let coded ones in was reverted
+  // rather than narrowed. See the `#errorEdges` entry below for the four rows that decided it.
   const outbound = all.filter((e) => e.kind !== "error" && e.kind !== "compensation");
   const unconditional = outbound.filter((e) => e.kind !== "conditional" && e.kind !== "loop");
+  // THE SPACE AND WHO CHOSE ARE TWO ANSWERS, and one predicate used to give both. A node with no
+  // unconditional out-edge picked among ALL of them — not taking the arm means nothing runs — so
+  // `narrowed` is right about the SPACE. It is not an answer to who picked: unless a producer
+  // supplied the take, the edge expressions did, and the node's own reads decided nothing.
   const narrowed = producerSupplied || unconditional.length === 0;
-  return narrowed
-    ? { space: outbound, byTheNode: true }
-    : { space: outbound.filter((e) => e.kind === "conditional" || e.kind === "loop"), byTheNode: false };
+  return {
+    space: narrowed ? outbound : outbound.filter((e) => e.kind === "conditional" || e.kind === "loop"),
+    byTheNode: producerSupplied,
+  };
 }
 
 /**
@@ -9390,6 +9458,11 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], pr
  * for a take that only edge expressions narrowed the node's reads decided nothing, and counting
  * them would gate every "summarise the page, then branch on a clean flag" graph — the
  * constant-gate shape this axis exists to avoid.
+ *
+ * THAT PARAGRAPH WAS FALSE FOR A ROUND while sitting here unchanged, which is the reason it now
+ * carries a pointer: `choiceOf` set `byTheNode` from `narrowed`, so a node with one `conditional`
+ * out-edge supplied its own reads as evidence for a decision the `when` made. `Choice.byTheNode`
+ * carries the measurement and the graph is pinned in `test/run/control-flow-taint.test.ts`.
  *
  * `observedChannels` IS NOT ENOUGH ALONE, for the reason `#gatePayload` and `dataClassification`
  * both carry one word at a time: an expression is evaluated against `scopeFor` — every
@@ -9553,28 +9626,68 @@ function controlRegion(
 }
 
 /**
- * The nodes that run ON one branch of a fan-out: `e.to`, and everything forward of it up to the
- * join that collapses the branch back.
+ * The nodes that run ON one branch of a fan-out: `e.to`, everything forward of it at or below
+ * the fan's own depth, and the join that collapses the branch back.
  *
  * The bound is what makes this usable at all. `reachableFromEdges` has no stop at the join, so a
  * fan body walked with it is "everything downstream of the fan" — the constant-gate shape two
- * other axes in this file refuse in writing. A `join` edge, and any node of type `join`, is the
- * branch's EXIT: the node it points at runs at the PARENT coordinate, so it is outside the body
- * by construction. Both tests are here because GRAPH021 requires a join node downstream of every
- * fan-out but does not require the edge reaching it to be of kind `join`.
+ * other axes in this file refuse in writing.
+ *
+ * ## THE BOUND IS THE COMPILED FAN-OUT DEPTH, AND IT WAS TWICE WRONG BEFORE
+ *
+ * This walk used to stop at the first `join` EDGE or the first node of type `join`, and exclude
+ * it. Both halves of that were wrong, and each cost a measured exploit.
+ *
+ * EXCLUDING THE EXIT JOIN LAUNDERS THE FOLDED CHANNEL. At width 0 nobody writes the channel the
+ * join folds, so `applyTaint` never taints it, and the join's own `conditional` arms then pick
+ * among branches on a value the attacker chose by suppressing every write to it. One graph,
+ * `plan` reading the fetched page, the join's arms leading to an irreversible `pay.charge`:
+ *
+ *     the page says TWO  -> awaiting_gate, gates=1, charged=0
+ *     the page says NONE -> succeeded,     gates=0, charged=1   (before)
+ *     the page says NONE -> awaiting_gate, gates=1, charged=0   (now)
+ *
+ * The join runs once at every width, so the width did not select the join's EXECUTION — but the
+ * width is exactly what its fold saw, so the width did select its DECISION. That is why the exit
+ * join is IN and the node past it is OUT.
+ *
+ * STOPPING AT THE *FIRST* JOIN NODE IS NOT THE FAN'S OWN EXIT. In a nested fan-out the OUTER
+ * branch continues past the INNER join, so everything the outer fan selected past that point was
+ * outside the walk. Both consumers paid: a `human_gate` authored between the two joins was
+ * invisible to `#fireEmptyJoin`'s scan — round 1's exploit reproduced verbatim one nesting level
+ * down — and an irreversible node there ran unmarked at the attacker's count.
+ *
+ *     nested, `plan` reads the page   -> succeeded,     gates=0, charged=2   (before)
+ *     nested, `plan` reads the page   -> awaiting_gate, gates=2, charged=0   (now)
+ *     nested, `plan` reads the input  -> succeeded,     gates=0, charged=2   (both)
+ *
+ * `index.fanoutDepth` is the number of enclosing fan-out coordinate segments a Task of a node
+ * carries (`graph/validate.ts`, built from `computeFanoutStacks`). Every node on this fan's
+ * branch is at the depth of `fanout.to`, or deeper inside a nested fan; the exit join is the
+ * first node SHALLOWER than that. So the walk admits every node it reaches and stops DESCENDING
+ * at the first one below `bodyDepth` — which puts the exit join in and everything past it out,
+ * at any nesting level, without asking what kind an edge or a node is.
+ *
+ * An UNDEFINED depth stops the descent too. `GRAPH008_JOIN_DEPTH` refuses an ambiguous depth for
+ * joins and their arms and tolerates it elsewhere, so absent means "this node is reachable at two
+ * different depths" — which is not a claim that it is on this branch.
  *
  * Everything else is followed, `loop` edges included: a cycle inside a fan body is a branch that
  * retries, and over-approximating the body is the direction that marks MORE.
  */
 function fanBody(index: GraphIndex, fanout: EdgeSpec): Set<NodeId> {
+  const bodyDepth = index.fanoutDepth.get(fanout.to);
   const seen = new Set<NodeId>([fanout.to]);
   const queue: NodeId[] = [fanout.to];
   for (let i = 0; i < queue.length; i++) {
     for (const e of index.outbound.get(queue[i]!) ?? []) {
-      if (e.kind === "join" || e.kind === "compensation") continue;
-      if (index.byId.get(e.to)?.type === "join") continue;
-      if (seen.has(e.to)) continue;
+      if (e.kind === "compensation" || seen.has(e.to)) continue;
+      // ADMITTED, then the walk decides whether to DESCEND. The exit join is the last node of
+      // the body and the first node shallower than it, so a rule that stopped BEFORE it would
+      // leave the one node whose own decisions the width still chose.
       seen.add(e.to);
+      const depth = index.fanoutDepth.get(e.to);
+      if (bodyDepth === undefined || depth === undefined || depth < bodyDepth) continue;
       queue.push(e.to);
     }
   }

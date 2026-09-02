@@ -28,7 +28,7 @@ import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
 import { indexGraph, reachableToolNamesThrough, type Diagnostic, type GraphIndex } from "./validate.ts";
-import { isHardToUndo } from "../vocab.ts";
+import { isHardToUndo, postureRank } from "../vocab.ts";
 
 export interface GraphMutation {
   readonly addNodes: readonly NodeSpec[];
@@ -156,7 +156,7 @@ export function compileMutation(input: MutateInput): MutationResult {
     }
   }
 
-  // ── 2b. no existing node loses a dominator ───────────────────────────────
+  // ── 2b. no existing node loses an OVERSIGHT-BEARING dominator ────────────
   //
   // The rule above is about the ADDED nodes' region. It says nothing about the direction that
   // matters most: an added `from` into an EXISTING `to`. That edge is a second path to a node
@@ -180,6 +180,20 @@ export function compileMutation(input: MutateInput): MutationResult {
   // legitimate rejoin — an added branch re-entering below everything that dominated its target
   // adds no path that skips anything — and refuses the graft, which is the whole of the
   // difference between the two.
+  //
+  // PRESERVATION OF *EVERY* DOMINATOR IS THE WRONG RULE, and it shipped once. Nothing in the
+  // argument above is about a dominator that carries no oversight, and refusing on one refuses
+  // the canonical expansion — "also do this lookup, then carry on into the node I already lead
+  // to". Measured on a four-node chain of plain `function` nodes, no gate, no tool, posture
+  // `out`, proposer `a`, one added node rejoining at `c`:
+  //
+  //     a -> b -> c -> d, add a -> lookup -> c   -> MUT003_DOMINATOR_LOST, lost dominator "b"
+  //
+  // `b` protects nothing. Property 3 runs through `compileMutation` and a refused mutation fails
+  // the task, so that is the most expensive thing this rule can get wrong. The predicate is
+  // therefore the oversight the lost dominator CARRIED, not the dominance: `oversightRank` below,
+  // and the target's own rank is the bar — losing a dominator no stricter than the target itself
+  // takes nothing away from it.
   //
   // DOMINANCE IS NECESSARY AND IT IS NOT SUFFICIENT, and this comment said "exactly while" until
   // the counterexample was driven. Static dominance is a claim about PATHS; whether the
@@ -210,7 +224,10 @@ export function compileMutation(input: MutateInput): MutationResult {
       const was = before.get(v.id);
       const now = after.get(v.id);
       if (was === undefined || now === undefined) continue;
-      const lost = [...was].find((d) => !now.has(d));
+      // ONLY A DOMINATOR THAT CARRIED OVERSIGHT. Losing one that did not is an ADDITIVE
+      // ALTERNATIVE PATH, which is the shape a mutation exists for — see the section header.
+      const target = oversightRank(base, v.id);
+      const lost = [...was].filter((d) => !now.has(d)).find((d) => oversightRank(base, d) > target);
       if (lost === undefined) continue;
       // The edge to NAME, and the order matters: a graft is a CHAIN of added edges, and every
       // one of them reaches the target. The edge worth pointing at is the one that crosses back
@@ -313,6 +330,31 @@ export function compileMutation(input: MutateInput): MutationResult {
     gatedNodes,
     addedNodes: mutation.addNodes.map((n) => n.id),
   };
+}
+
+/**
+ * HOW MUCH OVERSIGHT A NODE CARRIES, as one comparable number.
+ *
+ * `human_gate` sits ABOVE every posture rather than beside them, and that gap is what the number
+ * is for: a posture says how closely a person watches an action that is going to happen anyway,
+ * and a gate says the run stops until a person acts. Ranking the gate at 3 rather than folding it
+ * into `in` is what makes "the lost dominator was a gate" refuse whatever the target's own
+ * posture is — including a target already at `in`, which raises its own gate and would otherwise
+ * compare EQUAL and be admitted.
+ *
+ * The posture is the COMPILED one — `plans[id].posture`, after the `max` fold over the graph
+ * policy, the node's own declaration and its tool's irreversibility class — because that is the
+ * level the node actually runs at. Reading `NodeSpec.policy.posture` instead would miss every
+ * node whose oversight came from its class, which is most of the nodes that have any.
+ *
+ * A node absent from `plans` ranks 0, which is the fail-OPEN direction and is deliberate: the
+ * only way to be absent is to not be in the compiled graph, and the caller compares two ids that
+ * both came out of `base.spec.nodes`.
+ */
+function oversightRank(base: RunGraph, id: NodeId): number {
+  if (base.spec.nodes.find((x) => x.id === id)?.type === "human_gate") return 3;
+  const posture = base.plans[id]?.posture;
+  return posture === undefined ? 0 : postureRank(posture);
 }
 
 /**

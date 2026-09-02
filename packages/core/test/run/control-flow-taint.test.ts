@@ -88,11 +88,34 @@
  *     pre-existing in-flight run of a branchless graph need a second human; the row above closes
  *     it without the migration moving, and the branching journal still tightens.
  *   - A FAN'S WIDTH, which is the one control decision that is a NUMBER. Which nodes it selected
- *     is its BRANCH, bounded at the join — with the node below the join left alone, because that
- *     one runs once at every width including zero.
- *   - WHICH ERROR ARM FIRED, when `codes` had two candidates to filter. A failure picks one arm;
- *     a code picks between two, and a node that read the page can fail with a code derived from
- *     it. One error edge, and two catch-alls, both stay out — each with its own row.
+ *     is its BRANCH, bounded at the fan's own compiled depth — with the node below the exit join
+ *     left alone, because that one runs once at every width including zero.
+ *   - WHICH ERROR ARM FIRED. This one was CLOSED AND THEN REOPENED: see the four-row test at the
+ *     bottom of this file. The predicate was the arm count, and the count is wrong in both
+ *     directions — it gated ordinary error handling on every failure and let a single coded arm
+ *     through — while no predicate over the journal separates a code content produced from one
+ *     it did not. The rows are pinned as a ledger of what this axis does not cover.
+ *
+ * ## AND FOUR MORE, WHICH ARE THIS AXIS OVER-REACHING RATHER THAN UNDER-REACHING
+ *
+ * Three adversaries attacked the list above and all three came back with ordinary graphs that
+ * now gated. Each of these is an ordinary shape with no attacker in it, driven both ways:
+ *
+ *   - A CLEAN `when` ON A LONE CONDITIONAL EDGE. "Summarise the page, then branch on a clean
+ *     flag" — the constant gate `choiceTainted`'s own docstring names — because having no
+ *     unconditional out-edge was read as "the node chose". The space and who chose are two
+ *     answers; one predicate used to give both.
+ *   - AN EMPTY FAN OVER A CLEAN LIST, which is `test/run/empty-fanout-oversight.test.ts`.
+ *   - AN ORDINARY MUTATION, which is `test/graph/mutation-dominator.test.ts`.
+ *   - AN UNTAKEN CONDITIONAL SIBLING ON AN OLD JOURNAL, which is not a defect but a cost the
+ *     migration table asserted the opposite of. The last-but-one test here re-measures it.
+ *
+ * And two that were the bound being wrong rather than the rule:
+ *
+ *   - A JOIN'S OWN FOLD AT WIDTH 0. Nobody writes the folded channel, so nothing taints it, and
+ *     the join branches on a value an attacker chose by suppressing every write to it.
+ *   - A NESTED FAN'S OUTER WIDTH, which reaches past the INNER join — where a bound that stopped
+ *     at the first node of type `join` did not.
  *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
@@ -143,7 +166,13 @@ type Shape =
   | "fanoutafter"
   | "fanoutwidthgated"
   | "errcodes"
-  | "errcatchall";
+  | "errcatchall"
+  | "joinfoldwidth"
+  | "fanoutnested"
+  | "onlyclean"
+  | "seqaltgated"
+  | "errordinary"
+  | "errone";
 
 interface Options {
   /**
@@ -196,7 +225,13 @@ function spec(o: Options): GraphSpec {
     o.shape === "fanoutafter" ||
     o.shape === "fanoutwidthgated" ||
     o.shape === "errcodes" ||
-    o.shape === "errcatchall";
+    o.shape === "errcatchall" ||
+    o.shape === "joinfoldwidth" ||
+    o.shape === "fanoutnested" ||
+    o.shape === "onlyclean" ||
+    o.shape === "seqaltgated" ||
+    o.shape === "errordinary" ||
+    o.shape === "errone";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -217,7 +252,11 @@ function spec(o: Options): GraphSpec {
       // `parts` in the fanout shapes because the charge runs once per branch, and
       // GRAPH010_CONCURRENT_WRITE refuses `replace` for a node that runs in parallel.
       writes:
-        o.shape === "fanoutbind" || o.shape === "fanoutgated" || o.shape === "fanoutwidth" || o.shape === "fanoutwidthgated"
+        o.shape === "fanoutbind" ||
+        o.shape === "fanoutgated" ||
+        o.shape === "fanoutwidth" ||
+        o.shape === "fanoutwidthgated" ||
+        o.shape === "fanoutnested"
           ? ["parts"]
           : ["receipt"],
       tool: { name: "pay.charge", version: "1.0", args: { amount: 500 } },
@@ -259,6 +298,23 @@ function spec(o: Options): GraphSpec {
     // and the arm of `choiceOf` whose docstring calls itself load-bearing (`unconditional` is
     // empty, so `narrowed` is true and the node's own reads are evidence).
     nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+  } else if (o.shape === "seqaltgated") {
+    // ONE `seq` EDGE THAT FIRED, PLUS ONE `conditional` SIBLING THAT DID NOT. No producer, and
+    // the sibling's `when` reads only the run's own input — so nothing untrusted decided
+    // anything. The gate splits the run between the deciding commit and the charge's decision,
+    // which is what puts the two halves of the migration claim in two different processes.
+    const reads = o.branchOn === "request" ? ["request"] : [o.branchOn, "request"];
+    nodes.push({ id: "summarise", type: "function", reads, writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+    nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
+  } else if (o.shape === "onlyclean") {
+    // SUMMARISE THE PAGE, THEN BRANCH ON A CLEAN FLAG — the shape `choiceTainted`'s docstring
+    // names verbatim as the constant gate this axis exists to avoid. `decide` READS the fetched
+    // page; its single `conditional` out-edge's `when` reads only the run's own input, and no
+    // producer supplies a `take`. GRAPH004 makes the node declare every channel its outbound
+    // expressions reference, which is why `request` is in `reads` in both halves.
+    const reads = o.branchOn === "request" ? ["request"] : [o.branchOn, "request"];
+    nodes.push({ id: "decide", type: "function", reads, writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
   } else if (o.shape === "loopuntil") {
     // The cycle is `charge -> tail -> charge`. GRAPH006_STUCK_LOOP requires a node INSIDE the
     // cycle to be able to change the stop condition, so `tail` writes the channel `until` reads.
@@ -281,6 +337,24 @@ function spec(o: Options): GraphSpec {
     if (o.shape === "bodycondseqgated") {
       nodes.push({ id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } });
     }
+  } else if (o.shape === "joinfoldwidth") {
+    // THE JOIN'S OWN FOLD, AND THE CHANNEL NOBODY WROTE. `work` is the only writer of `parts`,
+    // so at width 0 `parts` is never written and `applyTaint` never touches it — the join then
+    // branches on a value the attacker chose by suppressing every write to it. The width is 0 in
+    // BOTH halves, so the only difference is whose text produced the empty list.
+    nodes.push({ id: "plan", type: "function", reads: [o.branchOn], writes: ["items"], function: { ref: "function/empty@stable", effects: [] } });
+    nodes.push({ id: "work", type: "function", reads: ["item"], writes: ["parts"], function: { ref: "function/part@stable", effects: [] } });
+    nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["work"], mode: "all", onBranchError: "skip" } });
+  } else if (o.shape === "fanoutnested") {
+    // NESTED, WITH THE CHARGE ON THE OUTER BRANCH PAST THE INNER JOIN. `fanBody` stopping at the
+    // first node of type `join` never reached it, so the outer width — which is exactly what says
+    // how many times the charge runs — marked nothing.
+    nodes.push({ id: "plan", type: "function", reads: [o.branchOn], writes: ["outerSeed", "innerSeed"], function: { ref: "function/nest@stable", effects: [] } });
+    nodes.push({ id: "outer", type: "function", reads: ["outerItem"], writes: ["parts"], function: { ref: "function/part@stable", effects: [] } });
+    nodes.push({ id: "inner", type: "function", reads: ["innerItem"], writes: ["parts"], function: { ref: "function/part@stable", effects: [] } });
+    nodes.push({ id: "innerJoin", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["inner"], mode: "all", onBranchError: "skip" } });
+    nodes.push({ id: "outerJoin", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["outer", "innerJoin"], mode: "all", onBranchError: "skip" } });
   } else if (o.shape === "fanoutwidth" || o.shape === "fanoutafter" || o.shape === "fanoutwidthgated") {
     // THE WIDTH, AND NOTHING ELSE. Nothing on the fan branch reads `item` or any other tainted
     // channel: the only thing the fetched page decides is HOW MANY branches there are.
@@ -322,6 +396,24 @@ function spec(o: Options): GraphSpec {
     }
   } else if (o.shape === "loopfallback") {
     // No other arm at all: the router's fallback IS the back-edge, so there is nothing to skip to.
+  } else if (o.shape === "errordinary" || o.shape === "errone") {
+    // `errordinary` — ORDINARY ERROR HANDLING. Two coded arms, "on parse failure do A, on
+    // timeout do B", and a body that ALWAYS throws whatever it read. Nothing content-derived
+    // picked this code.
+    // `errone` — ONE arm, `codes`-restricted, and NO catch-all. The code decides whether the
+    // recovery runs AT ALL: a code it does not name leaves no error edge to take and the run
+    // fails.
+    // `errone` has no second arm at all, so it has no `skip` node either.
+    if (o.shape === "errordinary") {
+      nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    }
+    nodes.push({
+      id: "decide",
+      type: "function",
+      reads: [o.branchOn],
+      writes: ["note"],
+      function: { ref: o.shape === "errone" ? "function/codepick@stable" : "function/boom@stable", effects: [] },
+    });
   } else if (o.shape === "errcodes" || o.shape === "errcatchall") {
     // THE SAME FAILING NODE WITH TWO ERROR ARMS INSTEAD OF ONE, and the code it fails with
     // derived from what it read. A body that returns `{retry}` raises `E_FUNCTION_UNAVAILABLE`;
@@ -357,6 +449,14 @@ function spec(o: Options): GraphSpec {
   } else if (o.shape === "only") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
+  } else if (o.shape === "seqaltgated") {
+    edges.push({ id: "e0", from: "fetch", to: "summarise", kind: "seq" });
+    edges.push({ id: "e1", from: "summarise", to: "hold", kind: "seq" });
+    edges.push({ id: "toOther", from: "summarise", to: "skip", kind: "conditional", when: 'contains(request, "NOPE")' });
+    edges.push({ id: "holdToCharge", from: "hold", to: "charge", kind: "seq" });
+  } else if (o.shape === "onlyclean") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: 'contains(request, "PAY")' });
   } else if (o.shape === "loopuntil") {
     edges.push({ id: "e0", from: "fetch", to: "charge", kind: "seq" });
     edges.push({ id: "e1", from: "charge", to: "tail", kind: "seq" });
@@ -373,6 +473,20 @@ function spec(o: Options): GraphSpec {
     }
     edges.push({ id: "toOther", from: "decide", to: "skip", kind: "conditional", when: 'contains(request, "PAY")' });
     edges.push({ id: "toSink", from: "decide", to: "sink", kind: "seq" });
+  } else if (o.shape === "joinfoldwidth") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "work", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "work", to: "j", kind: "join", branches: ["work"] });
+    edges.push({ id: "toChosen", from: "j", to: "charge", kind: "conditional", when: "len(parts) == 0" });
+    edges.push({ id: "toOther", from: "j", to: "skip", kind: "conditional", when: "len(parts) > 0" });
+  } else if (o.shape === "fanoutnested") {
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fo", from: "plan", to: "outer", kind: "fanout", over: "outerSeed", as: "outerItem", maxWidth: 4 });
+    edges.push({ id: "fi", from: "outer", to: "inner", kind: "fanout", over: "innerSeed", as: "innerItem", maxWidth: 4 });
+    edges.push({ id: "ji", from: "inner", to: "innerJoin", kind: "join", branches: ["inner"] });
+    edges.push({ id: "jo1", from: "outer", to: "outerJoin", kind: "join", branches: ["outer"] });
+    edges.push({ id: "jo2", from: "innerJoin", to: "outerJoin", kind: "join", branches: ["innerJoin"] });
+    edges.push({ id: "toCharge", from: "innerJoin", to: "charge", kind: "seq" });
   } else if (o.shape === "fanoutwidth") {
     edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
     edges.push({ id: "fan", from: "plan", to: "charge", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
@@ -432,6 +546,14 @@ function spec(o: Options): GraphSpec {
     edges.push({ id: "toChosen", from: "route", to: "charge", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "skip", kind: "seq" });
     edges.push({ id: "again", from: "skip", to: "fetch", kind: "loop", maxIterations: 2, until: 'contains(note, "done")' });
+  } else if (o.shape === "errordinary") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    // The charge is on the arm the ORDINARY failure takes — "on parse failure, undo the booking".
+    edges.push({ id: "errA", from: "decide", to: "charge", kind: "error", codes: ["E_INTERNAL"] });
+    edges.push({ id: "errB", from: "decide", to: "skip", kind: "error", codes: ["E_TOOL_TIMEOUT"] });
+  } else if (o.shape === "errone") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "errA", from: "decide", to: "charge", kind: "error", codes: ["E_FUNCTION_UNAVAILABLE"] });
   } else if (o.shape === "errcodes" || o.shape === "errcatchall") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     // `errcatchall` is the same two arms with NEITHER declaring `codes`: both fire, so the code
@@ -487,7 +609,12 @@ function spec(o: Options): GraphSpec {
     apiVersion: "loom.dev/v1",
     kind: "GraphSpec",
     metadata: { name: `control-taint-${o.shape}`, project: "test", version: 1 },
-    policy: { posture: "out", budget: { costUsd: 1 }, capabilities: ["net:fetch", "pay:charge"] },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "pay:charge"],
+      expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 8, maxLoopIterations: 3 },
+    },
     channels: {
       request: { type: "string", reduce: "replace" },
       untrusted: { type: "string", reduce: "replace" },
@@ -499,10 +626,19 @@ function spec(o: Options): GraphSpec {
       items: { type: "array", reduce: "replace" },
       item: { type: "string", reduce: "replace" },
       parts: { type: "array", reduce: "append_ordered" },
+      // `fanoutnested` only: one seed list and one binding per depth.
+      outerSeed: { type: "array", reduce: "replace" },
+      innerSeed: { type: "array", reduce: "replace" },
+      outerItem: { type: "string", reduce: "replace" },
+      innerItem: { type: "string", reduce: "replace" },
     },
     inputs: ["request"],
     outputs:
-      o.shape === "fanoutbind" || o.shape === "fanoutgated" || o.shape === "fanoutwidth" || o.shape === "fanoutwidthgated"
+      o.shape === "fanoutbind" ||
+      o.shape === "fanoutgated" ||
+      o.shape === "fanoutwidth" ||
+      o.shape === "fanoutwidthgated" ||
+      o.shape === "fanoutnested"
         ? ["parts"]
         : ["receipt"],
     nodes,
@@ -566,6 +702,11 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   // is explicit about where it goes next, and a `take` no `#edgesToTake` result can be told from.
   functions.register("function/linear@stable", () => ({ writes: { note: "summary" }, take: ["e1"] }));
   functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
+  // `joinfoldwidth`'s list producer: the width is 0 in BOTH halves, so the pair measures whose
+  // text built the empty list rather than how wide it was.
+  functions.register("function/empty@stable", () => ({ writes: { items: [] } }));
+  // `fanoutnested`'s list producer: one seed per depth.
+  functions.register("function/nest@stable", () => ({ writes: { outerSeed: ["one", "two"], innerSeed: ["a"] } }));
   // `fanoutafter`'s fan body: it contributes to the join and reads nothing untrusted.
   // `errcodes`' deciding node. It never succeeds; what it decides is WHICH failure, and it
   // decides it from whatever its node declared in `reads`.
@@ -1123,7 +1264,7 @@ test("HOW WIDE A FAN IS, IS A DECISION — and at width 0 it decides whether the
   assert.equal(clean.charged, 2, "and both branches the author authorised run");
 });
 
-test("THE MARKED FAN BODY STOPS AT THE JOIN — a node below it runs once whatever the width was", async () => {
+test("THE MARKED FAN BODY STOPS PAST THE EXIT JOIN — a node BELOW it runs once whatever the width was", async () => {
   const dirty = await drive({ branchOn: "untrusted", shape: "fanoutafter" });
   assert.equal(dirty.status, "succeeded", `marking past the join is a constant gate: ${dirty.status}`);
   assert.equal(dirty.gates, 0, "the charge below the join runs once at every width, so the width did not select it");
@@ -1170,37 +1311,165 @@ test("THE FAN'S WIDTH SURVIVES A RESTART — the fold rebuilds a count another p
   assert.equal(after.status, "awaiting_gate", `expected the charge to gate in the second process, got ${after.status}`);
 });
 
-test("WHICH ERROR ARM FIRES IS A CHOICE WHEN `codes` DISCRIMINATED — a failure picks one, a code picks between two", async () => {
-  // `choiceOf` excludes `error` edges with "A FAILURE selected that arm, not content", and that
-  // is true exactly while an error edge is a catch-all. `#errorEdges` filters on
-  // `e.codes.includes(code)`, so a node that reads the fetched page and fails with a code
-  // DERIVED from it picks which of its arms runs — and one of them is the charge. `decide`
-  // returns `{retry}` (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and throws
-  // (`E_INTERNAL`) otherwise. Both halves say PAY, so both take the same arm; the only
-  // difference is whose text said it. Measured with every error edge out of the space:
+test("A JOIN FOLDS THE WIDTH — at width 0 nobody writes the channel it branches on", async () => {
+  // WIDTH 0 LAUNDERS THE FOLD CHANNEL. `work` is the only writer of `parts`, so a fan that plans
+  // no branches leaves `parts` unwritten — `applyTaint` sees no write and never taints it — and
+  // the join's own `conditional` arms then pick between "charge" and "skip" on a value the
+  // attacker chose by SUPPRESSING every write to it. The join runs once at every width, so the
+  // width did not select its EXECUTION; it is exactly what its fold saw, so the width did select
+  // its DECISION. That is why `fanBody` now admits the exit join and stops past it. Measured
+  // with the body bounded BEFORE the join:
   //
-  //     the failure code comes from the fetched page -> succeeded, gates=0, charged=1
-  const dirty = await drive({ branchOn: "untrusted", shape: "errcodes" });
-  assert.equal(dirty.charged, 0, "injected text chose which error arm fired, and it was the charge");
-  assert.equal(dirty.status, "awaiting_gate", `expected a discriminated error arm to be a choice, got ${dirty.status}`);
+  //     the list is built from the fetched page -> succeeded, gates=0, charged=1
+  const dirty = await drive({ branchOn: "untrusted", shape: "joinfoldwidth" });
+  assert.equal(dirty.charged, 0, "suppressing every write to a channel is how an attacker gets a clean value");
+  assert.equal(dirty.status, "awaiting_gate", `expected the join's fold to carry the width's taint, got ${dirty.status}`);
   assert.equal(dirty.gates, 1, "and the human whose ceiling no longer covers this action is asked");
 
-  // The paired half, so this is a claim about whose content chose: same node, same two arms,
-  // same code, same charge — the node just declares the run's own input.
-  const clean = await drive({ branchOn: "request", shape: "errcodes" });
-  assert.equal(clean.status, "succeeded", `a failure code derived from clean input must not gate: ${clean.status}`);
-  assert.equal(clean.gates, 0, "or every graph with two coded error edges and a fetch gates forever");
-  assert.equal(clean.charged, 1, "and the arm the author wrote for that code runs");
+  // The paired half. The width is 0 HERE TOO — `function/empty@stable` returns the same empty
+  // list in both — so the only difference is whether the node that produced it had read the page.
+  const clean = await drive({ branchOn: "request", shape: "joinfoldwidth" });
+  assert.equal(clean.status, "succeeded", `an empty fan over a clean list must not gate its join: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every join behind a fan in a graph that also fetches gates forever");
+  assert.equal(clean.charged, 1, "and the arm the author wrote for an empty fold runs");
 });
 
-test("TWO CATCH-ALL ERROR ARMS DISCRIMINATED NOTHING — both fired, so nothing was chosen", async () => {
-  // The other side of the split, and the row that says the rule is "the code discriminated"
-  // rather than "the node has two error edges". Neither arm declares `codes`, so `#errorEdges`
-  // filters nothing and BOTH fire — the alternatives side is empty, every taken edge is an
-  // `error` edge that the failure alone selected, and `controlRegion` returns nothing. Without
-  // this row a reader would have to take the `choiceOf` docstring's word for it.
-  const dirty = await drive({ branchOn: "untrusted", shape: "errcatchall" });
-  assert.equal(dirty.status, "succeeded", `two catch-alls are not a choice: ${dirty.status}`);
-  assert.equal(dirty.gates, 0, "gating every node with two undeclared error arms is over-gating");
-  assert.equal(dirty.charged, 1, "and both arms run, which is what a catch-all is");
+test("A NESTED FAN'S OUTER WIDTH REACHES PAST THE INNER JOIN", async () => {
+  // The flat shape two tests up cannot distinguish "stop at the first join node" from "stop at
+  // the fan's own exit", because there is only one join. Here the OUTER branch continues past
+  // the INNER join, and the charge sits there — running once per outer branch, at the attacker's
+  // count. Measured with the body bounded at the first node of type `join`:
+  //
+  //     nested, `plan` reads the fetched page -> succeeded, gates=0, charged=2
+  const dirty = await drive({ branchOn: "untrusted", shape: "fanoutnested" });
+  assert.equal(dirty.charged, 0, "the fetched page decided how many times an irreversible action past the inner join ran");
+  assert.equal(dirty.status, "awaiting_gate", `expected the outer width to reach past the inner join, got ${dirty.status}`);
+
+  // The half that must not move: the same nesting over a list the run's own input produced.
+  const clean = await drive({ branchOn: "request", shape: "fanoutnested" });
+  assert.equal(clean.status, "succeeded", `a nested fan over a clean list must not gate: ${clean.status}`);
+  assert.equal(clean.gates, 0, "or every nested fan-out in a graph that also fetches gates forever");
+  assert.equal(clean.charged, 2, "and both outer branches the author authorised run");
+});
+
+test("A CLEAN `when` ON A LONE CONDITIONAL EDGE MUST NOT GATE — the node's reads decided nothing", async () => {
+  // `choiceOf` set `byTheNode: true` whenever the node had no unconditional out-edge, so a node
+  // that merely READ the fetched page supplied its own reads as branch evidence for a decision
+  // the edge's `when` made entirely from the run's own input. That is the exact shape
+  // `choiceTainted`'s docstring names — "summarise the page, then branch on a clean flag" —
+  // as the constant gate this axis exists to avoid, and the docstring was unchanged and false.
+  // Measured with `byTheNode = producerSupplied || unconditional.length === 0`:
+  //
+  //     `decide` reads the page, the `when` reads the input -> awaiting_gate, gates=1, charged=0
+  const dirty = await drive({ branchOn: "untrusted", shape: "onlyclean" });
+  assert.equal(dirty.status, "succeeded", `the node's reads are not evidence for the edge's choice: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "gating this gates every summarise-then-branch-on-a-clean-flag graph");
+  assert.equal(dirty.charged, 1, "and the action the human lowered the ceiling for runs");
+
+  // The control: nothing about this shape gates either way, which is what says the row above is
+  // measuring the ASYMMETRY rather than the branch.
+  const clean = await drive({ branchOn: "request", shape: "onlyclean" });
+  assert.equal(clean.status, "succeeded", `control: ${clean.status}`);
+  assert.equal(clean.charged, 1, "control");
+});
+
+test("WHAT ABSENT-AS-TRUE COSTS: an untaken sibling is enough, and the table now says so", async () => {
+  // `choiceOf`'s migration table used to claim that resuming an old journal on this binary
+  // differs from resuming a new one ONLY for a graph that "branches on the fetched page". False:
+  // `seqaltgated` takes its one `seq` edge and leaves a `conditional` sibling untaken, and that
+  // sibling's `when` reads only the run's own input — nothing untrusted decided anything — yet
+  // the absent bit costs a second human on resume. The taken-side kind test in `controlRegion`
+  // only runs when `alternatives.length === 0`, and an untaken sibling makes it non-empty.
+  //
+  // MEASURED HERE, not cross-binary: one journal, written by this binary and then aged in place
+  // by deleting the one key, so the only difference between the columns is the field itself.
+  const run = async (shape: Shape, age: (payload: Record<string, unknown>) => void): Promise<{ gates: number; charged: number }> => {
+    const store = new MemoryStateStore({ now: NOW });
+    const first = engineOver(store);
+    const graph = graphFor({ branchOn: "untrusted", shape });
+    const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+    await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+      kind: "human",
+      id: "u:alice",
+    });
+    const held = await first.engine.advance(runId);
+    assert.equal(held.status, "awaiting_gate", "precondition: the run stops on the authored gate");
+    for await (const ev of store.read(runId, 1)) {
+      if (ev.type === "task.committed") age(ev.payload as unknown as Record<string, unknown>);
+    }
+    const holdGate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+    assert.ok(holdGate !== undefined, "precondition: the authored gate is the open one");
+
+    const second = engineOver(store);
+    await second.engine.attach(runId, graph);
+    await second.engine.resolveGate(runId, {
+      gateId: holdGate.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: "k1",
+    });
+    const p = await second.engine.advance(runId);
+    return { gates: Object.keys(p.gates).length, charged: second.charged() };
+  };
+  const keep = (): void => {};
+  const drop = (payload: Record<string, unknown>): void => {
+    delete payload["takeSuppliedByProducer"];
+  };
+
+  // ROW 1 — no branch at all. Unchanged by the bit, which is what `controlRegion`'s taken-side
+  // kind test bought and what stops absent-as-true being a gate on every pre-existing run.
+  assert.deepEqual(await run("lineargated", keep), { gates: 1, charged: 1 }, "row 1, bit present");
+  assert.deepEqual(await run("lineargated", drop), { gates: 1, charged: 1 }, "row 1, bit absent");
+
+  // ROW 2 — THE ROW THE TABLE MISSED. One `seq` edge taken, one `conditional` sibling untaken,
+  // its `when` reading only the run's own input. The bit is what decides it.
+  assert.deepEqual(await run("seqaltgated", keep), { gates: 1, charged: 1 }, "row 2, bit present");
+  assert.deepEqual(await run("seqaltgated", drop), { gates: 2, charged: 0 }, "row 2, bit absent");
+
+  // ROW 3 — a producer really did choose, on the fetched page. Both columns gate, so this row is
+  // not what absent-as-true costs; it is what the field closed.
+  assert.deepEqual(await run("bodycondseqgated", keep), { gates: 2, charged: 0 }, "row 3, bit present");
+  assert.deepEqual(await run("bodycondseqgated", drop), { gates: 2, charged: 0 }, "row 3, bit absent");
+});
+
+test("A FAILURE CODE IS NOT A CHOICE — four rows, and the last one is a hole this leaves open", async () => {
+  // A ROUND SHIPPED THE OPPOSITE RULE and it was reverted, not narrowed. `#errorEdges` filters on
+  // `e.codes.includes(code)`, so with two coded arms the CODE says which one runs — and a node
+  // that read the fetched page can fail with a code derived from it. The rule keyed on "more than
+  // one error edge, at least one taken", and the count is wrong in both directions.
+  //
+  // These four rows are the measurement that decided it. Every one drives the same deciding node
+  // twice — reading the fetched page, then reading the run's own input — with an irreversible
+  // charge on one arm and a human ceiling of `on` typed before any untrusted byte existed.
+  const row = async (shape: Shape): Promise<{ dirty: string; clean: string }> => {
+    const d = await drive({ branchOn: "untrusted", shape });
+    const c = await drive({ branchOn: "request", shape });
+    return { dirty: `${d.status}/${String(d.gates)}/${String(d.charged)}`, clean: `${c.status}/${String(c.gates)}/${String(c.charged)}` };
+  };
+
+  // ROW 1 — the exploit the reverted rule closed. The body returns `{retry}`
+  // (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and throws (`E_INTERNAL`) otherwise, so
+  // injected text picks which arm fires and one of them is the charge. THIS IS OPEN.
+  assert.deepEqual(await row("errcodes"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+
+  // ROW 2 — WHY IT IS OPEN. The same node type, the same two coded arms, the same tainted read,
+  // one arm fired — and a body that ALWAYS throws the same code whatever it read. Ordinary error
+  // handling: "on parse failure do A, on timeout do B", above a recovery that undoes something.
+  // Rows 1 and 2 write the SAME journal; what differs is a counterfactual inside a body the
+  // engine never sees. The reverted rule gated both.
+  assert.deepEqual(await row("errordinary"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+
+  // ROW 3 — two catch-alls. Neither declares `codes`, so both fire and nothing was discriminated.
+  assert.deepEqual(await row("errcatchall"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+
+  // ROW 4 — the other end of the count, and the reason "at least one arm declares `codes`" is not
+  // the fix either. ONE `codes`-restricted arm and no catch-all: the code decides whether the
+  // recovery runs AT ALL — a code it does not name leaves no error edge to take and the run
+  // fails — so content chooses between "the charge runs" and "the run dies". The count let this
+  // through; the discrimination predicate would catch it, and would still gate row 2.
+  assert.deepEqual(await row("errone"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+
+  // AND THE ROW THAT WAS NEVER IN DOUBT: one catch-all error edge. A failure selected the arm,
+  // nothing filtered, and there was nothing to choose among.
+  assert.deepEqual(await row("failing"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
 });
