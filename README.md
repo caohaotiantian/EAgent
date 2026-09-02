@@ -82,8 +82,10 @@ That refusal ships *inside* the binary, which means a binary built before it exi
 you it is missing — that is how the `bin/loom` in this repo once answered `--help` with exit 0
 while eight days and 48 source files behind. The check that lives outside the artifact is
 `node scripts/verify-binary.mjs [path]`: it drives a built binary through all four cases (current,
-stale, overridden, no-sources) and fails the two a guardless binary passes silently. CI builds the
-binary and runs it on every commit.
+stale, overridden, no-sources) and fails the two a guardless binary passes silently. CI builds the binary and runs
+that check — on pushes to `loom` and on pull requests targeting it, which is every commit that
+reaches the branch and not every commit anybody makes. On `ubuntu-latest`, so the macOS path this
+repo is developed on is exercised by a maintainer running `npm run build:binary` and nothing else.
 
 ## What works today
 

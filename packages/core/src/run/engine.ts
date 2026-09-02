@@ -3710,6 +3710,64 @@ export class Engine {
     // a whole fold here buys the ability to rewind a run this engine no longer holds.
     const rewound = (await this.projection(runId))!;
 
+    // A PROMISE THE REWIND ORPHANED IS NOT A PROMISE — the lease defect below with money in
+    // place of work, and it arrived the moment the reservation gained a writer.
+    //
+    // `budget.reserved` is appended before a model call and `budget.settled` after it, so a
+    // boundary landing BETWEEN them keeps the debit and suppresses the credit; `projection.ts`
+    // folds `reservedUsd` by adding one and subtracting the other, so the run carries the
+    // promise for the rest of its life. Measured on `budget-reservation-is-durable.test.ts`'s
+    // own graph, whose journal is `... 9:budget.reserved 10:effect.started 11:budget.settled
+    // ... 16:run.completed` — rewind to 9, re-run to completion, before this repair existed:
+    //
+    //     after re-run  : status=succeeded reservedUsd=0.001048 costUsd=0.000027
+    //     audit budget.reservation-is-settled violations: 1
+    //       scope "node:work" reserved budget at seq 9 and the run completed without settling it
+    //
+    // Both answers are wrong and BOTH ARE NEW: `reservedUsd` folded to a uniform 0 until
+    // `#runAgent` gained the appenders, so `GET /runs/:id` now shows an operator money a
+    // SUCCEEDED run has committed and will never spend, and `journal/audit.ts` reports a
+    // violation on a healthy run — which is how a rule comes to be switched off.
+    //
+    // `actualUsd: 0`, AND IT IS THE ONLY NUMBER THIS METHOD CAN HONESTLY WRITE. The row releases
+    // a promise and never books a spend: `projection.ts` subtracts `reservedUsd` and reads
+    // `actualUsd` nowhere, spend being folded from the effect records `chargeUsage` walks. So a
+    // non-zero `actualUsd` would put a charge in the journal that no other row corroborates — and
+    // this method could not name one truthfully even if it wanted to, because the
+    // `effect.completed` carrying the turn's usage is INSIDE the range the marker just hid. Zero
+    // is what the surviving record says the suppressed call cost; anything else is a rewind
+    // reporting spend it cannot see.
+    //
+    // ONE ROW PER RESERVATION, WITH ITS OWN SCOPE AND ITS OWN AMOUNT, not one row for
+    // `rewound.reservedUsd`. `journal/audit.ts` pairs these by SCOPE and by COUNT — a stack of
+    // open seqs per scope, one pop per settlement — so a single aggregate row would zero the
+    // projection and leave the rule firing on every scope but one. The amount is read back off
+    // the `budget.reserved` row exactly as `#runAgent`'s own settle reads it off the reservation:
+    // if those two ever disagree the journal's arithmetic was already inconsistent, and plugging
+    // a number to force the display to zero would hide that rather than repair it.
+    //
+    // EVERY OPEN RESERVATION, NOT ONLY THE PROVABLY-ORPHANED ONES — which is the lease re-arm's
+    // own rule (`state === "leased"`, not "leased by a worker this rewind stranded") and holds
+    // for the same reason: after a rewind, the fold's account of what is in flight is the
+    // authoritative one. The case the two share is a rewind racing an `advance`, which `rewind`
+    // names as an open hazard and is not this repair's to close; what it costs HERE is bounded
+    // and lands on the refusing side — the live turn still settles above the marker,
+    // `projection.ts` clamps at 0, a settlement with no reservation is deliberately not an audit
+    // violation, and the number a budget REFUSAL reads is `ctx.policy.reservedUsd` in memory,
+    // which no journaled row moves.
+    //
+    // AND IT SURVIVES BEING DONE AGAIN, which is the question a journal-only repair has to
+    // answer. The fold is a pure function of the event sequence, so folding the repaired journal
+    // twice is folding it once — measured, three consecutive `projection` calls on the run above
+    // return `[0, 0, 0]`. The interesting case is a SECOND rewind to the same boundary: the
+    // first repair's row now falls inside the new suppressed range, so the reservation at seq 9
+    // reads open again and is compensated again above the new marker. Measured, `... 32:
+    // checkpoint.restored 33:operator.command 34:budget.settled 35:task.ready ...` and the run
+    // ends `succeeded reservedUsd=0` with an empty audit report. The repair is not idempotent in
+    // the sense of writing nothing the second time, and must not be: each rewind repairs the
+    // journal ITS OWN marker produced, and the row that repaired the last one is history it hid.
+    const orphaned = await this.#openReservations(ctx);
+
     // A LEASE THE REWIND UNDID IS NOT A LEASE. The `task.leased` that put a task into `leased`
     // can sit BELOW the checkpoint while the `task.committed` that ended it sits above — so the
     // fold shows a task held by a worker whose work no longer exists, and `#advanceSerially`
@@ -3722,11 +3780,32 @@ export class Engine {
     // lease is what makes `checkpoint: "before"` mean anything, since the checkpoint a node
     // declares lands between its lease and its commit by construction.
     const stranded = Object.values(rewound.tasks).filter((task) => task.state === "leased");
-    if (stranded.length === 0) return rewound;
+    if (orphaned.length === 0 && stranded.length === 0) return rewound;
 
+    // ONE APPEND, NOT TWO, and `RunLog.append` is the compare-and-swap that makes "both or
+    // neither" true — the same argument the marker and its authorization are batched under
+    // twenty lines above. A half-applied repair is worse than none here: `rewind` returns to its
+    // caller either way, so a process dying between two appends would leave a run whose fold
+    // shows a re-armed lease beside a promise nothing will ever release, and nobody with a
+    // reason to look. The two repairs do not interact in the fold — `task.ready` moves tasks,
+    // `budget.settled` moves `reservedUsd` — so their order inside the batch is legibility and
+    // nothing else: release the money the rewind orphaned, then re-arm the work it stranded.
     await this.#serialize(() =>
-      ctx.log.append(
-        stranded.map((task) => ({
+      ctx.log.append([
+        ...orphaned.map((r) => ({
+          type: "budget.settled" as const,
+          payload: { scope: r.scope, reservedUsd: r.amountUsd, actualUsd: 0 },
+          // `SYSTEM_ACTOR("policy")` is what `#runAgent` writes on the settle this stands in
+          // for, so an auditor reading a reserve/settle pair sees one actor on both halves.
+          // Not `by`: the human authorized a rewind, not a per-reservation release.
+          actor: SYSTEM_ACTOR("policy"),
+          ...(r.taskId === undefined ? {} : { taskId: r.taskId }),
+        })),
+        // `as const` HERE IS READ BY A TEST IN ANOTHER FILE. `test/readme-gaps.test.ts` probes
+        // `/task\.ready" as const/` in this file as its proxy for "rewind still re-arms the
+        // leases it undoes", so annotating this callback's return type instead — which is the
+        // same program — turns that row red. Named at the site somebody would reformat it.
+        ...stranded.map((task) => ({
           type: "task.ready" as const,
           payload: {
             nodeId: task.nodeId,
@@ -3736,7 +3815,7 @@ export class Engine {
           actor: SYSTEM_ACTOR("scheduler"),
           taskId: task.taskId,
         })),
-      ),
+      ]),
     );
     return (await this.projection(runId))!;
   }
@@ -4896,6 +4975,61 @@ export class Engine {
       out.set(h.key, h.result);
     }
     return out;
+  }
+
+  /**
+   * EVERY LIVE `budget.reserved` NOTHING LIVE HAS SETTLED — money this run has promised and,
+   * by its own surviving record, never released.
+   *
+   * `#rewindSerially` is the only caller and the reason it needs one: a rewind boundary between
+   * a reservation and its settlement suppresses the credit and keeps the debit, so the fold
+   * holds a promise for a call whose record is gone. `RunProjection.reservedUsd` is a SUM and
+   * cannot answer this — the repair has to name a scope and an amount per row, because
+   * `journal/audit.ts` pairs reservations by SCOPE and by COUNT.
+   *
+   * SUPPRESSION-AWARE, and the rule is `#completedEffects`'s verbatim because it is
+   * `projection.ts`'s `suppressedRanges` verbatim: `(atSeq, markerSeq)`, exclusive at both ends,
+   * recomputed in the same single pass rather than imported so this stays one walk with no
+   * second buffer of every event.
+   *
+   * LIFO WITHIN A SCOPE, which is `journal/audit.ts`'s pairing and not a second opinion about
+   * it — one node can hold several reservations at once, a fan-out being several tasks under
+   * one `node:` scope, so the value is a stack and not a flag. Which of two same-scope rows a
+   * settlement pairs with decides only WHICH seq is reported open, never how many are; and
+   * every settlement `#runAgent` writes carries its own reservation's `amountUsd` read back off
+   * the reservation, so the pairing is amount-preserving on any journal this engine wrote.
+   */
+  async #openReservations(
+    ctx: { readonly log: RunLog },
+  ): Promise<readonly { readonly seq: number; readonly scope: string; readonly amountUsd: number; readonly taskId?: TaskId }[]> {
+    const rows: { seq: number; opens: boolean; scope: string; amountUsd: number; taskId?: TaskId }[] = [];
+    const undone: [number, number][] = [];
+    for await (const e of ctx.log.read(1 as Seq)) {
+      if (isEvent(e, "checkpoint.restored")) {
+        if (e.payload.mode !== "rewind") continue;
+        const at = (e.payload as { atSeq?: number }).atSeq;
+        if (typeof at === "number") undone.push([at, e.seq]);
+        continue;
+      }
+      if (isEvent(e, "budget.reserved")) {
+        rows.push({ seq: e.seq, opens: true, scope: e.payload.scope, amountUsd: e.payload.amountUsd, ...(e.taskId === undefined ? {} : { taskId: e.taskId }) });
+      } else if (isEvent(e, "budget.settled")) {
+        rows.push({ seq: e.seq, opens: false, scope: e.payload.scope, amountUsd: e.payload.reservedUsd });
+      }
+    }
+    const open = new Map<string, typeof rows>();
+    for (const r of rows) {
+      if (undone.some(([from, to]) => r.seq > from && r.seq < to)) continue;
+      const stack = open.get(r.scope);
+      if (r.opens) {
+        if (stack === undefined) open.set(r.scope, [r]);
+        else stack.push(r);
+      } else stack?.pop();
+    }
+    // BY SEQ, so the repair is written in the order the promises were made and two folds of the
+    // same journal produce byte-identical batches. `Map` iteration order would be the order
+    // scopes were first seen, which is deterministic too and reads as an accident.
+    return [...open.values()].flat().sort((a, b) => a.seq - b.seq);
   }
 
   /**

@@ -837,8 +837,59 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   refusal at the terminal as well as journaling it in `goldenBlockers`. What cannot be fixed here
   stands: a workflow whose only signal is human approval still cannot rank its own runs.
 
-- **A.29 · STILL OPEN, and a wave-2 lane's answer was REFUSED on a measurement — which is worth
-  more than the row's original text.** The defect reproduces: a frozen golden case pins the
+- ~~**A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the
+  graph's OWN verifier certifies is refused.**~~ **CLOSED, on attempt three, and the two
+  refusals are kept in full below because each one named the axis the next attempt had to
+  cover.** `EvalCase.expect.verifiedBy` carries a `VerifierPin` per certifying evaluator —
+  WHO (a digest over the evaluator's declaration AND its resolved body), WHAT IT SAID (the
+  verdict channel read off the evaluator TASK's own writes, and the `pass` it carried), and
+  WHAT FED IT (`fed`, the digest of every channel the verifier reads that the RECORDING served
+  from outside the graph). `runCase` then stops comparing ONE channel byte for byte: the single
+  channel that verifier reads and the graph produced. `loom suite freeze` writes it, which is
+  the half that made the row's own reproduction go green:
+  `withVerifierPin 4 of 4 golden(s) | reordered promote=true | worse promote=false`, against
+  `1-must-pass FAILED — 4 must-pass failures` before.
+  **THE THIRD REFUSAL, AND WHY IT IS THE ONE THAT CLOSES THE ROW.** A pin covering all three
+  axes still promoted a candidate that certifies garbage, because axis 3 only covers reads that
+  are graph INPUTS and every other read had its byte pin waived. In the canonical eval topology
+  — a `fixture` node writing the ground truth, a `work` node writing the answer, a comparator
+  reading both — the candidate owns BOTH SIDES: rewrite `expected` and `answer` to the same
+  garbage, equality holds, the untouched grader says `pass`, and it promoted. Driven, and the
+  numbers are in `test/evolution/verifier-pin.test.ts` under `THE CANDIDATE OWNS BOTH SIDES`:
+  with the narrowing reverted, `pinned 6, mustPassFailures 0, promote true`; with it,
+  `pinned 0, mustPassFailures 6, promote false`. **The narrowing is condition 7 —
+  a verifier that reads more than one graph-produced channel is not pinned at all** — and it is
+  mechanical rather than clever, because deciding which upstream rewrite was harmless means
+  walking provenance, which is the loosening this row refused twice. Conditions 7 and 8 are one
+  function, `soleGradedRead`, asked of the recording's graph at freeze and of the candidate's at
+  check, because a rule stated twice is a rule that drifts.
+  **WHAT IT COSTS, NAMED:** every suite whose grader reads two or more produced channels keeps
+  the byte pin on all of them, so the false negative is still live for that shape — the fixture
+  topology above, a grader reading `{answer, rationale}`, one reading `{plan, result}`. The way
+  out is a change to the GRAPH (narrow the evaluator's reads, declare the ground truth an
+  input), not to the gate, which is the same answer `VerifierPin` note 1 gives.
+  **AND A FOURTH GAME, FOUND BY LOOKING FOR ONE RATHER THAN BY BEING TOLD:** the waiver lifts
+  the byte comparison from the run's FINAL value, while the verifier certified the value it was
+  SERVED — so a candidate that keeps every node byte-identical and ADDS one downstream of the
+  barrier that overwrites the graded channel promoted `picked: ["GARBAGE"]` at
+  `mustPassFailures 0, promote true`, every axis clean. Closed by condition 8, the mirror of
+  `VerifierPin` note 3: every node writing the graded channel must be an ANCESTOR of the
+  verifier by the candidate's own edges (`compensation` and `loop` edges are not followed, which
+  only shrinks the ancestor set). Refused at `mustPassFailures 6, promote false`, and a
+  recording made BY such a graph carries no pin at all.
+  **AND `certifies` WAS A FILE-DRIVEN WIDENING**, which is a failure mode `CLAUDE.md` names:
+  it was read verbatim out of the suite file and intersected with nothing, so appending one
+  entry waived a channel the verifier does not read (`mustPassFailures` 3 → 0 on the reviewer's
+  drive; 4 → 0 on this repo's, `A SUITE FILE CANNOT WIDEN THE WAIVER`). `waivedBy` now
+  recomputes the set from the candidate graph's own declaration of the pinned node — held fixed
+  by axis 1, which has already passed wherever it is reached — and honours `certifies` only
+  where the two agree. The file gets a veto and never a vote.
+  **NOT A CONSTANT GATE, checked:** in the two topologies whose grader reads one produced
+  channel, every golden case carries a pin (4 of 4 and 6 of 6) and the honest candidate
+  promotes where the byte pin refused it — `byte pin -> mustPassFailures 8, promote false`
+  against `three-axis -> 0, promote true`. Nine drives in `verifier-pin.test.ts`, plus
+  `test/cli/suite-freeze.test.ts`'s `A.29 ·` case through the shipped verbs.
+  THE SECOND REFUSAL, kept: The defect reproduces: a frozen golden case pins the
   whole work channel verbatim, so a candidate whose every run the graph's OWN deterministic
   verifier certifies as `pass` is refused by `1-must-pass` and reported as a 33.3pp regression.
   The lane proposed pinning `verifiedBy` — the verifier's declaration digest, its body digest,
@@ -854,8 +905,9 @@ same blindness about a refusal's TEXT rather than its identity — and is open.
   trade this row accepts. The branch was NOT merged.
   **What the lane did establish, and it is the useful half:** the axis a pin has to cover is
   three-wide — who the verifier is, what it said, AND what fed it — and the third is the one
-  nobody had named. **Closes when** a pin covers all three, or when somebody argues that the
-  artifact pin's false negatives are cheaper than any weaker floor and writes that here.
+  nobody had named. That was the closing condition, and it turned out to be necessary and not
+  sufficient: three axes still let the two-sided comparison through, and condition 7 is what
+  the fourth attempt would otherwise have had to find.
   ORIGINAL TEXT: A suite frozen from a corpus is a REGRESSION FLOOR, not a claim of improvement.**
   `EvalCase.expect` can name a status, a channel VALUE, a cost and `noIrreversibleWithoutGate` —
   every one of which describes what already happened, so an expectation derived from a recording

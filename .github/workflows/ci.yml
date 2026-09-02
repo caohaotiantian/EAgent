@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # Full history: `check-kernel.mjs` walks `git log` from kernel.json's `since`.
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -29,6 +32,18 @@ jobs:
       # computed import(), require).
       - run: node scripts/check-zero-dep.mjs
       - run: node scripts/check-surface.mjs
+      # THE THIRD GUARD, which CI ran none of until now. `package.json`'s `check` script runs
+      # all three and this workflow ran two, so the kernel seam ledger — the one guard whose
+      # output is a public count nobody may quietly reset — was exercised by nothing outside a
+      # maintainer's own shell. That is the same gap the binary job above exists to close, one
+      # file over.
+      #
+      # `fetch-depth: 0` on this job's checkout is REQUIRED and is not tidiness:
+      # `check-kernel.mjs` walks `git log` from `scripts/kernel.json`'s `since` commit, and
+      # `actions/checkout@v4` clones depth 1 by default, so the step fails on every run — a
+      # guard that always fails is the constant-gate failure this repo names, and it would have
+      # been switched off within a week.
+      - run: node scripts/check-kernel.mjs
 
   # WHY THIS JOB EXISTS, and why it is a job rather than a step in `check`.
   #

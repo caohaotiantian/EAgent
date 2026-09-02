@@ -148,7 +148,19 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
       // the command must stay present.
       assert.doesNotMatch(SRC("cli.ts"), /case "rewind"/, "a `loom rewind` verb exists now — update the row");
       assert.match(SRC("server/http.ts"), /case "rewind": \{/, "the control-plane command is gone — update the row");
-      assert.match(SRC("run/engine.ts"), /task\.ready" as const/, "and rewind must still re-arm the leases it undoes");
+      // NAMED, NOT SPELLED. This probe used to read `/task\.ready" as const/` — a FORMATTING
+      // TOKEN standing in for a behaviour. It fired on a change that strengthened exactly what
+      // it claims to protect: an agent annotated the two `.map` callbacks as `(x): NewEvent =>`
+      // instead of using `as const`, the same program, and this row went red while the rewind
+      // repair it guards got stronger. A probe that a reformat can break, and that a real
+      // regression could slip past by keeping the token, is pinning text rather than behaviour —
+      // which is the failure this whole file exists to catch, committed inside the file.
+      //
+      // The re-arm is named instead: `#rewindSerially` must still compute the leases a rewind
+      // stranded and append for them. `test/run/rewind-orphans-a-reservation.test.ts` asserts
+      // the batch shape behaviourally and is the real evidence; this stays the cheap check that
+      // the mechanism has not been deleted wholesale.
+      assert.match(SRC("run/engine.ts"), /stranded/, "and rewind must still re-arm the leases it undoes");
     },
   },
   {

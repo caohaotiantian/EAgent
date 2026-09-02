@@ -111,9 +111,11 @@ export interface EvalCase {
  *   recording — mapped to the digest of the value it was served. This is the axis that makes the
  *   grader's own input non-negotiable while leaving the graded artifact free.
  *
- * `certifies` is the consequence: the verifier's remaining reads, the ones the graph PRODUCED.
- * Those are the channels `runCase` stops comparing byte for byte, because they are the thing
- * under test and the verifier is what judges them.
+ * `certifies` is the consequence: the verifier's remaining read, the ONE the graph PRODUCED.
+ * That is the channel `runCase` stops comparing byte for byte, because it is the thing under
+ * test and the verifier is what judges it. It is a claim and not an instruction — `waivedBy`
+ * re-derives the waiver from the candidate's own graph and honours `certifies` only where the
+ * two agree, so a suite FILE cannot widen it. Note 5 says why the count is one.
  *
  * ## WHAT THIS PIN CAN NO LONGER CATCH — every pin trades something
  *
@@ -141,6 +143,41 @@ export interface EvalCase {
  *    recorded answer, and "the judge said pass" over a replayed judgment certifies nothing about
  *    the candidate. `verificationPin` skips them, so a graph whose only grader is a rubric keeps
  *    the byte pin entirely.
+ * 5. **A VERIFIER THAT READS TWO OR MORE GRAPH-PRODUCED CHANNELS IS NOT PINNED AT ALL** — the
+ *    whole byte pin stands, and this is the condition that closes the game a two-axis pin and
+ *    the first three-axis pin both let through. In the canonical eval topology a `fixture` node
+ *    writes the ground truth, a `work` node writes the answer, and the comparator reads both; a
+ *    candidate then owns BOTH sides of the comparison and can rewrite them to the same garbage
+ *    while leaving the grader byte-identical. Nothing in axes 1-3 can see that: the verifier is
+ *    the same verifier, it still says `pass`, and the only channel it reads from OUTSIDE the
+ *    graph is untouched. The narrowing is mechanical rather than clever — it does not try to
+ *    tell a ground-truth channel from a second work channel, because walking provenance to
+ *    decide which upstream rewrites were harmless is the loosening this row already refused
+ *    once. Driven in `test/evolution/verifier-pin.test.ts` under `THE CANDIDATE OWNS BOTH SIDES`.
+ *
+ *    **WHAT IT COSTS, NAMED:** every suite whose assertion evaluator reads more than one
+ *    produced channel keeps the byte pin on ALL of them, so A.29's false negative is still live
+ *    for that shape — a grader reading `{answer, rationale}` where only `answer` is graded, one
+ *    reading `{plan, result}`, and the fixture topology above, which is the common one. What
+ *    those suites lose is a waiver they would mostly have been entitled to; what they keep is
+ *    exactly the floor they have today, which is why this is the fail-closed direction. A suite
+ *    author who wants the waiver narrows the evaluator's `reads` to the single channel it grades
+ *    and moves the ground truth into the graph's declared `inputs`, where axis 3 pins it — a
+ *    change to the graph, not to the gate, and the same answer note 1 gives.
+ * 6. **A CHANNEL WRITTEN BY A NODE THAT IS NOT AN ANCESTOR OF THE VERIFIER IS NOT WAIVED** —
+ *    note 3's cost, mirrored onto the certified side and closed rather than accepted. The waiver
+ *    lifts the byte comparison from the run's FINAL value while the verifier certified the value
+ *    it was SERVED, so a candidate that adds a node overwriting the graded channel after the
+ *    grader ran promoted `picked: ["GARBAGE"]` at `mustPassFailures 0, promote true`, with every
+ *    axis clean — the grader really had certified the good value first. `soleGradedRead` refuses
+ *    the waiver unless every node writing the channel is upstream of the verifier by the
+ *    candidate's own edges, which is the cheap fail-closed answer to a question `RunProjection`
+ *    cannot answer. Driven in `test/evolution/verifier-pin.test.ts` under `THE GRADED CHANNEL IS
+ *    SPOILED AFTER IT WAS GRADED`, which also holds down the freeze side: a recording made BY
+ *    the spoiling graph carries no pin at all. **What it costs:** a graph whose graded channel is also written by a node
+ *    the grader does not depend on — a concurrent branch, a cleanup step after the barrier —
+ *    keeps the byte pin, and that is the correct reading rather than a loss: nothing in the
+ *    journal says the grader saw what that node left behind.
  */
 export interface VerifierPin {
   /** The evaluator node in the recording's graph. The candidate must still have it. */
@@ -152,8 +189,9 @@ export interface VerifierPin {
   /** AXIS 3 — WHAT FED IT. Channel → digest of the value the recording served the verifier. */
   readonly fed: Readonly<Record<string, Digest>>;
   /**
-   * The verifier's reads that the graph PRODUCED — the channels this pin lifts the byte
-   * comparison from. Sorted.
+   * The verifier's read that the graph PRODUCED — the channel this pin lifts the byte comparison
+   * from. Exactly one, by conditions 7 and 8; an array because the field predates them and a
+   * suite frozen before them can carry more, which `waivedBy` then declines to honour.
    */
   readonly certifies: readonly string[];
 }
@@ -382,13 +420,16 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
   // A channel a HOLDING pin certifies is not compared byte for byte — that waiver is the whole
   // repair. A pin that FAILED waives nothing: its verifier is not one whose word can stand in
   // for the recording, so the case falls back to the floor it had, and both reasons are
-  // reported. The waiver is therefore driven by this run's own answer and never by `certifies`
-  // read straight out of the suite file, because a broken pin's claims are not evidence.
+  // reported, because a broken pin's claims are not evidence.
+  // NEITHER HALF OF THE WAIVER IS TAKEN FROM THE SUITE FILE. The DECISION is this run's own
+  // answer, and the SET is `waivedBy`'s, recomputed from the candidate graph — `certifies` can
+  // only ever narrow it. Measured before that split existed: appending one channel name to a
+  // case's `certifies` took `mustPassFailures` from 3 to 0 over a corpus nothing else changed.
   const certified = new Set<string>();
   for (const pin of c.expect.verifiedBy ?? []) {
     const failures = verifierPinFailures(pin, opts.graph, p);
     for (const r of failures) reasons.push(r);
-    if (failures.length === 0) for (const ch of pin.certifies) certified.add(ch);
+    if (failures.length === 0) for (const ch of waivedBy(pin, opts.graph)) certified.add(ch);
   }
   for (const [channel, want] of Object.entries(c.expect.channels ?? {})) {
     if (certified.has(channel)) continue;
@@ -697,6 +738,55 @@ function verdictIn(writes: Readonly<Record<string, unknown>>): { channel: string
 }
 
 /**
+ * THE ONE CHANNEL A VERIFIER'S WORD CAN STAND IN FOR, or `undefined` when nothing can.
+ *
+ * Conditions 7 and 8, in the one place both sides of the pin ask the question — `verificationPin`
+ * asks it of the RECORDING's graph at freeze, `waivedBy` asks it of the CANDIDATE's at check, and
+ * a rule stated twice is a rule that drifts. `isFed` says which of the node's reads came from
+ * outside the graph: the declared `inputs` at freeze, the pin's own `fed` keys at check.
+ *
+ * 7 · EXACTLY ONE PRODUCED READ. Two means the verifier may be comparing two channels the
+ * candidate BOTH controls, and no axis can see that; zero means there is nothing to waive.
+ *
+ * 8 · EVERY NODE THAT WRITES THAT CHANNEL IS AN ANCESTOR OF THE VERIFIER. The waiver lifts the
+ * byte comparison from the run's FINAL value, and what the verifier certified is the value it
+ * was SERVED. A candidate that adds a node overwriting the graded channel AFTER the grader ran
+ * therefore promoted `picked: ["GARBAGE"]` with `mustPassFailures 0` — driven, and the axes were
+ * all clean, because the grader really did certify the good value before the spoiler replaced
+ * it. Ancestry is the cheap mechanical answer that fails closed: `RunProjection` carries no
+ * per-task ordering of channel state (`VerifierPin` note 3), but the compiled graph carries the
+ * edges, so "no writer of this channel can have run after the grader" is a reachability
+ * question. `compensation` and `loop` edges are not followed — the first is never taken in a
+ * forward walk and the second runs backwards, and excluding them only SHRINKS the ancestor set,
+ * which is the direction that refuses rather than waives.
+ */
+function soleGradedRead(graph: RunGraph, node: NodeSpec, isFed: (c: string) => boolean): string | undefined {
+  const produced = (node.reads ?? []).filter((c) => !isFed(c));
+  if (produced.length !== 1) return undefined; // 7
+  const channel = produced[0]!;
+  const parents = new Map<string, string[]>();
+  for (const e of graph.spec.edges) {
+    if (e.kind === "compensation" || e.kind === "loop") continue;
+    const list = parents.get(e.to);
+    if (list === undefined) parents.set(e.to, [e.from]);
+    else list.push(e.from);
+  }
+  const before = new Set<string>();
+  const stack = [...(parents.get(node.id) ?? [])];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    if (before.has(n)) continue;
+    before.add(n);
+    for (const up of parents.get(n) ?? []) stack.push(up);
+  }
+  for (const n of graph.spec.nodes) {
+    if (!(n.writes ?? []).includes(channel)) continue;
+    if (!before.has(n.id)) return undefined; // 8
+  }
+  return channel;
+}
+
+/**
  * Build the three-axis pin for one recording, or `undefined` when this recording cannot carry
  * one and the byte pin must stand.
  *
@@ -705,7 +795,7 @@ function verdictIn(writes: Readonly<Record<string, unknown>>): { channel: string
  * function of those two so that the same code can be driven from a test without the CLI, and so
  * that nothing here reads a clock or a store.
  *
- * SIX CONDITIONS, AND EVERY ONE OF THEM SKIPS THE NODE RATHER THAN WEAKENING THE PIN. A node
+ * EIGHT CONDITIONS, AND EVERY ONE OF THEM SKIPS THE NODE RATHER THAN WEAKENING THE PIN. A node
  * that fails any of them contributes no pin and certifies no channel, so its reads keep the byte
  * comparison they had. If no node survives, the answer is `undefined` and the case is exactly
  * the case it was before this existed.
@@ -721,6 +811,15 @@ function verdictIn(writes: Readonly<Record<string, unknown>>): { channel: string
  *      value this build can digest. The pinned value is the run's FINAL value, so a recording
  *      that overwrote its own input mid-run would pin a value the verifier may never have been
  *      served — and `channelDigest` says why the second half is a skip and not a throw.
+ *   7. the verifier reads EXACTLY ONE channel the graph produced — see `VerifierPin` note 5,
+ *      which is the condition that stops a candidate owning both sides of a comparison. Zero is
+ *      skipped by the same line and for the opposite reason: a pin that waives nothing is not a
+ *      floor being kept, it is a new refusal on a case that never had one;
+ *   8. every node that WRITES that channel is an ancestor of the verifier — `VerifierPin` note
+ *      6, the condition that stops a candidate spoiling the graded channel after it was graded.
+ *
+ * 7 and 8 are one function, `soleGradedRead`, because `waivedBy` asks the same two questions of
+ * the CANDIDATE's graph at check time and a rule stated twice is a rule that drifts.
  */
 export function verificationPin(graph: RunGraph, run: RunProjection): readonly VerifierPin[] | undefined {
   const inputs = new Set<string>(graph.spec.inputs);
@@ -744,6 +843,8 @@ export function verificationPin(graph: RunGraph, run: RunProjection): readonly V
     const served = reads.filter((c) => inputs.has(c)).sort();
     if (served.length === 0) continue; // 5
     if (served.some((c) => writtenByAnyTask.has(c))) continue; // 6
+    const graded = soleGradedRead(graph, node, (c) => inputs.has(c));
+    if (graded === undefined) continue; // 7, 8
 
     const fed: Record<string, Digest> = {};
     for (const c of served) {
@@ -757,10 +858,39 @@ export function verificationPin(graph: RunGraph, run: RunProjection): readonly V
       verifier,
       verdict: { channel: verdicts[0]!.channel, pass: true },
       fed,
-      certifies: reads.filter((c) => !inputs.has(c)).sort(),
+      certifies: [graded],
     });
   }
   return pins.length === 0 ? undefined : pins;
+}
+
+/**
+ * WHAT ONE HOLDING PIN ACTUALLY WAIVES — recomputed here, never read out of the suite file.
+ *
+ * `certifies` is a field in a JSON file, and a file that can widen a waiver is a file that can
+ * decide what the floor is. Driven before this existed: appending one entry to a case's
+ * `certifies` waived a channel the verifier does not read, and `mustPassFailures` went 3 → 0.
+ * "A widening reachable by a file rather than a human" is the failure mode `CLAUDE.md` names,
+ * and the fix is that the file gets a veto and never a vote.
+ *
+ * The waiver is derived from the CANDIDATE's own declaration of the pinned node, which costs
+ * nothing when the suite is honest because axis 1 has already pinned that declaration — this
+ * function is only ever reached with `verifierPinFailures` empty, so `node.reads` here is
+ * byte-for-byte the `reads` the recording's verifier had. Intersecting with `certifies` is
+ * belt-and-braces for exactly one case: a suite frozen before condition 7 existed, whose pin may
+ * name more than one produced channel.
+ *
+ * Then condition 7 again, at check time rather than at freeze: a verifier reading more than one
+ * produced channel may be comparing two channels the candidate both controls, so it waives
+ * NOTHING. See `VerifierPin` note 5 for the game that makes this the fail-closed answer and for
+ * what it costs.
+ */
+function waivedBy(pin: VerifierPin, graph: RunGraph): readonly string[] {
+  const node = graph.spec.nodes.find((n) => n.id === pin.nodeId);
+  if (node === undefined) return [];
+  const graded = soleGradedRead(graph, node, (c) => c in pin.fed);
+  if (graded === undefined) return [];
+  return pin.certifies.includes(graded) ? [graded] : [];
 }
 
 /**
