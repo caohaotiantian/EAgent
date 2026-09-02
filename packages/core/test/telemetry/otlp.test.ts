@@ -356,8 +356,13 @@ test("both endpoint spellings resolve to one /v1/traces, and the POST is applica
     assert.equal(res.ok, true);
     assert.equal(stub.calls[0]!.url, "http://collector.example:4318/v1/traces");
     assert.equal(stub.calls[0]!.init.method, "POST");
-    assert.equal((stub.calls[0]!.init.headers as Record<string, string>)["content-type"], "application/json");
-    assert.equal((stub.calls[0]!.init.headers as Record<string, string>)["x-api-key"], "k");
+    // A `Headers`, NOT A RECORD, since the exporter stopped handing `fetch` an object literal:
+    // that conversion silently drops a header named `__proto__`, so the class builds the
+    // `Headers` itself with `set`. `new Headers(…)` here accepts either shape, so this assertion
+    // survives whichever the implementation hands over.
+    const sent = new Headers(stub.calls[0]!.init.headers);
+    assert.equal(sent.get("content-type"), "application/json");
+    assert.equal(sent.get("x-api-key"), "k");
     // The body is the pure encoder's output verbatim — there is no second encoding path.
     assert.deepEqual(JSON.parse(String(stub.calls[0]!.init.body)), JSON.parse(JSON.stringify(otlpTraceRequest(spansFrom(fixtureJournal())))));
   }

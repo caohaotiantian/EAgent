@@ -161,10 +161,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                environment variable can make this command send, because a shell that
                happens to export one is not an operator asking for egress. It is read
                by trace and by no other verb, which refuses it rather than accepting
-               it and exporting nothing. A CREDENTIAL NEVER GOES ON ARGV, where every
-               user on the box can read it out of ps: set OTEL_EXPORTER_OTLP_HEADERS
-               to "k=v,k2=v2" (values percent-encoded) and they are sent on every
-               POST. A trace that follows subgraphs sends ONE REQUEST PER RUN, each
+               it and exporting nothing. THE HEADER CREDENTIAL NEVER GOES ON ARGV,
+               where every user on the box can read it out of ps: set
+               OTEL_EXPORTER_OTLP_HEADERS to "k=v,k2=v2" (values percent-encoded)
+               and they are sent on every POST. What this cannot protect is an
+               ENDPOINT that is itself a secret — a vendor host whose subdomain is
+               the key, or a path segment that is one. Those are in ps like any
+               other argument, and no split of a URL changes it.
+               A trace that follows subgraphs sends ONE REQUEST PER RUN, each
                under its own traceId, so the collector performs the join the terminal
                performs in process. Exit 1 then means the run did not conform to its
                graph OR the export did not complete, and the stderr lines say which
@@ -676,10 +680,31 @@ function otlpEndpoint(args: Args): string | undefined {
       return refuse("did not parse as a URL (the value is not repeated here, because it is the field a credential lives in)");
     }
   })();
+  // THE SCHEME IS NOT QUOTED BACK EITHER, and it used to be. `new URL("sk-live-abcdef:whatever")`
+  // parses, and its "protocol" is `sk-live-abcdef:` — so the one arm that interpolated printed a
+  // pasted key straight back, in the function whose docstring says flatly that no refusal here
+  // echoes the value. An absolute claim with a counterexample is worse than a narrower claim.
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    refuse(`names the "${parsed.protocol}" scheme, and OTLP/HTTP is http or https`);
+    refuse("names a scheme this exporter cannot speak — OTLP/HTTP is http or https");
   }
-  return raw;
+  // A QUERY OR A FRAGMENT IS REFUSED, because `OtlpHttpExporter` appends `/v1/traces` by STRING
+  // CONCATENATION and both defeat it. Measured:
+  //
+  //     http://h:4318/?a=b                  ->  http://h:4318/?a=b/v1/traces
+  //     https://v.example/otlp?token=sk-Q   ->  https://v.example/otlp?token=sk-Q/v1/traces
+  //
+  // — a path the operator never named, on a host they did, with their token mangled into it, and
+  // a permissive gateway answers 200 so the CLI reports success. That is word for word the
+  // failure this flag's environment fallback was DELETED over; it is reachable through argv too,
+  // and the fix is the same shape — fail closed, and name the component rather than the value.
+  if (parsed.search !== "") refuse("carries a query string, and `/v1/traces` is appended to the end of the value");
+  if (parsed.hash !== "") refuse("carries a URL fragment, and `/v1/traces` is appended to the end of the value");
+  // THE PARSED FORM, NOT `raw`, so the string that passed validation is the string that is sent.
+  // `new URL` normalises away surrounding whitespace and the exporter does not: `--otlp
+  // "  http://h:4318  "` validated clean and then POSTed to `"  http://h:4318  /v1/traces"`,
+  // failing with a masked message while the CLI's own line named the host correctly. It failed
+  // closed, but it reported a request that was never made.
+  return parsed.href;
 }
 
 /** Where a collector's credentials come from, and the only place they may. */
@@ -715,7 +740,24 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
         `the whole reason this is an environment variable and not a flag is that its values are credentials.`,
     );
   };
-  const out: Record<string, string> = {};
+  // A `Map`, AND THE PLAIN OBJECT IT REPLACES IS THE DEFECT. `out["__proto__"] = value` on an
+  // object literal runs `Object.prototype`'s setter instead of creating a property, so a header
+  // named `__proto__` — which passes `HEADER_NAME`, since `_` and letters are token characters —
+  // was SILENTLY DROPPED. Measured: `{}` after that assignment is `{}`, with
+  // `Object.hasOwn(out, "__proto__") === false`. Silently dropping a configured header is the
+  // one outcome this whole function exists to refuse, and it is the same class as the
+  // `KIND_CODE["constructor"]` defect `TODO.md` §C.4 records against the file this feeds — an
+  // inherited member answering for an absent one. `Map` has no such key, and
+  // `Object.fromEntries` creates the property rather than assigning it.
+  //
+  // **THAT FIX ALONE WAS NOT ENOUGH, AND THE TEST THAT "PROVED" IT WAS READING THE WRONG LAYER.**
+  // The parser then handed a correct record to `fetch`, whose own record→`Headers` conversion
+  // assigns into a plain object and dropped the header AGAIN — driven end to end, the wire
+  // carried `api-key` and `content-type` and no `__proto__`, while the assertion sat on the
+  // object one layer above the conversion and passed. `telemetry/otlp.ts` now builds a `Headers`
+  // with `set`, which carries it, and the test now reads the collector's `rawHeaders`. Two
+  // layers, one defect, and only the wire settles which of them is fixed.
+  const out = new Map<string, string>();
   const entries = raw.split(",");
   for (let i = 0; i < entries.length; i++) {
     const where = `entry ${String(i + 1)} of ${String(entries.length)}`;
@@ -727,6 +769,17 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
     if (eq <= 0) refuse(where, 'is not `key=value` (no "=", or nothing before it)');
     const key = entry.slice(0, eq).trim();
     if (!HEADER_NAME.test(key)) refuse(where, `has a key that is not a valid HTTP field name: "${key}"`);
+    // `__proto__` IS REFUSED BECAUSE `fetch` CANNOT SEND IT, which is a fact about the platform
+    // rather than a rule this file invented. It is a syntactically valid HTTP field name and it
+    // passes the check above; driven on loopback against a server printing `rawHeaders`, undici
+    // drops that one name on the way to the socket however the `Headers` is constructed — as a
+    // record, with `set`, or as an entries array — while `node:http` carries it. There is
+    // therefore no way for this binary to honour such a header, and the two honest answers are
+    // send it or refuse it. `constructor` and every other prototype name DO reach the wire and
+    // are not refused, which is why this names one string and not a class.
+    if (key === "__proto__") {
+      refuse(where, 'names the header "__proto__", which this binary cannot send: `fetch` drops that one name before the socket');
+    }
     let value: string;
     try {
       value = decodeURIComponent(entry.slice(eq + 1).trim());
@@ -740,10 +793,10 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
     if (/[\u0000-\u001f\u007f]/.test(value)) {
       refuse(where, `(key "${key}") has a value containing a control character — a trailing newline from $(cat …) is the usual cause`);
     }
-    if (Object.hasOwn(out, key)) refuse(where, `repeats the key "${key}", and the earlier value would be silently discarded`);
-    out[key] = value;
+    if (out.has(key)) refuse(where, `repeats the key "${key}", and the earlier value would be silently discarded`);
+    out.set(key, value);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
 /**
@@ -760,13 +813,17 @@ function legible(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
 }
 
-function refuseRepeated(args: Args, name: string, consequence: string): void {
+function refuseRepeated(args: Args, name: string, consequence: string, remedy?: string): void {
   if (!args.repeated.has(name)) return;
   throw err.validation(
     CODES.E_CONFIG_INVALID,
     `--${name} was given more than once. Flags on this CLI are last-wins, so every earlier ` +
-      `--${name} would be silently discarded — ${consequence} Pass one --${name} with the values ` +
-      `comma-separated instead: --${name} a,b`,
+      `--${name} would be silently discarded — ${consequence} ` +
+      // THE REMEDY IS THE CALLER'S, because it is not the same one twice. `--extension-module`
+      // has a comma-separated spelling for two modules and the refusal names it; `--otlp` does
+      // NOT — an endpoint is one URL, `--otlp a,b` would not parse, and telling an operator to
+      // write it would be advice that fails on their next command.
+      (remedy ?? `Pass one --${name} with the values comma-separated instead: --${name} a,b`),
   );
 }
 
@@ -5478,6 +5535,18 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // list costs a refusal rather than a graph lookup and a journal walk. The headers are
         // only consulted when an endpoint was given: an operator with `OTEL_EXPORTER_OTLP_HEADERS`
         // exported in their shell must not have a plain `loom trace` start refusing over it.
+        //
+        // A REPEAT IS REFUSED for `--extension-module`'s reason and it is the same shape one step
+        // over: flags here are last-wins, so two `--otlp` values name two collectors and export
+        // to one, which is the "believes they exported and did not" that `refuseOtlpOutsideTrace`
+        // exists for.
+        refuseRepeated(
+          args,
+          "otlp",
+          "the run's spans would go to the LAST collector named and to no other.",
+          "This flag takes ONE endpoint; a run that must reach two collectors is two `loom trace` invocations, " +
+            "or a collector that fans out — which is a pipeline decision and not one this binary makes.",
+        );
         const otlpTo = otlpEndpoint(args);
         const otlpWith = otlpTo === undefined ? undefined : otlpHeaders(process.env);
         // FOUND, NOT DEMANDED — see `recordedGraph`. Conformance is computed against this spec,
@@ -6233,6 +6302,21 @@ const COHORT_SCAN_LIMIT = 500;
 const MAX_TRACED_SUBGRAPHS = 64;
 
 /**
+ * How long `loom trace --otlp` will spend on a collector before giving up on ALL of it.
+ *
+ * A BOUND ON THE WALK, not on one POST. `OtlpHttpExporter` already bounds each request at 10 s,
+ * and with up to 65 runs to export that is eleven minutes of a terminal that looks hung — one
+ * line every ten seconds, which reads as progress. This is the deadline the whole loop shares:
+ * the first few runs get their real answers, and once it fires the rest fail fast as
+ * `reason: "timeout"` and are still reported one line each.
+ *
+ * 60 s because a healthy collector is nowhere near it — 65 POSTs on loopback finish in well
+ * under a second — so the only thing that reaches this number is a collector that is not
+ * answering, which is exactly what it is for.
+ */
+const OTLP_EXPORT_DEADLINE_MS = 60_000;
+
+/**
  * POST what `loom trace` just read to an OTLP/HTTP collector — the PUSH half of TODO §C.4.
  *
  * `telemetry/otlp.ts` has been able to do this for a wave and had no caller in the binary, so
@@ -6259,15 +6343,33 @@ const MAX_TRACED_SUBGRAPHS = 64;
  * rather than one number.
  *
  * WHAT IS ON THE LINE, AND WHY IT IS THE HOST AND NOT THE URL. `endpointSecrets` puts the full
- * href, the ORIGIN, `origin+pathname`, the userinfo and the query in the exporter's mask list —
- * driven, an unreachable `http://collector.internal:4318` yields
- * `detail: "TypeError: fetch failed to [redacted]v1/traces (ENOTFOUND collector.internal)"`. So
- * the scheme-qualified origin is masked and the BARE HOSTNAME is what survives, which is what
- * that file means by "the HOSTNAME is deliberately left legible". Printing the origin here
- * would print in plaintext the exact string the sibling line redacts, and the two lines
- * together would reconstruct it by adjacency. The residual is real and is not denied: a vendor
- * endpoint whose subdomain IS the key is exposed by the host as much as by the origin, and no
- * split of a URL fixes that.
+ * href, the ORIGIN, `origin+pathname`, the userinfo and the query in the exporter's mask list, so
+ * the scheme-qualified origin is masked and the BARE HOSTNAME is what survives — which is what
+ * that file means by "the HOSTNAME is deliberately left legible". Printing the origin here would
+ * print in plaintext the exact string the sibling line redacts.
+ *
+ * **AN EARLIER VERSION OF THIS PARAGRAPH PASTED A TRANSCRIPT THAT DOES NOT REPRODUCE**, and the
+ * correction is the more useful half. It quoted
+ * `detail: "TypeError: fetch failed to [redacted]v1/traces (ENOTFOUND collector.internal)"` as
+ * driven evidence; that came from a STUB `fetch` throwing a message I had written myself. Node's
+ * real `fetch` throws a bare `TypeError: fetch failed` and puts the reason on `.cause`, so the
+ * genuine measurement against `http://no-such-host.invalid:4318` was
+ * `detail: "TypeError: fetch failed"` and nothing more — the exporter's own claim about what an
+ * operator diagnoses with was false for every transport failure it had ever produced. `otlp.ts`
+ * now appends the cause, and the same command yields
+ * `TypeError: fetch failed (getaddrinfo ENOTFOUND no-such-host.invalid)`. A quotation is the
+ * strongest-looking evidence on a page, and it was the invented part.
+ *
+ * The residual on the host line is real and is not denied: a vendor endpoint whose subdomain IS
+ * the key is exposed by the host as much as by the origin, and no split of a URL fixes that —
+ * which is also why USAGE says an endpoint that is itself a secret is visible in `ps`.
+ *
+ * ONE DEADLINE ACROSS THE WHOLE LOOP, not one per POST. `folds` can hold 65 entries and the
+ * exporter's own timeout is 10 s, so a collector that accepts the connection and never answers
+ * would hold the terminal for eleven minutes, one silent line every ten seconds. The signal is
+ * created once and handed to every `export`, so a hung collector costs one timeout and the
+ * remaining runs fail fast — each still reported on its own line, which is what makes a partial
+ * export diagnosable.
  *
  * `empty` IS NOT A FAILURE. `otlp.ts` returns it to distinguish "nothing to say" from "said
  * it", and folding it into the exit code would erase the distinction the field exists to make.
@@ -6293,6 +6395,10 @@ async function exportTraceOverOtlp(
     }
   })();
   let ok = true;
+  // See the header: one deadline for the whole walk, not one per run. Generous enough that a
+  // working collector never sees it — 65 POSTs to a healthy collector is well under a second on
+  // loopback — and short enough that a black-holed one does not own the terminal.
+  const deadline = AbortSignal.timeout(OTLP_EXPORT_DEADLINE_MS);
   for (const fold of folds) {
     const exporter = new OtlpHttpExporter({
       endpoint,
@@ -6304,7 +6410,7 @@ async function exportTraceOverOtlp(
       // to `loom`, and a second spelling of a default is a second thing that can drift.
       resourceAttributes: { [OTLP_RUN_ID_ATTR]: fold.runId },
     });
-    const result = await exporter.export(fold.spans);
+    const result = await exporter.export(fold.spans, deadline);
     if (result.ok) {
       if (result.rejected === 0) {
         process.stderr.write(`otlp: ${fold.runId} — ${String(result.spans)} span(s) sent to ${where}\n`);
@@ -6322,6 +6428,16 @@ async function exportTraceOverOtlp(
       // it" must not look the same to whoever is watching the pipeline. This arm returns BEFORE
       // `ok` is touched; an earlier draft cleared the flag first and then tried to restore it,
       // which made an empty fold fail the command.
+      //
+      // **AND IT IS UNREACHABLE FROM `trace` TODAY, WHICH IS SAID HERE RATHER THAN CLAIMED AS
+      // TESTED.** `empty` needs a fold that encodes to zero spans: the parent's journal is
+      // non-empty (`recordedGraph` already resolved a `run.compiled` out of it), the walk skips
+      // any child whose journal reads empty, and `spansFrom` mints `loom.run` for anything that
+      // has a `run.submitted`. So no test drives this line — a mutation deleting it leaves the
+      // suite green, and that is a gap in coverage rather than a gap in the argument. It is kept
+      // because `OtlpExportResult` HAS the arm: a caller that treats "nothing to send" as a
+      // failure erases the distinction the field was added to make, and the next call site that
+      // can produce one should not have to rediscover that.
       process.stderr.write(`otlp: ${fold.runId} — nothing to export; its journal folded to no spans\n`);
       continue;
     }
@@ -6333,6 +6449,11 @@ async function exportTraceOverOtlp(
     // at `MAX_TRACED_SUBGRAPHS` quietly: the links and the child run ids are still on the
     // printed lines, so the reader can type the next command. A collector that is simply
     // missing those runs looks exactly like a run that had no subgraphs.
+    //
+    // **UNEXERCISED, AND SAID SO RATHER THAN COUNTED AS COVERED.** Reaching it needs a run with
+    // more than 64 subgraph children, which no test here builds; `MAX_TRACED_SUBGRAPHS` is a
+    // module constant with no seam to lower. The arithmetic it depends on is the part that was
+    // wrong on the first draft and is stated where it is computed.
     process.stderr.write(
       `otlp: ${String(unread)} child run(s) were not read and therefore not exported — \`loom trace\` follows at most ` +
         `${String(MAX_TRACED_SUBGRAPHS)} of them per invocation. Their ids are on the tree above; each is its own \`loom trace\`.\n`,

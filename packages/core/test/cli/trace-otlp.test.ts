@@ -102,10 +102,14 @@ interface Cli {
  *     ℹ tests 2
  *
  * Fourteen tests ran; two were counted. Every one of them PASSED when named with
- * `--test-name-pattern`, so the file looked green while twelve of its assertions were invisible
- * — and a failure among them would have been invisible in exactly the same way. Measured, five
- * identical tests with one 5 ms await inside the window: swallowing stdout reports **1 of 5**,
- * forwarding reports **5 of 5**, and swallowing only stderr reports **5 of 5**.
+ * `--test-name-pattern`, so the file looked green while twelve of its assertions were invisible.
+ * **A failure among them is NOT invisible, and the first draft of this paragraph said it was** —
+ * the run still exits non-zero and still reports `fail 1`. What is lost is the failing test's
+ * NAME and its assertion diff: it arrives as `test at <file>:1:1` and nothing else. Bad, and bad
+ * in a different way from "silently green", which is the kind of distinction this file is
+ * supposed to hold itself to. Measured, five identical tests with one 5 ms await inside the
+ * window: swallowing stdout reports **1 of 5**, forwarding reports **5 of 5**, and swallowing
+ * only stderr reports **5 of 5**.
  *
  * So stdout forwards (the CLI's own output shows up in the test log, which is the honest cost)
  * and stderr does not (measured safe, and it is where the `otlp:` lines and the compiler's
@@ -173,6 +177,8 @@ const ok200 = (): Response => new Response("{}", { status: 200, headers: { "cont
 interface Sent {
   readonly url: string;
   readonly headers: Record<string, string>;
+  /** Header names exactly as they arrived — the only witness for one that `fetch` might drop. */
+  readonly rawNames: readonly string[];
   readonly body: string;
 }
 
@@ -187,7 +193,12 @@ async function collector(reply: (n: number) => { status: number; body: string } 
     let body = "";
     q.on("data", (c) => (body += String(c)));
     q.on("end", () => {
-      seen.push({ url: q.url ?? "", headers: q.headers as Record<string, string>, body });
+      seen.push({
+        url: q.url ?? "",
+        headers: q.headers as Record<string, string>,
+        rawNames: q.rawHeaders.filter((_, i) => i % 2 === 0),
+        body,
+      });
       const r = reply(seen.length);
       s.writeHead(r.status, { "content-type": "application/json" });
       s.end(r.body);
@@ -210,8 +221,10 @@ function resourceAttrs(body: string): Record<string, unknown> {
   return out;
 }
 
-function spansOf(body: string): { name: string; traceId: string; links?: { traceId: string }[] }[] {
-  const p = JSON.parse(body) as { resourceSpans: { scopeSpans: { spans: { name: string; traceId: string; links?: { traceId: string }[] }[] }[] }[] };
+function spansOf(body: string): { name: string; traceId: string; spanId: string; links?: { traceId: string }[] }[] {
+  const p = JSON.parse(body) as {
+    resourceSpans: { scopeSpans: { spans: { name: string; traceId: string; spanId: string; links?: { traceId: string }[] }[] }[] }[];
+  };
   return p.resourceSpans[0]!.scopeSpans[0]!.spans;
 }
 
@@ -245,9 +258,12 @@ test("THE HOLE THIS CLOSES: `loom trace --otlp` POSTs the fold to a collector", 
     // `/v1/traces` is appended to the base — the spelling an operator has in
     // OTEL_EXPORTER_OTLP_ENDPOINT — and the encoding is OTLP/HTTP JSON.
     assert.equal(rec.calls[0]!.url, "http://collector.invalid:4318/v1/traces");
-    const headers = rec.calls[0]!.init.headers as Record<string, string>;
-    assert.equal(headers["content-type"], "application/json");
+    const headers = new Headers(rec.calls[0]!.init.headers);
+    assert.equal(headers.get("content-type"), "application/json");
     assert.equal(rec.calls[0]!.init.method, "POST");
+    // A REDIRECT IS REFUSED. Driven separately below; asserted here because it is a property of
+    // every request this command makes, not of one test's fixture.
+    assert.equal(rec.calls[0]!.init.redirect, "error", "a 3xx must not re-address the credential and the trace");
 
     const body = String(rec.calls[0]!.init.body);
     const attrs = resourceAttrs(body);
@@ -336,6 +352,19 @@ test("A SUBGRAPH IS ONE REQUEST PER RUN, UNSPLICED, AND THE PARENT'S LINK NAMES 
       "UNSPLICED: the child keeps its own traceId, which is the one its own trace carries",
     );
 
+    // UNSPLICED, MEASURED AS DISJOINTNESS AND NOT AS TRACE-ID COUNTS. Under a mutation that fed
+    // the parent's POST the SPLICED array, every assertion above still passed — `spliceSubgraph`
+    // rewrites the child's traceId onto the parent's, so the spliced payload still carries
+    // exactly one traceId, and the second POST is still the child's own fold. What separates the
+    // two is whether the parent's payload CONTAINS the child's spans, so that is what is checked.
+    const parentIds = new Set(parentSpans.map((x) => x.spanId));
+    const childIds = childSpans.map((x) => x.spanId);
+    assert.ok(
+      !childIds.some((id) => parentIds.has(id)),
+      "the parent's payload carries the child's spans — that is the spliced array, not one trace per run",
+    );
+    assert.equal(parentSpans.length + childSpans.length, parentIds.size + new Set(childIds).size, "no span was sent twice");
+
     // AND THE JOIN IS RESOLVABLE. This is `SpanLink.traceId`'s consumer outside the in-process
     // splice — the thing §C.4 was written because it did not have.
     const links = parentSpans.flatMap((s) => s.links ?? []);
@@ -358,9 +387,9 @@ test("HEADERS COME FROM THE ENVIRONMENT, AND THERE IS NO FLAG THAT TAKES THEM", 
       const rec = recorder(ok200);
       const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", "http://collector.invalid:4318"], rec.fetch);
       assert.equal(r.code, 0, r.err);
-      const headers = rec.calls[0]!.init.headers as Record<string, string>;
-      assert.equal(headers["api-key"], "sk-live-abc123");
-      assert.equal(headers["x-tenant"], "acme corp", "values are percent-decoded, as OTel specifies");
+      const headers = new Headers(rec.calls[0]!.init.headers);
+      assert.equal(headers.get("api-key"), "sk-live-abc123");
+      assert.equal(headers.get("x-tenant"), "acme corp", "values are percent-decoded, as OTel specifies");
     });
 
     // THE POINT OF THE ENV VAR. A credential on argv is readable out of `ps` by every user on
@@ -373,13 +402,58 @@ test("HEADERS COME FROM THE ENVIRONMENT, AND THERE IS NO FLAG THAT TAKES THEM", 
   }
 });
 
+test("A HEADER NAMED `__proto__` IS REFUSED, BECAUSE `fetch` CANNOT SEND IT", async () => {
+  // Two layers of the same defect, and the second is a fact about the platform.
+  //
+  // The parser first accumulated into an object literal, where `out["__proto__"] = value` runs
+  // `Object.prototype`'s setter instead of creating a property — measured, `{}` afterwards is
+  // `{}`. That is fixed (a `Map` plus `Object.fromEntries`), and the first version of this test
+  // asserted the header then reached "the wire" by reading the object handed to a STUB fetch,
+  // one layer above the conversion that was still losing it. It passed; the collector received
+  // nothing of the kind.
+  //
+  // Driven properly, against a loopback server printing `rawHeaders`: undici drops the name
+  // `__proto__` before the socket however the `Headers` is built — as a record, with `set`, or
+  // as an entries array — while `node:http` given the identical name carries it. So this binary
+  // CANNOT honour such a header, and the parser's contract is send-or-refuse. It refuses.
+  //
+  // `constructor` is the control: same prototype-name family, reaches the wire, not refused.
+  const w = workspace();
+  const c = await collector();
+  try {
+    const runId = await submit(w.dir);
+    await withEnv(HEADERS_ENV, "__proto__=sent-anyway,api-key=real", async () => {
+      const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+      assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, String(e));
+      assert.match(e.message, /cannot send/);
+      assert.equal(c.seen.length, 0, "and nothing was POSTed, because the refusal precedes the read");
+    });
+
+    await withEnv(HEADERS_ENV, "constructor=also,api-key=real", async () => {
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+      assert.equal(r.code, 0, r.err);
+      const names = c.seen[0]!.rawNames.map((n) => n.toLowerCase());
+      assert.ok(names.includes("constructor"), `the control header did not reach the wire: ${names.join(", ")}`);
+      assert.equal(c.seen[0]!.headers["constructor"], "also");
+      assert.equal(c.seen[0]!.headers["api-key"], "real");
+    });
+  } finally {
+    await c.close();
+    w.dispose();
+  }
+});
+
 test("A COLLECTOR CANNOT ECHO THE CREDENTIAL BACK ONTO STDERR", async () => {
   // The regression for the exporter's mask. `#secrets` was built from the ENDPOINT alone while
   // `OtlpExporterOptions.headers` said in its own docstring that it is where the API key goes,
   // so a gateway that quotes the auth header in its 4xx body put the key on the operator's
   // terminal — and into whatever CI log was capturing it.
   const secret = "sk-live-abc123";
-  const c = await collector(() => ({ status: 400, body: `bad request: seen authorization=Bearer ${secret} at /v1/traces` }));
+  // THE TOKEN ALONE, not the whole header value, and that distinction is the test. The mask list
+  // was built from whole values, so a gateway answering `invalid api key: <token>` — the ordinary
+  // thing a gateway does — matched nothing and printed the key. The exporter now also masks each
+  // word of the value, so `Bearer sk-live-abc123` covers `sk-live-abc123`.
+  const c = await collector(() => ({ status: 400, body: `invalid api key: ${secret}` }));
   const w = workspace();
   try {
     const runId = await submit(w.dir);
@@ -483,7 +557,33 @@ test("A VALUE THAT IS NOT AN http(s) URL IS REFUSED, AND IS NOT QUOTED BACK", as
     assert.ok(!e.message.includes("sk-live-abc123"), e.message);
 
     const scheme = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", "ftp://collector.invalid"]);
-    assert.match(scheme.message, /"ftp:" scheme/);
+    assert.match(scheme.message, /names a scheme this exporter cannot speak/);
+    // AND THE SCHEME ITSELF IS NOT QUOTED, which is why the message above is generic.
+    // `new URL("sk-live-abcdef:whatever")` parses and its "protocol" is `sk-live-abcdef:`, so an
+    // arm that interpolated the scheme printed a pasted key straight back — in the function whose
+    // docstring says no refusal here echoes the value.
+    const pasted = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", "sk-live-abcdef:whatever"]);
+    assert.ok(!pasted.message.includes("sk-live-abcdef"), pasted.message);
+
+    // A QUERY OR FRAGMENT IS REFUSED, because the exporter appends `/v1/traces` by string
+    // concatenation: `http://h:4318/?a=b` would have POSTed to `http://h:4318/?a=b/v1/traces`,
+    // a path the operator never named, and a permissive gateway answers 200 so it reads as
+    // success. Same failure D1 deleted the environment fallback over, reachable through argv.
+    for (const [ep, says] of [
+      ["http://collector.invalid:4318/?tenant=acme", /carries a query string/],
+      ["http://collector.invalid:4318/#frag", /carries a URL fragment/],
+    ] as const) {
+      const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", ep]);
+      assert.match(e.message, says, ep);
+    }
+
+    // AND THE VALUE THAT PASSED VALIDATION IS THE VALUE THAT IS SENT. `new URL` normalises
+    // surrounding whitespace away and the exporter does not, so `--otlp "  http://h:4318  "`
+    // used to validate clean and then POST to `"  http://h:4318  /v1/traces"`.
+    const rec = recorder(ok200);
+    const padded = await cli(["trace", runId, "--workspace", w.dir, "--otlp", "  http://collector.invalid:4318  "], rec.fetch);
+    assert.equal(padded.code, 0, padded.err);
+    assert.equal(rec.calls[0]!.url, "http://collector.invalid:4318/v1/traces");
   } finally {
     w.dispose();
   }
@@ -525,6 +625,33 @@ test("AN EXPORT THAT DID NOT HAPPEN IS EXIT 1, EVEN WHEN THE RUN CONFORMED", asy
   }
 });
 
+test("...and the failure says WHY, which for the whole life of this exporter it did not", async () => {
+  // `endpointSecrets`' docstring justifies leaving the hostname legible on the ground that
+  // "`ENOTFOUND collector.internal` is what an operator diagnoses this with". That never
+  // reproduced: Node's `fetch` throws a bare `TypeError: fetch failed` and puts the reason on
+  // `.cause`, so every transport failure — DNS, connection refused, TLS, a refused redirect —
+  // reported the same four words and the operator had nothing to act on.
+  //
+  // Driven against a port on loopback that nothing is listening on: bind, read the port, close,
+  // then export to it. No DNS, no network, and ECONNREFUSED is the same on every machine.
+  const w = workspace();
+  const dead = await collector();
+  const endpoint = dead.endpoint;
+  await dead.close();
+  try {
+    const runId = await submit(w.dir);
+    const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", endpoint]);
+    assert.equal(r.code, 1);
+    const line = r.err.split("\n").find((l) => l.startsWith("otlp:"))!;
+    assert.match(line, /FAILED \(transport\)/);
+    assert.match(line, /ECONNREFUSED/, `the reason must reach the operator, not just "fetch failed": ${line}`);
+    // The host stays legible for the same reason — it is what the operator diagnoses with.
+    assert.match(line, /127\.0\.0\.1:\d+/);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("A 200 THAT REJECTED SPANS IS ALSO EXIT 1, AND THE COUNT IS NAMED", async () => {
   // OTLP's partialSuccess. The collector took the request and threw part of it away; reporting
   // that as a clean success is how a broken pipeline stays invisible, which is why
@@ -538,6 +665,91 @@ test("A 200 THAT REJECTED SPANS IS ALSO EXIT 1, AND THE COUNT IS NAMED", async (
     assert.match(r.err, /REJECTED 3 of \d+ span\(s\): unsupported attribute type/);
   } finally {
     await c.close();
+    w.dispose();
+  }
+});
+
+test("...and `errorMessage` is masked like `detail`, because both are the collector's own words", async () => {
+  // The 200 path had no masking test at all: deleting the `mask` around `errorMessage` left the
+  // whole suite green, which is the definition of an unpinned change. Same class as the 400 body
+  // one screen up — text chosen by the party outside the trust boundary, printed on the line that
+  // explains a non-zero exit — and a collector that quotes the request back re-prints the
+  // credential the sibling branch redacts.
+  const secret = "sk-live-abc123";
+  const w = workspace();
+  const c = await collector(() => ({
+    status: 200,
+    body: JSON.stringify({ partialSuccess: { rejectedSpans: 1, errorMessage: `rejected for ${secret}` } }),
+  }));
+  try {
+    const runId = await submit(w.dir);
+    await withEnv(HEADERS_ENV, `authorization=Bearer%20${secret}`, async () => {
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+      assert.equal(r.code, 1);
+      assert.ok(!r.err.includes(secret), `the credential reached stderr through errorMessage:\n${r.err}`);
+      assert.match(r.err, /REJECTED 1 of/);
+      assert.match(r.err, /\[redacted\]/);
+    });
+  } finally {
+    await c.close();
+    w.dispose();
+  }
+});
+
+test("A COLLECTOR THAT REDIRECTS DOES NOT GET TO RE-ADDRESS THE CREDENTIAL OR THE TRACE", async () => {
+  // The one arm of this feature that is about an attacker rather than a mistake. `fetch` defaults
+  // to `redirect: "follow"`, so before this was pinned a collector answering
+  // `307 Location: http://<elsewhere>/v1/traces` moved the API key AND the whole run's spans to
+  // another origin — driven on loopback, the second server printed
+  // `ATTACKER RECEIVED: POST /v1/traces auth= sk-SUPER-SECRET bodyBytes= 438` — while `export`
+  // returned `{ok: true, spans: 1, rejected: 0}`, so the operator was told the spans reached the
+  // host they had named.
+  const w = workspace();
+  const elsewhere = await collector();
+  const redirector = createServer((_q, res) => {
+    res.writeHead(307, { location: `${elsewhere.endpoint}/v1/traces` });
+    res.end();
+  });
+  await new Promise<void>((res) => redirector.listen(0, "127.0.0.1", res));
+  const port = (redirector.address() as AddressInfo).port;
+  try {
+    const runId = await submit(w.dir);
+    await withEnv(HEADERS_ENV, "api-key=sk-SUPER-SECRET", async () => {
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", `http://127.0.0.1:${String(port)}`]);
+      assert.equal(r.code, 1, "a refused redirect is an export that did not happen");
+      assert.match(r.err, /otlp: .* FAILED \(transport\)/);
+      assert.equal(elsewhere.seen.length, 0, "the redirect target received the credential and the trace");
+      assert.ok(!r.err.includes("sk-SUPER-SECRET"), r.err);
+    });
+  } finally {
+    await new Promise<void>((res) => redirector.close(() => res()));
+    await elsewhere.close();
+    w.dispose();
+  }
+});
+
+test("A REPEATED --otlp IS REFUSED, because last-wins would name two collectors and use one", async () => {
+  const w = workspace();
+  try {
+    const runId = await submit(w.dir);
+    const e = await refusal([
+      "trace",
+      runId,
+      "--workspace",
+      w.dir,
+      "--otlp",
+      "http://a.invalid:4318",
+      "--otlp",
+      "http://b.invalid:4318",
+    ]);
+    assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, String(e));
+    assert.match(e.message, /--otlp was given more than once/);
+    // AND THE REMEDY IS NOT THE COMMA LIST. `refuseRepeated`'s default sentence tells the reader
+    // to pass `--otlp a,b`, which would not parse as a URL — advice that fails on the reader's
+    // next command. This flag supplies its own remedy, which is why that parameter exists.
+    assert.doesNotMatch(e.message, /comma-separated/);
+    assert.match(e.message, /takes ONE endpoint/);
+  } finally {
     w.dispose();
   }
 });

@@ -32,8 +32,8 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,791**, the
-fourteen cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
+**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,796** — the
+nineteen cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
 package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
 which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
 census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
@@ -75,7 +75,7 @@ count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,791 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,796 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -1058,19 +1058,46 @@ is a better view of nothing.
        `reason: "empty"` is excluded: `otlp.ts` returns it to distinguish "nothing to say" from
        "said it", and folding it in would erase the distinction the field exists to make.
 
-     **Two defects in the exporter were found BY WIRING IT, and both are this change's**, because
-     this is the first caller in the binary that hands it a credential. `#secrets` was
-     `endpointSecrets(base)` alone while `OtlpExporterOptions.headers` says in its own docstring
-     that it is where the API key goes — driven, a stub throwing a message containing the header
-     value returned `detail: "… auth=Bearer sk-SECRET"` verbatim, and a collector echoing the
-     header in a 4xx body reaches the same place. The header values are now in the mask list and
-     `partialSuccess.errorMessage` goes through the same `mask` as `detail`. **And the CLI prints
-     the collector's HOST, not its origin** — measured, `endpointSecrets` masks the
-     scheme-qualified origin and leaves the bare hostname legible, so printing the origin would
-     have printed in plaintext the exact string the sibling line redacts. This row's own finding 5
-     is the register of somebody reaching the opposite false conclusion about the same function by
-     reading the mask list instead of running it; both directions have now been settled by running
-     it.
+     **FIVE defects in the shipped exporter were found BY WIRING IT, and they are this change's**,
+     because this is the first caller in the binary that hands `OtlpHttpExporter` a credential and
+     a destination. Every one was driven on loopback, not read:
+     - **A COLLECTOR COULD RE-ADDRESS THE CREDENTIAL AND THE WHOLE TRACE.** `fetch` defaults to
+       `redirect: "follow"`, and nothing set it. A "collector" answering
+       `307 Location: http://<elsewhere>/v1/traces` moved the API key and the run's spans to
+       another origin — the second server printed
+       `ATTACKER RECEIVED: POST /v1/traces auth= sk-SUPER-SECRET bodyBytes= 438` — while
+       `export` returned `{ok: true, spans: 1, rejected: 0}`, so the caller was told the spans
+       reached the host it named. Now `redirect: "error"`.
+     - **The mask covered the endpoint and not the API key**, in the class whose own docstring
+       says "this is where a vendor's API key goes". And covering the WHOLE header value was not
+       enough either: a gateway answering `invalid api key: <token>` — echoing the token rather
+       than `Bearer <token>` — matched nothing. Each word of 8+ characters now joins the list,
+       and `partialSuccess.errorMessage` goes through the same `mask` as `detail`.
+     - **Every transport failure said `TypeError: fetch failed` and nothing else**, because Node
+       puts the reason on `.cause`. So `endpointSecrets`' stated justification — that the
+       hostname is left legible because `ENOTFOUND collector.internal` is what an operator
+       diagnoses with — had never once been true of this exporter's output. The cause is now
+       appended, through the same mask.
+     - **`__proto__` as a header name is undeliverable and now says so.** Two layers: the CLI's
+       parser accumulated into an object literal, where `out["__proto__"] = v` runs
+       `Object.prototype`'s setter and creates nothing; and then `fetch` drops that one name
+       before the socket however the `Headers` is built — as a record, with `set`, or as an
+       entries array — while `node:http` given the identical name carries it. `constructor` is
+       the control and reaches the wire. Since sending is measured impossible, the CLI refuses.
+     - **A query string or fragment in the endpoint POSTed to a path nobody named.** The exporter
+       appends `/v1/traces` by string concatenation, so `http://h:4318/?a=b` became
+       `http://h:4318/?a=b/v1/traces` — the identical failure this row's D1 deleted the
+       environment fallback over, reachable straight through argv. Refused, fail-closed.
+
+     **And the CLI prints the collector's HOST, not its origin** — measured, `endpointSecrets`
+     masks the scheme-qualified origin and leaves the bare hostname legible, so printing the
+     origin would have printed in plaintext the exact string the sibling line redacts. This row's
+     own finding 5 is the register of somebody reaching the opposite false conclusion about the
+     same function by reading the mask list instead of running it; both directions have now been
+     settled by running it. **Seventeen mutations, all CAUGHT**, one per decision that carries
+     weight — plus two coverage gaps stated in the source rather than papered over: the
+     `reason: "empty"` arm is unreachable from `trace` today, and the subgraph-bound report needs
+     65 child runs to exercise.
   2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
      is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
      `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a

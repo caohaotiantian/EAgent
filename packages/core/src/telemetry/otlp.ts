@@ -583,15 +583,49 @@ export class OtlpHttpExporter {
     // line — including the catch, through `secrets` — has the full list.
     let secrets = this.#secrets;
     try {
-      const headers = this.#opts.headers;
-      if (headers !== undefined) {
-        secrets = [...secrets, ...Object.values(headers).filter((v) => typeof v === "string" && v !== "")];
+      const bag = this.#opts.headers;
+      if (bag !== undefined) {
+        // THE VALUE *AND ITS WORDS*, because the whole value alone does not cover the commonest
+        // shape there is. `mask` replaces exact substrings, so with
+        // `authorization: "Bearer sk-live-abc123"` in the list, a gateway answering
+        // `401 invalid api key: sk-live-abc123` — echoing the TOKEN rather than the whole header,
+        // which is the ordinary thing a gateway does — matched nothing and printed the key. Each
+        // whitespace-separated word of 8 or more characters joins the list, which covers
+        // `Bearer <key>`, `Basic <b64>` and `Token <key>`; `mask` already sorts longest-first, so
+        // the whole value still wins where both appear. The 8 is a floor on the WORDS only —
+        // every value is masked whole whatever its length, so nothing that was covered before is
+        // uncovered now, and a word short enough to collide with ordinary prose would redact the
+        // sentence the mask exists to keep readable.
+        const values = Object.values(bag).filter((v) => typeof v === "string" && v !== "");
+        secrets = [...secrets, ...values, ...values.flatMap((v) => v.split(/\s+/).filter((w) => w.length >= 8))];
       }
       const attrs = this.#opts.resourceAttributes;
       const payload = otlpTraceRequest(spans, attrs === undefined ? {} : { resourceAttributes: attrs });
       const scopeSpans = (payload.resourceSpans[0] as { scopeSpans: readonly { spans: readonly unknown[] }[] }).scopeSpans;
       count = scopeSpans[0]!.spans.length;
       if (count === 0) return { ok: false, spans: 0, reason: "empty", detail: "no exportable spans in this fold" };
+      // A `Headers` BUILT WITH `set`, NOT A RECORD SPREAD — and the honest reason is narrower
+      // than the one first written here, which was that it makes a header named `__proto__`
+      // reach the wire. IT DOES NOT, AND NOTHING DOES. Driven on loopback against a server
+      // printing `rawHeaders`:
+      //
+      //     Headers via set, iterator shows [["__proto__","S"],["constructor","also"],…]
+      //     wire:  host, connection, content-type, constructor, accept, …   ← no __proto__
+      //     entries-array form                                              ← no __proto__
+      //     node:http with the same name                                    ← __proto__ PRESENT
+      //
+      // So `undici` drops that one name on the way to the socket however the `Headers` is built,
+      // while `node:http` carries it. `cli.ts` therefore REFUSES the name rather than pretending
+      // to send it — send-or-refuse, with sending measured impossible.
+      //
+      // What this form is actually worth: it removes the plain-object intermediate entirely, so
+      // no inherited-key surprise can happen in the conversion at all — the class this tree has
+      // already been bitten by twice (`KIND_CODE["constructor"]` here, `out["__proto__"]` in the
+      // CLI's parser). And `set` rather than the array form because the array APPENDS: a caller
+      // passing their own `content-type` would get `application/json, theirs` instead of theirs,
+      // where the record spread was last-wins.
+      const headers = new Headers({ "content-type": "application/json" });
+      for (const [k, v] of Object.entries(this.#opts.headers ?? {})) headers.set(k, v);
       const raw: unknown = this.#opts.timeoutMs;
       // Bounded rather than defaulted, `WebhookChannel.#timeout`'s lesson: `AbortSignal.timeout`
       // keeps its delay in a 32-bit signed int and TRUNCATES, so `2 ** 31` is one millisecond
@@ -601,8 +635,24 @@ export class OtlpHttpExporter {
       const doFetch = this.#opts.fetch ?? globalThis.fetch;
       const res = await doFetch(this.#url, {
         method: "POST",
-        headers: { "content-type": "application/json", ...this.#opts.headers },
+        headers,
         body: JSON.stringify(payload),
+        // A REDIRECT IS REFUSED, AND THIS IS THE ONE LINE IN THIS FILE THAT IS ABOUT AN
+        // ATTACKER RATHER THAN ABOUT A MISTAKE. `fetch` defaults to `redirect: "follow"`, and a
+        // POST this class makes carries two things a deployment cannot afford to have
+        // re-addressed: the API key in `headers`, and a whole run's trace. Driven on loopback —
+        // a "collector" answering `307 Location: http://127.0.0.1:4399/v1/traces` and a second
+        // server on that port printed
+        //
+        //     ATTACKER RECEIVED: POST /v1/traces auth= sk-SUPER-SECRET bodyBytes= 438
+        //
+        // and `export` returned `{ok: true, spans: 1, rejected: 0}`. The caller is then told the
+        // spans reached the host it named, and they reached a different one. Following a 3xx to
+        // a host the operator did not name is a decision no telemetry exporter is entitled to
+        // make on their behalf, so it is `"error"` — the redirect surfaces as
+        // `reason: "transport"`, and an operator whose collector genuinely redirects names the
+        // final URL on `--otlp` themselves, which is the same act stated once instead of twice.
+        redirect: "error",
         signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
       });
       if (!res.ok) {
@@ -643,12 +693,20 @@ export class OtlpHttpExporter {
       return message === undefined ? { ok: true, spans: count, rejected } : { ok: true, spans: count, rejected, message };
     } catch (e) {
       const timedOut = e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
-      return {
-        ok: false,
-        spans: count,
-        reason: timedOut ? "timeout" : "transport",
-        detail: mask(e instanceof Error ? `${e.name}: ${e.message}` : String(e), secrets),
-      };
+      // THE CAUSE, BECAUSE WITHOUT IT THIS FILE'S OWN DIAGNOSTIC CLAIM WAS FALSE. `endpointSecrets`
+      // says the hostname is left legible so that `ENOTFOUND collector.internal` survives — and it
+      // never did: Node's `fetch` throws a bare `TypeError: fetch failed` and puts the real reason
+      // on `.cause`. Measured against `http://no-such-host.invalid:4318`, `detail` was
+      // `"TypeError: fetch failed"` and nothing else, while the raw `fetch` rejection carried
+      // `cause.message === "getaddrinfo ENOTFOUND no-such-host.invalid"`. So every transport
+      // failure of this exporter — DNS, connection refused, TLS, a refused redirect — reported the
+      // same four words. The cause goes through the SAME mask, because it is the field that
+      // quotes the URL.
+      const detail =
+        e instanceof Error
+          ? `${e.name}: ${e.message}${e.cause instanceof Error && e.cause.message !== "" ? ` (${e.cause.message})` : ""}`
+          : String(e);
+      return { ok: false, spans: count, reason: timedOut ? "timeout" : "transport", detail: mask(detail, secrets) };
     }
   }
 }

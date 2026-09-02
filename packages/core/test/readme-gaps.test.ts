@@ -444,6 +444,14 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
       // KNOWN_FLAGS is what makes the sentence reachable rather than aspirational; the whole
       // set is gated against USAGE and the code's readers by `cli/known-flags.test.ts`.
       assert.match(SRC("cli.ts"), /"otlp",/, "the README names `--otlp`, so KNOWN_FLAGS must carry it");
+      // AND THE ROW'S NEW SENTENCE IS PINNED TOO. `claims` still holds only the text that
+      // survived the rewrite, so the push half of the row could be deleted and this probe would
+      // stay green on the code side alone — a row that understates is the exact rot this file
+      // exists to catch, and it is the direction the old row was wrong in.
+      assert.ok(
+        README.includes("`loom trace <runId> --otlp <endpoint>` POSTs it to a collector"),
+        "the Tracing out row must still say the CLI pushes; the code side of this probe cannot see the README",
+      );
     },
   },
   {
