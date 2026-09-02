@@ -432,7 +432,7 @@ survived contact — three predictions, three hits.*
 ### What follows item 14 — STILL NOTHING, and one of the three leftovers is now gone
 
 **This section's rule is that an item names a command which FAILS TODAY; finding one is itself a
-measurement, and no pass has found one.** Re-checked 2026-09-02 at `4a70a4e`: all six items above
+measurement, and no pass has produced an ITEM.** Re-checked 2026-09-02 at `4a70a4e`: all six items above
 pass, and no candidate for a fifteenth was reproduced through the shipped binary. **An entry
 written without a run would be the thing this section exists to refuse**, so the honest state is
 an empty list and it is written as one.

@@ -3125,9 +3125,19 @@ export class ControlPlane {
          * IT DOES NOT SPLICE SUBGRAPHS, AND THAT IS THE DESIGN. A child run is its own trace
          * (`traceId` is `digest(runId)`), and `spansFrom` already mints a cross-trace
          * `SpanLink` for it — which under `format=otlp` is a real OTLP `Link{traceId, spanId}`
-         * a collector resolves by itself. A caller here follows the link with a second GET on
-         * `/runs/<childRunId>/trace`, which also keeps each fetch's authorization scoped to
-         * one run instead of silently widening it to every descendant.
+         * a collector resolves by itself. The intended shape is that a caller follows the link
+         * with a second GET on `/runs/<childRunId>/trace`, which keeps each fetch's
+         * authorization scoped to one run instead of silently widening it to every descendant.
+         *
+         * **THAT SECOND GET CANNOT BE MADE TODAY, AND SAYING SO IS THE POINT.** A child run id
+         * is `${parent}~${nodeId@branchPath#iteration}`, so it contains a `#` — and this
+         * route's capture is `([^/]+)` read straight out of `params[0]`, never through
+         * `safeDecode`, which the channel segment two screens down does use. A percent-encoded
+         * `%23` therefore never becomes a `#`, and the run is unreachable by URL while `GET
+         * /runs` happily lists it. `TODO.md` §A.36 carries it: the fix is one helper call on
+         * three routes, and it changes what URLs an authenticated plane accepts, which is its
+         * own decision rather than a rider on the CLI's exporter. So a subgraph's child trace
+         * reaches a collector today through `loom trace --otlp` and not through this door.
          *
          * `loom trace` SPLICES WHAT IT RENDERS AND DOES NOT SPLICE WHAT IT EXPORTS, and the
          * split is this route's rule applied twice rather than an inconsistency. A terminal

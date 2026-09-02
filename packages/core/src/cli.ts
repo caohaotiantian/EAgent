@@ -572,31 +572,6 @@ export function parseArgs(argv: readonly string[]): Args {
 }
 
 /**
- * REFUSE A REPEATED FLAG WHOSE DROPPED VALUE IS A LOSS RATHER THAN AN OVERRIDE.
- *
- * `parseArgs` is last-wins for everything, and for everything else that is right: an override is
- * how a wrapper script layers defaults, and for the three other `listFlag` flags — `--egress`,
- * `--allow-exec`, `--exec-env` — a dropped repeat only ever narrows what the process may reach,
- * which is the safe direction.
- *
- * `--extension-module` is the one where it is not. Driven, two valid tool modules:
- *
- *     $ loom serve … --extension-module $S/a.mjs --extension-module $S/b.mjs
- *       ext:    /tmp/…/b.mjs → no adapters, tool b.ping
- *
- * `a.mjs` was named on argv, is absent from the process, and the plane came up. That is exactly
- * the outcome `loadExtensionModules` refuses six other ways — its own docstring says "there is no
- * arm in which a module named on argv is skipped and the process keeps going — that is a
- * deployment the operator believes is extended and is not" — and USAGE says every failure mode
- * REFUSES TO BOOT. This was the arm that existed.
- *
- * REFUSED RATHER THAN ACCUMULATED, and the flag's own help text is why: it promises "a
- * comma-separated list of paths", so the vocabulary for two modules already exists and a second
- * spelling would be a second thing to keep true. Accumulating would also make this flag the only
- * one on the CLI where repetition means something other than what it means everywhere else — a
- * rule that has to be remembered per flag. The comma form is named in the refusal.
- */
-/**
  * `--otlp` IS READ BY `trace` AND BY NO OTHER VERB, so every other verb REFUSES it.
  *
  * **THIS IS A NEW RULE ON THIS CLI AND SAYING SO IS HALF THE POINT.** No other flag here is
@@ -719,6 +694,16 @@ function otlpEndpoint(args: Args): string | undefined {
 /** Where a collector's credentials come from, and the only place they may. */
 const OTLP_HEADERS_ENV = "OTEL_EXPORTER_OTLP_HEADERS";
 
+/**
+ * The two variables an OTel SDK would read for an endpoint — and that this binary reads for
+ * NOTHING except to say it is ignoring them.
+ *
+ * Named here so `trace` can tell an operator their configuration is not in play, which is the
+ * one case `otlpEndpoint`'s rule leaves silent. Reading them for a VALUE is the thing that rule
+ * refuses; reading them to report that they were not used takes no decision from argv.
+ */
+const OTLP_ENDPOINT_ENVS: readonly string[] = ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT"];
+
 /** An HTTP field name, per RFC 9110's `token`. Node refuses anything else, late and unhelpfully. */
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
@@ -740,7 +725,21 @@ const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
  */
 function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<string, string> | undefined {
   const raw = env[OTLP_HEADERS_ENV];
-  if (raw === undefined || raw.trim() === "") return undefined;
+  if (raw === undefined) return undefined;
+  // WHITESPACE IS NOT UNSET. `OTEL_EXPORTER_OTLP_HEADERS="$(cat missing-key-file)"` and a
+  // variable that expanded to spaces both land here, and treating them as absent sent the POST
+  // with no credentials at all and said nothing — moving the diagnosis to the collector's 401,
+  // which is the outcome the empty-ENTRY refusal one screen down exists to prevent for exactly
+  // the same shell accident. Truly unset stays silent, because that is a deployment that never
+  // asked for headers.
+  if (raw.trim() === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${OTLP_HEADERS_ENV} is set and contains only whitespace, which is what an expansion that produced nothing ` +
+        `looks like — the POST would go out with no credentials and the collector's 401 would be the first sign. ` +
+        `Unset it, or give it k=v pairs.`,
+    );
+  }
   const refuse: (which: string, why: string) => never = (which, why) => {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
@@ -840,6 +839,33 @@ function legible(text: string): string {
   return text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, " ").trim();
 }
 
+/**
+ * REFUSE A REPEATED FLAG WHOSE DROPPED VALUE IS A LOSS RATHER THAN AN OVERRIDE.
+ *
+ * `parseArgs` is last-wins for everything, and for everything else that is right: an override is
+ * how a wrapper script layers defaults, and for the three other `listFlag` flags — `--egress`,
+ * `--allow-exec`, `--exec-env` — a dropped repeat only ever narrows what the process may reach,
+ * which is the safe direction.
+ *
+ * `--extension-module` is the one where it is not. Driven, two valid tool modules:
+ *
+ *     $ loom serve … --extension-module $S/a.mjs --extension-module $S/b.mjs
+ *       ext:    /tmp/…/b.mjs → no adapters, tool b.ping
+ *
+ * `a.mjs` was named on argv, is absent from the process, and the plane came up. That is exactly
+ * the outcome `loadExtensionModules` refuses six other ways — its own docstring says "there is no
+ * arm in which a module named on argv is skipped and the process keeps going — that is a
+ * deployment the operator believes is extended and is not" — and USAGE says every failure mode
+ * REFUSES TO BOOT. This was the arm that existed.
+ *
+ * REFUSED RATHER THAN ACCUMULATED, and the flag's own help text is why: it promises "a
+ * comma-separated list of paths", so the vocabulary for two modules already exists and a second
+ * spelling would be a second thing to keep true. Accumulating would also make this flag the only
+ * one on the CLI where repetition means something other than what it means everywhere else — a
+ * rule that has to be remembered per flag. The comma form is named in THAT refusal — and it is `--extension-module`'s remedy rather than
+ * this function's, which is why the remedy is a parameter: `--otlp` takes one endpoint, so
+ * telling its reader to write `--otlp a,b` would be advice that fails on their next command.
+ */
 function refuseRepeated(args: Args, name: string, consequence: string, remedy?: string): void {
   if (!args.repeated.has(name)) return;
   throw err.validation(
@@ -5576,6 +5602,26 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         );
         const otlpTo = otlpEndpoint(args);
         const otlpWith = otlpTo === undefined ? undefined : otlpHeaders(process.env);
+        // AN IGNORED ENDPOINT SAYS SO, ONCE. The rule that only argv can make this command send
+        // is right, and the silent case is the one that costs an operator: an OTel SDK honours
+        // `OTEL_EXPORTER_OTLP_ENDPOINT`, so somebody with it exported runs `loom trace`, sees a
+        // clean trace and a zero exit, and concludes their collector was fed. Nothing in the
+        // output distinguishes that from a run where no export was ever wanted. Refusing would
+        // be wrong — a plain `loom trace` is a legitimate thing to want with that variable set —
+        // so this is one line naming the variable and the flag that would use it.
+        if (otlpTo === undefined) {
+          const configured = OTLP_ENDPOINT_ENVS.filter((name) => (process.env[name] ?? "").trim() !== "");
+          if (configured.length > 0) {
+            process.stderr.write(
+              `trace: ${configured.join(" and ")} is set and was NOT used — no environment variable can make this command ` +
+                // THE DOLLAR IS PART OF THE ADVICE. Without it this line told the operator to pass
+                // the variable's NAME, which `otlpEndpoint` then refuses as "did not parse as a
+                // URL" — advice that fails on their very next command, which is the defect this
+                // change already refused to ship in `refuseRepeated`'s remedy.
+                `export. Pass --otlp "$${configured[0]!}" to send this run's spans to it.\n`,
+            );
+          }
+        }
         // FOUND, NOT DEMANDED — see `recordedGraph`. Conformance is computed against this spec,
         // so resolving the WRONG one would report the graph's differences as the run's.
         const graph = await recordedGraph(ws, args, runId, "trace");
@@ -6369,9 +6415,10 @@ const OTLP_EXPORT_DEADLINE_MS = 60_000;
  * atomicity, so EVERY RUN'S OUTCOME GETS ITS OWN LINE and a partial export is diagnosable
  * rather than one number.
  *
- * WHAT IS ON THE LINE, AND WHY IT IS THE HOST AND NOT THE URL. `endpointSecrets` puts the full
- * href, the ORIGIN, `origin+pathname`, the userinfo and the query in the exporter's mask list, so
- * the scheme-qualified origin is masked and the BARE HOSTNAME is what survives — which is what
+ * WHAT IS ON THE LINE, AND WHY IT IS THE HOST AND NOT THE URL. `endpointSecrets` puts six things
+ * in the exporter's mask list — the raw string as given, `href`, the ORIGIN, `origin+pathname`
+ * AND the bare pathname, the userinfo, and the query — so the scheme-qualified origin is masked
+ * and the BARE HOSTNAME is what survives — which is what
  * that file means by "the HOSTNAME is deliberately left legible". Printing the origin here would
  * print in plaintext the exact string the sibling line redacts.
  *
@@ -6501,10 +6548,13 @@ export async function exportTraceOverOtlp(
     // printed lines, so the reader can type the next command. A collector that is simply
     // missing those runs looks exactly like a run that had no subgraphs.
     //
-    // **UNEXERCISED, AND SAID SO RATHER THAN COUNTED AS COVERED.** Reaching it needs a run with
-    // more than 64 subgraph children, which no test here builds; `MAX_TRACED_SUBGRAPHS` is a
-    // module constant with no seam to lower. The arithmetic it depends on is the part that was
-    // wrong on the first draft and is stated where it is computed.
+    // **AND IT IS DRIVEN, after a review pointed out that the confession here was false on its
+    // own terms.** This said "reaching it needs a run with more than 64 subgraph children" and
+    // "no seam to lower" — while `unread` is the fifth positional parameter of a function the
+    // same commit had already exported so that two other arms could be driven. The seam was
+    // already open and the claim had not been re-read against it. The arithmetic `unread`
+    // depends on is the part that WAS wrong on the first draft, and it is stated where it is
+    // computed rather than here.
     process.stderr.write(
       `otlp: ${String(unread)} child run(s) were not read and therefore not exported — \`loom trace\` follows at most ` +
         `${String(MAX_TRACED_SUBGRAPHS)} of them per invocation. Their ids are on the tree above; each is its own \`loom trace\`.\n`,

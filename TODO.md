@@ -32,8 +32,8 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ## State — measured 2026-09-02, one command each
 
-**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,799** — the
-twenty-two cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
+**Re-run again at the `--otlp` commit, and ONE of the seven moved: tests 2,777 → 2,804** — the
+twenty-seven cases of `test/cli/trace-otlp.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
 package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
 which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
 census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
@@ -68,14 +68,17 @@ and only a re-run that comes back LOWER or non-zero on `fail` is news.
 Tried at `5ffc223` and it went red twice, which is the pin working:
 `test/readme-gaps.test.ts` binds that row's text verbatim as a probe's `claims` string, AND
 asserts the stated floor is at or below what the suite declares — and its metric is
-`^test(` declarations, **2,648** at `241e99f`, not the 2,777 cases `node --test` executes, because
-a `test()` in a loop runs more than once. So `2,700+` is both a broken probe and an overstatement
+`^test(` declarations — **2,648** at `241e99f` against the **2,777** cases `node --test` executed
+there, and **2,675** against **2,804** at the `--otlp` commit — because a `test()` in a loop runs
+more than once. BOTH numbers are dated, which is the only way this sentence stays true: an
+earlier version dated the first and left the second present-tense, so the same file said 2,777
+and 2,799 about the same suite. So `2,700+` is both a broken probe and an overstatement
 by the README's own measure. The floor is there so growth costs no doc edit; raising it to today's
 count is the edit it was designed to make unnecessary.
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,799 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
+| tests | **2,804 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
 | pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
 | kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
@@ -162,8 +165,8 @@ the capability was operator-unreachable, which is a different and smaller claim.
 
 **Recounted 2026-09-02 by running the grep, not by arithmetic on the previous number** — which is
 the only method that has ever produced a right answer here. **Re-run again when `--otlp` added
-§H.4: one cell moved** (§H 4 → 5 rows, 3 → 4 open), and the struck column did not, because H.4 is
-open. The member enumeration below is therefore unchanged, which is a fact the greps produced
+§H.4 and §A.36: two cells moved** (§H 4 → 5 rows, 3 → 4 open; §A 34 → 35 rows, 19 → 20 open),
+and the struck column did not, because both new rows are open. The member enumeration below is therefore unchanged, which is a fact the greps produced
 rather than one anybody assumed. Every column below comes from one of
 these three commands, and a reader who does not believe a cell should run them rather than argue:
 
@@ -185,7 +188,7 @@ can be wrong without being falsifiable.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A | 34 | 15 | 19 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A | 35 | 15 | 20 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 5 | 2 | 3 | decisions still owed, all of them narrow |
@@ -202,7 +205,7 @@ A.8, A.14, A.16, A.17, A.20, A.22, A.27, A.28, A.33, A.34, A.35; **§C** C.4, C.
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
 convention is `- ~~**A.N · …`, and the column is only checkable if every row obeys it.)
 
-**§A's `rows` column counts 34 LINES against 33 distinct ids, and the extra one is deliberate.**
+**§A's `rows` column counts 35 LINES against 34 distinct ids, and the extra one is deliberate.**
 A.20 matches the grep twice — the struck row that closed it, and the superseded four-sighting
 record kept beneath it because the *shape* of that record is the lesson. The last recount said
 **9** struck against 12, having named its members and then not re-derived them when A.1, A.14 and
@@ -808,6 +811,21 @@ order through `#invokeTool`, journaled `compensation.recorded` in three states. 
   **Whether an author should ALSO get a graph-level cleanup node on failure is a design question,
   not a wiring gap** — §D.3.
 
+- **A.36 · A SUBGRAPH'S CHILD RUN IS UNREACHABLE BY URL ON THE CONTROL PLANE, and the route's
+  own docstring sends a reader there.** A child run id is `${parent}~${nodeId@branchPath#iteration}`
+  and therefore contains a `#`. Every `/runs/([^/]+)/…` route reads `params[0]` raw — the channel
+  segment two screens below `GET /runs/:id/trace` goes through `safeDecode`, and the run-id
+  captures do not — so `%23` never becomes `#` and the request never reaches the handler, while
+  `GET /runs` lists that same run. **Found by wiring the OTLP push**, whose `--otlp` sends one
+  document per run: the pull door can serve the parent's and not the child's, so for a delegated
+  run `README.md`'s "three doors, one encoder" is two. Pre-existing, and the line asserting the
+  follow-up GET is one the `--otlp` change rewrote, so `server/http.ts` now states the gap where
+  it lives rather than promising a URL that cannot be built.
+  **Closes when** the three run-id captures resolve through `safeDecode` and a test fetches a
+  child run's trace by its percent-encoded id. **Not done with `--otlp`** deliberately: it
+  changes which URLs an authenticated plane accepts, which is a decision about the plane and not
+  a rider on the CLI's exporter.
+
 ### Two things that are NOT defects, written down so nobody "fixes" them
 
 - **A.31 · An adapter yielding a `UsageRecord` with an absent or non-finite `costUsd` crashes the
@@ -1036,7 +1054,7 @@ is a better view of nothing.
      push. Driven offline against a `node:http` collector on 127.0.0.1: `POST /v1/traces`,
      `service.name=loom loom.run_id=<runId>`, 9 spans, exit 0. Four decisions are worth more than
      the wiring and each is pinned by a test that goes red when it is reverted
-     (`test/cli/trace-otlp.test.ts`, 22/22 — the count below is the authoritative one):
+     (`test/cli/trace-otlp.test.ts`, 27/27 — the mutation count below is the authoritative one):
      - **argv decides both whether to send and where.** No environment variable can make this
        command export. A bare `--otlp` was going to fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`
        and that arm was DELETED rather than guarded, for three measured reasons: `--otlp "$UNSET"`
@@ -1095,11 +1113,14 @@ is a better view of nothing.
      origin would have printed in plaintext the exact string the sibling line redacts. This row's
      own finding 5 is the register of somebody reaching the opposite false conclusion about the
      same function by reading the mask list instead of running it; both directions have now been
-     settled by running it. **Twenty-four mutations, all CAUGHT**, one per decision that carries
-     weight. Two arms `trace` cannot reach on its own — a spent walk budget and
-     `reason: "empty"` — are driven through `exportTraceOverOtlp`'s exported signature rather
-     than left as coverage confessions; **one gap remains and is stated in the source**, the
-     subgraph-bound report, which needs 65 child runs and has no seam to lower.
+     settled by running it. **Twenty-seven mutations, all CAUGHT.** The count grew twice under
+     review and the shape of both growths is the point: the first claimed "one per decision that
+     carries weight" and a reader found three decisions it did not cover — the 8-character mask
+     floor, `legible`'s bidi class, and the subgraph-bound report. The third had been written up
+     in the source as needing 65 child runs and having "no seam to lower", which was FALSE on its
+     own terms: `unread` is a plain parameter of the function the previous round had already
+     exported so two other arms could be driven, and nobody re-read the confession against the
+     seam. **There are now no coverage confessions in this feature's source.**
   2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
      is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
      `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a

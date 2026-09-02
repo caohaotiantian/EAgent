@@ -936,3 +936,154 @@ test("A FOLD WITH NO EXPORTABLE SPANS IS REPORTED AND IS NOT A FAILURE", async (
   assert.equal(called, 0, "and no round trip was spent saying nothing");
   assert.match(errOut.join(""), /nothing to export/);
 });
+
+test("A SHORT HEADER VALUE DOES NOT EAT THE COLLECTOR'S MESSAGE", async () => {
+  // `mask` is an unanchored substring replace, so with no length floor a one-character header
+  // value matched inside ordinary text: `x-tenant: 1` turned a 401 into
+  // `collector returned 40[redacted]` — the mask ate the STATUS CODE, in the one message the
+  // operator has to act on. The floor is 8, and the residual is the other half of this test: a
+  // value AT the floor is still masked, so nothing that is plausibly a credential is exposed to
+  // buy the diagnosis back.
+  const w = workspace();
+  const c = await collector(() => ({ status: 401, body: "invalid api key for tenant 1 at sk-live-x" }));
+  try {
+    const runId = await submit(w.dir);
+    await withEnv(HEADERS_ENV, "x-tenant=1", async () => {
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+      assert.equal(r.code, 1);
+      const line = r.err.split("\n").find((l) => l.startsWith("otlp:"))!;
+      assert.match(line, /collector returned 401/, `the status code was masked away: ${line}`);
+      assert.match(line, /invalid api key for tenant 1/, `the message was masked away: ${line}`);
+    });
+    // …and a value long enough to be one is still masked whole.
+    await withEnv(HEADERS_ENV, "api-key=sk-live-x", async () => {
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+      assert.equal(r.code, 1);
+      const line = r.err.split("\n").find((l) => l.startsWith("otlp:"))!;
+      assert.ok(!line.includes("sk-live-x"), line);
+      assert.match(line, /collector returned 401/, "and the status code survives either way");
+    });
+  } finally {
+    await c.close();
+    w.dispose();
+  }
+});
+
+test("...and a BIDI OVERRIDE from a collector is stripped too, not just an ANSI escape", async () => {
+  // `legible`'s threat is "rewrite or hide that line". A right-to-left override does exactly
+  // that and is not a control character in the C0/C1 sense, so the first version of the filter
+  // let it through — measured, U+202E and U+2028 both survived into the rendered `otlp:` line.
+  // U+2028/2029 are line separators, which forge a second line rather than reordering one.
+  const w = workspace();
+  const c = await collector(() => ({ status: 400, body: "before‮reversed second" }));
+  try {
+    const runId = await submit(w.dir);
+    const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", c.endpoint]);
+    assert.equal(r.code, 1);
+    const line = r.err.split("\n").find((l) => l.startsWith("otlp:"))!;
+    for (const ch of ["‮", " "]) {
+      assert.ok(!line.includes(ch), `${JSON.stringify(ch)} survived into the report: ${JSON.stringify(line)}`);
+    }
+    assert.ok(line.includes("before") && line.includes("reversed") && line.includes("second"), line);
+  } finally {
+    await c.close();
+    w.dispose();
+  }
+});
+
+test("CHILD RUNS THE WALK DID NOT READ ARE NAMED, because a collector missing them looks like a run that had none", async () => {
+  // `loom trace` follows at most `MAX_TRACED_SUBGRAPHS` children, and the RENDER can afford to
+  // stop quietly — the links and child run ids stay on the printed lines. An export cannot.
+  // Driven through the exported signature rather than by building 65 child runs: `unread` is a
+  // plain parameter, which is why the source's earlier claim that this arm "needs a run with
+  // more than 64 subgraph children" and has "no seam to lower" was wrong on its own terms.
+  const span = {
+    traceId: "a".repeat(32),
+    spanId: "b".repeat(16),
+    name: "loom.run",
+    kind: "internal",
+    startTime: 1,
+    endTime: 2,
+    attributes: {},
+    events: [],
+    links: [],
+    status: "ok",
+  } as unknown as Span;
+  const errOut: string[] = [];
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((c: string) => (errOut.push(String(c)), true)) as typeof process.stderr.write;
+  let ok: boolean;
+  try {
+    ok = await exportTraceOverOtlp(
+      [{ runId: "r1" as RunId, spans: [span] }],
+      "http://collector.invalid:4318",
+      undefined,
+      () => Promise.resolve(ok200()),
+      7,
+    );
+  } finally {
+    process.stderr.write = realErr;
+  }
+  const err = errOut.join("");
+  assert.equal(ok, true, "an unread child is a reported gap, not a failed export");
+  assert.match(err, /7 child run\(s\) were not read and therefore not exported/);
+  assert.match(err, /at most 64 of them/, "the bound must be named, so the number is not a mystery");
+});
+
+test("AN ENDPOINT SET IN THE ENVIRONMENT AND NOT USED SAYS SO, ONCE", async () => {
+  // The rule that only argv can make this command send is right; the SILENT case is what costs
+  // an operator. An OTel SDK honours `OTEL_EXPORTER_OTLP_ENDPOINT`, so somebody with it exported
+  // runs `loom trace`, sees a clean tree and a zero exit, and concludes the collector was fed.
+  // Refusing would be wrong — a plain `loom trace` is a legitimate thing to want with the
+  // variable set — so it is one line naming the variable and the flag that would use it.
+  const w = workspace();
+  try {
+    const runId = await submit(w.dir);
+    await withEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318", async () => {
+      const rec = recorder(ok200);
+      const r = await cli(["trace", runId, "--workspace", w.dir], rec.fetch);
+      assert.equal(r.code, 0, r.err);
+      assert.deepEqual(rec.calls, [], "and it still exports nothing, which is the rule this line explains");
+      assert.match(r.err, /OTEL_EXPORTER_OTLP_ENDPOINT is set and was NOT used/);
+      assert.match(r.err, /--otlp/, "the line must name the flag that would use it");
+      // AND THE ADVICE MUST WORK. Without the \`$\` this told the operator to pass the variable's
+      // NAME, which \`otlpEndpoint\` then refuses as "did not parse as a URL" — advice that fails on
+      // the reader's very next command, which is the defect this change refused to ship once
+      // already in \`refuseRepeated\`'s remedy and then shipped here.
+      assert.match(r.err, /--otlp "\$OTEL_EXPORTER_OTLP_ENDPOINT"/, r.err);
+    });
+
+    // Nothing set: no line. A deployment that never configured one is not told about it.
+    const quiet = await cli(["trace", runId, "--workspace", w.dir]);
+    assert.equal(quiet.code, 0, quiet.err);
+    assert.doesNotMatch(quiet.err, /was NOT used/);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A HEADER LIST THAT EXPANDED TO WHITESPACE IS REFUSED, NOT TREATED AS UNSET", async () => {
+  // `OTEL_EXPORTER_OTLP_HEADERS="$(cat missing-key-file)"` lands here. Treated as absent, the
+  // POST went out with no credentials at all and said nothing, moving the diagnosis to the
+  // collector's 401 — the same shell accident the empty-ENTRY refusal already exists for, one
+  // level up. Truly unset stays silent, because that is a deployment that never asked.
+  const w = workspace();
+  try {
+    const runId = await submit(w.dir);
+    for (const blank of ["   ", "\t", "\n"]) {
+      await withEnv(HEADERS_ENV, blank, async () => {
+        const e = await refusal(["trace", runId, "--workspace", w.dir, "--otlp", "http://collector.invalid:4318"]);
+        assert.ok(isLoomError(e) && e.code === CODES.E_CONFIG_INVALID, String(e));
+        assert.match(e.message, /contains only whitespace/);
+      });
+    }
+    await withEnv(HEADERS_ENV, undefined, async () => {
+      const rec = recorder(ok200);
+      const r = await cli(["trace", runId, "--workspace", w.dir, "--otlp", "http://collector.invalid:4318"], rec.fetch);
+      assert.equal(r.code, 0, r.err);
+      assert.equal(rec.calls.length, 1, "an unset variable is a deployment with no headers, not an error");
+    });
+  } finally {
+    w.dispose();
+  }
+});
