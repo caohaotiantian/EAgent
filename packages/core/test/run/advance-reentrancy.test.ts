@@ -32,9 +32,43 @@ test("TWO CONCURRENT ADVANCES DO NOT EXECUTE ANY TASK TWICE", async () => {
   await Promise.all([h.engine.advance(runId), h.engine.advance(runId)]);
 
   const log = await events(h.store, runId);
-  const started = log.filter((e) => e.type === "task.started").map((e) => e.taskId);
+  // `task.leased`, NOT `task.started`, AND THAT WAS THIS TEST'S OWN SILENT FALSE NEGATIVE.
+  //
+  // `task.started` is declared in `journal/events.ts` and appended by nothing — pinned as such
+  // in `test/registries.test.ts`, decision `delete`, with this file named as what blocks it.
+  // So the filter matched zero events and the headline assertion below compared 0 to 0 on a
+  // run that leases seven times. Measured before this line changed:
+  //
+  //     task.started count  : 0 -> distinct 0   ASSERTION COMPARES 0 to 0
+  //     task.leased count   : 7 -> distinct 7
+  //
+  // A guard that compares 0 to 0 reports green under every mutation, and the mutation this file
+  // exists for was run to say exactly how much that cost. `Engine.advance` short-circuited to
+  // `#advanceSerially`, the chain gone:
+  //
+  //   - with `task.started`, THE HEADLINE ASSERTION PASSED and the failure came from the
+  //     side-effect assertion below it — `no file may be read twice for one Task:
+  //     ["doc-1.md","doc-0.md","doc-2.md","doc-1.md","doc-2.md"], 5 !== 3`.
+  //   - with `task.leased`, the headline assertion is the one that fires:
+  //     `these started twice: start@root#0#1, summarize@root/e0[1]#0#1,
+  //     summarize@root/e0[2]#0#1, 10 !== 7`.
+  //
+  // So the file was never green under the mutation — it was green ON ITS OWN HEADLINE, carried
+  // by its backup, and the backup is the assertion that depends on the skeleton graph reading
+  // files. Change the skeleton to a graph with no tool call and the whole test goes vacuous.
+  //
+  // THE KEY IS `taskId#attempt`, NOT `taskId`, and the difference is a false positive rather
+  // than a false negative. `#runWaveInner` appends `task.leased` with
+  // `attempt: w.task.attempt + 1`, so a RETRY legitimately leases the same TaskId a second
+  // time; keying on the id alone would call a retried task a double-dispatch. The pair is what
+  // "this task started once" actually means, and it is the pair `journal/audit.ts`'s
+  // `task.leased-once` already keys on for the same reason.
+  const started = log
+    .filter((e) => e.type === "task.leased")
+    .map((e) => `${String(e.taskId)}#${String((e.payload as { attempt: number }).attempt)}`);
   const distinct = new Set(started);
 
+  assert.ok(started.length > 0, "no task was leased at all — this run drove nothing and the assertion below would be vacuous");
   assert.equal(
     started.length,
     distinct.size,

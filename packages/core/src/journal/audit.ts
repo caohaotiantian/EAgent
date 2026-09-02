@@ -29,9 +29,14 @@
  *
  * **A rule for an event nothing writes is not a rule.** `budget.reservation-is-settled` and
  * `task.no-commit-after-cancel` were deleted, not disabled: `budget.reserved`, `budget.settled`
- * and `task.cancelled` are all pinned in `test/docs-drift.test.ts`'s never-appended registry
- * (the reservation lives in `PolicyEngine`'s memory; `cancel()` appends `run.cancelled` only).
- * They come back when the events do.
+ * and `task.cancelled` were all pinned in the never-appended registry that now lives in
+ * `test/registries.test.ts` (the reservation lived in `PolicyEngine`'s memory; `cancel()`
+ * appended `run.cancelled` only). "They come back when the events do" — and BOTH HAVE.
+ * `task.cancelled` gained its appender with the E6 fix and `task.cancelled-not-after-commit`
+ * came back with it; `budget.reserved`/`budget.settled` gained theirs at the engine's
+ * `ctx.policy.reserve`/`settle` call sites, and `budget.reservation-is-settled` is back below.
+ * The sentence was a promise this file kept twice, which is the argument for writing the
+ * condition down rather than deleting the rule and moving on.
  */
 
 import { suppressedRanges } from "../run/projection.ts";
@@ -50,6 +55,7 @@ export const AUDIT_RULES = [
   "task.leased-precedes-commit",
   "task.leased-is-resolved",
   "task.leased-once",
+  "budget.reservation-is-settled",
   "run.submitted-is-first-and-once",
   "run.terminal-is-last-and-once",
   "run.operator-pause-alternates",
@@ -263,6 +269,8 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const submissions: number[] = [];
   /** `${taskId}#${attempt}` → the seq that leased it. */
   const leasedAttempts = new Map<string, number>();
+  /** budget scope → the seqs of reservations not yet settled. See `budget.reservation-is-settled`. */
+  const openReservations = new Map<string, number[]>();
   /** gateId → the seq and event type that took it out of `open`. */
   const gateClosures = new Map<string, { seq: number; type: string }>();
   /** The FIRST terminal event, so a second one is reported against the end that really happened. */
@@ -739,6 +747,30 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         }
         break;
       }
+      case "budget.reserved": {
+        // A PROMISE OPENS. Paired by SCOPE and by COUNT, not by an id, because the rows carry
+        // no id and should not: `projection.ts` folds `reservedUsd` by adding and subtracting
+        // AMOUNTS, so an id would be a second identity that only this rule reads. One node can
+        // hold several at once — a fan-out is several tasks under one `node:` scope — which is
+        // why the value is a stack of seqs and not a flag.
+        const scope = str(p["scope"]);
+        if (scope === undefined) break;
+        const open = openReservations.get(scope);
+        if (open === undefined) openReservations.set(scope, [seq]);
+        else open.push(seq);
+        break;
+      }
+      case "budget.settled": {
+        // AND CLOSES. LIFO within a scope, which matters only for WHICH seq a violation cites,
+        // never for whether one fires — the count is what decides that. A settlement for a scope
+        // that never reserved is deliberately NOT a violation of this rule: `PolicyEngine.settle`
+        // is a documented no-op on an unknown reservation (`test/run/budget.test.ts` settles one
+        // that was never reserved to prove it), so the engine can legitimately write one.
+        const scope = str(p["scope"]);
+        if (scope === undefined) break;
+        openReservations.get(scope)?.pop();
+        break;
+      }
       case "task.cancelled": {
         // A CANCEL STOPS WORK; IT DOES NOT UNDO WORK THAT LANDED. `Engine.#cancelTree` skips
         // Tasks already in a terminal state for exactly this reason — re-ending a Task that
@@ -853,6 +885,19 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     // EVIDENCE IS "a lease existed and the run completed", not "a violation was found". Recording
     // it inside the loop below made a clean run report the rule as never checked — which is the
     // distinction this report exists to keep.
+    // A RESERVATION THE RUN NEVER RELEASED. Same precondition and same argument as the lease
+    // below it: a run that COMPLETED reported every call it made as finished, and a promise
+    // still standing at the end is money the fold will hold against the budget forever — the
+    // `reservedUsd` a resumed or forked run then reserves against. A failed or cancelled run
+    // legitimately abandons one, which is what the `else` branch says.
+    if ([...openReservations.values()].some((s) => s.length > 0) || live.some((e) => e.type === "budget.reserved")) {
+      saw.add("budget.reservation-is-settled");
+    }
+    for (const [scope, seqs] of openReservations) {
+      for (const s of seqs) {
+        add("budget.reservation-is-settled", s, `scope "${scope}" reserved budget at seq ${String(s)} and the run completed without settling it`);
+      }
+    }
     if (leased.size > 0) saw.add("task.leased-is-resolved");
     for (const [tid, seq] of openLeases) {
       add("task.leased-is-resolved", seq, `task "${tid}" was leased and the run completed without committing or failing it`);
@@ -885,6 +930,12 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     }
     if (leased.size > 0) {
       unrunnable.set("task.leased-is-resolved", "the run did not complete; a lease left open by a failed, cancelled or live run is abandoned on purpose");
+    }
+    if (live.some((e) => e.type === "budget.reserved")) {
+      unrunnable.set(
+        "budget.reservation-is-settled",
+        "the run did not complete; a reservation left outstanding by a failed, cancelled or live run is exactly the state this event exists to make readable",
+      );
     }
     if (childStarts.size > 0) {
       unrunnable.set(

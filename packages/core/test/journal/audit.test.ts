@@ -898,6 +898,53 @@ test("evolution.score-completed-matches-the-run — both directions", () => {
   );
 });
 
+test("budget.reservation-is-settled — money the run promised and never released", () => {
+  // The shape a worker leaves when it dies between `reserve` and `settle`. `PolicyEngine` held
+  // the number in memory, so this journal could not exist and the rule was deleted for it; both
+  // events have appenders in `run/engine.ts` now, and `journal/audit.ts`'s header said the rule
+  // comes back when they do.
+  const stranded = fixture(() => [ev("budget.reserved", { scope: "node:work", amountUsd: 0.001, warn: false }), DONE()]);
+  assert.deepEqual(rulesHit(stranded), ["budget.reservation-is-settled"]);
+
+  const settled = fixture(() => [
+    ev("budget.reserved", { scope: "node:work", amountUsd: 0.001, warn: false }),
+    ev("budget.settled", { scope: "node:work", reservedUsd: 0.001, actualUsd: 0.00002 }),
+    DONE(),
+  ]);
+  assert.deepEqual(rulesHit(settled), [], "the healthy shape — a rule that fires on it gets switched off");
+
+  // COUNTED PER SCOPE, not flagged. One node holds several reservations at once whenever a
+  // fan-out puts several tasks under one `node:` scope, so one settlement releases one promise
+  // and leaves the other outstanding.
+  const partial = fixture(() => [
+    ev("budget.reserved", { scope: "node:work", amountUsd: 0.001, warn: false }),
+    ev("budget.reserved", { scope: "node:work", amountUsd: 0.002, warn: false }),
+    ev("budget.settled", { scope: "node:work", reservedUsd: 0.002, actualUsd: 0.00002 }),
+    DONE(),
+  ]);
+  assert.equal(audit(partial).violations.filter((v) => v.rule === "budget.reservation-is-settled").length, 1);
+
+  // A SETTLEMENT WITH NO RESERVATION IS NOT A VIOLATION OF THIS RULE, deliberately.
+  // `PolicyEngine.settle` is a documented no-op on an unknown reservation and
+  // `test/run/budget.test.ts` settles one that was never reserved to prove it — so the engine
+  // can legitimately write this, and a rule firing on it would cry wolf on shipped behaviour.
+  assert.deepEqual(rulesHit(fixture(() => [ev("budget.settled", { scope: "node:work", reservedUsd: 0, actualUsd: 0 }), DONE()])), []);
+
+  // A run that did not COMPLETE may legitimately be holding one — that is the state this event
+  // exists to make readable, not a defect. And the SKIP REASON has to be the true one: the three
+  // rules two tests below this share a precondition whose reason was wrong for two of them, so
+  // "no event this rule constrains appears in this journal" over a journal that plainly contains
+  // one is the failure mode this assertion is here to refuse in advance.
+  seq = 0;
+  const live = [
+    ev("run.submitted", { graphHash: "sha256:x", inputs: {} }),
+    ev("budget.reserved", { scope: "node:work", amountUsd: 0.001, warn: false }),
+  ];
+  const r = audit(live);
+  assert.deepEqual(r.violations, []);
+  assert.match(r.skipped.find((x) => x.rule === "budget.reservation-is-settled")?.why ?? "", /the run did not complete/);
+});
+
 // ── and the gate that keeps the rule set honest ─────────────────────────────
 
 test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {

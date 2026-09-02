@@ -172,17 +172,24 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
  *
  * There were six, each excused indefinitely. `config.reloaded` is gone: nothing in the tree
  * referred to it, no reload path exists, and no work item plans one, so it was a row in a
- * closed vocabulary promising a fact nobody records. The five left cannot be settled from
- * this package's registry files alone — every one needs `run/projection.ts` (kernel),
- * `run/engine.ts`, `evolution/trajectory.ts`, `telemetry/spans.ts` or a suite owned
- * elsewhere — so each carries what it is waiting for, by path.
+ * closed vocabulary promising a fact nobody records. THEN THERE WERE THREE: `budget.reserved`
+ * and `budget.settled` were the two rows decided `wire`, and the decision was executed — the
+ * engine appends both at its `ctx.policy.reserve`/`settle` call sites, so the reservation
+ * `PolicyEngine` held in memory is now reconstructible by folding and `GET /runs/:id` reports
+ * a promise instead of zero. Six to five was a DELETION and five to three is a BUILD; the row
+ * count falls the same way for both and they are opposite facts, so the list says which.
+ * The three left cannot be settled from this package's registry files alone — every one needs
+ * `run/projection.ts` (kernel), `run/engine.ts`, `evolution/trajectory.ts`,
+ * `telemetry/spans.ts` or a suite owned elsewhere — so each carries what it is waiting for,
+ * by path.
  *
  * `blockedOn` IS THE EXPIRY, and it works in the direction that actually decays. An excuse
  * dies when its own reason does: the moment the last file listed stops mentioning the type,
  * the decision below is no longer blocked and this test fails until somebody executes it.
  * That is the failure mode this list has already had once — `journal/audit.ts` carried two
  * rules over never-appended types, reported them `checked` on every terminal run, and nothing
- * connected the excuse to the rule.
+ * connected the excuse to the rule. One of those two, `budget.reservation-is-settled`, is
+ * back in `AUDIT_RULES` now, because the wiring above is what un-blocked it.
  *
  * `type: "…"` spelling is load-bearing: `journal/audit-coverage.test.ts` parses this block for
  * it, so the two registries cannot drift into disagreeing about who is unappended.
@@ -194,23 +201,6 @@ const NEVER_APPENDED: readonly {
   /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
   readonly blockedOn: readonly string[];
 }[] = [
-  {
-    type: "budget.reserved",
-    decision: "wire",
-    why:
-      "CLAUDE.md's first non-negotiable, exactly: a decision reads a value the journal cannot reconstruct. `PolicyEngine.reserve` " +
-      "holds the reservation in memory, so a crashed worker's reservation is unrecoverable by folding, and `projection.ts:1112` " +
-      "already folds `reservedUsd` from this event — it folds zero. The appender belongs at the engine's `ctx.policy.reserve` call site",
-    blockedOn: ["src/run/policy.ts", "src/run/engine.ts", "src/run/projection.ts"],
-  },
-  {
-    type: "budget.settled",
-    decision: "wire",
-    why:
-      "the other half of the same reservation, folded at `projection.ts:1116`, and the same restart hole: the balance moves in " +
-      "memory with no durable record of the movement. One change with budget.reserved, or the fold releases what it never took",
-    blockedOn: ["src/run/policy.ts", "src/run/engine.ts", "src/run/projection.ts"],
-  },
   {
     type: "task.skipped",
     decision: "wire",

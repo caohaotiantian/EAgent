@@ -20,11 +20,13 @@
  * permanently inert. So the test for a row here is a WRITER, not a design — and a row that
  * loses its last writer is removed by the change that removed it, not excused.
  *
- * `config.reloaded` was removed under that rule (see the operator section). Five more members
- * have no appender and are pinned, decided, and blocked in `test/registries.test.ts`; two of
- * those five — `budget.reserved` and `budget.settled` — are decided WIRE, because
- * `PolicyEngine` holds a reservation in memory that a crashed worker cannot recover by
- * folding, which is the non-negotiable this union exists to serve.
+ * `config.reloaded` was removed under that rule (see the operator section). THREE members have
+ * no appender and are pinned, decided, and blocked in `test/registries.test.ts`. It was five:
+ * `budget.reserved` and `budget.settled` were the two decided WIRE, and they were wired — the
+ * reservation `PolicyEngine` held in memory is now a durable fact, which is the non-negotiable
+ * this union exists to serve. The three left are `task.skipped` (wire, behind the join's
+ * branch-error accounting), `channel.written` and `task.started` (both delete); read the
+ * decisions there, not here, because that file is the one a test keeps honest.
  */
 
 import type { LoomError } from "../errors.ts";
@@ -815,7 +817,38 @@ export interface EventPayloads {
   "policy.deescalated": { readonly from: Posture; readonly to: Posture; readonly scope: string; readonly justification: string };
 
   // ── budget ───────────────────────────────────────────────────────────────
-  "budget.reserved": { readonly scope: string; readonly amountUsd: number; readonly remainingUsd: number; readonly warn: boolean };
+  /**
+   * MONEY PROMISED BUT NOT YET SPENT — the half of a run's exposure that lived nowhere durable.
+   *
+   * `PolicyEngine.reserve` debits the worst case before a model call and `settle` credits the
+   * real cost after it, so between the two there is an amount that is committed and not spent.
+   * That amount decided things — `reserve` refuses against `spent + reserved`, `nearLimit` fires
+   * on it — while existing only in one process's memory, which is invariant 1 exactly. It is
+   * also what an operator asks for: `GET /runs/:id` served `reservedUsd` folded from this row
+   * and this row had no writer, so a run with three calls in flight reported `0` promised.
+   *
+   * `remainingUsd` IS OPTIONAL, and absent means "no dollar ceiling was declared" rather than
+   * "nobody looked". `PolicyEngine.remainingUsd` is `Infinity` when `budget.runUsd` is unset and
+   * `canonical.ts` refuses a non-finite number on the durable write path — measured there as
+   * `E_INTERNAL: non-finite number Infinity`, which is the same defect `policy.escalated`'s
+   * `remainingUsd` and `budget.exhausted`'s `limitUsd` each paid for once. Write the number when
+   * there is one; write nothing when there is not.
+   *
+   * DOLLARS ONLY, deliberately. `reserve` also holds TOKENS, and they are not here because
+   * nothing would read them: `projection.ts` folds `reservedUsd` and there is no
+   * `reservedTokens` on `RunProjection` to fold into. A field nobody reads is the thing this
+   * header's third paragraph refuses.
+   */
+  "budget.reserved": { readonly scope: string; readonly amountUsd: number; readonly remainingUsd?: number; readonly warn: boolean };
+  /**
+   * The reservation released, and what the call really cost.
+   *
+   * `reservedUsd` is the amount being RELEASED, not a new debit — `projection.ts` subtracts it
+   * from `reservedUsd` and `actualUsd` is already carried by the effect records `chargeUsage`
+   * folds, so this row moves the promise and never the spend. One of these per `budget.reserved`
+   * on a run that completed: `journal/audit.ts`'s `budget.reservation-is-settled` is the rule
+   * that says so, and it came back the day these two gained writers.
+   */
   "budget.settled": { readonly scope: string; readonly reservedUsd: number; readonly actualUsd: number };
   /**
    * A ceiling refused work.

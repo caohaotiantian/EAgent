@@ -52,14 +52,19 @@ type Excuse =
 const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: string }>> = {
   // ── nothing writes these ────────────────────────────────────────────────────
   //
-  // Each of these five now carries a DECISION and what it is blocked on, in
-  // `registries.test.ts` — two are `wire`, two are `delete`, one is `wire` behind the join
-  // accounting. The sixth, `config.reloaded`, was excused here and is gone: nothing in the
-  // tree referred to it and no work item planned a reload path, so the row was a promise the
-  // log could not keep. An excuse that a rule set can hold forever is what this file exists
-  // to make uncomfortable; an excuse that names the file blocking it is one that can end.
-  "budget.reserved": { kind: "never-appended", why: "PolicyEngine.reserve holds the reservation in memory and journals nothing" },
-  "budget.settled": { kind: "never-appended", why: "PolicyEngine.settle, same: the balance moves in memory only" },
+  // Each of these three now carries a DECISION and what it is blocked on, in
+  // `registries.test.ts` — two are `delete`, one is `wire` behind the join accounting. There
+  // were five, and the two that left are the reason this comment is worth re-reading:
+  // `budget.reserved` and `budget.settled` were excused here as never-appended, gained
+  // appenders in `run/engine.ts`, and left BY BEING CONSTRAINED — `budget.reservation-is-settled`
+  // is back in `AUDIT_RULES`, so `constrainedTypes()` finds them and an excuse would now fail
+  // the "excused AND constrained" assertion below. That is this file working as designed: the
+  // `todo` ratchet is capped at 5 and was AT 5, so there was no way to defer the rule, which is
+  // exactly what the ratchet is for. The sixth, `config.reloaded`, was excused here and is
+  // gone: nothing in the tree referred to it and no work item planned a reload path, so the row
+  // was a promise the log could not keep. An excuse that a rule set can hold forever is what
+  // this file exists to make uncomfortable; an excuse that names the file blocking it is one
+  // that can end.
   "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
   "task.skipped": { kind: "never-appended", why: "no appender; the skip arm resolves the task without its own event" },
   "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
