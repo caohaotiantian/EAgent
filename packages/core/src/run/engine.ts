@@ -9859,8 +9859,9 @@ function choiceTainted(
  * Exclusive reach is one walk per seed plus one per subtractor, where the naive form was two
  * walks flat. The subtraction side is re-formed for every seed, so the per-edge walks are
  * memoised and unioned — forward reachability distributes over union, so that is exact rather
- * than an approximation. On `workflows/incident-triage.ts`, the largest graph in the tree at 28
- * nodes, driven through its own suite: 20 walks / 58 node-visits before, 30 / 70 after.
+ * than an approximation. Measured on `workflows/incident-triage.ts` — 11 nodes and 15 edges,
+ * larger than every graph in `examples/graphs`, whose biggest is 10 — driven through its own
+ * suite: 20 reachability walks and 58 node-visits before, 30 and 70 after.
  */
 function controlRegion(
   index: GraphIndex,
