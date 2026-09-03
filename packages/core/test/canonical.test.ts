@@ -54,6 +54,51 @@ test("a repeated (non-cyclic) reference is fine", () => {
   assert.equal(canonicalize({ x: shared, y: shared }), '{"x":{"v":1},"y":{"v":1}}');
 });
 
+/**
+ * The sibling of the test above, and the pair is the point: SHALLOW sharing works, EXPONENTIAL
+ * sharing is refused. The suite already had the first — one shared reference, at depth one, the
+ * happy path the author imagined. The second input of that same shape was never constructed, and
+ * it is the one that mattered: `seen.delete` on the way out of every container is what makes a
+ * shared acyclic value correct, and it is also what makes it walked once per PATH.
+ *
+ * 26 objects fit in a few hundred bytes and nest to a tenth of `MAX_DEPTH`. Before the bound they
+ * produced 44 MB at 22 objects and then, at 25, a bare `RangeError: Invalid array length` with no
+ * `code` — out of `journal/store.ts`'s `prepare`, on the durable write path, holding `Engine`'s
+ * single commit chain for ~19 seconds while it did it.
+ */
+test("a value shared by MANY paths is refused with a typed error, not a RangeError", () => {
+  let x: unknown = { leaf: 1 };
+  for (let i = 0; i < 26; i++) x = { a: x, b: x };
+  const started = Date.now();
+  try {
+    canonicalize(x);
+    assert.fail("should have refused");
+  } catch (e) {
+    assert.ok(isLoomError(e), `a bare ${(e as Error).name} is the failure this replaces`);
+    assert.equal(e.code, CODES.E_PAYLOAD_TOO_LARGE);
+    assert.equal(e.class, "validation", "the caller's value — never retried");
+    assert.match(e.message, /walks over 1000001 containers/);
+    assert.match(e.message, /shared reference is expanded once per path/, "the message says how to fix it");
+  }
+  // An ABSOLUTE bound with an order-of-magnitude margin, not a ratio: refusing must be CHEAP,
+  // which is the half a byte bound could not deliver — it charged 1.7 s to 23 s before answering.
+  assert.ok(Date.now() - started < 3000, "the refusal arrives after a million containers, not after 44 MB");
+});
+
+test("...and sharing well under the bound still canonicalizes, identically to before", () => {
+  // 15 levels is 32,767 containers — 30x the largest walk measured anywhere in this suite (8,413)
+  // and 30x under the limit. Two structurally-equal values with DIFFERENT sharing must still
+  // produce the same bytes, which is the property that forbids memoising the shared subtree.
+  const shared = { v: 1 };
+  const dag = { x: shared, y: { z: shared } };
+  const copy = { x: { v: 1 }, y: { z: { v: 1 } } };
+  assert.equal(canonicalize(dag), canonicalize(copy), "sharing is invisible in the canonical form, and must stay so");
+
+  let deep: unknown = { leaf: 1 };
+  for (let i = 0; i < 15; i++) deep = { a: deep, b: deep };
+  assert.equal(canonicalize(deep).length, 688117, "unchanged from before the bound");
+});
+
 test("errors name the offending path", () => {
   try {
     canonicalize({ a: { b: [1, NaN] } });
