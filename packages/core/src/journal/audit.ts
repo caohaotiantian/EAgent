@@ -40,6 +40,7 @@
  */
 
 import { suppressedRanges } from "../run/projection.ts";
+import { POSTURES, isPosture } from "../vocab.ts";
 import type { JournalEvent } from "./events.ts";
 
 /** Stable ids: they get cited in journal entries and in the exhaustiveness gate that follows. */
@@ -107,7 +108,20 @@ export interface AuditOptions {
   readonly hookRefs?: Readonly<Record<string, readonly string[]>>;
 }
 
-const POSTURE_RANK: Readonly<Record<string, number>> = { out: 0, on: 1, in: 2 };
+/**
+ * Ranked THROUGH `isPosture`, and the guard is the point.
+ *
+ * This module used to carry its own `{ out: 0, on: 1, in: 2 }` and index it with the journal's
+ * string. An object literal inherits `Object.prototype`, so `from: "constructor"` came back a
+ * function rather than `undefined`: the malformed-posture arm did not fire, and `b <= a`
+ * comparing a number against a function is `false`, so an escalation that lowered a posture was
+ * reported as clean. `vocab.ts` had already been through this and answers it with
+ * `Object.hasOwn`; reading the ORDER from `POSTURES` too means the set and the ordering now have
+ * one definition instead of two that can drift apart again.
+ */
+function rankOf(v: string): number | undefined {
+  return isPosture(v) ? POSTURES.indexOf(v) : undefined;
+}
 
 /**
  * THE THREE AT-MOST-ONCE RULES ONLY A SECOND WRITER BREAKS, and the asymmetry that hid them.
@@ -556,8 +570,8 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         // `PolicyEngine.escalate` computes `max(from, to)` and returns WITHOUT firing when that
         // equals `from`, so a journalled escalation strictly raises by construction. An event
         // that does not is a posture lowered through the tightening door — invariant 5 inverted.
-        const a = POSTURE_RANK[from];
-        const b = POSTURE_RANK[to];
+        const a = rankOf(from);
+        const b = rankOf(to);
         if (a === undefined || b === undefined) {
           add("policy.escalation-only-raises", seq, `escalation names a posture that is not out/on/in: ${from} -> ${to}`);
         } else if (b <= a) {
@@ -580,7 +594,14 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         // AN EXTENSION THAT WAS NOT INSTALLED CHANGED SOMETHING. Hooks are pinned resources named
         // by the graph, so a `hook.applied` naming a ref the graph never declared at that point
         // is an extension that reached the run some other way.
-        if (!(opts.hookRefs[point] ?? []).includes(ref)) {
+        // READ THROUGH A TOTAL ACCESSOR, both halves of which matter. `point` comes out of the
+        // journal, so `"constructor"` resolved through `Object.prototype` to a function, `?? []`
+        // did not apply because a function is not nullish, and `.includes` threw a raw TypeError
+        // that killed the whole report — every other rule's findings for that run with it. And
+        // `hookRefs` is `spec.hooks`, which is JSON an operator wrote, so the value may not be an
+        // array even at a legitimate point. Neither case is "declared".
+        const declared = Object.hasOwn(opts.hookRefs, point) ? opts.hookRefs[point] : undefined;
+        if (!Array.isArray(declared) || !declared.includes(ref)) {
           add("hook.applied-ref-is-declared", seq, `hook "${ref}" changed a value at ${point}, and the graph declares no such hook there`);
         }
         break;
