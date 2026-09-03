@@ -48,16 +48,19 @@
  * this worker, which distinguishes a predecessor from ourselves only under `cli.ts`'s worker id
  * and not under `Engine`'s own default. See `deadlineExpired`.
  *
- * THE THIRD IS NOT IN THIS FILE, AND UNTIL IT LANDS EVERYTHING BELOW ABOUT RECLAIM IS TRUE OF
- * `select` AND FALSE OF A RUN. `Engine.#advanceSerially` computes `ready` and, at
- * `if (ready.length === 0)`, calls `#finish` and returns — sixty-five lines BEFORE it calls
+ * THE THIRD WAS NOT IN THIS FILE, AND WHILE IT WAS MISSING EVERYTHING BELOW ABOUT RECLAIM WAS
+ * TRUE OF `select` AND FALSE OF A RUN. `Engine.#advanceSerially` computed `ready` and, at
+ * `if (ready.length === 0)`, called `#finish` and returned — sixty-five lines BEFORE it called
  * `this.#scheduler.select`. A plane SIGKILLed mid-wave leaves every in-flight task `leased` and
- * zero `ready`, which is precisely the shape reclaim is for, so on that shape no scheduler is
+ * zero `ready`, which is precisely the shape reclaim is for, so on that shape no scheduler was
  * consulted at all: measured on a folded stranded journal with a spy scheduler, ZERO `select`
- * calls, and the run was then folded to `failed`. The engine's short-circuit has to consider
- * `select`'s answer before it decides a run is finished — one moved block and one widened
- * condition, in a file this lane does not own. Read every claim below with that caveat: this
- * file is correct in isolation and the product path does not reach it.
+ * calls, and the run then folded to `failed`. It landed as one moved block and one widened
+ * condition — `select` is asked first, and an empty ready set only ends a run when the wave is
+ * empty too. Two things carry the rest of the way and are worth knowing here, because this
+ * file's answer is only as reachable as they are: the engine no longer FINISHES a run that
+ * still holds a lease, so driving one whose holder is alive is a fold and a no-op rather than a
+ * verdict; and `cli.ts`'s run clock counts a `leased` task as due, which is what makes recovery
+ * automatic rather than a person clicking `advance`.
  *
  * `DEFERRED-v2: partition assignment and cross-worker fairness (G3).` The genuinely risky
  * part is not selection but *who runs which run* — that needs a coordinator, and shipping

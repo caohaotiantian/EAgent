@@ -2153,6 +2153,82 @@ export class Engine {
     return runId;
   }
 
+
+  /**
+   * Put the live `PolicyEngine` back where the journal says it is.
+   *
+   * ONCE PER ATTACH, behind `ctx.policySeeded`, and every dimension it folds is one-way —
+   * postures up, spend and promises up, ceilings and the allowlist REPLACED from the record —
+   * so arriving here twice cannot loosen anything.
+   *
+   * EXTRACTED BECAUSE IT HAD ONE CALLER AND NEEDED TWO. It lived inline in `#advanceSerially`,
+   * which made "the journal is authoritative" true of the ADVANCE door and false of the REWIND
+   * one: `#rewindSerially` dispatches compensation tools through `#invokeTool`, and a child run
+   * attached in a fresh process ran every undo against the child graph's OWN capability list
+   * rather than the narrowed one its parent recorded in `run.submitted.capabilities`. Measured,
+   * with a control — a parent granting `["db.write"]` to a child whose graph declares
+   * `["db.write","db.undo"]`: `attach(childRunId, graph)` then `rewind` dispatched `db.delete`
+   * and journaled `compensated`, where the same rewind after an `advance` refuses it
+   * `E_CAP_DENIED`. Reachable as `POST /runs/<childRunId>/commands {"kind":"rewind"}` and as
+   * `loom rewind <childRunId>`, neither of which advances first.
+   *
+   * A capability bound that holds on one verb and not the other is not a bound.
+   */
+  async #seedPolicy(ctx: RunContext, runId: RunId, p: RunProjection): Promise<void> {
+    if (ctx.policySeeded) return;
+    ctx.policySeeded = true;
+    // ALL THREE DIMENSIONS FROM ONE `UsageRecord`. `p.usage` is the fold `chargeUsage`
+    // builds out of the effect records, so tokens and provider time are reconstructible
+    // across a restart for exactly the reason dollars are — no new durable state, no new
+    // event. Restoring dollars alone would have handed a resumed run its full TOKEN budget
+    // back, which is this same invariant broken in a new dimension.
+    //
+    // AND THE BOUNDS THE RUN WAS SUBMITTED UNDER, read from its own `run.submitted`. A
+    // subgraph child gets its ceilings from a PARENT that a fresh process has never seen:
+    // `attach(childRunId, childGraph)` builds the child at the deployment's budget and the
+    // child graph's own capabilities, so the slice and the allowlist a parent imposed were
+    // lifted by the restart. Both are now recorded facts and `restore` folds them one way —
+    // budgets by MIN, the allowlist by intersection.
+    const recorded = await this.#compiledIdentity(runId);
+    ctx.policy.restore({
+      escalations: p.escalations,
+      ceilings: p.ceilings,
+      spentUsd: p.usage.costUsd,
+      spentTokens: p.usage.inputTokens + p.usage.outputTokens,
+      spentWallMs: p.usage.wallMs,
+      // THE PROMISE, NOT ONLY THE SPEND. A worker that died between `reserve` and `settle`
+      // left `budget.reserved` with no `budget.settled`, the projection folds it, and this
+      // was the one dimension `restore` had no parameter for — so the resumed run was
+      // handed the money back and could commit the same dollars twice.
+      reservedUsd: p.reservedUsd,
+      ...(recorded?.limits === undefined ? {} : { limits: recorded.limits }),
+      ...(recorded?.capabilities === undefined ? {} : { allowlist: recorded.capabilities }),
+    });
+    // THE SAME BOUND ON THE CONTEXT, because `grantBound` is what travels to a GRANDCHILD.
+    // Narrowed by the same filter `#contextFor` uses, so this can only ever remove.
+    if (recorded?.capabilities !== undefined) {
+      const bound = recorded.capabilities;
+      ctx.grantBound =
+        ctx.grantBound === undefined
+          ? [...bound]
+          : ctx.grantBound.filter((c) => bound.some((pat) => (pat.endsWith("*") ? c.startsWith(pat.slice(0, -1)) : pat === c)));
+    }
+    // AND THE EVIDENCE `#recordEvidence` HOLDS — the taint set and E4's failure streak.
+    // Both lived only on `RunContext`, so a crash, a deploy or a `loom serve` restart
+    // deleted them: E8 between the tainting write and the hard-to-undo action — measured,
+    // on two Engines over one journal with identical human decisions, the charge ran — and
+    // E4 between the second consecutive failure and the third, measured the same way, the
+    // escalation that fires without a restart firing not at all with one.
+    //
+    // The durable `policy.escalated` rows cannot stand in for either. `{rule:"taint"}`
+    // enters the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at
+    // `in`, and the ceiling clamp is applied after — so restoring the event changes no
+    // answer. `{rule:"repeated_failure"}` is only written once the streak has ALREADY
+    // breached, so it says nothing about a run sitting at two. Only the sets and the
+    // counter do, which is exactly what invariant 2 means by "rebuildable by folding".
+    await this.#restoreEvidence(ctx);
+  }
+
   /**
    * Drive a run until it suspends, completes, or has no runnable Task.
    *
@@ -2212,59 +2288,7 @@ export class Engine {
       // `policy.deescalated` no longer records stayed in memory and the run answered a gate
       // question the journal would answer the other way. `#rewindSerially` clears the flag for
       // that reason and this loop is where it is picked up.
-      if (!ctx.policySeeded) {
-        ctx.policySeeded = true;
-        // ALL THREE DIMENSIONS FROM ONE `UsageRecord`. `p.usage` is the fold `chargeUsage`
-        // builds out of the effect records, so tokens and provider time are reconstructible
-        // across a restart for exactly the reason dollars are — no new durable state, no new
-        // event. Restoring dollars alone would have handed a resumed run its full TOKEN budget
-        // back, which is this same invariant broken in a new dimension.
-        //
-        // AND THE BOUNDS THE RUN WAS SUBMITTED UNDER, read from its own `run.submitted`. A
-        // subgraph child gets its ceilings from a PARENT that a fresh process has never seen:
-        // `attach(childRunId, childGraph)` builds the child at the deployment's budget and the
-        // child graph's own capabilities, so the slice and the allowlist a parent imposed were
-        // lifted by the restart. Both are now recorded facts and `restore` folds them one way —
-        // budgets by MIN, the allowlist by intersection.
-        const recorded = await this.#compiledIdentity(runId);
-        ctx.policy.restore({
-          escalations: p.escalations,
-          ceilings: p.ceilings,
-          spentUsd: p.usage.costUsd,
-          spentTokens: p.usage.inputTokens + p.usage.outputTokens,
-          spentWallMs: p.usage.wallMs,
-          // THE PROMISE, NOT ONLY THE SPEND. A worker that died between `reserve` and `settle`
-          // left `budget.reserved` with no `budget.settled`, the projection folds it, and this
-          // was the one dimension `restore` had no parameter for — so the resumed run was
-          // handed the money back and could commit the same dollars twice.
-          reservedUsd: p.reservedUsd,
-          ...(recorded?.limits === undefined ? {} : { limits: recorded.limits }),
-          ...(recorded?.capabilities === undefined ? {} : { allowlist: recorded.capabilities }),
-        });
-        // THE SAME BOUND ON THE CONTEXT, because `grantBound` is what travels to a GRANDCHILD.
-        // Narrowed by the same filter `#contextFor` uses, so this can only ever remove.
-        if (recorded?.capabilities !== undefined) {
-          const bound = recorded.capabilities;
-          ctx.grantBound =
-            ctx.grantBound === undefined
-              ? [...bound]
-              : ctx.grantBound.filter((c) => bound.some((pat) => (pat.endsWith("*") ? c.startsWith(pat.slice(0, -1)) : pat === c)));
-        }
-        // AND THE EVIDENCE `#recordEvidence` HOLDS — the taint set and E4's failure streak.
-        // Both lived only on `RunContext`, so a crash, a deploy or a `loom serve` restart
-        // deleted them: E8 between the tainting write and the hard-to-undo action — measured,
-        // on two Engines over one journal with identical human decisions, the charge ran — and
-        // E4 between the second consecutive failure and the third, measured the same way, the
-        // escalation that fires without a restart firing not at all with one.
-        //
-        // The durable `policy.escalated` rows cannot stand in for either. `{rule:"taint"}`
-        // enters the FLOOR, where `CLASS_DEFAULT_POSTURE` already pins both hard classes at
-        // `in`, and the ceiling clamp is applied after — so restoring the event changes no
-        // answer. `{rule:"repeated_failure"}` is only written once the streak has ALREADY
-        // breached, so it says nothing about a run sitting at two. Only the sets and the
-        // counter do, which is exactly what invariant 2 means by "rebuildable by folding".
-        await this.#restoreEvidence(ctx);
-      }
+      await this.#seedPolicy(ctx, runId, p);
       // NOT RETIRED HERE, and the attempt is recorded because it looks obviously right.
       //
       // Evicting a terminal run's context on the call that finishes it fixes the leak
@@ -2341,6 +2365,27 @@ export class Engine {
           );
           return (await this.#project(ctx))!;
         }
+
+        // NEITHER IS A TASK WHOSE HOLDER HAS NOT COME BACK. A `leased` Task is work in flight:
+        // the state only advances when its holder commits, so an empty ready set beside one is
+        // "nobody can move this right now", not "there is nothing left to do". Finishing here
+        // declared such a run `failed` with `E_OUTPUT_MISSING` — a fold that says the run
+        // produced no outputs when what actually happened is that its worker was SIGKILLed
+        // mid-Task, or is alive in another process and still working.
+        //
+        // RETURNING IS WHAT MAKES THE RECLAIM REACHABLE, and that is the point of the pairing.
+        // `InProcessScheduler` takes such a Task back once the node's OWN declared `timeoutMs`
+        // has passed, and `select` is asked above; before this, the only shape that could reach
+        // the reclaim was one that had a ready Task as well. Now a stranded run stays `running`
+        // until its deadline passes and is then dispatched — and `cli.ts`'s run clock drives it,
+        // which is the half that makes recovery automatic rather than a person clicking.
+        //
+        // A LEASE THAT NEVER EXPIRES LEAVES THE RUN `running` RATHER THAN `failed`, and that is
+        // the intended trade: the four node types with no enforced deadline (`join`, `router`,
+        // `human_gate`, `subgraph`) are the ones where "the holder is dead" is not knowable, and
+        // "I do not know" is not a terminal verdict. `driveToRest` returns on this shape instead
+        // of spinning — "running with nothing to wait for is a run this process cannot move".
+        if (tasksInState(p, "leased").length > 0) return p;
 
         await this.#finish(ctx, p);
         const done = await this.#project(ctx);
@@ -3838,6 +3883,12 @@ export class Engine {
     // have no `undo` to be unable to run. It is no longer invisible, because `planRewind` shows
     // them to the operator before they authorize; it is still unwritten afterwards.
     if (live !== undefined) {
+      // THE JOURNAL'S BOUNDS BEFORE THE FIRST UNDO. `#invokeTool` asks the live `PolicyEngine`
+      // for every step below, and until this call that engine had only ever been seeded by
+      // `#advanceSerially` — so a run attached and rewound without being advanced compensated
+      // against the graph's own capability list rather than the narrowed one its parent
+      // recorded. See `#seedPolicy`.
+      await this.#seedPolicy(live, runId, (await this.projection(runId))!);
       // `walk`, NOT `#compensate` — the walk whose digest the operator authorized, rather than a
       // fresh plan computed after the check. See the destructure above.
       await this.#dispatchRollback(walk, "rewind");
@@ -4941,8 +4992,8 @@ export class Engine {
    * node-level refusal does — retries, error edges and the journal all work — and the message
    * names the node and the field.
    */
-  #unrecordableOutcome(w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
-    const refuse = (field: string, e: unknown): NodeOutcome => ({
+  #unrecordable(w: Wave, field: string, e: unknown): NodeOutcome {
+    return {
       status: "failed",
       writes: {},
       // ZERO USAGE, NOT `outcome.usage` — the refusal has to be recordable itself, and when the
@@ -4952,30 +5003,85 @@ export class Engine {
       usage: { ...ZERO_USAGE },
       error: err.validation(
         CODES.E_RESOURCE_INVALID,
-        `node "${w.node.id}" produced ${field} that the journal cannot record: ${(e as Error).message}`,
+        `node "${w.node.id}" produced ${field}: ${(e as Error).message}`,
         { details: { node: w.node.id, field } },
       ),
-    });
+    };
+  }
+
+  #unrecordableOutcome(w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
+    const refuse = (field: string, e: unknown): NodeOutcome => this.#unrecordable(w, field, e);
     for (const [channel, value] of Object.entries(outcome.writes)) {
       try {
         canonicalize(value);
       } catch (e) {
-        return refuse(`a value for "${channel}"`, e);
+        return refuse(`a value for "${channel}" that the journal cannot record`, e);
       }
     }
     if (outcome.error !== undefined) {
       try {
         canonicalize(errorRecord(outcome.error));
       } catch (e) {
-        return refuse("an error", e);
+        return refuse("an error that the journal cannot record", e);
       }
     }
     try {
       canonicalize(outcome.usage);
     } catch (e) {
-      return refuse("a usage record", e);
+      return refuse("a usage record that the journal cannot record", e);
     }
     return undefined;
+  }
+
+  /**
+   * The whole of what `#commit` will append, decided before any of it is built.
+   *
+   * `#unrecordableOutcome` guards the three fields `#commit` copies OUT of the outcome, and
+   * called that "exactly the set `#commit` appends from the outcome". It is not: `#commit` also
+   * appends `state.reduced`, whose `values` are DERIVED — the reducer's answer over this Task's
+   * writes and the channels as they stand. Every individual write can be recordable while their
+   * reduction is not, and two nodes writing `1e308` to a `sum` channel is the whole recipe.
+   * Measured on the static-sibling-join graph, before this: a raw `CanonicalizationError`
+   * ("non-finite number Infinity at total") out of `advance()` — not a `LoomError`, so
+   * `server/http.ts` had nothing to key on — the task stuck at `leased`, and the NEXT advance
+   * reporting `succeeded` with the second write silently gone.
+   *
+   * THE REDUCER'S OWN THROW IS THE SAME WEDGE. `reduceState` refuses a non-finite accumulator
+   * through `asNumber`, which is correct and fails closed, but it threw out of `advance()` too:
+   * the fan-out arm of that same graph raised `channel "total": expected number` and stranded
+   * the task identically. A refusal a caller cannot catch is not a refusal, so both arms come
+   * back here as an ordinary failed outcome and travel the way every node-level refusal does.
+   *
+   * COMPUTED ONCE. `#commit` used to build the reduction lower down, and the two would be the
+   * same expression over the same `p`, `w` and `outcome` — so this returns it rather than
+   * leaving the caller to repeat `reduceState`. A GATE outcome is not reduced at all: it
+   * returns before `#commit` appends anything, and reducing it here would refuse a gate that
+   * the run is entitled to raise.
+   */
+  #plannedCommit(
+    ctx: RunContext,
+    p: RunProjection,
+    w: Wave,
+    folded: NodeOutcome,
+  ): { readonly outcome: NodeOutcome; readonly reduce: NodeOutcome["reduced"] | undefined } {
+    const bad = this.#unrecordableOutcome(w, folded);
+    if (bad !== undefined) return { outcome: bad, reduce: undefined };
+    if (folded.status === "gate") return { outcome: folded, reduce: undefined };
+
+    let reduce: NodeOutcome["reduced"] | undefined;
+    try {
+      reduce = folded.reduced ?? this.#immediateReduce(ctx, p, w, folded);
+    } catch (e) {
+      return { outcome: this.#unrecordable(w, "writes its own channels refuse to reduce", e), reduce: undefined };
+    }
+    if (reduce !== undefined) {
+      try {
+        canonicalize(reduce.values);
+      } catch (e) {
+        return { outcome: this.#unrecordable(w, "a reduced value the journal cannot record", e), reduce: undefined };
+      }
+    }
+    return { outcome: folded, reduce };
   }
 
   #dispatchBody(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> | NodeOutcome {
@@ -7489,14 +7595,23 @@ export class Engine {
     // journal never records, so the same journal replayed to different state on a
     // differently-configured engine. `p` here is freshly re-projected, so the fold sees
     // its siblings' commits. This is the whole of the fix.
-    const folded =
-      w.node.type === "join" && settling.status === "succeeded" ? this.#foldJoin(ctx, p, w) : settling;
+    // THE FOLD IS INSIDE THE GUARD, not above it. `#foldJoin` reduces every branch's writes
+    // through the same `reduceState` a Task's own commit uses, so it refuses a non-finite
+    // accumulator the same way — and it threw out of `advance()`, stranding the join at
+    // `leased`, where the identical failure one node earlier is an ordinary failed Task.
+    let folded: NodeOutcome;
+    try {
+      folded = w.node.type === "join" && settling.status === "succeeded" ? this.#foldJoin(ctx, p, w) : settling;
+    } catch (e) {
+      folded = this.#unrecordable(w, "a fold its own channels refuse to reduce", e);
+    }
 
     // A VALUE THIS APPEND CANNOT CANONICALIZE IS REFUSED BEFORE ANY OF IT IS BUILT, and here is
     // the only place that sees every producer: a body's return, a body's THROW (caught in
-    // `#runWave`, so it never passes `#dispatch`), and the join fold one line up. See
-    // `#unrecordableOutcome`.
-    const outcome = this.#unrecordableOutcome(w, folded) ?? folded;
+    // `#runWave`, so it never passes `#dispatch`), the join fold one line up, and the REDUCTION
+    // of any of them. See `#plannedCommit`.
+    const planned = this.#plannedCommit(ctx, p, w, folded);
+    const outcome = planned.outcome;
 
     if (outcome.status === "gate") {
       // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT.
@@ -7798,9 +7913,10 @@ export class Engine {
     // a Task inside a fan-out holds them until its join.
     //
     // COMPUTED BEFORE `task.committed` IS BUILT, which it was not, because the answer decides
-    // whether that event's `writes` may be externalised at all. Nothing else moved: it is the
-    // same expression over the same `p`, `w` and `outcome`.
-    const reduce = outcome.reduced ?? this.#immediateReduce(ctx, p, w, outcome);
+    // whether that event's `writes` may be externalised at all — and computed further back
+    // still, by `#plannedCommit`, because whether it CAN be recorded decides whether this
+    // outcome commits at all.
+    const reduce = planned.reduce;
 
     // A WRITE THIS COMMIT DOES NOT REDUCE STAYS INLINE, and the condition is the whole reason
     // `#foldJoin` needs no resolution step. `#immediateReduce` returns `undefined` for a Task

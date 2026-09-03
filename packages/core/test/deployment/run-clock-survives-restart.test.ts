@@ -133,14 +133,13 @@ test("TWO PLANES THAT NEVER SPOKE COMPUTE THE SAME WINDOW", async () => {
 });
 
 /**
- * THE SET THE CLOCK DOES NOT RE-OFFER, which the sweep at `runClockTick` had to name.
+ * THE SET THE CLOCK RE-OFFERS, INCLUDING THE ONE IT USED TO ABANDON.
  *
  * The three tests above are about a window: given a run the clock CAN advance, does a restart
- * still reach it? This is the other half, and it is the one thing TODO.md §A.16's sweep of
- * `cli.ts` found that a re-fold cannot repair. A plane that dies BETWEEN `task.leased` and
- * `task.committed` leaves that task `leased` forever — the state only advances when its holder
- * commits, and its holder is gone. `runClockTick`'s `due` predicate wants a `ready` task, so
- * such a run is `running`, in view, and never driven, at every tick from now on.
+ * still reach it? This is the other half. A plane that dies BETWEEN `task.leased` and
+ * `task.committed` leaves that task `leased` — the state only advances when its holder commits,
+ * and its holder is gone. `runClockTick`'s `due` predicate wanted a `ready` task, so such a run
+ * was `running`, in view, and never driven, at every tick from then on.
  *
  * BUILT FROM A REAL JOURNAL, not from hand-written events: a `loom run` of a one-tool graph is
  * driven to completion through `main`, and its first five events — up to and including
@@ -152,11 +151,19 @@ test("TWO PLANES THAT NEVER SPOKE COMPUTE THE SAME WINDOW", async () => {
  * that is a different fix. The control is the same journal truncated one event earlier — a
  * task still `ready` — and it IS driven, on the same tick.
  *
- * IT ASSERTS THE COST, NOT A BUG TO FIX HERE. Widening the predicate would not help: `advance`
- * selects through `InProcessScheduler`, whose `eligible` returns `ready` tasks only, and the
- * arm that reclaims a dead holder's lease lives in `LeasedScheduler`, which `openWorkspace`
- * never constructs. This is the measured price of TODO.md §B.1, and the day something plugs
- * that scheduler in, this test is where the number changes.
+ * WIDENING THE PREDICATE DID NOT HELP UNTIL THREE THINGS WERE TRUE, and this test is where
+ * the number changed. `InProcessScheduler` grew a reclaim arm that takes a lease back past the
+ * node's own declared deadline; `Engine.#advanceSerially` now asks `select` BEFORE it decides a
+ * run is over, where it used to return sixty-five lines earlier; and it no longer FINISHES a run
+ * that still holds a lease, which is what makes driving a live-leased run a fold and a no-op
+ * rather than a `failed` verdict on someone else's work in flight.
+ *
+ * SO THE ASSERTION IS THAT IT IS DRIVEN, not that it is reclaimed. This journal's `fs.write`
+ * node carries no declared `timeoutMs`, so the scheduler correctly refuses to guess that its
+ * holder is dead — "I do not know" is not "the holder is gone". What the clock owes it is a
+ * drive; what happens on that drive is the scheduler's question and
+ * `test/run/inprocess-reclaims-a-dead-lease.test.ts` asks it. The run staying `running` rather
+ * than being declared `failed` is the second half of the same rule.
  */
 
 const ONE_TOOL = {
@@ -171,7 +178,7 @@ const ONE_TOOL = {
   edges: [],
 };
 
-test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS IN VIEW FOREVER AND IS NEVER DRIVEN", async () => {
+test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS DRIVEN AFTER THE RESTART, NOT ABANDONED", async () => {
   const d = deployment();
   try {
     const file = publishGraph(d, "stranded", ONE_TOOL);
@@ -227,8 +234,14 @@ test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS IN VIEW FOREVER AND IS 
       const t = await runClockTick(w, LIMIT, 1_700_000_000_100, LAP, (runId: RunId) => void driven.push(runId));
 
       assert.ok(t.visited.includes(leased), "the stranded run IS in the clock's window — it is not a listing problem");
-      assert.equal(driven.includes(leased), false, "and it is never driven: `due` wants a `ready` task and this one is leased for good");
+      assert.ok(driven.includes(leased), "and it IS driven: `due` counts a leased task, not only a ready one");
       assert.ok(driven.includes(ready), "THE CONTROL: the same journal one event shorter IS driven on the same tick");
+      // AND THE DRIVE DID NOT KILL IT. With no declared deadline on this node the scheduler
+      // will not take the lease back, so the honest outcome is a run still `running` with its
+      // task still `leased` — where before the engine's short-circuit finished it `failed`.
+      const after = (await w.engine.projection(leased))!;
+      assert.equal(after.status, "running", "a lease nobody can adjudicate leaves the run running, not failed");
+      assert.equal(after.tasks[TASK]?.state, "leased", "and the task is exactly where the crash left it");
     } finally {
       w.close();
     }

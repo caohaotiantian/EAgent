@@ -4638,27 +4638,33 @@ export async function runClockTick(
     // backoff case this clock was written for. See the header for the three things that keep
     // the wider predicate from fighting a live driver.
     //
-    // THE SET THIS PREDICATE DOES NOT COVER, named because the sweep above claims a re-fold
-    // fixes everything and this is the one place it does not. A plane that dies BETWEEN
-    // `task.leased` and `task.committed` leaves that task `leased` in the journal forever —
-    // the state only advances when its holder commits, and its holder is gone. Such a run is
-    // `running` with no `ready` task, so `due` is false at every tick from here to the heat
-    // death of the deployment. Measured on a real journal (a `loom run` of a one-tool graph,
-    // truncated after its `task.leased`, then folded by a fresh `openWorkspace`):
+    // AND A TASK WHOSE HOLDER IS GONE, which is the other half and used to be excluded here.
     //
-    //     status after restart: running   tasks: [{ apply@root#0, leased }]
-    //     run clock visited: 2   drove: []          ← in view, never driven
+    // A plane that dies BETWEEN `task.leased` and `task.committed` leaves that task `leased` in
+    // the journal forever — the state only advances when its holder commits, and its holder is
+    // gone. Such a run is `running` with no `ready` task, so the `ready`-only predicate was
+    // false at every tick from here to the heat death of the deployment. Measured on a real
+    // crash (`loom serve`, a tool node with a declared `timeoutMs`, `kill -9` between the lease
+    // and the commit, then a fresh plane over the same SQLite journal): 42 seconds, ~84 ticks
+    // at `--sweep-ms 500`, `status=running tasks=[('slow@root#0','leased')]`, never driven.
     //
-    // WIDENING THIS LINE WOULD NOT FIX IT, which is why it is not widened. `advance` selects
-    // through `InProcessScheduler`, whose `eligible` returns `ready` tasks only; the arm that
-    // reclaims a dead holder's lease is `LeasedScheduler.reclaimable`, and `openWorkspace`
-    // passes no scheduler. So driving such a run would fold it and do nothing. This is the
-    // COST of TODO.md §B.1 ("either plug it in or delete it"), measured rather than argued,
-    // and it belongs to that row: the missing piece is a lease DEADLINE, which is the one
-    // thing that can tell a dead holder from a slow one, and there is no honest signal here
-    // without it — a tick landing mid-`advance` sees exactly the same journal.
-    // `test/deployment/run-clock-survives-restart.test.ts` holds the reproduction.
-    const due = Object.values(p.tasks).some((t) => t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now));
+    // WIDENING IT DOES FIX IT NOW, AND DID NOT BEFORE — the comment that stood here said the
+    // opposite, correctly, for as long as it was true. `InProcessScheduler` gained a reclaim
+    // arm that takes back a lease past the NODE'S OWN declared deadline, and `#advanceSerially`
+    // now asks `select` BEFORE deciding a run is over, so driving such a run reaches it. The
+    // engine also no longer FINISHES a run that still holds a lease, which is what makes this
+    // predicate safe to widen: a tick that drives a run whose lease is live — held by this
+    // process, or by a peer replica — folds it, selects nothing and returns, where before the
+    // widening would have declared that run `failed` while its worker was still working.
+    //
+    // SO THE DEADLINE IS NOT TESTED HERE. It is the scheduler's question, asked with the
+    // `#handedOut` set this file cannot see; duplicating it would be a second spelling of one
+    // predicate, which is how `#immediateReduce` and `#foldJoin` came to disagree. The cost of
+    // being wrong is one extra fold per tick per stranded run, and the sweep above already pays
+    // a fold per run in view.
+    const due = Object.values(p.tasks).some(
+      (t) => (t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now)) || t.state === "leased",
+    );
     if (!due) continue;
     index ??= graphsByHash(ws).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
