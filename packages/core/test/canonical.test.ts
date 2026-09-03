@@ -85,6 +85,54 @@ test("a value shared by MANY paths is refused with a typed error, not a RangeErr
   assert.ok(Date.now() - started < 3000, "the refusal arrives after a million containers, not after 44 MB");
 });
 
+/**
+ * THE CONTAINER BOUND IS NOT AN OUTPUT BOUND, and the reason is in its own docstring: "a
+ * container count is independent of string length". A STRING IS NOT A CONTAINER, so the same
+ * attack with a FAT leaf instead of a thin one stays comfortably under 1,000,000 containers while
+ * the output grows without bound.
+ *
+ * Nineteen doublings is 524,287 containers — a twentieth of the container limit — and 524,288
+ * copies of the leaf. Measured on the tree that had only the container bound: a 1.1 KB leaf gave
+ * `RangeError: Invalid string length`, `code=undefined`, in 557 ms and 0.89 GB of RSS, driven
+ * through `journal/store.ts`'s `prepare` — the same bare untyped failure on the same durable
+ * write path the container bound was added to remove. One notch under, a 900-byte leaf did not
+ * throw at all: it produced 478,674,933 characters and handed them to `boundedPayload` to refuse
+ * after the fact.
+ */
+test("a THIN container graph with a FAT leaf is refused too — the container count is not the output", () => {
+  let x: unknown = "A".repeat(1100);
+  for (let i = 0; i < 19; i++) x = { a: x, b: x };
+  const started = Date.now();
+  try {
+    canonicalize(x);
+    assert.fail("should have refused");
+  } catch (e) {
+    assert.ok(isLoomError(e), `a bare ${(e as Error).name} is the failure this replaces`);
+    assert.equal(e.code, CODES.E_PAYLOAD_TOO_LARGE, "the same typed refusal the container bound gives");
+    assert.equal(e.class, "validation", "the caller's value — never retried");
+    assert.match(e.message, /emits over \d+ characters/);
+    assert.ok(!/containers/.test(e.message), "this is the OTHER bound; 524,287 containers is well inside the first");
+  }
+  // Absolute, with an order-of-magnitude margin. The point of counting as it goes is that the
+  // refusal costs a fraction of what producing the value did: 557 ms before, ~54 ms after.
+  assert.ok(Date.now() - started < 3000, "the refusal arrives at 64 MiB, not at V8's string limit");
+});
+
+/**
+ * THE ORDINARY LARGE VALUE STILL PASSES, which is the half a bound this shape can get wrong.
+ *
+ * 9,437,277 characters is the largest value the whole suite ever canonicalised — instrumented
+ * over 464,430 calls — and it entered 256 containers to do it, because a genuinely large value is
+ * a large LEAF. `MAX_OUTPUT_CHARS` sits 7.1x above it, so the measured worst case the system
+ * actually journals is nowhere near the bound.
+ */
+test("...and the largest value this project has ever produced is nowhere near the bound", () => {
+  const big = "x".repeat(9_437_277);
+  const out = canonicalize(big);
+  assert.equal(out.length, 9_437_279, "quoted, and otherwise untouched");
+  assert.equal(canonicalize({ doc: big }).length, 9_437_287, "and inside a container, the same");
+});
+
 test("...and sharing well under the bound still canonicalizes, identically to before", () => {
   // 15 levels is 32,767 containers — 30x the largest walk measured anywhere in this suite (8,413)
   // and 30x under the limit. Two structurally-equal values with DIFFERENT sharing must still
