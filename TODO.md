@@ -30,20 +30,20 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ---
 
-## State — measured 2026-09-03, one command each
+## State — re-measured 2026-09-03 after the phase-2-4 merge, one command each
 
 | fact | value | command |
 |---|---|---|
-| tests on `loom` | 2,865 pass / 0 fail | `npm test` |
-| tests, three lanes merged | **3,001 pass / 0 fail**, run twice | merge A+B+C onto `a638e7d`, then `npm test` |
-| pinned exports | 538 on `loom`; **539 on `phase2-4-subsystems`, and the pin was not updated** | `node scripts/check-surface.mjs` |
+| the gate | **exit 0** | `npm run check` |
+| tests on `loom` | **3,040 pass / 0 fail** | `npm test` |
+| pinned exports | 539 | `node scripts/check-surface.mjs` |
 | kernel | 10 files, 11 seams | `node scripts/check-kernel.mjs` |
 | zero runtime deps | green, 62 files | `node scripts/check-zero-dep.mjs` |
 | NUL census | 5 files, 0 invalid UTF-8 | read every `git ls-files` path; see CLAUDE.md |
 
-**The surface row is a live gate failure, not a note.** `phase2-4-subsystems` adds
-`providers/anthropic.ts:producedTokens` and `scripts/surface.json` still pins 538; the merged tree
-does not pass `npm run check` until `node scripts/check-surface.mjs --write` is committed with it.
+**The three phase-2-4 lanes are merged**, with two fix rounds on top. The surface row that used
+to sit here as a live gate failure is paid: `producedTokens` is pinned and the gate is green.
+`phase1-taint` is still unmerged and parked.
 
 **Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
 wave moved which number. Every one of those paragraphs was true when written and none was re-run,
