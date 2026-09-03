@@ -19,7 +19,7 @@ import type {
   ToolSpec,
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
-import { round6, roughTokens } from "./anthropic.ts";
+import { producedTokens, round6, roughTokens } from "./anthropic.ts";
 
 export interface OpenAIOptions extends HttpOptions {
   readonly apiKey: string;
@@ -104,7 +104,12 @@ export class OpenAIAdapter implements ModelAdapter {
       .sort((a, b) => a[0] - b[0])
       .map(([, acc]) => ({ id: acc.id, name: acc.name, arguments: safeJson(acc.args) }));
 
-    if (outputTokens === 0) outputTokens = Math.max(1, Math.ceil(text.length / 4));
+    // FLOORED on everything the turn produced, and the estimators are imported from
+    // `anthropic.ts` rather than copied so the two adapters cannot answer a missing usage frame
+    // differently — an OpenAI-wire gateway behind `baseUrl` is exactly as likely to send none.
+    // `text` is EMPTY on a `tool_use` turn, so a text-only floor charged one output token for a
+    // whole tool call; `producedTokens` reads the calls too. Reported numbers still win.
+    if (outputTokens === 0) outputTokens = producedTokens(text, toolCalls);
     if (inputTokens === 0) inputTokens = roughTokens(req);
 
     const usage: UsageRecord = {

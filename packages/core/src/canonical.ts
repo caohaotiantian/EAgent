@@ -85,6 +85,173 @@ function tooDeep(depth: number, path: string): LoomError {
   );
 }
 
+/**
+ * How many CONTAINERS this file will walk in one call. The other half of the bound, and the
+ * half that was missing.
+ *
+ * `MAX_DEPTH` bounds how LONG a path can be. Nothing bounded how MANY there are, and `seen` is
+ * deleted on the way out of every container — deliberately, so that a shared acyclic reference
+ * is not mistaken for a cycle — so a value shared by two parents is walked once per PATH. Output
+ * size is then exponential in depth while the input stays tiny. Measured at a638e7d, `x` built
+ * as `{a:x, b:x}` k times:
+ *
+ *     k = 22 objects → 44,040,181 bytes in 1,684 ms
+ *     k = 25 objects → RangeError: Invalid array length, code undefined, ~19 s
+ *
+ * 26 objects fit in a few hundred bytes of memory and reach depth 26, a tenth of `MAX_DEPTH`.
+ * The failure landed in `journal/store.ts`'s shared `prepare`, on the durable write path, as a
+ * bare `RangeError` — the untyped failure `tooDeep` exists to have removed — and it held
+ * `Engine`'s single `#commitChain` for the whole time, so one value stalled journal writes for
+ * every run on that engine. `boundedPayload` cannot help: it runs on canonicalize's OUTPUT, and
+ * `out[]` outgrows V8's array limit before it is ever reached.
+ *
+ * CONTAINERS AND NOT BYTES, and the measurement is why. Instrumenting this function and running
+ * the whole suite — 464,430 canonicalize calls, every real payload, graph spec, tool result,
+ * gate payload and channel map the project has — the deepest per-call figures were:
+ *
+ *     containers entered   8,413        the largest legitimate walk
+ *     output characters    9,437,277    the largest legitimate value
+ *
+ * Those two numbers do not move together, which is the whole point: the 9.4 MB value entered 256
+ * containers, because a genuinely large value is a large LEAF. A container count is independent
+ * of string length, so it catches the pathology at its source — the exponential path count —
+ * without arguing with `Engine.#externalise`, which hands `payloadStore.put` values with no size
+ * bound of its own.
+ *
+ * 1,000,000 therefore sits ~119x above the largest real walk measured and ~33x below the
+ * 33,554,431 containers the RangeError appeared at — the same two-sided shape `MAX_DEPTH` was
+ * chosen with, and for the same reason: it makes the limit a property of this file rather than
+ * of the machine. Walking a million containers costs ~0.4 s, so that is also the worst stall a
+ * pathological value can now impose.
+ *
+ * IT IS HALF THE BOUND AND THIS PARAGRAPH USED TO CLAIM IT WAS THE WHOLE ONE. "A container count
+ * never argues with externalisation" was true and was also the reason it does not bound the
+ * OUTPUT: a STRING is not a container, so the same attack with a FAT leaf stays under this limit
+ * while the output grows without bound. Measured on the patched tree — `"A".repeat(1100)` shared
+ * by `{a:x, b:x}` nineteen times — 524,287 containers walked, comfortably under 1,000,000, and
+ * 524,288 copies of the leaf emitted: `RangeError: Invalid string length`, `code=undefined`,
+ * 557 ms, the same bare untyped failure on the same durable write path. One notch under, a
+ * 900-byte leaf canonicalised to 478,674,933 characters in 562 ms and 0.89 GB of RSS before
+ * `journal/store.ts`'s `boundedPayload` got a chance to refuse it. `MAX_OUTPUT_CHARS` is the
+ * other half; neither bound subsumes the other.
+ *
+ * DO NOT FIX THIS BY MEMOISING SHARED SUBTREES. It would be cheaper and it would break this
+ * file's entire purpose: two structurally-equal values with different sharing would produce
+ * different bytes, and `graph.hash`, `state.hash` and every recorded `resultDigest` rest on them
+ * producing the same bytes. Refusing is the only answer that keeps the contract.
+ *
+ * Raising it is safe; lowering it is a compatibility break, for the reason `MAX_DEPTH` states.
+ */
+const MAX_CONTAINERS = 1_000_000;
+
+/**
+ * The second typed refusal, and it is typed for the reason `tooDeep` gives verbatim: this is on
+ * the durable write path, where a caller needs to be told "your value, never retry" in the
+ * vocabulary the retry policy and the HTTP mapping already branch on.
+ *
+ * `E_PAYLOAD_TOO_LARGE` is REUSED rather than minted, and the reuse is worth naming: `errors.ts`
+ * documents that code as "an event payload exceeded the per-event byte bound", and this bound is
+ * neither per-event nor stated in bytes. What the two share is the only thing a caller acts on —
+ * the value is too big to represent and refusing is final. A distinct code would say more, and
+ * that is a one-line change to `errors.ts`; it is named here rather than left implicit.
+ */
+function tooWide(containers: number, path: string): LoomError {
+  const where = path.length > 96 ? `${path.slice(0, 96)}…` : path || "<root>";
+  return err.validation(
+    CODES.E_PAYLOAD_TOO_LARGE,
+    `canonicalizing this value walks over ${containers} containers, limit is ${MAX_CONTAINERS}, at ${where} — ` +
+      `a shared reference is expanded once per path, so check for a value reachable by many routes`,
+    { details: { containers, limit: MAX_CONTAINERS, path: where } },
+  );
+}
+
+/**
+ * How many CHARACTERS this file will emit in one call. The half `MAX_CONTAINERS` cannot cover.
+ *
+ * A container count bounds the number of PATHS walked; it says nothing about what sits at the end
+ * of one. `{a:x, b:x}` nineteen deep over a 1.1 KB string walks 524,287 containers — a twentieth
+ * of the container limit — and emits 524,288 copies of the leaf, which is a `RangeError` out of
+ * `out.join("")`. See `MAX_CONTAINERS` for the reproduction and for why the two bounds are not
+ * the same bound.
+ *
+ * 64 MiB, CHOSEN THE SAME TWO-SIDED WAY. The largest legitimate value the whole suite produced
+ * is 9,437,277 characters and V8 refuses a string past 536,870,888 on this platform, so the
+ * usable window spans a factor of 57. 67,108,864 sits at its geometric middle: 7.1x above
+ * anything the project has ever canonicalised and 8.0x below the length that throws. Nothing is
+ * gained by hugging either end — sitting just over the legitimate maximum would refuse a value
+ * the system journals correctly today, which is the objection `MAX_CONTAINERS` raises against a
+ * byte cap and which is answered by the distance rather than by the absence of one.
+ *
+ * COUNTED, NOT MEASURED FROM `out`. Every character this file appends passes through `spend`,
+ * so the count is exact rather than an estimate of one, and the refusal lands before the
+ * allocation instead of after it: the point of the bound is that the pathological value never
+ * costs the 0.89 GB the unbounded walk did. Measured on the two attack shapes, before → after:
+ * 557 ms and 0.89 GB of RSS ending in a bare `RangeError` → 54 ms and 0.15 GB ending in
+ * `E_PAYLOAD_TOO_LARGE`, and 562 ms producing 478,674,933 characters → 54 ms producing none.
+ *
+ * WHAT THE ORDINARY CASE PAYS, measured the same way over the same tree — best of three, 50,000
+ * iterations for the event and 2,000 for the others:
+ *
+ *     a journal `task.committed` event     0.00282 → 0.00288 ms    1.02x
+ *     a 40-node compiled-graph-shaped spec 0.09914 → 0.10276 ms    1.04x
+ *     a 240 KB single-string document      0.10851 → 0.10765 ms    0.99x
+ *
+ * A per-push call is what a bound on the output costs, and 2-4% is what it came to. The large
+ * document is inside the noise because its whole cost is ONE `JSON.stringify` of a long string.
+ *
+ * AND IT MOVES NO EXISTING BYTES, which is the property that actually matters: a 73-case corpus
+ * — every primitive, every refusal, key ordering, prototype keys, lone surrogates, U+2028, the
+ * depth and sharing boundaries, and the 9,437,279-character value that is the largest this
+ * project has ever produced — canonicalises to the same sha256 on 53 cases and the same refusal
+ * on the other 20, pristine against patched. A bound that changed a digest would break
+ * `graph.hash`, `state.hash` and every recorded `resultDigest` at once.
+ *
+ * Raising it is safe; lowering it is a compatibility break, for the reason `MAX_DEPTH` states.
+ */
+const MAX_OUTPUT_CHARS = 64 * 1024 * 1024;
+
+/**
+ * The third typed refusal, and typed for the reason `tooDeep` gives verbatim: the durable write
+ * path needs "your value, never retry" in the vocabulary the retry policy already branches on.
+ *
+ * It shares `E_PAYLOAD_TOO_LARGE` with `tooWide` — the two really are the same statement to a
+ * caller, "this value is too big to represent and refusing is final" — and the MESSAGES are what
+ * separate them, because the remedies do not: a too-wide value is fixed by removing sharing and a
+ * too-long one by externalising or by writing less.
+ */
+function tooLong(chars: number, path: string): LoomError {
+  const where = path.length > 96 ? `${path.slice(0, 96)}…` : path || "<root>";
+  return err.validation(
+    CODES.E_PAYLOAD_TOO_LARGE,
+    `canonicalizing this value emits over ${chars} characters, limit is ${MAX_OUTPUT_CHARS}, at ${where} — ` +
+      `the value is too large to journal; externalise it or write less of it`,
+    { details: { chars, limit: MAX_OUTPUT_CHARS, path: where } },
+  );
+}
+
+/**
+ * What the whole call has spent so far. One box, threaded through the recursion, because both
+ * numbers are properties of the CALL and not of a subtree — which is exactly what `depth` is not.
+ */
+interface Budget {
+  walked: number;
+  chars: number;
+}
+
+/**
+ * Append, and refuse the moment the total is past the bound.
+ *
+ * EVERY `out.push` IN THIS FILE GOES THROUGH HERE, punctuation included, so the count is the
+ * length of what `join` would produce rather than an approximation of it. That completeness is
+ * what makes the check placement uninteresting: there is no path that emits characters without
+ * being asked whether it may.
+ */
+function spend(out: string[], budget: Budget, text: string, path: string): void {
+  budget.chars += text.length;
+  if (budget.chars > MAX_OUTPUT_CHARS) throw tooLong(budget.chars, path);
+  out.push(text);
+}
+
 export class CanonicalizationError extends Error {
   override readonly name = "CanonicalizationError";
   readonly path: string;
@@ -104,9 +271,17 @@ export class CanonicalizationError extends Error {
  *   - typed arrays, ArrayBuffer, DataView, RegExp: REJECTED — `Object.keys` describes
  *     something other than their content, so they collided with plain objects
  *   - cycles: REJECTED
- *   - more than `MAX_DEPTH` nested containers: REJECTED — and this one alone throws a
- *     typed `LoomError` (`E_PAYLOAD_TOO_DEEP`, class `validation`), not a
- *     `CanonicalizationError`. See `MAX_DEPTH` and `tooDeep` above for why.
+ *   - more than `MAX_DEPTH` nested containers: REJECTED
+ *   - more than `MAX_CONTAINERS` containers walked in one call: REJECTED — a shared acyclic
+ *     reference is expanded once per path, so this bounds how many PATHS there are where
+ *     `MAX_DEPTH` bounds how long one is. See `MAX_CONTAINERS`.
+ *   - more than `MAX_OUTPUT_CHARS` characters emitted in one call: REJECTED — the container
+ *     count does not bound the output, because a string is not a container. See
+ *     `MAX_OUTPUT_CHARS`.
+ *
+ * Those last three alone throw a typed `LoomError` (class `validation`) rather than a
+ * `CanonicalizationError`, because they are the three that fire on the durable write path. See
+ * `tooDeep` for the argument.
  *
  * Numbers use JSON.stringify's shortest round-trip representation, which is
  * specified by ECMA-262 and therefore stable across V8 versions.
@@ -114,27 +289,34 @@ export class CanonicalizationError extends Error {
 export function canonicalize(value: unknown): string {
   const seen = new Set<object>();
   const out: string[] = [];
-  write(value, "", seen, out, 0);
+  write(value, "", seen, out, 0, { walked: 0, chars: 0 });
   return out.join("");
 }
 
 /** `depth` is the number of containers already entered; the root value is at 0. */
-function write(value: unknown, path: string, seen: Set<object>, out: string[], depth: number): void {
+function write(
+  value: unknown,
+  path: string,
+  seen: Set<object>,
+  out: string[],
+  depth: number,
+  budget: Budget,
+): void {
   if (value === null) {
-    out.push("null");
+    spend(out, budget, "null", path);
     return;
   }
   switch (typeof value) {
     case "boolean":
-      out.push(value ? "true" : "false");
+      spend(out, budget, value ? "true" : "false", path);
       return;
     case "number": {
       if (!Number.isFinite(value)) throw new CanonicalizationError(`non-finite number ${String(value)}`, path);
-      out.push(JSON.stringify(Object.is(value, -0) ? 0 : value));
+      spend(out, budget, JSON.stringify(Object.is(value, -0) ? 0 : value), path);
       return;
     }
     case "string":
-      out.push(JSON.stringify(value));
+      spend(out, budget, JSON.stringify(value), path);
       return;
     case "undefined":
       throw new CanonicalizationError("undefined is not representable here", path);
@@ -157,21 +339,26 @@ function write(value: unknown, path: string, seen: Set<object>, out: string[], d
   // on the way out. `depth` counts containers, not values, so the reported number reads the
   // way a person counts nesting: `{a:{a:1}}` is two.
   if (depth >= MAX_DEPTH) throw tooDeep(depth + 1, path);
+  // ONE SITE, beside `seen.add`, because that is the definition: a container is walked exactly
+  // when it is added to `seen`, and `seen.delete` on the way out is what lets the same object be
+  // walked again by another path. Counting anywhere else would count something adjacent.
+  budget.walked += 1;
+  if (budget.walked > MAX_CONTAINERS) throw tooWide(budget.walked, path);
   seen.add(obj);
 
   if (Array.isArray(obj)) {
-    out.push("[");
+    spend(out, budget, "[", path);
     for (let i = 0; i < obj.length; i++) {
-      if (i > 0) out.push(",");
+      if (i > 0) spend(out, budget, ",", path);
       const item = obj[i];
       if (item === undefined) {
         // JSON.stringify would silently coerce this to null; that would make two
         // materially different arrays hash the same. Refuse instead.
         throw new CanonicalizationError("undefined array element", `${path}[${i}]`);
       }
-      write(item, `${path}[${i}]`, seen, out, depth + 1);
+      write(item, `${path}[${i}]`, seen, out, depth + 1, budget);
     }
-    out.push("]");
+    spend(out, budget, "]", path);
     seen.delete(obj);
     return;
   }
@@ -219,17 +406,18 @@ function write(value: unknown, path: string, seen: Set<object>, out: string[], d
   // comparator is exactly UTF-16 code-unit order, which is what we want: it is
   // locale-independent, unlike `localeCompare`.
   const keys = Object.keys(record).sort();
-  out.push("{");
+  spend(out, budget, "{", path);
   let first = true;
   for (const key of keys) {
     const v = record[key];
     if (v === undefined) continue; // omit, matching JSON.stringify's object behaviour
-    if (!first) out.push(",");
+    if (!first) spend(out, budget, ",", path);
     first = false;
-    out.push(JSON.stringify(key), ":");
-    write(v, path ? `${path}.${key}` : key, seen, out, depth + 1);
+    spend(out, budget, JSON.stringify(key), path);
+    spend(out, budget, ":", path);
+    write(v, path ? `${path}.${key}` : key, seen, out, depth + 1, budget);
   }
-  out.push("}");
+  spend(out, budget, "}", path);
   seen.delete(obj);
 }
 

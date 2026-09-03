@@ -77,6 +77,7 @@ import { constants as BUFFER } from "node:buffer";
 import { spawn } from "node:child_process";
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { CODES, err } from "../errors.ts";
 
@@ -578,6 +579,26 @@ export async function runSandboxed(opts: SandboxOptions, signal: AbortSignal): P
   let truncated = false;
   let timedOut = false;
 
+  /**
+   * ONE DECODER PER STREAM, claimed here with the other snapshots.
+   *
+   * `slice.toString("utf8")` decodes each chunk INDEPENDENTLY, and a pipe hands over 64 KiB at a
+   * time with no regard for character boundaries — so every multi-byte sequence straddling one
+   * became two U+FFFD. Measured, 300,000 bytes of a 3-byte character came back with eight
+   * characters destroyed. The silent part is what made it a fail-open: nothing was DROPPED, so
+   * `truncated` stayed `false` and answered "yes, this is all of it" over data that was not what
+   * the child wrote. It is also position-dependent, so the same tool over the same bytes
+   * reproduces intermittently — a replay hazard for a store that content-addresses every write.
+   *
+   * `StringDecoder` holds the incomplete tail until the next chunk completes it. The BYTE
+   * ACCOUNTING STAYS ON THE BUFFER, so `maxOutputBytes` still means bytes and `truncated` still
+   * means "output was dropped"; only the decode changed. The cap's own boundary is the same
+   * hazard and the same fix: a `slice` cut mid-character leaves a partial sequence the decoder
+   * holds, and `end()` below renders it as the one replacement character it genuinely is.
+   */
+  const outDecoder = new StringDecoder("utf8");
+  const errDecoder = new StringDecoder("utf8");
+
   const capture = (chunk: Buffer, to: "out" | "err"): void => {
     if (outBytes >= maxBytes) {
       truncated = true;
@@ -587,8 +608,8 @@ export async function runSandboxed(opts: SandboxOptions, signal: AbortSignal): P
     const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
     outBytes += slice.length;
     if (slice.length < chunk.length) truncated = true;
-    if (to === "out") stdout += slice.toString("utf8");
-    else stderr += slice.toString("utf8");
+    if (to === "out") stdout += outDecoder.write(slice);
+    else stderr += errDecoder.write(slice);
   };
 
   // ── every handle claimed BEFORE anything can fail ────────────────────────────
@@ -840,6 +861,14 @@ export async function runSandboxed(opts: SandboxOptions, signal: AbortSignal): P
         fail(err.cancelled(`tool "${command}" was cancelled`));
         return;
       }
+      // FLUSHED HERE, where the result is built, and not in `release`. `'close'` fires after both
+      // pipes have ended, so this is the first point at which "no more bytes are coming" is true;
+      // whatever the decoders still hold is a sequence the child cut short or the byte cap did,
+      // and `end()` renders it as the replacement character it actually is rather than dropping
+      // it. Doing it in `release` would also run it on the cancel and spawn-failure paths, whose
+      // results are discarded.
+      stdout += outDecoder.end();
+      stderr += errDecoder.end();
       finish({
         code,
         signal: sig,

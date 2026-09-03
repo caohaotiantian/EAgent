@@ -28,13 +28,14 @@
 
 import { closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { Script, createContext } from "node:vm";
 
 import { CODES, err } from "../errors.ts";
 import { encodeBranch, parseTaskId } from "../ids.ts";
 import { assertWithin, runSandboxed } from "../sandbox/subprocess.ts";
 import { locateEdit } from "./edit-match.ts";
 import { globToRegExp, walk } from "./search-match.ts";
-import type { ToolContext, ToolDefinition } from "../run/registry.ts";
+import type { ToolContext, ToolDefinition, ToolResult } from "../run/registry.ts";
 
 export interface BuiltinOptions {
   /** The jail. Every path argument is resolved against it and may not escape. */
@@ -539,7 +540,21 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       }
 
       const span = match.span;
-      const updated = replaceAll ? current.split(span).join(replace) : current.replace(span, replace);
+      // SPLICED BY INDEX, NOT `String.replace`, so the bytes written are the bytes asked for.
+      // `replace` is model-authored text and `String.replace` reads `$&`, `` $` ``, `$'`, `$1`
+      // and `$<name>` in it as SUBSTITUTION PATTERNS — all of which are ordinary content: `$'…'`
+      // is shell ANSI-C quoting, `$&` is a regex replacement an agent is itself writing, `$1` is
+      // a positional. Measured on `let cost = OLD;` with `find: "OLD"`, `replace: "$'y"` wrote
+      // the whole rest of the file back into the line and returned success with `isError` unset.
+      // The `replaceAll` arm is `split`/`join`, which is already literal, so the same tool had
+      // two contradictory semantics selected by a boolean the model chooses.
+      //
+      // `indexOf` cannot miss: `locateEdit` returns `exact` only when `content.split(find)`
+      // found the span and `relaxed` only after an explicit `content.indexOf(search) !== -1`.
+      const at = current.indexOf(span);
+      const updated = replaceAll
+        ? current.split(span).join(replace)
+        : current.slice(0, at) + replace + current.slice(at + span.length);
       const occurrences = replaceAll ? current.split(span).length - 1 : 1;
 
       // The write goes to the BRANCH path even though the read may have come from the
@@ -572,6 +587,174 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
 
 /** Results past this are dropped, and the drop is stated in the content. */
 const SEARCH_RESULT_CAP = 100;
+
+/**
+ * Wall-clock one search call may spend INSIDE regex matching, after which it refuses.
+ *
+ * THE RESULT CAPS WERE NEVER A BOUND ON THIS. `SEARCH_RESULT_CAP` and `GREP_FILE_CAP` bound how
+ * many lines are scanned; neither bounds how long ONE `re.test(line)` takes, and that is where
+ * the cost lives. `fs.grep` compiles `new RegExp(model_string)` and `fs.glob` compiles a
+ * model-written glob, so a catastrophically-backtracking pattern is one tool argument away.
+ * Measured at a638e7d, one file holding `"a" * n + "!"` and the pattern `(a+)+$`:
+ *
+ *     n = 24 →     876 ms      n = 28 →  14,105 ms
+ *     n = 26 →   3,506 ms      n = 30 →  56,354 ms
+ *
+ * — roughly 4x per two characters, so n = 45 is hours. Node is single-threaded and this ran in a
+ * SYNCHRONOUS `execute`, so nothing could interrupt it: the engine's node deadline is a
+ * `Promise.race` on the same thread and an `AbortSignal` callback is queued behind the regex. A
+ * 200 ms timer armed before the call had still not fired when it returned. Under `loom serve`
+ * that is every run, the HTTP control plane, the gate SLA clock and `loom cancel` at once, which
+ * is the goal's "watch it, stop it" gone. The docstring below used to assert the opposite.
+ *
+ * 2 s, AND THE NUMBER IS THE ORDINARY CASE'S, NOT THE ATTACK'S. Measured over this repo's own
+ * `packages/core/src` — 62 files, 3.6 MB — a whole-tree `fs.grep "export function"` takes 8.8 ms
+ * end to end, file reads included, and `fs.glob "**` + `/*.ts"` takes 1.2 ms. The budget is
+ * therefore more than two orders of magnitude above everything a real search does, let alone the
+ * matching alone. A search that needs more than two seconds of BACKTRACKING is not a search.
+ *
+ * WHAT THIS COSTS, re-measured over the same 62 files on 2026-09-03, best of three at 20
+ * iterations, against the unbounded `a638e7d`:
+ *
+ *                                   a638e7d   unbatched   batched
+ *     fs.grep "export function"      5.37 ms    8.27 ms    7.41 ms
+ *     fs.grep + include "**​/*.ts"    5.31 ms    9.81 ms    7.34 ms
+ *     fs.glob "**​/*.ts"              0.34 ms    0.58 ms    0.55 ms
+ *
+ * — about 1.4x for `fs.grep`, which is what a bound that arms a watchdog per batch costs.
+ *
+ * AND THE BUDGET IS NOT A FILE-COUNT LIMIT, which is what the middle column was on a large
+ * workspace: see `GREP_LINE_BATCH` for the 60,000-file measurement where an ordinary literal
+ * pattern was REFUSED, and for why both of `fs.grep`'s call sites had to be batched to fix it.
+ *
+ * WHAT IT DOES NOT BUY: the loop is still BLOCKED while a search runs — `execute` is synchronous
+ * and this bounds the block rather than removing it. The bound is on MATCHING, not on the whole
+ * call: walking a tree and reading its files is outside it, so the worst block a pathological
+ * pattern can impose is the budget PLUS the traversal, and the traversal is a cost the ordinary
+ * search on that tree pays too. Measured on the 60,000-file tree: `(a+)+$` refuses after
+ * 4,384 ms, of which ~1,450 ms is the same walk a successful `fs.grep` of that tree spends.
+ * Removing the block entirely means moving the scan to a worker thread, which is a bigger change
+ * than this one and is not what the finding was about. Bounded and stoppable was.
+ */
+const MATCH_BUDGET_MS = 2_000;
+
+/**
+ * The scan, as a script `node:vm` can TERMINATE.
+ *
+ * THIS IS NOT `vm` USED AS A SANDBOX. CLAUDE.md is right that it is not one, and nothing here is
+ * being isolated — the regex, the strings and this source are all ours. What `vm` uniquely
+ * provides is `timeout`, the one mechanism in Node that interrupts SYNCHRONOUS execution, which
+ * is exactly what a backtracking regex is. `resources/functions.ts` already depends on the same
+ * property for the same reason, and it is verified here rather than assumed: driven against
+ * `(a+)+$` and a 34-character line, `runInContext(…, {timeout: 200})` threw
+ * `ERR_SCRIPT_EXECUTION_TIMEOUT` after 202 ms.
+ *
+ * A BATCH OF STRINGS PER CALL, not one call per string, and the two constants below say what a
+ * call costs. `runInContext` with a `timeout` is 43 µs of fixed cost (it arms a watchdog), so
+ * per-line calls would be 43 µs A LINE — three orders of magnitude over the match itself — for
+ * no extra safety, since the budget is a total either way.
+ *
+ * `re` AND `lines` ARE HOISTED INTO LOCALS, which is not a style preference. They are globals of
+ * a contextified sandbox, so every read of them inside the loop goes through the context's
+ * interceptor rather than a slot. Measured over 90,000 lines: 13.10 ms reading the globals per
+ * iteration, 1.20 ms with them hoisted, against 0.80 ms for the identical loop on the host. That
+ * is the difference between this bound costing 6x and costing 1.5x.
+ */
+const SCAN_SCRIPT = new Script(
+  "(() => { const L = lines, R = re, out = []; for (let i = 0; i < L.length; i++) { if (R.test(L[i])) out.push(i); } return out; })()",
+  { filename: "loom:bounded-match" },
+);
+
+/**
+ * Paths a search accumulates before spending one match call on them.
+ *
+ * `fs.glob` sees one path per `visit`, so without this it would pay the 43 µs fixed cost per
+ * FILE. Measured over this repo's `packages/core/src` (62 files), unbuffered
+ * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms. The batch
+ * also delays `capped` by at most one buffer, which only means a few more paths are walked
+ * before the cap stops the search.
+ *
+ * SHARED WITH `fs.grep`'s `include` FILTER, which this docstring used to say needed no buffer.
+ * That sentence — "`fs.grep` hands a whole file's lines over at once and needs no buffer" — was
+ * the defect: it is true of the CONTENT scan and false of the include scan, which is one call
+ * per path exactly like `fs.glob`'s. See `GREP_LINE_BATCH` for what it cost.
+ */
+const GLOB_SCAN_BATCH = 512;
+
+/**
+ * Lines `fs.grep` accumulates ACROSS FILES before spending one match call on them.
+ *
+ * THE PER-CALL COST IS A COST PER FILE WHEN THE FILES ARE SMALL, and a workspace is mostly small
+ * files. `matchBudget` charges wall clock, `runInContext` with a `timeout` is a fixed 43-48 µs
+ * because it arms a watchdog, and `fs.grep` was making two unbatched calls per file — `scan`
+ * for `include` and `scan` for the content. At 60,000 files that is 120,000 watchdogs, ~5.4 s of
+ * pure fixed cost against a 2,000 ms budget, so the budget was gone before any real matching
+ * happened. MEASURED on a 60,000-file tree of two-line files: `fs.grep {pattern: "zzzzzzzz"}` —
+ * a literal string, no `include` — REFUSED with "the pattern is too expensive to run" after
+ * 3,289 ms, where the same tree at `a638e7d` answered `(no matches)` in 1,304 ms. An ordinary
+ * search was made impossible by the guard that was supposed to bound a pathological one.
+ *
+ * 4,096, AND THE UNIT IS LINES RATHER THAN FILES because that is what the cost is per. A file
+ * contributes as many lines as it has, so one batch is 4,096 lines whether that is one file or
+ * four thousand, and the fixed cost lands at ~11 ns per line — at or below what testing a line
+ * against a compiled regex costs, which is the point at which it stops being the thing that
+ * decides the answer. It is not a bound on memory beyond one batch plus one file, since a file's
+ * lines are queued whole and `GREP_FILE_CAP` already bounds a file at 1 MB.
+ *
+ * THE BUDGET IS STILL A TOTAL, so the catastrophic pattern is still terminated: a batch runs
+ * under one `runInContext` timeout of whatever remains, and a pattern that backtracks
+ * exponentially exhausts it inside the first batch exactly as it did inside the first file.
+ */
+const GREP_LINE_BATCH = 4_096;
+
+/** Thrown out of `visit` when a search has spent `MATCH_BUDGET_MS`; caught at the tool's door. */
+class MatchBudgetExhausted extends Error {}
+
+/**
+ * A matcher that cannot outlive its budget, however the pattern was written.
+ *
+ * ONE budget per tool CALL, not per file: a per-file deadline multiplies by the file count and
+ * is therefore not a bound at all — a workspace of ten thousand files would licence ten thousand
+ * times the stall. The remaining budget is what each `runInContext` is given, so the sum over a
+ * whole search is the budget itself.
+ *
+ * `Date.now()` here is a stopwatch and not a recorded value: nothing journals it, no decision
+ * folds from it, and `vm`'s own `timeout` reads the same clock. That is why this does not need
+ * the injected clock the rest of the runtime insists on.
+ */
+function matchBudget(): (re: RegExp, lines: readonly string[]) => readonly number[] {
+  const sandbox: { re: RegExp | undefined; lines: readonly string[] } = { re: undefined, lines: [] };
+  const ctx = createContext(sandbox);
+  let remaining = MATCH_BUDGET_MS;
+  return (re, lines) => {
+    if (lines.length === 0) return [];
+    if (remaining <= 0) throw new MatchBudgetExhausted();
+    sandbox.re = re;
+    sandbox.lines = lines;
+    const started = Date.now();
+    try {
+      return SCAN_SCRIPT.runInContext(ctx, { timeout: Math.max(1, Math.ceil(remaining)) }) as readonly number[];
+    } catch (e) {
+      // ONLY a timeout becomes exhaustion. Anything else out of a script this file wrote is a
+      // real fault and must not be reported to the model as "your pattern was too expensive".
+      if ((e as { code?: string }).code === "ERR_SCRIPT_EXECUTION_TIMEOUT") throw new MatchBudgetExhausted();
+      throw e;
+    } finally {
+      remaining -= Date.now() - started;
+    }
+  };
+}
+
+/** The one refusal both searches give when their budget is gone. */
+function budgetRefusal(tool: string, pattern: string): ToolResult {
+  return {
+    content:
+      `${tool}: the pattern ${JSON.stringify(pattern)} is too expensive to run — it spent the ` +
+      `${String(MATCH_BUDGET_MS)} ms match budget without finishing. Nested quantifiers such as ` +
+      `(a+)+ backtrack exponentially; rewrite the pattern or narrow the search with path/include.`,
+    isError: true,
+  };
+}
 
 /** Bytes of any one file `fs.grep` will scan. A match past it is not found, and says so. */
 const GREP_FILE_CAP = 1_000_000;
@@ -655,20 +838,40 @@ function fsGlob(opts: BuiltinOptions): ToolDefinition {
       const re = globToRegExp(String(args["pattern"]));
       const matches: string[] = [];
       let capped = false;
-      eachFile(
-        opts,
-        ctx,
-        sub,
-        (rel) => {
-          if (!re.test(rel)) return;
+      // BOUNDED, because a glob compiles to a regex too. `globToRegExp` emits no nested
+      // quantifier of its own, but `**/` becomes `(?:.*/)?` and a glob repeating it is a chain
+      // of optional greedy groups whose backtracking is exponential in the glob length against a
+      // deep path — measured, `"**/".repeat(10) + "zz"` against a 30-segment path had not
+      // returned after two minutes. One matcher, so `fs.glob` and `fs.grep` cannot disagree.
+      const scan = matchBudget();
+      const pending: string[] = [];
+      const flush = (): void => {
+        if (pending.length === 0) return;
+        for (const i of scan(re, pending)) {
           if (matches.length >= SEARCH_RESULT_CAP) {
             capped = true;
-            return;
+            break;
           }
-          matches.push(rel);
-        },
-        () => capped,
-      );
+          matches.push(pending[i]!);
+        }
+        pending.length = 0;
+      };
+      try {
+        eachFile(
+          opts,
+          ctx,
+          sub,
+          (rel) => {
+            pending.push(rel);
+            if (pending.length >= GLOB_SCAN_BATCH) flush();
+          },
+          () => capped,
+        );
+        flush();
+      } catch (e) {
+        if (e instanceof MatchBudgetExhausted) return budgetRefusal("fs.glob", String(args["pattern"]));
+        throw e;
+      }
       matches.sort();
       return {
         content:
@@ -686,12 +889,16 @@ function fsGlob(opts: BuiltinOptions): ToolDefinition {
 /**
  * Grep, with the regex compiled from the model's string.
  *
- * `new RegExp(userInput)` is normally a red flag, and the reason it is acceptable here is
- * narrow and worth stating: the input is already trusted to the extent that this process
- * runs whatever tools the graph declared, and the cost of a pathological pattern is bounded
- * by the file cap and the result cap rather than unbounded. An invalid pattern is a tool
- * error, not a throw — a model that wrote a bad regex should be told so and allowed to fix
- * it, which is the one case where returning `isError` beats raising.
+ * `new RegExp(userInput)` is normally a red flag, and what makes it acceptable here is the match
+ * BUDGET, not the file cap and the result cap. This paragraph used to say the opposite — "the
+ * cost of a pathological pattern is bounded by the file cap and the result cap rather than
+ * unbounded" — and that sentence was false and was the reason nobody looked: those caps bound
+ * how many lines are scanned, and the cost of a catastrophic pattern is in ONE `re.test`. See
+ * `MATCH_BUDGET_MS` for the measurements and for what the budget does and does not buy.
+ *
+ * An invalid pattern is a tool error, not a throw — a model that wrote a bad regex should be
+ * told so and allowed to fix it, which is the one case where returning `isError` beats raising.
+ * An unaffordable pattern is answered the same way, for the same reason.
  */
 function fsGrep(opts: BuiltinOptions): ToolDefinition {
   return {
@@ -725,39 +932,103 @@ function fsGrep(opts: BuiltinOptions): ToolDefinition {
 
       const hits: string[] = [];
       let capped = false;
-      eachFile(
-        opts,
-        ctx,
-        sub,
-        (rel, abs) => {
-          if (include !== undefined && !include.test(rel)) return;
-          let text: string;
+      // ONE budget for the whole call, spent across every file and both regexes — the pattern
+      // and the `include` glob, since either can be the expensive one.
+      const scan = matchBudget();
+
+      // BOTH SCANS ARE BATCHED, for the reason `GREP_LINE_BATCH` gives: a `runInContext` costs
+      // 43-48 µs whatever it is asked, so an unbatched call per file makes the budget a
+      // FILE-COUNT limit rather than a matching limit. `fs.glob` was batched for exactly this and
+      // this tool was left with two unbatched call sites.
+      //
+      // Paths are buffered, then filtered by `include`, then read; a file's lines join a running
+      // buffer that is flushed whole. Traversal ORDER survives both buffers — the paths in a
+      // batch keep their walk order and a file's lines are contiguous within it — so the hits
+      // come out in the same order they did unbatched, which is what the output claims by
+      // printing `path:line:` and never sorting.
+      const pendingPaths: { rel: string; abs: string }[] = [];
+      const pendingLines: string[] = [];
+      const ownerRel: string[] = [];
+      const ownerNo: number[] = [];
+
+      const flushLines = (): void => {
+        if (capped || pendingLines.length === 0) return;
+        for (const i of scan(re, pendingLines)) {
+          if (hits.length >= SEARCH_RESULT_CAP) {
+            capped = true;
+            break;
+          }
+          hits.push(`${ownerRel[i]!}:${String(ownerNo[i]!)}:${pendingLines[i]!.slice(0, 400)}`);
+        }
+        pendingLines.length = 0;
+        ownerRel.length = 0;
+        ownerNo.length = 0;
+      };
+
+      const queue = (rel: string, abs: string): void => {
+        let text: string;
+        try {
+          // Bounded before it is scanned: a multi-gigabyte file in the workspace must
+          // narrow the results, not exhaust the process.
+          const fd = openLeaf(abs, constants.O_RDONLY);
           try {
-            // Bounded before it is scanned: a multi-gigabyte file in the workspace must
-            // narrow the results, not exhaust the process.
-            const fd = openLeaf(abs, constants.O_RDONLY);
-            try {
-              text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
-            } finally {
-              closeSync(fd);
-            }
-          } catch {
-            return;
+            text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
+          } finally {
+            closeSync(fd);
           }
-          // A NUL in the first chunk means binary; scanning it produces noise, not matches.
-          if (text.includes("\u0000")) return;
-          const lines = text.split("\n");
-          for (const [i, line] of lines.entries()) {
-            if (!re.test(line)) continue;
-            if (hits.length >= SEARCH_RESULT_CAP) {
-              capped = true;
-              return;
-            }
-            hits.push(`${rel}:${String(i + 1)}:${line.slice(0, 400)}`);
+        } catch {
+          return;
+        }
+        // A NUL in the first chunk means binary; scanning it produces noise, not matches.
+        if (text.includes("\u0000")) return;
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          pendingLines.push(lines[i]!);
+          ownerRel.push(rel);
+          ownerNo.push(i + 1);
+        }
+        // Checked after a whole file rather than inside the loop, so one file's lines are never
+        // split across two calls — which keeps a hit's line number and its text together without
+        // any bookkeeping, and costs at most one file's lines of extra buffer.
+        if (pendingLines.length >= GREP_LINE_BATCH) flushLines();
+      };
+
+      const flushPaths = (): void => {
+        if (pendingPaths.length === 0) return;
+        const batch = pendingPaths.splice(0);
+        // NO `include`, NO CALL. The common shape is a search with no path filter at all, and
+        // spending a watchdog per batch to learn that every path passes is pure cost.
+        if (include === undefined) {
+          for (const p of batch) {
+            if (capped) return;
+            queue(p.rel, p.abs);
           }
-        },
-        () => capped,
-      );
+          return;
+        }
+        const keep = new Set(scan(include, batch.map((p) => p.rel)));
+        for (let i = 0; i < batch.length; i++) {
+          if (capped) return;
+          if (keep.has(i)) queue(batch[i]!.rel, batch[i]!.abs);
+        }
+      };
+
+      try {
+        eachFile(
+          opts,
+          ctx,
+          sub,
+          (rel, abs) => {
+            pendingPaths.push({ rel, abs });
+            if (pendingPaths.length >= GLOB_SCAN_BATCH) flushPaths();
+          },
+          () => capped,
+        );
+        flushPaths();
+        flushLines();
+      } catch (e) {
+        if (e instanceof MatchBudgetExhausted) return budgetRefusal("fs.grep", String(args["pattern"]));
+        throw e;
+      }
 
       return {
         content:

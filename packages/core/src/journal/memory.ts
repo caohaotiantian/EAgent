@@ -8,6 +8,7 @@
  */
 
 import { canonicalize } from "../canonical.ts";
+import { CODES, err } from "../errors.ts";
 import type { RunId, Seq, TaskId } from "../ids.ts";
 import type { JournalEvent } from "./events.ts";
 import {
@@ -38,6 +39,7 @@ interface RunLog {
 export class MemoryStateStore implements StateStore {
   readonly #runs = new Map<RunId, RunLog>();
   readonly #now: () => number;
+  #closed = false;
 
   constructor(opts: { now?: () => number } = {}) {
     this.#now = opts.now ?? Date.now;
@@ -47,6 +49,7 @@ export class MemoryStateStore implements StateStore {
   // read-check-write sequence is atomic. That is the same guarantee `BEGIN IMMEDIATE`
   // buys the SQLite store, expressed differently.
   async append(input: AppendInput): Promise<AppendResult> {
+    this.#assertOpen();
     const log = this.#runs.get(input.runId) ?? { events: [], fences: new Map<string, number>() };
     const headSeq = log.events.length === 0 ? 0 : log.events[log.events.length - 1]!.seq;
     if (headSeq !== input.expectedSeq) seqConflict(input.runId, input.expectedSeq, headSeq);
@@ -87,6 +90,7 @@ export class MemoryStateStore implements StateStore {
   }
 
   async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+    this.#assertOpen();
     const log = this.#runs.get(runId);
     if (!log) return;
     const end = toSeq ?? Number.MAX_SAFE_INTEGER;
@@ -100,12 +104,14 @@ export class MemoryStateStore implements StateStore {
   }
 
   async head(runId: RunId): Promise<Seq> {
+    this.#assertOpen();
     const log = this.#runs.get(runId);
     if (!log || log.events.length === 0) return 0;
     return log.events[log.events.length - 1]!.seq;
   }
 
   async listRuns(limit = 100, filter?: RunFilter): Promise<readonly RunSummary[]> {
+    this.#assertOpen();
     const out: (RunSummary & { readonly gateTs?: number })[] = [];
     const mine = filter?.submittedByOrUnowned;
     const gated = filter?.raisedAGate === true;
@@ -120,9 +126,17 @@ export class MemoryStateStore implements StateStore {
       // `ts` AND NOT `seq`, because `seq` is per-run: two runs that each gated on their second
       // event both have seq 2, and ordering by that is a tie between gates days apart. The SQL
       // store had the identical bug and the two agreed on it — see `listRuns` there.
+      //
+      // THE MAXIMUM, NOT THE LAST ONE SEEN. `prepare` honours a per-event `ts` and a wall clock
+      // steps backwards (NTP, a VM resume), so a run's gates are not necessarily appended in ts
+      // order. SQL asks for `MAX(ts)`; scanning for the last `gate.raised` in seq order answers
+      // a different question the moment those two orders come apart, and `GateSweeper` pages
+      // this listing to find gates whose SLA is due.
       let gateTs: number | undefined;
       if (gated) {
-        for (const e of log.events) if (e.type === "gate.raised") gateTs = Number(e.ts);
+        for (const e of log.events) {
+          if (e.type === "gate.raised") gateTs = gateTs === undefined ? Number(e.ts) : Math.max(gateTs, Number(e.ts));
+        }
         if (gateTs === undefined) continue;
       }
       // Filtered BEFORE the slice below, matching the SQL store's `WHERE … LIMIT` order —
@@ -163,7 +177,18 @@ export class MemoryStateStore implements StateStore {
     return out.slice(from, from + limit).map(({ gateTs: _drop, ...r }) => r);
   }
 
+  // CLOSED MEANS CLOSED, the same way it does for SQLite. Clearing the map and then answering
+  // as if fresh is worse than losing the data: `head` returns 0, so an append at
+  // `expectedSeq: 0` for the run that was just discarded PASSES the CAS and starts a second,
+  // empty journal under the same id — a durable write reporting success for a write it threw
+  // away. `test/journal/conformance.ts` asks both stores this now.
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     this.#runs.clear();
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw err.internal(CODES.E_INTERNAL, "state store is closed");
   }
 }
