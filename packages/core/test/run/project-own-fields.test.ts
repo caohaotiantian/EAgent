@@ -127,11 +127,20 @@ test("an unreadable take refuses on a NON-array value too — the declaration is
   // this used to be inert. Whether a `take` is readable is a fact about the DECLARATION, and
   // deferring the refusal to `Array.isArray` would let the same broken graph pass one run and
   // fail the next, depending only on whether the channel happened to hold rows.
-  for (const value of [{ a: 1 }, "hello", 42]) {
-    assert.throws(
-      () => project(value, { take: "abc", maxTokens: 100, overflow: "error" } as never),
-      (e: unknown) => (e as { code?: string }).code === "E_GRAPH_INVALID",
-    );
+  //
+  // `"abc"` ALONE DOES NOT SHOW THAT, and an earlier version of this test drove only `"abc"`:
+  // it refused on a non-array at the base sha too, because the old guard also sat above the
+  // `Array.isArray` branch. The values that actually changed are the ones `Number()` reads —
+  // `true`, `[3]` — and the four it maps to 0. Measured on a non-array channel, base leaves it
+  // untouched (`{"k":1}`) and this build refuses.
+  for (const take of ["abc", true, [3], "", " ", false]) {
+    for (const value of [{ a: 1 }, "hello", 42]) {
+      assert.throws(
+        () => project(value, { take, maxTokens: 100, overflow: "error" } as never),
+        (e: unknown) => (e as { code?: string }).code === "E_GRAPH_INVALID",
+        `take: ${JSON.stringify(take)} on ${JSON.stringify(value)} must refuse`,
+      );
+    }
   }
   // A READABLE take on a non-array is still inert — there is nothing to slice, and that is not
   // an error. This is the half the refusal must not swallow.

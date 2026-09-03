@@ -168,12 +168,31 @@ export function project(value: unknown, projection: ContextProjection | undefine
  * where it used to run — that graph was already wrong, and this is the run that says so.
  */
 function readTake(take: unknown): number {
-  if (typeof take === "number" && Number.isFinite(take)) return take;
-  if (typeof take === "string" && take.trim() !== "") {
-    const n = Number(take.trim());
+  const n = readBound(take);
+  if (n === undefined) {
+    throw err.validation(CODES.E_GRAPH_INVALID, `contextProjection.take is not an item count: ${describeTake(take)}`);
+  }
+  return n;
+}
+
+/**
+ * ONE READER FOR EVERY BOUND IN A PROJECTION, because there is one problem behind them.
+ *
+ * A projection is written by hand, usually in YAML, where `10` and `"10"` are a quoting accident
+ * apart. `readTake` was taught to read the quoted form — "the one non-number worth reading" — and
+ * `applyOverflow`, added in the same commit, refused it. Measured: `maxTokens: "10"` produced
+ * BYTE-IDENTICAL output to `maxTokens: 10` before that refusal, because both the comparison and
+ * the `keep` arithmetic coerce; the refusal turned a working graph into a failing one. Two
+ * readers for one quoting problem in one file is the shape a fix round is supposed to close, not
+ * open, so there is one.
+ */
+function readBound(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value.trim());
     if (Number.isFinite(n)) return n;
   }
-  throw err.validation(CODES.E_GRAPH_INVALID, `contextProjection.take is not an item count: ${describeTake(take)}`);
+  return undefined;
 }
 
 /** The rejected value, rendered so the author can see WHICH one it was. */
@@ -358,37 +377,49 @@ function buildSections(input: AssembleInput, channels: Readonly<Record<string, u
  * That is a pinned kernel file and this refusal is the runtime half; a diagnostic there would
  * make this arm unreachable for any compiled graph, which is the right shape.
  */
-const OVERFLOW_RULES: ReadonlySet<string> = new Set(["error", "truncate_tail", "summarize"]);
-
 function applyOverflow(value: unknown, projection: ContextProjection): unknown {
-  const { maxTokens, overflow } = projection as { maxTokens?: unknown; overflow?: unknown };
-  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) {
+  // EACH CHECK SITS WHERE ITS VALUE IS CONSUMED, and the first version of this guard put both at
+  // the top instead. `projectAll` calls this for EVERY projected channel once the ladder reaches
+  // rung 2, so validating eagerly made one typo'd `overflow` anywhere kill the whole assembly —
+  // including on a channel that is under its own bound and never reaches the switch, where the
+  // typo had been inert and the run correct. Worse, it fires the first time a run's context grows
+  // enough to reach rung 2, which may be hours after the graph was published. `overflow` is read
+  // by the switch, so the switch refuses it; `maxTokens` is read by the comparison one line down,
+  // so the comparison does.
+  const bound = readBound((projection as { maxTokens?: unknown }).maxTokens);
+  if (bound === undefined || bound <= 0) {
+    // `<= 0` and not just "unreadable": a negative bound passed the finite test and then silently
+    // did not truncate at all — `rendered.slice(0, -20)` removes nothing — which is the same
+    // unread-bound defect with a sign on it.
     throw err.validation(
       CODES.E_GRAPH_INVALID,
-      `a channel projection declares \`maxTokens\` that is not a finite number: ${JSON.stringify(maxTokens) ?? String(maxTokens)}`,
-    );
-  }
-  if (typeof overflow !== "string" || !OVERFLOW_RULES.has(overflow)) {
-    throw err.validation(
-      CODES.E_GRAPH_INVALID,
-      `a channel projection declares an unknown \`overflow\` rule: ${JSON.stringify(overflow) ?? String(overflow)} ` +
-        `(expected one of ${[...OVERFLOW_RULES].join(", ")})`,
+      `contextProjection.maxTokens is not a positive token bound: ${describeTake((projection as { maxTokens?: unknown }).maxTokens)}`,
     );
   }
   const rendered = JSON.stringify(value);
-  if (estimateTokens(rendered) <= projection.maxTokens) return value;
+  if (estimateTokens(rendered) <= bound) return value;
   switch (projection.overflow) {
     case "error":
-      throw err.validation(CODES.E_CONTEXT_OVERFLOW, `a channel projection exceeded ${projection.maxTokens} tokens`);
+      throw err.validation(CODES.E_CONTEXT_OVERFLOW, `a channel projection exceeded ${String(bound)} tokens`);
     case "truncate_tail":
     case "summarize":
       // `summarize` degrades to truncation here; the real summarizer runs at rung 3,
       // where it is an Effect and therefore replayable.
       if (Array.isArray(value)) {
-        const keep = Math.max(1, Math.floor(value.length * (projection.maxTokens / estimateTokens(rendered))));
+        const keep = Math.max(1, Math.floor(value.length * (bound / estimateTokens(rendered))));
         return value.slice(0, keep);
       }
-      return `${rendered.slice(0, projection.maxTokens * 4)}…[truncated]`;
+      return `${rendered.slice(0, bound * 4)}…[truncated]`;
+    default:
+      // THE ARM THAT WAS MISSING. Without it an unknown rule fell off the end as `undefined` and
+      // `projectAll` wrote that over the channel — a bare `TypeError` out of prompt assembly, not
+      // a `LoomError`. `overflow: "TRUNCATE_TAIL"` is a plausible thing to write by hand and
+      // `compile` reads only the KEY NAMES of `contextProjection`, so it gets this far.
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `contextProjection.overflow is not a rule this build knows: ${describeTake(projection.overflow)} ` +
+          `(expected one of error, truncate_tail, summarize)`,
+      );
   }
 }
 

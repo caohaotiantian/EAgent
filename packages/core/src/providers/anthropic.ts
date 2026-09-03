@@ -238,8 +238,20 @@ export class AnthropicAdapter implements ModelAdapter {
     // `output_tokens: 0` beside 5,000 characters of text was charged $0.000033 where the estimate
     // says $0.018783, and `input_tokens: 0` with NO cache field on an 80,000-character prompt was
     // charged $0.000105 against $0.060111. Under-charging is the loosening direction for
-    // `budget.runUsd` and `budget.runTokens`, so the passing value must not be reachable by
-    // anything the remote party can simply assert.
+    // `budget.runUsd` and `budget.runTokens`.
+    //
+    // **WHAT THIS DOES AND DOES NOT BUY, because the sentence that stood here overstated it.**
+    // It said the passing value "must not be reachable by anything the remote party can simply
+    // assert". Each rule below has exactly ONE disproof and a wire can assert it: measured on an
+    // 80,000-character prompt, `"cache_read_input_tokens": 1` prices the whole turn at $0.000105
+    // against an estimate of $0.060111, and `"input_tokens": 1` and `"output_tokens": 1` do the
+    // same on their own dimensions — a ~570x under-charge, from adding one. What the rules
+    // actually close is the ZERO, which is what a gateway that does not implement usage
+    // accounting emits by default and what every measured instance of this defect looked like.
+    // The version that is not defeated by adding 1 is quantitative — compare the reported total
+    // against `roughTokens(req)` and floor when it cannot account for a prompt this adapter
+    // demonstrably sent — and it needs a tolerance nobody has measured yet. `TODO.md` §A0.13 has
+    // the reproduction; do not read the rules below as more than they are.
     //
     // OUTPUT — the adapter RECEIVED what it is pricing. A zero beside non-empty `text` or a
     // parsed tool call contradicts bytes this function is holding, so the estimate wins there;

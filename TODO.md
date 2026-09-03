@@ -197,6 +197,36 @@ they are pre-existing, which is why they were recorded rather than folded into i
 - **A0.10 · `GLOB_SCAN_BATCH`'s docstring understates the cap fast path.** `grep hit` on a
   60,000-file workspace went 3 ms → 36 ms, because `capped` is only observable at a flush; "a few
   more paths" is a batch's worth. Absolute cost 33 ms.
+- **A0.13 · The usage floor closes the ZERO, and a wire defeats it by asserting 1.** The rules
+  in both adapters test a reported count against local evidence, but each has exactly one
+  disproof. Measured on an 80,000-character prompt / 5,000-character answer at $3/$15/$0.30 per
+  million, identical at every sha in this merge — **pre-existing, not a regression, and strictly
+  better than the `=== 0` it replaced**:
+
+      ordinary/full-cache-hit  {"in":0,"out":7,"cr":20000,"usd":0.006105}   honest, believed
+      exploit/cache_read=1     {"in":0,"out":7,"cr":1,"usd":0.000105}       buys the whole prompt
+      exploit/input_tokens=1   {"in":1,"out":7,"usd":0.000108}              both adapters
+      exploit/output_tokens=1  {"in":11,"out":1,"usd":0.000048}
+      output_tokens: 1e-9      {"in":11,"out":1e-9,"usd":0.000033}
+
+  ~570x under-charge, the loosening direction for `budget.runUsd`. What the rules DO close is
+  the zero, which is what a gateway with no usage accounting emits by default and what every
+  measured instance looked like. **The version that is not defeated by adding 1 is quantitative**
+  — floor when `inputTokens + cacheRead + cacheWrite` cannot account for `roughTokens(req)`, and
+  likewise `outputTokens` against `producedTokens` — and it needs a tolerance, because both are
+  estimates. Inventing that threshold without measuring it is how a guard starts refusing honest
+  turns, so it is a decision with work behind it rather than a patch.
+- **A0.14 · An unpriced model makes the dollar floor moot entirely.** `priceOf` returns 0 for a
+  model with no price-table entry, so `claude-sonnet-5-20260101` costs $0 where
+  `claude-sonnet-5` costs $0.135 on the same turn. Tokens still floor, so `budget.runTokens`
+  binds and `budget.runUsd` does not. Identical at base; two lines below the code A0.13 is about,
+  and the same "zero is the passing value" shape.
+- **A0.15 · Anthropic input usage is read only from `message_start`.** `AnthropicEvent` declares
+  input counts under `message` only; `message_delta.usage` is typed `{output_tokens?}`. A wire
+  that reports the cache hit in `message_delta` is charged 10x — `{"in":20002,"usd":0.060111}`
+  against `{"in":0,"cr":20000,"usd":0.006105}` for the same numbers on `message_start`.
+  Over-charging, so not a loosening, and identical at base.
+
 - **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every
   tick.** This one IS caused by the merge's fix round, and is recorded rather than fixed because
   the cheap fixes are wrong and the right one is a cache-invalidation design. `runClockTick`'s
