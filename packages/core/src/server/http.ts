@@ -203,6 +203,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import { SubscriberOverflowError, type EventBus } from "../bus.ts";
+import { canonicalize } from "../canonical.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
@@ -1127,6 +1128,33 @@ const MAX_TIMER_MS = 2_147_483_647;
 const MAX_IDEMPOTENT_SUBMITS = 10_000;
 
 /**
+ * How many runs `#restoreIdempotency` may READ to find them, as against how many it may
+ * restore.
+ *
+ * TWO NUMBERS BECAUSE THE TWO SETS ARE DIFFERENT SETS, and one number said they were the
+ * same. The map counts KEYED submissions; a listing counts RUNS, and a submission with no
+ * `Idempotency-Key` is a run that fills a row of the scan and restores nothing. So a journal
+ * whose newest `MAX_IDEMPOTENT_SUBMITS` runs are all header-less restored NOTHING, however
+ * recently the keyed run behind them was submitted: measured on one journal, one keyed run,
+ * then 10 000 header-less ones, then a restart and a retry of the key — a second run, where
+ * the same retry over the same journal without the 10 000 returns the first run's id.
+ *
+ * ITS SIZE IS A MEASURED COST. The walk pays one indexed `read(runId, 1, 1)` per row: on
+ * `SqliteStateStore` over a 100 000-run journal, 10 000 rows is 161 ms, 50 000 is 789 ms and
+ * 100 000 is 1.6 s — paid once per process, lazily, and only by a plane that receives an
+ * `Idempotency-Key` at all. This is the bound that may be hit without losing an answer in the
+ * ordinary case, because the walk STOPS as soon as it has restored a full map: a deployment
+ * where most submissions carry a key reads about `MAX_IDEMPOTENT_SUBMITS` rows and pays what
+ * it paid before.
+ *
+ * WHAT IT DOES NOT COVER, said plainly rather than left as a ratio to work out: a deployment
+ * where fewer than one submission in five carries a key restores a SHORTER window than it
+ * keeps live. Raise this together with `MAX_IDEMPOTENT_SUBMITS` if that is the deployment,
+ * and read the cost per row above before choosing.
+ */
+const MAX_IDEMPOTENT_SCAN = 50_000;
+
+/**
  * How much of a journal `GET /runs/:id/trace` will fold in one request.
  *
  * A journal is the one input to that route a caller supplies without limit, and unlike
@@ -1596,12 +1624,44 @@ export class ControlPlane {
    */
   readonly #idempotency = new Map<string, unknown>();
   /**
+   * The submissions this process is CURRENTLY making, by slot — the map above holds the ones
+   * it has finished.
+   *
+   * WHY TWO MAPS. `#idempotency` records a slot on SUCCESS, and everything between the read
+   * that missed and that record is an `await`: the journal scan, then `engine.submit` itself.
+   * A second request carrying the same key inside that window read the same empty slot and
+   * submitted too, so the one header whose whole job is "do this once" produced two runs with
+   * every irreversible tool call and every provider charge of each other. Measured against
+   * this class with a store whose `listRuns` yields to the macrotask queue — which a library
+   * embedder's store does and neither shipped store does, `MemoryStateStore` being in memory
+   * and `SqliteStateStore` synchronous under an async facade: two concurrent `POST /runs`,
+   * one `Idempotency-Key`, **202 202, two distinct run ids, two runs in the journal.**
+   *
+   * SO THE SLOT IS CLAIMED SYNCHRONOUSLY AT THE MISS. The claim is a promise put here in the
+   * same tick as the read that missed, before the handler awaits anything, and a concurrent
+   * caller that finds it awaits the first request's answer instead of making its own. That is
+   * the only ordering with no window in it: any check-then-act separated by an `await` has
+   * one, however short the await looks from the caller that wins the race.
+   *
+   * IT IS DELETED IN A `finally`, so an entry lives exactly as long as one in-flight request
+   * and this map is bounded by concurrency rather than by the journal — unlike `#idempotency`,
+   * which needs `MAX_IDEMPOTENT_SUBMITS` because its entries outlive their requests.
+   *
+   * A FAILED SUBMISSION IS NOT AN ANSWER, so the claim REJECTS and the slot is freed rather
+   * than recording a failure everyone else is handed forever. The concurrent caller gets that
+   * failure — it asked for the same operation, it gets the same answer — and the next request,
+   * arriving after the claim is gone, tries again for itself.
+   */
+  readonly #inflightSubmits = new Map<string, Promise<unknown>>();
+  /**
    * The rebuild of `#idempotency` from the journal — at most one in flight, and at most one
    * that SUCCEEDED.
    *
-   * A PROMISE RATHER THAN A BOOLEAN, because two concurrent submissions both miss the map
-   * and a flag would let the second fall through to `engine.submit` while the first was
-   * still scanning — which is precisely the duplicate the scan exists to prevent.
+   * A PROMISE RATHER THAN A BOOLEAN, so that two concurrent submissions share ONE scan
+   * instead of each starting its own. **It is not what keeps the second one from submitting,
+   * and this said it was:** both callers await the same promise, both then read the same
+   * empty slot, and both fell through to `engine.submit`. What decides that is the claim in
+   * `#inflightSubmits`, made before either of them gets here.
    *
    * **AND IT IS CLEARED ON REJECTION, which memoising a promise does not do for you.** A
    * rejected promise stays rejected forever, so `#restoreIdempotency` awaiting this field
@@ -2662,9 +2722,17 @@ export class ControlPlane {
    * rather than teaching the store a second index.
    *
    * ONE ROW PER RUN, NOT A FOLD PER RUN. `run.submitted` is the FIRST event of a run by
-   * construction, so the loop below reads one event and breaks. The scan is bounded by the
-   * same constant that bounds the map, walked oldest-first so that the eviction order after
-   * the restore is the insertion order it would have had.
+   * construction, so the loop below reads one event and breaks. What is collected is filled
+   * into the map from the BACK, so the eviction order after the restore is the insertion
+   * order it would have had.
+   *
+   * IT PAGES, AND ITS TWO BOUNDS ARE DIFFERENT ON PURPOSE — the same shape and the same
+   * reason as `#armGatedRuns`. This was one `listRuns(MAX_IDEMPOTENT_SUBMITS)`, which reads
+   * as "the scan covers what the map holds" and does not: the map holds keyed submissions and
+   * a listing holds RUNS, so on a plane where most submissions carry no header the whole
+   * budget went on rows that restore nothing. `MAX_IDEMPOTENT_SCAN` bounds the rows read;
+   * `MAX_IDEMPOTENT_SUBMITS` still bounds the entries restored, and reaching it stops the
+   * walk — so the deployment this cost is added for is the only one that pays it.
    *
    * **AND `toSeq` IS PASSED, WHICH IS THE HALF "reads one event and breaks" DID NOT BUY.**
    * `read` is an async ITERABLE over a paged query: `SqliteStateStore` fetches 500 rows a
@@ -2693,26 +2761,50 @@ export class ControlPlane {
    */
   async #restoreIdempotency(): Promise<void> {
     const started = (this.#idempotencyRestored ??= (async () => {
-      const rows = await this.#store.listRuns(MAX_IDEMPOTENT_SUBMITS);
-      // Oldest first: `listRuns` answers newest-run-id-first, and this map evicts by
-      // insertion order.
-      for (const summary of [...rows].reverse()) {
-        for await (const e of this.#store.read(summary.runId, 1 as Seq, 1 as Seq)) {
-          if (e.type !== "run.submitted") break;
-          const p = e.payload;
-          // The run's own id, which no caller may present. See above.
-          if (p.idempotencyKey === summary.runId) break;
-          // `SubmittedBy` IS the part of an `AuthContext` the slot is made of — kind,
-          // subject, method, the three `principalOf` writes and the three
-          // `idempotencySlot` reads. A run written before ownership existed carries none
-          // of them and folds to the same empty-string slot an unauthenticated caller
-          // gets today, which is the permissive reading `submittedByOrUnowned` already
-          // adopted for the same journals.
-          const slot = idempotencySlot(p.submittedBy, p.idempotencyKey);
-          if (!this.#idempotency.has(slot)) this.#idempotency.set(slot, acceptedBody(summary.runId, p.graphHash));
-          break;
+      // Newest first, which is the order `listRuns` answers in.
+      const found: { readonly slot: string; readonly body: Record<string, unknown> }[] = [];
+      const taken = new Set<string>();
+      let rowsRead = 0;
+      let after: RunId | undefined;
+      while (found.length < MAX_IDEMPOTENT_SUBMITS && rowsRead < MAX_IDEMPOTENT_SCAN) {
+        const page = await this.#store.listRuns(
+          Math.min(MAX_IDEMPOTENT_SUBMITS, MAX_IDEMPOTENT_SCAN - rowsRead),
+          after === undefined ? {} : { after },
+        );
+        if (page.length === 0) break;
+        rowsRead += page.length;
+        for (const summary of page) {
+          for await (const e of this.#store.read(summary.runId, 1 as Seq, 1 as Seq)) {
+            if (e.type !== "run.submitted") break;
+            const p = e.payload;
+            // The run's own id, which no caller may present. See above.
+            if (p.idempotencyKey === summary.runId) break;
+            // `SubmittedBy` IS the part of an `AuthContext` the slot is made of — kind,
+            // subject, method, the three `principalOf` writes and the three
+            // `idempotencySlot` reads. A run written before ownership existed carries none
+            // of them and folds to the same empty-string slot an unauthenticated caller
+            // gets today, which is the permissive reading `submittedByOrUnowned` already
+            // adopted for the same journals.
+            const slot = idempotencySlot(p.submittedBy, p.idempotencyKey);
+            // The NEWEST run holding a slot is the one restored, and a slot this process
+            // filled itself outranks anything the journal says about it.
+            if (!taken.has(slot) && !this.#idempotency.has(slot)) {
+              taken.add(slot);
+              found.push({ slot, body: acceptedBody(summary.runId, p.graphHash) });
+            }
+            break;
+          }
+          if (found.length >= MAX_IDEMPOTENT_SUBMITS) break;
         }
+        const next = page[page.length - 1]!.runId;
+        // A CURSOR THAT DOES NOT ADVANCE ENDS THE WALK, for the reason `#armGatedRuns` gives
+        // at greater length: `after` is contractually exclusive, and a store that answers its
+        // own boundary again would spin here inside a request.
+        if (next === after) break;
+        after = next;
       }
+      // Oldest last-found first: this map evicts by insertion order.
+      for (const entry of found.reverse()) this.#idempotency.set(entry.slot, entry.body);
     })());
     try {
       await started;
@@ -2777,6 +2869,23 @@ export class ControlPlane {
    * and stays 404, which is the honest answer. A store that throws leaves the plane unarmed
    * rather than unbootable: every route binds lazily on its own, and refusing to serve at
    * all because one journal row is odd would be a worse failure than the one being fixed.
+   *
+   * **AND SILENT PER RUN, NOT PER BOOT, which is what "one journal row is odd" claims and
+   * the code did not do.** The whole walk sat in one `try`, and the expensive half of the
+   * walk — `projection`, a FOLD of a stranger's journal — was inside it, so the first row
+   * whose events this binary cannot fold ended the scan for every run behind it. Measured on
+   * one plane over one journal: an open gate armed at boot on a clean journal, and the SAME
+   * gate unarmed once a single run with an unfoldable `state.reduced` row was appended ahead
+   * of it — and it sorts ahead by construction, because `raisedAGate` orders by the most
+   * recent `gate.raised`. One row a future version wrote, or one row written by hand, and a
+   * deployment's gates silently stop being armed at boot.
+   *
+   * SO THE TWO FAILURES ARE SEPARATED. A run that cannot be folded or bound is skipped and
+   * the walk goes on, exactly as a run that folded to `queued` is skipped; the outer guard
+   * keeps only what it can actually recover from — `listRuns` itself failing, which is the
+   * paging, not one run. That is also the answer for a mid-walk reorder: a cursor the store
+   * refuses raises out of `listRuns` and stops the walk short, which is the "unarmed, not
+   * unbootable" case above and not a per-run one.
    */
   async #armGatedRuns(): Promise<void> {
     try {
@@ -2791,11 +2900,16 @@ export class ControlPlane {
         if (page.length === 0) return;
         read += page.length;
         for (const summary of page) {
-          // ONLY RUNS STILL WAITING. Attaching a finished run would cost a `RunContext`
-          // apiece that nothing ever frees — and it is what the un-paged version spent its
-          // entire budget deciding.
-          if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
-          await this.#bindFromIndex(summary.runId);
+          try {
+            // ONLY RUNS STILL WAITING. Attaching a finished run would cost a `RunContext`
+            // apiece that nothing ever frees — and it is what the un-paged version spent its
+            // entire budget deciding.
+            if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
+            await this.#bindFromIndex(summary.runId);
+          } catch {
+            // THIS run is not armed. Its neighbours are unaffected — see above.
+            continue;
+          }
           if (++armed >= MAX_QUEUE_SCAN) return;
         }
         const next = page[page.length - 1]!.runId;
@@ -3172,164 +3286,209 @@ export class ControlPlane {
           const input = await body();
           const key = header(req, "idempotency-key");
           const slot = key === undefined ? undefined : idempotencySlot(auth, key);
+          // The claim on `slot`, settled on every path out of this handler below. `undefined`
+          // for an unkeyed submission, which claims nothing and dedups nothing.
+          let answered: ((accepted: unknown) => void) | undefined;
+          let abandoned: ((reason: unknown) => void) | undefined;
           if (slot !== undefined) {
-            // A MISS IS "I DO NOT KNOW", NOT "NEW", and it used to be answered with "new".
-            // The map is process-local and the journal is not, so a cold map and an unseen
-            // key are the same observation — and the passing answer to that is a second run
-            // with every irreversible side effect of the first. Rebuild from the journal
-            // before deciding. Once, lazily; see `#restoreIdempotency`.
-            if (!this.#idempotency.has(slot)) await this.#restoreIdempotency();
-            const seen = this.#idempotency.get(slot);
             // A duplicate submit BY THE SAME PRINCIPAL returns the ORIGINAL runId and
             // creates nothing. A different principal's identical key is a different slot.
+            const seen = this.#idempotency.get(slot);
             if (seen !== undefined) {
               send(res, 202, seen);
               return;
             }
+            // AND A SUBMISSION STILL IN FLIGHT IS ALSO A DUPLICATE, which reading only the
+            // map above could not see: it records a slot on success, and the two `await`s
+            // before that success are the window two concurrent retries both submitted in.
+            // See `#inflightSubmits`.
+            const inflight = this.#inflightSubmits.get(slot);
+            if (inflight !== undefined) {
+              send(res, 202, await inflight);
+              return;
+            }
+            // CLAIMED IN THIS TICK, before the scan below and before `engine.submit`. Every
+            // later caller finds the claim rather than an empty slot.
+            const claim = new Promise<unknown>((resolve, reject) => {
+              answered = resolve;
+              abandoned = reject;
+            });
+            // A claim nobody happened to be waiting on still rejects when the submission
+            // fails, and an unobserved rejection takes the process down. This is the
+            // observer of last resort; the caller that awaits it gets the failure.
+            void claim.catch(() => undefined);
+            this.#inflightSubmits.set(slot, claim);
           }
+          try {
+            if (slot !== undefined) {
+              // A MISS IS "I DO NOT KNOW", NOT "NEW", and it used to be answered with "new".
+              // The map is process-local and the journal is not, so a cold map and an unseen
+              // key are the same observation — and the passing answer to that is a second run
+              // with every irreversible side effect of the first. Rebuild from the journal
+              // before deciding. Once, lazily; see `#restoreIdempotency`.
+              await this.#restoreIdempotency();
+              const restored = this.#idempotency.get(slot);
+              if (restored !== undefined) {
+                answered?.(restored);
+                send(res, 202, restored);
+                return;
+              }
+            }
 
-          // BOTH FIELDS ARE CHECKED AND NEITHER WAS. This handler read them off a cast —
-          // `as { workflow?: string; inputs?: Record<string, unknown> }` — and `runInputs`
-          // in `cli.ts` states the rule that cast breaks, in its own docstring, for the
-          // very same value: "`inputs` is a channel map, the signature says
-          // `Record<string, unknown>`, and a cast is not a check." That door refuses an
-          // array; this one accepted one. Measured: `{"inputs":[1,2]}`, `"hello"`, `42`,
-          // `null` and `true` each answered **202** and started a run, and 202 means
-          // `run.submitted` is DURABLE — so the array is in the journal as the run's
-          // channel map for every later reader to cope with.
-          //
-          // `workflow` is the one that can reach further than the response: it is used as a
-          // lookup key and then written to `run.submitted` verbatim, so an object whose
-          // `toString` names a real graph passes `hasOwnProperty` and is journaled as the
-          // workflow. Absent stays legal for both — "" finds no graph and gives the 404
-          // below, which is the honest answer to a request that named none.
-          const workflow: unknown = input["workflow"];
-          if (workflow !== undefined && typeof workflow !== "string") {
-            throw err.validation(
-              CODES.E_PROVIDER_BAD_REQUEST,
-              `"workflow" must be the name of a compiled graph, not ${Array.isArray(workflow) ? "an array" : workflow === null ? "null" : typeof workflow}. ` +
-                `It is used as a lookup key AND journaled on run.submitted.`,
-            );
-          }
-          const inputs: unknown = input["inputs"];
-          if (inputs !== undefined && (typeof inputs !== "object" || inputs === null || Array.isArray(inputs))) {
-            throw err.validation(
-              CODES.E_PROVIDER_BAD_REQUEST,
-              `"inputs" must be a JSON object of channel values, not ${Array.isArray(inputs) ? "an array" : inputs === null ? "null" : typeof inputs}. ` +
-                `Omit it to start with no inputs.`,
-            );
-          }
-
-          // A BODY THAT CLAIMS A PRINCIPAL IS REFUSED, NOT IGNORED — the rule `#decider`
-          // already applies to a claimed gate approver, and its argument transfers verbatim:
-          // "a client that sends `actor` believes it is writing the audit trail; ignoring it
-          // would leave that client confidently wrong about what the journal says." Silence
-          // is worse here than at the gate, because the value being claimed is the one a
-          // later phase scopes access on. Refused even when it AGREES with the credential:
-          // unlike `#decider`'s `actor`, this is not a client restating who it is, it is a
-          // client asserting a field the perimeter owns.
-          for (const claimed of ["submittedBy", "actor", "principal"]) {
-            if (input[claimed] === undefined) continue;
-            throw err.policy(
-              CODES.E_NOT_AUTHORIZED,
-              `"${claimed}" is not accepted on this endpoint: who a run is submitted for comes from the credential, ` +
-                `never from the request body. Authenticate as the principal you mean to record.`,
-            );
-          }
-
-          const name = workflow ?? "";
-          // `graphIn`, NEVER a bare index — see its docstring for the six names that
-          // reached `engine.submit` and came back 500.
-          const graph = graphIn(this.#graphs, name);
-          if (graph === undefined) {
-            throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no compiled graph named "${name}"`);
-          }
-
-          const runId = await engine.submit({
-            graph,
-            // The check above narrowed this to `object`; the cast is the shape it proved.
-            inputs: (inputs ?? {}) as Record<string, unknown>,
-            workflow: name,
-            ...(key === undefined ? {} : { idempotencyKey: key }),
-            // FROM THE CREDENTIAL, NEVER THE BODY — see the refusal above.
+            // BOTH FIELDS ARE CHECKED AND NEITHER WAS. This handler read them off a cast —
+            // `as { workflow?: string; inputs?: Record<string, unknown> }` — and `runInputs`
+            // in `cli.ts` states the rule that cast breaks, in its own docstring, for the
+            // very same value: "`inputs` is a channel map, the signature says
+            // `Record<string, unknown>`, and a cast is not a check." That door refuses an
+            // array; this one accepted one. Measured: `{"inputs":[1,2]}`, `"hello"`, `42`,
+            // `null` and `true` each answered **202** and started a run, and 202 means
+            // `run.submitted` is DURABLE — so the array is in the journal as the run's
+            // channel map for every later reader to cope with.
             //
-            // UNCONDITIONAL, and `auth` is asserted rather than defaulted. `#serve` answers
-            // 401 before routing every guarded route, and an open plane still hands every
-            // caller a principal, so `undefined` is unreachable here — but the conditional
-            // that used to stand in its place had the PERMISSIVE value in its dead branch,
-            // so the day `/runs` joined `#requiresBearer`'s carve-out list it would have
-            // minted world-readable runs with nothing red. A dead branch whose value is the
-            // weaker claim is a fail-open waiting for an unrelated edit.
-            submittedBy: principalOf(mustAuth(auth)),
-          });
-          // 202, and the body says exactly what is durable — see the module docstring.
-          const accepted = acceptedBody(runId, graph.graphHash);
-          if (slot !== undefined) {
-            // Insertion order, oldest first, following `GateCallbackRouter.#admitRow`.
-            if (this.#idempotency.size >= MAX_IDEMPOTENT_SUBMITS) {
-              const oldest = this.#idempotency.keys().next();
-              if (oldest.done !== true) this.#idempotency.delete(oldest.value);
-            }
-            this.#idempotency.set(slot, accepted);
-          }
-          send(res, 202, accepted);
-
-          // Drive it after responding: the client is not made to wait on execution.
-          //
-          // THROUGH `drive` WHEN THE DEPLOYMENT SUPPLIED ONE, which is what puts a ceiling on
-          // how many accepted runs this process drives at once. It is a hand-off and not a
-          // gate: the 202 above is already sent, unconditionally, and a full dispatcher does
-          // nothing rather than refusing — the deployment's run clock re-derives the run from
-          // the journal and offers it again. See `ControlPlaneOptions.drive`.
-          if (this.#drive !== undefined) {
-            this.#drive(runId);
-            return;
-          }
-          //
-          // AND THE REJECTION IS REPORTED, WHICH IT USED TO NOT BE. This was
-          // `.catch(() => undefined)`, which dropped every failure of the one call that
-          // drives a freshly-accepted run. The 202 four lines up says, in those words,
-          // "accepted means this WILL run, not that it HAS run" — a promise about the
-          // future — and a silent catch is exactly what makes that promise unfalsifiable:
-          // the journal stops at `run.compiled`, `GET /runs/:id` reports `queued`, and the
-          // reason exists nowhere. That is this file's own rule about silence, on its own
-          // write path.
-          //
-          // The response has already been sent, so the CLIENT cannot be told and awaiting
-          // `advance` first is the thing the 202 exists to avoid. The operator can be, and
-          // `startControlPlane`'s boot warnings are the precedent for the sink. The line
-          // names the recovery because there is one: another `advance`.
-          void engine.advance(runId).catch((e: unknown) => {
-            // THE LAST FRAME. This runs inside a `.catch` on a promise nobody awaits, so a
-            // throw here is an unhandled rejection and the process — which is why the
-            // reason is rendered by `describeFailure` (total by construction) and not by
-            // `toLoomError`, whose `String(e)` throws on a value with no primitive
-            // conversion. The `try` is the backstop for the rest: `console.error` itself,
-            // and a `name`/`message` getter that traps.
-            try {
-              // WHAT THIS LINE USED TO SAY WAS FALSE ONCE THE RUN CLOCK EXISTED, and it is the
-              // instruction half that was wrong rather than the diagnosis: "nothing is driving
-              // this run" was true of a plane with no clock and is not true of `loom serve`,
-              // whose `runClockTick` re-derives every `running` run with a `ready` task from
-              // the journal on every tick and offers it again. Telling an operator that their
-              // run is stranded — and that a manual POST is the only way back — is worse than
-              // saying nothing, because it is a fact they can act on and it is wrong.
-              //
-              // A LIBRARY EMBEDDER WITH NO CLOCK IS THE CASE WHERE IT WAS TRUE, and that is
-              // now the case this branch is FOR: `drive` is absent, so nothing above this
-              // handler is bounding or retrying anything. The line says which of the two the
-              // reader is in rather than asserting one.
-              console.error(
-                `[loom] run ${runId} was ACCEPTED (202) and its first advance() FAILED: ${describeFailure(e)}. ` +
-                  `The journal holds run.submitted and run.compiled and nothing after them. This plane was built with no ` +
-                  `ControlPlaneOptions.drive, so nothing here will come back for it: POST /runs/${runId}/commands ` +
-                  `{"kind":"advance"} to retry it, or run this plane behind a deployment with a run clock.`,
+            // `workflow` is the one that can reach further than the response: it is used as a
+            // lookup key and then written to `run.submitted` verbatim, so an object whose
+            // `toString` names a real graph passes `hasOwnProperty` and is journaled as the
+            // workflow. Absent stays legal for both — "" finds no graph and gives the 404
+            // below, which is the honest answer to a request that named none.
+            const workflow: unknown = input["workflow"];
+            if (workflow !== undefined && typeof workflow !== "string") {
+              throw err.validation(
+                CODES.E_PROVIDER_BAD_REQUEST,
+                `"workflow" must be the name of a compiled graph, not ${Array.isArray(workflow) ? "an array" : workflow === null ? "null" : typeof workflow}. ` +
+                  `It is used as a lookup key AND journaled on run.submitted.`,
               );
-            } catch {
-              // Nothing above this frame can be told anything, and taking the process down
-              // to report that a report failed is strictly worse than the silence.
             }
-          });
+            const inputs: unknown = input["inputs"];
+            if (inputs !== undefined && (typeof inputs !== "object" || inputs === null || Array.isArray(inputs))) {
+              throw err.validation(
+                CODES.E_PROVIDER_BAD_REQUEST,
+                `"inputs" must be a JSON object of channel values, not ${Array.isArray(inputs) ? "an array" : inputs === null ? "null" : typeof inputs}. ` +
+                  `Omit it to start with no inputs.`,
+              );
+            }
+
+            // A BODY THAT CLAIMS A PRINCIPAL IS REFUSED, NOT IGNORED — the rule `#decider`
+            // already applies to a claimed gate approver, and its argument transfers verbatim:
+            // "a client that sends `actor` believes it is writing the audit trail; ignoring it
+            // would leave that client confidently wrong about what the journal says." Silence
+            // is worse here than at the gate, because the value being claimed is the one a
+            // later phase scopes access on. Refused even when it AGREES with the credential:
+            // unlike `#decider`'s `actor`, this is not a client restating who it is, it is a
+            // client asserting a field the perimeter owns.
+            for (const claimed of ["submittedBy", "actor", "principal"]) {
+              if (input[claimed] === undefined) continue;
+              throw err.policy(
+                CODES.E_NOT_AUTHORIZED,
+                `"${claimed}" is not accepted on this endpoint: who a run is submitted for comes from the credential, ` +
+                  `never from the request body. Authenticate as the principal you mean to record.`,
+              );
+            }
+
+            const name = workflow ?? "";
+            // `graphIn`, NEVER a bare index — see its docstring for the six names that
+            // reached `engine.submit` and came back 500.
+            const graph = graphIn(this.#graphs, name);
+            if (graph === undefined) {
+              throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no compiled graph named "${name}"`);
+            }
+
+            const runId = await engine.submit({
+              graph,
+              // The check above narrowed this to `object`; the cast is the shape it proved.
+              inputs: (inputs ?? {}) as Record<string, unknown>,
+              workflow: name,
+              ...(key === undefined ? {} : { idempotencyKey: key }),
+              // FROM THE CREDENTIAL, NEVER THE BODY — see the refusal above.
+              //
+              // UNCONDITIONAL, and `auth` is asserted rather than defaulted. `#serve` answers
+              // 401 before routing every guarded route, and an open plane still hands every
+              // caller a principal, so `undefined` is unreachable here — but the conditional
+              // that used to stand in its place had the PERMISSIVE value in its dead branch,
+              // so the day `/runs` joined `#requiresBearer`'s carve-out list it would have
+              // minted world-readable runs with nothing red. A dead branch whose value is the
+              // weaker claim is a fail-open waiting for an unrelated edit.
+              submittedBy: principalOf(mustAuth(auth)),
+            });
+            // 202, and the body says exactly what is durable — see the module docstring.
+            const accepted = acceptedBody(runId, graph.graphHash);
+            if (slot !== undefined) {
+              // Insertion order, oldest first, following `GateCallbackRouter.#admitRow`.
+              if (this.#idempotency.size >= MAX_IDEMPOTENT_SUBMITS) {
+                const oldest = this.#idempotency.keys().next();
+                if (oldest.done !== true) this.#idempotency.delete(oldest.value);
+              }
+              this.#idempotency.set(slot, accepted);
+            }
+            // The claim is settled BEFORE the response, so a caller waiting on it is handed
+            // this run rather than the empty slot a `finally` one line later would leave.
+            answered?.(accepted);
+            send(res, 202, accepted);
+
+            // Drive it after responding: the client is not made to wait on execution.
+            //
+            // THROUGH `drive` WHEN THE DEPLOYMENT SUPPLIED ONE, which is what puts a ceiling on
+            // how many accepted runs this process drives at once. It is a hand-off and not a
+            // gate: the 202 above is already sent, unconditionally, and a full dispatcher does
+            // nothing rather than refusing — the deployment's run clock re-derives the run from
+            // the journal and offers it again. See `ControlPlaneOptions.drive`.
+            if (this.#drive !== undefined) {
+              this.#drive(runId);
+              return;
+            }
+            //
+            // AND THE REJECTION IS REPORTED, WHICH IT USED TO NOT BE. This was
+            // `.catch(() => undefined)`, which dropped every failure of the one call that
+            // drives a freshly-accepted run. The 202 four lines up says, in those words,
+            // "accepted means this WILL run, not that it HAS run" — a promise about the
+            // future — and a silent catch is exactly what makes that promise unfalsifiable:
+            // the journal stops at `run.compiled`, `GET /runs/:id` reports `queued`, and the
+            // reason exists nowhere. That is this file's own rule about silence, on its own
+            // write path.
+            //
+            // The response has already been sent, so the CLIENT cannot be told and awaiting
+            // `advance` first is the thing the 202 exists to avoid. The operator can be, and
+            // `startControlPlane`'s boot warnings are the precedent for the sink. The line
+            // names the recovery because there is one: another `advance`.
+            void engine.advance(runId).catch((e: unknown) => {
+              // THE LAST FRAME. This runs inside a `.catch` on a promise nobody awaits, so a
+              // throw here is an unhandled rejection and the process — which is why the
+              // reason is rendered by `describeFailure` (total by construction) and not by
+              // `toLoomError`, whose `String(e)` throws on a value with no primitive
+              // conversion. The `try` is the backstop for the rest: `console.error` itself,
+              // and a `name`/`message` getter that traps.
+              try {
+                // WHAT THIS LINE USED TO SAY WAS FALSE ONCE THE RUN CLOCK EXISTED, and it is the
+                // instruction half that was wrong rather than the diagnosis: "nothing is driving
+                // this run" was true of a plane with no clock and is not true of `loom serve`,
+                // whose `runClockTick` re-derives every `running` run with a `ready` task from
+                // the journal on every tick and offers it again. Telling an operator that their
+                // run is stranded — and that a manual POST is the only way back — is worse than
+                // saying nothing, because it is a fact they can act on and it is wrong.
+                //
+                // A LIBRARY EMBEDDER WITH NO CLOCK IS THE CASE WHERE IT WAS TRUE, and that is
+                // now the case this branch is FOR: `drive` is absent, so nothing above this
+                // handler is bounding or retrying anything. The line says which of the two the
+                // reader is in rather than asserting one.
+                console.error(
+                  `[loom] run ${runId} was ACCEPTED (202) and its first advance() FAILED: ${describeFailure(e)}. ` +
+                    `The journal holds run.submitted and run.compiled and nothing after them. This plane was built with no ` +
+                    `ControlPlaneOptions.drive, so nothing here will come back for it: POST /runs/${runId}/commands ` +
+                    `{"kind":"advance"} to retry it, or run this plane behind a deployment with a run clock.`,
+                );
+              } catch {
+                // Nothing above this frame can be told anything, and taking the process down
+                // to report that a report failed is strictly worse than the silence.
+              }
+            });
+          } catch (e) {
+            // THE CLAIM IS FREED, NOT LEFT PENDING. A validation refusal, a missing graph, a
+            // store that threw: none of them is an answer to hand the next caller, and a
+            // claim that never settles is a same-key retry that hangs until its own timeout.
+            abandoned?.(e);
+            throw e;
+          } finally {
+            if (slot !== undefined) this.#inflightSubmits.delete(slot);
+          }
         },
       },
 
@@ -4016,9 +4175,21 @@ export class ControlPlane {
             // that commits, and a gate commits once.
             //
             // OVER `checkedDecision`'s OUTPUT, never the raw body: that call constructs a
-            // fresh checked object, so key order is fixed and no getter on a caller's object
-            // runs inside a key derivation.
-            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? `${String(gateId)}:${JSON.stringify(decision)}`),
+            // fresh checked object, so the caller cannot choose which of its fields the key
+            // is made of.
+            //
+            // **AND CANONICALLY, BECAUSE THAT OBJECT IS NOT AS FRESH AS IT LOOKS.** The
+            // `edit` arm of `gateDecisionOf` carries `writes` through BY REFERENCE, so
+            // `JSON.stringify` of it was serialising the caller's own object in the caller's
+            // own key order, at every depth. Two byte-different spellings of ONE edit are
+            // then two slots, and the second one is not a retry any more: measured on the
+            // skeleton's gate, `{"merged":{"a":1,"b":2}}` answered **200** and the same edit
+            // re-sent as `{"merged":{"b":2,"a":1}}` answered **409 E_GATE_ALREADY_RESOLVED**,
+            // where the identical bytes twice answer 200 and 200. `canonicalize` sorts keys,
+            // so one decision is one key however its sender spelled it — and it refuses the
+            // shapes it cannot order, which the journal this decision is about to be written
+            // to refuses too.
+            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? `${String(gateId)}:${canonicalize(decision)}`),
           });
           // THE RESPONSE IS SCOPED TOO, and forgetting that made every other check on this
           // route decorative. `summarise` carries the run's channels, outputs, usage, every
