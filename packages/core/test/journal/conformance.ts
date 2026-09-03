@@ -497,6 +497,41 @@ export function runConformance(factory: StoreFactory): void {
     });
   });
 
+  // A CLOSED STORE IS CLOSED FOR EVERY METHOD, IN BOTH BACKENDS. The memory store used to
+  // clear its map and then answer as if it were fresh, so an append at `expectedSeq: 0` for a
+  // run whose journal it had just discarded PASSED the CAS and started a second, empty journal
+  // under the same id — a durable-write API reporting success for a write it threw away, which
+  // is the one outcome the CAS exists to make impossible. SQLite refused all four the whole
+  // time; the divergence was invisible because no case here called `close()`.
+  test(`[${factory.name}] every method refuses after close, and close is idempotent`, async () => {
+    const store = factory.create(now);
+    await store.append({ runId: RUN, expectedSeq: 0, events: [started()] });
+    store.close();
+    store.close(); // idempotent — the second call must not throw
+    await expectLoomError(() => store.append({ runId: RUN, expectedSeq: 0, events: [started()] }), CODES.E_INTERNAL);
+    await expectLoomError(() => drain(store.read(RUN, 1)), CODES.E_INTERNAL);
+    await expectLoomError(() => store.head(RUN), CODES.E_INTERNAL);
+    await expectLoomError(() => store.listRuns(10), CODES.E_INTERNAL);
+  });
+
+  // THE GATED LISTING ORDERS BY A RUN'S LATEST GATE, WHICH IS NOT ITS LAST GATE IN SEQ ORDER.
+  // `prepare` honours a per-event `ts`, and a wall clock steps backwards (NTP, VM resume), so
+  // seq order and ts order come apart. SQL took `MAX(ts)`; memory kept whichever `gate.raised`
+  // it saw last while scanning. The two then paged the SLA sweep in different orders.
+  test(`[${factory.name}] the gated listing orders by a run's LATEST gate ts, not its last in seq order`, async () => {
+    await withStore(async (s) => {
+      const backwards = "01JRUNCCCCCCCCCCCCCCCCCCC" as RunId;
+      const single = "01JRUNDDDDDDDDDDDDDDDDDDD" as RunId;
+      await s.append({ runId: backwards, expectedSeq: 0, events: [started()] });
+      await s.append({ runId: backwards, expectedSeq: 1, events: [{ ...raised(), ts: 5000 }] });
+      await s.append({ runId: backwards, expectedSeq: 2, events: [{ ...raised(), ts: 1000 }] });
+      await s.append({ runId: single, expectedSeq: 0, events: [started(), { ...raised(), ts: 3000 }] });
+
+      const gated = (await s.listRuns(10, { raisedAGate: true })).map((r) => r.runId);
+      assert.deepEqual(gated, [backwards, single], "5000 is the run's latest gate even though 1000 came later in seq");
+    });
+  });
+
   test(`[${factory.name}] an empty batch is rejected`, async () => {
     await withStore(async (s) => {
       await assert.rejects(() => s.append({ runId: RUN, expectedSeq: 0, events: [] }));
