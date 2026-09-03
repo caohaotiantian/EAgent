@@ -9,12 +9,16 @@
  * plane that did not submit the run, then by a replica the gate was raised after; a boot scan
  * that spent its whole window on gates already answered; a shipped console with no control
  * that stops anything; and a gate queue that refolded every journal it has ever seen on every
- * four-second poll.
+ * four-second poll. Four more are measured the same way: two concurrent submissions under one
+ * key that minted two runs; a restore scan whose window counted RUNS while the map it fills
+ * counts KEYS; one unfoldable journal row that disarmed every gate behind it at boot; and one
+ * edit spelled two ways that answered 409 to its own retry.
  *
- * TWO DO NOT, and they say so in their own names rather than being left to look like the
- * others: `A GENUINE RETRY IS STILL ONE DECISION` and `THE GRAPH ROUTES ARE OPEN TO EVERY
- * CREDENTIAL` pass on the pre-change tree, and pin a property the change had to preserve. A
- * file where every name reads as "a defect closed" is a file that overstates what it found.
+ * THREE DO NOT, and they say so in their own names rather than being left to look like the
+ * others: `A GENUINE RETRY IS STILL ONE DECISION`, `A DIFFERENT EDIT IS STILL A DIFFERENT
+ * DECISION` and `THE GRAPH ROUTES ARE OPEN TO EVERY CREDENTIAL` each pass on the tree before
+ * the change that added them, and pin a property that change had to preserve. A file where
+ * every name reads as "a defect closed" is a file that overstates what it found.
  *
  * A THIRD ALSO PASSES ON THE PRE-CHANGE TREE and is neither of those things.
  * `A RUN SUBMITTED WITH NO HEADER CANNOT BE CLAIMED BY A KEY EQUAL TO ITS RUN ID` passes there
@@ -230,6 +234,57 @@ test("A GENUINE RETRY IS STILL ONE DECISION — the same decision twice is idemp
   }
 });
 
+test("ONE EDIT SPELLED TWO WAYS IS ONE DECISION — the default slot was derived over the caller's key order", async () => {
+  // The default slot is `gateId:<the decision>`, and the decision was rendered with
+  // `JSON.stringify` over an object whose `writes` is the CALLER'S own object, carried through
+  // by reference. So the byte order of the request decided the slot: the same edit re-sent
+  // with its channel value spelled in the other order was a different key, fell through to the
+  // gate's own state check, and answered 409 to a genuine retry. Measured on this gate:
+  // `{"merged":{"a":1,"b":2}}` → 200, the same edit as `{"merged":{"b":2,"a":1}}` → 409
+  // E_GATE_ALREADY_RESOLVED.
+  const r = await rig({ identity: people(), approvers: ["u:bob"] });
+  const asBob = { authorization: "Bearer bob-token", "content-type": "application/json" };
+  const edit = (writes: unknown): Promise<Response> =>
+    fetch(`${r.base}/runs/${String(runId)}/gates/${gateId}`, {
+      method: "POST",
+      headers: asBob,
+      body: JSON.stringify({ decision: { kind: "edit", writes } }),
+    });
+  let runId: string;
+  let gateId: GateId;
+  try {
+    runId = String((await submit(r, { authorization: "Bearer alice-token" }))["runId"]);
+    gateId = await gateOn(r, runId as RunId);
+    // `merged` because it is what this gate's `allowEdit` permits; the ordering is inside it.
+    assert.equal((await edit({ merged: { a: 1, b: 2 } })).status, 200);
+    assert.equal((await edit({ merged: { b: 2, a: 1 } })).status, 200, "the same edit, spelled the other way round, is the same decision");
+    assert.deepEqual(await decidedKinds(r, runId as RunId), ["edit"], "and it was decided once");
+  } finally {
+    await r.close();
+  }
+});
+
+test("A DIFFERENT EDIT IS STILL A DIFFERENT DECISION — the slot narrows a retry, it does not swallow a second answer", async () => {
+  // The ORDINARY half of the test above, and the property the canonical rendering must not
+  // trade away: two edits that differ in a VALUE are two decisions, so the second one meets
+  // the gate's own state check and is refused rather than being reported as this caller's own
+  // successful edit.
+  const r = await rig({ identity: people(), approvers: ["u:bob"] });
+  const asBob = { authorization: "Bearer bob-token", "content-type": "application/json" };
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const gateId = await gateOn(r, runId as RunId);
+    const edit = (writes: unknown): Promise<Response> =>
+      fetch(`${r.base}/runs/${String(runId)}/gates/${gateId}`, { method: "POST", headers: asBob, body: JSON.stringify({ decision: { kind: "edit", writes } }) });
+    assert.equal((await edit({ merged: { a: 1 } })).status, 200);
+    const second = await edit({ merged: { a: 2 } });
+    assert.equal(second.status, 409, "a second, DIFFERENT decision is a conflict this caller can see");
+    assert.deepEqual(await decidedKinds(r, runId as RunId), ["edit"]);
+  } finally {
+    await r.close();
+  }
+});
+
 // ── submission idempotency across a restart ──────────────────────────────────
 
 test("AN Idempotency-Key SURVIVES A RESTART — the journal already carries it, and nothing read it", async () => {
@@ -355,6 +410,137 @@ test("ONE TRANSIENT STORE ERROR DOES NOT KILL EVERY KEYED SUBMIT FOR THE LIFE OF
   }
 });
 
+test("TWO CONCURRENT SUBMISSIONS UNDER ONE KEY ARE ONE RUN", async () => {
+  // The handler read the slot, awaited the journal scan, and only recorded the slot after
+  // `engine.submit` returned. Everything in between is a window in which a second request
+  // carrying the same key read the same empty slot and submitted too — two runs, each with
+  // every irreversible tool call and every provider charge of the other, out of the one
+  // header whose entire job is that this cannot happen.
+  //
+  // THE WINDOW IS HELD OPEN BY A BARRIER: this store does not answer `listRuns` until the
+  // plane has authenticated two requests, so the second one is inside the door while the
+  // first is still scanning. The barrier is released from inside the second request's own
+  // identify call, which is BEFORE it has read its body, so the release also yields the event
+  // loop until that read has happened — a count of turns, not a duration, and none of it is
+  // asserted on. Measured on the pre-change tree: 202 202, two distinct run ids, two runs in
+  // the journal; measured here, with the yield removed, the second request lost the race and
+  // this test passed on both trees.
+  const inner = new MemoryStateStore({ now: () => NOW });
+  let identified = 0;
+  let bothArrived!: () => void;
+  const arrived = new Promise<void>((resolve) => (bothArrived = resolve));
+  const store: StateStore = {
+    append: (i) => inner.append(i),
+    read: (runId, from, to) => inner.read(runId, from, to),
+    head: (runId) => inner.head(runId),
+    listRuns: async (limit, filter) => {
+      // NOT the boot arm's listing — `listen()` awaits that one, so holding it would park the
+      // plane before either request exists.
+      if (filter?.raisedAGate !== true) await arrived;
+      return inner.listRuns(limit, filter);
+    },
+    close: () => inner.close(),
+  };
+  const known = people();
+  const identity: IdentitySource = {
+    name: "counting",
+    identify: (req) => {
+      // The SECOND request has arrived; give the loop enough turns for it to finish reading
+      // its body and reach the slot, then let the first request's scan answer.
+      if (++identified >= 2) {
+        void (async () => {
+          for (let turn = 0; turn < 20; turn++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          bothArrived();
+        })();
+      }
+      return known.identify(req);
+    },
+  };
+  const r = await rig({ store, identity });
+  const keyed = (key: string): Promise<Response> =>
+    fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer alice-token", "idempotency-key": key },
+      body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+    });
+  try {
+    const [a, b] = await Promise.all([keyed("nightly"), keyed("nightly")]);
+    assert.equal(a.status, 202);
+    assert.equal(b.status, 202);
+    const [ja, jb] = [await json(a), await json(b)];
+    assert.equal(ja["runId"], jb["runId"], "one key, one run — the later caller is handed the first request's answer");
+    assert.equal((await inner.listRuns(100)).length, 1, "…and nothing was submitted twice");
+
+    // THE ORDINARY CASES, beside the defect one. A retry after both have answered still
+    // collapses onto that run, and a key nobody has used still gets a run of its own — a
+    // claim that never cleared would break both.
+    assert.equal((await json(await keyed("nightly")))["runId"], ja["runId"], "a later retry still collapses");
+    assert.notEqual((await json(await keyed("weekly")))["runId"], ja["runId"], "and a different key is a different run");
+    assert.equal((await inner.listRuns(100)).length, 2);
+  } finally {
+    await r.close();
+  }
+});
+
+/** A run submitted with NO `Idempotency-Key`: it fills a row of the restore scan and restores nothing. */
+async function headerlessRun(store: StateStore, n: number, ts: number): Promise<void> {
+  // The id sorts above a ULID, so these are the NEWEST runs in a `run_id DESC` listing.
+  const runId = `zz-${String(n).padStart(6, "0")}` as RunId;
+  await store.append({
+    runId,
+    expectedSeq: 0 as Seq,
+    now: ts,
+    events: [
+      {
+        type: "run.submitted",
+        // `Engine.submit` journals `idempotencyKey: input.idempotencyKey ?? runId`, so a run
+        // submitted with no header carries its own id — which the scan skips.
+        payload: { workflow: "skeleton-summarize", inputs: {}, graphHash: "sha256:absent", idempotencyKey: runId, configDigest: "sha256:absent" },
+        actor: SYSTEM_ACTOR("test"),
+      },
+    ],
+  });
+}
+
+test("THE RESTORE SCAN PAGES PAST HEADER-LESS RUNS — its window counted runs while the map counts keys", async () => {
+  // `listRuns(MAX_IDEMPOTENT_SUBMITS)` reads as "the scan covers what the map holds" and does
+  // not: the map counts KEYED submissions and a listing counts RUNS. So on a plane where most
+  // submissions carry no header, the whole budget goes on rows that restore nothing, and the
+  // key that a restart was supposed to survive is behind them. Measured: one keyed run, then
+  // 10 000 header-less ones, then a restart and a retry of that key — a SECOND run.
+  const first = await rig();
+  let firstRunId: string;
+  try {
+    firstRunId = String((await submit(first, { "idempotency-key": "nightly" }))["runId"]);
+  } finally {
+    await first.close();
+  }
+
+  // THE ORDINARY CASE — a restart with nothing in front of the keyed run.
+  const plain = await rig({ store: first.h.store });
+  try {
+    assert.equal((await submit(plain, { "idempotency-key": "nightly" }))["runId"], firstRunId);
+    assert.equal((await first.h.store.listRuns(100_000)).length, 1);
+  } finally {
+    await plain.close();
+  }
+
+  // AND THE DEFECT ONE — `MAX_IDEMPOTENT_SUBMITS` header-less runs, every one of them newer.
+  for (let i = 0; i < 10_000; i++) await headerlessRun(first.h.store, i, NOW + 1_000 + i);
+  const buried = await rig({ store: first.h.store });
+  try {
+    assert.equal(
+      (await first.h.store.listRuns(10_000)).some((s) => String(s.runId) === firstRunId),
+      false,
+      "the keyed run is past the window the un-paged scan read, which is what made this reachable",
+    );
+    assert.equal((await submit(buried, { "idempotency-key": "nightly" }))["runId"], firstRunId, "…and the paged scan still reaches it");
+    assert.equal((await first.h.store.listRuns(100_000)).length, 10_001, "nothing minted a second run");
+  } finally {
+    await buried.close();
+  }
+});
+
 // ── the unauthenticated callback ─────────────────────────────────────────────
 
 test("A SIGNED GATE CALLBACK IS ANSWERED BY A PLANE THAT DID NOT SUBMIT THE RUN", async () => {
@@ -467,6 +653,77 @@ test("THE BOOT ARM PAGES PAST DECIDED GATES — its 500-run window was spent on 
   } finally {
     await buried.close();
   }
+});
+
+/**
+ * A run that raised a gate and whose journal this binary cannot fold.
+ *
+ * ONE ROW DOES IT: `state.reduced`'s fold iterates `payload.channels`, so a payload whose
+ * `channels` is not iterable throws out of `projection`. A future version's event, a row
+ * written by hand, a payload shape this binary predates — the arm has no business deciding
+ * which, and every one of them is one run's problem.
+ */
+async function unfoldableGatedRun(store: StateStore, ts: number): Promise<void> {
+  await store.append({
+    runId: "zz-unfoldable" as RunId,
+    expectedSeq: 0 as Seq,
+    now: ts,
+    events: [
+      {
+        type: "run.submitted",
+        payload: { workflow: "skeleton-summarize", inputs: {}, graphHash: "sha256:absent", idempotencyKey: "zz-unfoldable", configDigest: "sha256:absent" },
+        actor: SYSTEM_ACTOR("test"),
+      },
+      {
+        type: "gate.raised",
+        payload: { gateId: "g-zz" as GateId, nodeId: "approve" as never, policyRef: "policy/x@1", contentDigest: "sha256:absent" },
+        actor: SYSTEM_ACTOR("test"),
+      },
+      { type: "state.reduced", payload: { channels: 7 } as never, actor: SYSTEM_ACTOR("test") },
+    ],
+  });
+}
+
+test("ONE UNFOLDABLE RUN DOES NOT DISARM THE GATES BEHIND IT", async () => {
+  // The whole paging walk sat in one `try`, and the fold that decides whether a run is still
+  // waiting sat inside it — so the first row this binary cannot fold ended the scan for every
+  // run behind it, silently, at boot. It sorts ahead by construction: `raisedAGate` orders by
+  // the most recent `gate.raised`. Measured on one plane over one journal: the open gate
+  // armed on a clean journal, and the SAME gate unarmed with one unfoldable run appended.
+  //
+  // `rehydrateGates` is the probe because it is what the arm is FOR: it throws
+  // E_RUN_NOT_FOUND on a run this engine has not attached, and answers the count of gate
+  // clocks it re-armed on one it has.
+  const first = await rig({ approvers: ["u:alice"], identity: people() });
+  let runId: RunId;
+  try {
+    runId = String((await submit(first, { authorization: "Bearer alice-token" }))["runId"]) as RunId;
+    await gateOn(first, runId);
+  } finally {
+    await first.close();
+  }
+  const armedAtBoot = async (): Promise<string[]> => {
+    const r = await rig({ store: first.h.store, approvers: ["u:alice"], identity: people() });
+    try {
+      return (await r.h.engine.rehydrateGates(runId)) > 0 ? [String(runId)] : [];
+    } catch {
+      return [];
+    } finally {
+      await r.close();
+    }
+  };
+
+  // THE ORDINARY CASE — a clean journal, one open gate, armed.
+  assert.deepEqual(await armedAtBoot(), [String(runId)]);
+
+  // AND THE DEFECT ONE — the same journal with one unfoldable run in front.
+  await unfoldableGatedRun(first.h.store, NOW + 5_000);
+  assert.deepEqual(
+    (await first.h.store.listRuns(10, { raisedAGate: true })).map((s) => String(s.runId)),
+    ["zz-unfoldable", String(runId)],
+    "the unfoldable run is ahead of the open gate, which is what made this reachable",
+  );
+  assert.deepEqual(await armedAtBoot(), [String(runId)], "the run behind it is still armed");
 });
 
 test("A SECOND REPLICA ANSWERS A GATE RAISED AFTER IT BOOTED — the boot scan is a warm start, not the perimeter", async () => {
