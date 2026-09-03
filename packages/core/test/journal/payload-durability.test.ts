@@ -13,10 +13,17 @@
  * implementation performs, by size, on the shared `FileHandle` prototype: one on a handle whose
  * stat is the canonical bytes (the payload), one on a handle whose stat is a directory (so the
  * rename itself survives). Before the fix that count was 0.
+ *
+ * AND THE SAME METHOD LOST A RACE WITH ITSELF. The temp name was `${path}.${pid}.tmp`, which
+ * depends only on the digest and the process — and the digest is the one thing two concurrent
+ * puts of the SAME value necessarily share. `Promise.all` over a fan-out whose branches each
+ * externalise the same channel value is the ordinary case, not a contrived one; both opened one
+ * temp file, the first renamed it away, and the second's `rename` threw a bare untyped `ENOENT`
+ * on the durable write path. The last two tests are that.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -77,6 +84,37 @@ test("put stays idempotent and get still refuses a payload that is not there", a
       () => store.get(RUN, { digest: `sha256:${"0".repeat(64)}` as never, bytes: 1 }),
       /E_PAYLOAD_UNRESOLVED|unresolved|payload/i,
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent puts of the SAME value all succeed — the temp file is per call", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-payload-race-"));
+  try {
+    const store = filePayloads(dir);
+    // 71,688 bytes: past `EXTERNALISE_ABOVE_BYTES`, so this is a value that really would be
+    // externalised, and large enough that the two writes overlap rather than serialising by luck.
+    const canonical = JSON.stringify({ doc: "x".repeat(71_600) });
+    const refs = await Promise.all(Array.from({ length: 8 }, () => store.put(RUN, canonical)));
+    for (const r of refs) assert.deepEqual(r, refs[0], "content addressing: one value, one key");
+    assert.deepEqual(await store.get(RUN, refs[0]!), JSON.parse(canonical), "and the cell holds the value");
+    // Nothing is left over: a `.tmp` still on disk is a temp name that was never renamed.
+    const left = readdirSync(join(dir, String(RUN))).filter((f) => f.endsWith(".tmp"));
+    assert.deepEqual(left, [], "every temp file was renamed or swept");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("...and concurrent puts of DIFFERENT values do not collide either", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-payload-race-"));
+  try {
+    const store = filePayloads(dir);
+    const values = Array.from({ length: 8 }, (_, i) => JSON.stringify({ i, doc: "y".repeat(70_000 + i) }));
+    const refs = await Promise.all(values.map((v) => store.put(RUN, v)));
+    assert.equal(new Set(refs.map((r) => r.digest)).size, 8, "eight distinct values, eight distinct cells");
+    for (let i = 0; i < 8; i++) assert.deepEqual(await store.get(RUN, refs[i]!), JSON.parse(values[i]!));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

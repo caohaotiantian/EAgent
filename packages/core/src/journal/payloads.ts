@@ -137,6 +137,24 @@ function verified(runId: RunId, ref: PayloadRef, text: string | undefined): unkn
  * ids that come out of a journal, and a journal is a file an operator can hand to a tool.
  * Refusing is always allowed.
  */
+/**
+ * Makes one `put`'s temporary file its own, which `${path}.${pid}.tmp` did not.
+ *
+ * That name depended on the DIGEST and the PID and on nothing else, and the digest is the one
+ * thing two concurrent puts of the same value necessarily share — the `Promise.all` over a wave
+ * of fan-out branches that each externalise the same channel value is the ordinary case, not a
+ * contrived one. Both opened the same temp file, both wrote, the first renamed it onto the cell,
+ * and the second's `rename` raised a bare untyped `ENOENT` on the durable write path: the exact
+ * shape of failure this file's typed refusals exist to have removed, in the method whose whole
+ * subject is surviving a crash.
+ *
+ * A COUNTER AND NOT RANDOMNESS. Nothing journals this name and nothing folds it, so it is not
+ * one of the derived ids invariant 2 is about — but a counter is enough (a process cannot race
+ * itself past a synchronous `+= 1`) and it keeps this file free of a random source that a reader
+ * would have to check was not load-bearing.
+ */
+let putOrdinal = 0;
+
 export function filePayloads(dir: string): PayloadStore {
   const cellPath = (runId: RunId, d: Digest): string => {
     const hex = d.slice("sha256:".length);
@@ -179,7 +197,8 @@ export function filePayloads(dir: string): PayloadStore {
       // and the alternative outcome is not a slow run but a run whose outputs can never be read
       // again. Neither sync is droppable: without the file sync the bytes may be absent, without
       // the directory sync the name may be.
-      const tmp = `${path}.${process.pid}.tmp`;
+      putOrdinal += 1;
+      const tmp = `${path}.${String(process.pid)}.${String(putOrdinal)}.tmp`;
       const fh = await open(tmp, "w");
       try {
         await fh.writeFile(canonical, "utf8");
@@ -187,7 +206,36 @@ export function filePayloads(dir: string): PayloadStore {
       } finally {
         await fh.close();
       }
-      await rename(tmp, path);
+      try {
+        await rename(tmp, path);
+      } catch (e) {
+        // A LOSER OF A RACE IS NOT A FAILED WRITE, and the cell says which happened. The unique
+        // temp name above removes the collision that made this fire, so this arm is the second
+        // line rather than the fix: a platform that refuses to rename onto an existing name
+        // (EEXIST), or a concurrent removal of the temp (ENOENT), still lands here. The store is
+        // CONTENT-ADDRESSED, so "somebody else already wrote this cell" and "I wrote this cell"
+        // are the same outcome — but only if the bytes there are really this value's, which is
+        // why this re-reads and re-digests rather than trusting the path's existence. Anything
+        // else, or a cell holding other bytes, is a real fault and is re-thrown.
+        const code = (e as { code?: string }).code;
+        if (code !== "ENOENT" && code !== "EEXIST") throw e;
+        let landed: string | undefined;
+        try {
+          landed = await readFile(path, "utf8");
+        } catch {
+          landed = undefined;
+        }
+        if (landed === undefined || digestOf(landed) !== ref.digest) throw e;
+        // THE TEMP FILE IS NOT SWEPT, and that is a deliberate refusal rather than an oversight.
+        // Sweeping it means a filesystem REMOVE call, and `README.md`'s gaps table claims — with
+        // a whole-tree probe in `test/readme-gaps.test.ts` enforcing the claim by scanning for
+        // exactly that call — that nothing in this tree deletes a journal row or a payload file.
+        // A cosmetic leftover is not worth spending that claim on. It is also unreachable on the
+        // platforms this runs on: POSIX `rename` replaces its destination, so EEXIST is a
+        // Windows-only outcome, and ENOENT means the file is already gone. What EEXIST leaves is
+        // one stray `.tmp` beside a cell holding the right bytes — no lost write, and no wrong
+        // read, because `get` reads the cell.
+      }
       // BEST EFFORT, AND ONLY THIS ONE. A directory fsync is not portable — Windows refuses to
       // open a directory at all — and failing the write because the platform will not confirm the
       // rename would refuse work the store can do. The file's own contents are already synced
