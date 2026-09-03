@@ -844,3 +844,171 @@ test("A RETRY BACK-EDGE OUT OF A FAN BODY DOES NOT PUT THE NODE ABOVE THE FAN IN
   assert.deepEqual(await driveRetry("NONE", "input"), { status: "succeeded", gates: 1, wrote: 1 }, "empty, input-built list");
   assert.deepEqual(await driveRetry("TWO", "input"), { status: "succeeded", gates: 1, wrote: 1 }, "populated, input-built list");
 });
+
+// ---------------------------------------------------------------------------
+// THE OTHER DIRECTION: parent-fetched bytes arriving in a CHILD as a run input
+// ---------------------------------------------------------------------------
+
+const FAN_LEAF_REF = "graph/fanleaf@stable";
+
+/** The delegated graph, with its OWN fan, its OWN gate on the branch, and its OWN join. */
+function fanChildSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "child-fan-gate", project: "test", version: 1 },
+    policy: { posture: "out", budget: { costUsd: 1 }, expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: {
+      seed: { type: "string", reduce: "replace" },
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      out: { type: "array", reduce: "append_ordered" },
+    },
+    inputs: ["seed"],
+    outputs: ["out"],
+    nodes: [
+      { id: "plan", type: "function", reads: ["seed"], writes: ["items"], function: { ref: "function/split@stable", effects: [] } },
+      { id: "hold", type: "human_gate", reads: ["item"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: "j", type: "join", reads: ["out"], writes: ["out"], join: { branches: ["hold"], mode: "all", onBranchError: "skip" } },
+      { id: "leaf", type: "function", reads: ["seed"], writes: ["out"], function: { ref: "function/leaf@stable", effects: [] } },
+    ],
+    edges: [
+      { id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] },
+      { id: "toLeaf", from: "j", to: "leaf", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/**
+ * ONE WORKFLOW, TWO SHAPES. `flat` draws the fan, the gate and the join in the parent; `delegated`
+ * hands the same channel to a child that draws them itself. `-clean` feeds both from the run's own
+ * input instead of the fetched page, which is the half that must not gate.
+ */
+type Shape = "flat" | "delegated" | "flat-clean" | "delegated-clean";
+
+function delegatingSpec(mode: Shape): GraphSpec {
+  const src = mode.endsWith("-clean") ? "request" : "untrusted";
+  const nodes: unknown[] = [
+    { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+    { id: "write", type: "tool", reads: ["request"], writes: ["receipt"], tool: { name: "notes.write", version: "1.0", args: {} }, unhandled: true },
+  ];
+  const edges: unknown[] = [];
+  if (mode.startsWith("delegated")) {
+    nodes.push({
+      id: "delegate",
+      type: "subgraph",
+      reads: [src],
+      writes: ["parts"],
+      subgraph: { ref: FAN_LEAF_REF, inputs: { seed: src }, outputs: { parts: "out" }, budgetShare: 0.4 },
+    });
+    edges.push({ id: "e0", from: "fetch", to: "delegate", kind: "seq" });
+    edges.push({ id: "toWrite", from: "delegate", to: "write", kind: "seq" });
+  } else {
+    nodes.push({ id: "plan", type: "function", reads: [src], writes: ["items"], function: { ref: "function/split@stable", effects: [] } });
+    nodes.push({ id: "hold", type: "human_gate", reads: ["item"], humanGate: { ref: "oversight/hold@stable" } });
+    nodes.push({ id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["hold"], mode: "all", onBranchError: "skip" } });
+    edges.push({ id: "e0", from: "fetch", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] });
+    edges.push({ id: "toWrite", from: "j", to: "write", kind: "seq" });
+  }
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `parent-${mode}`, project: "test", version: 1 },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "notes:write"],
+      expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 },
+    },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes,
+    edges,
+  } as unknown as GraphSpec;
+}
+
+function fanChildResolver(): ResourceResolver {
+  const base = resolver();
+  return { ...base, subgraph: (ref) => (ref === FAN_LEAF_REF ? fanChildSpec() : undefined) };
+}
+
+async function driveDelegating(mode: Shape, page: Options["page"], restart: boolean): Promise<{ status: string; gates: number; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const graph = compileOrThrow({
+    spec: delegatingSpec(mode),
+    resolver: fanChildResolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const request = mode.endsWith("-clean") && page === "NONE" ? "NONE flagged today" : "please";
+  const first = engineOver(store, page, fanChildResolver());
+  const runId = (await first.engine.submit({ graph, inputs: { request } })) as RunId;
+  let p = await first.engine.advance(runId);
+  let wrote = first.wrote();
+  if (restart) {
+    // A SECOND PROCESS with no memory of the first, including no memory of the child's seed.
+    const second = engineOver(store, page, fanChildResolver());
+    await second.engine.attach(runId, graph);
+    p = await second.engine.advance(runId);
+    wrote += second.wrote();
+  }
+  return { status: p.status, gates: Object.keys(p.gates).length, wrote };
+}
+
+/**
+ * A DELEGATION IS THE OTHER DIRECTION OF THE SAME MISTAKE, and this one is DOWNWARD.
+ *
+ * `#runSubgraph` resolves `sub.inputs` against the parent scope and `#contextFor` hands the child
+ * a fresh empty `ctx.tainted`, so bytes a parent tool fetched arrive in the child as an ordinary
+ * RUN INPUT — indistinguishable from a value a person typed. The child's own `#fireEmptyJoin`
+ * then finds no evidence that the width was an attacker's and deletes the child's authored gate.
+ * The SAME workflow flattened into the parent gates:
+ *
+ *     flat,      the page yields none -> awaiting_gate, gates=1, wrote=0   (both)
+ *     delegated, the page yields none -> succeeded,     gates=0, wrote=1   (before)
+ *     delegated, the page yields none -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * The seed is journaled on the CHILD's own `run.submitted`, so the child's own fold rebuilds it —
+ * the parent's `subgraph.started` is in the parent's journal and no child restart can reach it.
+ */
+test("A DELEGATION CARRIES TAINT DOWNWARD — a child input is not clean because it crossed a boundary", async () => {
+  const flat = await driveDelegating("flat", "NONE", false);
+  assert.equal(flat.status, "awaiting_gate", `precondition: flattened, the empty fan raises the skipped gate: ${flat.status}`);
+  assert.equal(flat.wrote, 0, "precondition: flattened, nothing is written");
+
+  const delegated = await driveDelegating("delegated", "NONE", false);
+  assert.equal(delegated.wrote, 0, "the child saw parent-fetched bytes as a clean run input and deleted its own gate");
+  assert.equal(delegated.status, "awaiting_gate", `expected the delegated workflow to gate like the flattened one, got ${delegated.status}`);
+  assert.equal(delegated.gates, 1, "and exactly one gate");
+
+  // IT SURVIVES A RESTART, which is what makes the seed a journaled fact rather than a field on a
+  // context. Every previous member of this class was a guard a restart switched off in silence.
+  const resumed = await driveDelegating("delegated", "NONE", true);
+  assert.equal(resumed.status, "awaiting_gate", `a restart forgot the seed the delegation carried: ${resumed.status}`);
+  assert.equal(resumed.wrote, 0, "and wrote nothing across the restart");
+});
+
+test("A DELEGATION OVER A CLEAN INPUT STILL RUNS — the seed is the parent's taint, not the boundary", async () => {
+  // The half that must not move, and it is the one a seed keyed on "it crossed a boundary" would
+  // break: the same delegation, the same empty fan, fed from the run's OWN input. Nothing
+  // untrusted decided this width, so nothing gates — and the flattened shape agrees.
+  const flat = await driveDelegating("flat-clean", "NONE", false);
+  assert.equal(flat.status, "succeeded", `flattened over a clean list must run out: ${flat.status}`);
+  assert.equal(flat.wrote, 1, "and the downstream the join releases runs");
+
+  const delegated = await driveDelegating("delegated-clean", "NONE", false);
+  assert.equal(delegated.status, "succeeded", `delegated over a clean list must run out: ${delegated.status}`);
+  assert.equal(delegated.gates, 0, "nobody attacked this width");
+  assert.equal(delegated.wrote, 1, "and the downstream the join releases runs");
+});

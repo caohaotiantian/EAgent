@@ -60,7 +60,7 @@ import { EXTERNALISE_ABOVE_BYTES, payloadHandle, refFor, type PayloadRef, type P
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
-import { observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
+import { carriesOversight, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -251,6 +251,19 @@ export interface SubmitInput {
    * CLI authenticates nobody and inventing a subject is worse than recording none.
    */
   readonly submittedBy?: SubmittedBy;
+  /**
+   * Input channels that arrive ALREADY UNTRUSTED — the taint a delegation carries downward.
+   *
+   * Set by `#runSubgraph` and by nothing else, for the same reason `runId` is: a child run's
+   * `ctx.tainted` starts empty, and the parent channels its inputs were resolved from are the
+   * only thing that can say which of them a tool fetched. It is journaled on `run.submitted`
+   * so the child's OWN fold rebuilds it — see that event's field for why the parent's
+   * `subgraph.started` is not a place this can live.
+   *
+   * A caller may only ADD taint through it, never remove any, so an embedder that passes it is
+   * tightening. The default — absent — is what every existing caller already produces.
+   */
+  readonly taintedInputs?: readonly string[];
 }
 
 /**
@@ -1759,6 +1772,16 @@ export class Engine {
    */
   async #restoreEvidence(ctx: RunContext): Promise<void> {
     for await (const ev of this.#store.read(ctx.runId, 1 as Seq)) {
+      // THE SEED A DELEGATION CARRIED IN, and the one arm here that reads an event with no
+      // `taskId`. A child run's inputs are ordinary run inputs by the time they reach its own
+      // journal; `run.submitted.taintedInputs` is what says which of them a parent tool fetched,
+      // and `Engine.submit` folds the same list into `ctx.tainted` on the live path. Absent
+      // means nothing was tainted — see the event's own field for why that is exact and not the
+      // fail-open reading it looks like.
+      if (isEvent(ev, "run.submitted")) {
+        for (const channel of ev.payload.taintedInputs ?? []) ctx.tainted.add(channel);
+        continue;
+      }
       if (ev.taskId === undefined) continue;
       if (isEvent(ev, "task.retry_scheduled")) {
         ctx.streaks.record(parseTaskId(ev.taskId).nodeId, false);
@@ -2013,6 +2036,13 @@ export class Engine {
     // which seq 1 alone was 300,261 — the whole of the residual. It is now 4,556.
     const seeded = await this.#externalise(ctx, input.inputs);
 
+    // TAINT CROSSES INTO A CHILD RUN HERE, and this is the live half of a fact
+    // `#restoreEvidence` folds from the event appended two lines down. Both read the same list,
+    // so a child that a second process resumes starts from the set the first one started from.
+    // Seeded BEFORE anything can run, which is what makes it indistinguishable from a channel a
+    // tool inside the child wrote.
+    for (const channel of input.taintedInputs ?? []) ctx.tainted.add(channel);
+
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
     await ctx.log.append([
@@ -2026,6 +2056,13 @@ export class Engine {
           idempotencyKey: input.idempotencyKey ?? runId,
           configDigest: digest(this.#policyOpts),
           ...(input.submittedBy === undefined ? {} : { submittedBy: input.submittedBy }),
+          // WRITTEN ONLY WHEN NON-EMPTY, which is what makes absent exact rather than a guess:
+          // for a journal this binary wrote, absent and empty are the same statement. Every
+          // top-level submit produces absent, and that is correct — a run's own inputs are
+          // whatever its submitter handed it.
+          ...(input.taintedInputs === undefined || input.taintedInputs.length === 0
+            ? {}
+            : { taintedInputs: [...input.taintedInputs] }),
         },
         // The control plane IS what appended this row, so the envelope stays true and the
         // principal rides in the payload. See `SubmittedBy`.
@@ -6363,7 +6400,17 @@ export class Engine {
 
     const scope = scopeFor(p, ctx.graph.spec.channels, w.task.branch);
     const inputs: Record<string, unknown> = {};
-    for (const [childCh, parentCh] of Object.entries(sub.inputs)) inputs[childCh] = scope[parentCh];
+    // WHICH OF THE CHILD'S INPUTS ARRIVE UNTRUSTED, computed from the PARENT channel each one is
+    // resolved from. A set defined by node type is wrong at this boundary in both directions —
+    // `carriesOversight` is the upward half — and this is the downward one: the child's own
+    // `ctx.tainted` starts empty, so bytes a parent tool fetched arrived looking like a value a
+    // person typed and the child's guards could not see them. It is passed to `submit`, which
+    // journals it on the child's `run.submitted` so the child's own fold rebuilds it.
+    const taintedInputs: string[] = [];
+    for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
+      inputs[childCh] = scope[parentCh];
+      if (ctx.tainted.has(parentCh)) taintedInputs.push(childCh);
+    }
 
     // The slice is carved from what the PARENT still has, not from its original limit:
     // a subgraph reached late in an expensive run gets less, which is correct.
@@ -6414,6 +6461,7 @@ export class Engine {
         workflow: sub.ref,
         ...(slice === undefined ? {} : { budgetUsd: slice }),
         ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
+        ...(taintedInputs.length === 0 ? {} : { taintedInputs }),
       });
     } else {
       // THE PARENT'S CEILING TRAVELS on the resume path too — `#contextFor` returns an existing
@@ -8296,7 +8344,7 @@ export class Engine {
    * protects a `reversible_write`, which is exactly the class for which an authored gate is the
    * only oversight there is.
    *
-   * THE UNSKIPPABLE SET IS NAMED RATHER THAN COUNTED, and it is `isUnskippable`: `human_gate`,
+   * THE UNSKIPPABLE SET IS NAMED RATHER THAN COUNTED, and it is `carriesOversight`: `human_gate`,
    * and `subgraph` because its own body may hold one the parent cannot see. That function
    * carries the measurement and the argument for treating a delegation as unskippable outright
    * rather than walking into it.
@@ -8310,7 +8358,7 @@ export class Engine {
     const source = ctx.index.byId.get(fanout.from);
     const attackerWidth =
       source !== undefined && fanoutWidthEvidence(ctx.controlTainted, ctx.tainted, source, fanout) !== undefined;
-    const skipped = attackerWidth ? [...fanBody(ctx.index, fanout)].filter((id) => isUnskippable(ctx.index.byId.get(id))) : [];
+    const skipped = attackerWidth ? [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id))) : [];
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
@@ -9151,14 +9199,20 @@ function applyTaint(
   // DIFFERENT `RunId` and therefore a different `RunContext` with its own taint set, so nothing
   // the child learned reaches the parent — a child that fetched untrusted text and mapped it out
   // through `sub.outputs` handed the parent a channel that looked clean, and the parent charged
-  // on it. Carrying the child's set across the boundary would be more precise and would not
-  // SURVIVE: the fold at attach reads committed writes, and which of a child's channels were
-  // tainted is not among them. Treating the boundary itself as untrusted is the version that
-  // rebuilds. The cost is a pure-computation subgraph tainting its outputs.
+  // on it. Carrying the child's set UP would be more precise and would not SURVIVE: the fold at
+  // attach reads committed writes, and which of a child's channels were tainted is not among
+  // them. Treating the boundary itself as untrusted is the version that rebuilds. The cost is a
+  // pure-computation subgraph tainting its outputs.
   //
-  // The other direction needs no rule. Each run gets its own `PolicyEngine` (`#contextFor`), so
-  // a parent's ceiling never reaches the child, and the child re-decides every node at full
-  // strictness — an irreversible child node gates at `in` on its class whatever the parent did.
+  // THAT ARGUMENT IS ABOUT THE UPWARD DIRECTION AND DOES NOT SETTLE THE DOWNWARD ONE, and it
+  // stood as if it did. This paragraph used to say "the other direction needs no rule", meaning
+  // the child re-decides every node at full strictness under its own `PolicyEngine` — which is
+  // true and is about POSTURE, not about taint. The child's `ctx.tainted` starts EMPTY, so
+  // parent-fetched bytes arrived through `sub.inputs` as an ordinary run input and the child's
+  // own guards could not see them: the same workflow flattened into the parent gated and
+  // delegated did not. `#runSubgraph` computes which child inputs come from tainted parent
+  // channels and `submit` journals them on the CHILD's `run.submitted`, which is the only event
+  // the child's own fold can reach — so unlike the upward direction, this one does survive.
   if (!isExternal(node) && !controlTainted.has(node.id) && !observedChannels(node).some((c) => tainted.has(c))) return;
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
@@ -9935,47 +9989,6 @@ function fanBody(index: GraphIndex, fanout: EdgeSpec): Set<NodeId> {
     }
   }
   return seen;
-}
-
-/**
- * NODES A ZERO-WIDTH FAN MAY NOT PASS OVER IN SILENCE — the set, named rather than counted.
- *
- * `human_gate`, because of the eight `NodeType`s it is the only one whose whole purpose is that a
- * person acts before the run goes on. A `tool` or an `agent` on a skipped branch did not happen
- * either, but nothing about the graph promised it would — the fan's width is what says how many
- * times it runs, and zero is a width.
- *
- * `subgraph`, because ITS OWN BODY MAY HOLD ONE and the parent cannot see it. This was the set
- * being wrong rather than the predicate: with the fan's list tainted and a `subgraph` in the fan
- * body, a `human_gate` in the delegated graph was skipped along with everything else and the
- * scan for `type === "human_gate"` over the PARENT's nodes found nothing. Measured on one graph
- * driven twice, the child holding the only gate and a `reversible_write` tool under the join:
- *
- *     the page yields two items -> awaiting_gate, gates=1, wrote=0
- *     the page yields none      -> succeeded,     gates=0, wrote=1   (before)
- *     the page yields none      -> awaiting_gate, gates=1, wrote=0   (now)
- *
- * TREATED AS UNSKIPPABLE OUTRIGHT RATHER THAN WALKED, and the walk was the other candidate: the
- * child is compiled and cached in `#childGraphs`, so `#compileChild` would answer what is in it.
- * Three reasons it is not called from here.
- *
- *   1. `#compileChild` calls `compileOrThrow`, and this method is on the SCHEDULING path — it
- *      returns the events that release the join. A child spec that no longer compiles would come
- *      out of here as a throw rather than as a refusal, which is a guard that fails OPEN by
- *      crashing the wave that was supposed to raise it.
- *   2. A child may itself hold a `subgraph`, so the honest walk is a recursive compile of a tree
- *      whose depth is bounded only by `expansion.maxDepth`, performed to answer a question about
- *      a branch that did not run.
- *   3. The answer would be no better. A child re-decides every node at full strictness under its
- *      own `PolicyEngine` (`#contextFor`), so a delegation is exactly where oversight the parent
- *      cannot enumerate lives; "the child declares no `human_gate` today" is a claim about a spec
- *      the parent froze, not about the run that would have happened.
- *
- * The cost is one escalation on an empty ATTACKER-CHOSEN fan whose branch delegates, and E12 is a
- * gate rather than a refusal — a person who looks and approves gets the run they asked for.
- */
-function isUnskippable(node: NodeSpec | undefined): boolean {
-  return node !== undefined && (node.type === "human_gate" || node.type === "subgraph");
 }
 
 /**

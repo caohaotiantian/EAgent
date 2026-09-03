@@ -600,3 +600,135 @@ test("A LEGITIMATE RECORDED MUTATION STILL REHYDRATES — the re-validation is n
   assert.equal(done.graphHash, folded, "and the graph it ran out on is the successor the journal recorded");
   assert.equal(second.wrote(), 1, "and the action the human approved runs");
 });
+
+// ---------------------------------------------------------------------------
+// A `subgraph` AS THE DOMINATOR, whose CHILD holds the only gate
+// ---------------------------------------------------------------------------
+
+const CHILD_REF = "graph/approver@stable";
+
+/** The delegated graph: the gate the parent cannot see. */
+function childSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "approver", project: "test", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { payload: { type: "string", reduce: "replace" }, out: { type: "string", reduce: "replace" } },
+    inputs: ["payload"],
+    outputs: ["out"],
+    nodes: [
+      { id: n("hold"), type: "human_gate", reads: ["payload"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: n("leaf"), type: "function", reads: ["payload"], writes: ["out"], function: { ref: "function/noop@stable", effects: [] } },
+    ],
+    edges: [{ id: e("toLeaf"), from: n("hold"), to: n("leaf"), kind: "seq" }],
+  } as unknown as GraphSpec;
+}
+
+function childResolver(): ReturnType<typeof resolver> {
+  const base = resolver();
+  return { ...base, subgraph: (ref: string) => (ref === CHILD_REF ? childSpec() : undefined) };
+}
+
+/** `a -> delegate -> c -> d`, with `delegate` a `subgraph` and no `human_gate` anywhere in the parent. */
+function delegatingChain(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "delegating-chain", project: "test", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 }, capabilities: CAPS },
+    channels: {
+      goal: { type: "string", reduce: "replace" },
+      a1: { type: "string", reduce: "replace" },
+      b1: { type: "string", reduce: "replace" },
+      c1: { type: "string", reduce: "replace" },
+      d1: { type: "string", reduce: "replace" },
+      x1: { type: "string", reduce: "replace" },
+    },
+    inputs: ["goal"],
+    outputs: ["d1"],
+    nodes: [
+      { id: n("a"), type: "function", reads: ["goal"], writes: ["a1"], function: { ref: "function/noop@stable", effects: [] } },
+      {
+        id: n("delegate"),
+        type: "subgraph",
+        reads: ["a1"],
+        writes: ["b1"],
+        subgraph: { ref: CHILD_REF, inputs: { payload: "a1" }, outputs: { b1: "out" }, budgetShare: 0.5 },
+      },
+      { id: n("c"), type: "function", reads: ["b1"], writes: ["c1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("d"), type: "function", reads: ["c1"], writes: ["d1"], function: { ref: "function/noop@stable", effects: [] } },
+    ],
+    edges: [
+      { id: e("a0"), from: n("a"), to: n("delegate"), kind: "seq" },
+      { id: e("a1e"), from: n("delegate"), to: n("c"), kind: "seq" },
+      { id: e("a2"), from: n("c"), to: n("d"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/**
+ * THE DOMINATOR THAT CARRIES OVERSIGHT NEED NOT BE A `human_gate` — IT MAY DELEGATE TO ONE.
+ *
+ * The bar here was the literal type `human_gate`, scanned over the PARENT's nodes, while
+ * `Engine.#fireEmptyJoin` had already been widened to `human_gate ∪ subgraph` for exactly this
+ * reason. One question, two files, two answers — and a `subgraph` is a wrapper for arbitrary node
+ * types, so any set defined by listing types is wrong at that boundary.
+ *
+ *     the bar is the literal `human_gate` -> ok                                (before)
+ *     the bar is `carriesOversight`       -> MUT003_DOMINATOR_LOST, "delegate"  (now)
+ *
+ * And the half that must not move: the identical rejoin in the identical chain with an ordinary
+ * `function` in the delegation's place is still admitted, so this is the SET being widened and
+ * not the rule turning into "refuse every rejoin".
+ */
+test("A `subgraph` DOMINATOR IS OVERSIGHT TOO — the gate it carries is in its CHILD", () => {
+  const graft = {
+    addNodes: [
+      { id: n("lookup"), type: "function", reads: ["a1"], writes: ["x1"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec,
+    ],
+    addEdges: [
+      { id: e("m0"), from: n("a"), to: n("lookup"), kind: "seq" } as unknown as EdgeSpec,
+      { id: e("m1"), from: n("lookup"), to: n("c"), kind: "seq" } as unknown as EdgeSpec,
+    ],
+    proposedBy: "t1" as TaskId,
+    proposedByNode: n("a"),
+  };
+  const budget = { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } };
+
+  const r = compileMutation({
+    base: compileOrThrow({ spec: delegatingChain(), resolver: childResolver(), tools: { "notes.write": NOTE }, tenantCapabilities: CAPS }),
+    mutation: graft,
+    budget,
+    resolver: childResolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  const lost = r.diagnostics.find((d) => d.code === "MUT003_DOMINATOR_LOST");
+  assert.ok(lost !== undefined, `the graft around the delegation compiled: ${r.diagnostics.map((d) => d.code).join(", ") || "(none)"}`);
+  assert.match(lost.message, /\bdelegate\b/, "…and it is the delegation that was named");
+
+  // THE HALF THAT MUST NOT MOVE. The same chain with a plain `function` where the delegation was.
+  const plain = delegatingChain() as unknown as { nodes: { id: NodeId }[] };
+  plain.nodes[1] = {
+    id: n("delegate"),
+    type: "function",
+    reads: ["a1"],
+    writes: ["b1"],
+    function: { ref: "function/noop@stable", effects: [] },
+  } as unknown as { id: NodeId };
+  const ok = compileMutation({
+    base: compileOrThrow({ spec: plain as unknown as GraphSpec, resolver: childResolver(), tools: { "notes.write": NOTE }, tenantCapabilities: CAPS }),
+    mutation: graft,
+    budget,
+    resolver: childResolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  assert.equal(
+    ok.diagnostics.filter((d) => d.code === "MUT003_DOMINATOR_LOST").length,
+    0,
+    `the canonical expansion past an ordinary node was refused: ${ok.diagnostics.map((d) => d.message).join(" | ")}`,
+  );
+  assert.equal(ok.ok, true, `the expansion did not compile: ${ok.ok ? "" : ok.error.message}`);
+});

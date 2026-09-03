@@ -165,6 +165,33 @@ export interface EventPayloads {
      * a `PayloadRef` is scoped to the run that stored it.
      */
     readonly external?: Readonly<Record<string, PayloadRef>>;
+    /**
+     * Input channels that arrive ALREADY UNTRUSTED, and the only thing that carries taint
+     * across a delegation boundary.
+     *
+     * A `subgraph`'s child is a separate run with its own journal and its own `RunContext`, so
+     * `#contextFor` hands it an empty `ctx.tainted` and `sub.inputs` maps parent channels into
+     * it as ordinary run inputs. Bytes a parent tool fetched therefore arrived in the child
+     * looking exactly like a value a person typed, and the child's own guards — its
+     * `#fireEmptyJoin`, its E8 floor — were consulting a set that could not contain them. The
+     * same workflow FLATTENED into the parent gates; DELEGATED, it did not.
+     *
+     * WRITTEN HERE AND NOWHERE ELSE, because this is the only event a child's own fold can
+     * reach. `subgraph.started` is in the PARENT's journal, and the child rebuilds itself from
+     * its own; so a fact recorded there would be one a child restart cannot see, which is the
+     * failure class this codebase carries six of.
+     *
+     * ABSENT MEANS NOTHING WAS TAINTED, and that is exact rather than a guess. `Engine.submit`
+     * writes the key whenever the set is non-empty, so for any journal this binary wrote,
+     * absent and empty are the same statement. For a journal an OLDER binary wrote, absent is
+     * also what the original process acted on — it had no seed at all — so the fold reproduces
+     * that run rather than second-guessing it. Reading absent as "taint every input" would be
+     * the fail-closed shape this file usually prefers, and here it is the wrong one: it gates
+     * every pre-existing in-flight run at its first hard-to-undo node, including runs with no
+     * untrusted byte anywhere in them, which is the constant gate `applySecretFlow` and
+     * `applyControlTaint` both refuse in writing.
+     */
+    readonly taintedInputs?: readonly string[];
   };
   "run.compiled": {
     readonly graphHash: string;

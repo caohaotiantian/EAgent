@@ -40,6 +40,7 @@
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
+import { carriesOversight } from "./spec.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
 import { indexGraph, reachableToolNamesThrough, type Diagnostic, type GraphIndex } from "./validate.ts";
 import { isHardToUndo } from "../vocab.ts";
@@ -205,7 +206,7 @@ export function compileMutation(input: MutateInput): MutationResult {
   //
   // `b` protects nothing. Property 3 runs through `compileMutation` and a refused mutation fails
   // the task, so that is the most expensive thing this rule can get wrong. The predicate is
-  // therefore the oversight the lost dominator CARRIED, not the dominance: `isGate` below.
+  // therefore the oversight the lost dominator CARRIED, not the dominance: `carriesOversight`.
   //
   // AND THE PREDICATE IS THE NODE TYPE, NOT A POSTURE RANK, which is the same regression one
   // narrowing further out. Keyed on the COMPILED posture it refused the identical expansion in a
@@ -214,8 +215,11 @@ export function compileMutation(input: MutateInput): MutationResult {
   //
   //     a -> w -> c -> d, `w` a notes.write, add a -> lookup -> c  -> MUT003, lost dominator "w"
   //
-  // The admit test above used only plain `function` nodes, which is why that shipped. `isGate`
-  // carries the argument for why a gate is the only type another node's oversight can rest on.
+  // The admit test above used only plain `function` nodes, which is why that shipped.
+  // `carriesOversight` in `graph/spec.ts` carries the argument for which types another node's
+  // oversight can rest on, and it is the SAME function `Engine.#fireEmptyJoin` asks. That was
+  // one question with two answers: the narrower one here compiled a graft around a `subgraph`
+  // whose child held the only gate there was.
   //
   // DOMINANCE IS NECESSARY AND IT IS NOT SUFFICIENT, and this comment said "exactly while" until
   // the counterexample was driven. Static dominance is a claim about PATHS; whether the
@@ -256,7 +260,7 @@ export function compileMutation(input: MutateInput): MutationResult {
       if (was === undefined || now === undefined) continue;
       // ONLY A DOMINATOR THAT CARRIED OVERSIGHT. Losing one that did not is an ADDITIVE
       // ALTERNATIVE PATH, which is the shape a mutation exists for — see the section header.
-      const lost = [...was].filter((d) => !now.has(d)).find((d) => isGate(base, d));
+      const lost = [...was].filter((d) => !now.has(d)).find((d) => carriesOversight(base.spec.nodes.find((x) => x.id === d)));
       if (lost === undefined) continue;
       // The edge to NAME, and the order matters: a graft is a CHAIN of added edges, and every
       // one of them reaches the target. The edge worth pointing at is the one that crosses back
@@ -366,34 +370,6 @@ export function compileMutation(input: MutateInput): MutationResult {
     gatedNodes,
     addedNodes: mutation.addNodes.map((n) => n.id),
   };
-}
-
-/**
- * DOES THIS NODE CARRY OVERSIGHT SOMETHING ELSE DEPENDS ON — which is a question about its TYPE.
- *
- * `human_gate`, and nothing else. A gate is the only node whose whole purpose is that the run
- * STOPS until a person acts, so it is the only one another node's oversight can rest on by being
- * dominated by it. Every other node's oversight is about ITSELF: a `tool` at posture `in` raises
- * a gate for its OWN call, and a second path around it changes what the graph does rather than
- * who is watching what follows.
- *
- * THIS WAS A POSTURE RANK AND THE POSTURE WAS THE COMPILED ONE, which put `reversible_write` at
- * `on` through `CLASS_DEFAULT_POSTURE` and made every ordinary `fs.write` node an unremovable
- * dominator. Measured on a four-node chain with NO gate and NO irreversible action anywhere —
- * `a -> w -> c -> d`, `w` an ordinary `notes.write`, proposer `a`, one added node rejoining at
- * `c`, which is the canonical expansion §2b's header says the rule must admit:
- *
- *     the bar is the compiled posture -> MUT003_DOMINATOR_LOST, lost dominator "w"  (twice)
- *     the bar is the node type        -> ok
- *
- * The builder's admit test used only plain `function` nodes, which is why it passed. The refusal
- * this narrowing keeps is the one §2b was written for: a graft around an authored `human_gate`
- * is still refused, whatever the target's own posture — a target already at `in` raises its own
- * gate and would have compared EQUAL under the rank, which is the case the rank got wrong from
- * the other side.
- */
-function isGate(base: RunGraph, id: NodeId): boolean {
-  return base.spec.nodes.find((x) => x.id === id)?.type === "human_gate";
 }
 
 /**
