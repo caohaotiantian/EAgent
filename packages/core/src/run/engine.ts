@@ -1786,7 +1786,11 @@ export class Engine {
       // bytes is exact rather than an approximation — the channel NAME is the whole input.
       const written =
         ev.payload.external === undefined ? ev.payload.writes : { ...ev.payload.writes, ...ev.payload.external };
-      applyTaint(ctx.tainted, node, written);
+      // `ctx.controlTainted` is read here and WRITTEN four lines down, and the order is the
+      // point: what it holds at this line is what EARLIER commits put there, which is where a
+      // mark on this node can only have come from. The live path reads it at the same point of
+      // the same commit — `#recordEvidence` runs before `applyControlTaint` in `#commit`.
+      applyTaint(ctx.tainted, ctx.controlTainted, node, written);
       applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
       // The fan binding, folded after `applyTaint` and before the control-flow half exactly as
       // the live path folds it: the commit that TAKES a fanout edge is the commit that wrote the
@@ -7892,7 +7896,12 @@ export class Engine {
     // folded in `#commit` instead, because it keys on `take` and `take` is computed after this
     // method has already run. That makes this method no longer the only live site
     // `#restoreEvidence` has to mirror; both say so.
-    applyTaint(ctx.tainted, w.node, outcome.writes);
+    //
+    // `applyTaint` READS that map as well as being folded before it is written: a node whose own
+    // execution an attacker's choice selected writes the attacker's bytes. Running before
+    // `applyControlTaint` is what makes the map hold exactly the marks EARLIER commits left,
+    // which is the same thing the fold sees at the same point.
+    applyTaint(ctx.tainted, ctx.controlTainted, w.node, outcome.writes);
     applySecretFlow(ctx.carriesSecret, w.node, outcome.writes, ctx.graph.spec.channels);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
@@ -9092,19 +9101,52 @@ function applySecretFlow(
 /**
  * THE taint rule, and the only place it is written.
  *
- * Two ways a node's writes carry untrusted content, and the second was missing entirely:
- * the node fetched it (an external producer), or the node OBSERVED it and passed it on. With
- * only the first half, any node that is not a tool laundered taint away — a `function` node
+ * THREE ways a node's writes carry untrusted content, and each was missing in turn: the node
+ * FETCHED it (an external producer), the node OBSERVED it and passed it on, or the node RAN AT
+ * ALL only because an attacker's choice selected it.
+ *
+ * With only the first, any node that is not a tool laundered taint away — a `function` node
  * doing `clean = copy(notes)`, or an `agent` declaring `tools: []` and relaying its input, both
  * reproduced running an irreversible charge under a de-escalated ceiling with nothing raised.
  * Those are ordinary graph shapes: a normalizer, a summariser.
+ *
+ * WITH ONLY THE FIRST TWO, CONTROL FLOW NEVER BECAME DATA FLOW. `applyControlTaint` marks the
+ * nodes a tainted choice selected, and every consumer of that mark had to reach for the region
+ * itself — so each round added an evidence source to one call site to compensate for a
+ * propagation edge that did not exist. The sharpest shape needs no fan, no router special case
+ * and no width: the attacker picks WHICH of two CLEAN bodies writes the amount, and the charge
+ * reads it. One graph driven twice, same injected page, same human de-escalation to `on`:
+ *
+ *     the router reads the page        -> succeeded,     gates=0, charged=1   (before)
+ *     the router reads the page        -> awaiting_gate, gates=1, charged=0   (now)
+ *     the router reads the run's input -> succeeded,     gates=0, charged=1   (both)
+ *
+ * IT IS FOLD-SAFE BY POSITION, NOT BY ARGUMENT. `ctx.controlTainted` is populated by
+ * `applyControlTaint` at the DECIDING node's own commit, which is an EARLIER event than the
+ * commit of anything the decision selected — so `controlTainted.has(node.id)` is already
+ * answerable here. Both sites run the two in the same order on the same event: `#restoreEvidence`
+ * folds `applyTaint` then `applyControlTaint`, and `#commit` calls `#recordEvidence` (which is
+ * where this function runs) before the `applyControlTaint` line further down. A node marked by
+ * its own commit — the deciding node of a loop, which its own back-edge reaches — is marked
+ * before its NEXT commit at both sites, which is the same answer either way.
+ *
+ * THE RISK IS OVER-GATING AND THE ANSWER IS THE REGION, NOT THIS ARM. Marking the writes of
+ * everything in a tainted region is only as large as the region, so this arm was added AFTER
+ * `controlRegion` was made exact rather than before. Measured on the whole shape corpus in
+ * `test/run/control-flow-taint.test.ts` plus `examples/graphs`: no ordinary shape's column
+ * moved.
  *
  * Monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
  * running it live — which is what makes the rebuild at attach honest rather than approximate.
  * The cost is over-gating: a tainted channel later overwritten by trusted data stays tainted.
  * That is the fail-safe direction, and there is deliberately no declassification operator.
  */
-function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Record<string, unknown>>): void {
+function applyTaint(
+  tainted: Set<string>,
+  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
+  node: NodeSpec,
+  writes: Readonly<Record<string, unknown>>,
+): void {
   // `subgraph` counts as external, and deliberately over-approximates. A child runs under a
   // DIFFERENT `RunId` and therefore a different `RunContext` with its own taint set, so nothing
   // the child learned reaches the parent — a child that fetched untrusted text and mapped it out
@@ -9117,7 +9159,7 @@ function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Recor
   // The other direction needs no rule. Each run gets its own `PolicyEngine` (`#contextFor`), so
   // a parent's ceiling never reaches the child, and the child re-decides every node at full
   // strictness — an irreversible child node gates at `in` on its class whatever the parent did.
-  if (!isExternal(node) && !observedChannels(node).some((c) => tainted.has(c))) return;
+  if (!isExternal(node) && !controlTainted.has(node.id) && !observedChannels(node).some((c) => tainted.has(c))) return;
   for (const channel of Object.keys(writes)) tainted.add(channel);
 }
 

@@ -156,6 +156,21 @@
  *     and `choiceOf` drops error edges from the space, so an arm the producer PICKED sat on the
  *     subtraction side and took the irreversible action out of its own region.
  *
+ * ## AND TWO MORE, WHERE THE REGION WAS ALREADY RIGHT AND THE PROPAGATION WAS MISSING
+ *
+ * Every row above is about which nodes a choice selected. These two are about what happens NEXT:
+ * `applyTaint` had two sources of evidence — the node is EXTERNAL, or it READ a tainted channel —
+ * and no third for "this node ran only because a tainted choice selected it". So a node inside a
+ * correct region wrote channels that read as clean, and each round reached for the region again
+ * at one more call site instead. The arm is one clause in `applyTaint`; these are its two shapes:
+ *
+ *   - NO FAN AT ALL, which is the sharpest. The attacker picks WHICH of two CLEAN bodies writes
+ *     the amount and the charge reads it. No width, no router special case, nothing but the
+ *     missing arm.
+ *   - A FAN PLANNER THAT IS A RECONVERGENCE NODE, which has neither of `fanoutWidthEvidence`'s
+ *     two sources of its own: both arms reach it, so it is outside the region, and the list it
+ *     copies was written by a body reading only the run's own input.
+ *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
 
@@ -217,7 +232,9 @@ type Shape =
   | "armcond"
   | "errsupplied"
   | "routerall"
-  | "alsoseqbody";
+  | "alsoseqbody"
+  | "pickwriter"
+  | "fanplanner";
 
 interface Options {
   /**
@@ -299,7 +316,10 @@ function spec(o: Options): GraphSpec {
       // `item` is the fanout edge's `as` BINDING, never a channel any node writes. It is the
       // ordinary way a fan body sees its own element, and it is the read the two fanout shapes
       // below are about.
-      reads: o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["item"] : ["request"],
+      // `pickwriter`: the charge reads the channel WHOSE WRITER the attacker picked. Both
+      // writers are clean by data taint, and the charge reads nothing the fetch touched.
+      reads:
+        o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["item"] : o.shape === "pickwriter" ? ["note"] : ["request"],
       // `parts` in the fanout shapes because the charge runs once per branch, and
       // GRAPH010_CONCURRENT_WRITE refuses `replace` for a node that runs in parallel.
       writes:
@@ -310,7 +330,7 @@ function spec(o: Options): GraphSpec {
         o.shape === "fanoutnested"
           ? ["parts"]
           : ["receipt"],
-      tool: { name: "pay.charge", version: "1.0", args: { amount: 500 } },
+      tool: { name: "pay.charge", version: "1.0", args: o.shape === "pickwriter" ? { amount: "${note}" } : { amount: 500 } },
       unhandled: true,
     },
   ];
@@ -398,6 +418,23 @@ function spec(o: Options): GraphSpec {
     nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/bothseq@stable", effects: [] } });
     nodes.push({ id: "extra", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
     nodes.push({ id: "merge", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "pickwriter") {
+    // NO FAN, NO WIDTH, NO EDGE CONDITION READING ANYTHING UNTRUSTED. The router picks WHICH of
+    // two clean bodies writes `note`, and the charge reads `note`. `applyTaint` had two sources
+    // of evidence — the node is external, or it read a tainted channel — and neither fires for a
+    // node that ran only because a tainted choice selected it.
+    nodes.push({ id: "big", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/big@stable", effects: [] } });
+    nodes.push({ id: "small", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/small@stable", effects: [] } });
+  } else if (o.shape === "fanplanner") {
+    // THE FAN PLANNER IS A RECONVERGENCE NODE, so it has neither source of width evidence of its
+    // own: both router arms reach it, so it is outside the region, and the list it copies was
+    // written by a body that read only the run's input. What makes the width the attacker's is
+    // that the body which WROTE the list ran only because the injected page said so.
+    nodes.push({ id: "emptylist", type: "function", reads: ["request"], writes: ["items"], function: { ref: "function/empty@stable", effects: [] } });
+    nodes.push({ id: "fulllist", type: "function", reads: ["request"], writes: ["items"], function: { ref: "function/split@stable", effects: [] } });
+    nodes.push({ id: "plan", type: "function", reads: ["items"], writes: ["list"], function: { ref: "function/copy@stable", effects: [] } });
+    nodes.push({ id: "hold", type: "human_gate", reads: ["item"], humanGate: { ref: "oversight/hold@stable" } });
+    nodes.push({ id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["hold"], mode: "all", onBranchError: "skip" } });
   } else if (o.shape === "armcond") {
     // A ROUTER ARM THAT RECONVERGES, WITH ONE CONDITIONAL SIDE-TRIP ON IT. Both of the router's
     // arms reach `merge`, so the router's own region stops at `arm` and `extra` — the charge
@@ -577,6 +614,19 @@ function spec(o: Options): GraphSpec {
     edges.push({ id: "toSink", from: "decide", to: "merge", kind: "seq" });
     edges.push({ id: "extraToMerge", from: "extra", to: "merge", kind: "seq" });
     edges.push({ id: "mergeToCharge", from: "merge", to: "charge", kind: "seq" });
+  } else if (o.shape === "pickwriter") {
+    edges.push({ id: "toChosen", from: "route", to: "big", kind: "seq" });
+    edges.push({ id: "toOther", from: "route", to: "small", kind: "seq" });
+    edges.push({ id: "bigToCharge", from: "big", to: "charge", kind: "seq" });
+    edges.push({ id: "smallToCharge", from: "small", to: "charge", kind: "seq" });
+  } else if (o.shape === "fanplanner") {
+    edges.push({ id: "toChosen", from: "route", to: "emptylist", kind: "seq" });
+    edges.push({ id: "toOther", from: "route", to: "fulllist", kind: "seq" });
+    edges.push({ id: "emptyToPlan", from: "emptylist", to: "plan", kind: "seq" });
+    edges.push({ id: "fullToPlan", from: "fulllist", to: "plan", kind: "seq" });
+    edges.push({ id: "fan", from: "plan", to: "hold", kind: "fanout", over: "list", as: "item", maxWidth: 4 });
+    edges.push({ id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] });
+    edges.push({ id: "jToCharge", from: "j", to: "charge", kind: "seq" });
   } else if (o.shape === "armcond") {
     edges.push({ id: "toChosen", from: "route", to: "arm", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "merge", kind: "seq" });
@@ -754,6 +804,8 @@ function spec(o: Options): GraphSpec {
       // per-branch binding the edge's `as` names.
       items: { type: "array", reduce: "replace" },
       item: { type: "string", reduce: "replace" },
+      // `fanplanner` only: the copy the reconvergence node fans over.
+      list: { type: "array", reduce: "replace" },
       parts: { type: "array", reduce: "append_ordered" },
       // `fanoutnested` only: one seed list and one binding per depth.
       outerSeed: { type: "array", reduce: "replace" },
@@ -853,6 +905,12 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   // `alsoseqbody`'s deciding node: the ordinary "always continue to my sink, and also branch"
   // body, with the sink edge inside the producer-supplied take.
   functions.register("function/bothseq@stable", () => ({ writes: { note: "decided" }, take: ["toSink", "toChosen"] }));
+  // `pickwriter`'s two CLEAN writers. Neither reads anything the fetch touched; the only thing
+  // the injected page decides is which of them runs.
+  functions.register("function/big@stable", () => ({ writes: { note: "9999.00" } }));
+  functions.register("function/small@stable", () => ({ writes: { note: "1.00" } }));
+  // `fanplanner`'s reconvergence node: it copies whichever list ran into the channel it fans over.
+  functions.register("function/copy@stable", (view) => ({ writes: { list: (view.get("items") as unknown[]) ?? [] } }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
     return { writes: { note: "decided" }, take: [text.includes("PAY") ? "toChosen" : "toOther"] };
@@ -1761,6 +1819,58 @@ test("CONTINUE AND BRANCH, WITH THE PRODUCER NAMING BOTH — the sink is still n
   assert.equal(dirty.charged, 1);
 
   const clean = await drive({ shape: "alsoseqbody", branchOn: "request" });
+  assert.equal(clean.status, "succeeded");
+  assert.equal(clean.gates, 0);
+  assert.equal(clean.charged, 1);
+});
+
+/**
+ * NO FAN, NO WIDTH, NO ROUTER SPECIAL CASE — the arm `applyTaint` did not have.
+ *
+ * `applyTaint` opened with two sources of evidence: the node is EXTERNAL, or it READ a tainted
+ * channel. There was no third for "this node ran only because a tainted choice selected it", so a
+ * node inside a tainted control region wrote channels that read as perfectly clean and every
+ * guard consulting `ctx.tainted` consulted a set missing them. The attacker picks WHICH of two
+ * clean bodies writes the amount, and the charge reads it:
+ *
+ *     the router reads the page       -> succeeded,     gates=0, charged=1   (before)
+ *     the router reads the page       -> awaiting_gate, gates=1, charged=0   (now)
+ *     the router reads the run's input-> succeeded,     gates=0, charged=1   (both)
+ */
+test("A NODE THAT RAN ONLY BECAUSE A TAINTED CHOICE SELECTED IT WRITES THE ATTACKER'S BYTES", async () => {
+  const dirty = await drive({ shape: "pickwriter", branchOn: "untrusted" });
+  assert.equal(dirty.status, "awaiting_gate");
+  assert.equal(dirty.gates, 1);
+  assert.equal(dirty.charged, 0);
+
+  const clean = await drive({ shape: "pickwriter", branchOn: "request" });
+  assert.equal(clean.status, "succeeded");
+  assert.equal(clean.gates, 0);
+  assert.equal(clean.charged, 1);
+});
+
+/**
+ * A FAN PLANNER THAT IS A RECONVERGENCE NODE HAS NEITHER SOURCE OF WIDTH EVIDENCE OF ITS OWN.
+ *
+ * `fanoutWidthEvidence` asks two questions: is the planning node itself in an earlier tainted
+ * choice's region, and is the LIST tainted. Both answer no here — both router arms reach `plan`,
+ * so it is outside the region, and the two list builders read only the run's own input. What
+ * makes the width the attacker's is that the builder which ran was selected by the injected page,
+ * and only the control-to-data arm carries that into `items` and on into the channel the fan is
+ * taken over. The fan body holds the run's only `human_gate`, and E12 is what refuses to delete
+ * it at width 0.
+ *
+ *     the router reads the page        -> succeeded,     gates=0, charged=1   (before)
+ *     the router reads the page        -> awaiting_gate, gates=1, charged=0   (now)
+ *     the router reads the run's input -> succeeded,     gates=0, charged=1   (both)
+ */
+test("A FAN PLANNER BELOW A RECONVERGENCE STILL FANS AT THE ATTACKER'S WIDTH", async () => {
+  const dirty = await drive({ shape: "fanplanner", branchOn: "untrusted" });
+  assert.equal(dirty.status, "awaiting_gate");
+  assert.equal(dirty.gates, 1);
+  assert.equal(dirty.charged, 0);
+
+  const clean = await drive({ shape: "fanplanner", branchOn: "request" });
   assert.equal(clean.status, "succeeded");
   assert.equal(clean.gates, 0);
   assert.equal(clean.charged, 1);
