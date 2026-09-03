@@ -205,10 +205,13 @@ export class AnthropicAdapter implements ModelAdapter {
     // is `AgentOptions.budgetUsd`'s "an agent loop with no ceiling is the classic incident".
     // An estimate that is roughly right refuses eventually; a zero never does.
     //
-    // The same two lines and the same estimators as `OpenAIAdapter` — which imports `roughTokens`
+    // The same two lines and the same estimators as `OpenAIAdapter` — which imports both of them
     // from THIS file — so the two adapters cannot answer a missing usage frame differently.
     // Reported numbers still win: these only run when the counter is still at its initial 0.
-    if (outputTokens === 0) outputTokens = Math.max(1, Math.ceil(text.length / 4));
+    //
+    // `producedTokens` AND NOT `text.length`, because on this turn `text` is usually "": see
+    // that function for the measurement of what the text-only floor charged for a tool call.
+    if (outputTokens === 0) outputTokens = producedTokens(text, toolCalls);
     if (inputTokens === 0) inputTokens = roughTokens(req);
 
     const usage: UsageRecord = {
@@ -351,6 +354,29 @@ export function roughTokens(req: ModelRequest): number {
   let chars = req.system.length;
   for (const m of req.messages) chars += m.content.length;
   for (const t of req.tools) chars += t.name.length + t.description.length + JSON.stringify(t.parameters).length;
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/**
+ * The OUTPUT floor's estimator: everything the turn produced, not only its prose.
+ *
+ * The floor was `Math.ceil(text.length / 4)`, and `text` is EMPTY on a `tool_use` turn — the
+ * shape an agent loop mostly takes, because the model's whole answer is a tool call. So a
+ * gateway that sends no usage frame was charged `Math.max(1, 0)` = ONE output token for a
+ * complete tool call of any size, which is the same $0-priced turn the floor exists to stop,
+ * surviving in the majority case. The estimate has to read the tool calls too.
+ *
+ * `name` and the SERIALISED arguments, and the id with them: all three came down the wire as
+ * generated tokens. Two honest limits, stated rather than papered over — `safeJson` has already
+ * replaced an unparseable argument fragment with `{}`, so a truncated call is under-estimated;
+ * and re-serialising with `JSON.stringify` is not the provider's own whitespace. Both are
+ * bounded errors in an estimate whose job is only to be non-zero and roughly right, which is
+ * the argument the floor itself rests on: "an estimate that is roughly right refuses eventually;
+ * a zero never does."
+ */
+export function producedTokens(text: string, toolCalls: readonly ModelToolCall[]): number {
+  let chars = text.length;
+  for (const c of toolCalls) chars += c.id.length + c.name.length + JSON.stringify(c.arguments).length;
   return Math.max(1, Math.ceil(chars / 4));
 }
 

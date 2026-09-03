@@ -10,6 +10,12 @@
  *
  * `OpenAIAdapter` floors both, twenty lines away in the sibling file, and imports `roughTokens`
  * from this one. The sweep covered one adapter of two.
+ *
+ * AND THE FLOOR ITSELF THEN COVERED ONE TURN SHAPE OF TWO. It read `text.length`, and `text` is
+ * EMPTY on a `tool_use` turn — the shape an agent loop mostly takes, because the model's whole
+ * answer is the call. So `Math.max(1, 0)` charged ONE output token for a complete tool call of
+ * any size, which is the same $0-priced turn in the majority case, arrived at by a fix that only
+ * ever measured a prose answer. The last four tests here are that second shape.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -106,4 +112,82 @@ test("an EMPTY completed turn is charged for its input, and one output token", a
   const d = await done(a.stream(REQ, ac()));
   assert.equal(d.usage.outputTokens, 1);
   assert.ok(d.usage.inputTokens > 0);
+});
+
+// ── the shape an agent loop actually takes ───────────────────────────────────
+
+/** A large tool call and no prose: `fs.write` with a body, which is what an agent turn is. */
+const TOOL_ARGS = { path: "docs/report.md", body: "# Report\n\n".concat("finding ".repeat(120)) };
+const TOOL_JSON = JSON.stringify(TOOL_ARGS);
+
+const TOOL_ONLY = [
+  `event: message_start\ndata: {"type":"message_start","message":{}}`,
+  `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"fs.write"}}`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(TOOL_JSON)}}}`,
+  `event: content_block_stop\ndata: {"type":"content_block_stop","index":0}`,
+  `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+  `event: message_stop\ndata: {"type":"message_stop"}`,
+];
+
+test("a TOOL-ONLY turn is charged for the call it produced, not for its empty text", async () => {
+  const a = new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(TOOL_ONLY), prices: { "claude-sonnet-5": { input: 3, output: 15 } } });
+  const d = await done(a.stream(REQ, ac()));
+  assert.equal(d.finishReason, "tool_use", "the turn completed with a call — this is not an error path");
+  assert.equal(d.message.toolCalls?.length, 1);
+  // The defect, stated as a number: `text` is "" here, so the text-only floor charged exactly 1.
+  assert.ok(
+    d.usage.outputTokens > 100,
+    `a ${TOOL_JSON.length}-character tool call must not be one output token, got ${d.usage.outputTokens}`,
+  );
+  assert.ok(d.usage.costUsd > 0);
+});
+
+test("...and OpenAIAdapter charges the same turn the same way", async () => {
+  const o = new OpenAIAdapter({
+    apiKey: "k",
+    fetch: async () =>
+      new Response(
+        `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"toolu_01ABC","function":{"name":"fs.write","arguments":${JSON.stringify(TOOL_JSON)}}}]},"finish_reason":null}]}\n\n` +
+          `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  const od = await done(o.stream({ ...REQ, model: "gpt-5" }, ac()));
+  const a = new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(TOOL_ONLY) });
+  const ad = await done(a.stream(REQ, ac()));
+  assert.equal(od.finishReason, "tool_use");
+  assert.equal(
+    od.usage.outputTokens,
+    ad.usage.outputTokens,
+    "the two adapters must not answer a missing usage frame differently — they share the estimator",
+  );
+});
+
+test("a MIXED turn counts both the prose and the call", async () => {
+  const mixed = [
+    `event: message_start\ndata: {"type":"message_start","message":{}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(ANSWER)}}}`,
+    `event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"fs.write"}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(TOOL_JSON)}}}`,
+    `event: content_block_stop\ndata: {"type":"content_block_stop","index":1}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const textOnly = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(NO_USAGE) }).stream(REQ, ac()));
+  const toolOnly = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(TOOL_ONLY) }).stream(REQ, ac()));
+  const both = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(mixed) }).stream(REQ, ac()));
+  assert.ok(
+    both.usage.outputTokens > textOnly.usage.outputTokens && both.usage.outputTokens > toolOnly.usage.outputTokens,
+    `${both.usage.outputTokens} must exceed both ${textOnly.usage.outputTokens} and ${toolOnly.usage.outputTokens}`,
+  );
+});
+
+test("...and a REPORTED usage still wins on a tool turn too", async () => {
+  const reported = [
+    ...TOOL_ONLY.slice(0, 4),
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(reported) }).stream(REQ, ac()));
+  assert.equal(d.usage.outputTokens, 7, "the estimate must only run when the counter is still at its initial 0");
 });
