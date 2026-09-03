@@ -197,6 +197,20 @@ export class AnthropicAdapter implements ModelAdapter {
       });
     }
 
+    // FLOORED, BECAUSE "THE PROVIDER DID NOT SAY" IS NOT "IT COST NOTHING". Both counters start
+    // at 0 and only a usage frame moves them, so a stream carrying none — an Anthropic-wire
+    // gateway behind `baseUrl`, which is what that option is for — priced a real answer at $0.
+    // Zero is the PASSING value for every budget guard downstream: `budget.runUsd`, the per-node
+    // `budget.costUsd`, `budget.tokens` and the E2/E3 escalations all stop binding at once, which
+    // is `AgentOptions.budgetUsd`'s "an agent loop with no ceiling is the classic incident".
+    // An estimate that is roughly right refuses eventually; a zero never does.
+    //
+    // The same two lines and the same estimators as `OpenAIAdapter` — which imports `roughTokens`
+    // from THIS file — so the two adapters cannot answer a missing usage frame differently.
+    // Reported numbers still win: these only run when the counter is still at its initial 0.
+    if (outputTokens === 0) outputTokens = Math.max(1, Math.ceil(text.length / 4));
+    if (inputTokens === 0) inputTokens = roughTokens(req);
+
     const usage: UsageRecord = {
       inputTokens,
       outputTokens,
