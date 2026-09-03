@@ -70,6 +70,10 @@ export class OpenAIAdapter implements ModelAdapter {
     let finishReason: FinishReason = "stop";
     let inputTokens = 0;
     let outputTokens = 0;
+    // See `AnthropicAdapter.stream`: both counters start at 0, so "the provider did not say"
+    // and "the provider said zero" are the same bytes until something else remembers which.
+    let sawInputUsage = false;
+    let sawOutputUsage = false;
 
     try {
       for await (const frame of modelFrames(res, signal)) {
@@ -92,8 +96,16 @@ export class OpenAIAdapter implements ModelAdapter {
         }
         if (choice?.finish_reason != null) finishReason = mapFinish(choice.finish_reason);
         if (chunk.usage != null) {
-          inputTokens = chunk.usage.prompt_tokens ?? inputTokens;
-          outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+          const inp = wireCount(chunk.usage.prompt_tokens);
+          if (inp !== undefined) {
+            inputTokens = inp;
+            sawInputUsage = true;
+          }
+          const out = wireCount(chunk.usage.completion_tokens);
+          if (out !== undefined) {
+            outputTokens = out;
+            sawOutputUsage = true;
+          }
         }
       }
     } catch (e) {
@@ -108,9 +120,13 @@ export class OpenAIAdapter implements ModelAdapter {
     // `anthropic.ts` rather than copied so the two adapters cannot answer a missing usage frame
     // differently — an OpenAI-wire gateway behind `baseUrl` is exactly as likely to send none.
     // `text` is EMPTY on a `tool_use` turn, so a text-only floor charged one output token for a
-    // whole tool call; `producedTokens` reads the calls too. Reported numbers still win.
-    if (outputTokens === 0) outputTokens = producedTokens(text, toolCalls);
-    if (inputTokens === 0) inputTokens = roughTokens(req);
+    // whole tool call; `producedTokens` reads the calls too.
+    //
+    // GATED ON "WAS A USAGE FRAME SEEN", NOT ON `=== 0` — see `AnthropicAdapter.stream` for the
+    // measurement. A reported zero is a fact about the turn, and overwriting it with an estimate
+    // is the floor charging for a prompt the provider has already said it did not bill.
+    if (!sawOutputUsage) outputTokens = producedTokens(text, toolCalls);
+    if (!sawInputUsage) inputTokens = roughTokens(req);
 
     const usage: UsageRecord = {
       inputTokens,
@@ -141,7 +157,13 @@ export class OpenAIAdapter implements ModelAdapter {
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
     const p = this.#opts.prices?.[model] ?? DEFAULT_PRICES[model];
     if (p === undefined) return 0;
-    return round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
+    const cost = round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
+    // See `AnthropicAdapter.priceOf`: a cost that is not a non-negative number is refused
+    // rather than handed to a budget that would then stop binding.
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `price table for ${model} produced a cost that is not a non-negative number`);
+    }
+    return cost;
   }
 
   /**
@@ -232,6 +254,19 @@ function safeJson(text: string): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * A token count off the wire, or `undefined` if the remote party did not send one this adapter
+ * can bill from — the twin of `wireCount` in `anthropic.ts`, where the reasoning is written out.
+ *
+ * DUPLICATED RATHER THAN IMPORTED: `index.ts` re-exports both adapters with `export *`, so
+ * exporting it from there would widen the pinned public surface for a four-line predicate. The
+ * property that matters — the two adapters answer the same malformed frame the same way — is
+ * held by a test that drives both, not by the import.
+ */
+function wireCount(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
 interface OpenAIChunk {
   choices?: {
     delta?: {
@@ -240,5 +275,7 @@ interface OpenAIChunk {
     };
     finish_reason?: string | null;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number } | null;
+  // `unknown` AND NOT `number`: this is `JSON.parse` output, so the annotation would be a claim
+  // about bytes a remote party wrote. `wireCount` is what actually decides.
+  usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null;
 }

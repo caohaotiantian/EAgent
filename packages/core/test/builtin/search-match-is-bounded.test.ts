@@ -81,17 +81,25 @@ test("the STALL is bounded by the budget, not by the pattern", async () => {
   }
 });
 
-test("fs.glob is bounded too — a `**​/`-heavy glob is the same defect", async () => {
-  const deep = `${Array.from({ length: 30 }, (_, i) => `seg${String(i)}`).join("/")}/x`;
+test("fs.glob is bounded too — a `**\u200b/`-heavy glob is the same defect", async () => {
+  // THE DEEP PATH IS CREATED, and that is the whole test. The `**/`-repeated regex backtracks on
+  // the SEGMENTS of the path it is matched against, so against `a.txt` — one segment — it settles
+  // in ~1.5 ms whether or not any bound exists. Building the 30-segment path and never writing it
+  // measured the bound against a workspace that could not exercise it.
+  const deep = Array.from({ length: 30 }, (_, i) => `seg${String(i)}`).join("/");
   const s = ws({ "a.txt": "x" });
   try {
+    mkdirSync(join(s.root, deep), { recursive: true });
+    writeFileSync(join(s.root, deep, "x.txt"), "x", "utf8");
     const started = Date.now();
     const r = (await toolOf(s.root, "fs.glob").execute({ pattern: `${"**/".repeat(14)}zz` }, ctx())) as ToolResult;
     const elapsed = Date.now() - started;
-    assert.ok(elapsed < 20_000, `fs.glob must not block the event loop; took ${String(elapsed)} ms (path shape: ${deep})`);
-    // With only short paths in the workspace this may legitimately complete; what must never
-    // happen is an unbounded stall. If it did refuse, the refusal must be a refusal.
-    if (r.isError === true) assert.match(r.content, /too expensive|budget/i);
+    // Absolute, with an order-of-magnitude margin over the 2 s budget — never a ratio of two
+    // timings. Unbounded, this path takes 30,907 ms on the machine this was written on; one
+    // reviewer watched it still running at 90 s.
+    assert.ok(elapsed < 20_000, `fs.glob must not block the event loop; took ${String(elapsed)} ms`);
+    assert.equal(r.isError, true, "an unmatchable `**/`-heavy glob over a deep path must be REFUSED, not answered late");
+    assert.match(r.content, /too expensive|budget/i);
   } finally {
     s.cleanup();
   }

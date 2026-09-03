@@ -134,13 +134,25 @@ test("task.committed taking an inherited key is NOT an edge, and fabricates no v
 test("...and an edgeSource value that is not a string is `no source`, not a comparison", () => {
   // `edgeSource` is a `Record<string, string>` by TYPE only; it is assembled from a compiled
   // graph by a caller `auditRun` does not control.
+  //
+  // `null` AND NOT `undefined`, because `undefined` is the one non-string the old guard already
+  // handled — it read `if (from === undefined) continue`, so a test using it passes whether or
+  // not the `typeof from !== "string"` half exists and pins nothing. `null` is what a graph
+  // serialised through JSON produces for an absent source, and against it the old guard compared
+  // `null !== "n1"` and manufactured a violation naming `null` as the node the edge leaves.
   const evs = fixture(() => [
     ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "n1@root#0" }),
     ev("task.committed", { status: "succeeded", writes: {}, take: ["e1"], attempt: 1, usage: {} }, { taskId: "n1@root#0" }),
     DONE(),
   ]);
-  const r = auditRun(evs, { edgeSource: { e1: undefined } as unknown as Record<string, string> });
-  assert.deepEqual(r.violations.map((v) => v.rule), []);
+  for (const value of [null, undefined, 7, {}]) {
+    const r = auditRun(evs, { edgeSource: { e1: value } as unknown as Record<string, string> });
+    assert.deepEqual(
+      r.violations.map((v) => v.rule),
+      [],
+      `edgeSource.e1 = ${JSON.stringify(value) ?? "undefined"} is no source, so there is nothing to compare — got ${JSON.stringify(r.violations.map((v) => v.detail))}`,
+    );
+  }
 });
 
 test("the ORDINARY edge arms are unchanged — a real bypass is still reported", () => {

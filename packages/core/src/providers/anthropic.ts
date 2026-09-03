@@ -99,6 +99,11 @@ export class AnthropicAdapter implements ModelAdapter {
     let outputTokens = 0;
     let cacheReadTokens: number | undefined;
     let cacheWriteTokens: number | undefined;
+    // "THE PROVIDER DID NOT SAY" AND "THE PROVIDER SAID ZERO" ARE DIFFERENT FACTS, and the
+    // counters cannot tell them apart on their own because both start at 0. These two can.
+    // See the floor below for what conflating them charged.
+    let sawInputUsage = false;
+    let sawOutputUsage = false;
     // The provider's own statement that this message is over. See the docstring's third
     // point: without it, "the model stopped" and "the socket did" are the same bytes.
     let closed = false;
@@ -112,9 +117,24 @@ export class AnthropicAdapter implements ModelAdapter {
           case "message_start": {
             const u = ev.message?.usage;
             if (u !== undefined) {
-              inputTokens = u.input_tokens ?? 0;
-              if (u.cache_read_input_tokens !== undefined) cacheReadTokens = u.cache_read_input_tokens;
-              if (u.cache_creation_input_tokens !== undefined) cacheWriteTokens = u.cache_creation_input_tokens;
+              // Any of the three is the provider reporting its input accounting: a full cache
+              // hit reports `input_tokens: 0` next to a large `cache_read_input_tokens`, and
+              // that turn's input really was zero at the uncached rate.
+              const inp = wireCount(u.input_tokens);
+              if (inp !== undefined) {
+                inputTokens = inp;
+                sawInputUsage = true;
+              }
+              const cr = wireCount(u.cache_read_input_tokens);
+              if (cr !== undefined) {
+                cacheReadTokens = cr;
+                sawInputUsage = true;
+              }
+              const cw = wireCount(u.cache_creation_input_tokens);
+              if (cw !== undefined) {
+                cacheWriteTokens = cw;
+                sawInputUsage = true;
+              }
             }
             break;
           }
@@ -152,7 +172,11 @@ export class AnthropicAdapter implements ModelAdapter {
               finishReason = mapStop(ev.delta.stop_reason);
               closed = true;
             }
-            if (ev.usage?.output_tokens !== undefined) outputTokens = ev.usage.output_tokens;
+            const out = wireCount(ev.usage?.output_tokens);
+            if (out !== undefined) {
+              outputTokens = out;
+              sawOutputUsage = true;
+            }
             break;
           }
           case "message_stop": {
@@ -207,12 +231,21 @@ export class AnthropicAdapter implements ModelAdapter {
     //
     // The same two lines and the same estimators as `OpenAIAdapter` — which imports both of them
     // from THIS file — so the two adapters cannot answer a missing usage frame differently.
-    // Reported numbers still win: these only run when the counter is still at its initial 0.
     //
     // `producedTokens` AND NOT `text.length`, because on this turn `text` is usually "": see
     // that function for the measurement of what the text-only floor charged for a tool call.
-    if (outputTokens === 0) outputTokens = producedTokens(text, toolCalls);
-    if (inputTokens === 0) inputTokens = roughTokens(req);
+    //
+    // GATED ON "WAS A USAGE FRAME SEEN", NOT ON `=== 0`, because the counter's initial value and
+    // a reported zero are the same bytes and are opposite facts. `=== 0` broke the docstring's
+    // own rule that reported numbers win, in the one case the floor was written for: a full
+    // cache hit sends `{"input_tokens":0,"cache_read_input_tokens":20000}` — an honest zero,
+    // because every one of those tokens was billed at the cache-read rate — and the floor
+    // rewrote it to the whole prompt at the full uncached rate. Measured on a 20,000-token
+    // prompt priced $3/$15/$0.30: $0.006105 became $0.066111, a 10.8x over-charge on the
+    // cheapest turn shape there is. The same held for a genuinely empty answer reporting
+    // `output_tokens: 0`.
+    if (!sawOutputUsage) outputTokens = producedTokens(text, toolCalls);
+    if (!sawInputUsage) inputTokens = roughTokens(req);
 
     const usage: UsageRecord = {
       inputTokens,
@@ -262,12 +295,22 @@ export class AnthropicAdapter implements ModelAdapter {
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number {
     const p = this.#opts.prices?.[model] ?? DEFAULT_PRICES[model];
     if (p === undefined) return 0;
-    return round6(
+    const cost = round6(
       (usage.inputTokens / 1e6) * p.input +
         (usage.outputTokens / 1e6) * p.output +
         ((usage.cacheReadTokens ?? 0) / 1e6) * (p.cacheRead ?? p.input) +
         ((usage.cacheWriteTokens ?? 0) / 1e6) * (p.cacheWrite ?? p.input),
     );
+    // A PRICE THIS FUNCTION CANNOT COMPUTE IS REFUSED, NOT RETURNED. `wireCount` bounds the
+    // usage side; this bounds the OTHER input, the operator's own `prices` row, which is
+    // ordinary JSON and can carry a NaN or a negative. Either one poisons `PolicyEngine`'s
+    // running total for the life of the run — NaN by making every later comparison false, a
+    // negative by crediting the budget — and neither is a number a ledger may hold. Returning
+    // 0 here would be the same loosening in a quieter form.
+    if (!Number.isFinite(cost) || cost < 0) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `price table for ${model} produced a cost that is not a non-negative number`);
+    }
+    return cost;
   }
 
   /**
@@ -384,14 +427,43 @@ export function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
 }
 
+/**
+ * A token count off the wire, or `undefined` if the remote party did not send one this
+ * adapter can bill from.
+ *
+ * `UsageRecord` is typed `number`, but its values come out of `JSON.parse` on bytes a remote
+ * party wrote, and a type annotation stops nothing at runtime. An `{"output_tokens":"abc"}`
+ * frame made `costUsd` NaN, and NaN is the value that DISABLES a budget rather than tripping
+ * it: `PolicyEngine` accumulates it into `#spentUsd`, every later `committed > limit` is
+ * `NaN > limit` = false, and the run's ceiling is gone for the rest of its life. `-5` is the
+ * same defect with the sign flipped — it CREDITS the budget.
+ *
+ * So a value that is not a finite, non-negative number counts as NOT REPORTED, and the floor
+ * below charges the estimate instead. That is the conservative answer of the two available:
+ * failing the whole turn would throw away a completed answer over an accounting field and hand
+ * the retry ladder a licence to buy it a second time, while the estimate is a number that
+ * refuses eventually. What this function guarantees is the part that matters — no arithmetic
+ * downstream of it can produce a NaN out of a value the provider wrote.
+ *
+ * NOT EXPORTED, AND DUPLICATED IN `openai.ts` rather than shared, because `index.ts` re-exports
+ * both adapters with `export *` and every name here lands on the pinned public surface. The
+ * property the sharing was protecting — that the two adapters answer the same malformed frame
+ * the same way — is held by a test that drives both of them, not by the import.
+ */
+function wireCount(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
 // ---------------------------------------------------------------------------
 
 interface AnthropicEvent {
   type: string;
   index?: number;
-  message?: { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
+  // `unknown` AND NOT `number`: these are `JSON.parse` output, so the annotation would be a
+  // claim about bytes a remote party wrote. `wireCount` is what actually decides.
+  message?: { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } };
   content_block?: { type?: string; id?: string; name?: string };
   delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
-  usage?: { output_tokens?: number };
+  usage?: { output_tokens?: unknown };
   error?: { message?: string };
 }
