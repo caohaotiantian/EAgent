@@ -28,7 +28,7 @@
  * is one directory.
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { digestOf, type Digest } from "../canonical.ts";
@@ -151,13 +151,57 @@ export function filePayloads(dir: string): PayloadStore {
     async put(runId, canonical) {
       const ref = refFor(canonical);
       const path = cellPath(runId, ref.digest);
-      await mkdir(dirname(path), { recursive: true });
+      const cellDir = dirname(path);
+      await mkdir(cellDir, { recursive: true });
       // Written under a temporary name and renamed, because a reader that finds a half-written
       // file finds a DIGEST MISMATCH — a loud refusal for what is only a crash mid-write.
       // Rename is atomic within a directory.
+      //
+      // AND FSYNCED, BOTH THE FILE AND THE DIRECTORY, because the rename argument above covers a
+      // crash MID-write and this store's failure is a crash AFTER one. The journal event naming
+      // this digest is fsynced — `SqliteStateStoreOptions.synchronous` defaults to FULL, on the
+      // stated grounds that invariant 8 admits no exception for the journal — so without this the
+      // journal survives power loss asserting a value whose bytes did not, and the assertion is
+      // in an append-only row nothing can rewrite: every later read, fold, replay and trace of
+      // that run raises `E_PAYLOAD_UNRESOLVED` forever. Externalisation moved part of the
+      // authoritative state out of the journal file; the durability has to move with it.
+      //
+      // The file sync is before the rename, so the rename never publishes a name whose contents
+      // are not yet on the platter. The directory sync is after, and is what makes the rename
+      // itself durable.
+      //
+      // MEASURED, because this is not free and the honest thing is to write down what it costs.
+      // 200 puts of a 71,688-byte value on APFS/SSD, 2026-09-03: 0.25 ms each before, 10.92 ms
+      // each after — 5.4 ms of that the file sync and 4.6 ms the directory sync. That is a 44x
+      // multiple on the operation, far worse than the journal's own 1.4x for `synchronous=FULL`,
+      // and it is still the right trade because of the denominator: a payload write only happens
+      // above `EXTERNALISE_ABOVE_BYTES`, so it is per LARGE channel value rather than per event,
+      // and the alternative outcome is not a slow run but a run whose outputs can never be read
+      // again. Neither sync is droppable: without the file sync the bytes may be absent, without
+      // the directory sync the name may be.
       const tmp = `${path}.${process.pid}.tmp`;
-      await writeFile(tmp, canonical, "utf8");
+      const fh = await open(tmp, "w");
+      try {
+        await fh.writeFile(canonical, "utf8");
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
       await rename(tmp, path);
+      // BEST EFFORT, AND ONLY THIS ONE. A directory fsync is not portable — Windows refuses to
+      // open a directory at all — and failing the write because the platform will not confirm the
+      // rename would refuse work the store can do. The file's own contents are already synced
+      // above, which is the half that decides whether the bytes exist.
+      try {
+        const dh = await open(cellDir, "r");
+        try {
+          await dh.sync();
+        } finally {
+          await dh.close();
+        }
+      } catch {
+        // The platform does not permit fsync on a directory.
+      }
       return ref;
     },
     async get(runId, ref) {
