@@ -4659,9 +4659,16 @@ export async function runClockTick(
     //
     // SO THE DEADLINE IS NOT TESTED HERE. It is the scheduler's question, asked with the
     // `#handedOut` set this file cannot see; duplicating it would be a second spelling of one
-    // predicate, which is how `#immediateReduce` and `#foldJoin` came to disagree. The cost of
-    // being wrong is one extra fold per tick per stranded run, and the sweep above already pays
-    // a fold per run in view.
+    // predicate, which is how `#immediateReduce` and `#foldJoin` came to disagree.
+    //
+    // AND THE COST OF BEING WRONG IS A WHOLE-WORKSPACE COMPILE PER TICK, not the "one extra
+    // fold" this comment first claimed. A run that is due and cannot progress reaches
+    // `graphsByHash` below every time — measured on 31 published graphs, 2.0-2.3 ms per tick
+    // against 0.1-0.4 ms before, forever, and it scales with the WORKSPACE rather than with the
+    // stranded run. It bites two shapes: a run whose graph hash no longer resolves, and one
+    // whose leased node is a `join`, `router`, `human_gate` or `subgraph`, the four the
+    // scheduler will not adjudicate. TODO.md §A0.12 has the measurement and why both cheap
+    // fixes are wrong.
     const due = Object.values(p.tasks).some(
       (t) => (t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now)) || t.state === "leased",
     );

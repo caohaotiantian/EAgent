@@ -964,6 +964,22 @@ function commandActor(auth: AuthContext | undefined): CommandActor {
  * open-plane caller resolves to the same `UNIDENTIFIED_SUBJECT`. One helper, both doors,
  * so the next writer cannot get half of it.
  */
+/**
+ * The decision half of a gate's default idempotency key, with the caller's own malformed body
+ * reported as the caller's.
+ *
+ * `canonicalize` is what makes one decision one key however its sender spelled it, and it
+ * refuses what it cannot order — a `CanonicalizationError`, which is not a `LoomError`, so the
+ * route reported a caller's `1e999` as `E_INTERNAL` and 500.
+ */
+function gateDecisionSlot(decision: unknown): string {
+  try {
+    return canonicalize(decision);
+  } catch (e) {
+    throw err.validation(CODES.E_RESOURCE_INVALID, `gate decision cannot be recorded: ${(e as Error).message}`);
+  }
+}
+
 function idempotencySlot(auth: AuthContext | SubmittedBy | undefined, key: string): string {
   return JSON.stringify([auth?.method ?? "", auth?.kind ?? "", auth?.subject ?? "", key]);
 }
@@ -4189,7 +4205,14 @@ export class ControlPlane {
             // so one decision is one key however its sender spelled it — and it refuses the
             // shapes it cannot order, which the journal this decision is about to be written
             // to refuses too.
-            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? `${String(gateId)}:${canonicalize(decision)}`),
+            //
+            // THAT REFUSAL IS THE CALLER'S, SO IT IS REPORTED AS THE CALLER'S. `canonicalize`
+            // throws a `CanonicalizationError`, which is not a `LoomError`, so `httpStatusFor`
+            // read no class off it and the route answered **500** for a body the caller wrote:
+            // `{"decision":{"kind":"edit","writes":{"x":1e999}}}` parses to `Infinity`, which
+            // `JSON.stringify` used to render as `null` and canonical form refuses outright.
+            // Refusing is right and 500 is not — an internal error says the server is broken.
+            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? `${String(gateId)}:${gateDecisionSlot(decision)}`),
           });
           // THE RESPONSE IS SCOPED TOO, and forgetting that made every other check on this
           // route decorative. `summarise` carries the run's channels, outputs, usage, every

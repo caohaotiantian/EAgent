@@ -264,6 +264,42 @@ test("ONE EDIT SPELLED TWO WAYS IS ONE DECISION — the default slot was derived
   }
 });
 
+test("A DECISION CANONICAL FORM REFUSES IS THE CALLER'S 400, NOT THE SERVER'S 500", async () => {
+  // Deriving the slot canonically is what makes one decision one key — and `canonicalize`
+  // refuses what it cannot order, which is right, because the journal this decision is about to
+  // be written to refuses it too. But a `CanonicalizationError` is not a `LoomError`, so
+  // `httpStatusFor` read no class off it and the route answered 500 for a body the caller wrote.
+  // `1e999` parses to `Infinity`; `JSON.stringify` used to render it as `null` and let it
+  // through. An internal error says the SERVER is broken, and it is not.
+  const r = await rig({ identity: people(), approvers: ["u:bob"] });
+  const asBob = { authorization: "Bearer bob-token", "content-type": "application/json" };
+  try {
+    const runId = String((await submit(r, { authorization: "Bearer alice-token" }))["runId"]);
+    const gateId = await gateOn(r, runId as RunId);
+    const res = await fetch(`${r.base}/runs/${runId}/gates/${gateId}`, {
+      method: "POST",
+      headers: asBob,
+      // Not `JSON.stringify` of an object: `Infinity` cannot survive that. This is the wire.
+      body: '{"decision":{"kind":"edit","writes":{"merged":{"a":1e999}}}}',
+    });
+    assert.equal(res.status, 400, "a body the caller wrote is the caller's error");
+    const body = (await res.json()) as { error?: { code?: string } };
+    assert.notEqual(body.error?.code, "E_INTERNAL", `and it is not reported as an internal fault: ${JSON.stringify(body)}`);
+
+    // THE ORDINARY HALF: the gate is untouched and still answerable. A refusal that also
+    // consumed the decision would be worse than the 500.
+    assert.deepEqual(await decidedKinds(r, runId as RunId), [], "the refused decision decided nothing");
+    const ok = await fetch(`${r.base}/runs/${runId}/gates/${gateId}`, {
+      method: "POST",
+      headers: asBob,
+      body: JSON.stringify({ decision: { kind: "edit", writes: { merged: { a: 1 } } } }),
+    });
+    assert.equal(ok.status, 200, "and an ordinary edit on the same gate still lands");
+  } finally {
+    await r.close();
+  }
+});
+
 test("A DIFFERENT EDIT IS STILL A DIFFERENT DECISION — the slot narrows a retry, it does not swallow a second answer", async () => {
   // The ORDINARY half of the test above, and the property the canonical rendering must not
   // trade away: two edits that differ in a VALUE are two decisions, so the second one meets

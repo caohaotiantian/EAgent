@@ -197,6 +197,30 @@ they are pre-existing, which is why they were recorded rather than folded into i
 - **A0.10 · `GLOB_SCAN_BATCH`'s docstring understates the cap fast path.** `grep hit` on a
   60,000-file workspace went 3 ms → 36 ms, because `capped` is only observable at a flush; "a few
   more paths" is a batch's worth. Absolute cost 33 ms.
+- **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every
+  tick.** This one IS caused by the merge's fix round, and is recorded rather than fixed because
+  the cheap fixes are wrong and the right one is a cache-invalidation design. `runClockTick`'s
+  `due` now counts a `leased` task, which reaches `index ??= graphsByHash(ws).index` — the call
+  whose own comment says a tick with nothing due should cost "no compiles at all". A run whose
+  graph hash no longer resolves, or whose leased node is one of the four types with no enforced
+  deadline (`join`, `router`, `human_gate`, `subgraph`), is due on every tick and drives nothing.
+  Measured, 31 published graphs, six consecutive ticks:
+
+      HEAD      tick ms: 5.9, 2.2, 2.0, 1.8, 2.3, 2.2   (one graphsByHash sweep per tick)
+      dbe0528   tick ms: 0.4, 0.2, 0.2, 0.1, 0.2, 0.2
+
+  ~10x per tick, forever, for zero progress, and it scales with WORKSPACE size rather than with
+  the stranded run. ORDINARY half: a tick with no stranded run is unchanged, and a stranded run
+  whose graph does resolve is driven once and finishes.
+  **Two candidate fixes, neither free.** Cache the compiled index across ticks — but the sweep
+  re-reads the workspace on purpose, so this needs an invalidation rule that does not make a
+  republished graph invisible. Or skip a run whose `compiledGraphHash` failed to resolve on an
+  earlier tick — process-local memo, empty after a restart (which is safe: it costs one more
+  compile), but a hash that is unresolvable now resolves later if someone publishes that graph,
+  so the memo needs a way to expire. Restricting the `leased` arm to tasks whose node declares a
+  `timeoutMs` is NOT available: the clock cannot know the node's deadline without the graph,
+  which is the thing being resolved.
+
 - **A0.11 · `wireCount` is duplicated in `openai.ts` rather than shared with `anthropic.ts`,**
   because `index.ts` re-exports both with `export *` and sharing it would add a name to
   `scripts/surface.json`. The property that matters is held by a test driving both adapters.

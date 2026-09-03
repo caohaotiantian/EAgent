@@ -158,12 +158,22 @@ test("TWO PLANES THAT NEVER SPOKE COMPUTE THE SAME WINDOW", async () => {
  * that still holds a lease, which is what makes driving a live-leased run a fold and a no-op
  * rather than a `failed` verdict on someone else's work in flight.
  *
- * SO THE ASSERTION IS THAT IT IS DRIVEN, not that it is reclaimed. This journal's `fs.write`
- * node carries no declared `timeoutMs`, so the scheduler correctly refuses to guess that its
- * holder is dead — "I do not know" is not "the holder is gone". What the clock owes it is a
- * drive; what happens on that drive is the scheduler's question and
- * `test/run/inprocess-reclaims-a-dead-lease.test.ts` asks it. The run staying `running` rather
- * than being declared `failed` is the second half of the same rule.
+ * SO THE ASSERTION IS THAT THE RUN FINISHES, and an earlier version of this paragraph settled
+ * for less on a claim that was simply false. It said this journal's `fs.write` node "carries no
+ * declared `timeoutMs`, so the scheduler correctly refuses to guess"; measured, it carries
+ * `600000` — `compile.ts`'s `effectiveTimeout` gives `DEFAULT_NODE_TIMEOUT_MS` to every `tool`
+ * node. So the lease IS adjudicable, the reclaim DOES fire, and the honest assertion is the
+ * strong one: the stranded run is driven and runs to `succeeded` on that same tick.
+ *
+ * THE OLD VERSION ALSO ASSERTED A NO-OP. It passed `drive` a callback that only recorded the
+ * run id, then asserted the projection was unchanged afterwards — which held at the base sha
+ * too, because nothing had been advanced. Both assertions were vacuous. The tick's `drive`
+ * parameter DEFAULTS to an awaited `engine.advance`, so the fix is to let it default.
+ *
+ * THE DEADLINE IS PAST BECAUSE THE ENGINE READS `Date.now()`, not this file's fixed `now`. The
+ * lease is stamped in 2023 and any real clock is years beyond `lease.at + 600000`, so this is
+ * not a timing assertion and there is nothing to tune — it is a fixed instant in the past
+ * compared against the present.
  */
 
 const ONE_TOOL = {
@@ -178,7 +188,7 @@ const ONE_TOOL = {
   edges: [],
 };
 
-test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS DRIVEN AFTER THE RESTART, NOT ABANDONED", async () => {
+test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS DRIVEN AFTER THE RESTART, AND FINISHES", async () => {
   const d = deployment();
   try {
     const file = publishGraph(d, "stranded", ONE_TOOL);
@@ -230,18 +240,26 @@ test("A RUN WHOSE TASK WAS LEASED WHEN THE PLANE DIED IS DRIVEN AFTER THE RESTAR
       );
       assert.equal((await w.engine.projection(ready))?.tasks[TASK]?.state, "ready", "and the control's task folds back to `ready`");
 
+      // THE DEFAULT `drive` — an awaited `engine.advance` — with a wrapper that only records.
+      // Recording INSTEAD of driving is what made the previous version of this test assert that
+      // a no-op had changed nothing.
       const driven: RunId[] = [];
-      const t = await runClockTick(w, LIMIT, 1_700_000_000_100, LAP, (runId: RunId) => void driven.push(runId));
+      const t = await runClockTick(w, LIMIT, 1_700_000_000_100, LAP, async (runId: RunId) => {
+        driven.push(runId);
+        await w.engine.advance(runId);
+      });
 
       assert.ok(t.visited.includes(leased), "the stranded run IS in the clock's window — it is not a listing problem");
       assert.ok(driven.includes(leased), "and it IS driven: `due` counts a leased task, not only a ready one");
       assert.ok(driven.includes(ready), "THE CONTROL: the same journal one event shorter IS driven on the same tick");
-      // AND THE DRIVE DID NOT KILL IT. With no declared deadline on this node the scheduler
-      // will not take the lease back, so the honest outcome is a run still `running` with its
-      // task still `leased` — where before the engine's short-circuit finished it `failed`.
+      // AND THE DRIVE RECOVERED IT. The node's declared deadline is 600 s and the lease is
+      // stamped in 2023, so `InProcessScheduler` takes it back, the task re-executes under this
+      // process's id, and the run completes. At `dbe0528` the same tick left it `running` and
+      // `leased` because `due` never counted it; before the engine change it was worse still —
+      // an `E_OUTPUT_MISSING` verdict on work whose holder had simply died.
       const after = (await w.engine.projection(leased))!;
-      assert.equal(after.status, "running", "a lease nobody can adjudicate leaves the run running, not failed");
-      assert.equal(after.tasks[TASK]?.state, "leased", "and the task is exactly where the crash left it");
+      assert.equal(after.status, "succeeded", `the reclaimed task ran to completion: ${JSON.stringify(after.error ?? {})}`);
+      assert.equal(after.tasks[TASK]?.state, "succeeded", "and the stranded task is the one that finished");
     } finally {
       w.close();
     }
