@@ -1,12 +1,27 @@
 /**
  * The control plane's "watch it, stop it" half, and the durable state three doors read.
  *
- * Every test here reproduces a defect the 2026-09-02 audit measured against a real socket:
- * a HEAD liveness probe answered 404; a second, DIFFERENT gate decision answered 200 with a
- * decision the journal never recorded; an `Idempotency-Key` that deduplicated only until the
- * process restarted; a signed gate callback refused 404 by a plane that did not submit the
- * run; a shipped console with no control that stops anything; and a gate queue that refolded
- * every journal it has ever seen on every four-second poll.
+ * MOST of these reproduce a defect measured against a real socket — the 2026-09-02 audit and
+ * the 09-03 re-audit of the fix: a HEAD liveness probe answered 404; a second, DIFFERENT gate
+ * decision answered 200 with a decision the journal never recorded; an `Idempotency-Key` that
+ * deduplicated only until the process restarted, and then one that stopped working for the
+ * life of the process after a single store hiccup; a signed gate callback refused 404 by a
+ * plane that did not submit the run, then by a replica the gate was raised after; a boot scan
+ * that spent its whole window on gates already answered; a shipped console with no control
+ * that stops anything; and a gate queue that refolded every journal it has ever seen on every
+ * four-second poll.
+ *
+ * TWO DO NOT, and they say so in their own names rather than being left to look like the
+ * others: `A GENUINE RETRY IS STILL ONE DECISION` and `THE GRAPH ROUTES ARE OPEN TO EVERY
+ * CREDENTIAL` pass on the pre-change tree, and pin a property the change had to preserve. A
+ * file where every name reads as "a defect closed" is a file that overstates what it found.
+ *
+ * A THIRD ALSO PASSES ON THE PRE-CHANGE TREE and is neither of those things.
+ * `A RUN SUBMITTED WITH NO HEADER CANNOT BE CLAIMED BY A KEY EQUAL TO ITS RUN ID` passes there
+ * VACUOUSLY — nothing restored a key at all, so nothing could be claimed with one. It is a
+ * guard on the mechanism this change added, and deleting the run-id skip in
+ * `#restoreIdempotency` fails it. "Green on both trees" is therefore not by itself the test
+ * for whether a pin is load-bearing; what the mutant does is.
  *
  * They are here rather than in `http.test.ts` so the file that pins the perimeter stays about
  * the perimeter, and so a reader looking for "what the audit closed" finds one place.
@@ -16,9 +31,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { BearerTokenIdentity, ControlPlane, type IdentitySource } from "../../src/server/http.ts";
+import vm from "node:vm";
+
 import { CONSOLE_HTML } from "../../src/server/console.ts";
 import { GateDispatcher, ConsoleChannel, SignedWebhookChannel } from "../../src/run/delivery.ts";
-import type { GateId, RunId } from "../../src/ids.ts";
+import type { GateId, RunId, Seq } from "../../src/ids.ts";
+import { MemoryStateStore } from "../../src/journal/memory.ts";
+import type { StateStore } from "../../src/journal/store.ts";
+import { SYSTEM_ACTOR } from "../../src/journal/events.ts";
 import { compileSkeleton, harness, skeletonSpec, DOCS } from "../run/skeleton.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 
@@ -280,6 +300,61 @@ test("A RUN SUBMITTED WITH NO HEADER CANNOT BE CLAIMED BY A KEY EQUAL TO ITS RUN
   }
 });
 
+test("ONE TRANSIENT STORE ERROR DOES NOT KILL EVERY KEYED SUBMIT FOR THE LIFE OF THE PROCESS", async () => {
+  // `#idempotencyRestored ??= (async () => …)()` memoised the PROMISE, and a rejected promise
+  // stays rejected. So one `listRuns` failure — a SQLITE_BUSY, a reconnect, one odd row —
+  // turned every later submission carrying an `Idempotency-Key` into 500 E_INTERNAL quoting a
+  // store error that was long gone, with `retryable:false` so a well-behaved client stops
+  // retrying, PERMANENTLY, while unkeyed submits and /health stayed green.
+  //
+  // Refusing the first one is right and does not change: falling through to `engine.submit`
+  // on a scan that did not finish is the duplicate run the scan exists to prevent. What
+  // changes is that the NEXT request gets to try.
+  const inner = new MemoryStateStore({ now: () => NOW });
+  let failNextList = false;
+  const store: StateStore = {
+    append: (i) => inner.append(i),
+    read: (runId, from, to) => inner.read(runId, from, to),
+    head: (runId) => inner.head(runId),
+    listRuns: async (limit, filter) => {
+      if (failNextList) {
+        failNextList = false;
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+      return inner.listRuns(limit, filter);
+    },
+    close: () => inner.close(),
+  };
+
+  const r = await rig({ store });
+  try {
+    failNextList = true;
+    const boom = await fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "nightly" },
+      body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+    });
+    assert.equal(boom.status, 500, "a scan that did not finish must refuse rather than risk a duplicate run");
+    assert.equal(failNextList, false, "…and it must be THIS request's scan that consumed the failure");
+
+    // THE ORDINARY CASE, measured beside the defect one: everything that does not read the
+    // map stayed green throughout, which is what made this survivable for so long.
+    assert.equal((await fetch(`${r.base}/health`)).status, 200);
+    const unkeyed = await submit(r);
+
+    // The store is healthy again, and the very next keyed submit must scan again rather than
+    // be handed a rejection from a request that is over.
+    const first = await submit(r, { "idempotency-key": "nightly" });
+    assert.notEqual(first["runId"], unkeyed["runId"]);
+
+    // And what it rebuilt is the real map, not an empty one that merely stopped throwing.
+    assert.equal((await submit(r, { "idempotency-key": "nightly" }))["runId"], first["runId"], "the key still collapses");
+    assert.equal((await inner.listRuns(100)).length, 2, "one unkeyed run and one keyed run — nothing minted twice");
+  } finally {
+    await r.close();
+  }
+});
+
 // ── the unauthenticated callback ─────────────────────────────────────────────
 
 test("A SIGNED GATE CALLBACK IS ANSWERED BY A PLANE THAT DID NOT SUBMIT THE RUN", async () => {
@@ -322,6 +397,124 @@ test("A SIGNED GATE CALLBACK IS ANSWERED BY A PLANE THAT DID NOT SUBMIT THE RUN"
   }
 });
 
+/**
+ * A gated run that is DONE with its gate — the shape that fills the boot scan's window.
+ *
+ * `raisedAGate` means "has EVER raised one", and the listing is ordered by the most recent
+ * `gate.raised`, so on any deployment that uses gates these outnumber the open ones by
+ * whatever the ratio of finished to live runs is. Folded status is `queued`, which is what
+ * `#armGatedRuns` throws each one away for after paying for the fold.
+ */
+async function decidedGatedRun(store: StateStore, n: number, ts: number): Promise<void> {
+  await store.append({
+    runId: `decided-${String(n).padStart(4, "0")}` as RunId,
+    expectedSeq: 0 as Seq,
+    now: ts,
+    events: [
+      {
+        type: "run.submitted",
+        payload: { workflow: "skeleton-summarize", inputs: {}, graphHash: "sha256:absent", idempotencyKey: `decided-${n}`, configDigest: "sha256:absent" },
+        actor: SYSTEM_ACTOR("test"),
+      },
+      {
+        type: "gate.raised",
+        payload: { gateId: `g-${n}` as GateId, nodeId: "approve" as never, policyRef: "policy/x@1", contentDigest: "sha256:absent" },
+        actor: SYSTEM_ACTOR("test"),
+      },
+      { type: "gate.decided", payload: { gateId: `g-${n}` as GateId, decision: "approve", latencyMs: 1 }, actor: { kind: "human", subject: "u:alice", via: "api" } },
+    ],
+  });
+}
+
+test("THE BOOT ARM PAGES PAST DECIDED GATES — its 500-run window was spent on runs that had already been answered", async () => {
+  // `listRuns(MAX_QUEUE_SCAN, { raisedAGate: true })` read 500 rows and then discarded
+  // everything not `awaiting_gate`. On a deployment that uses gates, that budget goes almost
+  // entirely on finished runs: with 600 newer decided gates in the journal, a plain restart
+  // left a genuinely OPEN gate unarmed — no bound graph, no rehydrated gate clock, so nothing
+  // in the process to escalate or expire it.
+  //
+  // `rehydrateGates` is the probe because it is the thing the arm is FOR: it throws
+  // E_RUN_NOT_FOUND on a run this engine has not attached, and returns the count of gates it
+  // re-armed on one it has.
+  const first = await rig({ approvers: ["u:alice"], identity: people() });
+  let runId: RunId;
+  try {
+    runId = String((await submit(first, { authorization: "Bearer alice-token" }))["runId"]) as RunId;
+    await gateOn(first, runId);
+  } finally {
+    await first.close();
+  }
+
+  // THE ORDINARY CASE — one page, nothing in front of the open gate.
+  const plain = await rig({ store: first.h.store, approvers: ["u:alice"], identity: people() });
+  try {
+    assert.equal(await plain.h.engine.rehydrateGates(runId), 1, "a restart with a short journal arms the open gate");
+  } finally {
+    await plain.close();
+  }
+
+  // AND THE DEFECT ONE — 600 decided gates, every one of them newer.
+  for (let i = 0; i < 600; i++) await decidedGatedRun(first.h.store, i, NOW + 1_000 + i);
+  const buried = await rig({ store: first.h.store, approvers: ["u:alice"], identity: people() });
+  try {
+    assert.equal(
+      // 500 is `MAX_QUEUE_SCAN`, the window the un-paged version read and stopped at.
+      (await buried.h.store.listRuns(500, { raisedAGate: true })).some((s) => s.runId === runId),
+      false,
+      "the open gate is past the first page, which is what made this reachable",
+    );
+    assert.equal(await buried.h.engine.rehydrateGates(runId), 1, "…and the paged arm still reaches it");
+  } finally {
+    await buried.close();
+  }
+});
+
+test("A SECOND REPLICA ANSWERS A GATE RAISED AFTER IT BOOTED — the boot scan is a warm start, not the perimeter", async () => {
+  // The arm was a one-shot at `listen()`. Behind a load balancer the published callback URL
+  // is sprayed across replicas, so a gate raised on replica A after replica B booted is not
+  // in B's scan and never will be: B answered 404 E_RUN_NOT_FOUND and wrote a durable
+  // `gate.callback_rejected {reason:"not_found"}` while the gate was open and on its expiry
+  // clock. That is the deployment `#armGatedRuns` names as its own motivation.
+  const a = await rig({ callbacks: true, approvers: ["u:alice"], channels: ["slack"], identity: people() });
+  // B boots over the SAME journal while it is still empty. Nothing to arm, and nothing that
+  // will ever be armed at boot again.
+  const b = await rig({ store: a.h.store, callbacks: true, approvers: ["u:alice"], channels: ["slack"], identity: people() });
+  const post = async (rig_: Rig, runId: string, gateId: GateId): Promise<Response> => {
+    const body = JSON.stringify({ runId, gateId, actor: "u:alice", decision: { kind: "approve" } });
+    const ts = String(Math.floor(NOW / 1000));
+    return fetch(`${rig_.base}/runs/${runId}/callbacks/slack`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-loom-timestamp": ts, "x-loom-signature": rig_.channel.sign(body, ts) },
+      body,
+    });
+  };
+  const rejections = async (store: Rig["h"]["store"], runId: RunId): Promise<unknown[]> => {
+    const out: unknown[] = [];
+    for await (const e of store.read(runId, 1 as Seq)) if (e.type === "gate.callback_rejected") out.push(e.payload);
+    return out;
+  };
+  try {
+    // THE ORDINARY CASE: the plane that submitted the run answers its own callback, which is
+    // every single-process deployment and must not have been traded away for the replica.
+    const own = String((await submit(a, { authorization: "Bearer alice-token" }))["runId"]) as RunId;
+    const ownGate = await gateOn(a, own);
+    const owned = await post(a, own, ownGate);
+    assert.equal(owned.status, 200, await owned.text());
+    assert.deepEqual(await rejections(a.h.store, own), []);
+
+    // AND THE REPLICA: raised on A, minutes after B booted, answered on B.
+    const runId = String((await submit(a, { authorization: "Bearer alice-token" }))["runId"]) as RunId;
+    const gateId = await gateOn(a, runId);
+    const res = await post(b, runId, gateId);
+    assert.equal(res.status, 200, await res.text());
+    assert.deepEqual(await rejections(b.h.store, runId), [], "no false rejection row for a callback that verified");
+    assert.deepEqual(await decidedKinds(b, runId), ["approve"], "…and the decision the vendor sent is the one on the record");
+  } finally {
+    await b.close();
+    await a.close();
+  }
+});
+
 // ── the console ──────────────────────────────────────────────────────────────
 
 test("THE CONSOLE CAN STOP A RUN — the goal's fifth verb had no control on the shipped page", async () => {
@@ -351,26 +544,114 @@ test("THE RUN LIST ESCAPES ITS SERVER VALUES — one unescaped insertion among a
   assert.deepEqual(bare, [], "every innerHTML that concatenates a server field must route it through esc()");
 });
 
-test("THE CONSOLE'S STOP CONTROLS DRIVE THE REAL ROUTE — cancel, pause and resume over HTTP", async () => {
-  // The page issues exactly these three requests with the console's own credential. Driving
-  // them here is what makes the buttons a claim about the product rather than about the HTML.
+/**
+ * The console's own script, running against a live plane.
+ *
+ * NOT A BROWSER, and it does not pretend to be one: the DOM here is a bag of properties, so
+ * nothing about rendering is under test. What IS under test is the half a `assert.match` on
+ * the HTML cannot reach — that `command()` builds the right request, sends the credential the
+ * page holds, and applies the reply the route sends back. A test that issues the request
+ * ITSELF pins the route, which `http.test.ts` already does; only this pins the page.
+ *
+ * `alert` and the timer are captured rather than ignored. The page reports every failure
+ * through `alert(e.message)` and repaints through a 60 ms `setTimeout`, so an error in either
+ * is the page not working — silently, if nothing is watching.
+ */
+interface Page {
+  run: (expr: string) => Promise<unknown>;
+  alerts: string[];
+  errors: string[];
+  answers: string[];
+}
+
+function openConsole(base: string, token: string, answer: () => string): Page {
+  const script = CONSOLE_HTML.split("<script>")[1]!.split("</script>")[0]!;
+  const alerts: string[] = [];
+  const errors: string[] = [];
+  const answers: string[] = [];
+  const elements = new Map<string, Record<string, unknown>>();
+  const element = (): Record<string, unknown> => {
+    const children: Record<string, unknown>[] = [];
+    return {
+      innerHTML: "",
+      textContent: "",
+      title: "",
+      className: "",
+      value: "",
+      placeholder: "",
+      onclick: null,
+      onchange: null,
+      children,
+      appendChild: (c: Record<string, unknown>) => void children.push(c),
+    };
+  };
+  const store = new Map<string, string>([["loom.token", token]]);
+  const ctx = vm.createContext({
+    document: {
+      getElementById: (id: string) => {
+        const found = elements.get(id) ?? element();
+        elements.set(id, found);
+        return found;
+      },
+      createElement: () => element(),
+    },
+    localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) },
+    // RELATIVE, exactly as the page writes them — the base is the browser's, not the page's.
+    fetch: (path: string, init?: RequestInit) => fetch(base + String(path), init),
+    // Contained rather than ignored: a throw inside a repaint is an uncaught exception that
+    // would take down the test file with no attribution.
+    setTimeout: (fn: () => void, ms: number) => setTimeout(() => { try { fn(); } catch (e) { errors.push(String(e)); } }, ms),
+    // A NO-OP. The page's 4 s poll would outlive the test and keep the process alive.
+    setInterval: () => 0,
+    AbortController,
+    TextDecoder,
+    alert: (m: string) => void alerts.push(String(m)),
+    prompt: () => { const a = answer(); answers.push(a); return a; },
+    console,
+  });
+  vm.runInContext(script, ctx);
+  return { run: async (expr) => vm.runInContext(expr, ctx), alerts, errors, answers };
+}
+
+test("THE CONSOLE'S OWN command() STOPS A RUN — the page's script, not a request written by the test", async () => {
+  // This used to drive `POST /runs/:id/commands` with `fetch` written here, which pins the
+  // ROUTE — and `http.test.ts` already pins the route. Every defect in the console half
+  // (a missing credential, a body the route refuses, a reply `applySnapshot` drops on the
+  // floor) survived it. So the page's own script runs, and the page's own `command()` is
+  // what issues the three requests.
   const r = await rig({ identity: people() });
-  const asAlice = { authorization: "Bearer alice-token", "content-type": "application/json" };
-  const command = async (runId: string, kind: string, reason?: string): Promise<Response> =>
-    fetch(`${r.base}/runs/${runId}/commands`, { method: "POST", headers: asAlice, body: JSON.stringify({ kind, ...(reason === undefined ? {} : { reason }) }) });
   try {
     const { runId } = await submit(r, { authorization: "Bearer alice-token" });
-    const paused = await command(String(runId), "pause", "hold it");
-    assert.equal(paused.status, 200);
-    assert.equal((await json(paused))["paused"], true, "the summary the page applies must carry the pause");
+    const page = openConsole(r.base, "alice-token", () => "wrong inputs");
+    const select = `selected = ${JSON.stringify(String(runId))};`;
 
-    const resumed = await command(String(runId), "resume", "carry on");
-    assert.equal(resumed.status, 200);
-    assert.equal((await json(resumed))["paused"], false);
+    // PAUSE, and the page must SHOW it — `applySnapshot` dropped `run.paused`, so a paused
+    // run looked identical to one that had silently stalled.
+    assert.equal(await page.run(`(async () => { ${select} await command("pause", "paused from the console"); return current.paused; })()`), true);
+    assert.equal((await r.h.engine.projection(runId as RunId))?.paused, true, "…and the journal agrees");
 
-    const cancelled = await command(String(runId), "cancel", "wrong inputs");
-    assert.equal(cancelled.status, 200);
-    assert.equal((await json(cancelled))["status"], "cancelled");
+    assert.equal(await page.run(`(async () => { await command("resume", "carry on"); return current.paused; })()`), false);
+    assert.equal((await r.h.engine.projection(runId as RunId))?.paused, false);
+
+    // CANCEL through the BUTTON's own handler, prompt and all — the reason it asks for is
+    // journaled on `operator.command` and quoted into every gate the cancel closes, and
+    // asking IS the confirmation, so a cancel that skipped the prompt would be a different
+    // control from the one the page ships.
+    assert.equal(
+      await page.run(`(() => { drawControls(); return $("controls").children.map((b) => b.textContent).join(","); })()`),
+      "pause,advance,cancel",
+      "a running, unpaused run offers exactly these three",
+    );
+    // The handler is a plain `onclick` and returns no promise — a button cannot be awaited —
+    // so this polls the page's own state the way `gateOn` polls the journal, bounded.
+    await page.run(`$("controls").children[2].onclick()`);
+    assert.deepEqual(page.answers, ["wrong inputs"], "the cancel button asked for its reason");
+    for (let i = 0; i < 400 && (await page.run(`current.status`)) !== "cancelled"; i++) await new Promise((x) => setTimeout(x, 10));
+    assert.equal(await page.run(`current.status`), "cancelled");
+    assert.equal((await r.h.engine.projection(runId as RunId))?.status, "cancelled");
+
+    assert.deepEqual(page.alerts, [], "the page must have reported no failure to the operator");
+    assert.deepEqual(page.errors, [], "…and nothing must have thrown out of a repaint");
   } finally {
     await r.close();
   }
@@ -378,12 +659,18 @@ test("THE CONSOLE'S STOP CONTROLS DRIVE THE REAL ROUTE — cancel, pause and res
 
 // ── the graph inventory ──────────────────────────────────────────────────────
 
-test("EVERY CREDENTIAL READS THE GRAPH INVENTORY, AND THAT IS THE DELIBERATE CHOICE", async () => {
+test("THE GRAPH ROUTES ARE OPEN TO EVERY CREDENTIAL — a standing property, and NOT a defect this change closed", async () => {
+  // SAID PLAINLY, because a pass here is not evidence of anything the audit found: no code
+  // changed, this passes on both trees, and it would have passed a year ago. The audit item
+  // was a DOCSTRING — `#requiresBearer`'s enumerated "WHAT IS STILL NOT SCOPED" omitted these
+  // two routes, so a deliberate choice read as an oversight — and a docstring is not a thing
+  // a test can assert.
+  //
+  // What this pins is the sentence that replaced it, so a later narrowing of `/graphs` has to
+  // be a decision someone makes here rather than a silent drift out from under the paragraph.
   // A graph has no owner to scope by — `#graphByHash` scans the constructor-supplied
   // inventory and never reaches the store — and `POST /runs` applies no per-workflow
-  // predicate, so the inventory names actions every credential can already take. What was
-  // wrong is that the docstring's enumerated "WHAT IS STILL NOT SCOPED" omitted both routes,
-  // so a deliberate choice read as an oversight. This test is the enumeration's other half.
+  // predicate, so the inventory names actions every credential can already take.
   const r = await rig({ identity: people() });
   try {
     const asBob = { authorization: "Bearer bob-token" };

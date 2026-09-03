@@ -209,7 +209,7 @@ import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } fr
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
-import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
+import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
 import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
@@ -888,6 +888,22 @@ function namesApprover(g: GateRecord, subject: string): boolean {
  */
 const MAX_QUEUE_GATES = 200;
 const MAX_QUEUE_SCAN = 500;
+/**
+ * How many gated runs `#armGatedRuns` may READ at boot, as against how many it may ARM.
+ *
+ * Two numbers because the scan pages now, and the thing worth bounding is not the thing
+ * worth stopping on. `MAX_QUEUE_SCAN` bounds the runs armed — each costs a `RunContext` and
+ * a rehydrated gate clock for the life of the run. This bounds the rows walked to find them,
+ * because `raisedAGate` is "has EVER raised one" and the cost of rejecting one is a FOLD of
+ * its whole journal. Without it, "page until 500 open gates are armed" on a journal with a
+ * million decided gates is a `listen()` that never returns.
+ *
+ * IT IS THE BOUND THAT MAY BE HIT WITHOUT LOSING AN ANSWER, which is why it is allowed to be
+ * a guess. A gate past it is bound by `#callbackEngine` when its decision arrives and by
+ * `loom serve`'s gate clock on the next tick; what it delays is escalation on a plane where
+ * neither has happened yet.
+ */
+const MAX_ARM_SCAN = 5_000;
 
 function principalOf(auth: AuthContext): SubmittedBy {
   return { kind: auth.kind, subject: auth.subject, method: auth.method };
@@ -1580,11 +1596,25 @@ export class ControlPlane {
    */
   readonly #idempotency = new Map<string, unknown>();
   /**
-   * The one-shot rebuild of `#idempotency` from the journal — started at most once, ever.
+   * The rebuild of `#idempotency` from the journal — at most one in flight, and at most one
+   * that SUCCEEDED.
    *
    * A PROMISE RATHER THAN A BOOLEAN, because two concurrent submissions both miss the map
    * and a flag would let the second fall through to `engine.submit` while the first was
    * still scanning — which is precisely the duplicate the scan exists to prevent.
+   *
+   * **AND IT IS CLEARED ON REJECTION, which memoising a promise does not do for you.** A
+   * rejected promise stays rejected forever, so `#restoreIdempotency` awaiting this field
+   * re-threw one dead store error on every later call: a single `SQLITE_BUSY`, one
+   * reconnect, one odd row turned EVERY subsequent submission carrying an `Idempotency-Key`
+   * into `500 E_INTERNAL` — with `retryable:false`, so a well-behaved client stopped
+   * retrying — for the life of the process, while unkeyed submits and `/health` stayed
+   * green. Measured against this class with a store that fails `listRuns` exactly once.
+   *
+   * REFUSING THE REQUEST IS STILL RIGHT and that half does not change: falling through to
+   * `engine.submit` on a scan that did not finish is the duplicate run this whole mechanism
+   * exists to prevent, so the caller gets an error. What changes is that the error is about
+   * THIS request. The next one starts a new scan.
    */
   #idempotencyRestored: Promise<void> | undefined;
   /**
@@ -1940,7 +1970,7 @@ export class ControlPlane {
         ? undefined
         : new GateCallbackRouter({
             dispatcher,
-            engine: this.#engine,
+            engine: this.#callbackEngine(),
             logFor: (runId) =>
               new RunLog(runId, {
                 store: this.#store,
@@ -2636,6 +2666,14 @@ export class ControlPlane {
    * same constant that bounds the map, walked oldest-first so that the eviction order after
    * the restore is the insertion order it would have had.
    *
+   * **AND `toSeq` IS PASSED, WHICH IS THE HALF "reads one event and breaks" DID NOT BUY.**
+   * `read` is an async ITERABLE over a paged query: `SqliteStateStore` fetches 500 rows a
+   * page, so breaking after the first one still materialised the first page of every run's
+   * journal — the whole journal for anything shorter than that. On a 10 000-run journal
+   * that is ~20 000 statements and ~1.5M rows, inside a request bounded by
+   * `requestTimeoutMs`, paid by the first keyed submission after every restart. Measured at
+   * ~1.2 s. `read(runId, 1, 1)` bounds the SQL `LIMIT` to the one row this loop wants.
+   *
    * A KEY EQUAL TO THE RUN ID IS SKIPPED, and this is the one that would have been a hole.
    * `Engine.submit` journals `idempotencyKey: input.idempotencyKey ?? runId`, so a run
    * submitted with NO header still carries a key — its own id. Restoring those would let any
@@ -2654,12 +2692,12 @@ export class ControlPlane {
    * an index on this key would not give either without it.
    */
   async #restoreIdempotency(): Promise<void> {
-    this.#idempotencyRestored ??= (async () => {
+    const started = (this.#idempotencyRestored ??= (async () => {
       const rows = await this.#store.listRuns(MAX_IDEMPOTENT_SUBMITS);
       // Oldest first: `listRuns` answers newest-run-id-first, and this map evicts by
       // insertion order.
       for (const summary of [...rows].reverse()) {
-        for await (const e of this.#store.read(summary.runId, 1 as Seq)) {
+        for await (const e of this.#store.read(summary.runId, 1 as Seq, 1 as Seq)) {
           if (e.type !== "run.submitted") break;
           const p = e.payload;
           // The run's own id, which no caller may present. See above.
@@ -2675,61 +2713,157 @@ export class ControlPlane {
           break;
         }
       }
-    })();
-    await this.#idempotencyRestored;
+    })());
+    try {
+      await started;
+    } catch (e) {
+      // ONLY IF IT IS STILL THIS ATTEMPT. Two concurrent submissions share one promise and
+      // both land here; the first clears the field, and the second must not clear a fresh
+      // scan a third request has since started. Compare the value, do not assume it.
+      if (this.#idempotencyRestored === started) this.#idempotencyRestored = undefined;
+      throw e;
+    }
   }
 
   /**
-   * Attach every run this journal has parked on an open gate, once, as the socket opens.
+   * Attach the runs this journal has parked on an OPEN gate, as the socket opens.
    *
-   * WHY A PLANE-WIDE ARM AND NOT A SIXTH `#bindFromIndex` CALL. Five write routes bind
-   * lazily, on the request, after authorization. The gate CALLBACK route cannot: it is the
-   * one unauthenticated write on the plane, and `#bindFromIndex`'s own rule is "only on write
-   * paths, and only AFTER authorization" — binding before `GateCallbackRouter.handle` would
-   * let any stranger who can guess a run id make this process fold a journal and hold a
-   * `RunContext` that `#retire` frees only when the run ends. Binding after `handle` is too
-   * late: `handle` has already answered, and its `#refuse` has already written the row.
+   * A WARM START, NOT THE PERIMETER — and it used to be both, which is what made its bounds
+   * matter so much. `#callbackEngine` binds the run on the callback route itself, after the
+   * signature verifies, so a gate this scan never reaches is still answerable. What this
+   * buys is the part no inbound request can trigger: `#bindFromIndex` re-arms the gate clock
+   * (`rehydrateGates`), so a gate that must ESCALATE or EXPIRE while nobody posts anything
+   * has a process holding its `DeliverySpec` from the moment the socket opens.
    *
-   * WHAT THAT COST. On a plane that did not itself submit the run — after a restart, after a
-   * deploy, or on a second replica over the same journal — a CORRECTLY SIGNED approval on the
-   * URL the vendor was handed answered 404 `E_RUN_NOT_FOUND "… is not attached"`, and because
-   * step 3 had already admitted the request as durable, a FALSE
-   * `gate.callback_rejected {reason:"not_found"}` landed in that run's own journal while the
-   * run and the gate both existed and were open. The reason string describes THIS PROCESS's
-   * attachment state and is read as a statement about the run.
+   * WHY IT CANNOT SIMPLY BIND EVERYTHING ON THE REQUEST. `#bindFromIndex`'s own rule is
+   * "only on write paths, and only AFTER authorization", and the callback route is the one
+   * unauthenticated write on the plane: binding on arrival would let any stranger who can
+   * guess a run id make this process fold a journal and hold a `RunContext` that `#retire`
+   * frees only when the run ends. `#callbackEngine` is where that rule is satisfied — see it
+   * for which of `GateCallbackRouter`'s checks have already run by then.
+   *
+   * WHAT THAT COST BEFORE EITHER EXISTED. On a plane that did not itself submit the run —
+   * after a restart, after a deploy, or on a second replica over the same journal — a
+   * CORRECTLY SIGNED approval on the URL the vendor was handed answered 404
+   * `E_RUN_NOT_FOUND "… is not attached"`, and because step 3 had already admitted the
+   * request as durable, a FALSE `gate.callback_rejected {reason:"not_found"}` landed in that
+   * run's own journal while the run and the gate both existed and were open. The reason
+   * string describes THIS PROCESS's attachment state and is read as a statement about the run.
    *
    * SO THE CAPABILITY MOVES INTO THE PLANE. `cli.ts`'s gate clock has done exactly this on
-   * every tick (`armForeignGates`), which is why `loom serve` shrank the window to one tick
-   * rather than leaving it open — but a library embedder calling `startControlPlane` with no
-   * clock got a plane whose gate routes worked only for runs it submitted itself. Property 2
-   * says the things in the box are written against the surface a stranger uses; a plane that
-   * needs the CLI to be answerable is the other thing.
+   * every tick (`armForeignGates`), but a library embedder calling `startControlPlane` with
+   * no clock got a plane whose gate routes worked only for runs it submitted itself.
+   * Property 2 says the things in the box are written against the surface a stranger uses; a
+   * plane that needs the CLI to be answerable is the other thing.
    *
-   * WHAT IT DOES NOT CLOSE, said rather than left to be discovered: a run that gates AFTER
-   * this plane started, on a second replica, is not in this scan and its callback still 404s
-   * until something else binds it. The five authenticated routes cover themselves lazily;
-   * `loom serve`'s clock covers the callback route by re-arming every tick. This closes the
-   * window at boot, which is where every restart puts it.
+   * **IT PAGES, AND THE TWO BOUNDS ARE DIFFERENT ON PURPOSE.** This was one
+   * `listRuns(MAX_QUEUE_SCAN, { raisedAGate: true })` whose result was then filtered down to
+   * `awaiting_gate` — and `raisedAGate` means "has EVER raised one", ordered by the most
+   * recent `gate.raised`. So on the only deployments this method is for — the ones that
+   * actually use gates — the whole 500-row budget was spent on FINISHED runs and the open
+   * gate at the back was never armed. Measured: 600 newer gated-and-decided runs in the
+   * journal, one genuinely open gate behind them, plain restart, gate unarmed. `after` is
+   * the cursor `listRuns` grew for exactly this, so the walk stops on what it has ARMED
+   * (`MAX_QUEUE_SCAN` open gates) rather than on what it has READ.
    *
-   * BOUNDED AND SILENT. `MAX_QUEUE_SCAN` runs, newest gate first — the same window
-   * `GET /gates` and the sweeper use. A run whose graph this deployment does not hold is
-   * skipped by `#bindFromIndex` and stays 404, which is the honest answer. A store that
-   * throws leaves the plane unarmed rather than unbootable: the routes that bind lazily still
-   * work, and refusing to serve at all because one journal row is odd would be a worse
-   * failure than the one being fixed.
+   * READING IS STILL BOUNDED, by `MAX_ARM_SCAN` rows, because the cost per row is a FOLD:
+   * `projection` reads a run's whole journal, and "page to the end of the gated listing" on
+   * a journal with a million decided gates is a boot that never finishes. The read bound is
+   * the one that may now be hit without losing an answer — a gate past it is armed by
+   * `#callbackEngine` when its decision arrives, and by `loom serve`'s clock on the next
+   * tick.
+   *
+   * SILENT. A run whose graph this deployment does not hold is skipped by `#bindFromIndex`
+   * and stays 404, which is the honest answer. A store that throws leaves the plane unarmed
+   * rather than unbootable: every route binds lazily on its own, and refusing to serve at
+   * all because one journal row is odd would be a worse failure than the one being fixed.
    */
   async #armGatedRuns(): Promise<void> {
     try {
-      for (const summary of await this.#store.listRuns(MAX_QUEUE_SCAN, { raisedAGate: true })) {
-        // ONLY RUNS STILL WAITING. `raisedAGate` is "has EVER raised one", so most of this
-        // set is finished runs; attaching those would cost a `RunContext` apiece that
-        // nothing ever frees.
-        if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
-        await this.#bindFromIndex(summary.runId);
+      let armed = 0;
+      let read = 0;
+      let after: RunId | undefined;
+      while (armed < MAX_QUEUE_SCAN && read < MAX_ARM_SCAN) {
+        const page = await this.#store.listRuns(
+          Math.min(MAX_QUEUE_SCAN, MAX_ARM_SCAN - read),
+          after === undefined ? { raisedAGate: true } : { raisedAGate: true, after },
+        );
+        if (page.length === 0) return;
+        read += page.length;
+        for (const summary of page) {
+          // ONLY RUNS STILL WAITING. Attaching a finished run would cost a `RunContext`
+          // apiece that nothing ever frees — and it is what the un-paged version spent its
+          // entire budget deciding.
+          if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
+          await this.#bindFromIndex(summary.runId);
+          if (++armed >= MAX_QUEUE_SCAN) return;
+        }
+        const next = page[page.length - 1]!.runId;
+        // A CURSOR THAT DOES NOT ADVANCE ENDS THE WALK. `after` is contractually EXCLUSIVE,
+        // so a store that returns its own boundary again would spin this loop forever inside
+        // `listen()` — a plane that never binds its socket. `cli.ts`'s run clock refuses the
+        // same shape loudly; here the honest answer is to stop arming, because a boot that
+        // does not complete is strictly worse than a warm start that is short.
+        if (next === after) return;
+        after = next;
       }
     } catch {
       /* unarmed, not unbootable — see above */
     }
+  }
+
+  /**
+   * The `CallbackEngine` the unauthenticated gate route runs against — the engine, plus the
+   * one bind that route could not make for itself.
+   *
+   * WHY IT EXISTS. `#armGatedRuns` arms what the journal holds at `listen()`, and that is a
+   * one-shot: a gate raised on replica A five minutes after replica B booted is not in B's
+   * scan and never will be. The published callback URL is sprayed across replicas by the
+   * load balancer, so the vendor's correctly signed approval lands on B, `resolveGate` finds
+   * no `RunContext`, and B answers 404 `E_RUN_NOT_FOUND` and writes a durable
+   * `gate.callback_rejected {reason:"not_found"}` into the run's own journal while the gate
+   * is open and on its expiry clock. **The replica set is the deployment `#armGatedRuns`
+   * names as its motivation, and a boot-time scan cannot cover it by construction.**
+   *
+   * WHY IT IS SAFE HERE AND NOT ON ARRIVAL. `#bindFromIndex` may run "only on write paths,
+   * and only AFTER authorization", and this route carries no credential — binding on arrival
+   * would let anyone who can guess a run id make this process fold a journal and hold a
+   * `RunContext`. `resolveGate` is not arrival. By the time `GateCallbackRouter.handle` calls
+   * it, all six of these have already passed: the channel name matched one this deployment
+   * configured; the channel VERIFIED the signature over the bytes as sent; the request
+   * deadline had not passed; the run exists with an open gate; the callback names a human;
+   * and that human is on the gate's approvers list when it has one. That is a strictly
+   * NARROWER door than the bearer token the five authenticated write routes bind behind.
+   *
+   * `openGates` AND `projection` DELIBERATELY DO NOT BIND. Both answer from the journal on an
+   * unattached run — `Engine.openGates` says so in as many words — so binding there would buy
+   * nothing and would move the attach to before the signature is known good, which is the
+   * whole distinction above. One bind, at the narrowest point that needs it.
+   *
+   * The methods are FORWARDED rather than the engine being handed over with one patched, so
+   * the object `GateCallbackRouter` holds has exactly the three methods its interface names
+   * and no route can reach the rest of the engine through it.
+   */
+  #callbackEngine(): CallbackEngine {
+    // THE ROUTER'S OWN INTERFACE IS THE CONTRACT, so the widening happens here, once, rather
+    // than at the call below. `CallbackEngine.resolveGate` types its `actor` as any `Actor`
+    // while `Engine.resolveGate` accepts a human (or `system:replay` in replay mode) — the
+    // narrowing that `Engine`'s own docstring calls structural. `Engine` satisfies
+    // `CallbackEngine` and always did; what changed is only that this file now names the
+    // conversion instead of getting it from method bivariance at the assignment.
+    const engine = this.#engine as CallbackEngine;
+    return {
+      projection: (runId) => engine.projection(runId),
+      openGates: (runId) => engine.openGates(runId),
+      resolveGate: async (runId, input) => {
+        // NOT SWALLOWED. A bind that throws is this plane failing to attach a run whose
+        // decision it has already authenticated, and the caller must hear that rather than
+        // the 404 it decays into. A graph this deployment does not hold is a `return`, not a
+        // throw — see `#bindFromIndex` — and still ends as the honest "not attached".
+        await this.#bindFromIndex(runId);
+        return engine.resolveGate(runId, input);
+      },
+    };
   }
 
   async #bindFromIndex(runId: RunId): Promise<void> {
