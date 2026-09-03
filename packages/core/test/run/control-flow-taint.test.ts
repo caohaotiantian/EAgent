@@ -117,6 +117,26 @@
  *   - A NESTED FAN'S OUTER WIDTH, which reaches past the INNER join — where a bound that stopped
  *     at the first node of type `join` did not.
  *
+ * ## AND THREE MORE, WHICH ARE ALL ONE DEFECT AND IT IS IN THE SUBTRACTION
+ *
+ * The four over-reaching rows above were each closed by narrowing `choiceOf`'s SPACE, and each
+ * time the next adversary found the same shape one edge over. They were the wrong half:
+ * `controlRegion` subtracted only the space edges that were NOT taken, and never the edges that
+ * fired from OUTSIDE the space — which is what `choiceOf` does with a node's unconditional
+ * out-edges whenever no producer supplied the take. So "the choice selected this" meant "this is
+ * downstream of the arm", for every graph in which a node continues AND branches:
+ *
+ *   - ALWAYS CONTINUE, AND ADDITIONALLY DO X IF THE PAGE SAYS SO. The `seq` edge to the sink
+ *     fired too, so everything past the reconvergence would have run either way.
+ *   - AN ORDINARY POLL-UNTIL-DONE RETRY LOOP, which control-tainted everything forward of the
+ *     loop target — not "the cycle body" `controlRegion` claimed. GRAPH006_STUCK_LOOP makes every
+ *     poll loop's `until` read a channel a node inside the cycle wrote, so this is not exotic.
+ *   - A ROUTER ARM WITH ONE CONDITIONAL SIDE-TRIP, both of the router's arms reconverging. The
+ *     arm node is marked by INHERITANCE and re-expanded past the reconvergence the enclosing
+ *     region had already stopped at. "An inherited mark must not re-expand" was the other
+ *     candidate fix and is refused by test 4 above, where an inherited router's region is the
+ *     whole of what closes the laundering path.
+ *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
 
@@ -172,7 +192,10 @@ type Shape =
   | "onlyclean"
   | "seqaltgated"
   | "errordinary"
-  | "errone";
+  | "errone"
+  | "alsoseq"
+  | "pollloop"
+  | "armcond";
 
 interface Options {
   /**
@@ -231,7 +254,9 @@ function spec(o: Options): GraphSpec {
     o.shape === "onlyclean" ||
     o.shape === "seqaltgated" ||
     o.shape === "errordinary" ||
-    o.shape === "errone";
+    o.shape === "errone" ||
+    o.shape === "alsoseq" ||
+    o.shape === "pollloop";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -315,6 +340,31 @@ function spec(o: Options): GraphSpec {
     // expressions reference, which is why `request` is in `reads` in both halves.
     const reads = o.branchOn === "request" ? ["request"] : [o.branchOn, "request"];
     nodes.push({ id: "decide", type: "function", reads, writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+  } else if (o.shape === "alsoseq") {
+    // ALWAYS CONTINUE, AND ADDITIONALLY DO X IF THE PAGE SAYS SO. `decide` takes its `seq` edge
+    // to `merge` on every run and ALSO takes a `conditional` arm through `extra`. The charge is
+    // below `merge`, so it runs whichever way the `when` came out — the choice selected `extra`
+    // and nothing else.
+    nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "extra", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "merge", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "pollloop") {
+    // POLL UNTIL DONE, THEN ACT. The cycle is `poll -> check -> poll`; GRAPH006_STUCK_LOOP makes
+    // a node inside it own the stop condition, so `poll` writes the channel `until` reads — and
+    // `poll` is what read the page. `check`'s `seq` edge to `after` fires on every commit, so
+    // everything forward of the loop target runs whatever the `until` came out.
+    nodes.push({ id: "poll", type: "function", reads: [o.branchOn], writes: ["status"], function: { ref: "function/poll@stable", effects: [] } });
+    nodes.push({ id: "check", type: "function", reads: ["status"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "after", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "armcond") {
+    // A ROUTER ARM THAT RECONVERGES, WITH ONE CONDITIONAL SIDE-TRIP ON IT. Both of the router's
+    // arms reach `merge`, so the router's own region stops at `arm` and `extra` — the charge
+    // below `merge` runs whichever case matched. `arm` then commits with its unconditional edge
+    // to `merge` AND a clean `conditional` through `extra`, and it is control-tainted by
+    // inheritance, so its own region is what decides whether the charge gates.
+    nodes.push({ id: "arm", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "extra", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "merge", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
   } else if (o.shape === "loopuntil") {
     // The cycle is `charge -> tail -> charge`. GRAPH006_STUCK_LOOP requires a node INSIDE the
     // cycle to be able to change the stop condition, so `tail` writes the channel `until` reads.
@@ -457,6 +507,25 @@ function spec(o: Options): GraphSpec {
   } else if (o.shape === "onlyclean") {
     edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
     edges.push({ id: "toChosen", from: "decide", to: "charge", kind: "conditional", when: 'contains(request, "PAY")' });
+  } else if (o.shape === "alsoseq") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "toChosen", from: "decide", to: "extra", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
+    edges.push({ id: "toSink", from: "decide", to: "merge", kind: "seq" });
+    edges.push({ id: "extraToMerge", from: "extra", to: "merge", kind: "seq" });
+    edges.push({ id: "mergeToCharge", from: "merge", to: "charge", kind: "seq" });
+  } else if (o.shape === "pollloop") {
+    edges.push({ id: "e0", from: "fetch", to: "poll", kind: "seq" });
+    edges.push({ id: "e1", from: "poll", to: "check", kind: "seq" });
+    edges.push({ id: "again", from: "check", to: "poll", kind: "loop", maxIterations: 3, until: 'contains(status, "done")' });
+    edges.push({ id: "toAfter", from: "check", to: "after", kind: "seq" });
+    edges.push({ id: "afterToCharge", from: "after", to: "charge", kind: "seq" });
+  } else if (o.shape === "armcond") {
+    edges.push({ id: "toChosen", from: "route", to: "arm", kind: "seq" });
+    edges.push({ id: "toOther", from: "route", to: "merge", kind: "seq" });
+    edges.push({ id: "armToMerge", from: "arm", to: "merge", kind: "seq" });
+    edges.push({ id: "armCond", from: "arm", to: "extra", kind: "conditional", when: 'contains(request, "PAY")' });
+    edges.push({ id: "extraToMerge", from: "extra", to: "merge", kind: "seq" });
+    edges.push({ id: "mergeToCharge", from: "merge", to: "charge", kind: "seq" });
   } else if (o.shape === "loopuntil") {
     edges.push({ id: "e0", from: "fetch", to: "charge", kind: "seq" });
     edges.push({ id: "e1", from: "charge", to: "tail", kind: "seq" });
@@ -620,6 +689,8 @@ function spec(o: Options): GraphSpec {
       untrusted: { type: "string", reduce: "replace" },
       merged: { type: "object", reduce: "replace" },
       note: { type: "string", reduce: "replace" },
+      // `pollloop` only: the channel the loop's `until` tests, written by a node inside the cycle.
+      status: { type: "string", reduce: "replace" },
       receipt: { type: "object", reduce: "replace" },
       // The two fanout shapes only. `items` is the list a fan is taken over; `item` is the
       // per-branch binding the edge's `as` names.
@@ -702,6 +773,8 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   // is explicit about where it goes next, and a `take` no `#edgesToTake` result can be told from.
   functions.register("function/linear@stable", () => ({ writes: { note: "summary" }, take: ["e1"] }));
   functions.register("function/split@stable", () => ({ writes: { items: ["one", "two"] } }));
+  // `pollloop`'s poll: it never says done, so the loop runs to its declared bound in both halves.
+  functions.register("function/poll@stable", () => ({ writes: { status: "pending" } }));
   // `joinfoldwidth`'s list producer: the width is 0 in BOTH halves, so the pair measures whose
   // text built the empty list rather than how wide it was.
   functions.register("function/empty@stable", () => ({ writes: { items: [] } }));
@@ -1472,4 +1545,86 @@ test("A FAILURE CODE IS NOT A CHOICE — four rows, and the last one is a hole t
   // AND THE ROW THAT WAS NEVER IN DOUBT: one catch-all error edge. A failure selected the arm,
   // nothing filtered, and there was nothing to choose among.
   assert.deepEqual(await row("failing"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+});
+
+test("ALWAYS CONTINUE, AND ADDITIONALLY DO X IF THE PAGE SAYS SO — the sibling that fired is not an alternative", async () => {
+  // `decide` takes its unconditional `seq` edge to `merge` on EVERY run, and additionally takes a
+  // `conditional` arm through `extra` when the fetched page says PAY. The charge is below
+  // `merge`, so it runs whichever way the `when` came out — the choice selected `extra` and
+  // nothing else.
+  //
+  // `choiceOf` drops an unconditional out-edge from the SPACE when no producer supplied the take,
+  // so the space here is the one conditional edge, the alternatives side is empty, and
+  // `controlRegion` returned `reachable(taken)` with NOTHING subtracted. The sibling that fired
+  // is not in the space, so it was on neither side — and it is exactly the evidence that
+  // everything past `merge` would have run anyway. Measured with the subtraction reading
+  // `alternatives` alone:
+  //
+  //     region {extra,merge,charge} -> awaiting_gate, gates=1, charged=0
+  //     region {extra}              -> succeeded,     gates=0, charged=1
+  const dirty = await drive({ branchOn: "untrusted", shape: "alsoseq" });
+  assert.equal(dirty.status, "succeeded", `a node both the arm and its sibling reach was not selected: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "gating this gates every 'always continue, and also do X' graph");
+  assert.equal(dirty.charged, 1, "and the action the human lowered the ceiling for runs");
+
+  // The control: nothing about this shape gates either way, which is what says the row above
+  // measures the SUBTRACTION rather than the branch.
+  const clean = await drive({ branchOn: "request", shape: "alsoseq" });
+  assert.equal(clean.status, "succeeded", `control: ${clean.status}`);
+  assert.equal(clean.charged, 1, "control");
+});
+
+test("A POLL LOOP'S REGION IS THE CYCLE BODY — not everything forward of the loop target", async () => {
+  // `poll -> check -> poll`, with `check` also taking a `seq` edge to `after` on every commit.
+  // GRAPH006_STUCK_LOOP makes a node INSIDE the cycle own the stop condition, so `poll` — the
+  // node that read the page — writes the channel `until` tests. Every poll-until-done loop whose
+  // body touches fetched content has that shape by construction.
+  //
+  // `controlRegion`'s own docstring calls a loop's region "the cycle body". It was not: the
+  // taken side walked the back-edge with `followLoops` true and the alternatives side was empty,
+  // so the region was everything forward of the loop target. The regions, printed from the
+  // engine on the dirty half:
+  //
+  //     without the subtraction -> {poll,check,after,charge}  awaiting_gate, gates=1, charged=0
+  //     with it                 -> {poll,check}               succeeded,     gates=0, charged=3
+  const dirty = await drive({ branchOn: "untrusted", shape: "pollloop" });
+  assert.equal(dirty.status, "succeeded", `an ordinary retry loop control-tainted its whole downstream: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "gating this gates every poll-until-done loop in every graph that also fetches");
+  assert.equal(dirty.charged, 3, "and the downstream runs once per pass, exactly as it does on the clean half");
+
+  // The paired half: the same cycle, the same three passes, with `poll` declaring the run's own
+  // input. Nothing untrusted decided anything, and the numbers are identical — which is the
+  // point.
+  const clean = await drive({ branchOn: "request", shape: "pollloop" });
+  assert.equal(clean.status, "succeeded", `the clean half of a poll loop gated: ${clean.status}`);
+  assert.equal(clean.charged, 3, "control");
+});
+
+test("AN INHERITED MARK MAY NOT RE-EXPAND PAST THE RECONVERGENCE ITS ENCLOSING REGION STOPPED AT", async () => {
+  // The router branches on the fetched page and BOTH its arms reach `merge`, so the charge below
+  // `merge` runs whichever case matched and the router's own region correctly stops at {arm,
+  // extra}. `arm` is control-tainted by inheritance, and it commits taking its unconditional
+  // edge to `merge` AND a `conditional` side-trip through `extra` whose `when` reads only the
+  // run's own input. That side-trip's space is one edge, its alternatives side is empty, and the
+  // re-expansion put `merge` and everything past it back in. Regions printed from the engine:
+  //
+  //     route -> {arm,extra}                 (correct, both halves)
+  //     arm   -> {extra,merge,charge}        awaiting_gate, gates=1, charged=0   (before)
+  //     arm   -> {extra}                     succeeded,     gates=0, charged=1   (now)
+  //
+  // THE FIX IS THE SUBTRACTION AND NOT A RULE ABOUT INHERITANCE. "An inherited mark must not
+  // re-expand at all" was the other candidate and it is refused by the test four above this one:
+  // `nested`'s inner router is inherited, and its region {charge} is the whole of what closes
+  // that laundering path. What is wrong here is narrower — the edge to `merge` FIRED, so
+  // everything it reaches would have run whatever the side-trip decided.
+  const dirty = await drive({ branchOn: "untrusted", shape: "armcond" });
+  assert.equal(dirty.status, "succeeded", `an inherited mark re-marked what the router's region already bounded: ${dirty.status}`);
+  assert.equal(dirty.gates, 0, "the charge runs on either of the router's arms, so no choice selected it");
+  assert.equal(dirty.charged, 1, "and it runs");
+
+  // The paired half: the same graph with the router branching on the run's own input, so nothing
+  // is marked anywhere.
+  const clean = await drive({ branchOn: "request", shape: "armcond" });
+  assert.equal(clean.status, "succeeded", `control: ${clean.status}`);
+  assert.equal(clean.charged, 1, "control");
 });

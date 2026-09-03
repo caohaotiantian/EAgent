@@ -4058,44 +4058,88 @@ export class Engine {
    * A caller re-attaches the AUTHORED graph — it is what it has on disk. If this run
    * previously adopted mutations, the in-memory graph is behind the journal, and every
    * derived thing (plans, entry nodes, `maxInstances`) would be computed from the wrong
-   * spec. Replaying the recorded specs through the same compiler restores it, and a
-   * hash mismatch after replay is a genuine divergence rather than something to paper
+   * spec. Replaying the recorded mutations through the same DOOR they came in by restores it,
+   * and a hash mismatch after replay is a genuine divergence rather than something to paper
    * over.
+   *
+   * ONCE PER ATTACH, not once per turn: the early return below skips everything whenever the
+   * in-memory graph already matches the journal's target, so within a process this runs when a
+   * run is picked up behind its own history. That is the case that matters — a second process
+   * replaying another's mutations against a store that has since moved.
    */
   async #rehydrateGraph(ctx: RunContext): Promise<void> {
-    const nodes: NodeSpec[] = [];
-    const edges: EdgeSpec[] = [];
-    let target: string | undefined;
-    let consumed = 0;
+    const recorded: JournalEvent<"graph.mutated">["payload"][] = [];
     for await (const e of ctx.log.read(1)) {
-      if (!isEvent(e, "graph.mutated")) continue;
-      nodes.push(...e.payload.nodes);
-      edges.push(...e.payload.edges);
-      consumed += e.payload.nodes.length;
-      target = e.payload.newHash;
+      if (isEvent(e, "graph.mutated")) recorded.push(e.payload);
     }
+    const target = recorded.at(-1)?.newHash;
     if (target === undefined || target === ctx.graph.graphHash) return;
 
-    const result = compile({
-      spec: { ...ctx.graph.spec, nodes: [...ctx.graph.spec.nodes, ...nodes], edges: [...ctx.graph.spec.edges, ...edges] },
-      // What this run already froze, then the live store for anything the mutation ADDED.
-      //
-      // ONCE PER ATTACH, not once per turn: the early return above skips this whenever the
-      // in-memory graph already matches the journal's target, so within a process it recompiles
-      // when a run is picked up behind its own history. That is the case that matters — a
-      // second process replaying another's mutations against a store that has since moved.
-      resolver: frozenFirst(ctx.graph, this.#resolver),
-      tools: this.tools.manifests(),
-      tenantCapabilities: this.#policyOpts.granted,
-    });
-    if (!result.ok || result.graph.graphHash !== target) {
+    // REPLAYED ONE MUTATION AT A TIME, THROUGH `compileMutation` AND NOT `compile`, AND THAT IS
+    // THE FAIL-CLOSED READING OF A GUARD THAT ONLY EVER RAN AT PROPOSAL TIME.
+    //
+    // This method used to fold every recorded mutation into one merged spec and hand it to
+    // `compile`, which runs the 22 authored-graph rules and NOT the four `compileMutation` adds.
+    // §2b — a mutation may not take a node out of a `human_gate`'s dominated region — is one of
+    // the four, so a journal written by a binary that did not have it resumed on one that does
+    // with the graft intact and the human's rejection bypassed. Measured on one store: the
+    // authored `plan -> gate -> pay`, a `graph.mutated` holding `plan -> hop -> pay` appended
+    // straight into the log, a second Engine attaching the AUTHORED graph, and the human
+    // rejecting the gate:
+    //
+    //     fold-and-compile -> failed, wrote 1   (the tool ran, through the graft)
+    //     replay-and-revalidate -> attach refuses, wrote 0
+    //
+    // `mutate.ts`'s header says a model "cannot propose one that weakens oversight ... because
+    // those are compile errors", and that sentence was true only for the process that did the
+    // proposing. Making it true across a restart is what this loop is for.
+    //
+    // IT REFUSES THE ATTACH RATHER THAN DROPPING THE MUTATION. Dropping it would leave the run
+    // executing a graph its own journal does not describe, which is the one thing `#rehydrate`
+    // exists to prevent; refusing means the run cannot be picked up until a human looks, and
+    // refusing is always allowed.
+    //
+    // The journal carries every input the re-validation needs — `nodes`, `edges`, `proposedBy`,
+    // `proposedByNode` and the running node count — so this is a fold and not a guess.
+    let graph = ctx.graph;
+    let consumed = 0;
+    for (const m of recorded) {
+      const result = compileMutation({
+        base: graph,
+        mutation: {
+          addNodes: m.nodes,
+          addEdges: m.edges,
+          proposedBy: m.proposedBy,
+          proposedByNode: m.proposedByNode,
+        },
+        budget: { consumedNodes: consumed, expansion: graph.expansion },
+        // What this run already froze, then the live store for anything the mutation ADDED.
+        resolver: frozenFirst(ctx.graph, this.#resolver),
+        tools: this.tools.manifests(),
+        tenantCapabilities: this.#policyOpts.granted,
+        ...(this.#policyOpts.systemFloor === undefined ? {} : { systemPostureFloor: this.#policyOpts.systemFloor }),
+      });
+      if (!result.ok) {
+        throw err.policy(
+          CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
+          `run ${ctx.runId} recorded a mutation this binary refuses: ${result.diagnostics
+            .filter((d) => d.severity === "error")
+            .map((d) => `${d.code}: ${d.message}`)
+            .join("; ")}`,
+          { details: { diagnostics: result.diagnostics.filter((d) => d.severity === "error") } },
+        );
+      }
+      graph = result.graph;
+      consumed += m.nodes.length;
+    }
+    if (graph.graphHash !== target) {
       throw err.internal(
         CODES.E_REPLAY_DIVERGENCE,
-        `run ${ctx.runId} recorded graph ${target} but replaying its mutations produced ${result.ok ? result.graph.graphHash : "a compile error"}`,
+        `run ${ctx.runId} recorded graph ${target} but replaying its mutations produced ${graph.graphHash}`,
       );
     }
-    ctx.graph = result.graph;
-    ctx.index = indexGraph(result.graph.spec);
+    ctx.graph = graph;
+    ctx.index = indexGraph(graph.spec);
     ctx.addedNodes = consumed;
   }
 
@@ -8220,26 +8264,44 @@ export class Engine {
    *     the list is built from the input, nothing flagged -> succeeded,     gates=0  (now)
    *     the list is built from the fetched page, empty    -> awaiting_gate, gates=1  (both)
    *
-   * The predicate is `fanout.over` being tainted, which is the one `applyFanoutWidthTaint`
-   * already computes for the same edge — a width nothing untrusted produced was chosen by the
-   * run's own data, and skipping a branch on the strength of it is what the graph asked for.
+   * The predicate is `fanoutWidthEvidence`, THE FUNCTION `applyFanoutWidthTaint` CALLS AND NOT A
+   * SECOND COPY OF IT — a width nothing untrusted produced was chosen by the run's own data, and
+   * skipping a branch on the strength of it is what the graph asked for.
    * `test/run/empty-fanout-oversight.test.ts` pins all three rows.
    *
-   * THE UNSKIPPABLE SET IS ONE MEMBER, `human_gate`, and it is named rather than counted: of the
-   * eight `NodeType`s it is the only one whose whole purpose is that a person acts before the
-   * run goes on. A `tool` or an `agent` on a skipped branch did not happen either, but nothing
-   * about the graph promised it would — the fan's width is what says how many times it runs, and
-   * zero is a width.
+   * THIS LINE WAS A SECOND COPY AND IT HAD DRIFTED. It read `fanout.over !== undefined &&
+   * ctx.tainted.has(fanout.over)`, which is one of the two sources the other function reads;
+   * both docstrings asserted they computed the same predicate. What the copy missed is the node
+   * planning the fan being itself in an earlier tainted choice's region, which is how injected
+   * text steers a run between two CLEAN list-builders and gets an attacker-chosen width over a
+   * channel `ctx.tainted` never held. See `fanoutWidthEvidence` for the measurement.
+   *
+   * A NARROWING WAS PROPOSED HERE AND IS REFUSED, with numbers. "Escalate only when the fan's
+   * exit join reaches something `isHardToUndo`" was suggested on the argument that the ordinary
+   * alert-with-no-pods workflow escalates on an empty day. It does not: measured on
+   * `workflows/incident-triage.ts` driven with `pods: []`, the width DOES read as the attacker's
+   * — `signals` is tainted because `extract-signals` declares no `effects` — and the fan body is
+   * `{investigate, quarantine, correlate}`, which holds nothing unskippable, so this method
+   * escalates nothing and all 17 of that file's tests pass either way. What the narrowing costs
+   * is measured too: it reopens all three exploits this file pins, because every one of them
+   * protects a `reversible_write`, which is exactly the class for which an authored gate is the
+   * only oversight there is.
+   *
+   * THE UNSKIPPABLE SET IS NAMED RATHER THAN COUNTED, and it is `isUnskippable`: `human_gate`,
+   * and `subgraph` because its own body may hold one the parent cannot see. That function
+   * carries the measurement and the argument for treating a delegation as unskippable outright
+   * rather than walking into it.
    */
   #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
     const events: NewEvent[] = [];
-    // WHOSE WIDTH IT WAS is the predicate, and `applyFanoutWidthTaint` computes the same one two
-    // functions on: a fan over a list nothing untrusted produced was emptied by the run's own
-    // data, and that is not an attack on the gate.
-    const attackerWidth = fanout.over !== undefined && ctx.tainted.has(fanout.over);
-    const skipped = attackerWidth
-      ? [...fanBody(ctx.index, fanout)].filter((id) => ctx.index.byId.get(id)?.type === "human_gate")
-      : [];
+    // WHOSE WIDTH IT WAS is the predicate, and it is `fanoutWidthEvidence` — the SAME function
+    // `applyFanoutWidthTaint` calls, because this line used to be a second copy of it that had
+    // drifted narrower. See that function for the two sources and the graph that measured the
+    // one this was missing.
+    const source = ctx.index.byId.get(fanout.from);
+    const attackerWidth =
+      source !== undefined && fanoutWidthEvidence(ctx.controlTainted, ctx.tainted, source, fanout) !== undefined;
+    const skipped = attackerWidth ? [...fanBody(ctx.index, fanout)].filter((id) => isUnskippable(ctx.index.byId.get(id))) : [];
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
@@ -9116,6 +9178,11 @@ function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonl
  * and at width 0 the folded channel is never written at all, so a join branching on that channel
  * branches on a value an attacker chose by suppressing every write to it.
  *
+ * WHOSE WIDTH IT WAS is `fanoutWidthEvidence`, one function down, and it is a separate function
+ * because `Engine.#fireEmptyJoin` asks the same question and used to answer it with its own
+ * narrower copy. This docstring and that method's both claimed they computed one predicate while
+ * they computed two.
+ *
  * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
  * is called from `#restoreEvidence` as well as `#commit`, in the same position at both.
  */
@@ -9129,21 +9196,53 @@ function applyFanoutWidthTaint(
   for (const id of take) {
     const edge = index.edgeById.get(id);
     if (edge === undefined || edge.kind !== "fanout") continue;
-    // The same third source `choiceTainted` names: a node running only because an earlier tainted
-    // choice selected it is a node whose own decisions are that attacker's too, so the fan it
-    // plans carries the taint even when its list is clean.
-    const inherited = controlTainted.get(node.id);
-    const evidence =
-      inherited !== undefined
-        ? inherited.channels
-        : edge.over !== undefined && tainted.has(edge.over)
-          ? [edge.over]
-          : undefined;
+    const evidence = fanoutWidthEvidence(controlTainted, tainted, node, edge);
     if (evidence === undefined) continue;
     for (const b of fanBody(index, edge)) {
       if (!controlTainted.has(b)) controlTainted.set(b, { decidedBy: node.id, channels: evidence });
     }
   }
+}
+
+/**
+ * WHOSE WIDTH THIS FAN WAS — the tainted channels that say so, or `undefined` for the run's own.
+ *
+ * ONE FUNCTION BECAUSE THERE ARE TWO READERS AND THEY DRIFTED. `applyFanoutWidthTaint` above
+ * marks the fan body when the width was an attacker's; `Engine.#fireEmptyJoin` escalates when a
+ * width of ZERO skipped something unskippable, and it is the same question — a fan emptied by
+ * the run's own data skipped the branch the graph asked it to skip. Both docstrings asserted
+ * they computed the same predicate and they did not: `#fireEmptyJoin` read
+ * `fanout.over !== undefined && ctx.tainted.has(fanout.over)` and stopped there, missing the
+ * FIRST of the two sources below. Measured on one graph, a `human_gate` on the fan branch and a
+ * `reversible_write` tool under the join, driven twice:
+ *
+ *     the page steers into the empty list-builder -> succeeded,     gates=0, wrote=1   (before)
+ *     the page steers into the empty list-builder -> awaiting_gate, gates=1, wrote=0   (now)
+ *     the INPUT steers into the same builder      -> succeeded,     gates=0, wrote=1   (both)
+ *
+ * THE TWO SOURCES, and the first is the one that was missing:
+ *
+ *   1. THE NODE PLANNING THE FAN IS ITSELF IN AN EARLIER TAINTED CHOICE'S REGION. The same third
+ *      source `choiceTainted` names: a node running only because an attacker's choice selected
+ *      it is a node whose own decisions are that attacker's too, so the fan it plans carries the
+ *      taint even when the LIST is clean. That is not a corner: `applyTaint` never turns control
+ *      taint into data taint, so injected text that steers a run between two clean list-builders
+ *      produces an attacker-chosen width over a channel `ctx.tainted` has never heard of.
+ *   2. THE LIST ITSELF IS TAINTED — `over` is a channel something untrusted wrote.
+ *
+ * Both are folded from the journal (`ctx.controlTainted` and `ctx.tainted` are rebuilt by
+ * `#restoreEvidence`), so a restart reaches the same answer as the live process.
+ */
+function fanoutWidthEvidence(
+  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
+  tainted: ReadonlySet<string>,
+  node: NodeSpec,
+  edge: EdgeSpec,
+): readonly string[] | undefined {
+  const inherited = controlTainted.get(node.id);
+  if (inherited !== undefined) return inherited.channels;
+  if (edge.over !== undefined && tainted.has(edge.over)) return [edge.over];
+  return undefined;
 }
 
 /** Why a node is control-tainted: whose choice selected it, and what that choice had read. */
@@ -9344,8 +9443,12 @@ interface Choice {
  *     express an iteration count. What it can express is WHICH NODES the decision to go round
  *     again selected, and that is now what it returns: a loop edge alone in a space leaves the
  *     alternatives side empty, and an empty alternatives side subtracts nothing rather than
- *     emptying the region — see `controlRegion`. The first pass is the graph an author wrote and
- *     nothing marks it, because the deciding node commits only after the body has run once.
+ *     emptying the region — see `controlRegion`. The node set it returns is the CYCLE BODY, and
+ *     that is a measured claim rather than a definition: the deciding node's forward `seq` edge
+ *     is outside the space and fired on the same commit, so everything past the loop comes off
+ *     the region through `controlRegion`'s second subtraction source. The first pass is the graph
+ *     an author wrote and nothing marks it, because the deciding node commits only after the body
+ *     has run once.
  *   - WHICH of the four producers wrote a `take`. The journal records THAT one did — see below —
  *     and not which, so a human's redirect and a body's route are one case here. That OVER-marks
  *     a human decision, which is the fail-closed direction and costs a gate only when the node
@@ -9522,23 +9625,50 @@ function choiceTainted(
 /**
  * The nodes this choice SELECTED — not the ones it would have reached anyway.
  *
- * `reachable(the choice-space edges TAKEN) \ reachable(the choice-space edges NOT taken)`. Both
- * sides read the SAME space, which is what makes the subtraction a statement about the choice:
- * an edge outside the space was not something this commit picked, so it belongs on neither side.
- * That is also why a commit that took no edge from its own space selects nothing — the failed
- * node, whose `take` is its `error` edges, and the degenerate router whose only case names its
- * own fallback.
+ * `reachable(the space edges TAKEN) \ reachable(the space edges NOT taken, PLUS every edge that
+ * fired from outside the space)`.
+ *
+ * ## THE SUBTRACTION HAS TWO SOURCES, AND FOR THREE ROUNDS IT HAD ONE
+ *
+ * This docstring used to say the two sides read the SAME space, "which is what makes the
+ * subtraction a statement about the choice: an edge outside the space was not something this
+ * commit picked, so it belongs on neither side". The first half of that is right and the second
+ * is the defect. An edge outside the space was not picked — which means it FIRED WHATEVER THIS
+ * DECISION CAME OUT, and everything forward of it therefore runs whatever this decision came
+ * out. That is the definition of "would have reached it anyway", so it belongs on the
+ * SUBTRACTION side, and leaving it off made "the choice selected this" mean "this is downstream
+ * of the arm", which is a different and much larger set.
+ *
+ * `choiceOf` drops a node's unconditional out-edges from the space whenever no producer supplied
+ * the take, so this is not a corner — it is every graph in which a node continues AND branches.
+ * Three shapes, each driven twice on the same injected page and the same `pay.charge` reading
+ * only clean channels, with the regions printed from the engine:
+ *
+ *     "always continue, and additionally do X if the page says so"
+ *         {extra,merge,charge}       awaiting_gate 1 gate | {extra}       succeeded, charged 1
+ *     an ordinary poll-until-done retry loop
+ *         {poll,check,after,charge}  awaiting_gate 1 gate | {poll,check}  succeeded, charged 3
+ *     a router arm with one conditional side-trip, both arms reconverging
+ *         {extra,merge,charge}       awaiting_gate 1 gate | {extra}       succeeded, charged 1
+ *
+ * The middle row is also why the loop paragraph below is now true: a loop's region IS the cycle
+ * body, and it was "everything forward of the loop target" until the sibling `seq` edge that
+ * fired on the same commit joined the subtraction. `take` was already a parameter here, so this
+ * needed no signature change — only the second line of the walk.
+ *
+ * A commit that took no edge from its own space still selects nothing — the failed node, whose
+ * `take` is its `error` edges, and the degenerate router whose only case names its own fallback.
  *
  * ## AN EMPTY ALTERNATIVES SIDE, AND THE TEST THAT DECIDES WHAT IT MEANS
  *
- * When nothing in the space was left untaken there was no arm to go down INSTEAD, so the only
- * alternative the decision could have had is "nothing ran". Whether that was an alternative at
- * all is a question about the TAKEN edges, and it has two answers:
+ * When nothing in the space was left untaken there was no arm IN THE SPACE to go down instead.
+ * Whether that means "nothing would have run" is a question about the TAKEN edges, and it has
+ * two answers:
  *
  *   - A `conditional` or `loop` edge that fired COULD have not fired: its expression could have
- *     come out the other way, and then nothing past it would have run. So the region is
- *     `reachable(taken)`. A router is the same case one level up — a different case could have
- *     been selected.
+ *     come out the other way. So the region is `reachable(taken)`, LESS whatever the edges that
+ *     fired from outside the space reach — which is the paragraph above, and is why this clause
+ *     is not by itself a claim that "nothing past it would have run".
  *   - AN UNCONDITIONAL EDGE THAT FIRED WAS ALWAYS GOING TO FIRE. Nothing was chosen, the
  *     alternative does not exist, and the region is empty.
  *
@@ -9559,7 +9689,9 @@ function choiceTainted(
  *
  * The loop row is why the docstring below no longer says a loop's `until` contributes evidence
  * only when the space holds another edge: taking the back-edge selects the cycle body, and NOT
- * taking it is a real alternative that reaches nothing.
+ * taking it is a real alternative that reaches nothing. "The cycle body" is measured rather than
+ * asserted — see the poll-loop row above, where it is `{poll,check}` and the node past the loop
+ * is out.
  *
  * The residual is the router: one that takes every edge it declared marks `reachable(all of
  * them)` with nothing subtracted, which can be most of a graph. Measured on a single case whose
@@ -9616,12 +9748,18 @@ function controlRegion(
     return new Set<NodeId>();
   }
 
+  // THE EDGES THAT FIRED FROM OUTSIDE THE SPACE, which are the other half of "would have run
+  // anyway". See the section above: an edge outside the space was not picked, so it fired
+  // unconditionally, so everything forward of it runs whatever this decision came out.
+  const inSpace = new Set(space.map((e) => e.id));
+  const alsoRan = take.filter((id) => !inSpace.has(id));
+
   const selected = reachableFromEdges(
     index,
     taken.map((e) => e.id),
     true,
   );
-  for (const id of reachableFromEdges(index, alternatives, false)) selected.delete(id);
+  for (const id of reachableFromEdges(index, [...alternatives, ...alsoRan], false)) selected.delete(id);
   return selected;
 }
 
@@ -9668,9 +9806,36 @@ function controlRegion(
  * at the first one below `bodyDepth` — which puts the exit join in and everything past it out,
  * at any nesting level, without asking what kind an edge or a node is.
  *
- * An UNDEFINED depth stops the descent too. `GRAPH008_JOIN_DEPTH` refuses an ambiguous depth for
- * joins and their arms and tolerates it elsewhere, so absent means "this node is reachable at two
- * different depths" — which is not a claim that it is on this branch.
+ * AN UNDEFINED DEPTH IS DESCENDED THROUGH, AND THE ARGUMENT HERE USED TO RUN THE OTHER WAY.
+ * `GRAPH008_JOIN_DEPTH` refuses an ambiguous depth for joins and their named arms and tolerates
+ * it elsewhere, so absent means "this node is reachable at two different fan-out depths" — and
+ * this paragraph read that as "which is not a claim that it is on this branch" and stopped. It
+ * is not a claim that it is NOT, either, and the two are not symmetric: an unknown depth means
+ * the node MIGHT be on the branch, and answering "it is not" is the failure this file already
+ * carries a list of. ONE extra inbound edge — a `conditional` whose `when` never matches, or an
+ * edge a mutation adds — truncated the walk and made everything below it invisible to BOTH
+ * consumers at once. Measured on one graph driven twice, a `human_gate` two hops down the branch
+ * and a `reversible_write` tool under the join:
+ *
+ *     the page yields none -> succeeded,     gates=0, wrote=1   (before)
+ *     the page yields none -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * So the ONLY thing that stops the walk is a KNOWN depth shallower than a KNOWN body depth. When
+ * the body's own depth is ambiguous nothing stops it at all and the body is the whole downstream,
+ * which is the over-approximating direction and the one this function's `loop` paragraph already
+ * picks.
+ *
+ * A NODE SHALLOWER THAN THE BODY IS ADMITTED ONLY THROUGH A `join` EDGE. This walk used to
+ * `seen.add(e.to)` BEFORE testing the depth, so any edge out of the body admitted its target
+ * whatever depth it was at — and a retry `loop` back-edge out of a fan body points at a node
+ * ABOVE the fan. When that node is the run's already-approved `human_gate`, an empty fan
+ * escalated on a gate that had run and asked a second human:
+ *
+ *     an empty fan under an approved gate, retry edge out of the body -> gates=2   (before)
+ *     the same graph                                                  -> gates=1   (now)
+ *
+ * Only a `join` edge pops a fan-out level (`computeFanoutStacks`), so the edge kind separates the
+ * exit join from everything else exactly, with no second notion of depth to keep in step.
  *
  * Everything else is followed, `loop` edges included: a cycle inside a fan body is a branch that
  * retries, and over-approximating the body is the direction that marks MORE.
@@ -9682,16 +9847,62 @@ function fanBody(index: GraphIndex, fanout: EdgeSpec): Set<NodeId> {
   for (let i = 0; i < queue.length; i++) {
     for (const e of index.outbound.get(queue[i]!) ?? []) {
       if (e.kind === "compensation" || seen.has(e.to)) continue;
-      // ADMITTED, then the walk decides whether to DESCEND. The exit join is the last node of
-      // the body and the first node shallower than it, so a rule that stopped BEFORE it would
-      // leave the one node whose own decisions the width still chose.
-      seen.add(e.to);
       const depth = index.fanoutDepth.get(e.to);
-      if (bodyDepth === undefined || depth === undefined || depth < bodyDepth) continue;
+      // THE BOUND, AND IT IS THE ONLY THING THAT STOPS THE WALK. A node the compiler puts
+      // SHALLOWER than the body is one of two things and they need opposite answers: the fan's
+      // own EXIT JOIN, which is in and where the walk ends, or a node ABOVE the fan that a
+      // `loop` back-edge re-enters, which this width did not select at all. Only a `join` edge
+      // pops a fan-out level (`computeFanoutStacks`), so the edge kind separates them exactly.
+      if (bodyDepth !== undefined && depth !== undefined && depth < bodyDepth) {
+        if (e.kind === "join") seen.add(e.to);
+        continue;
+      }
+      seen.add(e.to);
       queue.push(e.to);
     }
   }
   return seen;
+}
+
+/**
+ * NODES A ZERO-WIDTH FAN MAY NOT PASS OVER IN SILENCE — the set, named rather than counted.
+ *
+ * `human_gate`, because of the eight `NodeType`s it is the only one whose whole purpose is that a
+ * person acts before the run goes on. A `tool` or an `agent` on a skipped branch did not happen
+ * either, but nothing about the graph promised it would — the fan's width is what says how many
+ * times it runs, and zero is a width.
+ *
+ * `subgraph`, because ITS OWN BODY MAY HOLD ONE and the parent cannot see it. This was the set
+ * being wrong rather than the predicate: with the fan's list tainted and a `subgraph` in the fan
+ * body, a `human_gate` in the delegated graph was skipped along with everything else and the
+ * scan for `type === "human_gate"` over the PARENT's nodes found nothing. Measured on one graph
+ * driven twice, the child holding the only gate and a `reversible_write` tool under the join:
+ *
+ *     the page yields two items -> awaiting_gate, gates=1, wrote=0
+ *     the page yields none      -> succeeded,     gates=0, wrote=1   (before)
+ *     the page yields none      -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * TREATED AS UNSKIPPABLE OUTRIGHT RATHER THAN WALKED, and the walk was the other candidate: the
+ * child is compiled and cached in `#childGraphs`, so `#compileChild` would answer what is in it.
+ * Three reasons it is not called from here.
+ *
+ *   1. `#compileChild` calls `compileOrThrow`, and this method is on the SCHEDULING path — it
+ *      returns the events that release the join. A child spec that no longer compiles would come
+ *      out of here as a throw rather than as a refusal, which is a guard that fails OPEN by
+ *      crashing the wave that was supposed to raise it.
+ *   2. A child may itself hold a `subgraph`, so the honest walk is a recursive compile of a tree
+ *      whose depth is bounded only by `expansion.maxDepth`, performed to answer a question about
+ *      a branch that did not run.
+ *   3. The answer would be no better. A child re-decides every node at full strictness under its
+ *      own `PolicyEngine` (`#contextFor`), so a delegation is exactly where oversight the parent
+ *      cannot enumerate lives; "the child declares no `human_gate` today" is a claim about a spec
+ *      the parent froze, not about the run that would have happened.
+ *
+ * The cost is one escalation on an empty ATTACKER-CHOSEN fan whose branch delegates, and E12 is a
+ * gate rather than a refusal — a person who looks and approves gets the run they asked for.
+ */
+function isUnskippable(node: NodeSpec | undefined): boolean {
+  return node !== undefined && (node.type === "human_gate" || node.type === "subgraph");
 }
 
 /**

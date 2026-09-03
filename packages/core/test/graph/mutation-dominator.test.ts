@@ -31,6 +31,21 @@
  *
  * The end-to-end arm is the one that matters: the compile-level checks that existed covered two
  * of the three edge directions, and covering two of three is how this arrived.
+ *
+ * ## AND THREE MORE, EACH ONE THE RULE BEING RIGHT AND ITS EDGES BEING WRONG
+ *
+ *   - THE BAR WAS THE COMPILED POSTURE, so `CLASS_DEFAULT_POSTURE` made every ordinary
+ *     `reversible_write` node an unremovable dominator and the canonical expansion was refused in
+ *     a graph with no gate and no irreversible action anywhere. The admit test above used only
+ *     plain `function` nodes, which is why it passed. The bar is the node TYPE now — a
+ *     `human_gate` — which is what the section header argues about throughout.
+ *   - THE RULE WAS COMPILE-TIME ONLY. `Engine.#rehydrateGraph` re-applied a RECORDED mutation
+ *     with `compile`, which does not run this rule, so a journal already holding a graft resumed
+ *     on a newer binary with the human's rejection bypassed. It replays through
+ *     `compileMutation` now and refuses the resume.
+ *   - ONE GRAFTED EDGE EMITTED ONE DIAGNOSTIC PER DOWNSTREAM NODE — the same sentence restated
+ *     once per node in the tail. One per (culprit edge, lost dominator) now, reported at the
+ *     shallowest node, which is where the author moves the edge to.
  */
 
 import test from "node:test";
@@ -135,6 +150,20 @@ function proposingGraft(mutate: boolean): MockScript {
       : { text: JSON.stringify({ plan: {} }), finishReason: "stop" };
 }
 
+/** A proposal that adds a node inside the proposer's own region and takes nothing away. */
+function proposingLegit(): MockScript {
+  return () => ({
+    text: JSON.stringify({
+      plan: {},
+      mutation: {
+        addNodes: [{ id: n("side"), type: "function", reads: ["goal"], function: { ref: "function/noop@stable", effects: [] } }],
+        addEdges: [{ id: e("s0"), from: n("plan"), to: n("side"), kind: "seq" }],
+      },
+    }),
+    finishReason: "stop",
+  });
+}
+
 const compile = (spec: GraphSpec): RunGraph =>
   compileOrThrow({ spec, resolver: resolver(), tools: { "notes.write": NOTE }, tenantCapabilities: CAPS });
 
@@ -143,9 +172,16 @@ interface Rig {
   readonly wrote: () => number;
 }
 
-function rig(script: MockScript): Rig {
+/** The successor graph a binary that ADMITTED the graft would have compiled and journaled. */
+function graftedHash(): string {
+  const base = authoredSpec() as unknown as { nodes: unknown[]; edges: unknown[] };
+  base.nodes.push(...(GRAFT_NODES as unknown[]));
+  base.edges.push(...(GRAFT_EDGES as unknown[]));
+  return compile(base as unknown as GraphSpec).graphHash;
+}
+
+function rig(script: MockScript, store: MemoryStateStore = new MemoryStateStore({ now: () => 1_700_000_000_000 })): Rig {
   const now = (): number => 1_700_000_000_000;
-  const store = new MemoryStateStore({ now });
   const tools = new ToolRegistry();
   let wrote = 0;
   tools.register({
@@ -355,4 +391,212 @@ test("A PLAIN CHAIN ADMITS THE CANONICAL EXPANSION — no gate, no tool, posture
     `the canonical expansion was refused: ${r.diagnostics.map((d) => d.message).join(" | ")}`,
   );
   assert.equal(r.ok, true, `the expansion did not compile: ${r.ok ? "" : r.error.message}`);
+});
+
+/** `a -> w -> c -> d` with `w` an ordinary REVERSIBLE tool. No gate, no irreversible action. */
+function writeChain(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "write-chain", project: "test", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 }, capabilities: CAPS },
+    channels: {
+      goal: { type: "string", reduce: "replace" },
+      a1: { type: "string", reduce: "replace" },
+      receipt: { type: "object", reduce: "replace" },
+      c1: { type: "string", reduce: "replace" },
+      d1: { type: "string", reduce: "replace" },
+      x1: { type: "string", reduce: "replace" },
+    },
+    inputs: ["goal"],
+    outputs: ["d1"],
+    nodes: [
+      { id: n("a"), type: "function", reads: ["goal"], writes: ["a1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("w"), type: "tool", reads: ["a1"], writes: ["receipt"], tool: { name: "notes.write", version: "1.0", args: {} }, unhandled: true },
+      { id: n("c"), type: "function", reads: ["receipt"], writes: ["c1"], function: { ref: "function/noop@stable", effects: [] } },
+      { id: n("d"), type: "function", reads: ["c1"], writes: ["d1"], function: { ref: "function/noop@stable", effects: [] } },
+    ],
+    edges: [
+      { id: e("a0"), from: n("a"), to: n("w"), kind: "seq" },
+      { id: e("a1e"), from: n("w"), to: n("c"), kind: "seq" },
+      { id: e("a2"), from: n("c"), to: n("d"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("A CHAIN WITH A REVERSIBLE_WRITE IN IT ADMITS THE CANONICAL EXPANSION — the bar is the gate", () => {
+  // The bar used to be the COMPILED POSTURE, and `CLASS_DEFAULT_POSTURE` puts `reversible_write`
+  // at `on` — so any ordinary `fs.write`/`notes.write` node became an unremovable dominator and
+  // the canonical expansion was refused in a graph with NO gate and NO irreversible action
+  // anywhere. The admit test one below used only plain `function` nodes, which is why it passed.
+  //
+  //     the bar is the compiled posture -> MUT003_DOMINATOR_LOST, lost dominator "w"
+  //     the bar is the node type        -> ok
+  const r = compileMutation({
+    base: compile(writeChain()),
+    mutation: {
+      addNodes: [
+        { id: n("lookup"), type: "function", reads: ["a1"], writes: ["x1"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec,
+      ],
+      addEdges: [
+        { id: e("m0"), from: n("a"), to: n("lookup"), kind: "seq" } as unknown as EdgeSpec,
+        { id: e("m1"), from: n("lookup"), to: n("c"), kind: "seq" } as unknown as EdgeSpec,
+      ],
+      proposedBy: "t1" as TaskId,
+      proposedByNode: n("a"),
+    },
+    budget: { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } },
+    resolver: resolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  assert.equal(
+    r.diagnostics.filter((d) => d.code === "MUT003_DOMINATOR_LOST").length,
+    0,
+    `an expansion past an ordinary write was refused: ${r.diagnostics.map((d) => d.message).join(" | ")}`,
+  );
+  assert.equal(r.ok, true, `the expansion did not compile: ${r.ok ? "" : r.error.message}`);
+
+  // AND THE GATE IS STILL THE BAR IN THE SAME GRAPH. One `human_gate` in front of `c`, and the
+  // identical rejoin is refused — so the row above is the narrowing and not the rule going away.
+  const gated = writeChain() as unknown as { nodes: unknown[]; edges: EdgeSpec[] };
+  gated.nodes.push({ id: n("gate"), type: "human_gate", reads: ["goal"], humanGate: { ref: "oversight/hold@stable" } });
+  gated.edges = gated.edges.filter((x) => x.id !== e("a1e"));
+  gated.edges.push({ id: e("g0"), from: n("w"), to: n("gate"), kind: "seq" } as unknown as EdgeSpec);
+  gated.edges.push({ id: e("g1"), from: n("gate"), to: n("c"), kind: "seq" } as unknown as EdgeSpec);
+  const g = compileMutation({
+    base: compile(gated as unknown as GraphSpec),
+    mutation: {
+      addNodes: [
+        { id: n("lookup"), type: "function", reads: ["a1"], writes: ["x1"], function: { ref: "function/noop@stable", effects: [] } } as unknown as NodeSpec,
+      ],
+      addEdges: [
+        { id: e("m0"), from: n("a"), to: n("lookup"), kind: "seq" } as unknown as EdgeSpec,
+        { id: e("m1"), from: n("lookup"), to: n("c"), kind: "seq" } as unknown as EdgeSpec,
+      ],
+      proposedBy: "t1" as TaskId,
+      proposedByNode: n("a"),
+    },
+    budget: { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } },
+    resolver: resolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  const lost = g.diagnostics.find((d) => d.code === "MUT003_DOMINATOR_LOST");
+  assert.ok(lost !== undefined, `the graft around the gate compiled: ${g.diagnostics.map((d) => d.code).join(", ") || "(none)"}`);
+  assert.match(lost.message, /\bgate\b/, "…and it is the gate that was named");
+});
+
+test("ONE GRAFTED EDGE IS ONE DIAGNOSTIC — reported at the SHALLOWEST node it takes out", () => {
+  // The loop reported per DOWNSTREAM NODE, so one edge that takes a whole tail out of a gate's
+  // region produced one sentence per node in the tail — the same fact, restated, differing only
+  // in which node it named. Measured on `plan -> gate -> pay -> after -> last` with the graft
+  // rejoining at `pay`:
+  //
+  //     per downstream node          -> 3 diagnostics: "pay", "after", "last"
+  //     per (culprit edge, lost)     -> 1 diagnostic: "pay"
+  const tailed = authoredSpec() as unknown as { nodes: unknown[]; edges: unknown[] };
+  tailed.nodes.push({ id: n("after"), type: "function", reads: ["goal"], writes: ["note"], function: { ref: "function/noop@stable", effects: [] } });
+  tailed.nodes.push({ id: n("last"), type: "function", reads: ["note"], function: { ref: "function/noop@stable", effects: [] } });
+  tailed.edges.push({ id: e("a2"), from: n("pay"), to: n("after"), kind: "seq" });
+  tailed.edges.push({ id: e("a3"), from: n("after"), to: n("last"), kind: "seq" });
+
+  const g = compileMutation({
+    base: compile(tailed as unknown as GraphSpec),
+    mutation: { addNodes: [...GRAFT_NODES], addEdges: [...GRAFT_EDGES], proposedBy: "t1" as TaskId, proposedByNode: n("plan") },
+    budget: { consumedNodes: 0, expansion: { maxNodes: 8, maxDepth: 2, maxFanout: 4, maxLoopIterations: 2 } },
+    resolver: resolver(),
+    tools: { "notes.write": NOTE },
+    tenantCapabilities: CAPS,
+  });
+  const lost = g.diagnostics.filter((d) => d.code === "MUT003_DOMINATOR_LOST");
+  assert.equal(lost.length, 1, `one edge, one lost dominator, ${String(lost.length)} diagnostics: ${lost.map((d) => d.message).join(" | ")}`);
+  assert.match(lost[0]!.message, /"pay"/, "and it names the shallowest node the edge took out, which is where the author moves the edge to");
+});
+
+test("A GRAFT ALREADY IN THE JOURNAL IS REFUSED AT ATTACH — the compile-time rule was compile-time only", async () => {
+  // MUT003 ran in `#applyMutation` and nowhere else. `#rehydrateGraph` re-applied the RECORDED
+  // mutation with `compile`, which runs the 22 authored-graph rules and not the four
+  // `compileMutation` adds — so a journal written by a binary without §2b resumed on one that has
+  // it with the graft intact and the human's rejection bypassed. `mutate.ts`'s header claims a
+  // model "cannot propose one that weakens oversight ... because those are compile errors", and
+  // that was true only for the process that did the proposing.
+  //
+  // The journal is written here the way `control-flow-taint.test.ts` ages one: the run is
+  // submitted, a `graph.mutated` holding the exact graft is appended straight into the log, and a
+  // SECOND Engine attaches the AUTHORED graph — which is what a caller has on disk.
+  //
+  //     fold-and-compile      -> failed, wrote 1   (the human rejected and the tool ran)
+  //     replay-and-revalidate -> attach refuses,  wrote 0
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const first = rig(proposingGraft(false), store);
+  const graph = compile(authoredSpec());
+  const runId = await first.engine.submit({ graph, inputs: { goal: "write it down" } });
+
+  let headSeq = 0;
+  for await (const ev of store.read(runId, 1 as never)) headSeq = ev.seq;
+  await store.append({
+    runId,
+    expectedSeq: headSeq as never,
+    events: [
+      {
+        type: "graph.mutated",
+        payload: {
+          parentHash: graph.graphHash,
+          newHash: graftedHash(),
+          addedNodes: GRAFT_NODES.map((x) => x.id),
+          addedEdges: GRAFT_EDGES.map((x) => x.id),
+          nodes: [...GRAFT_NODES],
+          edges: [...GRAFT_EDGES],
+          proposedBy: "t-old" as TaskId,
+          proposedByNode: n("plan"),
+          budgetConsumed: 1,
+        },
+        actor: { kind: "system", id: "executor" },
+      } as never,
+    ],
+  });
+
+  // `#rehydrateGraph` runs on the first `advance` after an attach, which is where the recorded
+  // mutation is replayed and therefore where it is refused.
+  const second = rig(proposingGraft(false), store);
+  second.engine.attach(runId, graph);
+  await assert.rejects(
+    () => second.engine.advance(runId),
+    (e: unknown) => /MUT003_DOMINATOR_LOST/.test((e as Error).message),
+    "a recorded graft around an authored gate was adopted on resume",
+  );
+  assert.equal(second.wrote(), 0, "and nothing ran");
+});
+
+test("A LEGITIMATE RECORDED MUTATION STILL REHYDRATES — the re-validation is not a refusal of every graft", async () => {
+  // The half that must not move. The same replay, with a mutation that removes no gate from
+  // anybody's dominator set: a second process attaching the AUTHORED graph rebuilds the successor
+  // from the journal, matches the recorded hash, and the run goes on. Without this the arm above
+  // would be measuring "attach refuses after any mutation".
+  const store = new MemoryStateStore({ now: () => 1_700_000_000_000 });
+  const first = rig(proposingLegit(), store);
+  const graph = compile(authoredSpec());
+  const runId = await first.engine.submit({ graph, inputs: { goal: "write it down" } });
+  const held = await first.engine.advance(runId);
+  assert.equal(held.status, "awaiting_gate", `precondition: the authored gate stops the run: ${held.status}`);
+  const folded = (await first.engine.projection(runId))?.graphHash;
+  assert.notEqual(folded, graph.graphHash, "precondition: the run really did adopt a mutation");
+
+  // A second Engine with no memory of the first, handed the graph a caller has on disk.
+  const second = rig(proposingLegit(), store);
+  second.engine.attach(runId, graph);
+
+  const gate = Object.values(held.gates).find((g) => g.nodeId === "gate");
+  assert.ok(gate !== undefined, "precondition: the authored gate is open");
+  await second.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+  const done = await second.engine.advance(runId);
+  assert.equal(done.status, "succeeded", `a legitimate recorded mutation blocked the resume: ${done.status}`);
+  assert.equal(done.graphHash, folded, "and the graph it ran out on is the successor the journal recorded");
+  assert.equal(second.wrote(), 1, "and the action the human approved runs");
 });

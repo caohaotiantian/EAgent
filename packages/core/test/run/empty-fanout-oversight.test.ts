@@ -30,6 +30,27 @@
  * graph out. `#fireEmptyJoin`'s own docstring is about that case — an alert with no pods must
  * not strand the downstream — and a fix that gated every empty fan would be a constant gate on
  * the shape the method exists for.
+ *
+ * ## FOUR MORE, AND TWO OF THEM ARE THE SAME QUESTION ANSWERED TWICE
+ *
+ * `#fireEmptyJoin` and `applyFanoutWidthTaint` both ask "whose width was this", and both
+ * docstrings said they computed one predicate while they computed two. And the set of things a
+ * skipped branch may not silently contain was a literal string.
+ *
+ *   - A WIDTH AN ATTACKER STEERED, OVER A CLEAN LIST. `applyTaint` never turns control taint into
+ *     data taint, so injected text that picks between two clean list-builders produces an
+ *     attacker-chosen width over a channel `ctx.tainted` has never held. One predicate now, in
+ *     `fanoutWidthEvidence`.
+ *   - A `subgraph` ON THE SKIPPED BRANCH. The unskippable set was `"human_gate"` scanned over the
+ *     PARENT's nodes, and a delegated graph's own gate is not there.
+ *
+ * And two where `fanBody` — which both consumers walk — answered an unknown with the passing
+ * value:
+ *
+ *   - AN AMBIGUOUS FAN-OUT DEPTH, which stopped the walk. One extra inbound edge is enough, and
+ *     everything below went invisible to both consumers at once.
+ *   - A RETRY `loop` BACK-EDGE OUT OF THE BODY, which admitted a node ABOVE the fan. When that
+ *     node is the run's already-approved gate, an empty fan asks a second human.
  */
 
 import test from "node:test";
@@ -42,6 +63,7 @@ import type { RunId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
+import type { ResourceResolver } from "../../src/graph/validate.ts";
 import { resolver } from "./skeleton.ts";
 
 const NOW = () => 1_700_000_000_000;
@@ -66,7 +88,7 @@ interface Options {
    * One read of difference and nothing else: `fetch` still runs and `untrusted` is still tainted
    * in both halves, so this is a claim about the LIST rather than about the graph.
    */
-  readonly listFrom?: "fetched" | "input";
+  readonly listFrom?: "fetched" | "input" | "steered" | "steered-clean";
 }
 
 /**
@@ -79,6 +101,45 @@ function spec(o: Options): GraphSpec {
   const branch = o.gateOnBranch
     ? { id: "hold", type: "human_gate", reads: ["item"], humanGate: { ref: "oversight/hold@stable" } }
     : { id: "hold", type: "function", reads: ["item"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } };
+  // THE STEERED SHAPE. `plan` is replaced by TWO list-builders, each of which reads only the
+  // run's own input — so whichever one runs, `items` is a channel nothing untrusted ever wrote
+  // and `ctx.tainted` never holds it. What the injected page decides is WHICH ONE RUNS, and
+  // therefore how wide the fan is. `steered-clean` is the same graph with the router reading the
+  // run's own input, which is the half that must not gate.
+  const steered = o.listFrom === "steered" || o.listFrom === "steered-clean";
+  const steerOn = o.listFrom === "steered" ? "untrusted" : "request";
+  const steerNodes = steered
+    ? [
+        {
+          id: "route",
+          type: "router",
+          reads: [steerOn],
+          router: { mode: "expression", cases: [{ when: `contains(${steerOn}, "NONE")`, take: ["toEmpty"] }], fallbackEdge: "toFull" },
+        },
+        { id: "planEmpty", type: "function", reads: ["request"], writes: ["items"], function: { ref: "function/none@stable", effects: [] } },
+        { id: "planFull", type: "function", reads: ["request"], writes: ["items"], function: { ref: "function/two@stable", effects: [] } },
+      ]
+    : [
+        {
+          id: "plan",
+          type: "function",
+          reads: [o.listFrom === "input" ? "request" : "untrusted"],
+          writes: ["items"],
+          function: { ref: "function/split@stable", effects: [] },
+        },
+      ];
+  const steerEdges = steered
+    ? [
+        { id: "e0", from: "fetch", to: "route", kind: "seq" },
+        { id: "toEmpty", from: "route", to: "planEmpty", kind: "seq" },
+        { id: "toFull", from: "route", to: "planFull", kind: "seq" },
+        { id: "fanE", from: "planEmpty", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+        { id: "fanF", from: "planFull", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      ]
+    : [
+        { id: "e0", from: "fetch", to: "plan", kind: "seq" },
+        { id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      ];
   return {
     apiVersion: "loom.dev/v1",
     kind: "GraphSpec",
@@ -102,13 +163,7 @@ function spec(o: Options): GraphSpec {
         writes: ["untrusted"],
         tool: { name: "net.fetch", version: "1.0", args: {} },
       },
-          {
-        id: "plan",
-        type: "function",
-        reads: [o.listFrom === "input" ? "request" : "untrusted"],
-        writes: ["items"],
-        function: { ref: "function/split@stable", effects: [] },
-      },
+          ...steerNodes,
       branch,
       { id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["hold"], mode: "all", onBranchError: "skip" } },
       {
@@ -121,15 +176,14 @@ function spec(o: Options): GraphSpec {
       },
     ],
     edges: [
-      { id: "e0", from: "fetch", to: "plan", kind: "seq" },
-      { id: "fan", from: "plan", to: "hold", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      ...steerEdges,
       { id: "jj", from: "hold", to: "j", kind: "join", branches: ["hold"] },
       { id: "toWrite", from: "j", to: "write", kind: "seq" },
     ],
   } as unknown as GraphSpec;
 }
 
-function engineOver(store: MemoryStateStore, page: Options["page"]): { engine: Engine; wrote: () => number } {
+function engineOver(store: MemoryStateStore, page: Options["page"], res?: ResourceResolver): { engine: Engine; wrote: () => number } {
   let wrote = 0;
   const tools = new ToolRegistry();
   tools.register({
@@ -163,6 +217,12 @@ function engineOver(store: MemoryStateStore, page: Options["page"]): { engine: E
     return { writes: { items: text.includes("NONE") ? [] : ["one", "two"] } };
   });
   functions.register("function/echo@stable", () => ({ writes: { parts: ["p"] } }));
+  // THE TWO CLEAN LIST-BUILDERS the steered shape routes between. Neither reads anything a tool
+  // fetched, so whichever one runs writes `items` with `ctx.tainted` silent.
+  functions.register("function/none@stable", () => ({ writes: { items: [] } }));
+  functions.register("function/two@stable", () => ({ writes: { items: ["one", "two"] } }));
+  // The delegated graph's own body, which runs in the CHILD run behind the child's own gate.
+  functions.register("function/leaf@stable", () => ({ writes: { out: ["p"] } }));
   // The nested shape's list producer: one seed per depth, both empty on the same word.
   functions.register("function/nest@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
@@ -179,6 +239,7 @@ function engineOver(store: MemoryStateStore, page: Options["page"]): { engine: E
     now: NOW,
     sleep: async () => {},
     maxParallelism: 1,
+    ...(res === undefined ? {} : { resolver: res }),
     policy: { granted: ["net:fetch", "notes:write"], budget: { runUsd: 1 } },
   });
   return { engine, wrote: () => wrote };
@@ -198,7 +259,8 @@ async function drive(o: Options): Promise<{ status: string; gates: number; wrote
   // The fetched page is still what `fetch` returns in BOTH halves; when the list comes from the
   // input instead, the same word decides the width from the run's own text.
   const { engine, wrote } = engineOver(store, o.page);
-  const request = o.listFrom === "input" && o.page === "NONE" ? "NONE flagged today" : "please";
+  const cleanSteer = o.listFrom === "input" || o.listFrom === "steered-clean";
+  const request = cleanSteer && o.page === "NONE" ? "NONE flagged today" : "please";
   const runId = await engine.submit({ graph: graphFor(o), inputs: { request } });
   const p = await engine.advance(runId as RunId);
   return { status: p.status, gates: Object.keys(p.gates).length, wrote: wrote() };
@@ -406,4 +468,379 @@ test("THE NESTED SHAPE OVER A CLEAN LIST STILL RUNS — both halves, at both dep
   const two = await driveNested("TWO", "input");
   assert.equal(two.status, "awaiting_gate", `the authored gate must still stop a populated nested fan: ${two.status}`);
   assert.equal(two.wrote, 0, "nothing is written while a human is deciding");
+});
+
+// ---------------------------------------------------------------------------
+// A `subgraph` ON THE SKIPPED BRANCH, whose CHILD holds the gate
+// ---------------------------------------------------------------------------
+
+const LEAF_REF = "graph/leaf@stable";
+
+/** The delegated graph: a human gate, then the work. The parent cannot see either node. */
+function leafSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "leaf-gate", project: "test", version: 1 },
+    policy: { posture: "out", budget: { costUsd: 1 }, expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: {
+      payload: { type: "string", reduce: "replace" },
+      out: { type: "array", reduce: "replace" },
+    },
+    inputs: ["payload"],
+    outputs: ["out"],
+    nodes: [
+      { id: "hold", type: "human_gate", reads: ["payload"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: "leaf", type: "function", reads: ["payload"], writes: ["out"], function: { ref: "function/leaf@stable", effects: [] } },
+    ],
+    edges: [{ id: "toLeaf", from: "hold", to: "leaf", kind: "seq" }],
+  } as unknown as GraphSpec;
+}
+
+/** `fetch -> plan -{fanout}-> delegate -{join}-> j -> write`, with `delegate` a `subgraph`. */
+function subgraphSpec(listFrom: "fetched" | "input"): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `sub-empty-fan-${listFrom}`, project: "test", version: 1 },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "notes:write"],
+      expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 },
+    },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes: [
+      { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+      {
+        id: "plan",
+        type: "function",
+        reads: [listFrom === "input" ? "request" : "untrusted"],
+        writes: ["items"],
+        function: { ref: "function/split@stable", effects: [] },
+      },
+      {
+        id: "delegate",
+        type: "subgraph",
+        reads: ["item"],
+        writes: ["parts"],
+        subgraph: { ref: LEAF_REF, inputs: { payload: "item" }, outputs: { parts: "out" }, budgetShare: 0.4 },
+      },
+      { id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["delegate"], mode: "all", onBranchError: "skip" } },
+      {
+        id: "write",
+        type: "tool",
+        reads: ["request"],
+        writes: ["receipt"],
+        tool: { name: "notes.write", version: "1.0", args: {} },
+        unhandled: true,
+      },
+    ],
+    edges: [
+      { id: "e0", from: "fetch", to: "plan", kind: "seq" },
+      { id: "fan", from: "plan", to: "delegate", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "jj", from: "delegate", to: "j", kind: "join", branches: ["delegate"] },
+      { id: "toWrite", from: "j", to: "write", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+function subResolver(): ResourceResolver {
+  const base = resolver();
+  return { ...base, subgraph: (ref) => (ref === LEAF_REF ? leafSpec() : undefined) };
+}
+
+async function driveSubgraph(page: Options["page"], listFrom: "fetched" | "input"): Promise<{ status: string; gates: number; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const { engine, wrote } = engineOver(store, page, subResolver());
+  const graph = compileOrThrow({
+    spec: subgraphSpec(listFrom),
+    resolver: subResolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const request = listFrom === "input" && page === "NONE" ? "NONE flagged today" : "please";
+  const runId = await engine.submit({ graph, inputs: { request } });
+  const p = await engine.advance(runId as RunId);
+  return { status: p.status, gates: Object.keys(p.gates).length, wrote: wrote() };
+}
+
+// ---------------------------------------------------------------------------
+// AN AMBIGUOUS DEPTH ON THE FAN BRANCH
+// ---------------------------------------------------------------------------
+
+/**
+ * `fetch -> plan -{fanout}-> mid -> amb -> hold`, with ONE extra edge into `amb`.
+ *
+ * `amb` is reachable at fan-out depth 1 (through the fan) and at depth 0 (through the
+ * `conditional` from `plan`, whose `when` never matches), so `computeFanoutStacks` gives it no
+ * stack at all and `index.fanoutDepth` has no entry. GRAPH008_JOIN_DEPTH refuses an ambiguous
+ * depth for a join and its named arms; `amb` is neither, so the graph compiles.
+ *
+ * The join's arm is `mid`, whose depth IS defined — so the ambiguity is confined to the side
+ * branch that carries the gate, which is exactly the shape a mutation or a never-taken
+ * conditional produces.
+ */
+function ambiguousSpec(listFrom: "fetched" | "input"): GraphSpec {
+  const planReads = listFrom === "input" ? ["request"] : ["untrusted", "request"];
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `amb-empty-fan-${listFrom}`, project: "test", version: 1 },
+    policy: { posture: "out", budget: { costUsd: 1 }, capabilities: ["net:fetch", "notes:write"] },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes: [
+      { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+      { id: "plan", type: "function", reads: planReads, writes: ["items"], function: { ref: "function/split@stable", effects: [] } },
+      { id: "mid", type: "function", reads: ["item"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "amb", type: "function", reads: ["request"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["mid"], mode: "all", onBranchError: "skip" } },
+      {
+        id: "write",
+        type: "tool",
+        reads: ["request"],
+        writes: ["receipt"],
+        tool: { name: "notes.write", version: "1.0", args: {} },
+        unhandled: true,
+      },
+    ],
+    edges: [
+      { id: "e0", from: "fetch", to: "plan", kind: "seq" },
+      { id: "fan", from: "plan", to: "mid", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "toAmb", from: "mid", to: "amb", kind: "seq" },
+      // THE ONE EXTRA INBOUND EDGE. Its `when` never matches, so it changes nothing the run does
+      // — it changes only what `computeFanoutStacks` can say about `amb`.
+      { id: "never", from: "plan", to: "amb", kind: "conditional", when: 'contains(request, "ZZZQQQ")' },
+      { id: "toHold", from: "amb", to: "hold", kind: "seq" },
+      { id: "jj", from: "mid", to: "j", kind: "join", branches: ["mid"] },
+      { id: "toWrite", from: "j", to: "write", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function driveAmbiguous(page: Options["page"], listFrom: "fetched" | "input"): Promise<{ status: string; gates: number; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const { engine, wrote } = engineOver(store, page);
+  const graph = compileOrThrow({
+    spec: ambiguousSpec(listFrom),
+    resolver: resolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const request = listFrom === "input" && page === "NONE" ? "NONE flagged today" : "please";
+  const runId = await engine.submit({ graph, inputs: { request } });
+  const p = await engine.advance(runId as RunId);
+  return { status: p.status, gates: Object.keys(p.gates).length, wrote: wrote() };
+}
+
+// ---------------------------------------------------------------------------
+// A RETRY BACK-EDGE OUT OF A FAN BODY
+// ---------------------------------------------------------------------------
+
+/**
+ * `fetch -> hold -> plan -{fanout}-> work -{join}-> j -> write`, with `work -{loop}-> hold`.
+ *
+ * The authored gate is ABOVE the fan, so on every run a person has already been asked before the
+ * fan is planned at all. The retry edge is the ordinary "if the batch came back short, go round
+ * again" shape, and it is a BACKWARD edge out of the fan body into a node at depth 0.
+ */
+function retrySpec(listFrom: "fetched" | "input"): GraphSpec {
+  const planReads = listFrom === "input" ? ["request"] : ["untrusted"];
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `retry-empty-fan-${listFrom}`, project: "test", version: 1 },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "notes:write"],
+      expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 8, maxLoopIterations: 2 },
+    },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      items: { type: "array", reduce: "replace" },
+      item: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes: [
+      { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+      { id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: "plan", type: "function", reads: planReads, writes: ["items"], function: { ref: "function/split@stable", effects: [] } },
+      { id: "work", type: "function", reads: ["item", "items"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["work"], mode: "all", onBranchError: "skip" } },
+      {
+        id: "write",
+        type: "tool",
+        reads: ["request"],
+        writes: ["receipt"],
+        tool: { name: "notes.write", version: "1.0", args: {} },
+        unhandled: true,
+      },
+    ],
+    edges: [
+      { id: "e0", from: "fetch", to: "hold", kind: "seq" },
+      { id: "toPlan", from: "hold", to: "plan", kind: "seq" },
+      { id: "fan", from: "plan", to: "work", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "jj", from: "work", to: "j", kind: "join", branches: ["work"] },
+      { id: "retry", from: "work", to: "hold", kind: "loop", maxIterations: 2, until: "len(items) > 0" },
+      { id: "toWrite", from: "j", to: "write", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** Drive to the first stop, approve every open gate in turn, and count how many were asked. */
+async function driveRetry(page: Options["page"], listFrom: "fetched" | "input"): Promise<{ status: string; gates: number; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const { engine, wrote } = engineOver(store, page);
+  const graph = compileOrThrow({
+    spec: retrySpec(listFrom),
+    resolver: resolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const request = listFrom === "input" && page === "NONE" ? "NONE flagged today" : "please";
+  const runId = await engine.submit({ graph, inputs: { request } });
+  let p = await engine.advance(runId as RunId);
+  for (let i = 0; i < 8; i++) {
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    await engine.resolveGate(runId as RunId, {
+      gateId: open.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: "u:alice", via: "console" },
+      idempotencyKey: `k${String(i)}`,
+    });
+    p = await engine.advance(runId as RunId);
+  }
+  return { status: p.status, gates: Object.keys(p.gates).length, wrote: wrote() };
+}
+
+test("A WIDTH AN ATTACKER STEERED IS THE ATTACKER'S, EVEN WHEN THE LIST IS CLEAN", async () => {
+  // E12's predicate and `applyFanoutWidthTaint`'s were two copies of one question and they
+  // drifted. `#fireEmptyJoin` asked only "is `fanout.over` tainted"; the other reads an INHERITED
+  // control taint as evidence too. `applyTaint` never turns control taint into data taint, so
+  // injected text that steers the run between two CLEAN list-builders produces an attacker-chosen
+  // width over a channel `ctx.tainted` has never heard of. Both list-builders read `request` and
+  // nothing else; what the page decides is which one runs.
+  //
+  //     the page steers into the empty builder -> succeeded,     gates=0, wrote=1   (before)
+  //     the page steers into the empty builder -> awaiting_gate, gates=1, wrote=0   (now)
+  const none = await drive({ page: "NONE", gateOnBranch: true, listFrom: "steered" });
+  assert.equal(none.wrote, 0, "a steered clean list deleted the authored gate and the tool ran unwatched");
+  assert.equal(none.status, "awaiting_gate", `expected the skipped gate to be raised, got ${none.status}`);
+  assert.equal(none.gates, 1, "and exactly one gate");
+
+  // The control: the same steer the other way expands the fan and the authored gate stops the run.
+  const two = await drive({ page: "TWO", gateOnBranch: true, listFrom: "steered" });
+  assert.equal(two.status, "awaiting_gate", `precondition: the authored gate stops a populated fan: ${two.status}`);
+  assert.equal(two.wrote, 0, "precondition: nothing is written while a human is deciding");
+
+  // THE HALF THAT MUST NOT MOVE, and it is one read of difference: the SAME graph with the router
+  // branching on the run's own input. `fetch` still runs and `untrusted` is still tainted; the
+  // steer is simply the run's own, so an empty fan is the run's own arithmetic.
+  const cleanNone = await drive({ page: "NONE", gateOnBranch: true, listFrom: "steered-clean" });
+  assert.equal(cleanNone.status, "succeeded", `a cleanly-steered empty fan must run out: ${cleanNone.status}`);
+  assert.equal(cleanNone.gates, 0, "nobody attacked this width");
+  assert.equal(cleanNone.wrote, 1, "and the downstream the join releases runs");
+});
+
+test("A `subgraph` ON THE SKIPPED BRANCH IS UNSKIPPABLE — the gate it hides is in its CHILD", async () => {
+  // The unskippable set was the literal string "human_gate", scanned over the PARENT's nodes. A
+  // `subgraph` node in the fan body delegates to a graph that holds the only gate there is, and
+  // an empty fan passed over the delegation and the gate with it. Here `over` IS tainted, so this
+  // is the SET being wrong rather than the predicate.
+  //
+  //     the page yields none -> succeeded,     gates=0, wrote=1   (before)
+  //     the page yields none -> awaiting_gate, gates=1, wrote=0   (now)
+  const none = await driveSubgraph("NONE", "fetched");
+  assert.equal(none.wrote, 0, "an empty fan passed over a delegation whose child holds the gate");
+  assert.equal(none.status, "awaiting_gate", `expected the skipped delegation to be raised, got ${none.status}`);
+  assert.equal(none.gates, 1, "and exactly one gate");
+
+  // The control: at width two the delegation runs and the CHILD's gate stops the parent.
+  const two = await driveSubgraph("TWO", "fetched");
+  assert.equal(two.status, "awaiting_gate", `precondition: the child's gate stops the run: ${two.status}`);
+  assert.equal(two.wrote, 0, "precondition: nothing is written while a human is deciding");
+
+  // The half that must not move: the same delegation over a list the run's own input produced.
+  const clean = await driveSubgraph("NONE", "input");
+  assert.equal(clean.status, "succeeded", `an empty fan over a clean list must run out: ${clean.status}`);
+  assert.equal(clean.gates, 0, "no attacker chose this width");
+  assert.equal(clean.wrote, 1, "and the downstream the join releases runs");
+});
+
+test("AN AMBIGUOUS DEPTH MEANS THE NODE MIGHT BE ON THE BRANCH — the walk descends through it", async () => {
+  // `fanBody` admitted a successor and then refused to DESCEND whenever `index.fanoutDepth` had
+  // no entry for it. A depth is absent whenever a node is reachable at two different fan-out
+  // depths, and GRAPH008_JOIN_DEPTH refuses that only for joins and their named arms — so ONE
+  // extra inbound edge, here a `conditional` whose `when` never matches, truncated the walk and
+  // everything below it went invisible to BOTH consumers at once.
+  //
+  //     one extra inbound edge, page NONE -> succeeded,     gates=0, wrote=1   (before)
+  //     one extra inbound edge, page NONE -> awaiting_gate, gates=1, wrote=0   (now)
+  //
+  // An unknown depth means the node MIGHT be on the branch, and the code answered "it is not".
+  // Over-approximating the body is the direction `fanBody`'s last paragraph already picks for
+  // `loop` edges.
+  const none = await driveAmbiguous("NONE", "fetched");
+  assert.equal(none.status, "awaiting_gate", `an ambiguous depth truncated the fan body: ${none.status}`);
+  assert.equal(none.gates, 1, "the gate below the ambiguous node is on the branch and was skipped");
+  assert.equal(none.wrote, 0, "and nothing is written while the escalation is open");
+
+  // The control: at width two the gate on the side branch actually runs.
+  const two = await driveAmbiguous("TWO", "fetched");
+  assert.equal(two.status, "awaiting_gate", `precondition: the authored gate stops the run: ${two.status}`);
+  assert.equal(two.gates, 1, "precondition: exactly the authored gate");
+
+  // The half that must not move: the same ambiguity over a list the run's own input produced.
+  const clean = await driveAmbiguous("NONE", "input");
+  assert.equal(clean.status, "succeeded", `an empty fan over a clean list must run out: ${clean.status}`);
+  assert.equal(clean.gates, 0, "no attacker chose this width");
+  assert.equal(clean.wrote, 1, "and the downstream runs");
+});
+
+test("A RETRY BACK-EDGE OUT OF A FAN BODY DOES NOT PUT THE NODE ABOVE THE FAN IN IT", async () => {
+  // `fanBody` did `seen.add(e.to)` BEFORE the depth test, so a `loop` edge out of the body
+  // admitted its target whatever depth it was at. Here that target is the run's authored gate,
+  // which sits ABOVE the fan and has already been asked and approved — so an empty fan escalated
+  // on a gate that ran, and a second human was asked for it.
+  //
+  //     page NONE, list from the page -> succeeded, gates=2, wrote=1   (before)
+  //     page NONE, list from the page -> succeeded, gates=1, wrote=1   (now)
+  //
+  // Only a `join` edge pops a fan-out level, so a node shallower than the body reached by
+  // anything else is not this fan's exit.
+  const none = await driveRetry("NONE", "fetched");
+  assert.equal(none.gates, 1, "an empty fan asked a second human for the gate it had already passed");
+  assert.equal(none.status, "succeeded", `the run must finish on the one authored gate: ${none.status}`);
+  assert.equal(none.wrote, 1, "and the downstream runs");
+
+  // The three rows that must not move: the same graph populated, and both halves over a list the
+  // run's own input produced.
+  assert.deepEqual(await driveRetry("TWO", "fetched"), { status: "succeeded", gates: 1, wrote: 1 }, "populated, page-built list");
+  assert.deepEqual(await driveRetry("NONE", "input"), { status: "succeeded", gates: 1, wrote: 1 }, "empty, input-built list");
+  assert.deepEqual(await driveRetry("TWO", "input"), { status: "succeeded", gates: 1, wrote: 1 }, "populated, input-built list");
 });

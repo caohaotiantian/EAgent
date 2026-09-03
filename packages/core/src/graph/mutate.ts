@@ -7,6 +7,20 @@
  * graph that is wrong; it cannot propose one that weakens oversight, overcommits
  * budget, or races on a channel, because those are compile errors.
  *
+ * THAT SENTENCE WAS TRUE ONLY FOR THE PROCESS THAT DID THE PROPOSING, and it is now true across
+ * a restart because `Engine.#rehydrateGraph` was changed to make it so. The four rules below run
+ * in `compileMutation` and nowhere else; rehydration used to re-apply a RECORDED mutation with
+ * `compile`, which runs the 22 authored-graph rules and none of these. So a journal written by a
+ * binary without §2b resumed on one that has it with the graft intact — measured, one store, the
+ * authored `plan -> gate -> pay`, a `graph.mutated` holding `plan -> hop -> pay` appended into
+ * the log, a second Engine attaching the AUTHORED graph, the human REJECTING the gate:
+ *
+ *     rehydration folds and compiles      -> failed, and the tool ran anyway
+ *     rehydration replays and re-validates -> the resume is refused, the tool never ran
+ *
+ * `test/graph/mutation-dominator.test.ts` pins both that refusal and the half that must not move,
+ * a legitimate recorded mutation still rehydrating.
+ *
  * THE OVERSIGHT HALF OF THAT SENTENCE NAMES TWO MECHANISMS, and for a while it only had one.
  * A posture cannot be lowered because section 4 recompiles against the running graph's own
  * postures. But a posture is not the only thing oversight rests on: a `human_gate` protects a
@@ -28,7 +42,7 @@ import type { NodeId, TaskId } from "../ids.ts";
 import { compile, type CompileInput } from "./compile.ts";
 import type { EdgeSpec, ExpansionBudget, GraphSpec, NodeSpec, RunGraph } from "./spec.ts";
 import { indexGraph, reachableToolNamesThrough, type Diagnostic, type GraphIndex } from "./validate.ts";
-import { isHardToUndo, postureRank } from "../vocab.ts";
+import { isHardToUndo } from "../vocab.ts";
 
 export interface GraphMutation {
   readonly addNodes: readonly NodeSpec[];
@@ -191,9 +205,17 @@ export function compileMutation(input: MutateInput): MutationResult {
   //
   // `b` protects nothing. Property 3 runs through `compileMutation` and a refused mutation fails
   // the task, so that is the most expensive thing this rule can get wrong. The predicate is
-  // therefore the oversight the lost dominator CARRIED, not the dominance: `oversightRank` below,
-  // and the target's own rank is the bar — losing a dominator no stricter than the target itself
-  // takes nothing away from it.
+  // therefore the oversight the lost dominator CARRIED, not the dominance: `isGate` below.
+  //
+  // AND THE PREDICATE IS THE NODE TYPE, NOT A POSTURE RANK, which is the same regression one
+  // narrowing further out. Keyed on the COMPILED posture it refused the identical expansion in a
+  // chain whose spanned node was an ordinary `reversible_write` tool — `CLASS_DEFAULT_POSTURE`
+  // puts that class at `on` — in a graph with no gate and no irreversible action anywhere:
+  //
+  //     a -> w -> c -> d, `w` a notes.write, add a -> lookup -> c  -> MUT003, lost dominator "w"
+  //
+  // The admit test above used only plain `function` nodes, which is why that shipped. `isGate`
+  // carries the argument for why a gate is the only type another node's oversight can rest on.
   //
   // DOMINANCE IS NECESSARY AND IT IS NOT SUFFICIENT, and this comment said "exactly while" until
   // the counterexample was driven. Static dominance is a claim about PATHS; whether the
@@ -220,14 +242,21 @@ export function compileMutation(input: MutateInput): MutationResult {
     const before = dominatorsOf(spec);
     const after = dominatorsOf(mergedForDominance);
     const mergedIndex = indexGraph(mergedForDominance);
+    const depth = depthFromEntries(mergedIndex);
+    // ONE DIAGNOSTIC PER (CULPRIT EDGE, LOST DOMINATOR), NOT PER DOWNSTREAM NODE. One grafted
+    // edge takes a whole tail of the graph out of a gate's region, and this loop reported every
+    // node in that tail: `a -> w -> c -> d` with a rejoin at `c` produced two identical
+    // sentences, differing only in whether they named `c` or `d`. They are one fact — the edge
+    // bypasses the dominator — and the node worth naming is the SHALLOWEST, because that is
+    // where the author moves the edge to.
+    const worst = new Map<string, { readonly node: NodeId; readonly lost: NodeId; readonly culprit: EdgeSpec | undefined }>();
     for (const v of spec.nodes) {
       const was = before.get(v.id);
       const now = after.get(v.id);
       if (was === undefined || now === undefined) continue;
       // ONLY A DOMINATOR THAT CARRIED OVERSIGHT. Losing one that did not is an ADDITIVE
       // ALTERNATIVE PATH, which is the shape a mutation exists for — see the section header.
-      const target = oversightRank(base, v.id);
-      const lost = [...was].filter((d) => !now.has(d)).find((d) => oversightRank(base, d) > target);
+      const lost = [...was].filter((d) => !now.has(d)).find((d) => isGate(base, d));
       if (lost === undefined) continue;
       // The edge to NAME, and the order matters: a graft is a CHAIN of added edges, and every
       // one of them reaches the target. The edge worth pointing at is the one that crosses back
@@ -238,12 +267,19 @@ export function compileMutation(input: MutateInput): MutationResult {
         mutation.addEdges.find((e) => e.to === v.id) ??
         mutation.addEdges.find((e) => !added.has(e.to) && reaches(e)) ??
         mutation.addEdges.find(reaches);
+      const key = `${culprit?.id ?? "(none)"}\u0000${lost}`;
+      const prev = worst.get(key);
+      const here = depth.get(v.id) ?? Number.MAX_SAFE_INTEGER;
+      if (prev === undefined || here < (depth.get(prev.node) ?? Number.MAX_SAFE_INTEGER)) {
+        worst.set(key, { node: v.id, lost, culprit });
+      }
+    }
+    for (const { node, lost, culprit } of worst.values()) {
       diagnostics.push({
         severity: "error",
         code: "MUT003_DOMINATOR_LOST",
-        message:
-          `edge "${culprit?.id ?? mutation.addEdges[0]?.id ?? "(none)"}" gives "${v.id}" a path that does not pass through "${lost}"`,
-        at: culprit === undefined ? { nodeId: v.id } : { edgeId: culprit.id, nodeId: v.id },
+        message: `edge "${culprit?.id ?? mutation.addEdges[0]?.id ?? "(none)"}" gives "${node}" a path that does not pass through "${lost}"`,
+        at: culprit === undefined ? { nodeId: node } : { edgeId: culprit.id, nodeId: node },
         fix: `route the edge into a node that "${lost}" already dominates, or through "${lost}" itself`,
       });
     }
@@ -333,28 +369,56 @@ export function compileMutation(input: MutateInput): MutationResult {
 }
 
 /**
- * HOW MUCH OVERSIGHT A NODE CARRIES, as one comparable number.
+ * DOES THIS NODE CARRY OVERSIGHT SOMETHING ELSE DEPENDS ON — which is a question about its TYPE.
  *
- * `human_gate` sits ABOVE every posture rather than beside them, and that gap is what the number
- * is for: a posture says how closely a person watches an action that is going to happen anyway,
- * and a gate says the run stops until a person acts. Ranking the gate at 3 rather than folding it
- * into `in` is what makes "the lost dominator was a gate" refuse whatever the target's own
- * posture is — including a target already at `in`, which raises its own gate and would otherwise
- * compare EQUAL and be admitted.
+ * `human_gate`, and nothing else. A gate is the only node whose whole purpose is that the run
+ * STOPS until a person acts, so it is the only one another node's oversight can rest on by being
+ * dominated by it. Every other node's oversight is about ITSELF: a `tool` at posture `in` raises
+ * a gate for its OWN call, and a second path around it changes what the graph does rather than
+ * who is watching what follows.
  *
- * The posture is the COMPILED one — `plans[id].posture`, after the `max` fold over the graph
- * policy, the node's own declaration and its tool's irreversibility class — because that is the
- * level the node actually runs at. Reading `NodeSpec.policy.posture` instead would miss every
- * node whose oversight came from its class, which is most of the nodes that have any.
+ * THIS WAS A POSTURE RANK AND THE POSTURE WAS THE COMPILED ONE, which put `reversible_write` at
+ * `on` through `CLASS_DEFAULT_POSTURE` and made every ordinary `fs.write` node an unremovable
+ * dominator. Measured on a four-node chain with NO gate and NO irreversible action anywhere —
+ * `a -> w -> c -> d`, `w` an ordinary `notes.write`, proposer `a`, one added node rejoining at
+ * `c`, which is the canonical expansion §2b's header says the rule must admit:
  *
- * A node absent from `plans` ranks 0, which is the fail-OPEN direction and is deliberate: the
- * only way to be absent is to not be in the compiled graph, and the caller compares two ids that
- * both came out of `base.spec.nodes`.
+ *     the bar is the compiled posture -> MUT003_DOMINATOR_LOST, lost dominator "w"  (twice)
+ *     the bar is the node type        -> ok
+ *
+ * The builder's admit test used only plain `function` nodes, which is why it passed. The refusal
+ * this narrowing keeps is the one §2b was written for: a graft around an authored `human_gate`
+ * is still refused, whatever the target's own posture — a target already at `in` raises its own
+ * gate and would have compared EQUAL under the rank, which is the case the rank got wrong from
+ * the other side.
  */
-function oversightRank(base: RunGraph, id: NodeId): number {
-  if (base.spec.nodes.find((x) => x.id === id)?.type === "human_gate") return 3;
-  const posture = base.plans[id]?.posture;
-  return posture === undefined ? 0 : postureRank(posture);
+function isGate(base: RunGraph, id: NodeId): boolean {
+  return base.spec.nodes.find((x) => x.id === id)?.type === "human_gate";
+}
+
+/**
+ * Hops from the nearest entry to each node, so "the shallowest" is a measured thing.
+ *
+ * BFS over the same edge set `forwardFrom` walks, which is every kind but `compensation`. A node
+ * no entry reaches is absent, and the caller reads that as "further than anything".
+ */
+function depthFromEntries(idx: GraphIndex): Map<NodeId, number> {
+  const depth = new Map<NodeId, number>();
+  const queue: NodeId[] = [];
+  for (const id of idx.entryNodes) {
+    if (depth.has(id)) continue;
+    depth.set(id, 0);
+    queue.push(id);
+  }
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i]!;
+    for (const e of idx.outbound.get(id) ?? []) {
+      if (e.kind === "compensation" || depth.has(e.to)) continue;
+      depth.set(e.to, (depth.get(id) ?? 0) + 1);
+      queue.push(e.to);
+    }
+  }
+  return depth;
 }
 
 /**
