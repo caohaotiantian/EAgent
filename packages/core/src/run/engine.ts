@@ -952,6 +952,25 @@ interface RunContext {
   /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
   readonly tainted: Set<string>;
   /**
+   * Fan-out EDGES whose list was untrusted — the per-branch half of E8's evidence.
+   *
+   * KEYED BY EDGE AND NOT BY CHANNEL NAME, and it was a channel name for a round. A fanout
+   * edge's `as` binding is not a channel any node writes: `#activate` puts a DIFFERENT VALUE
+   * into it per branch and per fanout edge. Putting the name into `tainted` therefore made
+   * every fan sharing a binding name ONE taint fact, and the run-global set is monotonic and
+   * never cleared, so an earlier dirty fan poisoned every later clean one. Two graphs one
+   * character apart, the second fan's list built entirely from the run's own input and its body
+   * reading only that fan's own item:
+   *
+   *     the first fan binds `as: "item"`  -> awaiting_gate, gates=1, charged=0
+   *     the first fan binds `as: "other"` -> succeeded,     gates=0, charged=2
+   *
+   * `taintedOn` is the only reader, and it answers by walking the asking task's own branch
+   * coordinate — which carries the edge id of every fan it is inside — so the answer is about
+   * THIS branch rather than about a name.
+   */
+  readonly taintedFans: Set<EdgeId>;
+  /**
    * Channels carrying secret-classified data they were NOT declared to hold.
    *
    * The confidentiality axis of what `tainted` does for integrity, and it exists because the
@@ -1788,7 +1807,8 @@ export class Engine {
         continue;
       }
       if (!isEvent(ev, "task.committed")) continue;
-      const nodeId = parseTaskId(ev.taskId).nodeId;
+      const parsed = parseTaskId(ev.taskId);
+      const nodeId = parsed.nodeId;
       ctx.streaks.record(nodeId, ev.payload.status !== "failed");
       const node = ctx.index.byId.get(nodeId);
       if (node === undefined) continue;
@@ -1813,17 +1833,17 @@ export class Engine {
       // point: what it holds at this line is what EARLIER commits put there, which is where a
       // mark on this node can only have come from. The live path reads it at the same point of
       // the same commit — `#recordEvidence` runs before `applyControlTaint` in `#commit`.
-      applyTaint(ctx.tainted, ctx.controlTainted, node, written);
+      applyTaint(ctx, parsed.branch, node, written);
       applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
       // The fan binding, folded after `applyTaint` and before the control-flow half exactly as
       // the live path folds it: the commit that TAKES a fanout edge is the commit that wrote the
       // list it fans over, so `over` is tainted by the line above and the binding is an ordinary
       // tainted channel by the time anything else reads the set.
-      applyFanoutTaint(ctx.tainted, ctx.index, ev.payload.take as readonly EdgeId[]);
+      applyFanoutTaint(ctx, parsed.branch, ev.payload.take as readonly EdgeId[]);
       // The fan's WIDTH, folded in the same position as the live path: after the binding, before
       // the control-flow half. A restart that skipped this would mark fewer nodes than the
       // original process, which is the loosening direction.
-      applyFanoutWidthTaint(ctx.controlTainted, ctx.tainted, ctx.index, node, ev.payload.take as readonly EdgeId[]);
+      applyFanoutWidthTaint(ctx, parsed.branch, node, ev.payload.take as readonly EdgeId[]);
       // E8's control-flow half. `take` is a durable field of this event, and the choice space
       // and region are derived from the graph, so a branch decision rebuilds exactly — which is
       // the whole reason the fact is recorded at the DECIDING NODE rather than re-derived at
@@ -1835,14 +1855,7 @@ export class Engine {
       // written before `takeSuppliedByProducer` existed cannot say who chose; absent-as-false
       // would reproduce the defect that field closed on every old run and do it across a
       // RESTART. See `choiceOf` for the argument and what absent-as-true costs.
-      applyControlTaint(
-        ctx.controlTainted,
-        ctx.tainted,
-        ctx.index,
-        node,
-        ev.payload.take as readonly EdgeId[],
-        ev.payload.takeSuppliedByProducer ?? true,
-      );
+      applyControlTaint(ctx, parsed.branch, node, ev.payload.take as readonly EdgeId[], ev.payload.takeSuppliedByProducer ?? true);
     }
   }
 
@@ -4080,6 +4093,7 @@ export class Engine {
       folder: new RunFolder(),
       streaks: new FailureStreaks(),
       tainted: new Set(),
+      taintedFans: new Set(),
       carriesSecret: new Set(),
       controlTainted: new Map(),
       waveTaint: new Map(),
@@ -7562,9 +7576,9 @@ export class Engine {
     // restart switches off silently — five of those, then a sixth. This is the first piece of
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
-    applyFanoutTaint(ctx.tainted, ctx.index, take);
-    applyFanoutWidthTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take);
-    applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take, takeSuppliedByProducer);
+    applyFanoutTaint(ctx, w.task.branch, take);
+    applyFanoutWidthTaint(ctx, w.task.branch, w.node, take);
+    applyControlTaint(ctx, w.task.branch, w.node, take, takeSuppliedByProducer);
 
     if (outcome.status === "failed") {
       events.push({
@@ -7949,7 +7963,7 @@ export class Engine {
     // execution an attacker's choice selected writes the attacker's bytes. Running before
     // `applyControlTaint` is what makes the map hold exactly the marks EARLIER commits left,
     // which is the same thing the fold sees at the same point.
-    applyTaint(ctx.tainted, ctx.controlTainted, w.node, outcome.writes);
+    applyTaint(ctx, w.task.branch, w.node, outcome.writes);
     applySecretFlow(ctx.carriesSecret, w.node, outcome.writes, ctx.graph.spec.channels);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
@@ -8357,7 +8371,7 @@ export class Engine {
     // one this was missing.
     const source = ctx.index.byId.get(fanout.from);
     const attackerWidth =
-      source !== undefined && fanoutWidthEvidence(ctx.controlTainted, ctx.tainted, source, fanout) !== undefined;
+      source !== undefined && fanoutWidthEvidence(ctx, parent, source, fanout) !== undefined;
     const skipped = attackerWidth ? [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id))) : [];
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
@@ -9000,13 +9014,39 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 /**
  * IS THIS CHANNEL UNTRUSTED FOR THIS TASK'S DECISION — the durable set plus this wave's overlay.
  *
- * Both readers go through here so the two halves cannot drift apart. `ctx.tainted` is what the
- * journal can rebuild; `ctx.waveTaint` is what a concurrent member of the same wave is about to
- * write and has not committed yet. See `RunContext.waveTaint` for why the second cannot simply
- * be folded into the first.
+ * Both readers go through here so the two halves cannot drift apart. `taintedOn` is what the
+ * journal can rebuild — the channel set plus this branch's own fan bindings; `ctx.waveTaint` is
+ * what a concurrent member of the same wave is about to write and has not committed yet. See
+ * `RunContext.waveTaint` for why the second cannot simply be folded into the first.
  */
 function taintedFor(ctx: RunContext, taskId: TaskId, channel: string): boolean {
-  return ctx.tainted.has(channel) || (ctx.waveTaint.get(taskId)?.has(channel) ?? false);
+  return taintedOn(ctx, parseTaskId(taskId).branch, channel) || (ctx.waveTaint.get(taskId)?.has(channel) ?? false);
+}
+
+/**
+ * IS THIS CHANNEL UNTRUSTED FOR A TASK ON THIS BRANCH — the DURABLE half, and the only reader
+ * of `ctx.taintedFans`.
+ *
+ * Two sources, and the second is per-branch rather than per-run. A CHANNEL is untrusted for
+ * everybody once something untrusted wrote it. A fan's `as` BINDING is untrusted only inside a
+ * branch of a fan whose own list was untrusted — it is not a channel any node writes, and
+ * `#activate` puts a different value in it per branch and per fanout edge. The branch coordinate
+ * carries the edge id of every fan the task is inside (`BranchSegment.edgeId`), so this walks it
+ * rather than asking a run-global set about a name. See `RunContext.taintedFans` for the two
+ * graphs one character apart that the name-keyed version got wrong.
+ *
+ * DELIBERATELY NOT `ctx.waveTaint`: everything folded from the journal reads this function, and
+ * the wave overlay is derived per wave and no fold reproduces it. `taintedFor` adds it for the
+ * one reader that is deciding a task rather than folding one.
+ */
+function taintedOn(ctx: RunContext, branch: BranchCoordinate, channel: string): boolean {
+  if (ctx.tainted.has(channel)) return true;
+  for (const seg of branch.segments) {
+    if (!ctx.taintedFans.has(seg.edgeId as EdgeId)) continue;
+    const edge = ctx.index.edgeById.get(seg.edgeId as EdgeId);
+    if (edge !== undefined && (edge.as ?? "item") === channel) return true;
+  }
+  return false;
 }
 
 /**
@@ -9190,8 +9230,8 @@ function applySecretFlow(
  * That is the fail-safe direction, and there is deliberately no declassification operator.
  */
 function applyTaint(
-  tainted: Set<string>,
-  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   writes: Readonly<Record<string, unknown>>,
 ): void {
@@ -9213,8 +9253,14 @@ function applyTaint(
   // delegated did not. `#runSubgraph` computes which child inputs come from tainted parent
   // channels and `submit` journals them on the CHILD's `run.submitted`, which is the only event
   // the child's own fold can reach — so unlike the upward direction, this one does survive.
-  if (!isExternal(node) && !controlTainted.has(node.id) && !observedChannels(node).some((c) => tainted.has(c))) return;
-  for (const channel of Object.keys(writes)) tainted.add(channel);
+  if (
+    !isExternal(node) &&
+    !ctx.controlTainted.has(node.id) &&
+    !observedChannels(node).some((c) => taintedOn(ctx, branch, c))
+  ) {
+    return;
+  }
+  for (const channel of Object.keys(writes)) ctx.tainted.add(channel);
 }
 
 /**
@@ -9229,6 +9275,12 @@ function applyTaint(
  *     the body reads `items` (the list channel)  -> awaiting_gate, gates=1, charged=0
  *     the body reads `item`  (the same bytes)    -> succeeded,     gates=0, charged=2
  *
+ * IT RECORDS THE EDGE, NOT THE BINDING'S NAME, and it recorded the name for a round. `as` is
+ * not a channel any node writes — `#activate` puts a DIFFERENT VALUE into it per branch and per
+ * fanout edge — so a name in the run-global, monotonic `ctx.tainted` made every fan sharing that
+ * name one taint fact. `RunContext.taintedFans` carries the two graphs one character apart that
+ * measured it, and `taintedOn` is the read that answers per branch.
+ *
  * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
  * is called from `#restoreEvidence` as well as `#commit`, in the same order relative to
  * `applyTaint`: the commit that TAKES the fanout edge is the commit that wrote the list.
@@ -9237,12 +9289,12 @@ function applyTaint(
  * function down: how many branches a tainted list opens is a count, but WHICH NODES that count
  * selected is the fan's branch, and that is a node set.
  */
-function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonly EdgeId[]): void {
+function applyFanoutTaint(ctx: RunContext, branch: BranchCoordinate, take: readonly EdgeId[]): void {
   for (const id of take) {
-    const edge = index.edgeById.get(id);
+    const edge = ctx.index.edgeById.get(id);
     if (edge === undefined || edge.kind !== "fanout") continue;
-    if (edge.over === undefined || !tainted.has(edge.over)) continue;
-    tainted.add(edge.as ?? "item");
+    if (edge.over === undefined || !taintedOn(ctx, branch, edge.over)) continue;
+    ctx.taintedFans.add(edge.id);
   }
 }
 
@@ -9283,19 +9335,18 @@ function applyFanoutTaint(tainted: Set<string>, index: GraphIndex, take: readonl
  * is called from `#restoreEvidence` as well as `#commit`, in the same position at both.
  */
 function applyFanoutWidthTaint(
-  controlTainted: Map<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
-  index: GraphIndex,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   take: readonly EdgeId[],
 ): void {
   for (const id of take) {
-    const edge = index.edgeById.get(id);
+    const edge = ctx.index.edgeById.get(id);
     if (edge === undefined || edge.kind !== "fanout") continue;
-    const evidence = fanoutWidthEvidence(controlTainted, tainted, node, edge);
+    const evidence = fanoutWidthEvidence(ctx, branch, node, edge);
     if (evidence === undefined) continue;
-    for (const b of fanBody(index, edge)) {
-      if (!controlTainted.has(b)) controlTainted.set(b, { decidedBy: node.id, channels: evidence });
+    for (const b of fanBody(ctx.index, edge)) {
+      if (!ctx.controlTainted.has(b)) ctx.controlTainted.set(b, { decidedBy: node.id, channels: evidence });
     }
   }
 }
@@ -9330,14 +9381,14 @@ function applyFanoutWidthTaint(
  * `#restoreEvidence`), so a restart reaches the same answer as the live process.
  */
 function fanoutWidthEvidence(
-  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   edge: EdgeSpec,
 ): readonly string[] | undefined {
-  const inherited = controlTainted.get(node.id);
+  const inherited = ctx.controlTainted.get(node.id);
   if (inherited !== undefined) return inherited.channels;
-  if (edge.over !== undefined && tainted.has(edge.over)) return [edge.over];
+  if (edge.over !== undefined && taintedOn(ctx, branch, edge.over)) return [edge.over];
   return undefined;
 }
 
@@ -9419,19 +9470,18 @@ interface ControlTaint {
  * tainted choices names the first — one escalation, and the same answer under replay.
  */
 function applyControlTaint(
-  controlTainted: Map<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
-  index: GraphIndex,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   take: readonly EdgeId[],
   producerSupplied: boolean,
 ): void {
-  const choice = choiceOf(index, node, take, producerSupplied);
+  const choice = choiceOf(ctx.index, node, take, producerSupplied);
   if (choice.space.length === 0) return;
-  const evidence = choiceTainted(controlTainted, tainted, node, choice);
+  const evidence = choiceTainted(ctx, branch, node, choice);
   if (evidence === undefined) return;
-  for (const id of controlRegion(index, choice.space, take)) {
-    if (!controlTainted.has(id)) controlTainted.set(id, { decidedBy: node.id, channels: evidence });
+  for (const id of controlRegion(ctx.index, choice.space, take)) {
+    if (!ctx.controlTainted.has(id)) ctx.controlTainted.set(id, { decidedBy: node.id, channels: evidence });
   }
 }
 
@@ -9528,8 +9578,8 @@ interface Choice {
  *     pins all four rows, including the one this leaves open.
  *   - A `fanout` edge's WIDTH. A fan edge narrows no `take`, so it is in no choice space and this
  *     function has nothing to say about it — but the width IS a decision, and it is answered two
- *     functions up rather than left open. `applyFanoutTaint` puts the edge's `as` binding into
- *     `ctx.tainted` so a fan body reading its own item reads a tainted channel, and
+ *     functions up rather than left open. `applyFanoutTaint` records the fanout EDGE in
+ *     `ctx.taintedFans` so a fan body reading its own item reads untrusted bytes, and
  *     `applyFanoutWidthTaint` marks the fan BODY, bounded at the join, when `over` is tainted.
  *     The sentence here used to say the node set is identical whatever the width, which is false
  *     at width 0 — the branch nodes do not run at all.
@@ -9682,19 +9732,20 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[], pr
  * exact failure this codebase has now had six of.
  */
 function choiceTainted(
-  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   choice: Choice,
 ): readonly string[] | undefined {
-  const inherited = controlTainted.get(node.id);
+  const inherited = ctx.controlTainted.get(node.id);
   if (inherited !== undefined) return inherited.channels;
   // Nothing untrusted exists in this run yet, so no expression can have read any. Checked
-  // first because it is also what stops the fail-closed arm below being a constant gate.
-  if (tainted.size === 0) return undefined;
+  // first because it is also what stops the fail-closed arm below being a constant gate. BOTH
+  // halves of the durable evidence, because a fan's binding is not in `tainted`.
+  if (ctx.tainted.size === 0 && ctx.taintedFans.size === 0) return undefined;
 
   const hit = new Set<string>();
-  if (choice.byTheNode) for (const c of observedChannels(node)) if (tainted.has(c)) hit.add(c);
+  if (choice.byTheNode) for (const c of observedChannels(node)) if (taintedOn(ctx, branch, c)) hit.add(c);
 
   const exprs: string[] = [];
   for (const c of node.router?.cases ?? []) exprs.push(c.when);
@@ -9714,7 +9765,7 @@ function choiceTainted(
       // is treated as untrusted.
       return [...hit];
     }
-    for (const r of refs) if (tainted.has(r)) hit.add(r);
+    for (const r of refs) if (taintedOn(ctx, branch, r)) hit.add(r);
   }
   return hit.size === 0 ? undefined : [...hit];
 }

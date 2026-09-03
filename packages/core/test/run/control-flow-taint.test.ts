@@ -234,7 +234,9 @@ type Shape =
   | "routerall"
   | "alsoseqbody"
   | "pickwriter"
-  | "fanplanner";
+  | "fanplanner"
+  | "twofans"
+  | "twofansapart";
 
 interface Options {
   /**
@@ -266,6 +268,11 @@ interface Options {
  * `failing` is the other direction — a node that READ the injected page and then THREW, so its
  * `take` is its `error` edges. A failure is not a choice, and this shape is what says so.
  */
+/** The FIRST fan's binding name — `item` collides with the second fan's, `other` does not. */
+function bindA(shape: Shape): string {
+  return shape === "twofans" ? "item" : "other";
+}
+
 function spec(o: Options): GraphSpec {
   // `routerall` is the ONE case whose `take` names every edge the router declared: it excluded
   // nothing, so it chose nothing, and its region must be empty.
@@ -299,7 +306,9 @@ function spec(o: Options): GraphSpec {
     o.shape === "alsoseq" ||
     o.shape === "pollloop" ||
     o.shape === "errsupplied" ||
-    o.shape === "alsoseqbody";
+    o.shape === "alsoseqbody" ||
+    o.shape === "twofans" ||
+    o.shape === "twofansapart";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -319,7 +328,11 @@ function spec(o: Options): GraphSpec {
       // `pickwriter`: the charge reads the channel WHOSE WRITER the attacker picked. Both
       // writers are clean by data taint, and the charge reads nothing the fetch touched.
       reads:
-        o.shape === "fanoutbind" || o.shape === "fanoutgated" ? ["item"] : o.shape === "pickwriter" ? ["note"] : ["request"],
+        o.shape === "fanoutbind" || o.shape === "fanoutgated" || o.shape === "twofans" || o.shape === "twofansapart"
+          ? ["item"]
+          : o.shape === "pickwriter"
+            ? ["note"]
+            : ["request"],
       // `parts` in the fanout shapes because the charge runs once per branch, and
       // GRAPH010_CONCURRENT_WRITE refuses `replace` for a node that runs in parallel.
       writes:
@@ -327,7 +340,9 @@ function spec(o: Options): GraphSpec {
         o.shape === "fanoutgated" ||
         o.shape === "fanoutwidth" ||
         o.shape === "fanoutwidthgated" ||
-        o.shape === "fanoutnested"
+        o.shape === "fanoutnested" ||
+        o.shape === "twofans" ||
+        o.shape === "twofansapart"
           ? ["parts"]
           : ["receipt"],
       tool: { name: "pay.charge", version: "1.0", args: o.shape === "pickwriter" ? { amount: "${note}" } : { amount: 500 } },
@@ -418,6 +433,15 @@ function spec(o: Options): GraphSpec {
     nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/bothseq@stable", effects: [] } });
     nodes.push({ id: "extra", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
     nodes.push({ id: "merge", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "twofans" || o.shape === "twofansapart") {
+    // TWO FANS IN SEQUENCE, and the ONLY difference between the shapes is what the FIRST one
+    // names its binding. The second fan's list is built from the run's own input and the charge
+    // reads only the second fan's own binding, so nothing untrusted reaches it either way.
+    nodes.push({ id: "planDirty", type: "function", reads: ["untrusted"], writes: ["dirtyItems"], function: { ref: "function/dirty@stable", effects: [] } });
+    nodes.push({ id: "workA", type: "function", reads: [bindA(o.shape)], writes: ["partsA"], function: { ref: "function/pa@stable", effects: [] } });
+    nodes.push({ id: "jA", type: "join", reads: ["partsA"], writes: ["partsA"], join: { branches: ["workA"], mode: "all", onBranchError: "skip" } });
+    nodes.push({ id: "planClean", type: "function", reads: ["request"], writes: ["cleanItems"], function: { ref: "function/clean@stable", effects: [] } });
+    nodes.push({ id: "jB", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["charge"], mode: "all", onBranchError: "skip" } });
   } else if (o.shape === "pickwriter") {
     // NO FAN, NO WIDTH, NO EDGE CONDITION READING ANYTHING UNTRUSTED. The router picks WHICH of
     // two clean bodies writes `note`, and the charge reads `note`. `applyTaint` had two sources
@@ -614,6 +638,13 @@ function spec(o: Options): GraphSpec {
     edges.push({ id: "toSink", from: "decide", to: "merge", kind: "seq" });
     edges.push({ id: "extraToMerge", from: "extra", to: "merge", kind: "seq" });
     edges.push({ id: "mergeToCharge", from: "merge", to: "charge", kind: "seq" });
+  } else if (o.shape === "twofans" || o.shape === "twofansapart") {
+    edges.push({ id: "e0", from: "fetch", to: "planDirty", kind: "seq" });
+    edges.push({ id: "fanA", from: "planDirty", to: "workA", kind: "fanout", over: "dirtyItems", as: bindA(o.shape), maxWidth: 4 });
+    edges.push({ id: "jjA", from: "workA", to: "jA", kind: "join", branches: ["workA"] });
+    edges.push({ id: "toClean", from: "jA", to: "planClean", kind: "seq" });
+    edges.push({ id: "fanB", from: "planClean", to: "charge", kind: "fanout", over: "cleanItems", as: "item", maxWidth: 4 });
+    edges.push({ id: "jjB", from: "charge", to: "jB", kind: "join", branches: ["charge"] });
   } else if (o.shape === "pickwriter") {
     edges.push({ id: "toChosen", from: "route", to: "big", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "small", kind: "seq" });
@@ -806,6 +837,12 @@ function spec(o: Options): GraphSpec {
       item: { type: "string", reduce: "replace" },
       // `fanplanner` only: the copy the reconvergence node fans over.
       list: { type: "array", reduce: "replace" },
+      // The two-fan shapes only: one list a tool fetched, one the run's own input produced, and
+      // the alternative binding name that is the whole difference between them.
+      dirtyItems: { type: "array", reduce: "replace" },
+      cleanItems: { type: "array", reduce: "replace" },
+      other: { type: "string", reduce: "replace" },
+      partsA: { type: "array", reduce: "append_ordered" },
       parts: { type: "array", reduce: "append_ordered" },
       // `fanoutnested` only: one seed list and one binding per depth.
       outerSeed: { type: "array", reduce: "replace" },
@@ -819,7 +856,9 @@ function spec(o: Options): GraphSpec {
       o.shape === "fanoutgated" ||
       o.shape === "fanoutwidth" ||
       o.shape === "fanoutwidthgated" ||
-      o.shape === "fanoutnested"
+      o.shape === "fanoutnested" ||
+      o.shape === "twofans" ||
+      o.shape === "twofansapart"
         ? ["parts"]
         : ["receipt"],
     nodes,
@@ -909,6 +948,10 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
   // the injected page decides is which of them runs.
   functions.register("function/big@stable", () => ({ writes: { note: "9999.00" } }));
   functions.register("function/small@stable", () => ({ writes: { note: "1.00" } }));
+  // The two-fan shapes: one list from the fetched page, one from the run's own input.
+  functions.register("function/dirty@stable", () => ({ writes: { dirtyItems: ["d"] } }));
+  functions.register("function/clean@stable", () => ({ writes: { cleanItems: ["x", "y"] } }));
+  functions.register("function/pa@stable", () => ({ writes: { partsA: ["p"] } }));
   // `fanplanner`'s reconvergence node: it copies whichever list ran into the channel it fans over.
   functions.register("function/copy@stable", (view) => ({ writes: { list: (view.get("items") as unknown[]) ?? [] } }));
   functions.register("function/pick@stable", (view) => {
@@ -1874,4 +1917,40 @@ test("A FAN PLANNER BELOW A RECONVERGENCE STILL FANS AT THE ATTACKER'S WIDTH", a
   assert.equal(clean.status, "succeeded");
   assert.equal(clean.gates, 0);
   assert.equal(clean.charged, 1);
+});
+
+/**
+ * TWO FANS ONE CHARACTER APART, AND A FAN'S BINDING IS NOT A CHANNEL.
+ *
+ * `applyFanoutTaint` used to do `tainted.add(edge.as ?? "item")` into a run-global, monotonic,
+ * never-cleared set keyed by CHANNEL NAME. But `as` is not a channel any node writes: `#activate`
+ * puts a different value into it per branch and per fanout edge. So two fanout edges sharing an
+ * `as` name were ONE taint fact, and a later, entirely clean fan over a list the run's own input
+ * produced handed its body a "tainted" `item`.
+ *
+ * `fetch -> planDirty -{fanA}-> workA -{join}-> planClean -{fanB}-> charge`, where `fanB`'s list
+ * is built from the run's own input and the charge reads only `fanB`'s own binding. The ONLY
+ * difference between the two rows is what `fanA` names its binding:
+ *
+ *     the first fan binds `as: "item"`  -> awaiting_gate, gates=1, charged=0   (before)
+ *     the first fan binds `as: "item"`  -> succeeded,     gates=0, charged=2   (now)
+ *     the first fan binds `as: "other"` -> succeeded,     gates=0, charged=2   (both)
+ *
+ * `ctx.taintedFans` is keyed by `EdgeId` and `taintedOn` answers by walking the asking task's own
+ * branch coordinate, which carries the edge id of every fan it is inside.
+ *
+ * THE HALF THAT MUST NOT MOVE is `fanoutbind`, four tests up: a body reading ITS OWN fan's
+ * binding still reads the fetched page. The narrowing is by BRANCH, not by removal.
+ */
+test("A FAN'S BINDING IS NOT A CHANNEL — two fans sharing an `as` name are not one taint fact", async () => {
+  const collide = await drive({ shape: "twofans", branchOn: "untrusted" });
+  assert.equal(collide.status, "succeeded", `a clean fan inherited an earlier fan's taint by name: ${collide.status}`);
+  assert.equal(collide.gates, 0, "nothing untrusted reached the second fan");
+  assert.equal(collide.charged, 2, "and the second fan's two branches both ran");
+
+  // The control: the same graph with the first fan's binding renamed. One character.
+  const apart = await drive({ shape: "twofansapart", branchOn: "untrusted" });
+  assert.equal(apart.status, "succeeded", `the renamed graph must behave identically: ${apart.status}`);
+  assert.equal(apart.gates, 0, "still nothing");
+  assert.equal(apart.charged, 2, "and still two");
 });
