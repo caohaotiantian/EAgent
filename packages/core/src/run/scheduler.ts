@@ -29,6 +29,13 @@
  * `LeasedScheduler` below implements the first two against the same journal the local one
  * reads, so the behaviour is exercised in v1 rather than asserted about v2.
  *
+ * (2) IS NOT ONLY A DISTRIBUTED PROBLEM, which is what this list originally implied and what
+ * left the shipped scheduler stranding runs. One worker still has a PREDECESSOR: a plane killed
+ * between `task.leased` and `task.committed` leaves a Task in a state only its holder advances,
+ * and the next process is not that holder. `InProcessScheduler` therefore reclaims too, expired
+ * against the node's own compiled deadline rather than an operator-chosen lease — see
+ * `deadlineExpired`.
+ *
  * (2) took two goes. The first version filtered `eligible`, and `eligible` returns only
  * `ready` Tasks — which is exactly right for one worker and silently empty for the case
  * reclaim exists to handle, since a Task whose holder died stays `leased` forever. The
@@ -143,12 +150,71 @@ function reclaimable(input: SelectInput, leaseMs: number): Runnable[] {
   return out;
 }
 
-/** The v1 default: one worker, so every eligible Task is this worker's to take. */
+/**
+ * Tasks a crash left behind, expired by the node's OWN declared deadline.
+ *
+ * This is `reclaimable()`'s argument with a different clock, and the clock is the whole point.
+ * `LeasedScheduler` expires a lease against an operator-chosen `leaseMs`, and its docstring is
+ * right that there is no safe default for that number. A single-plane deployment does not need
+ * one: the graph already carries a bound that means "no live execution can still be inside this
+ * task". `NodePlan.timeoutMs` is the deadline `Engine.#withNodeDeadline` WILL enforce, so a
+ * holder that is still alive has already aborted the task by `lease.at + timeoutMs` and appended
+ * its own outcome. Past that instant a `leased` task is a dead worker's, and reclaiming it costs
+ * no double execution that the deadline was not already going to cause.
+ *
+ * TWO WAYS IT REFUSES, and both are the conservative direction:
+ *
+ *   - OUR OWN LEASE IS NEVER TAKEN BACK, at any age. `advance` is re-entrant, so a lease under
+ *     this worker's id is work running right now. `workerId` is `hostname:pid:ordinal`
+ *     (`cli.ts`'s `planeWorkerId`), so a restarted plane comes back under a new name and its
+ *     pre-restart leases are correctly foreign — which is exactly the case that was stranded.
+ *   - NO DEADLINE, NO RECLAIM. `compile.ts`'s `effectiveTimeout` gives an enforced deadline to
+ *     `agent`, `tool`, `evaluator` and `function` and to nothing else, so a `join`, `router`,
+ *     `human_gate` or `subgraph` task is left alone: with no bound there is nothing to reason
+ *     from, and "I do not know" is not "the holder is dead". Those four are also the four whose
+ *     bodies return synchronously or delegate to a child run, so the window a crash can land in
+ *     is a tick rather than a node's whole duration. A deployment that wants them reclaimed too
+ *     asks for a flat lease by passing `Engine`'s `opts.scheduler` a `LeasedScheduler` — that is
+ *     the seam, and it is on the pinned public surface.
+ *
+ * The boundary is `leaseLive`'s, inclusive: a deadline landing exactly on `now` is still live,
+ * for the reason stated there.
+ */
+function deadlineExpired(input: SelectInput): Runnable[] {
+  const out: Runnable[] = [];
+  for (const task of Object.values(input.projection.tasks)) {
+    if (task.state !== "leased") continue;
+    if (task.lease === undefined) continue;
+    if (task.lease.workerId === input.workerId) continue;
+    const timeoutMs = input.graph.plans[task.nodeId]?.timeoutMs;
+    if (timeoutMs === undefined) continue;
+    if (leaseLive(task.lease.at, input.now, timeoutMs)) continue;
+    if (task.retryAfter !== undefined && task.retryAfter > input.now) continue;
+    const node = input.nodes.get(task.nodeId);
+    if (node !== undefined) out.push({ task, node });
+  }
+  return out;
+}
+
+/**
+ * The v1 default: one worker, so every eligible Task is this worker's to take.
+ *
+ * `eligible` returns `ready` Tasks only, and for the worker that is running RIGHT NOW that is
+ * complete — a `leased` Task is its own work in flight. It is not complete for the worker BEFORE
+ * this one. A plane SIGKILLed between `task.leased` and `task.committed` (OOM, deploy, crash)
+ * leaves a Task in `leased`, a state only its holder's commit advances, so selection skipped it
+ * forever: `loom resume` folded a complete, correct journal, chose an empty wave and exited 0
+ * having done nothing — indistinguishable from a run legitimately waiting. `deadlineExpired`
+ * above is the second candidate source that ends that, and it is a source rather than a filter
+ * for the reason this file's header gives about (2): the stranded Tasks are precisely the ones
+ * `eligible` excludes.
+ */
 export class InProcessScheduler implements Scheduler {
   readonly kind = "in-process";
 
   select(input: SelectInput): readonly Runnable[] {
-    return orderByCriticalPath(eligible(input), input.graph).slice(0, input.maxParallelism);
+    const candidates = [...eligible(input), ...deadlineExpired(input)];
+    return orderByCriticalPath(candidates, input.graph).slice(0, input.maxParallelism);
   }
 }
 
