@@ -22,6 +22,17 @@
  * A deployment with no history supplies nothing and those two rules simply never fire —
  * which is correct: neither has anything to say about the first run of a new graph.
  *
+ * **AND NO DEPLOYMENT THIS PRODUCT SHIPS SUPPLIES EITHER**, so eight of these ten rules are
+ * armed and two are not. The measurement, and the exact command, are at `EngineOptions.sequences`
+ * in `run/engine.ts` — including why it has to be ANCHORED (an unanchored grep for the field name
+ * matches the prose describing it, so it grows when somebody writes this paragraph).
+ * `test/run/escalation.test.ts` builds both by hand, so the suite is green over
+ * two rules a user never runs. The paragraph above is an account of a DEPLOYMENT with no
+ * history; it was standing in for an account of the product, and the two are not the same
+ * claim. Wiring them is owed to `cli.ts`'s `openWorkspace` — with durable backings, since a
+ * `CohortBaseline` is cross-run state that `journal/store.ts` will not hold — or the option
+ * and the rule go together, the rule `journal/events.ts` states for an event with no writer.
+ *
  */
 
 import type { NodeId } from "../ids.ts";

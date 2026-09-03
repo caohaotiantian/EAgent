@@ -187,9 +187,43 @@ export interface EngineOptions {
   readonly resolver?: ResourceResolver;
   /** Which Tasks this worker takes. Default: one worker, every ready Task. */
   readonly scheduler?: Scheduler;
-  /** E5's evidence. Absent ⇒ the rule never fires, which is right with no history. */
+  /**
+   * E5's evidence. Absent ⇒ `novel_sequence` never fires.
+   *
+   * **NOTHING IN `src/` PASSES THIS**, so in the shipped binary E5 is inert. Measured:
+   * `/usr/bin/grep -rEn "^[[:space:]]*(readonly )?#?sequences:" packages/core/src --include='*.ts'`
+   * matches ONE line, this option's private field — so no object literal in `src/` sets it, and
+   * the one chain that forwards options (`replayRun` -> `new Engine({...engineOpts})`) can only
+   * carry what it was given. TWO THINGS ABOUT THAT COMMAND. It is ANCHORED because a bare
+   * `grep "sequences:"` matches this very sentence, so the unanchored measurement inflates
+   * whenever somebody documents it — the trap `CLAUDE.md` records for the kernel-seam ledger,
+   * one file over. And counting `new Engine(` sites does not settle the question at all, because
+   * two of the three spread their options rather than naming fields.
+   * The rule is exercised only by `test/run/escalation.test.ts`, which
+   * builds an `InMemorySequenceIndex` by hand, so the suite is green over a rule the product
+   * does not run. "Absent is right with no history" is true of a DEPLOYMENT that has none; it
+   * is not an account of a product that never supplies one.
+   *
+   * Wiring it belongs to whoever owns `cli.ts`'s `openWorkspace`, and it needs a durable
+   * backing — the index folds out of trajectories already on disk. The alternative is deleting
+   * the option and the rule under the rule `journal/events.ts` states for an event with no
+   * writer: "a row that loses its last writer is removed by the change that removed it, not
+   * excused." Shipping the option and never passing it is the third thing, and it is the one
+   * that lies.
+   */
   readonly sequences?: SequenceIndex;
-  /** E7's evidence. Absent ⇒ the rule never fires. */
+  /**
+   * E7's evidence. Absent ⇒ `anomaly` never fires — and the undecidable case ("I have no
+   * history") is answered with the passing value ("not an anomaly").
+   *
+   * **NOTHING IN `src/` PASSES THIS EITHER**, by the same anchored measurement: the five matches
+   * are this option's private field, two `cli.ts` sites building `loom promote`'s baseline
+   * REPORT, `evolution/gate.ts`'s `EvalReport` field of that name, and `detectAnomaly`'s own
+   * parameter. None is a `CohortBaseline` reaching this option.
+   * `InMemoryCohortBaseline` is also cross-run state with no durable form, so even a deployment
+   * that injected one would lose its p99 on every restart and `detectAnomaly` would answer
+   * `undefined` — the loosening direction, unlike E5, whose empty index over-escalates.
+   */
   readonly baseline?: CohortBaseline;
   /**
    * Tuning for the gate clock that `sweepGates` drives — how many runs one tick sees.
@@ -1117,19 +1151,29 @@ export class Engine {
   #sweeper: GateSweeper | undefined;
 
   readonly #runs = new Map<RunId, RunContext>();
-  /** Per-run advance chain. See `advance`. Self-evicting. */
-  readonly #advancing = new Map<RunId, Promise<void>>();
   /**
-   * The per-run rewind chain, `#advancing`'s sibling and for the identical reason.
+   * ONE PER-RUN CHAIN FOR BOTH VERBS. Every path that drives a run — `advance` and `rewind` —
+   * queues on this. Self-evicting; see `advance`.
    *
-   * SEPARATE FROM `#advancing` rather than shared, and that is a choice with a cost. Sharing one
-   * map would also serialize a rewind against a concurrent `advance`, which is a real hazard —
-   * but `advance` is called from `rewind`'s own callers and from the HTTP route in the same
-   * breath, and a rewind that waits on an advance that waits on a lease is a deadlock this change
-   * has no evidence it needs. What IS measured is two rewinds racing each other, and that is what
-   * this closes. Rewind-against-advance stays open and is named here rather than implied.
+   * IT WAS TWO MAPS, and the split was the hole. `#rewinding`'s docstring argued for separate
+   * chains on a deadlock worry ("a rewind that waits on an advance that waits on a lease") and
+   * named rewind-against-advance as a real hazard it was leaving open. It was open: a rewind ran
+   * concurrently with an in-flight wave, and the wave journaled `tool.called`,
+   * `task.committed` and `state.reduced` AFTER the `checkpoint.restored` marker. The fold
+   * suppresses only the seqs strictly between `atSeq` and the marker, so the surviving history
+   * had a task `succeeded` with no `task.ready` and no `task.leased` behind it, reading a channel
+   * value nothing visible produced — and the run reported `succeeded`. Reproduced with two
+   * sequential tool nodes and a `POST /runs/:id/commands {"kind":"rewind"}` mid-wave.
+   *
+   * THE DEADLOCK THE SPLIT FEARED DOES NOT EXIST. Neither `rewind` nor `#rewindSerially` calls
+   * `advance`: the three `this.advance` call sites are `resolveGateBatch`, `#resolveGateAsSystem`
+   * and `#runSubgraph`, and the third is on a DIFFERENT runId, which is a different key. What the
+   * shared chain costs is that a rewind WAITS for the wave — which is the behaviour an operator
+   * wants, because the alternative is dispatching an undo for work that is still running. A
+   * rewind whose plan the wave has since invalidated is then refused by the plan hash, which
+   * `rewind`'s own docstring already calls the correct answer.
    */
-  readonly #rewinding = new Map<RunId, Promise<void>>();
+  readonly #driving = new Map<RunId, Promise<void>>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
   #commitChain: Promise<unknown> = Promise.resolve();
 
@@ -1291,7 +1335,16 @@ export class Engine {
       }
       if (ev.type !== "tool.called") continue;
       const called = ev.payload;
-      if (called.irreversibility !== "irreversible" && called.irreversibility !== "externally_visible") continue;
+      // READ POSITIVELY. This was an allow-list spelled in the NEGATIVE — `!== "irreversible" &&
+      // !== "externally_visible"` — so a class outside the union was SKIPPED and the rewind that
+      // must refuse was granted with the effect still standing. `tool.called.irreversibility` is
+      // typed `string` because a journal is allowed to hold a word this binary predates:
+      // `run/registry.ts` records that `"nuclear"` was accepted by `register` before
+      // `checkManifest` existed. Measured on `"nuclear"`, `"IRREVERSIBLE"` and
+      // `"irreversible_write"`: REWIND ALLOWED, money still gone. `isHardToUndo` is the negative
+      // form — an unreadable class is hard to undo — and `#applyGateDecision` closed the
+      // byte-identical hazard for `gate.decision`.
+      if (!isHardToUndo(called.irreversibility as IrreversibilityClass)) continue;
       // Fail closed: a tool the registry no longer carries cannot be shown to compensate.
       if (this.tools.get(called.name)?.compensation === undefined) {
         return { name: called.name, seq: ev.seq, irreversibility: called.irreversibility, runId };
@@ -2287,22 +2340,31 @@ export class Engine {
    * from where it is *after* the first finishes, not the first's answer.
    */
   async advance(runId: RunId): Promise<RunProjection> {
-    const prev = this.#advancing.get(runId);
+    return this.#drive(runId, () => this.#advanceSerially(runId));
+  }
+
+  /**
+   * Queue one run-driving operation behind whatever is already driving that run.
+   *
+   * ONE IMPLEMENTATION, because `advance` and `rewind` had a copy each and the copies keyed on
+   * different maps — which is how they came to run concurrently. The handle stored is
+   * NEVER-REJECTING: a predecessor that threw must not reject its successor, and an unhandled
+   * rejection here would take the process down. Self-evicting, so the map does not grow with
+   * every run the process ever saw.
+   */
+  #drive<T>(runId: RunId, work: () => Promise<T>): Promise<T> {
+    const prev = this.#driving.get(runId);
     const run = (async () => {
       if (prev !== undefined) await prev;
-      return this.#advanceSerially(runId);
+      return work();
     })();
-
-    // Store a never-rejecting handle: a predecessor that threw must not reject its
-    // successor, and an unhandled rejection here would take the process down.
     const settled = run.then(
       () => undefined,
       () => undefined,
     );
-    this.#advancing.set(runId, settled);
-    // Self-evicting, so the map does not grow with every run the process ever saw.
+    this.#driving.set(runId, settled);
     void settled.then(() => {
-      if (this.#advancing.get(runId) === settled) this.#advancing.delete(runId);
+      if (this.#driving.get(runId) === settled) this.#driving.delete(runId);
     });
     return run;
   }
@@ -3131,22 +3193,9 @@ export class Engine {
     // journaled its `compensation.recorded` rows, `planCompensation` settles those seqs, the plan
     // is genuinely different, and the hash then refuses it — which is the correct answer and the
     // one the operator can act on. Chain and hash close it together; neither does alone.
-    const prev = this.#rewinding.get(runId);
-    const run = (async () => {
-      if (prev !== undefined) await prev;
-      return this.#rewindSerially(runId, atSeq, reason, by, auth);
-    })();
-    // A never-rejecting handle, `advance`'s shape: a predecessor that threw must not reject its
-    // successor, and an unhandled rejection here would take the process down.
-    const settled = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.#rewinding.set(runId, settled);
-    void settled.then(() => {
-      if (this.#rewinding.get(runId) === settled) this.#rewinding.delete(runId);
-    });
-    return run;
+    //
+    // AND AGAINST `advance`, which the two-map version did not do — see `#driving`.
+    return this.#drive(runId, () => this.#rewindSerially(runId, atSeq, reason, by, auth));
   }
 
   /**
@@ -3981,6 +4030,24 @@ export class Engine {
    * "corrected" graph here would be this engine deciding what a human meant to approve.
    */
   async #assertBound(ctx: RunContext, why: string, opts: { readonly requireRecord: boolean } = { requireRecord: true }): Promise<void> {
+    // AN EDGE KIND THIS BUILD CANNOT READ REFUSES THE RUN, and this check is first because it is
+    // about the graph in hand rather than about the journal. `EdgeKind` is a seven-member union
+    // that nothing validated at run time and `#edgesToTake`'s `default:` arm TOOK — so
+    // `kind: "conditionl"` dropped the `when` and ran the guarded node every time. Closed at
+    // compile by GRAPH003_UNKNOWN_EDGE_KIND; closed here because `attach` is public and
+    // `RunGraph` is exported, so a graph can reach the executor without passing this build's
+    // compiler, which is the rule `run/registry.ts` states as "closing the append does not close
+    // the read".
+    const unreadable = ctx.graph.spec.edges.filter((edge) => !EDGE_KINDS.has(edge.kind));
+    if (unreadable.length > 0) {
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `the graph supplied for ${why} has ${unreadable.length === 1 ? "an edge" : "edges"} of a kind this build cannot read: ` +
+          `${unreadable.map((edge) => `"${edge.id}" (kind ${JSON.stringify(edge.kind)})`).join(", ")} — ` +
+          `an unreadable kind means the edge's \`when\`, \`until\` and \`over\` are never evaluated`,
+        { details: { runId: ctx.runId, edges: unreadable.map((edge) => ({ id: edge.id, kind: edge.kind })) } },
+      );
+    }
     const recorded = await this.#compiledIdentity(ctx.runId);
     // A run with no `run.compiled` cannot be checked, and what to do about that DIFFERS BY DOOR.
     //
@@ -4422,7 +4489,10 @@ export class Engine {
     // digest computed over handles and `#approvalStillCovers` would have re-derived it over
     // values, so every approved task would have failed as "no longer the one this task would
     // execute".
-    const p = await this.#resolveReads(ctx, (await this.#project(ctx))!, w);
+    // AND WHAT THIS TASK'S OWN BRANCH HAS ALREADY WRITTEN, which is not in `p.channels` while a
+    // fan-out is open — see `#withBranchWrites`. After `#resolveReads`, so a branch-local write
+    // wins over an externalised value of the same channel resolved from an earlier state.
+    const p = this.#withBranchWrites(ctx, await this.#resolveReads(ctx, (await this.#project(ctx))!, w), w.task.branch);
     const { node, task } = w;
     const spec = ctx.graph.spec;
 
@@ -4763,7 +4833,7 @@ export class Engine {
 
     const declared = new Set(w.node.writes ?? []);
     const stray = Object.keys(outcome.writes).filter((c) => !declared.has(c));
-    if (stray.length === 0) return outcome;
+    if (stray.length === 0) return this.#unrecordableWrite(w, outcome) ?? outcome;
 
     // REFUSED, not dropped. Dropping leaves a node body that believes it wrote and a
     // journal that disagrees — the silent divergence class that is hardest to diagnose
@@ -4780,6 +4850,41 @@ export class Engine {
         { details: { node: w.node.id, stray, declared: [...declared] } },
       ),
     };
+  }
+
+  /**
+   * A write the journal cannot record, refused where the outcome is CONSTRUCTED.
+   *
+   * `canonical.ts` refuses a sparse array, a `NaN`, a `BigInt` and a cycle by design, and nothing
+   * checked for one before `#commit` — which sits OUTSIDE the try/catch that turns an execution
+   * failure into `{status:"failed"}`. So the throw escaped `advance()` as a raw
+   * `CanonicalizationError` (not a `LoomError`, so `server/http.ts` had nothing to key on),
+   * `ctx.leases.delete` never ran, the task stayed `leased` forever, and the next advance
+   * reported `E_OUTPUT_MISSING` — sending an author to look at their `outputs:` declaration
+   * rather than at the `NaN` their averaging function produced on an empty list.
+   *
+   * Refused HERE for the reason `sodOn` gives for its own placement: as an ordinary failed
+   * outcome it travels the way every other node-level refusal does — retries, error edges and
+   * the journal all work — and the message can name the node and the channel.
+   */
+  #unrecordableWrite(w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
+    for (const [channel, value] of Object.entries(outcome.writes)) {
+      try {
+        canonicalize(value);
+      } catch (e) {
+        return {
+          status: "failed",
+          writes: {},
+          usage: outcome.usage,
+          error: err.validation(
+            CODES.E_RESOURCE_INVALID,
+            `node "${w.node.id}" wrote a value to "${channel}" that the journal cannot record: ${(e as Error).message}`,
+            { details: { node: w.node.id, channel } },
+          ),
+        };
+      }
+    }
+    return undefined;
   }
 
   #dispatchBody(ctx: RunContext, p: RunProjection, w: Wave): Promise<NodeOutcome> | NodeOutcome {
@@ -7558,7 +7663,15 @@ export class Engine {
         taskId: w.task.taskId,
       });
     }
-    const take = outcome.status === "failed" ? this.#errorEdges(ctx, w, outcome.error?.code) : this.#edgesToTake(ctx, p, w, outcome);
+    // ROUTING READS THE BRANCH-LOCAL VIEW TOO. A `conditional` edge's `when` and a `fanout`'s
+    // `over` are evaluated against this task's scope, and a scope missing its own branch's writes
+    // routes on a value the node itself could see — the same silent wrong answer one layer down.
+    //
+    // `p` STAYS UNMODIFIED FOR `#foldJoin` ABOVE, deliberately: the join's baseline is
+    // `stateAtPrefix`, and giving it an overlay of held writes would make its fold include values
+    // the OUTER join is going to fold again.
+    const routing = this.#withBranchWrites(ctx, p, w.task.branch);
+    const take = outcome.status === "failed" ? this.#errorEdges(ctx, w, outcome.error?.code) : this.#edgesToTake(ctx, routing, w, outcome);
 
     // E8'S CONTROL-FLOW HALF, FOLDED HERE AND NOT IN `#recordEvidence`, WHICH IS WHERE EVERY
     // OTHER PIECE OF THIS RUN'S ESCALATION EVIDENCE IS FOLDED. The reason is one line up:
@@ -7658,14 +7771,23 @@ export class Engine {
 
     // Activation is part of the same append: a crash between "committed" and "next
     // task ready" would otherwise strand the run with nothing runnable.
-    events.push(...this.#activate(ctx, p, w, take, outcome, outcome.status === "failed" ? "failed" : "succeeded"));
+    events.push(...this.#activate(ctx, routing, w, take, outcome, outcome.status === "failed" ? "failed" : "succeeded"));
 
     // PRESENT THE LEASE. The store refuses an append whose token is below the highest it
     // has seen for this Task, so a worker whose lease another process has taken cannot
     // commit over it. Without this the fence was inert: the token was minted, journaled,
     // and never shown to the thing that checks it, so `E_LEASE_LOST` had no thrower.
-    await ctx.log.commit(p.seq, events, this.#fence(ctx, w));
-    ctx.leases.delete(w.task.taskId);
+    // BELT AND BRACES ON THE LEASE. `#unrecordableWrite` refuses the values this append could
+    // choke on before the body's outcome ever gets here, but the STORE can still reject — a
+    // fencing token another worker took, a full disk, exhausted seq-conflict retries — and a
+    // throw past this line used to leave the task `leased` in memory forever, so every later
+    // advance re-leased it, re-executed it and threw again. The lease goes back either way; the
+    // error still propagates, because a commit that did not happen is not a commit.
+    try {
+      await ctx.log.commit(p.seq, events, this.#fence(ctx, w));
+    } finally {
+      ctx.leases.delete(w.task.taskId);
+    }
   }
 
   /**
@@ -7960,6 +8082,11 @@ export class Engine {
 
     // E5 — a tool sequence never seen in a successful run of this graph.
     //
+    // INERT IN THE SHIPPED BINARY. `this.#sequences` is `undefined` in every process the
+    // product starts, because no `new Engine({...})` in `src/` passes the option — see
+    // `EngineOptions.sequences` for the measurement and for what wiring it would take. This
+    // branch is reached only by a library embedder and by `test/run/escalation.test.ts`.
+    //
     // AGENT NODES ONLY. A `tool` node's tool is written in the spec: if it changed, the
     // graph hash changed and this is a different graph. Only an agent CHOOSES its
     // sequence at run time, so only an agent can produce one nobody has seen.
@@ -8015,6 +8142,11 @@ export class Engine {
    * Checked at FINISH, not per task, because "this run cost 3× the p99" is a fact about
    * the whole run. Escalating at the end still matters: the posture is durable, so a
    * follow-up or a resumed branch inherits it, and the journal says why.
+   *
+   * INERT IN THE SHIPPED BINARY, and the first line is why: no `new Engine({...})` in `src/`
+   * passes `baseline`, so this returns before reading anything in every process the product
+   * starts. Stated here rather than only at the option, because this line reads like a
+   * defensive guard and is in fact the whole behaviour. See `EngineOptions.baseline`.
    */
   #checkAnomaly(ctx: RunContext, p: RunProjection): void {
     if (this.#baseline === undefined) return;
@@ -8030,6 +8162,54 @@ export class Engine {
       p99: reading.p99,
       ratio: Number(reading.ratio.toFixed(2)),
     });
+  }
+
+  /**
+   * The projection a task at `branch` sees, INCLUDING what its own branch already wrote.
+   *
+   * `writesHeldForJoin` is true for every non-root branch, so a task inside a fan-out holds its
+   * writes for the join and they reach neither `p.channels` nor `p.bindings`. That rule is right
+   * for the JOIN — the fold has to be branch-ordered or the result depends on which sibling
+   * finished first — and it was also, silently, the rule for the rest of the writer's OWN branch.
+   * Measured on `start --fanout--> A --seq--> B`, where `A` writes `mid` and `B` reads it: `B` saw
+   * `undefined`, wrote a value computed from nothing, and the run reported `succeeded` — while the
+   * join folded `mid` correctly, so the final channel state looked right. A silent wrong answer on
+   * the most ordinary fan-out shape there is.
+   *
+   * WHAT THIS DOES NOT DO IS LET A SIBLING'S WRITE OUT. Only tasks at EXACTLY this branch path are
+   * folded, so branch `#0` never sees branch `#1` — rule 3 of this file's header still holds, and
+   * `p.channels` is untouched, so the join still folds every member from the same base as before.
+   *
+   * NOT ANCESTORS, EITHER, and that is a deliberate bound rather than an oversight. A nested
+   * fan-out's inner join emits its fold as its OWN held write, which the outer join folds again;
+   * if an ancestor's held write were visible here it would enter that inner fold as the base and
+   * be counted twice under `append`/`sum`. Reaching an ancestor's write needs the inner join to
+   * subtract its own base, which is a different change.
+   *
+   * DERIVED, NOT STORED. Everything folded here comes from `task.committed` through
+   * `TaskRecord.writes`, ordered by each task's lease seq — so a restart and a replay reconstruct
+   * the identical view, which is what makes it legal for a decision to read.
+   */
+  #withBranchWrites(ctx: RunContext, p: RunProjection, branch: BranchCoordinate): RunProjection {
+    if (!writesHeldForJoin(branch)) return p;
+    const path = encodeBranch(branch);
+    const held = Object.values(p.tasks)
+      .filter((t) => t.state === "succeeded" && encodeBranch(t.branch) === path && Object.keys(t.writes).length > 0)
+      // The lease's seq IS the journal position it was taken at, so this is journal order and not
+      // map order — the same fact `task.leased`'s fencing token is.
+      .sort((a, b) => (a.lease?.fencingToken ?? 0) - (b.lease?.fencingToken ?? 0));
+    if (held.length === 0) return p;
+
+    const wave: Record<string, Contribution[]> = {};
+    for (const t of held) {
+      for (const [channel, value] of Object.entries(t.writes)) {
+        (wave[channel] ??= []).push({ branch: t.branch, nodeId: t.nodeId, iteration: t.iteration, value });
+      }
+    }
+    // THE SAME REDUCER THE JOIN USES, over the same base, so "what my branch has written so far"
+    // is computed the one way this system computes channel state.
+    const reduced = reduceState(ctx.graph.spec.channels, p.channels, wave);
+    return withResolved(p, branch, pick(reduced.state, reduced.channels));
   }
 
   #immediateReduce(
@@ -8137,8 +8317,28 @@ export class Engine {
           if (e.when === undefined || evaluate(this.#expr(ctx, e.when), scope) === true) out.push(e.id);
           break;
         }
-        default:
+        // THE THREE UNCONDITIONAL KINDS, NAMED. `default:` used to carry them, which meant it
+        // also carried every kind this binary cannot read — and answered it by TAKING the edge
+        // with its `when` never evaluated. Naming them leaves `default:` for the one case it
+        // should have had, and makes a new member of `EdgeKind` a compile error here rather than
+        // a silent unconditional edge.
+        case "seq":
+        case "fanout":
+        case "join":
           out.push(e.id);
+          break;
+        default:
+          // NOT TAKEN. An edge whose kind this build cannot read carries a `when`, an `until` or
+          // an `over` that nothing evaluated, so taking it runs a node the graph meant to guard —
+          // measured: `kind: "conditionl"` on a `when: "false"` edge ran the guarded node every
+          // time. Refusing to take is the failing-closed direction.
+          //
+          // THE LOUD HALF IS `#assertBound`, which refuses the whole run at the door and names
+          // the edge; this arm exists because a `default:` that TAKES is one line away from
+          // being written again, and because a silent drop is the honest answer for a code path
+          // the door has already made unreachable. Nothing throws here: `#edgesToTake` is called
+          // from inside `#commit`, and a throw would reject `advance()` — see `#strayRoute`.
+          break;
       }
     }
     return out;
@@ -8159,6 +8359,17 @@ export class Engine {
    * them was for this.
    */
   #errorEdges(ctx: RunContext, w: Wave, code: string | undefined): readonly EdgeId[] {
+    // A RUN-FATAL CODE ACTIVATES NOTHING. `RUN_FATAL_CODES` is the set whose members mean "this
+    // run may not continue on any path", and an `error` edge is a path — so routing one is the
+    // graph handling a failure it is not allowed to handle. Measured before this: a gate that
+    // could not be supervised failed `E_GATE_REQUIRED`, took an ordinary error edge, and because
+    // an EARLIER node had already written the declared output, `#finish` appended `run.completed`
+    // and the run reported succeeded with zero gates.
+    //
+    // HERE AS WELL AS IN `#finish`, deliberately. `#finish` refuses to complete a run holding a
+    // fatal failure however it routed; this makes the two agree BY CONSTRUCTION rather than by
+    // review, which is the shape `#fence` argues for one method over.
+    if (code !== undefined && RUN_FATAL_CODES.has(code)) return [];
     return (ctx.index.outbound.get(w.node.id) ?? [])
       .filter((e) => e.kind === "error" && (e.codes === undefined || (code !== undefined && e.codes.includes(code))))
       .map((e) => e.id);
@@ -8555,12 +8766,22 @@ export class Engine {
       }
     }
 
-    const failed = Object.values(p.tasks).filter(
-      (t) =>
-        t.state === "failed" &&
-        t.take.length === 0 &&
-        (p.budgetExhausted || RUN_FATAL_CODES.has(t.error?.code ?? "") || !this.#absorbedByJoin(ctx, t.nodeId)),
+    // TWO QUESTIONS, ASKED SEPARATELY, and asking them as one was the defect. "Did this task
+    // fail run-fatally?" is about the CODE and nothing else; "was this ordinary failure handled?"
+    // is about routing. The single filter below required `take.length === 0` for both, so a
+    // fatal failure that activated an error edge was excluded from the filter entirely — and a
+    // run whose declared outputs were already written then completed, reporting success for a
+    // supervision requirement that went unmet.
+    //
+    // `#errorEdges` now returns `[]` for a fatal code, so in this build the two agree; this stays
+    // because a filter that depends on another function's refusal to be correct is a filter that
+    // breaks silently when that refusal moves.
+    const fatal = Object.values(p.tasks).filter(
+      (t) => t.state === "failed" && (p.budgetExhausted || RUN_FATAL_CODES.has(t.error?.code ?? "")),
     );
+    const failed = fatal.length > 0
+      ? fatal
+      : Object.values(p.tasks).filter((t) => t.state === "failed" && t.take.length === 0 && !this.#absorbedByJoin(ctx, t.nodeId));
     if (failed.length > 0) {
       const first = failed[0]!;
       await this.#failRun(
@@ -9635,6 +9856,16 @@ function minDefined(...values: readonly (number | undefined)[]): number | undefi
  * Sorted rather than emitted in `plans` order because two compiles of one spec must journal the
  * identical value — the same rule `resolveManifest` follows for the same reason one field over.
  */
+/**
+ * The seven members of `EdgeKind` — the executor's own copy, for `#assertBound`.
+ *
+ * A set rather than an import from `graph/compile.ts`: the compiler is the earlier answer and the
+ * executor must not depend on having been the caller of it. Adding a member to `EdgeKind` means
+ * adding it here AND to `#edgesToTake`'s switch, and the switch is exhaustive, so the type checker
+ * names the second site.
+ */
+const EDGE_KINDS: ReadonlySet<string> = new Set(["seq", "conditional", "fanout", "join", "error", "compensation", "loop"]);
+
 function compiledPostures(graph: RunGraph): readonly { readonly nodeId: NodeId; readonly posture: Posture }[] {
   return Object.entries(graph.plans)
     .map(([nodeId, plan]) => ({ nodeId: nodeId as NodeId, posture: plan.posture }))
