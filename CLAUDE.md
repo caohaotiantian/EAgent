@@ -36,14 +36,22 @@ it is there — the criterion is *this file is the mechanism that makes one of t
 below true, and an extension must depend on it and cannot replace it*. `scripts/check-kernel.mjs`
 runs the test: a `feat` commit touching one of them fails the gate unless it carries a
 `Kernel-seam:` trailer saying which seam was missing. `fix` may touch the kernel freely — fixing
-it is what a kernel is for. That trailer is the escape hatch and also the ledger:
-the guard's own output lists every seam ever declared, with its reason, and that count is not a
-number anyone can quietly reset. Read it there and nowhere else: `git log --grep='^Kernel-seam:'`
-is NOT the ledger — it matches prose ABOUT the trailer as readily as the trailer itself, so it
-inflates precisely when somebody documents how the ledger works. Nor is git's own trailer
-parser (`%(trailers:key=Kernel-seam,valueonly)`) the fix: it reads only the final paragraph,
-so it MISSES every commit that put the line mid-body, and undercounts. Three commands, three
-answers; only the guard reads the declarations themselves.
+it is what a kernel is for. That trailer is the escape hatch and also the ledger: the guard's own
+output lists every seam declared in `since..HEAD`, with its reason.
+
+**That ledger IS resettable, three ways, and this line used to claim it was not.** Measured
+2026-09-02 by running the guard against synthetic commits: advancing `since` one commit prints
+`0 declared seams` and exits 0; a `refactor:` rename of a pinned file (with the pin updated in the
+same commit) drops that file's seams AND erases an outstanding unfixed violation against it,
+because the matcher compares historical commits to the CURRENT path; and `Feat:`/`FEAT:`/`feature:`
+are not classified as features at all. A one-character trailer value satisfies "a sentence of
+design argument". Treat the count as a number a reviewer must watch in the diff, not as one the
+tool defends.
+
+Read it from the guard and nowhere else. `git log --grep='^Kernel-seam:'` inflates (it matches prose
+ABOUT the trailer; guard 11, grep 12) and git's own trailer parser undercounts (it reads only the
+final paragraph). Three commands, three answers. `check-kernel.mjs`'s own failure text still
+recommends the grep — a correction it is owed.
 
 The list says nothing about whether `engine.ts` should be split — see its header for three
 arguments against. `check-surface.mjs` pins the exported NAME SET and nothing else, so it reports
@@ -66,19 +74,30 @@ endpoint, a non-webhook delivery transport, an identity source) and **three** do
 — a node type, a reducer, a ninth hook point. Every entry there is quoted from the refusal the
 binary actually prints. All three are closed for ONE reason, replay: a fold can only reproduce a
 decision whose vocabulary the folding binary already knows. **Shrinking that second list is what
-this property means in practice; the list moving the other way is the alarm.** It went six → seven
-on 2026-08-28 by being measured again rather than because a door closed, then seven → five when
-`--extension-module` gave the CLI the door onto `ModelRegistry` and `ToolRegistry` that a library
-embedder always had — and the blanket "closed by replay" reason went with the two rows it did not
-fit. It went **five → three** on 2026-09-01 when the same flag's object widened from
-`{models, tools}` to `{models, tools, channels, identity}`, deleting the two rows that were forks
-*from the CLI only*: `DeliveryChannel`/`GateDispatcher` and `IdentitySource`/`startControlPlane`
-were pinned public types a library embedder always reached, so those two were never bounds, only
-debts — and the whole debt was reachability from argv. **What is left has no debts in it**, which
-is why the honest next move on this property is a new capability rather than another row off this
-list. The trust argument that bounds the widening is stated at `loadExtensionModules`: the module
-path comes from ARGV and nowhere else, because a path read out of a file would let a FILE decide
-who may approve.
+this property means in practice; the list moving the other way is the alarm.** It went six → seven,
+then to five when `--extension-module` gave the CLI the door onto `ModelRegistry` and `ToolRegistry`
+a library embedder always had, then to **three** on 2026-09-01 when the same flag's object widened
+to `{models, tools, channels, identity}` — deleting two rows that were forks *from the CLI only*
+and were therefore never bounds, only debts. The trust argument that bounds the widening is stated
+at `loadExtensionModules`: the module path comes from ARGV and nowhere else, because a path read
+out of a file would let a FILE decide who may approve.
+
+**"What is left has no debts in it" was the claim, and the 2026-09-02 audit falsified it by driving
+all twelve rows through the shipped binary.** All twelve genuinely work — that half survived. But
+`EngineOptions` takes five more members whose types are all already on `scripts/surface.json` and
+which `openWorkspace` constructs unconditionally with no `extensions?.` fallback: `functions`
+(`FunctionRegistry`), `hooks` (`HookRegistry`), `resolver` (`ResourceResolver`), `store`
+(`StateStore`), `payloads` (`PayloadStore`). A library embedder reaches all five; argv reaches
+none. **Those are debts of exactly the shape the 5 → 3 change paid off, so the published number is
+an undercount — correct it before shrinking it.** Measured consequence: a host-realm async function
+body with `Date` runs from a library embedder and cannot be supplied from the CLI at all.
+
+The audit also found two privileged built-ins: `builtinTools(jail)` registers AFTER extension
+modules and `ToolRegistry.register` shadows on collision, so an extension tool sharing a built-in's
+name is silently never dispatched (the identical collision on an adapter or channel name refuses to
+boot); and the extension registrar carries no jail, so an outsider's filesystem or network tool
+cannot apply the operator's own guards even if it wants to. `README.md`'s section is the ledger and
+is owed both corrections.
 
 ### 3 · Endless self-improvement
 
@@ -89,18 +108,43 @@ This is the property most easily faked. Capturing trajectories is not improvemen
 not improvement. **Improvement is when a later run is measurably better because of an earlier one**,
 and the measurement has to be one that cannot be gamed by the thing being measured.
 
+**It is currently faked, and this was driven end to end through the shipped verbs on 2026-09-02.**
+A candidate that DELETES the work node and returns `{pass:true}` promotes through
+`loom promote --against-cohort` at paired mean Δscore **+0.4000 over 30 pairs**, all eight checks
+green. A candidate whose only change is swapping its own grader promotes through
+`loom promote --suite` with **all thirteen** checks green. The reason is one sentence: the whole
+ladder rests on S1, and `extractSignals` reads S1 out of the CANDIDATE'S OWN graph — any
+`evaluator` step whose commit carries `{pass:true}` and made no model call. **A candidate owns its
+graph, so it owns S1**, and with it the outcome, the promotion ceiling and the ground-truth
+condition. `freezeSuite` compounds it by excluding grader-written channels from the pin by
+construction, so the one node the exam cannot see is the one a candidate may freely rewrite.
+
+Do not treat this as a bug list. **Until a measurement exists whose inputs the candidate provably
+cannot write, this property is aspirational**, and the audit found none in the tree. The three
+defeated attempts to pin a verifier are recorded at `aabdc63`; the shape that defeated all three is
+that the candidate owns both sides of any channel the graph produces. `docs/audit-2026-09-02.md`
+has the reproductions.
+
 ## What follows from those, and is not negotiable
 
 - **The journal is the only authoritative state.** Everything else is a projection you can rebuild
   by folding it. If a decision reads a value, the journal must be able to reconstruct that value —
-  including across a restart. This has been violated **six** times and each violation silently
+  including across a restart. This has been violated **eight** times and each violation silently
   switched off a guard. Five are named in
   `packages/core/test/run/oversight-survives-restart.test.ts`; the sixth is
-  `packages/core/test/run/escalation.test.ts` — search either file for `MEMBER`.
-  **The enumeration is split, and that is the lesson, not an accident:** this line used to say
-  "cite that file rather than repeating the number", and the device failed on its first test —
-  the sixth member landed in a different file and the cited one still said five. A pointer to an
-  enumeration is only as good as the enumeration's own discipline about growing.
+  `packages/core/test/run/escalation.test.ts` — search either file for `MEMBER`. Seven and eight
+  were found by the 2026-09-02 audit and are the same shape in the same blind spot, **a delegated
+  child run**: `grantBound` (the capability allowlist a parent narrows for its child) and the
+  child's dollar slice both lived only as arguments to `#contextFor`, recorded in no journal the
+  CHILD's own fold can read. Both reproduce end to end — a `pay.charge` refused `E_CAP_DENIED`
+  CHARGES after a restart; a child bounded to $0.01 SUCCEEDS and spends.
+  **The enumeration is split, and a pointer to an enumeration is only as good as that
+  enumeration's discipline about growing** — the sixth member landed in a file the citation did not
+  name, and the cited one still said five. When you close seven and eight, put them where a reader
+  of the other six will find them.
+  **The lens that finds these:** ask of every `Map`, `Set`, class field and closure in `run/`,
+  `server/` and `resources/` — what decision reads this, and what does it do when a restart hands
+  it back empty? Then look where the existing tests do not: at a CHILD run.
 - **Every nondeterministic call is recorded under a derived key, and replay serves the record.**
   Derived, never random: an id you cannot recompute breaks replay.
 - **Oversight only tightens.** Nothing raises its own permissions. A human may lower a posture; no
@@ -119,19 +163,21 @@ and the measurement has to be one that cannot be gamed by the thing being measur
   can.
 - Every module says *why it exists* at the top, not what it does.
 - **Tests are offline and deterministic — no network, no API key, and no test asserts on a RATIO
-  OF TWO TIMINGS.** That distinction is the whole content of this entry: assertions that READ a
-  clock are fine and several remain, because every one is an ABSOLUTE bound with an
-  order-of-magnitude margin (`ms < 100`, `elapsed < 3000`). **There is deliberately no count
-  here** — this line carried one three times and it did not reproduce three times, and no single
-  grep enumerates the set anyway (a bound on a differently-named variable escapes a grep for
-  `ms`/`elapsed`, and two of the bounds are LOWER ones asserting that something waited). The two
-  ratios are gone: `scale.test.ts` and `server/layout.test.ts` each count the property reads
-  their subject makes instead of timing it — byte-identical run to run, and tighter than what it
-  replaced. Re-run 2026-09-01, layout measures **5.37× against a bound of 10×**.
-  **A ratio of two timings is not more robust than one timing, it is less** — the noise does not
-  cancel, it compounds asymmetrically, so `t_big / t_small < K` is likeliest to pass when its own
-  denominator sample is worst. `TODO.md` §F.17 carries the measurements; this entry carries the
-  rule, which is the only half that stays true.
+  OF TWO TIMINGS.** Assertions that READ a clock are fine, and several remain: every one is an
+  ABSOLUTE bound with an order-of-magnitude margin (`ms < 100`, `elapsed < 3000`). There is
+  deliberately no count here — this line carried one three times and it did not reproduce three
+  times, and no single grep enumerates the set. **A ratio of two timings is not more robust than
+  one timing, it is less** — the noise compounds asymmetrically, so `t_big / t_small < K` is
+  likeliest to pass when its denominator sample is worst. `TODO.md` §F.17 has the measurements.
+- **How defects are actually found here, measured over 207 of them (`docs/audit-2026-09-02.md`).**
+  Two lenses account for most: *a guard answering its undecidable case with the passing value*,
+  and *a decision reading state a restart empties*. Two methods make the difference: every finding
+  carries a pasted reproduction, and every finding is re-run by a fresh agent told to REFUTE it and
+  to default to refuted when unsure — that pass refuted 7 of 118 outright and downgraded 17,
+  including one the lead had reached independently. **A builder's own green suite is not evidence:**
+  five successive builders on one guard each passed their own tests and shipped a defect the next
+  reviewer found, every time because they had measured the shapes they imagined. Ask for the
+  ORDINARY half of every measurement, not just the defect half.
 - `/usr/bin/grep -a` always, and the path matters: this shell's `grep` is a ugrep wrapper that
   passes `-I`. Empty output is not evidence of absence. **The trigger set is NUL ∪ invalid
   UTF-8**, not non-ASCII — valid non-ASCII matches fine. **Five** tracked files carry a NUL byte
@@ -151,9 +197,13 @@ scripts/           build and the three guards that are worth their cost:
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records: audit findings and backlog re-checks, with reproductions
-                   `backlog-close-2026-09-02.md` is the handoff for the 08-25 → 09-02 run
+                   START HERE: `handoff-2026-09-03.md`, then `audit-2026-09-02.md`
 .agent/<task>/     per-task working state (gitignored)
 ```
+
+**Four branches are unmerged and green, all based on `a638e7d`** — `phase2-4-engine`,
+`phase2-4-plane`, `phase2-4-subsystems` (these three merge with zero conflicts; merged suite
+3,001 pass) and `phase1-taint` (parked, see the handoff §5). `loom` itself is at `a638e7d`.
 
 ## Commands
 

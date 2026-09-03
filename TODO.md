@@ -30,139 +30,41 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ---
 
-## State — measured 2026-09-02, one command each
-
-**Re-run again after wave 3, and ONE of the seven moved: tests 2,777 → 2,851.** The `--otlp`
-work added the twenty-seven cases of `test/cli/trace-otlp.test.ts`; wave 1 added the rest across
-`test/server/child-run-by-url.test.ts`, `test/run/child-run-callback-url.test.ts`,
-`test/run/undo-args-must-be-recorded.test.ts`, `test/cli/verb-flags.test.ts`,
-`test/cli/mcp-file-fields.test.ts` and `test/cli/run-progress-bound.test.ts`. Exports stayed at 538 (`cli.ts` is not in the
-package's public surface), the kernel stayed at 10 files and 10 seams (`cli.ts` is not kernel,
-which is why the push cost none), source files stayed at 62 (no new `src/` file), and the NUL
-census stayed at **5** — that one was CHECKED rather than assumed, because the first draft of
-this change wrote two regexes containing literal control bytes, one of them a NUL, which would
-have made `cli.ts` the sixth and would have been invisible to every grep in this file.
-
-The previous re-run, at `241e99f`, kept for the shape of it: **three of the seven had moved** —
-tests 2,774 → 2,777, exports 537 → 538, and nothing else. Kernel files, seams, source-file count
-(62) and the NUL census (5) came back unchanged.
-
-The three new cases and the one new export are all wave 12, and each is named rather than
-apportioned: `otlp.test.ts` gained the `Object.prototype`-key case, `trace-endpoint.test.ts`
-gained the truncation-attribute case, and `compensation-fires.test.ts` gained the `run_failed`
-arm that closes A.8's residue. The export is `OTLP_TRUNCATED_ATTR`, and it is
-`telemetry/spans.ts`'s for the same reason `OTLP_RUN_ID_ATTR` is — that file owns the `loom.*`
-vocabulary and `registries.test.ts` enforces it.
-
-Wave 11's own arithmetic, kept because the shape of the correction is the point: the new source
-file was `telemetry/otlp.ts`, and SEVEN of its eight new exports were its (`OtlpExportResult`,
-`OtlpExporterOptions`, `OtlpHttpExporter`, `OtlpJson`, `OtlpTracePayload`,
-`OtlpTraceRequestOptions`, `otlpTraceRequest`); the eighth, `OTLP_RUN_ID_ATTR`, was
-`telemetry/spans.ts`'s — put there deliberately by `552d999`. An earlier wording of this
-paragraph gave all eight to the exporter, which named the one file the commit had taken it away
-from.
-
-A dated table is only as good as the last time somebody ran its commands, and the date is not the
-evidence; the command is. **The tests row is the one that moves on almost every commit, so read it
-as a floor rather than as an identity** — a re-run that comes back higher is the suite growing,
-and only a re-run that comes back LOWER or non-zero on `fail` is news.
-
-**AND DO NOT CARRY THIS NUMBER INTO `README.md`'s Gates row, which says `2,300+` ON PURPOSE.**
-Tried at `5ffc223` and it went red twice, which is the pin working:
-`test/readme-gaps.test.ts` binds that row's text verbatim as a probe's `claims` string, AND
-asserts the stated floor is at or below what the suite declares — and its metric is
-`^test(` declarations — **2,648** at `241e99f` against the **2,777** cases `node --test` executed
-there, and **2,675** against **2,804** at the `--otlp` commit — because a `test()` in a loop runs
-more than once. BOTH numbers are dated, which is the only way this sentence stays true: an
-earlier version dated the first and left the second present-tense, so the same file said 2,777
-and 2,799 about the same suite. So `2,700+` is both a broken probe and an overstatement
-by the README's own measure. The floor is there so growth costs no doc edit; raising it to today's
-count is the edit it was designed to make unnecessary.
+## State — measured 2026-09-03, one command each
 
 | fact | value | command |
 |---|---|---|
-| tests | **2,865 pass, 0 fail** | `node --test "packages/*/test/**/*.test.ts"` |
-| pinned public exports | **538** | `scripts/surface.json` is a JSON array — `node -e "console.log(require('./scripts/surface.json').length)"`. (`check-surface.mjs` itself needs `dist/`, which needs a build) |
-| kernel | **10 files, 10 declared seams** | `node scripts/check-kernel.mjs` |
-| zero runtime deps | green, **62 source files** | `node scripts/check-zero-dep.mjs` |
-| source files in `packages/core/src` | **62** | `find packages/core/src -name '*.ts' \| wc -l` |
-| tracked files carrying a NUL byte | **5**, and **0** invalid UTF-8 | census over `git ls-files` — see §F.15 for why grep cannot count these |
-| wall-clock-dependent assertions in the suite | **none** | `abb1e01`, `8b9182f` — see §F.17 |
+| tests on `loom` | 2,865 pass / 0 fail | `npm test` |
+| tests, three lanes merged | **3,001 pass / 0 fail**, run twice | merge A+B+C onto `a638e7d`, then `npm test` |
+| pinned exports | 538 on `loom`; **539 on `phase2-4-subsystems`, and the pin was not updated** | `node scripts/check-surface.mjs` |
+| kernel | 10 files, 11 seams | `node scripts/check-kernel.mjs` |
+| zero runtime deps | green, 62 files | `node scripts/check-zero-dep.mjs` |
+| NUL census | 5 files, 0 invalid UTF-8 | read every `git ls-files` path; see CLAUDE.md |
 
-**The seam census is 10 and it did NOT move in waves 11 or 12 — but the command this file
-published as its independent cross-check disagrees with the guard, and that is the news.**
-Re-measured at `241e99f`: `node scripts/check-kernel.mjs` prints
-`kernel guard ok: 10 files pinned, <N> commits since 86b84c9, 10 declared seams` — `<N>` written
-out here because it moves with every commit including the one carrying this line, and a number
-that invalidates itself the moment it is written is not a measurement anybody can check. Ten is
-the field that must not move by accident. The two newest are `a8d62fb`
-(item 10's `quote` effect, which needed `journal/events.ts` and `run/replay.ts`) and `3762a0e`
-(item 13's `RunFilter.after`, which needed `journal/store.ts`), and nothing since has spent one:
-`552d999` was argued down to a `fix` (§F.19), `7daa1e4` touched no kernel file, and wave 12's
-three commits touched none either — the two `fix`/`test` ones are in `telemetry/`, `server/` and
-`test/`, and the third is documentation.
-**This paragraph said 8 across nine commits once**, and it said so while quoting a
-`check-kernel.mjs` line the guard does not print — the guard's real first line is the one pasted
-above. That is how a stale number survives a reader who checks: the quotation is the
-strongest-looking evidence on the page and it was the invented part. Paste the guard's output or
-cite nothing.
+**The surface row is a live gate failure, not a note.** `phase2-4-subsystems` adds
+`providers/anthropic.ts:producedTokens` and `scripts/surface.json` still pins 538; the merged tree
+does not pass `npm run check` until `node scripts/check-surface.mjs --write` is committed with it.
 
-**AND THE CROSS-CHECK IS NOT A CROSS-CHECK, measured 2026-09-02.** This file and `DESIGN.md` both
-said `git log --grep='^Kernel-seam:' --oneline | wc -l` "agrees with it independently". It returns
-**11**. The eleventh is `2a9eda8`, a `docs:` commit that spends no seam and touches no kernel file:
-its body says *"…both kernel, under a feat, so it costs a Kernel-seam: trailer and is a
-maintainer's call"*, and the line wrap put `Kernel-seam:` at a line start. **A grep for a trailer
-matches PROSE ABOUT the trailer**, so the ledger inflates whenever somebody writes down how the
-ledger works — which is a thing this project does constantly. Nor is git's own parser the
-fallback: `%(trailers:key=Kernel-seam,valueonly)` finds only **6** of the ten, because four
-(`3762a0e`, `97a53a1`, `d0ca421`, `dcdb3f1`) put the line mid-body rather than in the final
-trailer block, where git requires it. So the three commands give 10, 11 and 6.
-**`node scripts/check-kernel.mjs` is the census and there is no second opinion** — it is the only
-one of the three that applies the actual rule, `feat` ∧ touches-a-pinned-file ∧ declares a seam,
-and the other two apply one third of it each. The ledger is still not a number anyone can quietly
-reset; what is gone is the claim that a one-line grep audits it.
+**Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
+wave moved which number. Every one of those paragraphs was true when written and none was re-run,
+which is the failure this file's own second rule names. A number here is a command's output or it
+is not here.
 
-**The roadmap's items 9–14 are ALL CLOSED, re-run at `4a70a4e`, one command each.** Item 9 was
-the last one open and it closed by a DECISION rather than a build (§A.8); item 14 closed by
-`0a8aa6d`. Each row below was RUN rather than transcribed from `DESIGN.md`'s verdict table, which
-is the discipline that caught the last drift: **the two documents had drifted in OPPOSITE
-directions and DESIGN had also drifted from itself**, recording item 10 as "still fails" while
-item 10's own section was headed **DONE 2026-09-01**.
+## The 2026-09-02 audit — 207 findings, and where they live
 
-| item | command | measured |
-|---|---|---|
-| 9 · a rewind does not run the child's undo | `node --test packages/core/test/run/rewind-through-subgraph.test.ts` | **3 pass. DONE** — and the pin was TURNED OVER rather than left green: the third case used to assert `charges [42] refunds []` and now asserts the child's rollback runs and the money comes back. `rewind-plan.test.ts`'s companion pin flipped in the same commit, `552d999`, on one character |
-| 10 · three ceilings cannot be re-derived | `node --test packages/core/test/run/replay-fidelity.test.ts` | **13 pass. DONE** — the pin was renamed `THE HOLE THIS CLOSES` and now asserts the refusal |
-| 11 · `hermetic`'s third conjunct has no producer | `node --test packages/core/test/run/hermetic-names-the-live-bodies.test.ts` | **13 pass. DONE** |
-| 12 · the fork ledger's two DEBT rows | `node --test packages/core/test/cli/extension-module.test.ts` | **18 pass. DONE** |
-| 13 · a run past the scan ceiling | `node --test packages/core/test/deployment/run-clock-window.test.ts` | **6 pass. First half DONE.** The second half (two planes dividing one listing) is §E.2's coordinator and is not a cursor |
-| 14 · `replay`/`trace` demand a graph the workspace holds | `node --test packages/core/test/cli/cli.test.ts` | **38 pass. DONE**, and driven through the binary from `README.md`'s own "Try it" workspace: `loom replay <id>` with no `--graph` answers `{"match": true, "hermetic": true}` after printing the file it resolved on stderr |
+Seventeen read-only lenses over the whole tree, every finding carrying a pasted reproduction, then
+one fresh skeptic per finding instructed to REFUTE it. **207 findings — 24 blocking, 83 major,
+71 minor, 29 opportunity. 118 verified: 94 CONFIRMED, 17 downgraded, 7 REFUTED.** Every blocking
+finding was verified; the 89 unverified are minor/opportunity plus 10 major.
 
-Of the three backlog rows those items pointed at, none is still live. Item 9's home was **§A.30**,
-whose sub-bullet stated the cause as `rewind`'s parent-only entry condition; that condition is
-DELETED and the descent is entered, so §A.30's copy was the third statement of item 9 and the only
-one still asserting a cause that is gone. It moved to **§A.8**, which owned what was actually left
-— the decision — and §A.8 is now struck. Item 10's **§A.1** is struck FIXED and item 13's **§A.15**
-reads CLOSED, each carrying only the residual its closure did not cover. **Items 12 and 14 have no
-row, deliberately:** item 12's subject is `README.md`'s fork ledger, whose two DEBT rows it closes,
-and §E's closing paragraph is explicit that the ledger is not re-enumerated here; item 14 was a CLI
-gap driven through the binary, and a second copy of a driven failure is the copy that rots. §A.24
-is the different and harder question — putting the SPEC in the journal rather than its hash — and
-it stays where it is.
+- The record, with what holds and what does not: **`docs/audit-2026-09-02.md`**
+- Where the branches are and what is open: **`docs/handoff-2026-09-03.md`**
+- The full register, per-lens reports and every verdict: `.agent/full-audit-2026-09-02/`
 
-**`DESIGN.md`'s live list is therefore EMPTY, and no replacement is invented here.** That section's
-rule is that an item names a command which FAILS today; finding one is a measurement, and nothing
-in this pass produced one. The nearest candidates are already rows below rather than roadmap items:
-A.8's (a `run_failed` fixture whose undo would actually gate) and G.1's schema change, which is a
-maintainer's seam to spend. **C.4's residue was the third and it is CLOSED** — `loom trace --otlp`
-posts to a collector, so nothing in this file still says the exporter has no caller. Its closure
-also settled what the refusal it was reached through is WORTH: `loom trace <id> --otlp <ep>`
-answering `unknown flag` is NOT "a command that fails" in `DESIGN.md`'s sense, because that
-sentence is manufacturable for every unbuilt thing in this corpus — `--gzip`, `--sample`, any §E
-row — and a rule that admits a counterexample generator has stopped discriminating. It is evidence
-the capability was operator-unreachable, which is a different and smaller claim.
-
----
+**These findings are NOT copied into the sections below.** A second copy of a dated, reproducible
+fact is the copy that rots — this file's most-repeated finding about itself. The register is the
+list; the sections below remain the older backlog, and where the audit falsified one of their rows
+that row was corrected in place.
 
 ## What is still open, by section
 

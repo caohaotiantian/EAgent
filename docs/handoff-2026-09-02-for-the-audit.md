@@ -1,3 +1,23 @@
+> **SUPERSEDED 2026-09-03 by `handoff-2026-09-03.md`. Two claims below were falsified by the
+> audit this file commissioned, and are corrected here rather than edited out, because the audit
+> was run against the file as written:**
+>
+> 1. **§5's "`cli/cli.test.ts` still swallows both" is FALSE at HEAD.** All 243 test files were run
+>    individually; none reports fewer tests than its static `test(` call sites, `cli.test.ts`
+>    included (38 sites, 38 reported). 2,757 static + 108 loop-generated = 2,865 exactly.
+> 2. **§2's "the highest-leverage single change in the tree" rests on a false premise.** It says
+>    `RunProjection` does not carry a per-task ordering of served channel state. It does not *store*
+>    it, but the fact is fully *reconstructible*:
+>    `foldRun(store.read(runId, 1, seqOf(task.leased)))` then `viewFor(...)` returns byte-identically
+>    what the body was handed, including fan-out bindings and channels a later task overwrote.
+>    `StateStore.read` already takes an end bound. What is missing is that nothing ASKS — no
+>    `--at-seq`, and none of `foldRun`'s five call sites answers the question. That is a read-model
+>    affordance OUTSIDE the kernel, needing no new durable event, so A.29 and DESIGN item 20 are
+>    cheaper than this file implies.
+>
+> Everything else here held up, including §1's central claim about adversarial review and §6's
+> warning about the taint guard — which took five rounds and is still parked.
+
 # Handoff — 2026-09-02, written for a thorough audit and refactor
 
 The session that produced this ran from `c8bdf22` to HEAD: **31 commits**, 15 `fix`, 3 `feat`,
