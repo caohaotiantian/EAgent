@@ -185,11 +185,14 @@ export interface EventPayloads {
      * writes the key whenever the set is non-empty, so for any journal this binary wrote,
      * absent and empty are the same statement. For a journal an OLDER binary wrote, absent is
      * also what the original process acted on — it had no seed at all — so the fold reproduces
-     * that run rather than second-guessing it. Reading absent as "taint every input" would be
-     * the fail-closed shape this file usually prefers, and here it is the wrong one: it gates
-     * every pre-existing in-flight run at its first hard-to-undo node, including runs with no
-     * untrusted byte anywhere in them, which is the constant gate `applySecretFlow` and
-     * `applyControlTaint` both refuse in writing.
+     * that run rather than second-guessing it.
+     *
+     * THE FAIL-CLOSED READING WAS MEASURED BEFORE IT WAS REFUSED, because this file usually
+     * prefers it. With the fold reading absent as `Object.keys(inputs)`, 43 of the suite's 2912
+     * tests fail, and they are the CLEAN halves of paired rows — "A CLEAN CHOICE STILL RUNS",
+     * "AN OLD JOURNAL WITH NO BRANCH IN IT STILL RESUMES", "A NODE BOTH ARMS REACH WAS NOT
+     * SELECTED". A run's own inputs are whatever its submitter handed it, so tainting them all
+     * is the constant gate `applySecretFlow` and `applyControlTaint` both refuse in writing.
      */
     readonly taintedInputs?: readonly string[];
   };
