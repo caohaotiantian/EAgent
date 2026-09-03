@@ -22,8 +22,19 @@
  * oversight model is usable on day one — an approval queue nobody can reach is an
  * oversight model that does not exist.
  *
- * Three things here are not cosmetic:
+ * Four things here are not cosmetic:
  *
+ *   - **The run controls are the goal's fifth verb, and the page had none.** "Install it,
+ *     describe what they want done, have it run against a real provider, watch it, STOP it,
+ *     and trust what it did" lists five verbs; this page implemented submit, watch and
+ *     approve, and referenced `POST /runs/:id/commands` zero times. The only ways to stop a
+ *     run were `curl` with a hand-copied run id and a hand-set bearer token, or `loom cancel`
+ *     on the machine holding the journal. An emergency stop that requires curl is not an
+ *     emergency stop, and the argument is the same one this file already makes about the
+ *     approval queue. `pause` was worse than absent: `summarise` puts `paused` on the wire
+ *     specifically so a console can render it, and `applySnapshot` dropped it, so a run
+ *     paused from the CLI looked identical to one that had silently stalled. See
+ *     `drawControls`, and the `run.suspended`/`run.resumed` arms of `applyEvent`.
  *   - **The oversight queue is read from `/runs/:id/gates`, not from the run summary.**
  *     Those are two different orderings of the same set: `summarise` sends
  *     `Object.values(p.gates)` — journal order — and only `/runs/:id/gates` carries D7.9
@@ -89,6 +100,8 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
            background:var(--panel); color:var(--ink); cursor:pointer; }
   button.primary { background:var(--ok); border-color:var(--ok); color:#fff; }
   button.danger  { background:var(--err); border-color:var(--err); color:#fff; }
+  .controls { display:flex; gap:6px; align-items:center; margin-bottom:10px; min-height:31px; }
+  .controls .note { color:var(--muted); font-size:11px; }
   .gate { border:1px solid var(--gate); border-radius:8px; padding:10px; margin-bottom:8px; background:color-mix(in srgb, var(--gate) 8%, var(--panel)); }
   .gate .actions { display:flex; gap:6px; margin-top:8px; }
   pre { font:11px/1.45 ui-monospace,Menlo,monospace; background:var(--bg); border:1px solid var(--line);
@@ -122,6 +135,7 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
 
   <section>
     <h2>Graph</h2>
+    <div id="controls" class="controls"></div>
     <div id="canvas"><div class="empty">select a run</div></div>
   </section>
 
@@ -175,7 +189,7 @@ let lastSeq = 0;
 let epoch = 0;
 /** graphHash -> spec. Structure is fetched ONCE and cached; only deltas stream. */
 const graphCache = new Map();
-let current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
+let current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "", paused: false };
 
 // ── delta coalescing ────────────────────────────────────────────────────────
 // 25 branches finishing at once must produce ONE repaint, not 25.
@@ -247,7 +261,12 @@ async function loadRuns() {
   for (const r of runs) {
     const d = document.createElement("div");
     d.className = "row" + (r.runId === selected ? " sel" : "");
-    d.innerHTML = '<code>' + r.runId.slice(0, 12) + '</code><div class="meta">' + r.headSeq + ' events</div>';
+    // esc() ON BOTH, like every other render site on this page. Run ids are engine-minted
+    // ULIDs today, so this was safe by a property of the ID FORMAT rather than of the code —
+    // and the format has already widened once (child run ids carry at-signs and hashes,
+    // which is why runIdIn exists). This page holds the operator's token in localStorage and
+    // approve buttons wired to it, so it is the highest-value XSS target in the product.
+    d.innerHTML = '<code>' + esc(String(r.runId).slice(0, 12)) + '</code><div class="meta">' + esc(String(r.headSeq)) + ' events</div>';
     d.onclick = () => select(r.runId);
     el.appendChild(d);
   }
@@ -288,7 +307,7 @@ async function select(runId) {
   selected = runId;
   const mine = ++epoch;
   lastSeq = 0;
-  current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "" };
+  current = { graph: null, tasks: new Map(), gates: [], channels: {}, status: "", paused: false };
   if (stream) stream.abort();
   await loadRuns();
 
@@ -371,6 +390,17 @@ function onFrame(raw) {
 
 function applySnapshot(run) {
   current.status = run.status;
+  // A PAUSE IS NOT A STATUS, so it has to be read separately or it is not read at all.
+  // summarise() sends this field for exactly this reason — "the operator who paused it has
+  // no other way to confirm the pause landed" — and this line was missing, so the console
+  // could not display a pause it also could not cause. A run paused while waiting on a gate
+  // that has since been answered reads "running"; only this says otherwise.
+  //
+  // A SERVER THAT SENDS NOTHING READS AS "not paused", and that is the honest default here
+  // rather than a convenient one: the field is a required boolean on the projection, so an
+  // absent value means a plane too old to have the pause at all, and the button it renders
+  // ("pause") is the one such a plane would accept.
+  current.paused = run.paused === true;
   current.channels = run.channels || {};
   current.gates = (run.gates || []).filter((g) => g.state === "open");
   current.tasks = new Map((run.tasks || []).map((t) => [t.taskId, t]));
@@ -395,6 +425,19 @@ function applyEvent(ev) {
     current.status = "awaiting_gate";
   } else if (ev.type === "gate.decided") {
     current.gates = current.gates.filter((g) => g.gateId !== p.gateId);
+  } else if (ev.type === "run.suspended") {
+    // THE SAME TWO LINES foldRun() applies, in this page's vocabulary. Without them a pause
+    // taken from the CLI, or from another browser tab, changed nothing on screen: tasks
+    // simply stopped appearing, which is indistinguishable from a stall. "interrupted" is
+    // the status for every non-gate suspension, and only an OPERATOR's sets the pause —
+    // budget and backoff suspend without anybody having decided anything.
+    current.status = p.reason === "gate" ? "awaiting_gate" : "interrupted";
+    if (p.reason === "operator") current.paused = true;
+  } else if (ev.type === "run.resumed") {
+    // And only an operator's resume clears it: the "by" field is "gate" for the broker's resume and
+    // "timer" for the sweeper's, and neither is a human saying the run should carry on.
+    current.status = "running";
+    if (p.by === "operator") current.paused = false;
   } else if (ev.type === "run.completed") { current.status = "succeeded"; }
   else if (ev.type === "run.failed") { current.status = "failed"; }
   else if (ev.type === "run.cancelled") { current.status = "cancelled"; }
@@ -412,10 +455,76 @@ async function ensureGraph(hash) {
 const W = 190, H = 52;
 
 function draw() {
-  $("stat").textContent = current.status || "";
+  $("stat").textContent = (current.status || "") + (current.paused ? " · paused" : "");
+  drawControls();
   drawGraph();
   drawGates();
   $("state").textContent = JSON.stringify(current.channels, null, 1);
+}
+
+/**
+ * STOP IT — the verb the goal sentence names and this page did not have.
+ *
+ * All three post the same body to POST /runs/:id/commands and all three come back with a run
+ * summary, so applySnapshot(run) is the whole of the client half. The route already asks
+ * ownsRun() and already refuses a non-human where it must; nothing here is a second check.
+ *
+ * WHY NOT steer AND rewind. Both are refused outright to a credential that is not a person,
+ * and rewind needs the planHash handshake from GET /runs/:id/rewind-plan — a second screen,
+ * not a button.
+ *
+ * WHY cancel PROMPTS. checkedReason() journals the value on operator.command and quotes it
+ * into every gate the cancel closes, so a shrug default degrades real audit text. The reject
+ * button already established this. It is also the confirmation: a second confirm() on top
+ * would be a guard in front of a guard.
+ *
+ * WHY advance IS HERE AT ALL. It is the answer to a run that is ready and stalled, and it is
+ * the one verb behind #bindFromIndex — so on a plane that does not hold the graph it 404s
+ * with a message about binding. That message is shown unchanged rather than guessed at.
+ */
+function drawControls() {
+  const el = $("controls");
+  el.innerHTML = "";
+  if (!selected) return;
+  if (["succeeded", "failed", "cancelled"].includes(current.status)) {
+    el.innerHTML = '<span class="note">' + esc(current.status) + ' · nothing left to stop</span>';
+    return;
+  }
+  const add = (label, cls, run, title) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    if (cls) b.className = cls;
+    if (title) b.title = title;
+    b.onclick = run;
+    el.appendChild(b);
+  };
+  if (current.paused) add("resume", "", () => command("resume", "resumed from the console"), "let this run take work again");
+  else add("pause", "", () => command("pause", "paused from the console"), "stop leasing new work; nothing in flight is killed");
+  add("advance", "", () => command("advance"), "offer ready tasks now — for a run that has stalled");
+  add("cancel", "danger", () => {
+    // The reason is journaled and quoted into every gate this closes, so it is asked for
+    // rather than defaulted — and asking IS the confirmation.
+    const reason = prompt("Why are you cancelling this run?");
+    if (reason) command("cancel", reason);
+  }, "stop this run and close its open gates");
+}
+
+/** One operator command. The response is a run summary, so the page reseeds from it. */
+async function command(kind, reason) {
+  try {
+    const run = await api("/runs/" + selected + "/commands", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(reason === undefined ? { kind } : { kind, reason }),
+    });
+    applySnapshot(run);
+    invalidate();
+    // The head moved, so the run list's event count is stale; the queue may have lost the
+    // gates a cancel closed.
+    await loadRuns();
+    await loadGates(selected, epoch);
+    await loadMine();
+  } catch (e) { alert(e.message); }
 }
 
 function drawGraph() {
