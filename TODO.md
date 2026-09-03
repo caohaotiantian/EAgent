@@ -68,7 +68,11 @@ that row was corrected in place.
 
 ## What is still open, by section
 
-**EVERY OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
+**§A0 is the newest and reads first.** Eleven rows the phase-2-4 merge's three attackers
+reproduced and did NOT fix, because none is caused by that merge. Everything they found that IS
+caused by it was fixed in it.
+
+**EVERY OTHER OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
 `docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
 required to paste a command it had actually run: **14 BUILDABLE** (a command fails at
 `9f81f77`), **13 OPEN-HARD** (blocked on a named thing), **16 REFUSED** (with a measurement),
@@ -135,6 +139,68 @@ closed and moved bodily into §Z, where the argument for each closure is the com
 reused — §H.2 is the record of what a renumber cost the last time one happened.
 
 ---
+
+## A0 · The phase-2-4 merge — confirmed, reproduced, and NOT fixed
+
+Three agents attacked `7eaa206..the merge`: lane C's round-2 adversary (the check
+`docs/handoff-2026-09-03.md` §4 recorded as skipped, now run), a fresh diff reviewer, and a
+behavior check that drove the console, a real `kill -9` recovery and a three-level child-bounds
+chain through the shipped binary. What they found and the merge FIXED is in the commits; this is
+the remainder. **Every row below was reproduced by running, and none is caused by the merge** —
+they are pre-existing, which is why they were recorded rather than folded into it.
+
+- **A0.1 · `canonicalize`'s string arm still throws a bare `RangeError`.** The container bound
+  made the object walk a typed refusal, but `spend` charges AFTER `JSON.stringify(value)` has
+  already built the string, so a single escape-heavy leaf escapes it:
+  `canonicalize("\n".repeat(300_000_000))` → `RangeError: Invalid string length`, `code`
+  undefined, 729 ms. Thin but not nil: `fs.read` does `readFileSync(fd, "utf8")` on the WHOLE
+  file and only then slices to `maxBytes`, and `maxBytes` has no ceiling of its own.
+  **Fix:** check `text.length` before `JSON.stringify` in `case "string"`.
+- **A0.2 · The console's connection pill is dead, because SSE sends no bytes until the first
+  event.** There is no `flushHeaders()` anywhere in `server/http.ts` (`grep -c` → 0, both shas),
+  so with a client caught up at head the handler parks and Node never flushes:
+  `curl -sN -D - -H "last-event-id: 20" …/events` → six seconds, zero bytes; with
+  `last-event-id: 0` the headers come out at once because a backlog exists. Instrumented inside
+  the page, `$("conn").textContent` was written ZERO times over 3 s on a live run, so `follow`'s
+  `= "live"` never runs. The stream works — `lastSeq` advances off it — but the page's only "am I
+  connected" signal is a lie, and an intermediary with an idle-response timeout would cut a
+  stream that has emitted nothing. **Fix:** `res.flushHeaders()` after `writeHead`.
+- **A0.3 · A child run's gate is listed by `GET /gates` and 404s on the route the console posts
+  to.** `POST /runs/<childRunId>/gates/<gateId>` answers `E_RUN_NOT_FOUND` "is not attached"
+  after a restart, identically at both shas, while the console's "Awaiting you" panel renders
+  approve/reject buttons for exactly those rows. `loom approve … --graph <the subgraph file>`
+  works. Related and worth knowing before anyone hand-writes a URL: a child run id contains `#`,
+  so an unencoded path silently truncates to `E_ROUTE_NOT_FOUND`.
+- **A0.4 · `producedTokens` under-prices a `max_tokens`-truncated tool turn ~227x.** `safeJson`
+  has already collapsed the cut-off argument JSON to `{}` by the time the floor counts it, so a
+  turn that burned its whole output allowance is priced at ~$0.00015. The COMPLETE turn is
+  correct (2,267 tokens for 9,032 chars) and a strict improvement on the `1` it used to charge.
+- **A0.5 · `state/channels.ts`'s own-key sweep names a set and leaves four members.**
+  `reduceState`, `foldPartial`, `initialState` and `makeStateView` still read and write raw, so a
+  channel named `toString` compiles clean and kills the run with
+  `E_INTERNAL channel "toString": expected array, got function`. Pre-existing, but an unswept
+  member of the set the merge claims to have swept IN THAT FILE.
+- **A0.6 · `console.ts`'s fold arms drop the terminal guard `projection.ts`'s `apply()` keeps,**
+  while their comment claims to be "THE SAME TWO LINES `foldRun()` applies". A `run.resumed`
+  after `run.cancelled` re-renders the stop controls.
+- **A0.7 · `listen()` answers `/health` before `#armGatedRuns` has finished,** though its comment
+  says "BEFORE THE FIRST REQUEST": 200 after 52 of 5,000 folds while `listen()` was still
+  pending. Separately `MAX_ARM_SCAN` pays 5,000 folds at boot for ZERO arms whenever the gated
+  set is all-decided, which is the common shape for a deployment that uses gates.
+- **A0.8 · `#edgesToTake`'s exhaustiveness claim is false.** The comment says naming the three
+  unconditional kinds "makes a new member of `EdgeKind` a compile error here", and `EDGE_KINDS`
+  says "the switch is exhaustive, so the type checker names the second site". Adding a kind and
+  typechecking flags ONE site, `compile.ts:289`; neither engine.ts site. A new kind therefore
+  compiles clean and `#assertBound` refuses every run using it at run time — fail-closed, but
+  unflagged at build time.
+- **A0.9 · `filePayloads`'s docstring was orphaned** onto the new `putOrdinal` counter.
+- **A0.10 · `GLOB_SCAN_BATCH`'s docstring understates the cap fast path.** `grep hit` on a
+  60,000-file workspace went 3 ms → 36 ms, because `capped` is only observable at a flush; "a few
+  more paths" is a batch's worth. Absolute cost 33 ms.
+- **A0.11 · `wireCount` is duplicated in `openai.ts` rather than shared with `anthropic.ts`,**
+  because `index.ts` re-exports both with `export *` and sharing it would add a name to
+  `scripts/surface.json`. The property that matters is held by a test driving both adapters.
+  Sharing it is a one-line pin edit if anyone would rather.
 
 ## A · Open defects and unguarded behaviour
 
