@@ -22,6 +22,7 @@ import { CLASSIFICATION_POSTURE_FLOOR, CLASS_DEFAULT_POSTURE, maxPosture, type P
 import {
   DEFAULT_EXPANSION,
   dataFloorOf,
+  type EdgeKind,
   type ExpansionBudget,
   type GraphSpec,
   type NodePlan,
@@ -269,8 +270,66 @@ export function createGraphCompiler(): GraphCompiler {
   };
 }
 
+/**
+ * The seven members of `EdgeKind`, as data a runtime check can read.
+ *
+ * `NodeType` is closed by GRAPH020 twenty lines from where the edge fields are checked, and this
+ * set was not closed anywhere: `EDGE_FIELDS` checks an edge's KEYS and nothing checked the VALUE
+ * of `kind`. Measured — `kind: "conditionl"`, `"Conditional"`, `"eror"` and `"__proto__"` all
+ * compiled with ZERO diagnostics at any severity, and at run time each fell to `#edgesToTake`'s
+ * `default:` arm and was TAKEN with its `when` never evaluated. The comment three lines above
+ * `EDGE_FIELDS` states the consequence for the sibling case it did close: "A misspelled `when`
+ * does not disable a condition — it makes the edge unconditional, so a branch the author meant to
+ * guard fires every time."
+ *
+ * HERE RATHER THAN IN `graph/validate.ts` only because of who owns which file today; the rule
+ * belongs beside GRAPH020 and moving it there is a pure relocation. It runs before the error
+ * check below so an unknown kind is an ordinary compile error with a `fix`.
+ */
+const EDGE_KINDS: Readonly<Record<EdgeKind, true>> = {
+  seq: true,
+  conditional: true,
+  fanout: true,
+  join: true,
+  error: true,
+  compensation: true,
+  loop: true,
+};
+
+function unknownEdgeKinds(spec: GraphSpec): readonly Diagnostic[] {
+  // TOTAL ON A MALFORMED SPEC, because `compile` is. `validateGraph` diagnoses a missing `edges`
+  // array and a null entry inside one, and this runs BEFORE it — so a bare `spec.edges.filter`
+  // turned "a diagnostic" into `TypeError: Cannot read properties of undefined`, which is the
+  // exact failure `authoring-mistakes.test.ts` exists to prevent. A shape this cannot read is
+  // left to the validator rather than reported twice.
+  if (!Array.isArray(spec.edges)) return [];
+  // ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE. The guard used to read
+  // `typeof edge?.kind === "string" && !Object.hasOwn(…)`, which made the check about STRINGS
+  // rather than about kinds: `kind: 123`, `null`, `true`, `{}` and an edge with no `kind` at all
+  // compiled with ZERO diagnostics and then threw `E_GRAPH_INVALID` out of every `advance`, from
+  // the executor's own copy of this list — which is precisely the outcome a compile-time check
+  // exists to spare an author. Measured, one graph per value: `ok=true, []` for all five.
+  //
+  // `edge?.kind` still guards a null ENTRY, which `validateGraph` diagnoses on its own and this
+  // must not turn into a `TypeError` first. A null entry has no `id` to name either, so it is
+  // left to the validator exactly as a missing `edges` array is.
+  return spec.edges
+    .filter((edge) => edge !== null && edge !== undefined && !Object.hasOwn(EDGE_KINDS, (edge as { kind?: unknown }).kind as never))
+    .map((edge) => ({
+      severity: "error" as const,
+      code: "GRAPH003_UNKNOWN_EDGE_KIND",
+      // `JSON.stringify` ANSWERS `undefined` FOR `undefined`, which would print the word "kind"
+      // followed by nothing and read as a formatting bug rather than as the missing declaration
+      // it is. `String()` covers every non-string this now catches, and a string kind still gets
+      // its quotes so `""` is visible.
+      message: `edge "${edge.id}" declares kind ${JSON.stringify(edge.kind) ?? String(edge.kind)}, which is not an edge kind — its \`when\`, \`until\`, \`over\` and \`branches\` are all ignored and the edge is taken unconditionally`,
+      at: { edgeId: edge.id },
+      fix: `use one of ${Object.keys(EDGE_KINDS).join(", ")}`,
+    }));
+}
+
 export function compile(input: CompileInput): CompileResult {
-  const diagnostics = validateGraph({ ...input, depth: 0, expanding: [] });
+  const diagnostics = [...unknownEdgeKinds(input.spec), ...validateGraph({ ...input, depth: 0, expanding: [] })];
   const errors = diagnostics.filter((d) => d.severity === "error");
 
   if (errors.length > 0) {
