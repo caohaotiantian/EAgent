@@ -70,9 +70,8 @@ export class OpenAIAdapter implements ModelAdapter {
     let finishReason: FinishReason = "stop";
     let inputTokens = 0;
     let outputTokens = 0;
-    // See `AnthropicAdapter.stream`: both counters start at 0, so "the provider did not say"
-    // and "the provider said zero" are the same bytes until something else remembers which.
-    let sawInputUsage = false;
+    // See `AnthropicAdapter.stream`: the counter starts at 0, so "the provider did not say" and
+    // "the provider said zero" are the same bytes until something else remembers which.
     let sawOutputUsage = false;
 
     try {
@@ -97,10 +96,7 @@ export class OpenAIAdapter implements ModelAdapter {
         if (choice?.finish_reason != null) finishReason = mapFinish(choice.finish_reason);
         if (chunk.usage != null) {
           const inp = wireCount(chunk.usage.prompt_tokens);
-          if (inp !== undefined) {
-            inputTokens = inp;
-            sawInputUsage = true;
-          }
+          if (inp !== undefined) inputTokens = inp;
           const out = wireCount(chunk.usage.completion_tokens);
           if (out !== undefined) {
             outputTokens = out;
@@ -122,11 +118,20 @@ export class OpenAIAdapter implements ModelAdapter {
     // `text` is EMPTY on a `tool_use` turn, so a text-only floor charged one output token for a
     // whole tool call; `producedTokens` reads the calls too.
     //
-    // GATED ON "WAS A USAGE FRAME SEEN", NOT ON `=== 0` — see `AnthropicAdapter.stream` for the
-    // measurement. A reported zero is a fact about the turn, and overwriting it with an estimate
-    // is the floor charging for a prompt the provider has already said it did not bill.
-    if (!sawOutputUsage) outputTokens = producedTokens(text, toolCalls);
-    if (!sawInputUsage) inputTokens = roughTokens(req);
+    // A REPORTED ZERO IS BELIEVED ONLY WHERE THIS ADAPTER HOLDS NO EVIDENCE AGAINST IT — see
+    // `AnthropicAdapter.stream` for the measurement and the reasoning. The OUTPUT rule is the
+    // same one and is meant to stay the same one: a zero beside text or a tool call contradicts
+    // bytes this function received.
+    //
+    // THE INPUT RULE IS STRICTER HERE, AND THE WIRE IS WHY. `OpenAIChunk` declares
+    // `prompt_tokens` and `completion_tokens` and nothing else, so no field on this wire can
+    // account for a prompt the adapter demonstrably sent — there is no cache count to make a
+    // zero honest, as there is on the Anthropic side. `prompt_tokens: 0` is therefore refused
+    // outright, and an endpoint that wants its cache read believed has to report it as input.
+    if (!sawOutputUsage || (outputTokens === 0 && (text !== "" || toolCalls.length > 0))) {
+      outputTokens = producedTokens(text, toolCalls);
+    }
+    if (inputTokens === 0) inputTokens = roughTokens(req);
 
     const usage: UsageRecord = {
       inputTokens,

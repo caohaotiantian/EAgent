@@ -115,7 +115,10 @@ const DEFAULT_PRIORITY: Readonly<Record<SectionName, number>> = {
 export function project(value: unknown, projection: ContextProjection | undefined): unknown {
   if (projection === undefined) return value;
   const fields = (projection as { fields?: readonly string[] }).fields;
-  const take = (projection as { take?: number }).take;
+  // `unknown` AND NOT `number`, deliberately: `ContextProjection` types `take?: number`, but a
+  // projection is JSON a graph author wrote and nothing validates its VALUES. Annotating it
+  // `number` here would be a claim about bytes; `readTake` is what actually decides.
+  const take = (projection as { take?: unknown }).take;
 
   let out = value;
   // A PRESENT `take` NEVER MEANS "NO SLICE". `undefined` and `null` are the two ways to declare
@@ -125,24 +128,8 @@ export function project(value: unknown, projection: ContextProjection | undefine
   // `take: 0` IS A SLICE OF ZERO, not the absence of one. Treating it as "no slice" made a
   // projection asking for nothing get everything, which is the wrong direction for a knob whose
   // whole job is to bound what a node sees.
-  //
-  // COERCED AND THEN REFUSED, not type-tested. `ContextProjection` types `take?: number`, but a
-  // projection is JSON a graph author wrote and `graph/spec.ts` validates only the KEY NAMES in
-  // `contextProjection`, so `take: "3"` — what hand-written YAML gives for a quoted number —
-  // arrives here with no diagnostic. A `typeof take === "number"` gate answers that undecidable
-  // case with the passing value: the string is "not a slice", so a node asking for three items
-  // is shown all of them. `Number` reads the bound the author actually wrote (`"3"` → 3, `true`
-  // → 1, `[3]` → 3); what does not coerce to a finite number (`"abc"`, `{}`, `NaN`, `Infinity`)
-  // is refused, because a bound nobody can read is not a licence to widen. The refusal is raised
-  // for a non-array value too — the projection is malformed whatever it is applied to.
   if (take !== undefined && take !== null) {
-    const n = Number(take);
-    if (!Number.isFinite(n)) {
-      // `JSON.stringify` renders NaN and Infinity as `null`, which is the one word this message
-      // must not say, since `null` is the legal way to declare no slice.
-      const shown = typeof take === "object" ? JSON.stringify(take) : String(take);
-      throw err.validation(CODES.E_GRAPH_INVALID, `contextProjection.take is not a finite number: ${shown}`);
-    }
+    const n = readTake(take);
     // Negative takes from the end — "the last N findings" is the common case. `>= 0` and not
     // `> 0`: `slice(0)` is the whole array, so zero has to fall on the first-N side to mean zero.
     if (Array.isArray(out)) out = n >= 0 ? out.slice(0, n) : out.slice(n);
@@ -151,6 +138,55 @@ export function project(value: unknown, projection: ContextProjection | undefine
     out = Array.isArray(out) ? out.map((item) => pickFields(item, fields)) : pickFields(out, fields);
   }
   return out;
+}
+
+/**
+ * The item count a `take` declares, or a refusal — and NOT `Number()`, which is the bug.
+ *
+ * Nothing checks this value before it arrives. `compile` runs `unknownKeys` over a
+ * `contextProjection` and validates the KEY NAMES only, so `{take: "abc"}` produces zero
+ * diagnostics and reaches this function at run time; `graph/validate.ts` is where a compile-time
+ * check would belong, and there is none today. So the reading has to happen here, and a
+ * `typeof take === "number"` gate would answer the undecidable case with the passing value —
+ * a string is "not a slice", so a node asking for three items would be shown all of them.
+ *
+ * `Number()` LOOKED LIKE THE READER AND IS A COERCION. It maps `""`, `" "`, `[]` and `false` to
+ * 0, and 0 is a legitimate bound meaning "show nothing" — so four bounds nobody can read emptied
+ * the channel SILENTLY, while `"abc"`, an unreadable bound of exactly the same kind, refused
+ * loudly. That is `Number`'s semantics standing in for the author's intent, and it fails in the
+ * direction that hides: a node shown an empty array cannot tell it from a channel with no rows.
+ *
+ * So the vocabulary is stated instead of coerced: a finite number, or a string that PARSES as
+ * one — `take: "3"` is what hand-written YAML gives for a quoted number, and it is the one
+ * non-number worth reading. Everything else refuses, `""` and `false` and `[]` among them.
+ *
+ * REFUSED WHATEVER THE VALUE IS, INCLUDING A NON-ARRAY. Whether a `take` is readable is a fact
+ * about the DECLARATION, not about what the channel happens to hold on this run; deferring the
+ * refusal to `Array.isArray` would make the same broken graph pass one run and fail the next,
+ * and would report it at whichever node first read the channel while it held rows. The cost is
+ * that a graph carrying an unreadable `take` on a channel that never holds an array now fails
+ * where it used to run — that graph was already wrong, and this is the run that says so.
+ */
+function readTake(take: unknown): number {
+  if (typeof take === "number" && Number.isFinite(take)) return take;
+  if (typeof take === "string" && take.trim() !== "") {
+    const n = Number(take.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  throw err.validation(CODES.E_GRAPH_INVALID, `contextProjection.take is not an item count: ${describeTake(take)}`);
+}
+
+/** The rejected value, rendered so the author can see WHICH one it was. */
+function describeTake(take: unknown): string {
+  // `JSON.stringify` renders NaN and Infinity as `null`, which is the one word this message must
+  // not say, since `null` is the legal way to declare no slice. It also renders `""` and `" "` as
+  // quoted strings, which is the whole point for those two.
+  if (typeof take === "number") return String(take);
+  try {
+    return JSON.stringify(take) ?? typeof take;
+  } catch {
+    return typeof take;
+  }
 }
 
 function pickFields(value: unknown, fields: readonly string[]): unknown {
@@ -299,7 +335,46 @@ function buildSections(input: AssembleInput, channels: Readonly<Record<string, u
   return out;
 }
 
+/**
+ * THE SAME DEFECT `readTake` CLOSES, ONE FIELD OVER, AND IT IS WORSE HERE.
+ *
+ * `overflow` reached this `switch` unvalidated, and the switch had no `default`, so an unknown
+ * value fell off the end and returned `undefined` — which `projectAll` then wrote OVER the
+ * channel, so the node was shown no such channel at all. `maxTokens` was unvalidated too, and
+ * `slice(0, NaN)` is `[]`. Measured at rung 2 before this:
+ *
+ *     {"maxTokens":10,"overflow":"truncate_tail"} -> {"c":["aaaa…    correct
+ *     {"maxTokens":10,"overflow":"TRUNCATE_TAIL"} -> {}              the channel VANISHES
+ *     {"maxTokens":10,"overflow":"nonsense"}      -> {}              same
+ *     {"maxTokens":"abc","overflow":"truncate_tail"} -> {"c":[]}     emptied
+ *
+ * Nothing checks either field: `compile` runs `unknownKeys` over `contextProjection` and reads
+ * the key NAMES only. A bound nobody can read is not a licence to widen, and it is not a licence
+ * to silently narrow to nothing either — the node is told a different story than its author
+ * wrote, with no diagnostic anywhere. Both refuse now, for the same reason and in the same
+ * words as `readTake`.
+ *
+ * THE COMPILE-TIME HALF BELONGS IN `graph/validate.ts`, where the other projection checks live.
+ * That is a pinned kernel file and this refusal is the runtime half; a diagnostic there would
+ * make this arm unreachable for any compiled graph, which is the right shape.
+ */
+const OVERFLOW_RULES: ReadonlySet<string> = new Set(["error", "truncate_tail", "summarize"]);
+
 function applyOverflow(value: unknown, projection: ContextProjection): unknown {
+  const { maxTokens, overflow } = projection as { maxTokens?: unknown; overflow?: unknown };
+  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) {
+    throw err.validation(
+      CODES.E_GRAPH_INVALID,
+      `a channel projection declares \`maxTokens\` that is not a finite number: ${JSON.stringify(maxTokens) ?? String(maxTokens)}`,
+    );
+  }
+  if (typeof overflow !== "string" || !OVERFLOW_RULES.has(overflow)) {
+    throw err.validation(
+      CODES.E_GRAPH_INVALID,
+      `a channel projection declares an unknown \`overflow\` rule: ${JSON.stringify(overflow) ?? String(overflow)} ` +
+        `(expected one of ${[...OVERFLOW_RULES].join(", ")})`,
+    );
+  }
   const rendered = JSON.stringify(value);
   if (estimateTokens(rendered) <= projection.maxTokens) return value;
   switch (projection.overflow) {

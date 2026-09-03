@@ -100,9 +100,9 @@ export class AnthropicAdapter implements ModelAdapter {
     let cacheReadTokens: number | undefined;
     let cacheWriteTokens: number | undefined;
     // "THE PROVIDER DID NOT SAY" AND "THE PROVIDER SAID ZERO" ARE DIFFERENT FACTS, and the
-    // counters cannot tell them apart on their own because both start at 0. These two can.
-    // See the floor below for what conflating them charged.
-    let sawInputUsage = false;
+    // counter cannot tell them apart on its own because both start at 0. This one can.
+    // See the floor below for what conflating them charged, and for why the INPUT side needs no
+    // twin of this flag.
     let sawOutputUsage = false;
     // The provider's own statement that this message is over. See the docstring's third
     // point: without it, "the model stopped" and "the socket did" are the same bytes.
@@ -117,24 +117,15 @@ export class AnthropicAdapter implements ModelAdapter {
           case "message_start": {
             const u = ev.message?.usage;
             if (u !== undefined) {
-              // Any of the three is the provider reporting its input accounting: a full cache
-              // hit reports `input_tokens: 0` next to a large `cache_read_input_tokens`, and
-              // that turn's input really was zero at the uncached rate.
+              // Three DISJOINT counts, which is why `priceOf` bills them as three terms: a full
+              // cache hit reports `input_tokens: 0` next to a large `cache_read_input_tokens`,
+              // and that turn's input really was zero at the UNCACHED rate.
               const inp = wireCount(u.input_tokens);
-              if (inp !== undefined) {
-                inputTokens = inp;
-                sawInputUsage = true;
-              }
+              if (inp !== undefined) inputTokens = inp;
               const cr = wireCount(u.cache_read_input_tokens);
-              if (cr !== undefined) {
-                cacheReadTokens = cr;
-                sawInputUsage = true;
-              }
+              if (cr !== undefined) cacheReadTokens = cr;
               const cw = wireCount(u.cache_creation_input_tokens);
-              if (cw !== undefined) {
-                cacheWriteTokens = cw;
-                sawInputUsage = true;
-              }
+              if (cw !== undefined) cacheWriteTokens = cw;
             }
             break;
           }
@@ -235,17 +226,40 @@ export class AnthropicAdapter implements ModelAdapter {
     // `producedTokens` AND NOT `text.length`, because on this turn `text` is usually "": see
     // that function for the measurement of what the text-only floor charged for a tool call.
     //
-    // GATED ON "WAS A USAGE FRAME SEEN", NOT ON `=== 0`, because the counter's initial value and
-    // a reported zero are the same bytes and are opposite facts. `=== 0` broke the docstring's
-    // own rule that reported numbers win, in the one case the floor was written for: a full
-    // cache hit sends `{"input_tokens":0,"cache_read_input_tokens":20000}` — an honest zero,
-    // because every one of those tokens was billed at the cache-read rate — and the floor
-    // rewrote it to the whole prompt at the full uncached rate. Measured on a 20,000-token
-    // prompt priced $3/$15/$0.30: $0.006105 became $0.066111, a 10.8x over-charge on the
-    // cheapest turn shape there is. The same held for a genuinely empty answer reporting
-    // `output_tokens: 0`.
-    if (!sawOutputUsage) outputTokens = producedTokens(text, toolCalls);
-    if (!sawInputUsage) inputTokens = roughTokens(req);
+    // A REPORTED ZERO IS BELIEVED ONLY WHERE THIS ADAPTER HOLDS NO EVIDENCE AGAINST IT, and the
+    // two dimensions hold different evidence, so they are two rules rather than one flag.
+    //
+    // Both simpler rules were tried and both loosen. `=== 0` alone cannot see a reported zero at
+    // all, so it re-charged a full cache hit — `{"input_tokens":0,"cache_read_input_tokens":
+    // 20000}` is an honest zero, every one of those tokens having been billed at the cache-read
+    // rate — as the whole prompt at the uncached rate: $0.006105 became $0.066111 on a
+    // 20,000-token prompt priced $3/$15/$0.30 per million. Gating on "was a usage frame seen"
+    // alone then handed the ceiling the other way, to whoever writes the bytes: a gateway sending
+    // `output_tokens: 0` beside 5,000 characters of text was charged $0.000033 where the estimate
+    // says $0.018783, and `input_tokens: 0` with NO cache field on an 80,000-character prompt was
+    // charged $0.000105 against $0.060111. Under-charging is the loosening direction for
+    // `budget.runUsd` and `budget.runTokens`, so the passing value must not be reachable by
+    // anything the remote party can simply assert.
+    //
+    // OUTPUT — the adapter RECEIVED what it is pricing. A zero beside non-empty `text` or a
+    // parsed tool call contradicts bytes this function is holding, so the estimate wins there;
+    // a zero on a turn that really produced nothing is believed and charged 0. A missing usage
+    // frame is still the original case and still floors, which is why the flag survives on this
+    // side: with no frame at all, an empty turn has to cost `producedTokens`' `Math.max(1, …)`
+    // rather than nothing.
+    //
+    // INPUT — the adapter SENT what it is pricing, and `roughTokens(req)` reads it locally. The
+    // only honest zero here is one some OTHER count accounts for, and on this wire that is the
+    // pair of cache fields, disjoint from `input_tokens` above. So: zero uncached input with no
+    // cache tokens beside it is refused whatever produced it, and a flag distinguishing "did not
+    // say" from "said zero" would answer the same question twice — with no usage frame at all,
+    // `inputTokens` is 0 and both cache counts are absent, which is this condition already.
+    if (!sawOutputUsage || (outputTokens === 0 && (text !== "" || toolCalls.length > 0))) {
+      outputTokens = producedTokens(text, toolCalls);
+    }
+    if (inputTokens === 0 && (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0) === 0) {
+      inputTokens = roughTokens(req);
+    }
 
     const usage: UsageRecord = {
       inputTokens,

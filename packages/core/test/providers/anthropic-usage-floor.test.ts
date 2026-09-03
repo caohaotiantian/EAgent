@@ -15,7 +15,12 @@
  * EMPTY on a `tool_use` turn — the shape an agent loop mostly takes, because the model's whole
  * answer is the call. So `Math.max(1, 0)` charged ONE output token for a complete tool call of
  * any size, which is the same $0-priced turn in the majority case, arrived at by a fix that only
- * ever measured a prose answer. The last four tests here are that second shape.
+ * ever measured a prose answer.
+ *
+ * THEN THE FLOOR OVER-CHARGED A REAL CACHE HIT, AND THE ANSWER TO THAT UNDER-CHARGED EVERYTHING.
+ * Three rounds, and each one moved the same question — "is this zero a report?" — one step
+ * without asking what evidence the adapter itself holds. The file is in three sections in that
+ * order: the missing frame, the honest zero, and the zero the adapter can disprove.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -236,7 +241,109 @@ test("...and an honestly-empty answer reporting `output_tokens: 0` is charged fo
   assert.equal(d.usage.outputTokens, 0, "reported, not floored to the `Math.max(1, …)` estimate");
 });
 
-test("...and OpenAIAdapter answers a reported zero the same way", async () => {
+test("...and OpenAIAdapter believes a reported zero OUTPUT on an empty turn the same way", async () => {
+  const o = new OpenAIAdapter({
+    apiKey: "k",
+    prices: PRICES,
+    fetch: async () =>
+      new Response(
+        `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":0}}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  const d = await done(o.stream({ ...REQ, model: "gpt-5" }, ac()));
+  assert.equal(d.usage.inputTokens, 11);
+  assert.equal(d.usage.outputTokens, 0, "nothing was produced, and the provider said so");
+});
+
+// ── and the answer to it handed the ceiling to whoever writes the bytes ───────
+
+/**
+ * "WAS A USAGE FRAME SEEN" MADE ANY REPORTED NUMBER WIN, INCLUDING A ZERO THE ADAPTER CAN
+ * DISPROVE — and under-charging is the loosening direction for `budget.runUsd`/`budget.runTokens`.
+ *
+ * Measured at that revision, priced $3/$15/$0.30 per million: `output_tokens: 0` beside 5,000
+ * characters of text settled at $0.000033 where the estimate says $0.018783, and
+ * `input_tokens: 0` with NO cache field on an 80,000-character prompt settled at $0.000105
+ * against $0.060111. Both are the floor's own undecidable case answered with the passing value,
+ * reintroduced in the direction the fix above set out to close.
+ *
+ * The two dimensions are not one problem, so they are not one flag. The adapter RECEIVED the
+ * output, so a zero beside text or a parsed tool call contradicts bytes it is holding; the
+ * adapter SENT the input, so the only zero it cannot disprove is one another count explains —
+ * on the Anthropic wire, the cache pair, which is disjoint from `input_tokens`.
+ */
+const bigText = "y".repeat(5_000);
+
+const ZERO_OUT_WITH_TEXT = [
+  `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":11}}}`,
+  `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(bigText)}}}`,
+  `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}`,
+  `event: message_stop\ndata: {"type":"message_stop"}`,
+];
+
+test("A REPORTED ZERO BESIDE 5,000 CHARACTERS OF TEXT IS NOT A REPORT — the adapter received them", async () => {
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(ZERO_OUT_WITH_TEXT), prices: PRICES }).stream(REQ, ac()));
+  assert.equal(d.usage.outputTokens, 1_250, "ceil(5000/4) — the estimate, not the 0 the gateway asserted");
+  assert.equal(d.usage.costUsd, 0.018783, "not the $0.000033 that a believed zero settles at");
+});
+
+test("...and a reported zero beside a TOOL CALL is not a report either — `text` is empty on that turn", async () => {
+  const zeroOnTool = [
+    ...TOOL_ONLY.slice(0, 4),
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":0}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(zeroOnTool), prices: PRICES }).stream(REQ, ac()));
+  assert.ok(
+    d.usage.outputTokens > 100,
+    `a ${TOOL_JSON.length}-character call the adapter parsed must not be zero output tokens, got ${d.usage.outputTokens}`,
+  );
+});
+
+test("A REPORTED ZERO INPUT WITH NO CACHE FIELD IS NOT A REPORT — the adapter sent the prompt", async () => {
+  const bareZeroIn = [
+    `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0}}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi there"}}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(bareZeroIn), prices: PRICES }).stream(BIG_PROMPT, ac()));
+  assert.equal(d.usage.inputTokens, 20_002, "roughTokens of the 80,000-character prompt this adapter itself sent");
+  assert.equal(d.usage.costUsd, 0.060111, "not the $0.000105 a believed zero settles at");
+});
+
+test("...and a cache field reporting ZERO explains nothing, so that zero is not believed either", async () => {
+  // The undecidable case fails CLOSED: `{"input_tokens":0,"cache_read_input_tokens":0}` accounts
+  // for none of a prompt that demonstrably exists, so it is the same unexplained zero.
+  const zeroCache = [
+    `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi there"}}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(zeroCache), prices: PRICES }).stream(BIG_PROMPT, ac()));
+  assert.equal(d.usage.inputTokens, 20_002);
+});
+
+test("a cache field that DOES account for the prompt keeps the zero — the fix above, still held", async () => {
+  // Both directions of the ordinary case: a cache READ, and a cache WRITE with `input_tokens`
+  // absent entirely. Neither may be re-charged at the uncached rate.
+  const write = [
+    `event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":20000}}}`,
+    `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi there"}}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+    `event: message_stop\ndata: {"type":"message_stop"}`,
+  ];
+  const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(write), prices: PRICES }).stream(BIG_PROMPT, ac()));
+  assert.equal(d.usage.inputTokens, 0, "the 20,000 tokens were billed as a cache write, not as uncached input");
+  assert.equal(d.usage.cacheWriteTokens, 20_000);
+});
+
+test("OpenAIAdapter refuses a zero prompt_tokens outright — nothing on that wire can explain one", async () => {
+  // The asymmetry is the wire, not a difference of opinion: `OpenAIChunk` carries `prompt_tokens`
+  // and `completion_tokens` and no cache count, so there is no field an endpoint could have used
+  // to account for a prompt this adapter demonstrably sent.
   const o = new OpenAIAdapter({
     apiKey: "k",
     prices: PRICES,
@@ -248,8 +355,25 @@ test("...and OpenAIAdapter answers a reported zero the same way", async () => {
       ),
   });
   const d = await done(o.stream({ ...BIG_PROMPT, model: "gpt-5" }, ac()));
-  assert.equal(d.usage.inputTokens, 0, "a gateway that reports a cached prompt as 0 is believed, not re-priced");
-  assert.equal(d.usage.outputTokens, 7);
+  assert.equal(d.usage.inputTokens, 20_002);
+  assert.equal(d.usage.costUsd, 0.060111);
+});
+
+test("...and it disbelieves a zero completion_tokens beside text exactly as the other adapter does", async () => {
+  const o = new OpenAIAdapter({
+    apiKey: "k",
+    prices: PRICES,
+    fetch: async () =>
+      new Response(
+        `data: {"choices":[{"delta":{"content":${JSON.stringify(bigText)}},"finish_reason":null}]}\n\n` +
+          `data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":0}}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  const od = await done(o.stream({ ...REQ, model: "gpt-5" }, ac()));
+  const ad = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(ZERO_OUT_WITH_TEXT), prices: PRICES }).stream(REQ, ac()));
+  assert.equal(od.usage.outputTokens, 1_250);
+  assert.equal(od.usage.outputTokens, ad.usage.outputTokens, "one rule, held over both adapters");
 });
 
 /**
