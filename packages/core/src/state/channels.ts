@@ -343,9 +343,28 @@ function asNumber(channel: string, v: unknown, fallback: number | undefined): nu
 function typeError(channel: string, want: string, got: unknown): Error {
   return err.validation(
     CODES.E_INTERNAL,
-    `channel "${channel}": expected ${want}, got ${got === null ? "null" : typeof got}`,
-    { details: { channel, want } },
+    `channel "${channel}": expected ${want}, got ${describe(got)}`,
+    { details: { channel, want, got: describe(got) } },
   );
+}
+
+/**
+ * What the value IS, in words a reader can act on.
+ *
+ * `typeof` alone answered `expected number, got number` for `NaN` — the one refusal in this
+ * file whose message cannot be diagnosed from itself, because `asNumber` refuses a non-finite
+ * number (correctly: a channel folding NaN poisons every later `sum`, `max` and `min`) and
+ * `typeof NaN` is "number". Arrays are the same shape at one remove: `typeof [1]` is "object",
+ * so an array written to an `object` channel read `expected object, got object`.
+ *
+ * The three cases `typeof` gets wrong, and nothing more. The VALUE is deliberately not shown:
+ * a channel holds model and tool output, and this string reaches a journal.
+ */
+function describe(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "array";
+  if (typeof v === "number" && !Number.isFinite(v)) return String(v);
+  return typeof v;
 }
 
 // ---------------------------------------------------------------------------

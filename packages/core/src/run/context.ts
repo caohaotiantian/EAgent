@@ -118,21 +118,34 @@ export function project(value: unknown, projection: ContextProjection | undefine
   const take = (projection as { take?: number }).take;
 
   let out = value;
+  // A PRESENT `take` NEVER MEANS "NO SLICE". `undefined` and `null` are the two ways to declare
+  // no bound; every other value is an author asking for one, and the single answer this function
+  // may not give such an author is the whole array.
+  //
   // `take: 0` IS A SLICE OF ZERO, not the absence of one. Treating it as "no slice" made a
   // projection asking for nothing get everything, which is the wrong direction for a knob whose
   // whole job is to bound what a node sees.
   //
-  // GATED ON THE TYPE AND NOT ON `!== undefined`, and the difference is a whole value. This
-  // guard was `take !== undefined`, which is what a `ContextProjection` typed `take?: number`
-  // suggests — but the object arrives as JSON a graph author wrote, so `take: null` reaches
-  // here, `null >= 0` is TRUE, and `slice(0, null)` is `slice(0, 0)`: a projection that declared
-  // no slice at all came back EMPTY. `Number.isFinite` closes the same hole for `NaN`, which
-  // fails both comparisons and would have taken the negative arm. Anything that is not a finite
-  // number is "no slice", which is what `undefined` already meant.
-  if (Array.isArray(out) && typeof take === "number" && Number.isFinite(take)) {
+  // COERCED AND THEN REFUSED, not type-tested. `ContextProjection` types `take?: number`, but a
+  // projection is JSON a graph author wrote and `graph/spec.ts` validates only the KEY NAMES in
+  // `contextProjection`, so `take: "3"` — what hand-written YAML gives for a quoted number —
+  // arrives here with no diagnostic. A `typeof take === "number"` gate answers that undecidable
+  // case with the passing value: the string is "not a slice", so a node asking for three items
+  // is shown all of them. `Number` reads the bound the author actually wrote (`"3"` → 3, `true`
+  // → 1, `[3]` → 3); what does not coerce to a finite number (`"abc"`, `{}`, `NaN`, `Infinity`)
+  // is refused, because a bound nobody can read is not a licence to widen. The refusal is raised
+  // for a non-array value too — the projection is malformed whatever it is applied to.
+  if (take !== undefined && take !== null) {
+    const n = Number(take);
+    if (!Number.isFinite(n)) {
+      // `JSON.stringify` renders NaN and Infinity as `null`, which is the one word this message
+      // must not say, since `null` is the legal way to declare no slice.
+      const shown = typeof take === "object" ? JSON.stringify(take) : String(take);
+      throw err.validation(CODES.E_GRAPH_INVALID, `contextProjection.take is not a finite number: ${shown}`);
+    }
     // Negative takes from the end — "the last N findings" is the common case. `>= 0` and not
     // `> 0`: `slice(0)` is the whole array, so zero has to fall on the first-N side to mean zero.
-    out = take >= 0 ? out.slice(0, take) : out.slice(take);
+    if (Array.isArray(out)) out = n >= 0 ? out.slice(0, n) : out.slice(n);
   }
   if (fields !== undefined && fields.length > 0) {
     out = Array.isArray(out) ? out.map((item) => pickFields(item, fields)) : pickFields(out, fields);

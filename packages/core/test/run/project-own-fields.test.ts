@@ -8,13 +8,22 @@
  * landing in one is a canonicalization failure three layers from its cause, and a re-parented
  * object is a value whose own keys — all `stateHash` can see — no longer describe it.
  *
- * And `take: 0` meant "no slice", so a projection asking for zero items got every item.
+ * And `take: 0` meant "no slice", so a projection asking for zero items got every item. The arm
+ * that did that was `take !== undefined && take !== 0`, dispatching on `take > 0`.
  *
- * FIXING THAT WIDENED THE SLICE ITSELF. The guard became `take !== undefined`, which is what a
- * `ContextProjection` typed `take?: number` suggests — but a projection is JSON a graph author
- * wrote, so `take: null` reaches it, `null >= 0` is TRUE, and `slice(0, null)` is `slice(0, 0)`:
- * a projection that declared no slice came back EMPTY. The zero case was measured and the
- * not-a-number cases were not.
+ * FIXING THAT WIDENED THE SLICE ITSELF, in the direction a bounding knob may never widen. The
+ * arm became `typeof take === "number" && Number.isFinite(take)` — which is what a
+ * `ContextProjection` typed `take?: number` suggests, but a projection is JSON a graph author
+ * wrote and `graph/spec.ts` checks only the KEY NAMES, so `take: "3"` (a quoted number in
+ * hand-written YAML) compiles clean, is "not a number", and is therefore NOT A SLICE: the node
+ * asking for three items is shown all ten. The old arm coerced, so it showed three. `true` and
+ * `[3]` are the same story.
+ *
+ * `take: null` was never the empty case that fix was written against: `null !== 0` is true so
+ * the old arm ran, `null > 0` is FALSE so it took the negative side, and `slice(null)` is
+ * `slice(0)` — the whole array, which is also what `null` should mean. What actually needed
+ * closing was `take: 0`, and everything that is not a finite number after coercion, which now
+ * refuses rather than widening.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -44,17 +53,28 @@ test("take: 0 keeps nothing, which is what it asked for", () => {
   assert.deepEqual(project([1, 2, 3], { take: 0, maxTokens: 100, overflow: "error" }), []);
 });
 
-test("...and a take that is not a NUMBER is not a slice of zero either", () => {
-  // `null` is what JSON gives for an explicitly-absent value, and it is the one that used to
-  // silently empty the array: `null >= 0` is true and `slice(0, null)` is `slice(0, 0)`. `NaN`
-  // is the other side — it fails both comparisons, so it took the NEGATIVE arm.
+test("a take that is not a finite number refuses; it never means `show everything`", () => {
   const p = (take: unknown): unknown => project([1, 2, 3], { take, maxTokens: 100, overflow: "error" } as never);
+
+  // The two ways to declare no bound, and the only two.
+  assert.deepEqual(p(undefined), [1, 2, 3], "the documented way to say `no slice` still says it");
   assert.deepEqual(p(null), [1, 2, 3], "take: null declares no slice; it does not declare an empty one");
-  assert.deepEqual(p(NaN), [1, 2, 3]);
-  assert.deepEqual(p(Infinity), [1, 2, 3], "an infinite take is not a finite bound, so it is no bound");
-  assert.deepEqual(p(-Infinity), [1, 2, 3]);
-  assert.deepEqual(p("2"), [1, 2, 3], "a string is not a slice — the knob is typed `number`");
-  assert.deepEqual(p(undefined), [1, 2, 3], "and the documented way to say `no slice` still says it");
+
+  // Coercible: the bound the author wrote, not the whole array. `"2"` is what YAML gives for a
+  // quoted number and what `graph/spec.ts` lets through without a diagnostic.
+  assert.deepEqual(p("2"), [1, 2], "a quoted number is the number the author wrote");
+  assert.deepEqual(p(true), [1], "Number(true) is 1");
+  assert.deepEqual(p([2]), [1, 2], "a one-element array coerces to its element");
+  assert.deepEqual(p("-2"), [2, 3], "and the negative arm coerces too");
+
+  // Not coercible: refused. Showing all three would be the loosening.
+  for (const bad of [NaN, Infinity, -Infinity, "abc", {}, [1, 2]]) {
+    assert.throws(
+      () => p(bad),
+      (e: unknown) => (e as { code?: string }).code === "E_GRAPH_INVALID",
+      `take: ${JSON.stringify(bad) ?? String(bad)} must refuse, not widen`,
+    );
+  }
 });
 
 test("the ORDINARY projection arms are unchanged", () => {

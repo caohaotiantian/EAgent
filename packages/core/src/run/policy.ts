@@ -860,6 +860,44 @@ export class PolicyEngine {
     // debits would leave a reservation nothing will ever settle, and `#reservedUsd` only
     // falls in `settle` — so the run would carry a permanent phantom charge and refuse work
     // it could afford. Every `throw` below therefore precedes every mutation.
+    //
+    // A LEDGER THAT CANNOT SAY WHAT IT HOLDS REFUSES; IT DOES NOT PERMIT. Every ceiling below
+    // is an inequality, and `NaN > limit` is FALSE — so one unreadable number does not fail a
+    // single check, it silently switches off every dollar and token ceiling for the rest of the
+    // run. Measured: settling a `{"output_tokens":"abc"}` turn made `costUsd` NaN, `#spentUsd`
+    // NaN, and the very next `reserve($1000)` against a $1.00 budget SUCCEEDED. A NaN
+    // `estimateUsd` does the same to `#reservedUsd` with no settlement involved at all, and a
+    // NEGATIVE one is the same defect with its sign flipped — it CREDITS the budget.
+    //
+    // The totals are checked here and not only the arguments, because this is the one place
+    // every debit passes through: a poisoned total refuses all further work rather than
+    // pretending to bound it. `chargeable` is the whole test — finite, and not negative.
+    if (
+      !chargeable(estimateUsd) ||
+      !chargeable(estimateTokens) ||
+      !chargeable(this.#spentUsd) ||
+      !chargeable(this.#reservedUsd) ||
+      !chargeable(this.#spentTokens) ||
+      !chargeable(this.#reservedTokens) ||
+      !chargeable(this.#spentWallMs)
+    ) {
+      throw err.exhausted(
+        CODES.E_BUDGET_EXHAUSTED,
+        `a reservation cannot be checked against a budget it cannot read ` +
+          `(requested $${String(estimateUsd)}/${String(estimateTokens)} tokens, ` +
+          `$${String(this.#spentUsd)} spent, $${String(this.#reservedUsd)} reserved)`,
+        {
+          details: {
+            dimension: "costUsd",
+            scope,
+            limit: this.#budget.runUsd ?? 0,
+            spent: this.#spentUsd,
+            reserved: this.#reservedUsd,
+            requested: estimateUsd,
+          },
+        },
+      );
+    }
     const limit = this.#budget.runUsd;
     const committed = this.#spentUsd + this.#reservedUsd;
     if (limit !== undefined && committed + estimateUsd > limit + 1e-9) {
@@ -934,13 +972,22 @@ export class PolicyEngine {
     this.#reservations.delete(reservation.id);
     this.#reservedUsd = Math.max(0, round6(this.#reservedUsd - held.amountUsd));
     this.#reservedTokens = Math.max(0, this.#reservedTokens - (held.amountTokens ?? 0));
-    if (typeof actual === "number") {
-      this.#spentUsd = round6(this.#spentUsd + actual);
-      return;
-    }
-    this.#spentUsd = round6(this.#spentUsd + actual.costUsd);
-    this.#spentTokens += billedTokens(actual);
-    this.#spentWallMs += actual.wallMs;
+    // AN UNREADABLE BILL KEEPS THE WORST CASE, which is the number this reservation was already
+    // holding. `costUsd` is typed `number` and arrives from an adapter that parsed a remote
+    // party's JSON, so it can be NaN or negative; adding either to a running total is what
+    // `reserve` above refuses to work with. Substituting rather than throwing is deliberate —
+    // the hold has already been released three lines up, so a throw here would leave the run
+    // charged NOTHING for the call, which is the loosest outcome available and the opposite of
+    // failing closed. The estimate is defensible: it is what the run had already committed.
+    const charged = typeof actual === "number" ? actual : actual.costUsd;
+    this.#spentUsd = round6(this.#spentUsd + (chargeable(charged) ? charged : held.amountUsd));
+    if (typeof actual === "number") return;
+    const tokens = billedTokens(actual);
+    this.#spentTokens += chargeable(tokens) ? tokens : (held.amountTokens ?? 0);
+    // Nothing reserves wall time (see `#spentWallMs`), so an unreadable duration has no worst
+    // case to fall back to and this adds none. Inventing one would be a fabrication; the dollar
+    // and token ceilings are the two that still hold on this turn.
+    this.#spentWallMs += chargeable(actual.wallMs) ? actual.wallMs : 0;
   }
 
   get spentUsd(): number {
@@ -1003,6 +1050,18 @@ function matches(patterns: readonly string[], capability: string): boolean {
 
 function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
+}
+
+/**
+ * Whether a number may enter the ledger at all.
+ *
+ * Not exported, for the reason `billedTokens` gives. The predicate is deliberately one line and
+ * deliberately used on the TOTALS as well as the arguments: an amount that is not a finite,
+ * non-negative number cannot be compared against a ceiling, and "cannot be compared" has to mean
+ * refused rather than allowed.
+ */
+function chargeable(n: number): boolean {
+  return Number.isFinite(n) && n >= 0;
 }
 
 /** The smaller of the two ceilings, treating absent as "no ceiling" rather than as zero. */
