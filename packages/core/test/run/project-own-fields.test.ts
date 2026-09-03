@@ -9,6 +9,12 @@
  * object is a value whose own keys — all `stateHash` can see — no longer describe it.
  *
  * And `take: 0` meant "no slice", so a projection asking for zero items got every item.
+ *
+ * FIXING THAT WIDENED THE SLICE ITSELF. The guard became `take !== undefined`, which is what a
+ * `ContextProjection` typed `take?: number` suggests — but a projection is JSON a graph author
+ * wrote, so `take: null` reaches it, `null >= 0` is TRUE, and `slice(0, null)` is `slice(0, 0)`:
+ * a projection that declared no slice came back EMPTY. The zero case was measured and the
+ * not-a-number cases were not.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -36,6 +42,19 @@ test("a projection naming __proto__ stores it as data instead of re-parenting", 
 
 test("take: 0 keeps nothing, which is what it asked for", () => {
   assert.deepEqual(project([1, 2, 3], { take: 0, maxTokens: 100, overflow: "error" }), []);
+});
+
+test("...and a take that is not a NUMBER is not a slice of zero either", () => {
+  // `null` is what JSON gives for an explicitly-absent value, and it is the one that used to
+  // silently empty the array: `null >= 0` is true and `slice(0, null)` is `slice(0, 0)`. `NaN`
+  // is the other side — it fails both comparisons, so it took the NEGATIVE arm.
+  const p = (take: unknown): unknown => project([1, 2, 3], { take, maxTokens: 100, overflow: "error" } as never);
+  assert.deepEqual(p(null), [1, 2, 3], "take: null declares no slice; it does not declare an empty one");
+  assert.deepEqual(p(NaN), [1, 2, 3]);
+  assert.deepEqual(p(Infinity), [1, 2, 3], "an infinite take is not a finite bound, so it is no bound");
+  assert.deepEqual(p(-Infinity), [1, 2, 3]);
+  assert.deepEqual(p("2"), [1, 2, 3], "a string is not a slice — the knob is typed `number`");
+  assert.deepEqual(p(undefined), [1, 2, 3], "and the documented way to say `no slice` still says it");
 });
 
 test("the ORDINARY projection arms are unchanged", () => {

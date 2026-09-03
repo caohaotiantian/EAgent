@@ -120,8 +120,16 @@ export function project(value: unknown, projection: ContextProjection | undefine
   let out = value;
   // `take: 0` IS A SLICE OF ZERO, not the absence of one. Treating it as "no slice" made a
   // projection asking for nothing get everything, which is the wrong direction for a knob whose
-  // whole job is to bound what a node sees. `undefined` remains the way to say "no slice".
-  if (Array.isArray(out) && take !== undefined) {
+  // whole job is to bound what a node sees.
+  //
+  // GATED ON THE TYPE AND NOT ON `!== undefined`, and the difference is a whole value. This
+  // guard was `take !== undefined`, which is what a `ContextProjection` typed `take?: number`
+  // suggests — but the object arrives as JSON a graph author wrote, so `take: null` reaches
+  // here, `null >= 0` is TRUE, and `slice(0, null)` is `slice(0, 0)`: a projection that declared
+  // no slice at all came back EMPTY. `Number.isFinite` closes the same hole for `NaN`, which
+  // fails both comparisons and would have taken the negative arm. Anything that is not a finite
+  // number is "no slice", which is what `undefined` already meant.
+  if (Array.isArray(out) && typeof take === "number" && Number.isFinite(take)) {
     // Negative takes from the end — "the last N findings" is the common case. `>= 0` and not
     // `> 0`: `slice(0)` is the whole array, so zero has to fall on the first-N side to mean zero.
     out = take >= 0 ? out.slice(0, take) : out.slice(take);
