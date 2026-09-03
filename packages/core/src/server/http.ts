@@ -149,6 +149,26 @@
  * routes the value came back in the SAME body whose `channels` two keys above already read
  * `[secret]`. `gateRecordWire` closes it, and `gateWire`'s `{...g}` spread with it.
  *
+ * **AND THE GRAPH ROUTES ARE OPEN TO EVERY CREDENTIAL ON PURPOSE.** `GET /graphs` and
+ * `GET /graphs/by-hash/:hash` take `auth` for admission and apply no access predicate, so a
+ * scoped non-operator whose `GET /runs` is empty still reads every workflow name, every graph
+ * hash, and — from `by-hash` — every node id, every node type and every node's compiled
+ * `posture`. That is deliberate, and it is written here because this section makes an
+ * ENUMERATED claim and the enumeration used to be short by exactly these two routes: a reader
+ * finished it believing ownership scoping covered every route but gate payloads.
+ *
+ * The argument for leaving them open, measured rather than asserted: a graph HAS NO OWNER to
+ * scope by — `#graphByHash` scans `this.#graphs`, the constructor-supplied deployment
+ * inventory, and never reaches the store, so no principal's graph can leak through it — and
+ * `POST /runs` applies no per-workflow predicate, so a non-operator who can read the
+ * inventory can already SUBMIT every workflow in it. Knowing a name is not a privilege when
+ * invoking it is already granted. Scoping them would also break the console's `loadGraphs`
+ * for any principal with no runs, which is every new operator, and would build the
+ * hash-existence oracle the "404, NEVER 403" rule exists to forbid. If `POST /runs` ever
+ * grows a per-workflow predicate, this paragraph is the first thing that stops being true.
+ * Pinned by *EVERY CREDENTIAL READS THE GRAPH INVENTORY* in
+ * `test/server/plane-watch-and-stop.test.ts`.
+ *
  * ## AND THE CALLER MAY BE A BROWSER SOMEBODY ELSE IS DRIVING
  *
  * Everything above reasons about who can reach the socket. On the supported open posture
@@ -189,7 +209,7 @@ import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } fr
 import type { StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
-import { GateCallbackRouter, type GateDispatcher } from "../run/delivery.ts";
+import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
 import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
@@ -868,6 +888,22 @@ function namesApprover(g: GateRecord, subject: string): boolean {
  */
 const MAX_QUEUE_GATES = 200;
 const MAX_QUEUE_SCAN = 500;
+/**
+ * How many gated runs `#armGatedRuns` may READ at boot, as against how many it may ARM.
+ *
+ * Two numbers because the scan pages now, and the thing worth bounding is not the thing
+ * worth stopping on. `MAX_QUEUE_SCAN` bounds the runs armed — each costs a `RunContext` and
+ * a rehydrated gate clock for the life of the run. This bounds the rows walked to find them,
+ * because `raisedAGate` is "has EVER raised one" and the cost of rejecting one is a FOLD of
+ * its whole journal. Without it, "page until 500 open gates are armed" on a journal with a
+ * million decided gates is a `listen()` that never returns.
+ *
+ * IT IS THE BOUND THAT MAY BE HIT WITHOUT LOSING AN ANSWER, which is why it is allowed to be
+ * a guess. A gate past it is bound by `#callbackEngine` when its decision arrives and by
+ * `loom serve`'s gate clock on the next tick; what it delays is escalation on a plane where
+ * neither has happened yet.
+ */
+const MAX_ARM_SCAN = 5_000;
 
 function principalOf(auth: AuthContext): SubmittedBy {
   return { kind: auth.kind, subject: auth.subject, method: auth.method };
@@ -927,8 +963,20 @@ function commandActor(auth: AuthContext | undefined): CommandActor {
  * open-plane caller resolves to the same `UNIDENTIFIED_SUBJECT`. One helper, both doors,
  * so the next writer cannot get half of it.
  */
-function idempotencySlot(auth: AuthContext | undefined, key: string): string {
+function idempotencySlot(auth: AuthContext | SubmittedBy | undefined, key: string): string {
   return JSON.stringify([auth?.method ?? "", auth?.kind ?? "", auth?.subject ?? "", key]);
+}
+
+/**
+ * The 202 body — what is durable at ACK, in ONE place.
+ *
+ * TWO WRITERS, ONE SHAPE: the handler that accepts a submission and `#restoreIdempotency`,
+ * which rebuilds the same answer for a run this process did not accept. A retry that crossed
+ * a restart must be handed the body the original request got, and two copies of an object
+ * literal is how those two drift.
+ */
+function acceptedBody(runId: RunId, graphHash: string): Record<string, unknown> {
+  return { runId, graphHash, durable: ["run.submitted", "run.compiled"], note: "accepted means this WILL run, not that it HAS run" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1515,27 @@ function ceilingScopeOf(v: unknown, runId: RunId): string {
 
 interface Route {
   readonly method: string;
+  /**
+   * Whether `HEAD` reaches this route's `GET` handler.
+   *
+   * PER ROUTE, AND NOT A BLANKET `HEAD ⇒ GET` REWRITE, which is the version that was
+   * measured and rejected. Every route here declares `"GET"` or `"POST"` and `#serve`
+   * compares the string exactly, so `HEAD /health` fell to the 404 arm — on the one route
+   * that is uncredentialed BECAUSE "a load balancer probes it", and against a probe
+   * (`option httpchk HEAD /health`) that discards the body the 404 explains itself in. A
+   * plane out of rotation with every process healthy is the outage `#healthDiagnostics`
+   * spends a paragraph arguing against, caused by the check rather than caught by it.
+   *
+   * The blanket rewrite also opens the SSE route, whose handler NEVER ENDS: measured on a
+   * patched tree, `HEAD /runs/:id/events` held an open bus subscription until the client
+   * aborted at 4003 ms, where today it is a clean 404. Trading a wrong 404 on one route
+   * for a leaked connection on another is not a fix, so the mapping is opt-in and only
+   * routes that finish declare it.
+   *
+   * `node:http` suppresses the body itself and `send` still sets an accurate
+   * `content-length`, so a handler needs no HEAD branch.
+   */
+  readonly head?: true;
   readonly pattern: RegExp;
   handle(ctx: RequestContext): Promise<void>;
 }
@@ -1517,8 +1586,68 @@ export class ControlPlane {
    * deduplicated. Divide by the deployment's submission rate to get the window a retry may
    * arrive in: at ten runs a minute that is about 17 hours — so a nightly job retrying the next
    * day is outside it, which is the case the number was chosen against.
+   *
+   * AND THE OTHER BOUND WAS THIS PROCESS'S LIFETIME, which the paragraph above did not say.
+   * A map is not durable state, so a `loom serve` restart — a deploy, an OOM, a crash — made
+   * that 17-hour window ZERO: the same key presented after it minted a second run with every
+   * side effect of the first. Measured across two OS processes over one SQLite journal, same
+   * key, same principal: two runs. See `#restoreIdempotency`, which rebuilds this map by
+   * FOLDING, so the window is the count again and not the uptime.
    */
   readonly #idempotency = new Map<string, unknown>();
+  /**
+   * The rebuild of `#idempotency` from the journal — at most one in flight, and at most one
+   * that SUCCEEDED.
+   *
+   * A PROMISE RATHER THAN A BOOLEAN, because two concurrent submissions both miss the map
+   * and a flag would let the second fall through to `engine.submit` while the first was
+   * still scanning — which is precisely the duplicate the scan exists to prevent.
+   *
+   * **AND IT IS CLEARED ON REJECTION, which memoising a promise does not do for you.** A
+   * rejected promise stays rejected forever, so `#restoreIdempotency` awaiting this field
+   * re-threw one dead store error on every later call: a single `SQLITE_BUSY`, one
+   * reconnect, one odd row turned EVERY subsequent submission carrying an `Idempotency-Key`
+   * into `500 E_INTERNAL` — with `retryable:false`, so a well-behaved client stopped
+   * retrying — for the life of the process, while unkeyed submits and `/health` stayed
+   * green. Measured against this class with a store that fails `listRuns` exactly once.
+   *
+   * REFUSING THE REQUEST IS STILL RIGHT and that half does not change: falling through to
+   * `engine.submit` on a scan that did not finish is the duplicate run this whole mechanism
+   * exists to prevent, so the caller gets an error. What changes is that the error is about
+   * THIS request. The next one starts a new scan.
+   */
+  #idempotencyRestored: Promise<void> | undefined;
+  /**
+   * `runId -> the head this run had when its fold held NO open gate`.
+   *
+   * WHAT IT SAVES. `GET /gates` scans every run that has EVER raised a gate — that is what
+   * the `raisedAGate` filter means, and the set only grows — and folds each one to discover
+   * whether anything is still open. Most of that set is finished runs. Measured on 8 gated
+   * runs after a restart, with every gate decided and ZERO open anywhere: `GET /gates` read
+   * all 1184 events of those journals and returned `gates: []`, on every poll, and the
+   * console polls it every 4 seconds. This makes the second poll read nothing.
+   *
+   * WHY IT CANNOT GO STALE, which is the only question a cache like this has to answer. The
+   * key is the run's HEAD, and a head moves whenever anything is appended — including the
+   * `gate.raised` that would make the memo wrong. Both stores write `run_head` inside the
+   * same append that writes the events (`sqlite.ts`'s `BEGIN IMMEDIATE` block; `memory.ts`
+   * derives it from the event list), so the head this listing returns is exact and not a
+   * lagging index. A fold is deterministic, so "same run, same head" is "same answer".
+   *
+   * WHAT IT IS NOT ALLOWED TO BE. It answers ONE question — "did this run have any open gate
+   * at this head" — which is a fact about the run and not about the caller, so it can never
+   * decide who may see what. Whether a gate reaches a given principal is still recomputed
+   * from the projection every time, because that answer depends on `ownsRun` and
+   * `namesApprover` and this map knows nothing about either. And a MISS folds: absent means
+   * "I have not looked", never "nothing there".
+   *
+   * IT IS NOT THE FIX THIS ROUTE NEEDS. The remaining cost is `engine.openGates`, which
+   * re-folds from seq 1 a journal this handler has just folded incrementally one line
+   * earlier — removable only by letting `HumanGateBroker.list` take a projection, which is
+   * `run/gates.ts` and `run/engine.ts`. That is the cheap first move and it lives in the
+   * kernel; this is the part that lives here.
+   */
+  readonly #gatelessAt = new Map<RunId, Seq>();
   /**
    * `ControlPlaneOptions.drive`, captured ONCE at construction.
    *
@@ -1841,7 +1970,7 @@ export class ControlPlane {
         ? undefined
         : new GateCallbackRouter({
             dispatcher,
-            engine: this.#engine,
+            engine: this.#callbackEngine(),
             logFor: (runId) =>
               new RunLog(runId, {
                 store: this.#store,
@@ -2076,6 +2205,9 @@ export class ControlPlane {
     // protect. Set before the first request can arrive — `listening` has fired, but the
     // event loop has not yet reached an accepted connection.
     this.#allowedHosts = this.#configuredHosts ?? loopbackHosts(host, bound);
+    // BEFORE THE FIRST REQUEST, for the one write route that cannot bind lazily. See
+    // `#armGatedRuns`.
+    await this.#armGatedRuns();
     // THE ADDRESS, READ BACK OFF THE SOCKET, for the reason `port` is: `listen(0)` learns
     // its port from the OS and `listen(port, "localhost")` learns its address from the
     // resolver, so what the caller ASKED for is not what a boot banner may print. `cli.ts`
@@ -2232,7 +2364,8 @@ export class ControlPlane {
     }
 
     for (const route of this.#routes) {
-      if (req.method !== route.method) continue;
+      // HEAD reaches a GET handler only where the route says it may — see `Route.head`.
+      if (req.method !== route.method && !(req.method === "HEAD" && route.head === true && route.method === "GET")) continue;
       const match = route.pattern.exec(url.pathname);
       if (match === null) continue;
       await route.handle({
@@ -2507,6 +2640,232 @@ export class ControlPlane {
     return summarise(p, this.#graphByHash(p.graphHash));
   }
 
+  /**
+   * Rebuild `#idempotency` from the journal, once, on the first key this process has not seen.
+   *
+   * WHY IT EXISTS: `POST /runs` decided whether a submission was a duplicate by reading a
+   * process-local `Map`, while `run.submitted.idempotencyKey` has been journaled on every run
+   * since the field existed and was read by NOTHING in `src/` but an OTel attribute. So a
+   * retry that crossed a process boundary — the client timed out, the plane was redeployed,
+   * the request landed on a second replica — was indistinguishable from a new submission, and
+   * the answer to "have I seen this key?" on a cold map was the PASSING one. The failure is
+   * not a lost read: it is a duplicated WRITE, a second run with every irreversible tool call
+   * and every provider charge of the first.
+   *
+   * FOLDING, NOT A COLUMN. The tempting fix is an index keyed by the slot beside `run_head`,
+   * and it is the wrong shape twice over: `journal/store.ts`'s own header states the rule it
+   * would break — "the journal is addressed PER RUN, so no decision may read a fact that spans
+   * runs" — and adding the capability would touch two kernel files for a value the journal
+   * already holds. Everything the slot is made of is in the payload: `idempotencySlot` needs
+   * `auth.method`, `auth.kind`, `auth.subject` and the key, and `run.submitted` carries
+   * `submittedBy: {kind, subject, method}` beside `idempotencyKey`. So this rebuilds the map
+   * rather than teaching the store a second index.
+   *
+   * ONE ROW PER RUN, NOT A FOLD PER RUN. `run.submitted` is the FIRST event of a run by
+   * construction, so the loop below reads one event and breaks. The scan is bounded by the
+   * same constant that bounds the map, walked oldest-first so that the eviction order after
+   * the restore is the insertion order it would have had.
+   *
+   * **AND `toSeq` IS PASSED, WHICH IS THE HALF "reads one event and breaks" DID NOT BUY.**
+   * `read` is an async ITERABLE over a paged query: `SqliteStateStore` fetches 500 rows a
+   * page, so breaking after the first one still materialised the first page of every run's
+   * journal — the whole journal for anything shorter than that. On a 10 000-run journal
+   * that is ~20 000 statements and ~1.5M rows, inside a request bounded by
+   * `requestTimeoutMs`, paid by the first keyed submission after every restart. Measured at
+   * ~1.2 s. `read(runId, 1, 1)` bounds the SQL `LIMIT` to the one row this loop wants.
+   *
+   * A KEY EQUAL TO THE RUN ID IS SKIPPED, and this is the one that would have been a hole.
+   * `Engine.submit` journals `idempotencyKey: input.idempotencyKey ?? runId`, so a run
+   * submitted with NO header still carries a key — its own id. Restoring those would let any
+   * caller present a run id as an `Idempotency-Key` and be handed that run's 202 body,
+   * including its `graphHash`, for a run they did not submit. The plane never puts a run id
+   * in this map itself, so dropping them loses nothing.
+   *
+   * LAZY, so a plane that never receives an `Idempotency-Key` never pays for it, and a plane
+   * that does pays once. A cold journal with many runs makes the FIRST keyed submission
+   * slower; every one after it reads the map.
+   *
+   * WHAT IT DOES NOT CLOSE. This collapses a retry that crossed a RESTART, which is the
+   * measured failure. It does not close a RACE between two live planes over one journal:
+   * both scan, both miss, both submit. Closing that needs a uniqueness constraint the store
+   * would have to enforce at insert — a different change, in a different file, and one that
+   * an index on this key would not give either without it.
+   */
+  async #restoreIdempotency(): Promise<void> {
+    const started = (this.#idempotencyRestored ??= (async () => {
+      const rows = await this.#store.listRuns(MAX_IDEMPOTENT_SUBMITS);
+      // Oldest first: `listRuns` answers newest-run-id-first, and this map evicts by
+      // insertion order.
+      for (const summary of [...rows].reverse()) {
+        for await (const e of this.#store.read(summary.runId, 1 as Seq, 1 as Seq)) {
+          if (e.type !== "run.submitted") break;
+          const p = e.payload;
+          // The run's own id, which no caller may present. See above.
+          if (p.idempotencyKey === summary.runId) break;
+          // `SubmittedBy` IS the part of an `AuthContext` the slot is made of — kind,
+          // subject, method, the three `principalOf` writes and the three
+          // `idempotencySlot` reads. A run written before ownership existed carries none
+          // of them and folds to the same empty-string slot an unauthenticated caller
+          // gets today, which is the permissive reading `submittedByOrUnowned` already
+          // adopted for the same journals.
+          const slot = idempotencySlot(p.submittedBy, p.idempotencyKey);
+          if (!this.#idempotency.has(slot)) this.#idempotency.set(slot, acceptedBody(summary.runId, p.graphHash));
+          break;
+        }
+      }
+    })());
+    try {
+      await started;
+    } catch (e) {
+      // ONLY IF IT IS STILL THIS ATTEMPT. Two concurrent submissions share one promise and
+      // both land here; the first clears the field, and the second must not clear a fresh
+      // scan a third request has since started. Compare the value, do not assume it.
+      if (this.#idempotencyRestored === started) this.#idempotencyRestored = undefined;
+      throw e;
+    }
+  }
+
+  /**
+   * Attach the runs this journal has parked on an OPEN gate, as the socket opens.
+   *
+   * A WARM START, NOT THE PERIMETER — and it used to be both, which is what made its bounds
+   * matter so much. `#callbackEngine` binds the run on the callback route itself, after the
+   * signature verifies, so a gate this scan never reaches is still answerable. What this
+   * buys is the part no inbound request can trigger: `#bindFromIndex` re-arms the gate clock
+   * (`rehydrateGates`), so a gate that must ESCALATE or EXPIRE while nobody posts anything
+   * has a process holding its `DeliverySpec` from the moment the socket opens.
+   *
+   * WHY IT CANNOT SIMPLY BIND EVERYTHING ON THE REQUEST. `#bindFromIndex`'s own rule is
+   * "only on write paths, and only AFTER authorization", and the callback route is the one
+   * unauthenticated write on the plane: binding on arrival would let any stranger who can
+   * guess a run id make this process fold a journal and hold a `RunContext` that `#retire`
+   * frees only when the run ends. `#callbackEngine` is where that rule is satisfied — see it
+   * for which of `GateCallbackRouter`'s checks have already run by then.
+   *
+   * WHAT THAT COST BEFORE EITHER EXISTED. On a plane that did not itself submit the run —
+   * after a restart, after a deploy, or on a second replica over the same journal — a
+   * CORRECTLY SIGNED approval on the URL the vendor was handed answered 404
+   * `E_RUN_NOT_FOUND "… is not attached"`, and because step 3 had already admitted the
+   * request as durable, a FALSE `gate.callback_rejected {reason:"not_found"}` landed in that
+   * run's own journal while the run and the gate both existed and were open. The reason
+   * string describes THIS PROCESS's attachment state and is read as a statement about the run.
+   *
+   * SO THE CAPABILITY MOVES INTO THE PLANE. `cli.ts`'s gate clock has done exactly this on
+   * every tick (`armForeignGates`), but a library embedder calling `startControlPlane` with
+   * no clock got a plane whose gate routes worked only for runs it submitted itself.
+   * Property 2 says the things in the box are written against the surface a stranger uses; a
+   * plane that needs the CLI to be answerable is the other thing.
+   *
+   * **IT PAGES, AND THE TWO BOUNDS ARE DIFFERENT ON PURPOSE.** This was one
+   * `listRuns(MAX_QUEUE_SCAN, { raisedAGate: true })` whose result was then filtered down to
+   * `awaiting_gate` — and `raisedAGate` means "has EVER raised one", ordered by the most
+   * recent `gate.raised`. So on the only deployments this method is for — the ones that
+   * actually use gates — the whole 500-row budget was spent on FINISHED runs and the open
+   * gate at the back was never armed. Measured: 600 newer gated-and-decided runs in the
+   * journal, one genuinely open gate behind them, plain restart, gate unarmed. `after` is
+   * the cursor `listRuns` grew for exactly this, so the walk stops on what it has ARMED
+   * (`MAX_QUEUE_SCAN` open gates) rather than on what it has READ.
+   *
+   * READING IS STILL BOUNDED, by `MAX_ARM_SCAN` rows, because the cost per row is a FOLD:
+   * `projection` reads a run's whole journal, and "page to the end of the gated listing" on
+   * a journal with a million decided gates is a boot that never finishes. The read bound is
+   * the one that may now be hit without losing an answer — a gate past it is armed by
+   * `#callbackEngine` when its decision arrives, and by `loom serve`'s clock on the next
+   * tick.
+   *
+   * SILENT. A run whose graph this deployment does not hold is skipped by `#bindFromIndex`
+   * and stays 404, which is the honest answer. A store that throws leaves the plane unarmed
+   * rather than unbootable: every route binds lazily on its own, and refusing to serve at
+   * all because one journal row is odd would be a worse failure than the one being fixed.
+   */
+  async #armGatedRuns(): Promise<void> {
+    try {
+      let armed = 0;
+      let read = 0;
+      let after: RunId | undefined;
+      while (armed < MAX_QUEUE_SCAN && read < MAX_ARM_SCAN) {
+        const page = await this.#store.listRuns(
+          Math.min(MAX_QUEUE_SCAN, MAX_ARM_SCAN - read),
+          after === undefined ? { raisedAGate: true } : { raisedAGate: true, after },
+        );
+        if (page.length === 0) return;
+        read += page.length;
+        for (const summary of page) {
+          // ONLY RUNS STILL WAITING. Attaching a finished run would cost a `RunContext`
+          // apiece that nothing ever frees — and it is what the un-paged version spent its
+          // entire budget deciding.
+          if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
+          await this.#bindFromIndex(summary.runId);
+          if (++armed >= MAX_QUEUE_SCAN) return;
+        }
+        const next = page[page.length - 1]!.runId;
+        // A CURSOR THAT DOES NOT ADVANCE ENDS THE WALK. `after` is contractually EXCLUSIVE,
+        // so a store that returns its own boundary again would spin this loop forever inside
+        // `listen()` — a plane that never binds its socket. `cli.ts`'s run clock refuses the
+        // same shape loudly; here the honest answer is to stop arming, because a boot that
+        // does not complete is strictly worse than a warm start that is short.
+        if (next === after) return;
+        after = next;
+      }
+    } catch {
+      /* unarmed, not unbootable — see above */
+    }
+  }
+
+  /**
+   * The `CallbackEngine` the unauthenticated gate route runs against — the engine, plus the
+   * one bind that route could not make for itself.
+   *
+   * WHY IT EXISTS. `#armGatedRuns` arms what the journal holds at `listen()`, and that is a
+   * one-shot: a gate raised on replica A five minutes after replica B booted is not in B's
+   * scan and never will be. The published callback URL is sprayed across replicas by the
+   * load balancer, so the vendor's correctly signed approval lands on B, `resolveGate` finds
+   * no `RunContext`, and B answers 404 `E_RUN_NOT_FOUND` and writes a durable
+   * `gate.callback_rejected {reason:"not_found"}` into the run's own journal while the gate
+   * is open and on its expiry clock. **The replica set is the deployment `#armGatedRuns`
+   * names as its motivation, and a boot-time scan cannot cover it by construction.**
+   *
+   * WHY IT IS SAFE HERE AND NOT ON ARRIVAL. `#bindFromIndex` may run "only on write paths,
+   * and only AFTER authorization", and this route carries no credential — binding on arrival
+   * would let anyone who can guess a run id make this process fold a journal and hold a
+   * `RunContext`. `resolveGate` is not arrival. By the time `GateCallbackRouter.handle` calls
+   * it, all six of these have already passed: the channel name matched one this deployment
+   * configured; the channel VERIFIED the signature over the bytes as sent; the request
+   * deadline had not passed; the run exists with an open gate; the callback names a human;
+   * and that human is on the gate's approvers list when it has one. That is a strictly
+   * NARROWER door than the bearer token the five authenticated write routes bind behind.
+   *
+   * `openGates` AND `projection` DELIBERATELY DO NOT BIND. Both answer from the journal on an
+   * unattached run — `Engine.openGates` says so in as many words — so binding there would buy
+   * nothing and would move the attach to before the signature is known good, which is the
+   * whole distinction above. One bind, at the narrowest point that needs it.
+   *
+   * The methods are FORWARDED rather than the engine being handed over with one patched, so
+   * the object `GateCallbackRouter` holds has exactly the three methods its interface names
+   * and no route can reach the rest of the engine through it.
+   */
+  #callbackEngine(): CallbackEngine {
+    // THE ROUTER'S OWN INTERFACE IS THE CONTRACT, so the widening happens here, once, rather
+    // than at the call below. `CallbackEngine.resolveGate` types its `actor` as any `Actor`
+    // while `Engine.resolveGate` accepts a human (or `system:replay` in replay mode) — the
+    // narrowing that `Engine`'s own docstring calls structural. `Engine` satisfies
+    // `CallbackEngine` and always did; what changed is only that this file now names the
+    // conversion instead of getting it from method bivariance at the assignment.
+    const engine = this.#engine as CallbackEngine;
+    return {
+      projection: (runId) => engine.projection(runId),
+      openGates: (runId) => engine.openGates(runId),
+      resolveGate: async (runId, input) => {
+        // NOT SWALLOWED. A bind that throws is this plane failing to attach a run whose
+        // decision it has already authenticated, and the caller must hear that rather than
+        // the 404 it decays into. A graph this deployment does not hold is a `return`, not a
+        // throw — see `#bindFromIndex` — and still ends as the honest "not attached".
+        await this.#bindFromIndex(runId);
+        return engine.resolveGate(runId, input);
+      },
+    };
+  }
+
   async #bindFromIndex(runId: RunId): Promise<void> {
     const wanted = await this.#engine.compiledGraphHash(runId);
     const found = this.#graphByHash(wanted);
@@ -2722,6 +3081,8 @@ export class ControlPlane {
 
       {
         method: "GET",
+        // The one route a load balancer probes, and the only one that needs HEAD.
+        head: true,
         pattern: /^\/health$/,
         handle: async ({ req, res }) => {
           const callbacks = this.#callbacks;
@@ -2812,6 +3173,12 @@ export class ControlPlane {
           const key = header(req, "idempotency-key");
           const slot = key === undefined ? undefined : idempotencySlot(auth, key);
           if (slot !== undefined) {
+            // A MISS IS "I DO NOT KNOW", NOT "NEW", and it used to be answered with "new".
+            // The map is process-local and the journal is not, so a cold map and an unseen
+            // key are the same observation — and the passing answer to that is a second run
+            // with every irreversible side effect of the first. Rebuild from the journal
+            // before deciding. Once, lazily; see `#restoreIdempotency`.
+            if (!this.#idempotency.has(slot)) await this.#restoreIdempotency();
             const seen = this.#idempotency.get(slot);
             // A duplicate submit BY THE SAME PRINCIPAL returns the ORIGINAL runId and
             // creates nothing. A different principal's identical key is a different slot.
@@ -2896,12 +3263,7 @@ export class ControlPlane {
             submittedBy: principalOf(mustAuth(auth)),
           });
           // 202, and the body says exactly what is durable — see the module docstring.
-          const accepted = {
-            runId,
-            graphHash: graph.graphHash,
-            durable: ["run.submitted", "run.compiled"],
-            note: "accepted means this WILL run, not that it HAS run",
-          };
+          const accepted = acceptedBody(runId, graph.graphHash);
           if (slot !== undefined) {
             // Insertion order, oldest first, following `GateCallbackRouter.#admitRow`.
             if (this.#idempotency.size >= MAX_IDEMPOTENT_SUBMITS) {
@@ -3002,9 +3364,30 @@ export class ControlPlane {
          * page here is an amplifier reachable by the lowest-privilege credential a
          * deployment issues.
          *
-         * The reversal is a denormalised open-gate index beside `run_head` — the same move
-         * `submitted_by` already is, one question over — at which point the scan bound and
-         * the truncation flag both go away.
+         * HALF OF THAT IS NOW PAID ONCE PER HEAD RATHER THAN PER POLL. `#gatelessAt`
+         * remembers, per run, the head at which the fold found NO open gate, so the candidate
+         * set's dominant member — a run that gated once and finished, which is what
+         * `raisedAGate` accumulates forever — is skipped instead of re-folded. Measured on 8
+         * gated runs, all finished, ZERO gates open, on a plane rebuilt over the same store:
+         * poll #1 read 1184 journal events and polls #2 and #3 read 0. Warm, `Engine.#project`
+         * was already incremental and this changes nothing.
+         *
+         * WHAT IS LEFT IS `openGates`, and it is the bigger half whenever a gate IS open:
+         * `HumanGateBroker.list` calls `project(log)`, which does `log.read(1)` with no cursor
+         * at all, so the route folds from seq 1 the same journal it folded incrementally one
+         * line earlier and throws the cheap answer away. Measured warm, 8 runs each parked on
+         * a gate: 1056 events per poll, every one of them from that second fold. The fix is to
+         * let `list` take the projection this handler already holds — `run/gates.ts` and
+         * `run/engine.ts`, both kernel, and a `fix` may touch them. It is removable
+         * duplication and not a missing index.
+         *
+         * The eventual reversal is still a denormalised open-gate index beside `run_head` —
+         * the same move `submitted_by` already is — at which point the scan bound and the
+         * truncation flag both go away. Its hazard, which is the load-bearing part of that
+         * change: an existing journal's `run_head` rows carry no counter, and reading a
+         * missing one as "no open gate" would silently drop a live question from the only
+         * place its approver can find it. Absent must mean "fold it anyway", exactly as an
+         * absent entry in `#gatelessAt` does.
          */
         handle: async ({ res, url, auth }) => {
           const who = mustAuth(auth);
@@ -3034,8 +3417,22 @@ export class ControlPlane {
               break;
             }
             scanned++;
+            // ALREADY ANSWERED AT THIS HEAD. Counted in `scanned` because the walk really did
+            // reach this run; skipped before the fold because the fold's answer is known. See
+            // `#gatelessAt`.
+            if (this.#gatelessAt.get(summary.runId) === summary.headSeq) continue;
             const p = await engine.projection(summary.runId);
             if (p === undefined) continue;
+            if (!Object.values(p.gates).some((g) => g.state === "open")) {
+              // Insertion order, oldest first, following `#idempotency` and
+              // `GateCallbackRouter.#admitRow`.
+              if (this.#gatelessAt.size >= MAX_QUEUE_SCAN) {
+                const oldest = this.#gatelessAt.keys().next();
+                if (oldest.done !== true) this.#gatelessAt.delete(oldest.value);
+              }
+              this.#gatelessAt.set(summary.runId, summary.headSeq);
+              continue;
+            }
             const mine = ownsRun(p, who);
             // A stranger's queue holds ONLY the questions naming them. An unrestricted gate is
             // answerable by whoever reaches it, and putting it in everyone's queue would
@@ -3601,7 +3998,27 @@ export class ControlPlane {
             // gate hashed to one key: the second one's decision was swallowed as "already
             // handled" and answered 200. A rejection that never happened, reported as
             // success, is the worst shape this endpoint has.
-            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? String(gateId)),
+            //
+            // AND THE DEFAULT SLOT CARRIES THE DECISION, which is the half that namespacing
+            // by principal left standing: `String(gateId)` is the same string for every
+            // decision one person ever sends about one gate, so their approve and their
+            // later reject shared a slot. `#resolveOnce` tests the seen-key map BEFORE
+            // `gate.state !== "open"`, so the second one returned `{resolved:false}` and this
+            // route answered 200 — the sentence above, produced by the line under it.
+            // Measured: `bob reject -> 200 {"decision":"reject"}` with `gate.decided` saying
+            // approve and the guarded write already done.
+            //
+            // AN EXPLICIT HEADER STILL COLLAPSES A GENUINE RETRY, unchanged: a sender that
+            // keys per message keeps one slot per message. What the default now says is
+            // "this exact decision, from this principal, on this gate", so a DIFFERENT
+            // decision falls through to the gate's own state check and gets the 409 it
+            // deserves. It opens no memory vector: an entry is recorded only on a decision
+            // that commits, and a gate commits once.
+            //
+            // OVER `checkedDecision`'s OUTPUT, never the raw body: that call constructs a
+            // fresh checked object, so key order is fixed and no getter on a caller's object
+            // runs inside a key derivation.
+            idempotencyKey: idempotencySlot(auth, header(req, "idempotency-key") ?? `${String(gateId)}:${JSON.stringify(decision)}`),
           });
           // THE RESPONSE IS SCOPED TOO, and forgetting that made every other check on this
           // route decorative. `summarise` carries the run's channels, outputs, usage, every
@@ -3610,7 +4027,24 @@ export class ControlPlane {
           // per gate. An approver who answered one question was handed the whole run as the
           // reply. A door that refuses a read and then performs it in the response to a write
           // is not a door.
-          send(res, 200, ownsRun(p, mustAuth(auth)) ? this.#summary(p) : { runId, gateId, status: p.status, decision: decision.kind });
+          //
+          // AND IT ECHOES THE RECORDED DECISION, NOT THE SUBMITTED ONE. This read
+          // `decision.kind` — the value the caller had just sent — so the non-owner branch
+          // reported what was ASKED FOR while the owner branch (`#summary`, through
+          // `gateRecordWire`) reported what the journal holds. Two branches of one `send`
+          // disagreeing about one gate is how "your rejection succeeded" got said about an
+          // approval that stands. The slot above closes the path that reached it; this
+          // closes the shape, because a door that reports a write must report what the
+          // write did.
+          //
+          // The fallback is the submitted kind and it is not a guess: the only way here
+          // with no gate in the projection is a decision the fold did not record, and
+          // there is nothing truer to say about that than what was asked.
+          send(
+            res,
+            200,
+            ownsRun(p, mustAuth(auth)) ? this.#summary(p) : { runId, gateId, status: p.status, decision: gateOf(p, gateId)?.decision ?? decision.kind },
+          );
         },
       },
 
