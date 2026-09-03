@@ -49,9 +49,17 @@ design argument". Treat the count as a number a reviewer must watch in the diff,
 tool defends.
 
 Read it from the guard and nowhere else. `git log --grep='^Kernel-seam:'` inflates (it matches prose
-ABOUT the trailer; guard 11, grep 12) and git's own trailer parser undercounts (it reads only the
-final paragraph). Three commands, three answers. `check-kernel.mjs`'s own failure text still
-recommends the grep — a correction it is owed.
+ABOUT the trailer; guard 11, grep 12) and git's own trailer parser reads only the final paragraph.
+Three commands, three answers. `check-kernel.mjs`'s failure text used to recommend the grep and no
+longer does — that correction is paid.
+
+**The limit that fires most often is `fix:`, and the phase-2-4 merge is the worked example.** Five
+pinned files changed on it and the ledger recorded nothing, correctly by the rules: every commit
+was a `fix`. But `journal/events.ts` gained three new durable payload fields —
+`run.submitted.limits`, `run.submitted.capabilities`, `run.compiled.postures` — and new journal
+vocabulary is capability, whatever the subject line says. The seams were genuinely fixes (they
+close journal violations seven and eight) and the vocabulary was genuinely new. Both are true, and
+only a reader comparing the two notices.
 
 The list says nothing about whether `engine.ts` should be split — see its header for three
 arguments against. `check-surface.mjs` pins the exported NAME SET and nothing else, so it reports
