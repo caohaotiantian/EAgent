@@ -24,7 +24,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -98,6 +98,71 @@ test("fs.glob is bounded too — a `**​/`-heavy glob is the same defect", asyn
 });
 
 // ── the ordinary case, which the bound must not touch ────────────────────────
+
+/**
+ * THE BUDGET BECAME A FILE-COUNT LIMIT, AND REFUSED AN ORDINARY LITERAL PATTERN.
+ *
+ * `matchBudget` charges wall clock and `runInContext` with a `timeout` costs a fixed 43-48 µs
+ * because it arms a watchdog. `fs.glob` was batched for exactly that reason and `fs.grep` was
+ * left with TWO unbatched call sites — one `scan(include, [rel])` per file and one
+ * `scan(re, lines)` per file — so a large workspace spent the whole 2,000 ms budget on watchdogs
+ * before any matching happened, and answered a literal string with "the pattern is too expensive
+ * to run". Measured on 60,000 two-line files: `fs.grep {pattern: "zzzzzzzz"}`, no `include` at
+ * all, refused after 3,289 ms where the unbounded `a638e7d` answered `(no matches)` in 1,304 ms.
+ *
+ * 48,000 EMPTY FILES HERE, and both numbers are chosen rather than round. The defect is a cost
+ * per CALL, so an empty file trips it exactly as a full one does — `"".split("\n")` is one line
+ * and still buys a watchdog — and empty files cost ~2 s to create instead of ~8 s. 48,000 is
+ * where BOTH call sites are over the budget on the machine this was written on: measured against
+ * the unbatched tree, `{pattern}` alone refused at 3,206 ms and `{pattern, include}` at 2,624 ms,
+ * while the batched one answers both in under 1,000 ms. The margin is the point — a count just
+ * over the threshold would be a test about this laptop.
+ *
+ * BOTH HALVES, OVER ONE TREE, because measuring only the defect shape is what let this ship: the
+ * workspace holds the catastrophic line too, and the pathological pattern must still be refused
+ * over the very same files the literal one is now answered over.
+ */
+test("a large workspace does not exhaust the budget on fixed per-call cost", async () => {
+  const root = mkdtempSync(join(tmpdir(), "loom-grep-scale-"));
+  try {
+    for (let d = 0; d < 48; d++) {
+      const dir = join(root, `d${String(d)}`);
+      mkdirSync(dir);
+      for (let f = 0; f < 1000; f++) writeFileSync(join(dir, `f${String(f)}.ts`), "", "utf8");
+      // One file per directory with real content, so the hit below crosses batch boundaries.
+      writeFileSync(join(dir, "real.ts"), `export const a = 1;\nexport function g7() { return a; }\n`, "utf8");
+    }
+    writeFileSync(join(root, "redos.txt"), CATASTROPHIC_LINE, "utf8");
+    const g = toolOf(root, "fs.grep");
+
+    // 1 — the ordinary case, and the exact call the finding was reported against: a literal
+    // pattern, no `include`, over 48,049 files. It must ANSWER.
+    const miss = (await g.execute({ pattern: "zzzzzzzz" }, ctx())) as ToolResult;
+    assert.notEqual(miss.isError, true, `a literal pattern must not be called too expensive: ${miss.content}`);
+    assert.equal(miss.content, "(no matches)");
+
+    // 2 — …and the second call site, which is one scan per PATH: `include` must answer too, and
+    // the hits must still carry the right path and line number across the batch boundaries.
+    const hit = (await g.execute({ pattern: "export function g7\\(", include: "**/*.ts" }, ctx())) as ToolResult;
+    assert.notEqual(hit.isError, true, hit.content);
+    assert.equal((hit.details as { count: number }).count, 48, "one per directory");
+    assert.match(hit.content, /^d\d+\/real\.ts:2:export function g7\(\) \{ return a; \}$/m);
+
+    // 3 — the defect case, over the SAME tree: still refused, and still promptly. Batching the
+    // ordinary case must not have bought it by weakening the bound.
+    const started = Date.now();
+    const bad = (await g.execute({ pattern: "(a+)+$" }, ctx())) as ToolResult;
+    const elapsed = Date.now() - started;
+    assert.equal(bad.isError, true, "the catastrophic pattern must still be refused");
+    assert.match(bad.content, /too expensive|budget/i);
+    // Absolute, with an order-of-magnitude margin over the 2 s budget. The bound is on MATCHING;
+    // walking and reading 48,049 files is outside it and is a cost the two searches above paid
+    // too, so the worst block is the budget PLUS one traversal rather than the budget alone.
+    assert.ok(elapsed < 30_000, `the refusal must arrive on the budget, not on the pattern; took ${String(elapsed)} ms`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("an ORDINARY grep still finds every match, with line numbers", async () => {
   const s = ws({

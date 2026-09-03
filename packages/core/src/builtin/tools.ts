@@ -613,12 +613,28 @@ const SEARCH_RESULT_CAP = 100;
  * therefore more than two orders of magnitude above everything a real search does, let alone the
  * matching alone. A search that needs more than two seconds of BACKTRACKING is not a search.
  *
- * WHAT THIS COSTS, measured the same way, before → after: `fs.grep` 6.2 → 8.8 ms and `fs.glob`
- * 0.8 → 1.2 ms, both about 1.4x. WHAT IT DOES NOT BUY: the loop is still BLOCKED while a search
- * runs — `execute` is synchronous and this bounds the block rather than removing it, so a
- * pathological pattern still costs every other run on this process up to two seconds. Removing
- * the block entirely means moving the scan to a worker thread, which is a bigger change than
- * this one and is not what the finding was about. Bounded and stoppable was.
+ * WHAT THIS COSTS, re-measured over the same 62 files on 2026-09-03, best of three at 20
+ * iterations, against the unbounded `a638e7d`:
+ *
+ *                                   a638e7d   unbatched   batched
+ *     fs.grep "export function"      5.37 ms    8.27 ms    7.41 ms
+ *     fs.grep + include "**​/*.ts"    5.31 ms    9.81 ms    7.34 ms
+ *     fs.glob "**​/*.ts"              0.34 ms    0.58 ms    0.55 ms
+ *
+ * — about 1.4x for `fs.grep`, which is what a bound that arms a watchdog per batch costs.
+ *
+ * AND THE BUDGET IS NOT A FILE-COUNT LIMIT, which is what the middle column was on a large
+ * workspace: see `GREP_LINE_BATCH` for the 60,000-file measurement where an ordinary literal
+ * pattern was REFUSED, and for why both of `fs.grep`'s call sites had to be batched to fix it.
+ *
+ * WHAT IT DOES NOT BUY: the loop is still BLOCKED while a search runs — `execute` is synchronous
+ * and this bounds the block rather than removing it. The bound is on MATCHING, not on the whole
+ * call: walking a tree and reading its files is outside it, so the worst block a pathological
+ * pattern can impose is the budget PLUS the traversal, and the traversal is a cost the ordinary
+ * search on that tree pays too. Measured on the 60,000-file tree: `(a+)+$` refuses after
+ * 4,384 ms, of which ~1,450 ms is the same walk a successful `fs.grep` of that tree spends.
+ * Removing the block entirely means moving the scan to a worker thread, which is a bigger change
+ * than this one and is not what the finding was about. Bounded and stoppable was.
  */
 const MATCH_BUDGET_MS = 2_000;
 
@@ -650,15 +666,46 @@ const SCAN_SCRIPT = new Script(
 );
 
 /**
- * Paths `fs.glob` accumulates before spending one match call on them.
+ * Paths a search accumulates before spending one match call on them.
  *
- * `fs.grep` hands a whole file's lines over at once and needs no buffer; `fs.glob` sees one path
- * per `visit`, so without this it would pay the 43 µs fixed cost per FILE. Measured over this
- * repo's `packages/core/src` (62 files), unbuffered `fs.glob "**​/*.ts"` cost 22.6 ms
- * against a 0.8 ms baseline; buffered it is 1.4 ms. The batch also delays `capped` by at most
- * one buffer, which only means a few more paths are walked before the cap stops the search.
+ * `fs.glob` sees one path per `visit`, so without this it would pay the 43 µs fixed cost per
+ * FILE. Measured over this repo's `packages/core/src` (62 files), unbuffered
+ * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms. The batch
+ * also delays `capped` by at most one buffer, which only means a few more paths are walked
+ * before the cap stops the search.
+ *
+ * SHARED WITH `fs.grep`'s `include` FILTER, which this docstring used to say needed no buffer.
+ * That sentence — "`fs.grep` hands a whole file's lines over at once and needs no buffer" — was
+ * the defect: it is true of the CONTENT scan and false of the include scan, which is one call
+ * per path exactly like `fs.glob`'s. See `GREP_LINE_BATCH` for what it cost.
  */
 const GLOB_SCAN_BATCH = 512;
+
+/**
+ * Lines `fs.grep` accumulates ACROSS FILES before spending one match call on them.
+ *
+ * THE PER-CALL COST IS A COST PER FILE WHEN THE FILES ARE SMALL, and a workspace is mostly small
+ * files. `matchBudget` charges wall clock, `runInContext` with a `timeout` is a fixed 43-48 µs
+ * because it arms a watchdog, and `fs.grep` was making two unbatched calls per file — `scan`
+ * for `include` and `scan` for the content. At 60,000 files that is 120,000 watchdogs, ~5.4 s of
+ * pure fixed cost against a 2,000 ms budget, so the budget was gone before any real matching
+ * happened. MEASURED on a 60,000-file tree of two-line files: `fs.grep {pattern: "zzzzzzzz"}` —
+ * a literal string, no `include` — REFUSED with "the pattern is too expensive to run" after
+ * 3,289 ms, where the same tree at `a638e7d` answered `(no matches)` in 1,304 ms. An ordinary
+ * search was made impossible by the guard that was supposed to bound a pathological one.
+ *
+ * 4,096, AND THE UNIT IS LINES RATHER THAN FILES because that is what the cost is per. A file
+ * contributes as many lines as it has, so one batch is 4,096 lines whether that is one file or
+ * four thousand, and the fixed cost lands at ~11 ns per line — at or below what testing a line
+ * against a compiled regex costs, which is the point at which it stops being the thing that
+ * decides the answer. It is not a bound on memory beyond one batch plus one file, since a file's
+ * lines are queued whole and `GREP_FILE_CAP` already bounds a file at 1 MB.
+ *
+ * THE BUDGET IS STILL A TOTAL, so the catastrophic pattern is still terminated: a batch runs
+ * under one `runInContext` timeout of whatever remains, and a pattern that backtracks
+ * exponentially exhausts it inside the first batch exactly as it did inside the first file.
+ */
+const GREP_LINE_BATCH = 4_096;
 
 /** Thrown out of `visit` when a search has spent `MATCH_BUDGET_MS`; caught at the tool's door. */
 class MatchBudgetExhausted extends Error {}
@@ -888,39 +935,96 @@ function fsGrep(opts: BuiltinOptions): ToolDefinition {
       // ONE budget for the whole call, spent across every file and both regexes — the pattern
       // and the `include` glob, since either can be the expensive one.
       const scan = matchBudget();
+
+      // BOTH SCANS ARE BATCHED, for the reason `GREP_LINE_BATCH` gives: a `runInContext` costs
+      // 43-48 µs whatever it is asked, so an unbatched call per file makes the budget a
+      // FILE-COUNT limit rather than a matching limit. `fs.glob` was batched for exactly this and
+      // this tool was left with two unbatched call sites.
+      //
+      // Paths are buffered, then filtered by `include`, then read; a file's lines join a running
+      // buffer that is flushed whole. Traversal ORDER survives both buffers — the paths in a
+      // batch keep their walk order and a file's lines are contiguous within it — so the hits
+      // come out in the same order they did unbatched, which is what the output claims by
+      // printing `path:line:` and never sorting.
+      const pendingPaths: { rel: string; abs: string }[] = [];
+      const pendingLines: string[] = [];
+      const ownerRel: string[] = [];
+      const ownerNo: number[] = [];
+
+      const flushLines = (): void => {
+        if (capped || pendingLines.length === 0) return;
+        for (const i of scan(re, pendingLines)) {
+          if (hits.length >= SEARCH_RESULT_CAP) {
+            capped = true;
+            break;
+          }
+          hits.push(`${ownerRel[i]!}:${String(ownerNo[i]!)}:${pendingLines[i]!.slice(0, 400)}`);
+        }
+        pendingLines.length = 0;
+        ownerRel.length = 0;
+        ownerNo.length = 0;
+      };
+
+      const queue = (rel: string, abs: string): void => {
+        let text: string;
+        try {
+          // Bounded before it is scanned: a multi-gigabyte file in the workspace must
+          // narrow the results, not exhaust the process.
+          const fd = openLeaf(abs, constants.O_RDONLY);
+          try {
+            text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
+          } finally {
+            closeSync(fd);
+          }
+        } catch {
+          return;
+        }
+        // A NUL in the first chunk means binary; scanning it produces noise, not matches.
+        if (text.includes("\u0000")) return;
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+          pendingLines.push(lines[i]!);
+          ownerRel.push(rel);
+          ownerNo.push(i + 1);
+        }
+        // Checked after a whole file rather than inside the loop, so one file's lines are never
+        // split across two calls — which keeps a hit's line number and its text together without
+        // any bookkeeping, and costs at most one file's lines of extra buffer.
+        if (pendingLines.length >= GREP_LINE_BATCH) flushLines();
+      };
+
+      const flushPaths = (): void => {
+        if (pendingPaths.length === 0) return;
+        const batch = pendingPaths.splice(0);
+        // NO `include`, NO CALL. The common shape is a search with no path filter at all, and
+        // spending a watchdog per batch to learn that every path passes is pure cost.
+        if (include === undefined) {
+          for (const p of batch) {
+            if (capped) return;
+            queue(p.rel, p.abs);
+          }
+          return;
+        }
+        const keep = new Set(scan(include, batch.map((p) => p.rel)));
+        for (let i = 0; i < batch.length; i++) {
+          if (capped) return;
+          if (keep.has(i)) queue(batch[i]!.rel, batch[i]!.abs);
+        }
+      };
+
       try {
         eachFile(
           opts,
           ctx,
           sub,
           (rel, abs) => {
-            if (include !== undefined && scan(include, [rel]).length === 0) return;
-            let text: string;
-            try {
-              // Bounded before it is scanned: a multi-gigabyte file in the workspace must
-              // narrow the results, not exhaust the process.
-              const fd = openLeaf(abs, constants.O_RDONLY);
-              try {
-                text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
-              } finally {
-                closeSync(fd);
-              }
-            } catch {
-              return;
-            }
-            // A NUL in the first chunk means binary; scanning it produces noise, not matches.
-            if (text.includes("\u0000")) return;
-            const lines = text.split("\n");
-            for (const i of scan(re, lines)) {
-              if (hits.length >= SEARCH_RESULT_CAP) {
-                capped = true;
-                return;
-              }
-              hits.push(`${rel}:${String(i + 1)}:${lines[i]!.slice(0, 400)}`);
-            }
+            pendingPaths.push({ rel, abs });
+            if (pendingPaths.length >= GLOB_SCAN_BATCH) flushPaths();
           },
           () => capped,
         );
+        flushPaths();
+        flushLines();
       } catch (e) {
         if (e instanceof MatchBudgetExhausted) return budgetRefusal("fs.grep", String(args["pattern"]));
         throw e;
