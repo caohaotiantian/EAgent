@@ -11,6 +11,19 @@
  *
  * This folds that journal — the real one, not a hand-built projection, which is the distinction
  * `contention.test.ts` opens with — and asks the scheduler.
+ *
+ * TWO THINGS THIS FILE ALSO PINS, because the first version of the fix passed while being
+ * unreachable and while refusing the ordinary deployment:
+ *
+ *   - `Engine.#advanceSerially` DOES NOT CALL `select` ON THIS SHAPE. It short-circuits on an
+ *     empty `ready` set sixty-five lines earlier and finishes the run. The last test drives a
+ *     real engine over the stranded journal with a spy scheduler and asserts zero calls, so this
+ *     file states the gap rather than implying the product path works. Delete that test when the
+ *     engine consults `select` first, and flip it to the opposite assertion.
+ *   - THE WORKER ID IS NOT THE IDENTITY. `Engine` defaults `workerId` to `"worker-0"`, which is
+ *     stable across a restart, so a name-based "is this mine?" refused to reclaim for every
+ *     embedder and for the whole test harness. The reclaim tests below therefore run under the
+ *     DEFAULT id, on a fresh scheduler object, which is what a restarted process has.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -21,7 +34,10 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { encodeBranch, taskId as makeTaskId, type NodeId, type RunId, type TaskId } from "../../src/ids.ts";
 import { RunLog } from "../../src/run/log.ts";
 import { foldRun, type RunProjection } from "../../src/run/projection.ts";
-import { InProcessScheduler, LeasedScheduler } from "../../src/run/scheduler.ts";
+import { InProcessScheduler, LeasedScheduler, type Runnable, type Scheduler, type SelectInput } from "../../src/run/scheduler.ts";
+import { InProcessEventBus } from "../../src/bus.ts";
+import { Engine } from "../../src/run/engine.ts";
+import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
 import { compileSkeleton } from "./skeleton.ts";
 
 const RUN = "run_stranded" as RunId;
@@ -94,11 +110,79 @@ test("InProcessScheduler reclaims it once the node's OWN declared deadline has p
   assert.deepEqual(ask(s, w, LEASED_AT + 60_001, restarted), [AGENT_TASK], "past it, no live execution can hold it");
 });
 
-test("...and never takes back a lease this same worker still holds", async () => {
+test("...under `Engine`'s DEFAULT worker id, which a restart does not change", async () => {
+  // The shape the whole product path is in: `EngineOptions.workerId` is optional and defaults to
+  // `"worker-0"`, so the dead plane and the one reading its journal are the same NAME. A test
+  // that only ever varied the name proved the fix on the one deployment `cli.ts` produces and
+  // missed every embedder and this suite's own harness.
+  const w = await strandedRun(AGENT, AGENT_TASK, "worker-0");
+  const s = new InProcessScheduler(); // fresh, because a restart builds a fresh one
+  assert.deepEqual(ask(s, w, LEASED_AT + 60_000, "worker-0"), [], "inside the deadline, still live");
+  assert.deepEqual(ask(s, w, LEASED_AT + 60_001, "worker-0"), [AGENT_TASK], "past it, the predecessor's work is reclaimed");
+});
+
+test("...and never takes back a lease THIS scheduler object handed out", async () => {
   // In-process that lease is work running RIGHT NOW, in a later wave of a re-entrant `advance`.
-  const w = await strandedRun(AGENT, AGENT_TASK, "host:111:1");
+  // The journal cannot tell the two apart — same id, same shape — so the discriminator is that
+  // this object returned the task from `select` and therefore owns what happened next.
+  const clock = { t: LEASED_AT };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const graph = compileSkeleton();
+  const log = new RunLog(RUN, { store, now: () => clock.t });
+  const nodes = new Map<string, NodeSpec>(graph.spec.nodes.map((nd) => [String(nd.id), nd]));
+  await log.append([
+    {
+      type: "run.submitted",
+      payload: { workflow: "reentrant", graphHash: graph.graphHash, inputs: {}, idempotencyKey: "k", configDigest: "d" },
+      actor: SYSTEM_ACTOR("api"),
+    },
+    { type: "run.started", payload: { posture: "out" }, actor: SYSTEM_ACTOR("executor") },
+    {
+      type: "task.ready",
+      payload: { nodeId: AGENT, branchPath: encodeBranch(branch), edgesIn: ["e0"] },
+      actor: SYSTEM_ACTOR("scheduler"),
+      taskId: AGENT_TASK,
+    },
+  ]);
+  const fold = async (): Promise<RunProjection> => {
+    const events = [];
+    for await (const ev of store.read(RUN, 1)) events.push(ev);
+    return foldRun(events)!;
+  };
+
   const s = new InProcessScheduler();
-  assert.deepEqual(ask(s, w, LEASED_AT + 10_000_000, "host:111:1"), [], "our own lease is never expired out from under us");
+  // The wave this process dispatches …
+  assert.deepEqual(ask(s, { graph, projection: await fold(), nodes }, LEASED_AT, "worker-0"), [AGENT_TASK]);
+  // … and the lease the executor then writes for it.
+  await log.append([
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+  ]);
+  const leased = { graph, projection: await fold(), nodes };
+  assert.deepEqual(
+    ask(s, leased, LEASED_AT + 10_000_000, "worker-0"),
+    [],
+    "our own in-flight lease is never expired out from under us, at any age",
+  );
+  // A DIFFERENT process reading the same journal is a fresh object, and it reclaims.
+  assert.deepEqual(ask(new InProcessScheduler(), leased, LEASED_AT + 60_001, "worker-0"), [AGENT_TASK]);
+
+  // AND THE MEMORY IS RELEASED WHEN THE TASK RESOLVES, which is observable rather than a claim
+  // about a private map: once the task commits, this object is no longer answerable for it, so a
+  // LATER lease on the same id — the shape a retry plus a crash produces — is reclaimable again.
+  clock.t = LEASED_AT + 1;
+  await log.append([
+    { type: "task.committed", payload: { status: "succeeded" as const, writes: {}, take: [], attempt: 1, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0, wallMs: 0 } }, actor: SYSTEM_ACTOR("executor"), taskId: AGENT_TASK },
+  ]);
+  assert.deepEqual(ask(s, { graph, projection: await fold(), nodes }, LEASED_AT + 2, "worker-0"), [], "committed, so nothing to run");
+  await log.append([
+    { type: "task.ready", payload: { nodeId: AGENT, branchPath: encodeBranch(branch), edgesIn: ["e0"] }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 2 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+  ]);
+  assert.deepEqual(
+    ask(s, { graph, projection: await fold(), nodes }, LEASED_AT + 60_002, "worker-0"),
+    [AGENT_TASK],
+    "the id was forgotten when it stopped being `leased`, so this lease is a stranger's",
+  );
 });
 
 test("a node with no enforced deadline is NOT reclaimed — the scheduler fails closed", async () => {
@@ -147,4 +231,73 @@ test("the ORDINARY selection is unchanged — ready tasks, critical path first",
     1,
     "maxParallelism still bounds the wave",
   );
+});
+
+/**
+ * THE ENGINE NEVER ASKS. Everything above is a property of `select`, and `select` is not on the
+ * path a stranded run takes.
+ *
+ * This is a REGRESSION PIN ON A KNOWN GAP, not a passing feature: it asserts the wrong
+ * behaviour, so that the day `engine.ts` moves its short-circuit below the scheduler call this
+ * test fails and is flipped. `#advanceSerially` reads
+ *
+ *     const ready = tasksInState(p, "ready").filter(…);
+ *     if (ready.length === 0) { … await this.#finish(ctx, p); return …; }
+ *
+ * sixty-five lines above `const wave = this.#scheduler.select({…})`. A SIGKILLed plane leaves
+ * `ready` empty and one task `leased`, so the run is FINISHED — folded to `failed` — without any
+ * scheduler being consulted.
+ */
+class SpyScheduler implements Scheduler {
+  readonly kind = "spy";
+  calls = 0;
+  readonly #inner = new InProcessScheduler();
+  select(input: SelectInput): readonly Runnable[] {
+    this.calls += 1;
+    return this.#inner.select(input);
+  }
+}
+
+test("the engine's `ready.length === 0` short-circuit means `select` is never called on a stranded run", async () => {
+  const clock = { t: LEASED_AT };
+  const store = new MemoryStateStore({ now: () => clock.t });
+  const graph = compileSkeleton();
+  const log = new RunLog(RUN, { store, now: () => clock.t });
+  await log.append([
+    {
+      type: "run.submitted",
+      payload: { workflow: "stranded", graphHash: graph.graphHash, inputs: {}, idempotencyKey: "k", configDigest: "d" },
+      actor: SYSTEM_ACTOR("api"),
+    },
+    { type: "run.started", payload: { posture: "out" }, actor: SYSTEM_ACTOR("executor") },
+    {
+      type: "task.ready",
+      payload: { nodeId: AGENT, branchPath: encodeBranch(branch), edgesIn: ["e0"] },
+      actor: SYSTEM_ACTOR("scheduler"),
+      taskId: AGENT_TASK,
+    },
+    { type: "task.leased", payload: { workerId: "worker-0", attempt: 1 }, actor: SYSTEM_ACTOR("scheduler"), taskId: AGENT_TASK },
+  ]);
+
+  const spy = new SpyScheduler();
+  // Well past the node's 60 s deadline, so `select` WOULD reclaim — see the tests above, which
+  // ask this exact scheduler the same question over this exact journal and get the task back.
+  clock.t = LEASED_AT + 10_000_000;
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions: new FunctionRegistry(),
+    models: new ModelRegistry(),
+    now: () => clock.t,
+    scheduler: spy,
+    policy: { granted: ["fs:read", "fs:write"], budget: { runUsd: 1 } },
+  });
+  engine.attach(RUN, graph);
+
+  const p = await engine.advance(RUN);
+
+  assert.equal(spy.calls, 0, "the scheduler seam is not reached at all on the shape reclaim exists for");
+  assert.equal(p.tasks[AGENT_TASK]?.state, "leased", "the stranded task is exactly where the crash left it");
+  assert.equal(p.status, "failed", "and the run was declared over rather than resumed");
 });
