@@ -136,12 +136,27 @@ has the reproductions.
   were found by the 2026-09-02 audit and are the same shape in the same blind spot, **a delegated
   child run**: `grantBound` (the capability allowlist a parent narrows for its child) and the
   child's dollar slice both lived only as arguments to `#contextFor`, recorded in no journal the
-  CHILD's own fold can read. Both reproduce end to end — a `pay.charge` refused `E_CAP_DENIED`
-  CHARGES after a restart; a child bounded to $0.01 SUCCEEDS and spends.
+  CHILD's own fold can read.
+  **Both are CLOSED.** Each run records its own bound on its own `run.submitted`, and
+  `PolicyEngine.restore` folds them one way — budgets by MIN, the allowlist by intersection.
+  Driven through the shipped binary across a real `kill -9` and a second `loom serve` over the
+  same SQLite journal, three levels deep: a grandchild answering its OWN gate in a process that
+  never held the parent refuses `E_CAP_DENIED` and writes no file, where at `a638e7d` the same
+  door wrote 20 bytes to disk; a child on a `budgetShare` of 0.0005 refuses
+  `E_BUDGET_EXHAUSTED`, where at `a638e7d` it ran against the deployment's whole $1
+  (`remainingUsd: 0.998955` is the tell). `test/run/lane-a-child-bounds-survive-restart.test.ts`
+  is the pin.
+  **Seven had a second door, and finding it is the lesson.** `restore` was called from
+  `#advanceSerially` alone, so a child ATTACHED AND REWOUND without being advanced compensated
+  against its own graph's list — the bound held on one verb and not the other, which is not a
+  bound. `#seedPolicy` is now what both verbs call;
+  `test/run/rewind-applies-the-parents-bound.test.ts` is the pin, with the control that makes it
+  mean something. **Ask of every new bound: which verbs reach the guard, and does it hold on all
+  of them?**
   **The enumeration is split, and a pointer to an enumeration is only as good as that
   enumeration's discipline about growing** — the sixth member landed in a file the citation did not
-  name, and the cited one still said five. When you close seven and eight, put them where a reader
-  of the other six will find them.
+  name, and the cited one still said five. Seven and eight are named in
+  `oversight-survives-restart.test.ts`'s header, where a reader of the other six will find them.
   **The lens that finds these:** ask of every `Map`, `Set`, class field and closure in `run/`,
   `server/` and `resources/` — what decision reads this, and what does it do when a restart hands
   it back empty? Then look where the existing tests do not: at a CHILD run.
@@ -201,9 +216,10 @@ docs/              dated records: audit findings and backlog re-checks, with rep
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-**Four branches are unmerged and green, all based on `a638e7d`** — `phase2-4-engine`,
-`phase2-4-plane`, `phase2-4-subsystems` (these three merge with zero conflicts; merged suite
-3,001 pass) and `phase1-taint` (parked, see the handoff §5). `loom` itself is at `a638e7d`.
+**The three phase-2-4 branches are MERGED into `loom`** — `phase2-4-engine`, `phase2-4-plane`
+and `phase2-4-subsystems` went in with zero conflicts, as predicted. `phase1-taint` is still
+unmerged and parked: RC-6 is a design change, not a patch, and the design comes before the code
+(see the handoff §5).
 
 ## Commands
 

@@ -11,15 +11,33 @@
  * journal already had. Invariant 2 in its sharpest form: state that is durable in
  * principle and only in memory in practice is state the journal is not authoritative for.
  *
- * THE CLASS HAS SIX MEMBERS, AND THE SIXTH IS NOT IN THIS FILE — it is
- * `test/run/escalation.test.ts`, "E8 — TAINT SURVIVES A RESTART FOR AN EXTERNALISED CHANNEL
- * TOO", and it is the reason `CLAUDE.md` stopped delegating the count to this file alone. Five
- * are below; the last two of those are at the bottom. Taint
- * was the fourth and E4's failure streak the fifth — both live on `RunContext`, both are
- * written by `Engine.#recordEvidence`, and only one of them was being restored. The lesson
- * that generalises past this file: the unit that needs a restore arm is not the FIELD, it
- * is the PRODUCER. `#restoreEvidence` is named for `#recordEvidence` so a sixth counter
- * added there has one obvious place it is missing from.
+ * THE CLASS HAS EIGHT MEMBERS AND ONLY FIVE ARE IN THIS FILE, so the enumeration lives here in
+ * full rather than in a count a reader has to trust. Five are below; the last two of those are
+ * at the bottom. Taint was the fourth and E4's failure streak the fifth — both live on
+ * `RunContext`, both are written by `Engine.#recordEvidence`, and only one of them was being
+ * restored. The lesson that generalises past this file: the unit that needs a restore arm is not
+ * the FIELD, it is the PRODUCER. `#restoreEvidence` is named for `#recordEvidence` so a sixth
+ * counter added there has one obvious place it is missing from.
+ *
+ * MEMBER SIX is `test/run/escalation.test.ts`, "E8 — TAINT SURVIVES A RESTART FOR AN
+ * EXTERNALISED CHANNEL TOO". It landed in a file `CLAUDE.md`'s citation did not name, which is
+ * why the count stopped being delegated to this file alone.
+ *
+ * MEMBERS SEVEN AND EIGHT are the same shape in the blind spot the first six share — a DELEGATED
+ * CHILD RUN, which no test above looks at. `grantBound` (the capability allowlist a parent
+ * narrows for its child) and the child's dollar slice both lived only as arguments to
+ * `#contextFor`, so a fresh process rebuilt the child at the deployment's budget and the child
+ * graph's own capabilities and the parent's narrowing was simply gone. Both are recorded on the
+ * CHILD's own `run.submitted` now and folded by `PolicyEngine.restore` — budgets by MIN, the
+ * allowlist by intersection. `test/run/lane-a-child-bounds-survive-restart.test.ts` pins them.
+ *
+ * AND SEVEN HAD A SECOND DOOR, which is the part worth carrying forward. `restore` was reached
+ * from `#advanceSerially` alone, so a child ATTACHED AND REWOUND — `POST /runs/<childRunId>/
+ * commands {"kind":"rewind"}`, or `loom rewind` — dispatched its compensation tools before any
+ * advance, against its own graph's list. A bound that holds on one verb is not a bound.
+ * `#seedPolicy` is what both verbs call; `test/run/rewind-applies-the-parents-bound.test.ts`
+ * pins it. The question that finds the next one is "which verbs reach this guard", not "is this
+ * value journaled".
  */
 
 import assert from "node:assert/strict";
