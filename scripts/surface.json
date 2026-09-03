@@ -480,6 +480,7 @@
   "postJson",
   "postureRank",
   "prepare",
+  "producedTokens",
   "project",
   "projectionDigest",
   "promotionCeiling",
