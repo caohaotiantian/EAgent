@@ -852,11 +852,23 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         for (const raw of take) {
           const edge = str(raw);
           if (edge === undefined) continue;
-          const from = opts.edgeSource[edge];
+          // THE THIRD JOURNAL STRING READ AS A RAW OBJECT KEY, and the sibling of the `hookRefs`
+          // one above: `edge` comes out of a `task.committed` payload's `take` array, and
+          // `cli.ts` builds `edgeSource` with `Object.fromEntries`, which inherits
+          // `Object.prototype`. A crafted `take: ["constructor"]` therefore resolved to a
+          // FUNCTION, `from === undefined` did not fire, and `from !== owner` compared a
+          // function against a node id — fabricating a finding that named
+          // `function Object() { [native code] }` as the node an edge leaves.
+          //
+          // `typeof from !== "string"` is the second half and is not belt-and-braces: `edgeSource`
+          // is a `Record<string, string>` by TYPE only, assembled from a compiled graph by a
+          // caller this function does not control, so a non-string value at a legitimate key is
+          // also "no source for this edge" rather than something to compare.
+          const from = Object.hasOwn(opts.edgeSource, edge) ? opts.edgeSource[edge] : undefined;
           // The gate bypass as a relation: `#activate` looked an edge id up in the WHOLE graph's
           // table, so a `take` naming another node's edge jumped everything between — and span
           // conformance reported `ok`, because every id involved was declared.
-          if (from === undefined) continue;
+          if (typeof from !== "string") continue;
           saw.add("edge.taken-belongs-to-its-node");
           if (from !== owner) {
             add("edge.taken-belongs-to-its-node", seq, `task "${tid}" took edge "${edge}", which leaves "${from}"`);
