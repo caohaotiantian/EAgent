@@ -1411,13 +1411,29 @@ export class HumanGateBroker {
    * silently empty is a check that passes by default.
    *
    * The two facts this keeps apart:
-   *   - "this gate names nobody"  → permissive, and the common case
+   *   - "this gate names nobody"  → permissive about WHICH person, and the common case
    *   - "I could not read who it names" → not reachable here, and that is the design:
    *     an unreadable `gate.raised` yields no `GateRecord`, so `resolve` has already
    *     refused with `E_GATE_NOT_FOUND` before arriving.
+   *
+   * THE ACTOR KIND IS ASKED WHATEVER THE GATE NAMES, and it used to be asked only inside the
+   * approvers branch — so for the common case an `agent` or `evolution` actor passed every check
+   * here and `gate.decided{decidedBy:"agent"}` was journaled. Measured through this method on the
+   * shipped skeleton's own no-approvers gate: `{"resolved":true}`. `claim`, a strictly weaker
+   * operation on this same object, has always refused a non-human unconditionally; the two doors
+   * disagreed about one rule. "Names nobody" is a statement about WHICH human, never about
+   * whether a human is required — which is what `isAuthorizedActor`'s own "an `agent` or
+   * `evolution` actor NEVER passes" already claimed.
    */
   #authorize(gate: GateRecord, input: ResolveInput): void {
     const approvers = gate.approvers ?? [];
+    if (!isAuthorizedKind(input.actor)) {
+      throw err.policy(
+        CODES.E_GATE_NOT_AUTHORIZED,
+        `gate "${gate.gateId}" can only be answered by a human; actor is ${input.actor.kind} "${actorId(input.actor)}"`,
+        { details: { gateId: gate.gateId, actor: actorId(input.actor), kind: input.actor.kind } },
+      );
+    }
     if (approvers.length > 0 && !isAuthorizedActor(approvers, input.actor)) {
       throw err.policy(
         CODES.E_GATE_NOT_AUTHORIZED,
@@ -3494,11 +3510,30 @@ const GATE_SYSTEM_ACTORS: ReadonlySet<string> = new Set([
  *
  * An approvers list names HUMANS. An `agent` or `evolution` actor NEVER passes: a model
  * satisfying a human approval is precisely the thing the gate exists to prevent. A
- * `system` actor passes only if it is one of the three components above.
+ * `system` actor passes only if it is one of the four components above.
+ *
+ * THAT SENTENCE USED TO BE FALSE FOR THE COMMON CASE, and the correction is `isAuthorizedKind`
+ * below rather than a change here: `#authorize` called this only when `approvers.length > 0`, so
+ * a gate naming nobody never asked the question at all. "NEVER passes" is now enforced by the
+ * caller asking the kind unconditionally. `run/delivery.ts`'s note about "a gate that names NO
+ * approvers skips `isAuthorizedActor` entirely" describes the old shape and is owed a correction
+ * in that file.
  */
 function isAuthorizedActor(approvers: readonly string[], a: Actor): boolean {
+  if (!isAuthorizedKind(a)) return false;
+  // A `system` actor that reached here is one of `GATE_SYSTEM_ACTORS`, and none of them is a
+  // person who could appear in an approvers list — the kind is what entitles it.
+  return a.kind === "system" || (a.kind === "human" && approvers.includes(a.subject));
+}
+
+/**
+ * MAY AN ACTOR OF THIS KIND ANSWER A GATE AT ALL — asked before, and independently of, WHICH
+ * subjects the gate names. Split out of `isAuthorizedActor` because the approvers question is the
+ * one a gate can decline to ask and this one is not.
+ */
+function isAuthorizedKind(a: Actor): boolean {
   if (a.kind === "system") return GATE_SYSTEM_ACTORS.has(a.component);
-  return a.kind === "human" && approvers.includes(a.subject);
+  return a.kind === "human";
 }
 
 function actorId(a: Actor): string {

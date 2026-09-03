@@ -165,12 +165,66 @@ export interface EventPayloads {
      * a `PayloadRef` is scoped to the run that stored it.
      */
     readonly external?: Readonly<Record<string, PayloadRef>>;
+    /**
+     * THE CEILINGS THIS RUN WAS SUBMITTED UNDER, after `Engine.submit`'s min-fold.
+     *
+     * They were arguments to `#contextFor` and nothing else, so they lived in one process's
+     * `PolicyEngine`. A subgraph child is where that bites: its parent carves a dollar SLICE
+     * (`subgraph.budgetShare`) and passes it as `budgetUsd`, and the number reached no event in
+     * the CHILD's own journal — while a child's fold reads only its own log. Measured before
+     * this field: a child bounded to $0.0001, refused `E_BUDGET_EXHAUSTED` in the process that
+     * carved the slice, ran an agent turn and spent after a restart.
+     *
+     * ABSENT MEANS "no ceiling narrower than the deployment's", which is what was true of every
+     * journal written before this field and is NOT the refusing value. The refusing value here
+     * would be zero dollars, and it would make every pre-existing journal unrunnable while
+     * protecting nothing: the deployment's own `policy.budget` is applied by `#contextFor`
+     * whatever this says, so absent leaves the operator's ceiling standing and present can only
+     * lower it. `PolicyEngine.restore` folds it by MIN for the same reason.
+     */
+    readonly limits?: {
+      readonly runUsd?: number;
+      readonly runTokens?: number;
+      readonly runWallMs?: number;
+    };
+    /**
+     * The effective capability allowlist — the graph's own, already filtered by any ceiling a
+     * PARENT imposed. Same defect and same shape as `limits`: `grantBound` was the `inherited`
+     * argument to `#contextFor` and nothing else, so `attach(childRunId, childGraph)` rebuilt a
+     * child at its OWN declared capabilities and a `pay.charge` the parent forbade charged.
+     *
+     * ABSENT MEANS "the graph declared no list", which `graph/spec.ts` already distinguishes
+     * from `[]` ("absent is not empty") — so absent cannot be read as "deny everything" without
+     * refusing every journal written before this field. `restore` intersects, never widens.
+     */
+    readonly capabilities?: readonly string[];
   };
   "run.compiled": {
     readonly graphHash: string;
     readonly nodes: number;
     readonly edges: number;
     readonly resolutionManifest: readonly { ref: string; digest: string }[];
+    /**
+     * THE COMPILED PER-NODE OVERSIGHT FLOOR — `plans[nodeId].posture`, sorted by node id.
+     *
+     * `graphHash` is `digest(spec)` and excludes `plans` by design, so the same spec compiled in
+     * a process that registered `chat.post` as `read_only` instead of `externally_visible`
+     * yields a byte-identical hash with a node's floor dropped from `in` to `out`. The check
+     * written for that compared `run.started.posture` — a single `max` over ALL nodes — so a
+     * PER-NODE drop was invisible whenever another node held the maximum. Driven end to end
+     * before this field: same journal, same graphHash, a restart, and the externally-visible
+     * post fired with no gate.
+     *
+     * RECORDED RATHER THAN HASHED. Folding the floors into `graphHash` would invalidate every
+     * journal already written and change what `evolution/score.ts`'s cohort key means — the hash
+     * is "the authored spec" and stays that. This makes the DERIVED floor a recorded fact, which
+     * is what `#assertBound` needs and all it needs.
+     *
+     * ABSENT means a journal from a build that predates the field, and `#assertBound` falls back
+     * to the aggregate check it always had. That is the pre-existing guarantee, not a weakening
+     * of one: no journal ever carried a per-node floor to compare against.
+     */
+    readonly postures?: readonly { readonly nodeId: NodeId; readonly posture: Posture }[];
   };
   "run.started": { readonly posture: Posture };
   "run.suspended": { readonly reason: "gate" | "operator" | "budget" | "backoff" };

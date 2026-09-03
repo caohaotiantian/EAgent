@@ -418,8 +418,15 @@ export class PolicyEngine {
   readonly #denied: readonly string[];
   readonly #deniedActors: ReadonlyMap<string, readonly string[]>;
   readonly #systemFloor: Posture;
-  readonly #budget: BudgetLimits;
-  readonly #allowlist: readonly string[] | undefined;
+  /**
+   * NOT `readonly`, and the two mutators are `restore` alone. A ceiling this object was
+   * CONSTRUCTED with is the deployment's; a ceiling the journal records for this run may be
+   * tighter, and re-seeding it is the only way a restarted process reaches the number the run
+   * was bounded by. `restore` folds it by MIN, so the direction is one-way.
+   */
+  #budget: BudgetLimits;
+  /** Mutable for `restore`'s sake, and it only ever INTERSECTS. See `#budget`. */
+  #allowlist: readonly string[] | undefined;
   readonly #onEscalate: PolicyEngineOptions["onEscalate"];
 
   /** Runtime escalations, keyed by scope (`run:<id>` or `node:<runId>/<nodeId>`). */
@@ -666,6 +673,23 @@ export class PolicyEngine {
    * `evolution-engine` and left the field off, since an absent list matches nothing.
    */
   deescalate(scope: string, to: Posture, justification: string, actor: PolicyActor): void {
+    this.assertMayDeescalate(scope, justification, actor);
+    this.#escalations.delete(scope);
+    this.#ceilings.set(scope, to);
+  }
+
+  /**
+   * Every refusal `deescalate` makes, and NO mutation. Split out so a caller can journal first.
+   *
+   * `Engine.deescalate` used to lower the live ceiling and then append `policy.deescalated`, so a
+   * failed append — a stale fencing token, a full disk, eight exhausted seq-conflict retries —
+   * left the run executing at a posture no journal records, and `restore` re-seeded from a
+   * projection that never carried it. That is a loosening with no durable trace, which is the one
+   * direction this file may not fail. The checks still have to run BEFORE the append, or the
+   * journal would carry a de-escalation that was going to be refused; this is the half that can
+   * be asked twice.
+   */
+  assertMayDeescalate(scope: string, justification: string, actor: PolicyActor): void {
     if (actor.kind !== "human") {
       throw err.policy(
         CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
@@ -693,8 +717,6 @@ export class PolicyEngine {
     if (justification.trim() === "") {
       throw err.validation(CODES.E_HUMAN_APPROVAL_REQUIRED, "de-escalation requires a non-empty justification");
     }
-    this.#escalations.delete(scope);
-    this.#ceilings.set(scope, to);
   }
 
   /**
@@ -706,8 +728,19 @@ export class PolicyEngine {
    * be reused for this: it would fire `onEscalate` and re-append the very events being
    * replayed, growing the journal on every attach.
    *
-   * Called once per attach, from the first path that holds a projection. It only ever
-   * RAISES a posture and only ever ADDS spend, so a double call cannot loosen anything.
+   * Called once per attach, from the first path that holds a projection. Every dimension moves
+   * in ONE direction — postures up, spend up, promises up, ceilings and the allowlist down — so
+   * a double call cannot loosen anything.
+   *
+   * CEILINGS ARE REPLACED FROM THE JOURNAL, NOT `max`ed IN. The docstring used to claim this
+   * method "only ever RAISES a posture", and for the ceiling arm that was false in both
+   * directions: a bare `set` let a stale projection overwrite a live `in` with `out` (measured:
+   * `effectivePosture` dropped from `in` to `out` on the same request), and it could never
+   * REMOVE a ceiling the journal does not carry. Both matter now that `Engine.deescalate`
+   * journals before it mutates: a failed append leaves this object holding a ceiling nothing
+   * recorded, and clearing before re-seeding is what makes the next attach authoritative rather
+   * than additive. `#ceilings` is folded from `policy.deescalated` alone, so the projection is
+   * the whole truth about it.
    */
   restore(state: {
     readonly escalations: Readonly<Record<string, Posture>>;
@@ -722,16 +755,64 @@ export class PolicyEngine {
      */
     readonly spentTokens?: number;
     readonly spentWallMs?: number;
+    /**
+     * MONEY ALREADY PROMISED AND NOT YET SETTLED, from `RunProjection.reservedUsd`.
+     *
+     * There was no reserved dimension at all, so a worker that died between `reserve` and
+     * `settle` — the window a model call is held across — came back believing it had committed
+     * nothing. Measured: a run that folded `reservedUsd = 0.001043` from its own journal
+     * restored to `reservedUsd = 0` and reserved the full ceiling a second time, standing
+     * committed for $0.051043 against a $0.05 budget. The number was durable (`budget.reserved`
+     * was wired for exactly that) and the guard that reads it was never plumbed back to it.
+     *
+     * `max`, like spend: this is a floor on what is outstanding, and arriving twice must not
+     * lower it. Absent means zero, which is the pre-existing behaviour and the loosening
+     * direction — so the caller must pass it, and `#advanceSerially` reads it from the same
+     * projection it reads `usage` from. A resumed process cannot SETTLE these (the reservation
+     * ids belong to the process that took them), so the promise stands until the run ends or a
+     * rewind's `#openReservations` repair releases it deliberately.
+     */
+    readonly reservedUsd?: number;
+    /**
+     * The ceilings recorded on this run's own `run.submitted`, folded by MIN into the ones this
+     * object was constructed with. A subgraph child's dollar slice is the case that needs it:
+     * it is journaled on the child and reached no `PolicyEngine` after a restart.
+     */
+    readonly limits?: BudgetLimits;
+    /**
+     * The capability allowlist recorded on this run's own `run.submitted`. INTERSECTED with the
+     * live one — a pattern the recorded list does not match is dropped, which under-permits
+     * rather than over-permits, and is the same filter `Engine.#contextFor` applies to a
+     * parent's `inherited` bound.
+     */
+    readonly allowlist?: readonly string[];
   }): void {
     for (const [scope, to] of Object.entries(state.escalations)) {
       this.#escalations.set(scope, maxPosture(this.#escalations.get(scope) ?? "out", to));
     }
+    this.#ceilings.clear();
     for (const [scope, to] of Object.entries(state.ceilings)) this.#ceilings.set(scope, to);
     this.#spentUsd = round6(Math.max(this.#spentUsd, state.spentUsd));
     // `max`, like the dollars above and for the same reason: arriving here twice must not
     // lower a running total, and a restore that ADDED would double-count on the second call.
     this.#spentTokens = Math.max(this.#spentTokens, state.spentTokens ?? 0);
     this.#spentWallMs = Math.max(this.#spentWallMs, state.spentWallMs ?? 0);
+    this.#reservedUsd = round6(Math.max(this.#reservedUsd, state.reservedUsd ?? 0));
+    if (state.limits !== undefined) {
+      this.#budget = {
+        ...this.#budget,
+        ...pruneUndefined({
+          runUsd: minDefined(this.#budget.runUsd, state.limits.runUsd),
+          runTokens: minDefined(this.#budget.runTokens, state.limits.runTokens),
+          runWallMs: minDefined(this.#budget.runWallMs, state.limits.runWallMs),
+        }),
+      };
+    }
+    if (state.allowlist !== undefined) {
+      const recorded = state.allowlist;
+      this.#allowlist =
+        this.#allowlist === undefined ? [...recorded] : this.#allowlist.filter((c) => matches(recorded, c));
+    }
   }
 
   /*
@@ -916,6 +997,24 @@ function matches(patterns: readonly string[], capability: string): boolean {
 
 function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
+}
+
+/** The smaller of the two ceilings, treating absent as "no ceiling" rather than as zero. */
+function minDefined(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.min(a, b);
+}
+
+/**
+ * Drop the keys whose value is `undefined`, because `exactOptionalPropertyTypes` is on and a
+ * spread that carries an explicit `undefined` is not the same shape as one that omits the key —
+ * it would ERASE a ceiling the constructor set rather than leave it standing.
+ */
+function pruneUndefined(o: Record<string, number | undefined>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+  return out;
 }
 
 /** Combine the classifications of every channel an action touches. */
