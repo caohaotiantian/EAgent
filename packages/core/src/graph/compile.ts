@@ -303,12 +303,26 @@ function unknownEdgeKinds(spec: GraphSpec): readonly Diagnostic[] {
   // exact failure `authoring-mistakes.test.ts` exists to prevent. A shape this cannot read is
   // left to the validator rather than reported twice.
   if (!Array.isArray(spec.edges)) return [];
+  // ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE. The guard used to read
+  // `typeof edge?.kind === "string" && !Object.hasOwn(…)`, which made the check about STRINGS
+  // rather than about kinds: `kind: 123`, `null`, `true`, `{}` and an edge with no `kind` at all
+  // compiled with ZERO diagnostics and then threw `E_GRAPH_INVALID` out of every `advance`, from
+  // the executor's own copy of this list — which is precisely the outcome a compile-time check
+  // exists to spare an author. Measured, one graph per value: `ok=true, []` for all five.
+  //
+  // `edge?.kind` still guards a null ENTRY, which `validateGraph` diagnoses on its own and this
+  // must not turn into a `TypeError` first. A null entry has no `id` to name either, so it is
+  // left to the validator exactly as a missing `edges` array is.
   return spec.edges
-    .filter((edge) => typeof edge?.kind === "string" && !Object.hasOwn(EDGE_KINDS, edge.kind))
+    .filter((edge) => edge !== null && edge !== undefined && !Object.hasOwn(EDGE_KINDS, (edge as { kind?: unknown }).kind as never))
     .map((edge) => ({
       severity: "error" as const,
       code: "GRAPH003_UNKNOWN_EDGE_KIND",
-      message: `edge "${edge.id}" declares kind ${JSON.stringify(edge.kind)}, which is not an edge kind — its \`when\`, \`until\`, \`over\` and \`branches\` are all ignored and the edge is taken unconditionally`,
+      // `JSON.stringify` ANSWERS `undefined` FOR `undefined`, which would print the word "kind"
+      // followed by nothing and read as a formatting bug rather than as the missing declaration
+      // it is. `String()` covers every non-string this now catches, and a string kind still gets
+      // its quotes so `""` is visible.
+      message: `edge "${edge.id}" declares kind ${JSON.stringify(edge.kind) ?? String(edge.kind)}, which is not an edge kind — its \`when\`, \`until\`, \`over\` and \`branches\` are all ignored and the edge is taken unconditionally`,
       at: { edgeId: edge.id },
       fix: `use one of ${Object.keys(EDGE_KINDS).join(", ")}`,
     }));

@@ -21,6 +21,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver } from "../../src/graph/validate.ts";
@@ -236,4 +237,84 @@ test("…and an ordinary write still commits", async () => {
   const p = await engine.advance(await engine.submit({ graph, inputs: {} }));
   assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
   assert.deepEqual(p.channels["out"], ["a", "x"]);
+});
+
+// ── 3 · an ERROR the journal cannot record ──────────────────────────────────
+
+/**
+ * The SIBLING FIELD of the same append, and the first fix missed it by one line.
+ *
+ * `#unrecordableWrite` canonicalized `outcome.writes` and asserted the class closed. `#commit`
+ * appends `task.failed{error: errorRecord(outcome.error)}` beside `task.committed{writes}`, and
+ * `ErrorRecord.details` is `unknown` — so a body that FAILS with a `NaN` in its details wedged
+ * exactly as a body that WROTE one used to: raw `CanonicalizationError` out of `advance()`, task
+ * stuck at `leased`, next advance reporting `E_OUTPUT_MISSING`.
+ *
+ * It is also the same NaN-from-an-empty-average the write case's docstring uses, which is why
+ * placement is the whole fix: a body that throws is caught by `#runWave` and turned into a failed
+ * outcome AFTER `#dispatch` has returned, so a guard at the construction site could never see it.
+ */
+const FAILING_SPEC: GraphSpec = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "unrecordable-error", project: "lane-a", version: 1 },
+  policy: { posture: "out" },
+  channels: { out: { type: "object", reduce: "replace" } },
+  inputs: [],
+  outputs: ["out"],
+  nodes: [{ id: n("a"), type: "function", writes: ["out"], function: { ref: "function/avg@stable" } }],
+  edges: [],
+} as unknown as GraphSpec;
+
+function failingRig(body: () => never): { engine: Engine; store: MemoryStateStore } {
+  const store = new MemoryStateStore({ now: NOW });
+  const functions = new FunctionRegistry();
+  functions.register("function/avg@stable", body);
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now: NOW,
+    sleep: async () => {},
+    policy: { granted: ["*"], systemFloor: "out" },
+  });
+  return { engine, store };
+}
+
+test("AN ERROR THE JOURNAL CANNOT RECORD IS AN ORDINARY TASK FAILURE TOO, NOT AN ESCAPING THROW", async () => {
+  const r = failingRig(() => {
+    // What an extension actually writes. `err` is exported, `details` is `unknown`, and an
+    // average over an empty list is `NaN` — which `canonical.ts` refuses on the durable path.
+    throw err.validation(CODES.E_RESOURCE_INVALID, "no samples to average", { details: { avg: NaN } });
+  });
+  const graph = compileOrThrow({ spec: FAILING_SPEC, resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
+  const runId = await r.engine.submit({ graph, inputs: {} });
+
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "failed");
+  assert.match(p.error?.message ?? "", /"a"/, "the message must name the node…");
+  assert.match(p.error?.message ?? "", /an error/, "…and say which part of the outcome it could not record");
+  assert.notEqual(p.error?.code, "E_OUTPUT_MISSING", "the cause reported must be the cause");
+
+  // AND THE LEASE IS RELEASED — the half that turns a wedge into a failure.
+  assert.equal(Object.values(p.tasks)[0]?.state, "failed", JSON.stringify(p.tasks));
+  const again = await r.engine.advance(runId);
+  assert.equal(again.status, "failed");
+  assert.equal(again.error?.code, p.error?.code, "a second advance reports the same cause, not a different one");
+});
+
+test("…and an ordinary FAILURE still reaches the journal with its own details intact", async () => {
+  // THE ORDINARY CASE. A guard that refused every failed outcome would pass the test above and
+  // delete error reporting; this pins that a recordable `details` object survives the check.
+  const r = failingRig(() => {
+    throw err.validation(CODES.E_RESOURCE_INVALID, "no samples to average", { details: { avg: null, n: 0 } });
+  });
+  const graph = compileOrThrow({ spec: FAILING_SPEC, resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
+  const p = await r.engine.advance(await r.engine.submit({ graph, inputs: {} }));
+  assert.equal(p.status, "failed");
+  assert.equal(p.error?.code, "E_RESOURCE_INVALID");
+  assert.match(p.error?.message ?? "", /no samples to average/, "the body's own message, not the guard's");
+  assert.deepEqual(p.error?.details, { avg: null, n: 0 }, "and its own details");
 });

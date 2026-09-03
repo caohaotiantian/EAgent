@@ -777,6 +777,12 @@ export class PolicyEngine {
      * The ceilings recorded on this run's own `run.submitted`, folded by MIN into the ones this
      * object was constructed with. A subgraph child's dollar slice is the case that needs it:
      * it is journaled on the child and reached no `PolicyEngine` after a restart.
+     *
+     * WHAT IS RECORDED THERE IS NARROWER THAN THE DEPLOYMENT'S CEILING BY CONSTRUCTION — the
+     * caller's allotment and the graph's own declaration, never the operator's number. The fold
+     * here is MIN and it runs on EVERY attach, so the operator's ceiling is whatever config says
+     * today; recording it would pin the run to the ceiling that stood at submit and break
+     * "raise the budget and resume". See `run.submitted.limits` in `journal/events.ts`.
      */
     readonly limits?: BudgetLimits;
     /**

@@ -2023,13 +2023,23 @@ export class Engine {
     // would let any graph vote itself more money. Three sources, and the smallest present one
     // wins: the deployment's cap, the caller's allotment (a subgraph carving a slice from its
     // parent), and the graph's own declaration.
-    const budgetUsd = minDefined(
-      input.budgetUsd,
-      input.graph.spec.policy?.budget?.costUsd,
-      // Included so `min` cannot silently raise the deployment's ceiling when the other two are
-      // larger — `#contextFor` overwrites `runUsd` with whatever it is handed.
-      this.#policyOpts.budget?.runUsd,
-    );
+    //
+    // TWO NUMBERS, AND ONLY ONE OF THEM IS JOURNALED. `declaredUsd` is the bound this SUBMISSION
+    // imposes — the caller's allotment and the graph's own declaration, both of which are facts
+    // about this run that no config can re-supply. `budgetUsd` is what this process will actually
+    // enforce, the same value min-folded against the deployment's ceiling so `#contextFor` cannot
+    // silently raise it.
+    //
+    // WRITING THE ENFORCED ONE INTO `run.submitted.limits` BROKE "raise the budget and resume".
+    // `restore` min-folds the recorded limits into the live engine's on every attach, so an
+    // operator's own ceiling written there stops being a ceiling and becomes a bound ON THE RUN,
+    // pinned at whatever it was the instant somebody pressed submit: raising the deployment
+    // budget and re-attaching left the run bound to the old number forever, and an in-flight run
+    // that fitted the old ceiling could never be given room. An operator's ceiling is an
+    // operator's ceiling precisely because it is re-read from config every time — so it is
+    // supplied by `#contextFor` from `#policyOpts` on each attach and recorded nowhere.
+    const declaredUsd = minDefined(input.budgetUsd, input.graph.spec.policy?.budget?.costUsd);
+    const budgetUsd = minDefined(declaredUsd, this.#policyOpts.budget?.runUsd);
     // AND THE OTHER TWO THIRDS OF THE SAME DECLARATION. `graph/spec.ts` lists
     // `["costUsd", "tokens", "wallMs"]`, and until now the loop above ran for the first
     // alone: `budget: {tokens: 200000}` compiled clean and bound nothing, which is the same
@@ -2042,14 +2052,26 @@ export class Engine {
     // ceiling in the other two dimensions is not sliced, and a child therefore inherits its
     // parent's tokens and time only through `subgraph.completed`, which folds the child's whole
     // usage into the parent AFTER it finishes. Stated because it is a real gap, not a design.
-    const budgetTokens = minDefined(input.graph.spec.policy?.budget?.tokens, this.#policyOpts.budget?.runTokens);
-    const budgetWallMs = minDefined(input.graph.spec.policy?.budget?.wallMs, this.#policyOpts.budget?.runWallMs);
-    const recordedLimits = {
+    const declaredTokens = input.graph.spec.policy?.budget?.tokens;
+    const declaredWallMs = input.graph.spec.policy?.budget?.wallMs;
+    const budgetTokens = minDefined(declaredTokens, this.#policyOpts.budget?.runTokens);
+    const budgetWallMs = minDefined(declaredWallMs, this.#policyOpts.budget?.runWallMs);
+    // ENFORCED HERE, RECORDED BELOW, and the two differ by exactly the deployment's ceiling. A
+    // declaration LARGER than the operator's cap is still recorded — recording it is harmless
+    // because `restore` folds by MIN against whatever the live config says, so the run gets the
+    // operator's number today and the graph's the day an operator raises theirs above it. What
+    // must not be recorded is the operator's number itself.
+    const enforcedLimits = {
       ...(budgetUsd === undefined ? {} : { runUsd: budgetUsd }),
       ...(budgetTokens === undefined ? {} : { runTokens: budgetTokens }),
       ...(budgetWallMs === undefined ? {} : { runWallMs: budgetWallMs }),
     };
-    const ctx = this.#contextFor(runId, input.graph, recordedLimits);
+    const recordedLimits = {
+      ...(declaredUsd === undefined ? {} : { runUsd: declaredUsd }),
+      ...(declaredTokens === undefined ? {} : { runTokens: declaredTokens }),
+      ...(declaredWallMs === undefined ? {} : { runWallMs: declaredWallMs }),
+    };
+    const ctx = this.#contextFor(runId, input.graph, enforcedLimits);
 
     // THE LAST INLINE COPY OF A PAYLOAD, and the reason it was left behind was recorded as
     // "externalising it needs a store the SUBMIT path can reach, which `submit` does not have
@@ -2085,9 +2107,11 @@ export class Engine {
           // it bit: the slice its parent carved and the allowlist its parent narrowed are
           // facts about the CHILD run, and a child's fold reads only its own log.
           //
-          // Written from the same `ctx` the run executes under, so the recorded numbers are
-          // the ones this process is actually about to enforce rather than a second
-          // computation that could answer differently.
+          // NARROWER-THAN-THE-DEPLOYMENT ONLY, which is `recordedLimits` and NOT the
+          // `enforcedLimits` this run executes under. The difference is the operator's own
+          // ceiling: journaling that turns a number config supplies on every attach into a bound
+          // pinned to this run forever, and "raise the budget and resume" stops working. See the
+          // paragraph above `declaredUsd`.
           ...(Object.keys(recordedLimits).length === 0 ? {} : { limits: recordedLimits }),
           ...(ctx.grantBound === undefined ? {} : { capabilities: [...ctx.grantBound] }),
         },
@@ -2170,7 +2194,7 @@ export class Engine {
       const p = await this.#project(ctx);
       if (p === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} has no journal`);
 
-      // RE-SEED OVERSIGHT AND SPEND FROM THE JOURNAL, once per attach.
+      // RE-SEED OVERSIGHT AND SPEND FROM THE JOURNAL, once per attach AND once per rewind.
       //
       // `PolicyEngine` held escalations, human ceilings and spend in memory only, and
       // `#contextFor` builds a fresh one — so a restart handed the run back its full
@@ -2179,8 +2203,15 @@ export class Engine {
       // happens on the first path that holds a projection instead. Every dimension `restore`
       // touches moves one way — postures up, spend and promises up, ceilings and the allowlist
       // down — so arriving here twice cannot loosen anything. Human CEILINGS are REPLACED from
-      // the fold rather than merged, which is what makes the journal authoritative in both
-      // directions; see `PolicyEngine.restore`.
+      // the fold rather than merged; see `PolicyEngine.restore`.
+      //
+      // "ONCE PER ATTACH" IS NOT ENOUGH ON ITS OWN, and the claim that replacing the ceilings
+      // makes the journal "authoritative in both directions" was false for as long as this flag
+      // had exactly one writer. It holds at the instant `restore` runs and no longer; a REWIND
+      // moves the fold backwards under a live engine, so the ceiling a rewound
+      // `policy.deescalated` no longer records stayed in memory and the run answered a gate
+      // question the journal would answer the other way. `#rewindSerially` clears the flag for
+      // that reason and this loop is where it is picked up.
       if (!ctx.policySeeded) {
         ctx.policySeeded = true;
         // ALL THREE DIMENSIONS FROM ONE `UsageRecord`. `p.usage` is the fold `chargeUsage`
@@ -3842,6 +3873,22 @@ export class Engine {
     // a whole fold here buys the ability to rewind a run this engine no longer holds.
     const rewound = (await this.projection(runId))!;
 
+    // AND THE SEEDING FLAG GOES BACK, or the live `PolicyEngine` outlives the journal it was
+    // seeded from. `restore` runs once per attach behind `ctx.policySeeded`, which nothing reset
+    // — so after a rewind the in-memory ceilings, escalations, spend and reservations were the
+    // ones folded from the events the marker has just hidden, and no later `advance` re-read
+    // them. Measured on one journal rewound past a `policy.deescalated`: the live engine
+    // reported `succeeded` with 0 gates while a fresh engine over the same bytes reported
+    // `awaiting_gate` with 1. That is fold != live, the class this tree has eight of, and the
+    // rewind is the one operation that can move a fold BACKWARDS.
+    //
+    // ALL FOUR DIMENSIONS, not the ceilings alone, because a rewind changes what the journal says
+    // about every one of them. `restore` is still one-way per dimension by its own design —
+    // postures up, spend and promises up, ceilings replaced — so re-seeding cannot loosen
+    // anything a rewind did not already authorize, and the money a rewind genuinely released is
+    // released by the `budget.settled` rows below rather than by a refund here.
+    if (live !== undefined) live.policySeeded = false;
+
     // A PROMISE THE REWIND ORPHANED IS NOT A PROMISE — the lease defect below with money in
     // place of work, and it arrived the moment the reservation gained a writer.
     //
@@ -4833,7 +4880,7 @@ export class Engine {
 
     const declared = new Set(w.node.writes ?? []);
     const stray = Object.keys(outcome.writes).filter((c) => !declared.has(c));
-    if (stray.length === 0) return this.#unrecordableWrite(w, outcome) ?? outcome;
+    if (stray.length === 0) return outcome;
 
     // REFUSED, not dropped. Dropping leaves a node body that believes it wrote and a
     // journal that disagrees — the silent divergence class that is hardest to diagnose
@@ -4853,7 +4900,7 @@ export class Engine {
   }
 
   /**
-   * A write the journal cannot record, refused where the outcome is CONSTRUCTED.
+   * An OUTCOME the journal cannot record, refused at the boundary that owns the WHOLE append.
    *
    * `canonical.ts` refuses a sparse array, a `NaN`, a `BigInt` and a cycle by design, and nothing
    * checked for one before `#commit` — which sits OUTSIDE the try/catch that turns an execution
@@ -4863,26 +4910,64 @@ export class Engine {
    * reported `E_OUTPUT_MISSING` — sending an author to look at their `outputs:` declaration
    * rather than at the `NaN` their averaging function produced on an empty list.
    *
-   * Refused HERE for the reason `sodOn` gives for its own placement: as an ordinary failed
-   * outcome it travels the way every other node-level refusal does — retries, error edges and
-   * the journal all work — and the message can name the node and the channel.
+   * THREE FIELDS, NOT ONE. `#commit` appends `task.committed{writes, usage}` and
+   * `task.failed{error: errorRecord(outcome.error)}`, and `ErrorRecord.details` is `unknown` —
+   * so a body that threw `err.validation(…, {details: {avg: NaN}})` produced a byte-identical
+   * wedge to the write case: the same raw `CanonicalizationError` out of `advance()`, the same
+   * task stuck at `leased`, the same misleading `E_OUTPUT_MISSING`. It is the very
+   * NaN-from-an-empty-average example the paragraph above uses, arriving through `catch` instead
+   * of through `return`. The set checked is therefore exactly the set `#commit` appends from the
+   * outcome — `writes`, `error`, `usage` — named rather than called total, because a fourth field
+   * added to those events has to be added here too.
+   *
+   * AND CALLED FROM `#commit`, NOT FROM `#dispatch`, which is what makes the error arm reachable
+   * at all. A body that THROWS never returns through `#dispatch`: `#runWave` catches it and
+   * builds `{status:"failed", error: toLoomError(e)}` afterwards, so a guard placed where the
+   * outcome is constructed sees only the outcomes that were constructed there. `#foldJoin`'s
+   * result is a third producer that skips `#dispatch` the same way. One check where the events
+   * are built covers all three, which is the rule `#dispatch`'s own stray-`take` wrapper states
+   * one method up: "a check applied per-caller is a check that the next node type forgets."
+   *
+   * The `try/finally` on `ctx.log.commit` is NOT this guard's redundant twin: it covers a STORE
+   * that rejects (a lost fence, a full disk) and returns the lease, which nothing here can do.
+   *
+   * The substituted outcome is an ordinary failed one, so it travels the way every other
+   * node-level refusal does — retries, error edges and the journal all work — and the message
+   * names the node and the field.
    */
-  #unrecordableWrite(w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
+  #unrecordableOutcome(w: Wave, outcome: NodeOutcome): NodeOutcome | undefined {
+    const refuse = (field: string, e: unknown): NodeOutcome => ({
+      status: "failed",
+      writes: {},
+      // ZERO USAGE, NOT `outcome.usage` — the refusal has to be recordable itself, and when the
+      // unrecordable value IS the usage, carrying it forward would wedge the very commit this
+      // returns to. The turn's cost is already journaled by the effect records `chargeUsage`
+      // folds, so nothing about spend is lost by dropping a number the journal would refuse.
+      usage: { ...ZERO_USAGE },
+      error: err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `node "${w.node.id}" produced ${field} that the journal cannot record: ${(e as Error).message}`,
+        { details: { node: w.node.id, field } },
+      ),
+    });
     for (const [channel, value] of Object.entries(outcome.writes)) {
       try {
         canonicalize(value);
       } catch (e) {
-        return {
-          status: "failed",
-          writes: {},
-          usage: outcome.usage,
-          error: err.validation(
-            CODES.E_RESOURCE_INVALID,
-            `node "${w.node.id}" wrote a value to "${channel}" that the journal cannot record: ${(e as Error).message}`,
-            { details: { node: w.node.id, channel } },
-          ),
-        };
+        return refuse(`a value for "${channel}"`, e);
       }
+    }
+    if (outcome.error !== undefined) {
+      try {
+        canonicalize(errorRecord(outcome.error));
+      } catch (e) {
+        return refuse("an error", e);
+      }
+    }
+    try {
+      canonicalize(outcome.usage);
+    } catch (e) {
+      return refuse("a usage record", e);
     }
     return undefined;
   }
@@ -7398,8 +7483,14 @@ export class Engine {
     // journal never records, so the same journal replayed to different state on a
     // differently-configured engine. `p` here is freshly re-projected, so the fold sees
     // its siblings' commits. This is the whole of the fix.
-    const outcome =
+    const folded =
       w.node.type === "join" && settling.status === "succeeded" ? this.#foldJoin(ctx, p, w) : settling;
+
+    // A VALUE THIS APPEND CANNOT CANONICALIZE IS REFUSED BEFORE ANY OF IT IS BUILT, and here is
+    // the only place that sees every producer: a body's return, a body's THROW (caught in
+    // `#runWave`, so it never passes `#dispatch`), and the join fold one line up. See
+    // `#unrecordableOutcome`.
+    const outcome = this.#unrecordableOutcome(w, folded) ?? folded;
 
     if (outcome.status === "gate") {
       // THE RUN MAY HAVE ENDED WHILE THIS TASK WAS IN FLIGHT.
@@ -7777,8 +7868,8 @@ export class Engine {
     // has seen for this Task, so a worker whose lease another process has taken cannot
     // commit over it. Without this the fence was inert: the token was minted, journaled,
     // and never shown to the thing that checks it, so `E_LEASE_LOST` had no thrower.
-    // BELT AND BRACES ON THE LEASE. `#unrecordableWrite` refuses the values this append could
-    // choke on before the body's outcome ever gets here, but the STORE can still reject — a
+    // BELT AND BRACES ON THE LEASE. `#unrecordableOutcome` refuses the three outcome fields this
+    // append canonicalizes before the body's outcome ever gets here, but the STORE can still reject — a
     // fencing token another worker took, a full disk, exhausted seq-conflict retries — and a
     // throw past this line used to leave the task `leased` in memory forever, so every later
     // advance re-leased it, re-executed it and threw again. The lease goes back either way; the
@@ -8776,9 +8867,28 @@ export class Engine {
     // `#errorEdges` now returns `[]` for a fatal code, so in this build the two agree; this stays
     // because a filter that depends on another function's refusal to be correct is a filter that
     // breaks silently when that refusal moves.
-    const fatal = Object.values(p.tasks).filter(
-      (t) => t.state === "failed" && (p.budgetExhausted || RUN_FATAL_CODES.has(t.error?.code ?? "")),
-    );
+    //
+    // AND `p.budgetExhausted` IS NOT A THIRD QUESTION TO ASK OF A TASK, which is how it got in
+    // here and what it broke. It is a statement about the RUN — one `budget.exhausted` row, no
+    // taskId that matters to the fold — so carrying it into a per-task filter made EVERY failed
+    // task fatal the moment the run ran out of money, a task that routed cleanly down an `error`
+    // edge and was handled included. `failed[0]` was then whichever failed task
+    // `Object.values(p.tasks)` happened to yield first, so a budget-killed run reported the
+    // HANDLED task's `E_RESOURCE_INVALID` instead of `E_BUDGET_EXHAUSTED` with its
+    // dimension/limit/spent. Measured, on one run with both: `E_RESOURCE_INVALID` before,
+    // `E_BUDGET_EXHAUSTED` after.
+    //
+    // NOTHING IS LOST BY DROPPING IT, because the budget failure carries its own error and that
+    // error is `E_BUDGET_EXHAUSTED`, a member of `RUN_FATAL_CODES`. The task that could not
+    // reserve fails with exactly that code, so this filter still selects it — and now selects it
+    // ALONE, which is what puts the dimension, the limit and the spend back in `run.failed`.
+    //
+    // AND A RUN WITH NO FAILED TASK AT ALL STILL COMPLETES, which is deliberate and is why this
+    // is a deletion rather than a swap for a run-level arm. `gate-lifecycle.test.ts`'s
+    // "A RUN THAT SUCCEEDS CLOSES ITS OPEN GATES TOO" is the shape: the floor reaches `#finish`
+    // with the declared outputs already written, and a run that produced everything it promised
+    // did not fail because the money ran out on the way past the finish line.
+    const fatal = Object.values(p.tasks).filter((t) => t.state === "failed" && RUN_FATAL_CODES.has(t.error?.code ?? ""));
     const failed = fatal.length > 0
       ? fatal
       : Object.values(p.tasks).filter((t) => t.state === "failed" && t.take.length === 0 && !this.#absorbedByJoin(ctx, t.nodeId));

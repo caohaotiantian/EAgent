@@ -234,6 +234,43 @@ test("…AND THE EXECUTOR REFUSES ONE TOO, for a graph that skipped this compile
   assert.equal(ran.length, 0, "the guarded node must not run on an edge whose kind this binary cannot read");
 });
 
+/**
+ * A KIND THAT IS NOT A STRING IS STILL NOT A KIND.
+ *
+ * The first version of this guard filtered on `typeof edge?.kind === "string"`, which made the
+ * check about the TYPE of the declaration rather than about the set of kinds. So `kind: 123`,
+ * `null`, `true`, `{}` and an edge with no `kind` at all compiled with ZERO diagnostics — and
+ * then threw `E_GRAPH_INVALID` out of every `advance`, from `#assertBound`'s copy of the same
+ * list, which is exactly the outcome the compile check was added to spare an author. A guard
+ * that only reads well-typed input is a guard for the inputs that were never the problem.
+ */
+test("…AND A KIND THAT IS NOT A STRING IS REFUSED AT COMPILE TOO, which is where an author sees it", () => {
+  const cases: readonly (readonly [string, unknown])[] = [
+    ["a number", 123],
+    ["null", null],
+    ["true", true],
+    ["an object", {}],
+  ];
+  for (const [label, kind] of cases) {
+    const r = compile({ spec: guardedSpec(kind as never), resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
+    assert.equal(r.ok, false, `kind ${label} must not compile`);
+    const d = r.diagnostics.filter((x) => x.code === "GRAPH003_UNKNOWN_EDGE_KIND");
+    assert.equal(d.length, 1, `${label}: ${JSON.stringify(r.diagnostics)}`);
+    assert.match(d[0]!.message, /"e1"/, `${label}: the diagnostic must name the edge`);
+    assert.match(d[0]!.fix ?? "", /seq/, `${label}: the fix must list the kinds that exist`);
+  }
+
+  // AND AN EDGE WITH NO `kind` AT ALL, which is the same hole with nothing in it. `EdgeSpec.kind`
+  // is required, `#assertBound` refuses it at run time, and this was the one shape that reached
+  // that refusal with a clean compile behind it.
+  const bare = { ...guardedSpec("seq"), edges: [{ id: e("e1"), from: n("a"), to: n("b"), when: "false" }] } as unknown as GraphSpec;
+  const r = compile({ spec: bare, resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
+  assert.equal(r.ok, false, "an edge that declares no kind must not compile");
+  const d = r.diagnostics.filter((x) => x.code === "GRAPH003_UNKNOWN_EDGE_KIND");
+  assert.equal(d.length, 1, JSON.stringify(r.diagnostics));
+  assert.match(d[0]!.message, /undefined/, "and the message says what it read, rather than printing nothing");
+});
+
 test("…and the ORDINARY graph is untouched: `when:false` holds, `when:true` fires", async () => {
   const store = new MemoryStateStore({ now: NOW });
   const ran: number[] = [];

@@ -166,7 +166,24 @@ export interface EventPayloads {
      */
     readonly external?: Readonly<Record<string, PayloadRef>>;
     /**
-     * THE CEILINGS THIS RUN WAS SUBMITTED UNDER, after `Engine.submit`'s min-fold.
+     * THE CEILINGS THIS SUBMISSION IMPOSED — the caller's allotment and the graph's own
+     * declaration, and NEVER the deployment's.
+     *
+     * The distinction is the whole content of this field. A run has two kinds of bound on it:
+     * ones that are facts about THIS RUN, which no config can re-supply after a restart, and the
+     * operator's ceiling, which config supplies on every attach and is therefore the one thing
+     * that must not be frozen here. Writing the post-min-fold number recorded both as one, and
+     * because `PolicyEngine.restore` folds this by MIN forever, RAISING THE DEPLOYMENT BUDGET AND
+     * RESUMING STOPPED WORKING: the run stayed pinned to whatever ceiling stood the instant it
+     * was submitted, and an in-flight run that had fitted the old ceiling could never be given
+     * room. `Engine.submit` therefore records `declaredUsd`/`declaredTokens`/`declaredWallMs` and
+     * hands `#contextFor` the enforced fold separately.
+     *
+     * A DECLARATION LARGER THAN THE OPERATOR'S CEILING IS STILL RECORDED, and that is not a
+     * loosening: `restore` mins it against whatever config says today, so the run gets the
+     * operator's number while it is the smaller and the graph's the day an operator raises theirs
+     * above it. A graph never votes itself money either way, because the min is taken again on
+     * every attach rather than once at submit.
      *
      * They were arguments to `#contextFor` and nothing else, so they lived in one process's
      * `PolicyEngine`. A subgraph child is where that bites: its parent carves a dollar SLICE
@@ -175,12 +192,12 @@ export interface EventPayloads {
      * this field: a child bounded to $0.0001, refused `E_BUDGET_EXHAUSTED` in the process that
      * carved the slice, ran an agent turn and spent after a restart.
      *
-     * ABSENT MEANS "no ceiling narrower than the deployment's", which is what was true of every
-     * journal written before this field and is NOT the refusing value. The refusing value here
-     * would be zero dollars, and it would make every pre-existing journal unrunnable while
+     * ABSENT MEANS "this submission declared no ceiling of its own", which is what was true of
+     * every journal written before this field and is NOT the refusing value. The refusing value
+     * here would be zero dollars, and it would make every pre-existing journal unrunnable while
      * protecting nothing: the deployment's own `policy.budget` is applied by `#contextFor`
-     * whatever this says, so absent leaves the operator's ceiling standing and present can only
-     * lower it. `PolicyEngine.restore` folds it by MIN for the same reason.
+     * whatever this says, so absent leaves the operator's ceiling standing and present is folded
+     * into it by MIN. `PolicyEngine.restore` does that fold.
      */
     readonly limits?: {
       readonly runUsd?: number;
