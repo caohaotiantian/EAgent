@@ -239,7 +239,18 @@ function step(name: string, spec: ChannelSpec, acc: unknown, c: Contribution): u
       const incoming = asObject(name, c.value, undefined);
       const out: Record<string, unknown> = { ...base };
       for (const [k, v] of Object.entries(incoming)) {
-        if (k in out && spec.onConflict !== "last_by_branch" && !sameValue(out[k], v)) {
+        // OWN KEYS ON BOTH SIDES OF THE STEP, which is the rule `declared()` and `own()` in this
+        // same file exist to state and this site did not remember. A node body writes JSON, and
+        // `toString`, `constructor`, `valueOf`, `hasOwnProperty` and `__proto__` are all legal
+        // JSON keys: `k in out` was true for every one of them on an accumulator that declared
+        // none, so the conflict check compared the incoming value against an inherited FUNCTION
+        // and `sameValue` threw an untyped `CanonicalizationError` — a crash where a merge was
+        // the correct answer. The assignment is the worse half: `out["__proto__"] = v` goes
+        // through `Object.prototype`'s setter, so under `onConflict: "last_by_branch"` the
+        // author's key silently vanished and the channel's value came back with an
+        // attacker-supplied prototype that `stateHash` — own keys only — could not see.
+        // `defineProperty` is the shape `graph/yaml.ts`'s `put()` already settled on.
+        if (Object.hasOwn(out, k) && spec.onConflict !== "last_by_branch" && !sameValue(out[k], v)) {
           throw err.validation(
             CODES.E_INTERNAL,
             `channel "${name}": merge_object conflict on key "${k}" from concurrent branches ` +
@@ -247,7 +258,7 @@ function step(name: string, spec: ChannelSpec, acc: unknown, c: Contribution): u
             { details: { channel: name, key: k } },
           );
         }
-        out[k] = v;
+        Object.defineProperty(out, k, { value: v, writable: true, enumerable: true, configurable: true });
       }
       return out;
     }
@@ -298,7 +309,10 @@ export function channelValue(spec: ChannelSpec, stored: unknown): unknown {
 }
 
 function identityOf(v: unknown, key: string | undefined): string {
-  if (key !== undefined && v !== null && typeof v === "object" && key in (v as object)) {
+  // OWN, for the same reason the `merge_object` step above is: a declared `identity` of
+  // `toString` found the inherited function on every element and `canonicalize` refused it, so
+  // the dedup key was a throw rather than an identity.
+  if (key !== undefined && v !== null && typeof v === "object" && Object.hasOwn(v as object, key)) {
     return canonicalize((v as Record<string, unknown>)[key]);
   }
   return canonicalize(v);
