@@ -118,9 +118,13 @@ export function project(value: unknown, projection: ContextProjection | undefine
   const take = (projection as { take?: number }).take;
 
   let out = value;
-  if (Array.isArray(out) && take !== undefined && take !== 0) {
-    // Negative takes from the end — "the last N findings" is the common case.
-    out = take > 0 ? out.slice(0, take) : out.slice(take);
+  // `take: 0` IS A SLICE OF ZERO, not the absence of one. Treating it as "no slice" made a
+  // projection asking for nothing get everything, which is the wrong direction for a knob whose
+  // whole job is to bound what a node sees. `undefined` remains the way to say "no slice".
+  if (Array.isArray(out) && take !== undefined) {
+    // Negative takes from the end — "the last N findings" is the common case. `>= 0` and not
+    // `> 0`: `slice(0)` is the whole array, so zero has to fall on the first-N side to mean zero.
+    out = take >= 0 ? out.slice(0, take) : out.slice(take);
   }
   if (fields !== undefined && fields.length > 0) {
     out = Array.isArray(out) ? out.map((item) => pickFields(item, fields)) : pickFields(out, fields);
@@ -132,7 +136,18 @@ function pickFields(value: unknown, fields: readonly string[]): unknown {
   if (value === null || typeof value !== "object") return value;
   const src = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const f of fields) if (f in src) out[f] = src[f];
+  // OWN KEYS ON THE READ, `defineProperty` ON THE WRITE — the pair `resources/realm.ts`'s
+  // `rebuild` documents and closes, and this is the unfixed copy of it. `f in src` was true for
+  // `toString`/`constructor` on every object, so a declared projection copied a HOST FUNCTION
+  // into a value that flows into the prompt and into `stateHash`'s canonicalization; and
+  // `out["__proto__"] = …` goes through `Object.prototype`'s setter, so a value carrying an own
+  // `__proto__` key (which is what `JSON.parse` produces) re-parented the projection instead of
+  // being projected into it.
+  for (const f of fields) {
+    if (Object.hasOwn(src, f)) {
+      Object.defineProperty(out, f, { value: src[f], writable: true, enumerable: true, configurable: true });
+    }
+  }
   return out;
 }
 
