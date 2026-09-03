@@ -223,6 +223,13 @@ function engineOver(store: MemoryStateStore, page: Options["page"], res?: Resour
   functions.register("function/two@stable", () => ({ writes: { items: ["one", "two"] } }));
   // The delegated graph's own body, which runs in the CHILD run behind the child's own gate.
   functions.register("function/leaf@stable", () => ({ writes: { out: ["p"] } }));
+  // The TRIPLE-nested shape's list producer. Only the OUTERMOST list empties on the word, so the
+  // two inner fans are populated in both halves and the bound is being asked about depth rather
+  // than about width.
+  functions.register("function/nest3@stable", (view) => {
+    const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
+    return { writes: { s1: text.includes("NONE") ? [] : ["a", "b"], s2: ["p"], s3: ["q"] } };
+  });
   // The nested shape's list producer: one seed per depth, both empty on the same word.
   functions.register("function/nest@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
@@ -1011,4 +1018,134 @@ test("A DELEGATION OVER A CLEAN INPUT STILL RUNS — the seed is the parent's ta
   assert.equal(delegated.status, "succeeded", `delegated over a clean list must run out: ${delegated.status}`);
   assert.equal(delegated.gates, 0, "nobody attacked this width");
   assert.equal(delegated.wrote, 1, "and the downstream the join releases runs");
+});
+
+// ---------------------------------------------------------------------------
+// `fanBody`'s BOUND UNDER TRIPLE NESTING
+// ---------------------------------------------------------------------------
+
+/**
+ * Three fans deep. `hold` sits on the OUTERMOST branch, past TWO inner joins; `after` sits BELOW
+ * the outermost join. The compiled-depth bound has to put the first IN and the second OUT, and a
+ * two-level fixture cannot tell a bound that stops at the first join from one that stops at the
+ * fan's own.
+ *
+ *     plan -fo1-> L1 -fo2-> L2 -fo3-> L3 -j3-> J3 -j2b-> J2 -toHold-> hold -j1c-> J1 -> after
+ *
+ * Depths: L1 1, L2 2, L3 3, J3 2, J2 1, hold 1, J1 0, after 0. So the walk from `L1` admits
+ * everything down to and including `J1` — the first node SHALLOWER than the body, reached by a
+ * `join` edge — and stops there.
+ */
+type GateWhere = "branch" | "none" | "below";
+
+function tripleSpec(where: GateWhere): GraphSpec {
+  const hold =
+    where === "branch"
+      ? { id: "hold", type: "human_gate", reads: ["parts"], humanGate: { ref: "oversight/hold@stable" } }
+      : { id: "hold", type: "function", reads: ["parts"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } };
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `triple-${where}`, project: "test", version: 1 },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "notes:write"],
+      expansion: { maxNodes: 64, maxDepth: 3, maxFanout: 8, maxLoopIterations: 1 },
+    },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      s1: { type: "array", reduce: "replace" },
+      s2: { type: "array", reduce: "replace" },
+      s3: { type: "array", reduce: "replace" },
+      i1: { type: "string", reduce: "replace" },
+      i2: { type: "string", reduce: "replace" },
+      i3: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes: [
+      { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+      { id: "plan", type: "function", reads: ["untrusted"], writes: ["s1", "s2", "s3"], function: { ref: "function/nest3@stable", effects: [] } },
+      { id: "L1", type: "function", reads: ["i1"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "L2", type: "function", reads: ["i2"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "L3", type: "function", reads: ["i3"], writes: ["parts"], function: { ref: "function/echo@stable", effects: [] } },
+      { id: "J3", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["L3"], mode: "all", onBranchError: "skip" } },
+      { id: "J2", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["L2", "J3"], mode: "all", onBranchError: "skip" } },
+      hold,
+      { id: "J1", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["L1", "J2", "hold"], mode: "all", onBranchError: "skip" } },
+      { id: "write", type: "tool", reads: ["request"], writes: ["receipt"], tool: { name: "notes.write", version: "1.0", args: {} }, unhandled: true },
+      ...(where === "below" ? [{ id: "after", type: "human_gate", reads: ["parts"], humanGate: { ref: "oversight/hold@stable" } }] : []),
+    ],
+    edges: [
+      { id: "e0", from: "fetch", to: "plan", kind: "seq" },
+      { id: "fo1", from: "plan", to: "L1", kind: "fanout", over: "s1", as: "i1", maxWidth: 4 },
+      { id: "fo2", from: "L1", to: "L2", kind: "fanout", over: "s2", as: "i2", maxWidth: 4 },
+      { id: "fo3", from: "L2", to: "L3", kind: "fanout", over: "s3", as: "i3", maxWidth: 4 },
+      { id: "j3", from: "L3", to: "J3", kind: "join", branches: ["L3"] },
+      { id: "j2a", from: "L2", to: "J2", kind: "join", branches: ["L2"] },
+      { id: "j2b", from: "J3", to: "J2", kind: "join", branches: ["J3"] },
+      { id: "toHold", from: "J2", to: "hold", kind: "seq" },
+      { id: "j1a", from: "L1", to: "J1", kind: "join", branches: ["L1"] },
+      { id: "j1b", from: "J2", to: "J1", kind: "join", branches: ["J2"] },
+      { id: "j1c", from: "hold", to: "J1", kind: "join", branches: ["hold"] },
+      ...(where === "below"
+        ? [
+            { id: "toAfter", from: "J1", to: "after", kind: "seq" },
+            { id: "toWrite", from: "after", to: "write", kind: "seq" },
+          ]
+        : [{ id: "toWrite", from: "J1", to: "write", kind: "seq" }]),
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function driveTriple(page: Options["page"], where: GateWhere): Promise<{ status: string; gateNodes: string; escalated: string; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const { engine, wrote } = engineOver(store, page);
+  const graph = compileOrThrow({
+    spec: tripleSpec(where),
+    resolver: resolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const runId = await engine.submit({ graph, inputs: { request: "please" } });
+  const p = await engine.advance(runId as RunId);
+  return {
+    status: p.status,
+    gateNodes: Object.values(p.gates).map((g) => g.nodeId).sort().join(","),
+    // The escalation key is `node:<runId>/<nodeId>`; only the node part is stable across runs.
+    escalated: Object.keys(p.escalations).map((k) => k.split("/").pop() ?? "").sort().join(","),
+    wrote: wrote(),
+  };
+}
+
+test("THE FAN BODY'S BOUND HOLDS THREE FANS DEEP — past two inner joins, and stopping at its own", async () => {
+  // IN. The outermost fan is empty, and the only `human_gate` sits on its branch past TWO inner
+  // joins. A walk that stopped at the first `join` node, or at the first one it reached, would
+  // never see it — E12 escalates on the outermost join, which is what says `fanBody` reached it.
+  const inBody = await driveTriple("NONE", "branch");
+  assert.equal(inBody.status, "awaiting_gate", `a gate two joins down the outer branch was skipped: ${inBody.status}`);
+  assert.equal(inBody.escalated, "J1", "E12 escalates on the join that releases the downstream");
+  assert.equal(inBody.wrote, 0, "and nothing is written while it is open");
+
+  // OUT. The identical graph with the gate moved BELOW the outermost join. That node runs once at
+  // every width including zero, so the width did not select it and E12 must say nothing — the
+  // gate that stops the run here is the authored one doing its own job.
+  const below = await driveTriple("NONE", "below");
+  assert.equal(below.escalated, "", `the bound reached past the fan's own join: ${below.escalated}`);
+  assert.equal(below.gateNodes, "after", "the only gate is the authored one, raised by itself");
+
+  // AND NOT A CONSTANT ESCALATION. Nothing unskippable anywhere on the branch, same empty fan.
+  const none = await driveTriple("NONE", "none");
+  assert.equal(none.status, "succeeded", `an empty triple fan with nothing on its branch must run out: ${none.status}`);
+  assert.equal(none.wrote, 1, "and the downstream the joins release runs");
+
+  // The control at width two, so every row above is a claim about the BOUND and not the width.
+  const two = await driveTriple("TWO", "branch");
+  assert.equal(two.status, "awaiting_gate", `precondition: the authored gate stops a populated fan: ${two.status}`);
+  assert.equal(two.escalated, "", "…on its own, with nothing escalated");
+  assert.equal(two.wrote, 0, "and nothing written while it is open");
 });
