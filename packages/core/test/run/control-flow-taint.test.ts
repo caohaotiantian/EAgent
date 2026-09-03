@@ -137,6 +137,25 @@
  *     candidate fix and is refused by test 4 above, where an inherited router's region is the
  *     whole of what closes the laundering path.
  *
+ * ## AND THREE MORE, WHICH ARE THE SUBTRACTION AGAIN — ONE MECHANISM OVER, AND ONE LOOSENING
+ *
+ * `controlRegion` answered the three above by subtracting the edges that fired from OUTSIDE the
+ * space, and by round 4 its early return carried three conditions. It computes EXCLUSIVE REACH
+ * per taken edge now — `reachable(e) \ reachable(everything else the decision could have gone
+ * through, or went through regardless)` — which is the actual definition of "what did this
+ * choice select" and which removed the `isRouter` parameter along with the three conditions:
+ *
+ *   - CONTINUE AND BRANCH, WITH A PRODUCER NAMING BOTH EDGES. A producer-supplied take makes
+ *     `choiceOf`'s space every outbound edge, so there is nothing outside the space to subtract
+ *     and the whole forward cone was marked. Under exclusive reach the sink edge is the arm's
+ *     own sibling and subtracts from it directly.
+ *   - A ROUTER WHOSE CASE TAKES EVERY EDGE IT DECLARED. It excluded nothing, so it chose
+ *     nothing; the `isRouter` exemption used to give it `reachable(all of them)` instead.
+ *   - A PRODUCER TAKE THAT NAMES ITS OWN `error` ARM, which is round 4's own loosening and the
+ *     one row here that points the other way. `#strayRoute` lets a producer name an error edge
+ *     and `choiceOf` drops error edges from the space, so an arm the producer PICKED sat on the
+ *     subtraction side and took the irreversible action out of its own region.
+ *
  * The set the guard now covers, and the set it does not, are named at `choiceOf`.
  */
 
@@ -195,7 +214,10 @@ type Shape =
   | "errone"
   | "alsoseq"
   | "pollloop"
-  | "armcond";
+  | "armcond"
+  | "errsupplied"
+  | "routerall"
+  | "alsoseqbody";
 
 interface Options {
   /**
@@ -228,7 +250,9 @@ interface Options {
  * `take` is its `error` edges. A failure is not a choice, and this shape is what says so.
  */
 function spec(o: Options): GraphSpec {
-  const routerCase = { when: `contains(${o.branchOn}, "PAY")`, take: ["toChosen"] };
+  // `routerall` is the ONE case whose `take` names every edge the router declared: it excluded
+  // nothing, so it chose nothing, and its region must be empty.
+  const routerCase = { when: `contains(${o.branchOn}, "PAY")`, take: o.shape === "routerall" ? ["toChosen", "toOther"] : ["toChosen"] };
   // The shapes that have no router: something else narrows the `take` instead — an edge
   // condition, a body, or a failure.
   const routerless =
@@ -256,7 +280,9 @@ function spec(o: Options): GraphSpec {
     o.shape === "errordinary" ||
     o.shape === "errone" ||
     o.shape === "alsoseq" ||
-    o.shape === "pollloop";
+    o.shape === "pollloop" ||
+    o.shape === "errsupplied" ||
+    o.shape === "alsoseqbody";
   const nodes: unknown[] = [
     {
       id: "fetch",
@@ -356,6 +382,22 @@ function spec(o: Options): GraphSpec {
     nodes.push({ id: "poll", type: "function", reads: [o.branchOn], writes: ["status"], function: { ref: "function/poll@stable", effects: [] } });
     nodes.push({ id: "check", type: "function", reads: ["status"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
     nodes.push({ id: "after", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "errsupplied") {
+    // A PRODUCER TAKE THAT NAMES ONE OF THE NODE'S OWN `error` EDGES. `#strayRoute` bounds a
+    // producer take to the node's outbound edges INCLUDING its error arms, and `choiceOf` drops
+    // every error edge from the space — so an edge that fired BECAUSE the producer picked it sits
+    // outside the space, where round 4 read "outside the space" as "fired regardless" and
+    // subtracted the charge straight out of the region.
+    nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/errarm@stable", effects: [] } });
+    nodes.push({ id: "mid", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "alt", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
+  } else if (o.shape === "alsoseqbody") {
+    // `alsoseq` WITH A PRODUCER. The body names its unconditional sink edge as well as the arm,
+    // which puts BOTH inside `choiceOf`'s space — so there is nothing outside the space left for
+    // round 4's `alsoRan` to subtract, and the whole forward cone was marked.
+    nodes.push({ id: "decide", type: "function", reads: [o.branchOn], writes: ["note"], function: { ref: "function/bothseq@stable", effects: [] } });
+    nodes.push({ id: "extra", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
+    nodes.push({ id: "merge", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/noop2@stable", effects: [] } });
   } else if (o.shape === "armcond") {
     // A ROUTER ARM THAT RECONVERGES, WITH ONE CONDITIONAL SIDE-TRIP ON IT. Both of the router's
     // arms reach `merge`, so the router's own region stops at `arm` and `extra` — the charge
@@ -481,7 +523,9 @@ function spec(o: Options): GraphSpec {
     // `note` is also what the loop's `until` tests, and GRAPH006 requires a node inside the
     // cycle to be able to change the stop condition — `skip` is that node.
     nodes.push({ id: "skip", type: "function", reads: ["request", "note"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
-  } else if (o.shape === "nested" || routerless) {
+  } else if (o.shape === "nested" || o.shape === "routerall" || routerless) {
+    // `routerall` takes BOTH arms, so its `skip` may not write the channel the charge writes —
+    // GRAPH010_CONCURRENT_WRITE is right that two nodes running in parallel cannot both `replace`.
     nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["note"], function: { ref: "function/noop3@stable", effects: [] } });
   } else {
     nodes.push({ id: "skip", type: "function", reads: ["request"], writes: ["receipt"], function: { ref: "function/noop@stable", effects: [] } });
@@ -519,6 +563,20 @@ function spec(o: Options): GraphSpec {
     edges.push({ id: "again", from: "check", to: "poll", kind: "loop", maxIterations: 3, until: 'contains(status, "done")' });
     edges.push({ id: "toAfter", from: "check", to: "after", kind: "seq" });
     edges.push({ id: "afterToCharge", from: "after", to: "charge", kind: "seq" });
+  } else if (o.shape === "errsupplied") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "toChosen", from: "decide", to: "mid", kind: "seq" });
+    edges.push({ id: "toOther", from: "decide", to: "alt", kind: "seq" });
+    edges.push({ id: "midToCharge", from: "mid", to: "charge", kind: "seq" });
+    // Both the arm the body took and the error arm it also named reach the charge, so
+    // subtracting the error arm is what takes the charge out of the region.
+    edges.push({ id: "toErr", from: "decide", to: "charge", kind: "error" });
+  } else if (o.shape === "alsoseqbody") {
+    edges.push({ id: "e0", from: "fetch", to: "decide", kind: "seq" });
+    edges.push({ id: "toChosen", from: "decide", to: "extra", kind: "conditional", when: `contains(${o.branchOn}, "PAY")` });
+    edges.push({ id: "toSink", from: "decide", to: "merge", kind: "seq" });
+    edges.push({ id: "extraToMerge", from: "extra", to: "merge", kind: "seq" });
+    edges.push({ id: "mergeToCharge", from: "merge", to: "charge", kind: "seq" });
   } else if (o.shape === "armcond") {
     edges.push({ id: "toChosen", from: "route", to: "arm", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "merge", kind: "seq" });
@@ -642,7 +700,7 @@ function spec(o: Options): GraphSpec {
     // condition, and `fetch` is the only one there.
     edges.push({ id: "toChosen", from: "route", to: "charge", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "fetch", kind: "loop", maxIterations: 2, until: 'contains(untrusted, "done")' });
-  } else if (o.shape === "select") {
+  } else if (o.shape === "select" || o.shape === "routerall") {
     edges.push({ id: "toChosen", from: "route", to: "charge", kind: "seq" });
     edges.push({ id: "toOther", from: "route", to: "skip", kind: "seq" });
   } else if (o.shape === "converge") {
@@ -789,6 +847,12 @@ function engineOver(store: MemoryStateStore): { engine: Engine; charged: () => n
     throw new Error("no pay");
   });
   functions.register("function/part@stable", () => ({ writes: { parts: ["p"] } }));
+  // `errsupplied`'s deciding node: it succeeds, names its arm, and ALSO names one of its own
+  // `error` edges — which `#strayRoute` permits because that edge is one of its outbound edges.
+  functions.register("function/errarm@stable", () => ({ writes: { note: "decided" }, take: ["toChosen", "toErr"] }));
+  // `alsoseqbody`'s deciding node: the ordinary "always continue to my sink, and also branch"
+  // body, with the sink edge inside the producer-supplied take.
+  functions.register("function/bothseq@stable", () => ({ writes: { note: "decided" }, take: ["toSink", "toChosen"] }));
   functions.register("function/pick@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
     return { writes: { note: "decided" }, take: [text.includes("PAY") ? "toChosen" : "toOther"] };
@@ -1627,4 +1691,77 @@ test("AN INHERITED MARK MAY NOT RE-EXPAND PAST THE RECONVERGENCE ITS ENCLOSING R
   const clean = await drive({ branchOn: "request", shape: "armcond" });
   assert.equal(clean.status, "succeeded", `control: ${clean.status}`);
   assert.equal(clean.charged, 1, "control");
+});
+
+/**
+ * ROUND 4'S OWN LOOSENING, AND IT IS THE ONE ROW HERE THAT POINTS THE OTHER WAY.
+ *
+ * `alsoRan` subtracted every edge that fired from OUTSIDE `choiceOf`'s space, justified by "an
+ * edge outside the space was not picked, so it fired unconditionally". `#strayRoute` bounds a
+ * producer's `take` to the node's own outbound edges INCLUDING its `error` arms, and `choiceOf`
+ * drops every error edge from the space — so an arm the producer explicitly picked landed on the
+ * subtraction side and took the irreversible action out of its own region.
+ *
+ *     the body reads the page and names its error arm -> succeeded,     gates=0, charged=1 (r4)
+ *     the same graph                                  -> awaiting_gate, gates=1, charged=0 (now)
+ *     the body reads the run's input                  -> succeeded,     gates=0, charged=1 (both)
+ */
+test("A PRODUCER'S OWN `error` ARM IS A CHOICE, NOT SOMETHING THAT FIRED REGARDLESS", async () => {
+  const dirty = await drive({ shape: "errsupplied", branchOn: "untrusted" });
+  assert.equal(dirty.status, "awaiting_gate");
+  assert.equal(dirty.gates, 1);
+  assert.equal(dirty.charged, 0);
+
+  const clean = await drive({ shape: "errsupplied", branchOn: "request" });
+  assert.equal(clean.status, "succeeded");
+  assert.equal(clean.gates, 0);
+  assert.equal(clean.charged, 1);
+});
+
+/**
+ * A ROUTER WHOSE MATCHED CASE TAKES EVERY EDGE IT DECLARED EXCLUDED NOTHING.
+ *
+ * The `isRouter` exemption existed so a router never fell through the "nothing was left untaken"
+ * early return, and the cost was that a router taking all of its own edges marked
+ * `reachable(all of them)` with nothing subtracted — which can be most of a graph.
+ * `couldHaveNotFired` answers it from the choice instead of from the node type.
+ *
+ *     the router reads the page, its case takes both arms -> awaiting_gate, gates=1, charged=0 (r4)
+ *     the same graph                                      -> succeeded,     gates=0, charged=1 (now)
+ *     the router reads the run's input                    -> succeeded,     gates=0, charged=1 (both)
+ */
+test("A ROUTER THAT TOOK EVERY EDGE IT DECLARED CHOSE NOTHING", async () => {
+  const dirty = await drive({ shape: "routerall", branchOn: "untrusted" });
+  assert.equal(dirty.status, "succeeded");
+  assert.equal(dirty.gates, 0);
+  assert.equal(dirty.charged, 1);
+
+  const clean = await drive({ shape: "routerall", branchOn: "request" });
+  assert.equal(clean.status, "succeeded");
+  assert.equal(clean.gates, 0);
+  assert.equal(clean.charged, 1);
+});
+
+/**
+ * `alsoseq` ONE MECHANISM OVER: the sink edge is inside the space because a PRODUCER named it.
+ *
+ * Round 4 closed "always continue, and additionally do X" by subtracting the edges that fired
+ * from outside the space — which is empty here, because a producer-supplied take makes
+ * `choiceOf`'s space every outbound edge. Exclusive reach needs nothing outside the space: the
+ * sink edge is one of the SEED's own siblings, so it subtracts from the arm directly.
+ *
+ *     the body reads the page and names both edges -> awaiting_gate, gates=1, charged=0 (r4)
+ *     the same graph                               -> succeeded,     gates=0, charged=1 (now)
+ *     the body reads the run's input               -> succeeded,     gates=0, charged=1 (both)
+ */
+test("CONTINUE AND BRANCH, WITH THE PRODUCER NAMING BOTH — the sink is still not an alternative", async () => {
+  const dirty = await drive({ shape: "alsoseqbody", branchOn: "untrusted" });
+  assert.equal(dirty.status, "succeeded");
+  assert.equal(dirty.gates, 0);
+  assert.equal(dirty.charged, 1);
+
+  const clean = await drive({ shape: "alsoseqbody", branchOn: "request" });
+  assert.equal(clean.status, "succeeded");
+  assert.equal(clean.gates, 0);
+  assert.equal(clean.charged, 1);
 });

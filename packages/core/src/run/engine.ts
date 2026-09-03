@@ -9301,8 +9301,8 @@ interface ControlTaint {
  * `applySecretFlow` already refuses that shape for the confidentiality axis for the reason
  * that applies here too: an axis that marks everything carries no information, and a gate that
  * always fires is one somebody switches off. So the marked set is the CONTROL REGION and
- * nothing else — the nodes this choice actually selected, `reachable(the choice-space edges
- * TAKEN) \ reachable(the choice-space edges NOT taken)`. A node the choice reaches whichever
+ * nothing else — the nodes this choice actually selected, which `controlRegion` computes as the
+ * EXCLUSIVE reach of each taken edge. A node the choice reaches whichever
  * way it went would have run anyway; the choice did not select it, and it is not marked. That
  * is the arm between the deciding node and the point where its branches reconverge, and it is
  * EMPTY for a choice whose arms lead to the same place. It narrows again at the consumer: E8
@@ -9315,8 +9315,8 @@ interface ControlTaint {
  *   1. A node with no conditional, loop or producer-supplied edges has an empty choice space and
  *      returns before any of this runs.
  *   2. A node whose every out-edge fired, and whose out-edges are UNCONDITIONAL, chose nothing —
- *      the edges were always going to fire. `controlRegion` is where that is decided, and it
- *      decides it from the taken edges' kinds rather than from the emptiness of the other side.
+ *      the edges were always going to fire, so none of them seeds a region. `controlRegion`
+ *      is where that is decided; `couldHaveNotFired` beside it is the predicate.
  *
  * Monotonic and never cleared, exactly like `applyTaint`, so folding forward from seq 1
  * reaches the state the live process held. First writer wins, so a node selected by two
@@ -9334,7 +9334,7 @@ function applyControlTaint(
   if (choice.space.length === 0) return;
   const evidence = choiceTainted(controlTainted, tainted, node, choice);
   if (evidence === undefined) return;
-  for (const id of controlRegion(index, choice.space, take, node.type === "router")) {
+  for (const id of controlRegion(index, choice.space, take)) {
     if (!controlTainted.has(id)) controlTainted.set(id, { decidedBy: node.id, channels: evidence });
   }
 }
@@ -9441,9 +9441,9 @@ interface Choice {
  *     length.
  *   - HOW MANY TIMES a loop body runs, as a NUMBER. `controlRegion` is a node set and cannot
  *     express an iteration count. What it can express is WHICH NODES the decision to go round
- *     again selected, and that is now what it returns: a loop edge alone in a space leaves the
- *     alternatives side empty, and an empty alternatives side subtracts nothing rather than
- *     emptying the region — see `controlRegion`. The node set it returns is the CYCLE BODY, and
+ *     again selected, and that is now what it returns: a `loop` edge could have come out the
+ *     other way whatever else is in the space, so it seeds a region on its own — see
+ *     `couldHaveNotFired`. The node set it returns is the CYCLE BODY, and
  *     that is a measured claim rather than a definition: the deciding node's forward `seq` edge
  *     is outside the space and fired on the same commit, so everything past the loop comes off
  *     the region through `controlRegion`'s second subtraction source. The first pass is the graph
@@ -9502,8 +9502,9 @@ interface Choice {
  *
  * THE MIDDLE ROW IS WHAT THIS DEFAULT COSTS, and this table asserted the opposite of it for a
  * round: it claimed the columns differ only for a graph that "branches on the fetched page". They
- * do not. `controlRegion`'s taken-side kind test — the thing that keeps the first row cheap —
- * only runs when the alternatives side is EMPTY, and one untaken sibling makes it non-empty. So
+ * do not. `couldHaveNotFired` — the thing that keeps the first row cheap — admits an
+ * unconditional taken edge as a seed as soon as SOMETHING in the space was left untaken, and one
+ * untaken sibling is something. So
  * any pre-existing in-flight run whose deciding node read fetched content and left one
  * conditional sibling untaken needs a second human to resume, however clean that sibling's `when`
  * was.
@@ -9625,84 +9626,60 @@ function choiceTainted(
 /**
  * The nodes this choice SELECTED — not the ones it would have reached anyway.
  *
- * `reachable(the space edges TAKEN) \ reachable(the space edges NOT taken, PLUS every edge that
- * fired from outside the space)`.
+ * EXCLUSIVE REACH, per taken edge:
  *
- * ## THE SUBTRACTION HAS TWO SOURCES, AND FOR THREE ROUNDS IT HAD ONE
+ *     union over the taken edges e of:
+ *         reachable(e)  \  reachable((the rest of the space) + (what fired inevitably outside it))
  *
- * This docstring used to say the two sides read the SAME space, "which is what makes the
- * subtraction a statement about the choice: an edge outside the space was not something this
- * commit picked, so it belongs on neither side". The first half of that is right and the second
- * is the defect. An edge outside the space was not picked — which means it FIRED WHATEVER THIS
- * DECISION CAME OUT, and everything forward of it therefore runs whatever this decision came
- * out. That is the definition of "would have reached it anyway", so it belongs on the
- * SUBTRACTION side, and leaving it off made "the choice selected this" mean "this is downstream
- * of the arm", which is a different and much larger set.
+ * A node is in the region iff SOME taken edge reaches it and NOTHING ELSE the decision could have
+ * gone through, or did go through regardless, reaches it. That is exactly "this choice, and
+ * nothing else, put it there."
  *
- * `choiceOf` drops a node's unconditional out-edges from the space whenever no producer supplied
- * the take, so this is not a corner — it is every graph in which a node continues AND branches.
- * Three shapes, each driven twice on the same injected page and the same `pay.charge` reading
- * only clean channels, with the regions printed from the engine:
+ * ## IT REPLACED `reachable(taken) \ reachable(alternatives ∪ alsoRan)`, WHICH IS A WEAKER CLAIM
  *
- *     "always continue, and additionally do X if the page says so"
- *         {extra,merge,charge}       awaiting_gate 1 gate | {extra}       succeeded, charged 1
- *     an ordinary poll-until-done retry loop
- *         {poll,check,after,charge}  awaiting_gate 1 gate | {poll,check}  succeeded, charged 3
- *     a router arm with one conditional side-trip, both arms reconverging
- *         {extra,merge,charge}       awaiting_gate 1 gate | {extra}       succeeded, charged 1
+ * The set-at-a-time form asks "is this node downstream of the arm and of nothing that did not
+ * fire". It cannot see that a node is reached by TWO edges of the same take, so a node the
+ * decision reached by an edge it would have taken anyway stayed in the region as long as some
+ * OTHER taken edge also reached it. Four rounds each answered one shape of that with one more
+ * condition on the early return, which by round 4 read
+ * `alternatives.length === 0 && !isRouter && !taken.some(conditional || loop)`. Each of the four
+ * measured below is that same defect one mechanism over, and none of them needs a special case
+ * here now. Every row is one graph driven twice — the deciding node reading the fetched page,
+ * then the run's own input — with an irreversible `pay.charge` reading only clean channels and a
+ * human ceiling of `on` typed before any untrusted byte existed:
  *
- * The middle row is also why the loop paragraph below is now true: a loop's region IS the cycle
- * body, and it was "everything forward of the loop target" until the sibling `seq` edge that
- * fired on the same commit joined the subtraction. `take` was already a parameter here, so this
- * needed no signature change — only the second line of the walk.
+ *     shape                                            before            after
+ *     always continue, AND do X if the page says so    (closed round 4, still closed)
+ *     an ordinary poll-until-done retry loop           (closed round 4, still closed)
+ *     a router arm below a reconvergence               (closed round 4, still closed)
+ *     the same "continue AND branch" with a PRODUCER
+ *       take, so both edges are inside the space       gate 1, ch 0     ch 1, no gate
+ *     a router whose case takes every edge it declared gate 1, ch 0     ch 1, no gate
+ *     a producer take naming its own `error` edge      ch 1, no gate    gate 1, ch 0
  *
- * A commit that took no edge from its own space still selects nothing — the failed node, whose
- * `take` is its `error` edges, and the degenerate router whose only case names its own fallback.
+ * The last row is the one pointing the other way, and it is round 4's own loosening: `alsoRan`
+ * subtracted every edge that fired from outside the space, and `#strayRoute` lets a producer name
+ * an `error` edge in its own `take` while `choiceOf` drops error edges from the space. So a body
+ * that read the injected page and named one of its own error arms subtracted the irreversible
+ * action out of its own region. The kind test in the `alsoRan` loop below is what separates the
+ * two populations; see the comment there.
  *
- * ## AN EMPTY ALTERNATIVES SIDE, AND THE TEST THAT DECIDES WHAT IT MEANS
+ * ## WHAT IS SUBTRACTED, AND WHY EACH SOURCE IS ON THAT SIDE
  *
- * When nothing in the space was left untaken there was no arm IN THE SPACE to go down instead.
- * Whether that means "nothing would have run" is a question about the TAKEN edges, and it has
- * two answers:
+ *   - THE REST OF THE SPACE, taken or not. An untaken edge is the arm the decision did not go
+ *     down. A DIFFERENTLY-taken edge is an arm it also went down, so a node both reach is not
+ *     something this edge selected — and that is the half the set-at-a-time form could not
+ *     express at all.
+ *   - WHAT FIRED INEVITABLY FROM OUTSIDE THE SPACE. `choiceOf` drops a node's unconditional
+ *     out-edges from the space whenever no producer supplied the take, and those edges FIRED —
+ *     `#edgesToTake` always takes them — so everything forward of them runs whatever this
+ *     decision came out. This is not a corner: it is every graph in which a node continues AND
+ *     branches.
  *
- *   - A `conditional` or `loop` edge that fired COULD have not fired: its expression could have
- *     come out the other way. So the region is `reachable(taken)`, LESS whatever the edges that
- *     fired from outside the space reach — which is the paragraph above, and is why this clause
- *     is not by itself a claim that "nothing past it would have run".
- *   - AN UNCONDITIONAL EDGE THAT FIRED WAS ALWAYS GOING TO FIRE. Nothing was chosen, the
- *     alternative does not exist, and the region is empty.
+ * A commit that took no edge from its own space selects nothing — the failed node, whose `take`
+ * is its `error` edges, and the degenerate router whose only case names its own fallback.
  *
- * This clause once read `taken.length === 0 || alternatives.length === 0` and gave the first
- * answer's shapes the second answer; then it read `taken.length === 0` alone and gave the second
- * answer's shapes the first. Both directions were measured end to end on the same injected page,
- * the same `pay.charge` reading only clean channels, and the same human de-escalation to `on`
- * typed before any untrusted byte existed:
- *
- *     one `conditional` out-edge and no sibling    -> succeeded, gates=0, charged=1     (too few)
- *     a `loop` edge alone in the space             -> succeeded, gates=0, charged=3     (too few)
- *     fetch -> summarise -> charge, one `seq` edge -> awaiting_gate, gates=1, charged=0 (too many)
- *
- * The third row is a graph with NO BRANCH IN IT: three nodes, one out-edge, and a body whose
- * `take` names that edge — byte-identical to what `#edgesToTake` produces from no take at all.
- * A guard that gates that gates every ordinary graph, which is the shape this axis exists to
- * avoid. `test/run/control-flow-taint.test.ts` pins all three.
- *
- * The loop row is why the docstring below no longer says a loop's `until` contributes evidence
- * only when the space holds another edge: taking the back-edge selects the cycle body, and NOT
- * taking it is a real alternative that reaches nothing. "The cycle body" is measured rather than
- * asserted — see the poll-loop row above, where it is `{poll,check}` and the node past the loop
- * is out.
- *
- * The residual is the router: one that takes every edge it declared marks `reachable(all of
- * them)` with nothing subtracted, which can be most of a graph. Measured on a single case whose
- * `take` names both of the router's edges — succeeded/gates=0/charged=1 before, awaiting_gate/
- * gates=1/charged=0 now. Narrowing the alternatives side to "the edges the other cases and the
- * fallback would have taken" was measured against this shape and changes nothing: with one case
- * and a fallback the router also took, that set is empty too. It is over-marking in the
- * fail-closed direction, and E8 clamps only hard-to-undo actions, so it costs a gate where one
- * is arguably owed.
- *
- * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS THE FIX
+ * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS STILL THE FIX
  *
  * This walk once followed every edge kind except `compensation` on both sides, and the sentence
  * here claimed that "on the alternatives side credits an arm with everything it could have led
@@ -9716,51 +9693,105 @@ function choiceTainted(
  *     not-taken arm loops back  -> succeeded,     gates=0, charged=1
  *
  * "Would have run anyway" has to mean "without passing through this same decision again". A
- * backward edge does pass through it again, so credit stops there: on the alternatives side a
+ * backward edge does pass through it again, so credit stops there: on the subtraction side a
  * `loop` edge contributes neither its target nor anything past it. The TAKEN side still walks
  * them, where over-approximating marks MORE.
  *
  * This subsumes refusing to re-expand the deciding node's own id, which was the other candidate
  * fix and is the weaker one: GRAPH006_UNMARKED_CYCLE makes every cycle in a compiled graph run
- * through a `loop` edge, so with loop edges dropped the alternatives walk is a DAG walk that
+ * through a `loop` edge, so with loop edges dropped the subtraction walk is a DAG walk that
  * cannot come back at all — including by a route that re-enters ABOVE the deciding node rather
  * than at it, which blocking one id does not stop.
  *
  * `error` edges are still walked on the taken side, and `compensation` is walked on neither: it
  * is a DECLARATION the compiler checks rather than a route the executor follows — `#edgesToTake`
  * argues that at length.
+ *
+ * ## WHAT IT COSTS, MEASURED
+ *
+ * Exclusive reach is one walk per seed plus one per subtractor, where the naive form was two
+ * walks flat. The subtraction side is re-formed for every seed, so the per-edge walks are
+ * memoised and unioned — forward reachability distributes over union, so that is exact rather
+ * than an approximation. On `workflows/incident-triage.ts`, the largest graph in the tree at 28
+ * nodes, driven through its own suite: 20 walks / 58 node-visits before, 30 / 70 after.
  */
 function controlRegion(
   index: GraphIndex,
   space: readonly EdgeSpec[],
   take: readonly EdgeId[],
-  isRouter: boolean,
 ): ReadonlySet<NodeId> {
   const chosen = new Set<EdgeId>(take);
   const taken: EdgeSpec[] = [];
-  const alternatives: EdgeId[] = [];
+  const alternatives: EdgeSpec[] = [];
   for (const e of space) {
     if (chosen.has(e.id)) taken.push(e);
-    else alternatives.push(e.id);
+    else alternatives.push(e);
   }
   if (taken.length === 0) return new Set<NodeId>();
-  if (alternatives.length === 0 && !isRouter && !taken.some((e) => e.kind === "conditional" || e.kind === "loop")) {
-    return new Set<NodeId>();
+
+  // THE EDGES THAT FIRED FROM OUTSIDE THE SPACE, WHICH IS NOT THE SAME AS "were not picked".
+  // An unconditional sibling outside the space fired because `#edgesToTake` always takes it, so
+  // everything forward of it runs whatever this decision came out and it belongs on the
+  // subtraction side. An `error` edge outside the space is the opposite: `#strayRoute` lets a
+  // producer name one in its own `take`, so it fired BECAUSE the producer picked it, and
+  // subtracting it takes the arm the producer chose straight out of the region. `choiceOf` drops
+  // every `error` edge from the space, so the kind is what separates the two — and when a
+  // producer supplied the take there is nothing else outside the space, because `choiceOf`'s
+  // space is then every outbound edge but the `error` and `compensation` ones.
+  const inSpace = new Set(space.map((e) => e.id));
+  const alsoRan: EdgeId[] = [];
+  for (const id of take) {
+    if (inSpace.has(id)) continue;
+    const e = index.edgeById.get(id);
+    if (e === undefined || e.kind === "error" || e.kind === "compensation") continue;
+    alsoRan.push(id);
   }
 
-  // THE EDGES THAT FIRED FROM OUTSIDE THE SPACE, which are the other half of "would have run
-  // anyway". See the section above: an edge outside the space was not picked, so it fired
-  // unconditionally, so everything forward of it runs whatever this decision came out.
-  const inSpace = new Set(space.map((e) => e.id));
-  const alsoRan = take.filter((id) => !inSpace.has(id));
+  // One walk per edge, memoised, because the subtraction side is re-formed for every seed and
+  // forward reachability distributes over union: `reachable(A ∪ B) === reachable(A) ∪
+  // reachable(B)`. So the cost is |space| + |alsoRan| walks whatever the seed count is.
+  const cache = new Map<EdgeId, ReadonlySet<NodeId>>();
+  const anyway = (id: EdgeId): ReadonlySet<NodeId> => {
+    let r = cache.get(id);
+    if (r === undefined) {
+      r = reachableFromEdges(index, [id], false);
+      cache.set(id, r);
+    }
+    return r;
+  };
 
-  const selected = reachableFromEdges(
-    index,
-    taken.map((e) => e.id),
-    true,
-  );
-  for (const id of reachableFromEdges(index, [...alternatives, ...alsoRan], false)) selected.delete(id);
-  return selected;
+  const region = new Set<NodeId>();
+  for (const e of taken) {
+    if (!couldHaveNotFired(e, alternatives.length)) continue;
+    const otherwise = new Set<NodeId>();
+    for (const o of space) if (o.id !== e.id) for (const n of anyway(o.id)) otherwise.add(n);
+    for (const id of alsoRan) for (const n of anyway(id)) otherwise.add(n);
+    for (const n of reachableFromEdges(index, [e.id], true)) if (!otherwise.has(n)) region.add(n);
+  }
+  return region;
+}
+
+/**
+ * Could this taken edge have not fired? Only such an edge is a seed of the region.
+ *
+ * Two ways, and both have to be here or one of two measured shapes breaks:
+ *
+ *   - ITS OWN EXPRESSION COULD HAVE COME OUT THE OTHER WAY — `conditional` and `loop`. Not
+ *     taking the arm is a real alternative even when it reaches nothing, which is what makes a
+ *     lone conditional out-edge (`only`) and a lone `loop` edge (`loopuntil`) real choices.
+ *   - THE DECISION DEMONSTRABLY EXCLUDED SOMETHING — some edge of the space was left untaken.
+ *     An unconditional edge cannot fail to fire on its own, so the only thing that can have
+ *     omitted it is the producer that wrote the `take`, and a producer that named every edge in
+ *     its space omitted nothing. `fetch -> summarise -> charge` with a body naming its one `seq`
+ *     edge is byte-identical in the journal to a body that named nothing at all, and marking it
+ *     control-tainted gates a graph with no branch in it.
+ *
+ * The second clause is what replaced the `isRouter` exemption. A router that takes every edge it
+ * declared left nothing untaken, so under this predicate it seeds nothing — which is the answer
+ * the exemption was there to avoid giving for the wrong reason.
+ */
+function couldHaveNotFired(edge: EdgeSpec, untaken: number): boolean {
+  return edge.kind === "conditional" || edge.kind === "loop" || untaken > 0;
 }
 
 /**
