@@ -2299,10 +2299,29 @@ export class Engine {
         return (await this.#project(ctx))!;
       }
 
+      // WHICH Tasks to run is the scheduler's question; HOW they run is not, and never
+      // varies between deployments. Swapping in a partitioned scheduler is a constructor
+      // argument, which is the whole content of "changes implementations, never call
+      // sites" for this component.
+      const wave = this.#scheduler.select({
+        projection: p,
+        graph: ctx.graph,
+        nodes: ctx.index.byId,
+        maxParallelism: this.#maxParallelism,
+        now: this.#now(),
+        workerId: this.#workerId,
+      });
+
+      // ASKED BEFORE THE "nothing is ready" SHORT-CIRCUIT BELOW, AND THAT ORDER IS THE POINT.
+      // A worker SIGKILLed between `task.leased` and `task.committed` leaves a task `leased`
+      // and the ready set EMPTY, which is the one shape `InProcessScheduler`'s deadline reclaim
+      // exists for. Selecting after the short-circuit meant the reclaim was never reached on the
+      // product path at all: the run was declared over instead. See
+      // `test/run/inprocess-reclaims-a-dead-lease.test.ts`.
       const ready = tasksInState(p, "ready").filter(
         (t) => t.retryAfter === undefined || t.retryAfter <= this.#now(),
       );
-      if (ready.length === 0) {
+      if (ready.length === 0 && wave.length === 0) {
         // A Task still in backoff is not "nothing left to do" — finishing here would
         // complete a run that has work pending. Return instead, so the caller can
         // advance again once the clock has moved.
@@ -2327,19 +2346,6 @@ export class Engine {
         const done = await this.#project(ctx);
         return done!;
       }
-
-      // WHICH Tasks to run is the scheduler's question; HOW they run is not, and never
-      // varies between deployments. Swapping in a partitioned scheduler is a constructor
-      // argument, which is the whole content of "changes implementations, never call
-      // sites" for this component.
-      const wave = this.#scheduler.select({
-        projection: p,
-        graph: ctx.graph,
-        nodes: ctx.index.byId,
-        maxParallelism: this.#maxParallelism,
-        now: this.#now(),
-        workerId: this.#workerId,
-      });
 
       // AN EMPTY WAVE OVER A NON-EMPTY READY SET IS NOT AN ERROR — it is a peer holding
       // the leases. `LeasedScheduler` returns exactly that, legitimately, whenever

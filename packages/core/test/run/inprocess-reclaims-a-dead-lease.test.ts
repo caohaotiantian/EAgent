@@ -15,11 +15,10 @@
  * TWO THINGS THIS FILE ALSO PINS, because the first version of the fix passed while being
  * unreachable and while refusing the ordinary deployment:
  *
- *   - `Engine.#advanceSerially` DOES NOT CALL `select` ON THIS SHAPE. It short-circuits on an
- *     empty `ready` set sixty-five lines earlier and finishes the run. The last test drives a
- *     real engine over the stranded journal with a spy scheduler and asserts zero calls, so this
- *     file states the gap rather than implying the product path works. Delete that test when the
- *     engine consults `select` first, and flip it to the opposite assertion.
+ *   - `Engine.#advanceSerially` REACHES `select` ON THIS SHAPE. It used not to: the
+ *     "nothing is ready" short-circuit sat sixty-five lines above the scheduler call, so a
+ *     stranded run was declared over without any scheduler being consulted. The last test drives
+ *     a real engine over the stranded journal with a spy scheduler and pins the product path.
  *   - THE WORKER ID IS NOT THE IDENTITY. `Engine` defaults `workerId` to `"worker-0"`, which is
  *     stable across a restart, so a name-based "is this mine?" refused to reclaim for every
  *     embedder and for the whole test harness. The reclaim tests below therefore run under the
@@ -234,19 +233,13 @@ test("the ORDINARY selection is unchanged — ready tasks, critical path first",
 });
 
 /**
- * THE ENGINE NEVER ASKS. Everything above is a property of `select`, and `select` is not on the
- * path a stranded run takes.
+ * THE ENGINE ASKS. Everything above is a property of `select`; this is the product path.
  *
- * This is a REGRESSION PIN ON A KNOWN GAP, not a passing feature: it asserts the wrong
- * behaviour, so that the day `engine.ts` moves its short-circuit below the scheduler call this
- * test fails and is flipped. `#advanceSerially` reads
- *
- *     const ready = tasksInState(p, "ready").filter(…);
- *     if (ready.length === 0) { … await this.#finish(ctx, p); return …; }
- *
- * sixty-five lines above `const wave = this.#scheduler.select({…})`. A SIGKILLed plane leaves
- * `ready` empty and one task `leased`, so the run is FINISHED — folded to `failed` — without any
- * scheduler being consulted.
+ * `#advanceSerially` calls `this.#scheduler.select({…})` BEFORE its `ready.length === 0`
+ * short-circuit, and that short-circuit now also requires an empty wave. While the order was the
+ * other way round a SIGKILLed plane — `ready` empty, one task `leased` — was FINISHED, folded to
+ * `failed`, with no scheduler consulted; that is what this test pinned before the fix and what it
+ * refutes now.
  */
 class SpyScheduler implements Scheduler {
   readonly kind = "spy";
@@ -258,7 +251,7 @@ class SpyScheduler implements Scheduler {
   }
 }
 
-test("the engine's `ready.length === 0` short-circuit means `select` is never called on a stranded run", async () => {
+test("the engine consults `select` on a stranded run, and the reclaimed task is dispatched", async () => {
   const clock = { t: LEASED_AT };
   const store = new MemoryStateStore({ now: () => clock.t });
   const graph = compileSkeleton();
@@ -297,7 +290,10 @@ test("the engine's `ready.length === 0` short-circuit means `select` is never ca
 
   const p = await engine.advance(RUN);
 
-  assert.equal(spy.calls, 0, "the scheduler seam is not reached at all on the shape reclaim exists for");
-  assert.equal(p.tasks[AGENT_TASK]?.state, "leased", "the stranded task is exactly where the crash left it");
-  assert.equal(p.status, "failed", "and the run was declared over rather than resumed");
+  assert.equal(spy.calls, 1, "the scheduler seam is reached on the shape reclaim exists for");
+  // Dispatched, not stranded and not buried: an `agent` node under posture `out` asks before it
+  // acts, so the reclaimed task is at its gate. `leased` would mean the crash still owns it and
+  // `failed` would mean the run was declared over — the two outcomes this change removes.
+  assert.equal(p.tasks[AGENT_TASK]?.state, "awaiting_gate", "the reclaimed task ran and reached its gate");
+  assert.equal(p.status, "awaiting_gate", "and the run is alive, waiting on a human, rather than failed");
 });
