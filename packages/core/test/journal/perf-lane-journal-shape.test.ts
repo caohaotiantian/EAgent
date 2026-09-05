@@ -113,6 +113,31 @@ test("…and it still answers exactly what it answered before: prefix, bounds, a
   assert.deepEqual(unknown, [], "an unknown run is empty, not an error");
 });
 
+test("A BOUND THE READ CANNOT UNDERSTAND YIELDS NOTHING, which is the direction the filter failed in", async () => {
+  // Every comparison against NaN is false, so the range test the binary search sits in front of
+  // answers "no" for an unreadable bound. Deriving the answer from the search alone would have
+  // put the start index at 0 and served the WHOLE journal — a read that widens when it cannot
+  // read its own arguments. Neither bound is reachable as NaN from `src/` today; the point is
+  // that the guard does not depend on that staying true.
+  const store = new MemoryStateStore({ now: () => 1 });
+  await fill(store, 20);
+
+  for (const [from, to] of [
+    [NaN, undefined],
+    [1, NaN],
+    [NaN, NaN],
+  ] as const) {
+    const seen: JournalEvent[] = [];
+    for await (const e of store.read(RUN, from as Seq, to as Seq | undefined)) seen.push(e);
+    assert.deepEqual(seen, [], `read(${String(from)}, ${String(to)}) must yield nothing`);
+  }
+
+  // THE ORDINARY HALF: the same journal with readable bounds still answers in full.
+  const ok: JournalEvent[] = [];
+  for await (const e of store.read(RUN, 1 as Seq)) ok.push(e);
+  assert.equal(ok.length, 20);
+});
+
 test("THE READ IS A CONSISTENT PREFIX even when an append lands mid-iteration", async () => {
   // The `limit` snapshot this read pins is the reason: the binary search is over that pinned
   // prefix, not over the live array, so a concurrent append cannot extend a read in flight.
