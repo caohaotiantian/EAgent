@@ -462,6 +462,84 @@ test("THE ARMING SCAN SKIPS A RUN ITS LAST EVENT PROVES TERMINAL, without foldin
   }
 });
 
+test("`GET /gates` DOES NOT FOLD A FINISHED RUN ON ITS FIRST POLL EITHER, which is when the cache is empty", async () => {
+  // `#gatelessAt` pays the fold once per head and is empty by construction on a cold process —
+  // which is exactly the poll a restarted deployment makes, and exactly where the candidate set
+  // is at its worst: `raisedAGate` accumulates finished runs forever.
+  const now = (): number => NOW;
+  const store = new MemoryStateStore({ now });
+  const bus = new InProcessEventBus({ store });
+  const functions = new FunctionRegistry();
+  functions.register("function/double@stable", (view) => ({ writes: { doubled: (view.get<number>("amount") ?? 0) * 2 } }));
+  const engine = new Engine({
+    store,
+    bus,
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now,
+    resolver,
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
+  });
+  const graph = compileOrThrow({ spec: leafSpec(), resolver, tools: {}, tenantCapabilities: [] });
+  const owner = { kind: "human", subject: "owner", method: "bearer-token" } as const;
+  const finished = await engine.submit({ graph, inputs: { amount: 1 }, submittedBy: owner });
+  await engine.advance(finished);
+  const g = (await engine.openGates(finished))[0];
+  assert.ok(g !== undefined);
+  await engine.resolveGate(finished, { gateId: g.gateId, decision: { kind: "approve" }, actor: { kind: "human", subject: "u:a", via: "cli" }, idempotencyKey: "lane-p-2" });
+  await engine.advance(finished);
+  const waiting = await engine.submit({ graph, inputs: { amount: 2 }, submittedBy: owner });
+  await engine.advance(waiting);
+
+  const folded: string[] = [];
+  const counted: StateStore = {
+    append: (input) => store.append(input),
+    read: (runId, from, to) => {
+      if (from === 1) folded.push(String(runId));
+      return store.read(runId, from, to);
+    },
+    head: (runId) => store.head(runId),
+    listRuns: (limit, filter) => store.listRuns(limit, filter),
+    close: () => store.close(),
+  };
+  const cold = new Engine({
+    store: counted,
+    bus,
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now,
+    resolver,
+    policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
+  });
+  const plane = new ControlPlane({
+    engine: cold,
+    store: counted,
+    bus,
+    graphs: { leaf: graph },
+    now,
+    identity: new BearerTokenIdentity({ subjects: [{ token: OWNER, subject: "owner", kind: "human" }] }),
+  });
+  const { port } = await plane.listen(0);
+  try {
+    folded.length = 0;
+    const res = await fetch(`http://127.0.0.1:${port}/gates`, { headers: as(OWNER) });
+    assert.equal(res.status, 200, await res.clone().text());
+    const gates = ((await res.json()) as { gates: readonly { runId: string }[] }).gates;
+    // THE ORDINARY HALF FIRST: the queue still answers with the open gate. A prefilter that hid
+    // one would pass every cost assertion below.
+    assert.deepEqual(
+      gates.map((x) => x.runId),
+      [String(waiting)],
+      "the open gate must still be in the queue",
+    );
+    assert.equal(folded.includes(String(finished)), false, `a finished run must not be folded by GET /gates: ${JSON.stringify(folded)}`);
+  } finally {
+    await plane.close();
+  }
+});
+
 // ── stop means stopped ───────────────────────────────────────────────────────
 
 test("THE PAGE'S FOLD REFUSES A STATUS CHANGE OUT OF A TERMINAL RUN, as `foldRun` does", () => {

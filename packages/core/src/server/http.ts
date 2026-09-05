@@ -3004,6 +3004,22 @@ export class ControlPlane {
   }
 
   /**
+   * Remember that this run had no open gate at this head, so the next poll skips the fold.
+   *
+   * Bounded and evicted in insertion order, oldest first, following `#idempotency` and
+   * `GateCallbackRouter.#admitRow`. It is a CACHE and nothing decides on it: an entry that a
+   * restart erases costs one fold, and a head that has moved does not match, so the miss is
+   * always the expensive answer rather than a wrong one.
+   */
+  #rememberGateless(summary: RunSummary): void {
+    if (this.#gatelessAt.size >= MAX_QUEUE_SCAN) {
+      const oldest = this.#gatelessAt.keys().next();
+      if (oldest.done !== true) this.#gatelessAt.delete(oldest.value);
+    }
+    this.#gatelessAt.set(summary.runId, summary.headSeq);
+  }
+
+  /**
    * Did this run END at the seq the listing says is its head? A cheap, one-sided answer.
    *
    * `succeeded`, `failed` and `cancelled` are terminal and `run/projection.ts` refuses every
@@ -3635,6 +3651,11 @@ export class ControlPlane {
          * poll #1 read 1184 journal events and polls #2 and #3 read 0. Warm, `Engine.#project`
          * was already incremental and this changes nothing.
          *
+         * AND POLL #1 IS PAID BY `#endedAtHead`, because that map is empty by construction on a
+         * cold process — which is the poll a restarted deployment makes, and the one where the
+         * candidate set is at its worst. A run whose LAST event is terminal is skipped on one
+         * indexed row instead of a fold; anything not proven terminal still folds.
+         *
          * WHAT IS LEFT IS `openGates`, and it is the bigger half whenever a gate IS open:
          * `HumanGateBroker.list` calls `project(log)`, which does `log.read(1)` with no cursor
          * at all, so the route folds from seq 1 the same journal it folded incrementally one
@@ -3684,16 +3705,18 @@ export class ControlPlane {
             // reach this run; skipped before the fold because the fold's answer is known. See
             // `#gatelessAt`.
             if (this.#gatelessAt.get(summary.runId) === summary.headSeq) continue;
+            // AND ON THE FIRST POLL OF A COLD PROCESS, where that map is empty by construction,
+            // the run's last event answers the same question for the candidate set's dominant
+            // member — a run that gated once and finished. One indexed row instead of a fold,
+            // and one-sided: only a run PROVEN terminal is skipped. See `#endedAtHead`.
+            if (await this.#endedAtHead(summary)) {
+              this.#rememberGateless(summary);
+              continue;
+            }
             const p = await engine.projection(summary.runId);
             if (p === undefined) continue;
             if (!Object.values(p.gates).some((g) => g.state === "open")) {
-              // Insertion order, oldest first, following `#idempotency` and
-              // `GateCallbackRouter.#admitRow`.
-              if (this.#gatelessAt.size >= MAX_QUEUE_SCAN) {
-                const oldest = this.#gatelessAt.keys().next();
-                if (oldest.done !== true) this.#gatelessAt.delete(oldest.value);
-              }
-              this.#gatelessAt.set(summary.runId, summary.headSeq);
+              this.#rememberGateless(summary);
               continue;
             }
             const mine = ownsRun(p, who);
