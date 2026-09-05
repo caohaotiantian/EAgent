@@ -643,8 +643,10 @@ function thrownName(e: unknown): string {
  * replay report has vouched for does not get to become one it has not.
  *
  * WHAT THIS DOES NOT CLOSE: `opts.globals` are host values and are the same objects in every
- * realm, so an embedder that hands a body a mutable object has handed it cross-call state. That is
- * the hazard `RealmOptions.globals` already names, and such a realm carries no brand.
+ * realm, so an embedder that hands a body a mutable object has handed it cross-call state — and
+ * a body's DEFINITION-TIME code now runs once at compile and once per call, so a side effect it
+ * has on such an object is multiplied rather than removed. That is the hazard
+ * `RealmOptions.globals` already names, and such a realm carries no brand.
  */
 export function compileRealm(opts: RealmOptions): RealmCall {
   // PARSED ONCE. A body that does not parse fails here, before any realm exists.

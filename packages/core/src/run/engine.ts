@@ -5496,8 +5496,8 @@ export class Engine {
     // derived on every miss, on the argument that a miss can only be a candidate's new node under
     // `onGraphChange: "allow"` — an option no code in this file can see. `ReplayEffects.seed`
     // holds the decision now, beside the report that has to name what it did: a miss is
-    // `E_REPLAY_DIVERGENCE` unless `replayRun` said the graph may differ, and a derived seed is
-    // counted against `hermetic`. `seedFromKey` is only the derivation.
+    // `E_REPLAY_DIVERGENCE` unless the replayed graph is not the recorded one, and a derived seed
+    // is counted against `hermetic`. `seedFromKey` is only the derivation.
     const seed = this.#replay !== undefined ? this.#replay.seed(key, seedFromKey) : randomInt(0, 2 ** 32);
     await this.#serialize(() =>
       ctx.log.append(

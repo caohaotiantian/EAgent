@@ -15,9 +15,9 @@
  * now journals a seed per task under `effectKey(taskId, "random", 0)` and the bridge builds the
  * body's `Math.random` from it, so the draws are SERVED here like any other effect. A key this
  * replay's graph asks for that the recording never held is `E_REPLAY_DIVERGENCE` like any other
- * missing effect — unless the caller said `onGraphChange: "allow"`, in which case a seed is DERIVED
- * from the key (`seedFromKey`, in `engine.ts`), `derivedSeeds` names it and `hermetic` is false.
- * See `ReplayEffects.seed`. An embedder passing
+ * missing effect — unless this replay runs a graph that is NOT the recorded one, in which case a
+ * seed is DERIVED from the key (`seedFromKey`, in `engine.ts`), `derivedSeeds` names it and
+ * `hermetic` is false. See `ReplayEffects.seed`. An embedder passing
  * `opts.globals`, or registering a body directly on `FunctionRegistry`, still gets a genuine live
  * side effect. See `the design notes` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
@@ -298,11 +298,16 @@ export class ReplayEffects {
   /**
    * Let `seed` derive a value for a key the recording never held.
    *
-   * Called by `replayRun` under `onGraphChange: "allow"` and by nothing else. The permission is
-   * the CALLER's statement that this graph is not the recorded one, so a body with no recorded
-   * seed can be a node the recording never had; without it a missing seed is a missing effect
-   * and `seed` refuses. It only ever widens what is REPORTED, never what is served: a derived
-   * seed is named in `derivedSeeds` and costs `ReplayReport.hermetic`.
+   * Called by `replayRun` when the graph it was handed is NOT the graph the journal records —
+   * by hash or by resolved resources — and by nothing else. That fact, not the caller's
+   * `onGraphChange` setting, is what makes a missing seed explicable: a node the recording never
+   * had has no seed to serve. It was keyed on `onGraphChange: "allow"` first, and that broke the
+   * one caller the derivation exists for — `evolution/gate.ts`'s `runEvalSuite` replays a
+   * candidate at the DEFAULT setting, so a candidate that added a `function` node failed every
+   * case `E_REPLAY_DIVERGENCE`. On the recorded graph a missing seed can only be an old or
+   * truncated journal, and stays a divergence whatever the caller said. This only ever widens
+   * what is REPORTED, never what is served: a derived seed is named in `derivedSeeds` and costs
+   * `ReplayReport.hermetic`.
    */
   allowDerivedSeeds(): void {
     this.#deriveSeeds = true;
@@ -319,10 +324,11 @@ export class ReplayEffects {
    * a seed the record never held and the report said `match: true, hermetic: true` whenever the
    * draw did not reach a channel. A replay that invents its entropy is not a replay.
    *
-   * So a miss is a DIVERGENCE unless the caller said the graph may differ, and even then it is
-   * recorded: `derivedSeeds` names the key and `hermetic` counts it. Deriving from the key rather
-   * than drawing keeps two replays of one candidate on one stream, which is what `runEvalSuite`
-   * needs to be measuring the candidate and not the entropy.
+   * So a miss is a DIVERGENCE unless this replay runs a graph that is not the recorded one (see
+   * `allowDerivedSeeds`), and even then it is recorded: `derivedSeeds` names the key and
+   * `hermetic` counts it. Deriving from the key rather than drawing keeps two replays of one
+   * candidate on one stream, which is what `runEvalSuite` needs to be measuring the candidate
+   * and not the entropy.
    *
    * `derive` is a parameter rather than an import because the derivation lives in `engine.ts`
    * beside the bridge that consumes the seed; this class decides whether to SERVE, not how to
@@ -334,9 +340,9 @@ export class ReplayEffects {
     if (!this.#deriveSeeds) {
       throw err.internal(
         CODES.E_REPLAY_DIVERGENCE,
-        `effect "${key}" is not in the journal — the recording holds no seed for this body, because it predates ` +
-          `the random effect or because this node is not the recorded one. A replay may derive a seed only under ` +
-          `onGraphChange: "allow", and the report then names it in derivedSeeds`,
+        `effect "${key}" is not in the journal — this is the recorded graph, so the recording holds no seed for this ` +
+          `body because it predates the random effect or was truncated. A replay derives a seed only for a graph that ` +
+          `is not the recorded one, and the report then names it in derivedSeeds`,
         { details: { key } },
       );
     }
@@ -493,9 +499,9 @@ export interface ReplayReport {
   /**
    * `random` effect keys this replay DERIVED from the key because the recording held no seed.
    *
-   * Reachable only under `onGraphChange: "allow"`, where a candidate's new `function` node has a
-   * taskId the recording never wrote a seed for; at any other setting the same miss is
-   * `E_REPLAY_DIVERGENCE`. Named, for the reason `liveBodies` gives: a false `hermetic` without
+   * Reachable only when the replayed graph is not the recorded one, where a candidate's new
+   * `function` node has a taskId the recording never wrote a seed for; on the recorded graph the
+   * same miss is `E_REPLAY_DIVERGENCE`. Named, for the reason `liveBodies` gives: a false `hermetic` without
    * the keys sends its reader to the wrong file. `ReplayEffects.seed` decides it and carries the
    * argument, including the measurement of what the unconditional derivation used to certify.
    */
@@ -669,9 +675,6 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   if (original === undefined) throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${opts.runId} has no journal`);
 
   const effects = await ReplayEffects.fromStore(opts.store, opts.runId);
-  // THE ONE PERMISSION TO DERIVE RATHER THAN SERVE, and it is the caller's to give: a candidate
-  // graph may hold a `function` node the recording never seeded. See `ReplayEffects.seed`.
-  if (opts.onGraphChange === "allow") effects.allowDerivedSeeds();
   const events: JournalEvent[] = [];
   for await (const e of opts.store.read(opts.runId, 1)) events.push(e);
 
@@ -734,6 +737,10 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const refsBound = recordedManifest === "" || recordedManifest === replayedManifest;
 
   const graphBound = (recordedGraph === "" || recordedGraph === opts.graph.graphHash) && refsBound;
+  // THE ONE PERMISSION TO DERIVE RATHER THAN SERVE, and it is a fact about the graph rather than
+  // a setting: a graph that is not the recorded one may hold a `function` node the recording
+  // never seeded. On the recorded graph a missing seed stays a divergence. See `ReplayEffects.seed`.
+  if (!graphBound) effects.allowDerivedSeeds();
   if (!graphBound && opts.onGraphChange === "throw") {
     const what = recordedGraph !== "" && recordedGraph !== opts.graph.graphHash ? "graph" : "resolved resources";
     throw err.internal(
@@ -1060,12 +1067,17 @@ function reboundEffects(
  * `compare` runs — and unread, the same shape as `resultDigest` written at four sites and
  * compared nowhere.
  *
- * ORDER IS SAFE TO COMPARE, and it was checked rather than assumed: `Engine.#runWaveInner` runs a
- * wave in parallel and then commits it in `compareBranch` order, so the sequence of
- * `state.reduced` events is a function of the graph and the served effects, not of which task's
- * tool answered first. A replay of an unchanged run therefore walks the same sequence — the
- * skeleton's five-way fan-out does, in `test/run/replay.test.ts` — and a different sequence is a
- * different run.
+ * ORDER IS COMPARED, AND HERE IS WHAT WAS CHECKED. `Engine.#runWaveInner` runs a wave in parallel
+ * and commits it in `compareBranch` order, so within a wave the sequence does not depend on which
+ * task's tool answered first. Across waves the partition is the scheduler's, and one attempt to
+ * make it differ did not: two independent chains recorded at `maxParallelism: 1` and replayed at
+ * the default, and the reverse, walked the same four steps. The skeleton's five-way fan-out
+ * replays to the same sequence in `test/run/replay.test.ts`. NOT CHECKED, and named so the next
+ * false divergence has somewhere to start: a retried task whose backoff elapsed during a slow
+ * recorded tool call and not during the instantaneous replay would partition differently, and
+ * whether its step then moves depends on its order against its neighbours. This frame reads the
+ * raw journal where `compare` reads the fold, so a rewound span is visible here and suppressed
+ * there; a rewound run diverges on `task.committed` already.
  *
  * WHAT IT DOES NOT SEE: a hash is over the channel map AS THE FOLD BUILDS IT, so a divergence in
  * a value the fold never touches (a tool result that only reaches a transcript) is `reboundEffects`'
