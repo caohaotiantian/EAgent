@@ -666,18 +666,35 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
     detail: `pass rate ${(input.candidate.passRate * 100).toFixed(1)}% vs baseline ${(input.baseline.passRate * 100).toFixed(1)}% (Δ ${(delta * 100).toFixed(1)}pp)`,
   });
 
-  const costRatio = input.baseline.totalCostUsd === 0 ? 1 : input.candidate.totalCostUsd / input.baseline.totalCostUsd;
+  // A BASELINE THAT SPENT NOTHING IS NOT A BASELINE ANY CANDIDATE IS 1.00× OF. These two ratios
+  // used to read `baseline === 0 ? 1 : candidate / baseline`, so a suite whose recordings cost
+  // $0 — every function-only workflow — certified a candidate at "cost ratio 1.00×" whatever it
+  // spent: driven, `totalCostUsd 0` against `100` passed both this check and `4-latency`. The
+  // rule is `pairedCostRatio`'s (live.ts), because it is the limit of the ratio and not a
+  // convention: 0 / 0 is 1 — neither side spent, cost did not increase — and x / 0 for x > 0 is
+  // UNBOUNDED, which no ceiling contains. A replayed suite spends the recording's money, so the
+  // ordinary case is both sides at $0 and a tie; the refused case is a candidate that somehow
+  // billed where the recording did not, which is a fact about the candidate and not a rounding.
+  const ratioOf = (baseline: number, candidate: number): number =>
+    baseline > 0 ? candidate / baseline : candidate > 0 ? Number.POSITIVE_INFINITY : 1;
+  const costRatio = ratioOf(input.baseline.totalCostUsd, input.candidate.totalCostUsd);
   checks.push({
     id: "3-cost",
     pass: costRatio <= maxCost,
-    detail: `cost ratio ${costRatio.toFixed(2)}× (max ${maxCost}×)`,
+    detail: Number.isFinite(costRatio)
+      ? `cost ratio ${costRatio.toFixed(2)}× (max ${maxCost}×)`
+      : `the baseline suite cost $0 and the candidate cost $${input.candidate.totalCostUsd.toFixed(6)}, so the ratio is ` +
+        `unbounded and no ceiling contains it (max ${maxCost}×)`,
   });
 
-  const latencyRatio = input.baseline.p95WallMs === 0 ? 1 : input.candidate.p95WallMs / input.baseline.p95WallMs;
+  const latencyRatio = ratioOf(input.baseline.p95WallMs, input.candidate.p95WallMs);
   checks.push({
     id: "4-latency",
     pass: latencyRatio <= maxLatency,
-    detail: `p95 ratio ${latencyRatio.toFixed(2)}× (max ${maxLatency}×)`,
+    detail: Number.isFinite(latencyRatio)
+      ? `p95 ratio ${latencyRatio.toFixed(2)}× (max ${maxLatency}×)`
+      : `the baseline suite's p95 wall time was 0 ms and the candidate's is ${String(input.candidate.p95WallMs)} ms, so the ` +
+        `ratio is unbounded and no ceiling contains it (max ${maxLatency}×)`,
   });
 
   const growth = input.promptGrowth ?? 0;

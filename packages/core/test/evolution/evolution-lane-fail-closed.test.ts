@@ -141,3 +141,83 @@ test("the cohort's own members still rank under the new rule — p90Score is a r
   assert.equal(c2.p90Score, DEFAULT_WEIGHTS.outcome);
   assert.equal(c2.outcomeSpread, 1);
 });
+
+// ── the same rule one door up: `3-cost` and `4-latency` in the replayed gate ─────────────────
+
+function report(over: Partial<EvalReport> = {}): EvalReport {
+  return {
+    suite: "s",
+    suiteVersion: 1,
+    suiteFrozenAt: 1_000,
+    cases: [],
+    passed: 10,
+    total: 10,
+    passRate: 1,
+    mustPassFailures: [],
+    totalCostUsd: 1,
+    p95WallMs: 100,
+    suiteValid: true,
+    suiteIssues: [],
+    budgets: {},
+    ...over,
+  };
+}
+
+const check = (v: ReturnType<typeof gateCandidate>, id: string) => {
+  const c = v.checks.find((x) => x.id === id);
+  assert.ok(c !== undefined, `no check ${id}`);
+  return c;
+};
+
+test("A BASELINE THAT SPENT NOTHING DOES NOT MAKE A PAYING CANDIDATE FREE — `3-cost` refuses the unbounded ratio", () => {
+  // Measured at 95a3dde: `cost ratio 1.00× (max 1.1×)`, PASS, promote true.
+  const v = gateCandidate({
+    baseline: report({ totalCostUsd: 0 }),
+    candidate: report({ totalCostUsd: 100 }),
+    postureDiffNonNegative: true,
+    deterministic: true,
+  });
+  const c = check(v, "3-cost");
+  assert.equal(c.pass, false, c.detail);
+  assert.match(c.detail, /unbounded/);
+  assert.match(c.detail, /\$0/);
+  assert.equal(v.promote, false);
+});
+
+test("…and `4-latency` refuses a baseline p95 of 0 ms against a candidate that took time", () => {
+  const v = gateCandidate({
+    baseline: report({ p95WallMs: 0 }),
+    candidate: report({ p95WallMs: 100_000 }),
+    postureDiffNonNegative: true,
+    deterministic: true,
+  });
+  const c = check(v, "4-latency");
+  assert.equal(c.pass, false, c.detail);
+  assert.match(c.detail, /unbounded/);
+  assert.equal(v.promote, false);
+});
+
+test("ORDINARY: two sides that both spent nothing tie at 1.00× and promote — a replayed function-only suite", () => {
+  const v = gateCandidate({
+    baseline: report({ totalCostUsd: 0, p95WallMs: 0 }),
+    candidate: report({ totalCostUsd: 0, p95WallMs: 0 }),
+    postureDiffNonNegative: true,
+    deterministic: true,
+  });
+  assert.equal(check(v, "3-cost").pass, true);
+  assert.match(check(v, "3-cost").detail, /1\.00×/);
+  assert.equal(check(v, "4-latency").pass, true);
+  assert.equal(v.promote, true);
+});
+
+test("ORDINARY: a priced baseline is divided as before", () => {
+  const v = gateCandidate({
+    baseline: report({ totalCostUsd: 1, p95WallMs: 100 }),
+    candidate: report({ totalCostUsd: 1.05, p95WallMs: 110 }),
+    postureDiffNonNegative: true,
+    deterministic: true,
+  });
+  assert.match(check(v, "3-cost").detail, /1\.05×/);
+  assert.match(check(v, "4-latency").detail, /1\.10×/);
+  assert.equal(v.promote, true);
+});
