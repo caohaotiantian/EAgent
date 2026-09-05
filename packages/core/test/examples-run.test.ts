@@ -161,7 +161,14 @@ test("fan-out → join produces the report examples/README.md prints", async () 
       JSON.stringify({ document: "alpha beta\ngamma\n\ndelta epsilon zeta" }),
     ]);
     assert.equal(r.code, 0, `${r.out}${r.err}`);
-    assert.equal(r.err, "", "these graphs have no agent node, so nothing warns about the mock");
+    // `loom run` announces the run id on stderr as soon as `submit` returns — the one durable
+    // coordinate an interrupt would otherwise take with it. What this line is about is that
+    // NOTHING ELSE is there: these graphs have no agent node, so nothing warns about the mock.
+    assert.deepEqual(
+      r.err.split("\n").filter((l) => l !== "" && !/^run \S+ — inspect it with: loom trace \S+$/.test(l)),
+      [],
+      "these graphs have no agent node, so nothing warns about the mock",
+    );
 
     const s = summary(r);
     assert.equal(s["status"], "succeeded");

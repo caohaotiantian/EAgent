@@ -163,6 +163,19 @@ const api = (p, o = {}) => fetch(p, { ...o, headers: { ...(o.headers || {}), ...
   return body;
 });
 
+/**
+ * A path built from ids the SERVER minted — every segment percent-encoded.
+ *
+ * A delegated run's id is the parent's id, a tilde, and a TaskId — and a TaskId is spelled
+ * nodeId@branchPath#iteration, so a child run's id carries both an at-sign and a hash.
+ * Concatenated raw into a URL the hash starts a fragment the browser never sends: the plane saw
+ * /runs/<parent>~delegate@root and answered 404 E_ROUTE_NOT_FOUND — for a gate its own /gates
+ * response had listed one request earlier, with approve and reject buttons rendered beside it.
+ * Every by-id capture on the plane resolves through runIdIn, which decodes; this is the other
+ * half of that pair, and it is the half that lives in the page.
+ */
+const path = (...segments) => "/" + segments.map(encodeURIComponent).join("/");
+
 async function whoami() {
   try {
     const me = await api("/whoami");
@@ -296,7 +309,7 @@ async function loadRuns() {
  */
 async function loadGates(runId, mine) {
   try {
-    const { gates } = await api("/runs/" + runId + "/gates");
+    const { gates } = await api(path("runs", runId, "gates"));
     if (selected !== runId || epoch !== mine || !Array.isArray(gates)) return;
     current.gates = gates;
     invalidate();
@@ -311,7 +324,7 @@ async function select(runId) {
   if (stream) stream.abort();
   await loadRuns();
 
-  const run = await api("/runs/" + runId);
+  const run = await api(path("runs", runId));
   applySnapshot(run);
   await ensureGraph(run.graphHash);
   await loadGates(runId, mine);
@@ -336,7 +349,7 @@ async function follow(runId, mine) {
     const ctrl = new AbortController();
     stream = ctrl;
     try {
-      const res = await fetch("/runs/" + runId + "/events", {
+      const res = await fetch(path("runs", runId, "events"), {
         headers: { accept: "text/event-stream", "last-event-id": String(lastSeq), ...auth() },
         signal: ctrl.signal,
       });
@@ -407,9 +420,25 @@ function applySnapshot(run) {
   current.graphHash = run.graphHash;
 }
 
+/**
+ * The statuses nothing moves a run out of, and the events that would try.
+ *
+ * THE SAME RULE foldRun() APPLIES, and this page used to claim that and not have it. Its arms
+ * were written as "the same two lines", which was true of the two lines they copied and not of
+ * the guard those lines sit under: projection.ts refuses every RUN_STATUS_EVENT once the status
+ * is terminal, because a cancel is not un-cancelled by a later timeout and a run does not succeed
+ * after it failed. Without it a run.resumed arriving after run.cancelled — which the SLA sweeper
+ * and a second operator can both produce — set the status back to "running", and drawControls()
+ * put pause, advance and cancel back on the screen for a run that had ended. The page and the
+ * journal then disagreed about the one fact the page exists to show.
+ */
+const TERMINAL = ["succeeded", "failed", "cancelled"];
+const RUN_STATUS_EVENTS = ["run.started", "run.suspended", "run.resumed", "run.completed", "run.failed", "run.cancelled"];
+
 /** Incremental application — the whole point of streaming deltas. */
 function applyEvent(ev) {
   const p = ev.payload || {};
+  if (RUN_STATUS_EVENTS.includes(ev.type) && TERMINAL.includes(current.status)) return;
   if (ev.type === "task.ready" && ev.taskId) {
     current.tasks.set(ev.taskId, { taskId: ev.taskId, nodeId: p.nodeId, state: "ready", take: [] });
   } else if (ev.type === "task.leased" && ev.taskId) {
@@ -426,9 +455,10 @@ function applyEvent(ev) {
   } else if (ev.type === "gate.decided") {
     current.gates = current.gates.filter((g) => g.gateId !== p.gateId);
   } else if (ev.type === "run.suspended") {
-    // THE SAME TWO LINES foldRun() applies, in this page's vocabulary. Without them a pause
-    // taken from the CLI, or from another browser tab, changed nothing on screen: tasks
-    // simply stopped appearing, which is indistinguishable from a stall. "interrupted" is
+    // What foldRun() does with this event, in this page's vocabulary; the terminal guard at the
+    // top of this function is the rest of it. Without these a pause taken from the CLI, or from
+    // another browser tab, changed nothing on screen: tasks simply
+    // stopped appearing, which is indistinguishable from a stall. "interrupted" is
     // the status for every non-gate suspension, and only an OPERATOR's sets the pause —
     // budget and backoff suspend without anybody having decided anything.
     current.status = p.reason === "gate" ? "awaiting_gate" : "interrupted";
@@ -445,7 +475,7 @@ function applyEvent(ev) {
 
 async function ensureGraph(hash) {
   if (graphCache.has(hash)) { current.graph = graphCache.get(hash); return; }
-  const g = await api("/graphs/by-hash/" + encodeURIComponent(hash)).catch(() => null);
+  const g = await api(path("graphs", "by-hash", hash)).catch(() => null);
   if (g) { graphCache.set(hash, g); current.graph = g; }
 }
 
@@ -486,7 +516,7 @@ function drawControls() {
   const el = $("controls");
   el.innerHTML = "";
   if (!selected) return;
-  if (["succeeded", "failed", "cancelled"].includes(current.status)) {
+  if (TERMINAL.includes(current.status)) {
     el.innerHTML = '<span class="note">' + esc(current.status) + ' · nothing left to stop</span>';
     return;
   }
@@ -512,7 +542,7 @@ function drawControls() {
 /** One operator command. The response is a run summary, so the page reseeds from it. */
 async function command(kind, reason) {
   try {
-    const run = await api("/runs/" + selected + "/commands", {
+    const run = await api(path("runs", selected, "commands"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(reason === undefined ? { kind } : { kind, reason }),
@@ -616,7 +646,7 @@ function drawGates() {
 // from runs that are not the selected one and may not be selectable at all.
 async function decideOn(runId, gateId, decision) {
   try {
-    await api("/runs/" + runId + "/gates/" + gateId, {
+    await api(path("runs", runId, "gates", gateId), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ decision }),
@@ -630,7 +660,7 @@ async function decide(gateId, decision) {
   try {
     // NO actor field. The server takes the decider's subject from the credential this
     // request carries; a name typed here would be a claim it refuses, and rightly.
-    const run = await api("/runs/" + selected + "/gates/" + gateId, {
+    const run = await api(path("runs", selected, "gates", gateId), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ decision }),

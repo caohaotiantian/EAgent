@@ -4269,6 +4269,12 @@ export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOpti
     store: ws.store,
     bus: ws.bus,
     graphs,
+    // THE SUBGRAPHS ITS OWN RUNS DELEGATE TO — attachable, never submittable. `graphsByHash`
+    // already indexes `resources/subgraph/` and `resources/graph/`; this hands the plane the
+    // members of that index `discoverGraphs` does not publish by name, which is what makes a
+    // child run's gate answerable over HTTP rather than only through `loom approve --graph`.
+    // See `ControlPlaneOptions.subgraphs` for why the two lists stay separate.
+    subgraphs: [...graphsByHash(ws).index.values()].filter((g) => !Object.values(graphs).some((top) => top.graphHash === g.graphHash)),
     ...(tokenFlag === undefined ? {} : { token: String(tokenFlag) }),
     ...(identity === undefined ? {} : { identity }),
     // THE UNAUTHENTICATED ROUTE EXISTS ONLY IF SOMEBODY CAN ANSWER ON IT.
