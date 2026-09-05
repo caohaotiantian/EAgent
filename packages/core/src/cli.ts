@@ -4181,7 +4181,20 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
         : `It publishes ${String(others.length)}, and none is this run's — ${others.join("; ")}`) +
       `${failed.length === 0 ? "" : ` (${String(failed.length)} would not compile — ${failed.join("; ")})`}. ` +
       `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
-      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.`,
+      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.` +
+      // THE FIX LINE IS WRONG FOR THE COMMONEST INSTANCE OF THIS REFUSAL, and this is the sentence that
+      // says so. A graph is compiled HERE with THIS invocation's grants, so `graphs/slow.json` declaring
+      // `net:fetch` compiles under `loom run --egress 127.0.0.1` and not under a bare `loom trace` —
+      // which drops it out of the index and produces this message about a graph that is published, is
+      // unedited, and needs no `--graph`. Measured through the binary: `loom trace <that run>` exits 1
+      // with the parenthetical above naming GRAPH017, and the same command with `--egress 127.0.0.1`
+      // exits 0. Only said when something actually failed to compile, so the ordinary refusal is
+      // unchanged.
+      (failed.length === 0
+        ? ""
+        : ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
+          `flags on THIS command line, so a graph declaring net:fetch needs the same --egress, and one declaring ` +
+          `proc:exec the same --allow-exec.`),
     { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
   );
 }
