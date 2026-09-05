@@ -225,4 +225,8 @@ test("A CANDIDATE'S NEW NODES GET DISTINCT SEEDS — derived from the key, not a
   assert.notEqual(a, b, "two new nodes must draw different streams — a constant seed would make them identical");
   // …and the node the recording DID have still serves its recorded seed rather than deriving one.
   assert.equal(String(report.replayed.channels["out"]), String((await h.engine.projection(runId))!.channels["out"]));
+  // The derivation is REPORTED: two seeds came from the key and not from the record, and a
+  // replay that had to invent entropy is not hermetic, however reproducible the invention is.
+  assert.deepEqual(report.derivedSeeds, ["extraA@root#0:random:0", "extraB@root#0:random:0"]);
+  assert.equal(report.hermetic, false);
 });

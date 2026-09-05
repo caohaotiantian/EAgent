@@ -608,6 +608,20 @@ function writesElsewhere(): RunGraph {
   );
 }
 
+/**
+ * A candidate that is a DIFFERENT GRAPH and makes the SAME CALLS: only the metadata moves.
+ *
+ * `writesElsewhere` used to stand in here, and it is the wrong fixture for the opt-out: a write
+ * redirected to another path is served the recorded write, and `reboundEffects` now says so —
+ * the recorded call's `argsDigest` is part of its identity. What `onGraphChange: "allow"` is FOR
+ * is a candidate whose change did not move any recorded call, and that is the only candidate
+ * that should replay clean under it.
+ */
+function renamed(): RunGraph {
+  const base = skeletonSpec();
+  return compileSkeleton(skeletonSpec({ metadata: { ...base.metadata, version: base.metadata.version + 1 } }));
+}
+
 test("A MODIFIED GRAPH DOES NOT REPLAY GREEN — the recorded results belong to one graph", async () => {
   const { h, graph, runId } = await recorded();
   const tampered = writesElsewhere();
@@ -660,11 +674,13 @@ test("`onGraphChange: \"throw\"` refuses to serve anything at all", async () => 
 
 test("`onGraphChange: \"allow\"` is the named opt-out the eval gate needs", async () => {
   const { h, graph, runId } = await recorded();
-  const tampered = writesElsewhere();
+  const tampered = renamed();
+  assert.notEqual(tampered.graphHash, graph.graphHash, "the fixture has to actually be a different graph");
 
   const report = await replayRun({ store: h.store, runId, graph: tampered, engine: REPLAY_ENGINE(h), onGraphChange: "allow" });
 
-  assert.equal(report.match, true, "opting out is what lets a candidate be judged on its own expectations");
+  assert.equal(report.match, true, `opting out is what lets a candidate be judged on its own expectations: ${JSON.stringify(report.frames.filter((f) => !f.match))}`);
+  assert.deepEqual(report.reboundEffects, [], "…because this candidate made every recorded call with the recorded arguments");
   // The FACT is still reported. Opting out changes the verdict, never the record.
   assert.equal(report.graph.match, false);
   assert.equal(report.graph.recorded, graph.graphHash);
@@ -686,7 +702,7 @@ test("THE EVAL GATE STILL REPLAYS A CANDIDATE GRAPH — the check did not make `
       frozenAt: 1_000,
       cases: [{ id: "a", runId, mustPass: true, expect: { status: "succeeded" } }],
     },
-    graph: writesElsewhere(),
+    graph: renamed(),
     engine: REPLAY_ENGINE(h),
   });
 
@@ -747,10 +763,17 @@ test("A RECORDED RESULT IS NOT SILENTLY SERVED TO A DIFFERENT CALL", async () =>
   assert.deepEqual(report.unservedEffects, [], "the same keys were consumed, which is the whole problem");
   assert.equal(report.match, false, "serving one call's result to another call is a divergence");
   assert.ok(report.frames.some((f) => f.kind === "effect.rebound" && !f.match));
-  assert.deepEqual(
-    report.reboundEffects.map((r) => [r.key, r.recorded, r.replayed]),
-    [["write@root#0:tool:0", "fs.write@1.0({body:string,path:string})", "fs.append@1.0({body:string,path:string})"]],
-  );
+  assert.equal(report.reboundEffects.length, 1);
+  const [r] = report.reboundEffects;
+  assert.equal(r!.key, "write@root#0:tool:0");
+  // `name@version(shape) argsDigest`. The two calls were made with the SAME arguments, so the
+  // digests agree and the difference is the tool — the case this test is about.
+  const [recordedCall, recordedDigest] = r!.recorded.split(" ");
+  const [replayedCall, replayedDigest] = r!.replayed.split(" ");
+  assert.equal(recordedCall, "fs.write@1.0({body:string,path:string})");
+  assert.equal(replayedCall, "fs.append@1.0({body:string,path:string})");
+  assert.match(String(recordedDigest), /^sha256:[0-9a-f]{64}$/);
+  assert.equal(recordedDigest, replayedDigest, "same arguments, same digest");
 });
 
 test("an unchanged run rebinds nothing", async () => {
