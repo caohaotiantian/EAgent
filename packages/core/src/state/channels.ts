@@ -167,20 +167,37 @@ export function foldPartial(
   const values: Record<string, unknown> = {};
   const channels: string[] = [];
   for (const name of Object.keys(wave).sort()) {
-    const spec = specs[name];
-    const list = wave[name];
+    // `declared()` and `own()` for the same reason every other site in this file uses them: a
+    // node body writes JSON, `toString` is a legal JSON key, and `specs["toString"]` answered with
+    // a FUNCTION off `Object.prototype` — so a partial fold of a channel named `toString` walked
+    // straight past the `spec === undefined` guard and into `reduceChannel`. This was the last
+    // unswept member of the set the file's own docstring names.
+    const spec = declared(specs, name);
+    const list = own(wave, name) as readonly Contribution[] | undefined;
     if (spec === undefined || list === undefined || list.length === 0) continue;
     const folded = reduceChannel(name, spec, identityFor(spec), list);
     if (folded === undefined) continue;
     // A held `last_write_wins_by_ts` value is the `{value, ts}` envelope `step` builds.
     // The enclosing fold re-wraps, so hand it the bare value or the timestamp is lost.
-    values[name] =
+    put(values, name,
       spec.reduce === "last_write_wins_by_ts" && typeof folded === "object" && folded !== null && "value" in folded
         ? (folded as { value: unknown }).value
-        : folded;
+        : folded);
     channels.push(name);
   }
   return { values, channels };
+}
+
+/**
+ * Write a channel's value as a PROPERTY, whatever the channel is called.
+ *
+ * `out["__proto__"] = v` invokes the accessor `Object.prototype` defines: it sets the object's
+ * prototype and stores nothing, so the channel the author declared comes back absent and the
+ * value comes back as a prototype `stateHash` — own keys only — cannot see. The same shape
+ * `graph/yaml.ts` and `security/redact.ts` both settled on for the same reason.
+ */
+function put(out: Record<string, unknown>, channel: string, value: unknown): void {
+  Object.defineProperty(out, channel, { value, writable: true, enumerable: true, configurable: true });
 }
 
 /** `initialFor` without the `spec.initial` shortcut — the reducer's identity alone. */
@@ -441,9 +458,15 @@ export function reduceState(
         details: { channel },
       });
     }
-    const contributions = wave[channel] ?? [];
+    const contributions = (own(wave, channel) as readonly Contribution[] | undefined) ?? [];
     if (contributions.length === 0) continue;
-    next[channel] = reduceChannel(channel, spec, current[channel], contributions);
+    // `own(current, …)` AND `put(next, …)`, because `declared()` alone covered one of the three
+    // lookups this loop makes. A graph may declare a channel named `toString`, and `current` is a
+    // plain object: the raw read handed `reduceChannel` `Object.prototype.toString` and killed the
+    // run with `E_INTERNAL channel "toString": expected array, got function`, on a channel whose
+    // state was simply empty. The raw WRITE is the worse half — `next["__proto__"] = v` stores
+    // nothing.
+    put(next, channel, reduceChannel(channel, spec, own(current, channel), contributions));
     touched.push(channel);
   }
 
