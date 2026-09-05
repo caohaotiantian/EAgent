@@ -558,7 +558,13 @@ function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): un
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         // A key that names a secret redacts its value whatever the declared
         // classification says — belt and braces for hand-built payloads.
-        if (SECRETISH_KEY.test(k)) {
+        // A `SecretValue` UNDER A SECRET-ISH KEY IS STILL ITS REF, and the widened word list is
+        // why this exception has to be written down. A ref names WHICH secret without disclosing
+        // it — that is the whole design of `SecretValue` and it is what an operator reads — and
+        // the narrower rule missed keys like `auth`, so it never met the case. Replacing a ref
+        // with `[secret]` discloses nothing new and tells the reader less than the value already
+        // told them, which is how a redactor teaches people to ignore it.
+        if (isSecretishKey(k) && !isSecret(v)) {
           put(out, k, "[secret]");
           st.hits.push("secretish-key");
           continue;
@@ -601,7 +607,89 @@ function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): un
   return typeof value === "string" ? sweep(value, st.hits, st.maxSweep) : value;
 }
 
-const SECRETISH_KEY = /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i;
+/**
+ * Words that name a credential, matched against a SEGMENT of the key rather than its suffix.
+ *
+ * `/^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i` anchored
+ * the word at the END of the key and only tolerated an underscore-terminated prefix, so it caught
+ * `db_password` and `totp_secret` and missed the majority of real credential names. Measured at
+ * 95a3dde over 43 keys carrying a 32-hex value no DETECTOR matches — the shape where this arm is
+ * the only thing between the value and the reader — 32 leaked, including:
+ *
+ *     x-api-key  private_key  secret_key  signing_key  ssh_key  encryption_key  secretKey
+ *     accessToken  refreshToken  sessionToken  authToken  bearerToken  clientSecret
+ *     cookie  Set-Cookie  passphrase  pwd  auth  bearer  session_id
+ *
+ * `private_key` and `secret_key` leaking while `totp_secret` redacts is the worst shape of
+ * partial coverage: it looks like it works. `walk`'s comment calls this arm "belt and braces for
+ * hand-built payloads", and the live sinks are `server/http.ts`'s operator event stream,
+ * `telemetry/spans.ts`'s OTLP export and `run/delivery.ts`'s webhook channel — the last of which
+ * this module itself calls "outside the trust boundary".
+ *
+ * A NAMED LIST RATHER THAN A CLEVERER REGEX, and `test/security/leaf-lane-secretish-keys.test.ts`
+ * enumerates every member plus the ordinary half, so a later narrowing is visible in a diff
+ * rather than discovered by a leak.
+ */
+const SECRET_WORDS: readonly string[] = [
+  "password",
+  "passwd",
+  "passphrase",
+  "pwd",
+  "secret",
+  "token",
+  "authorization",
+  "auth",
+  "bearer",
+  "credential",
+  "credentials",
+  "cookie",
+  "session",
+  "sessionid",
+  "apikey",
+  "jwt",
+  "otp",
+  "signature",
+  "sig",
+];
+
+/**
+ * Words that make a neighbouring `key` mean a CREDENTIAL rather than a lookup key.
+ *
+ * `key` on its own cannot be a secret word: `keyboard_layout`, `key_id`, `monkey`, `turkey` and a
+ * channel literally named `key` are ordinary, and shredding them would make the redactor lie
+ * about data nobody classified. So `key` counts only next to one of these.
+ */
+const KEY_QUALIFIERS: readonly string[] = ["api", "private", "secret", "signing", "ssh", "encryption", "access", "shared", "master"];
+
+/**
+ * The key's segments, lowercased: `_`, `-`, `.`, space and camelCase boundaries all split.
+ *
+ * `x-api-key` is three segments, `accessToken` is two, `clientSecret` is two. That is the whole
+ * of why the suffix anchor missed them.
+ */
+function keySegments(key: string): readonly string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[_\-. ]+/)
+    .map((part) => part.toLowerCase())
+    .filter((part) => part !== "");
+}
+
+function isSecretishKey(key: string): boolean {
+  const parts = keySegments(key);
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]!;
+    // A plural is the same word: `credentials`, `secrets`, `cookies`.
+    const singular = part.endsWith("s") ? part.slice(0, -1) : part;
+    if (SECRET_WORDS.includes(part) || SECRET_WORDS.includes(singular)) return true;
+    if (part === "key" || part === "keys") {
+      const before = i > 0 ? parts[i - 1] : undefined;
+      const after = parts[i + 1];
+      if ((before !== undefined && KEY_QUALIFIERS.includes(before)) || (after !== undefined && KEY_QUALIFIERS.includes(after))) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Copy one key onto the rebuilt object — as a PROPERTY, even when it is named `__proto__`.

@@ -670,9 +670,21 @@ const SCAN_SCRIPT = new Script(
  *
  * `fs.glob` sees one path per `visit`, so without this it would pay the 43 µs fixed cost per
  * FILE. Measured over this repo's `packages/core/src` (62 files), unbuffered
- * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms. The batch
- * also delays `capped` by at most one buffer, which only means a few more paths are walked
- * before the cap stops the search.
+ * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms.
+ *
+ * IT DELAYS `capped` BY A WHOLE BATCH, WHICH IS NOT "a few more paths" — the sentence that stood
+ * here. `capped` is only observable at a flush, so a search that hits `SEARCH_RESULT_CAP` walks
+ * to the end of the current buffer first. Counted on a 60,000-file tree of two-line files:
+ *
+ *     fs.glob "**​/*.ts"     512 paths walked to return 100    1.5 ms
+ *     fs.grep "needle"      1,536 files walked AND READ to return 100 hits    15.7 ms
+ *
+ * — 512 is exactly this constant, and `fs.grep`'s number is `GREP_LINE_BATCH`'s doing rather than
+ * this one's. The same two searches with both batches set to 1 cost 5.8 ms and 7.7 ms, so the
+ * batch is a 4x WIN for `fs.glob` and a 2x LOSS on `fs.grep`'s capped fast path. Both are tens of
+ * milliseconds and neither scales with the workspace; the trade is worth making and the cost is
+ * worth stating, because "a few more paths" reads as a rounding error and 1,536 file READS is
+ * not one.
  *
  * SHARED WITH `fs.grep`'s `include` FILTER, which this docstring used to say needed no buffer.
  * That sentence — "`fs.grep` hands a whole file's lines over at once and needs no buffer" — was

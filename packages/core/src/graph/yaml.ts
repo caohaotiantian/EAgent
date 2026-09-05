@@ -63,7 +63,15 @@ export function parseYaml(source: string, opts: ParseYamlOptions = {}): unknown 
   const lines: Line[] = [];
   let docs = 0;
 
-  source.split(/\r?\n/).forEach((raw, i) => {
+  // A LEADING BOM IS NOT CONTENT. An editor that writes one made `\ufeffa: 1` parse as a key
+  // named `\ufeffa`, and the document then failed at line 2 with "content after the document
+  // ended" — a diagnostic pointing at the wrong line for a file with nothing wrong with it.
+  //
+  // AND A LONE `\r` IS A LINE ENDING. Splitting on `/\r?\n/` read a classic-Mac or
+  // `\r`-terminated file as ONE line, so `a: 1\rb: 2` parsed as the single key `a` with the
+  // value `"1\rb: 2"` — the silent mis-read this module refuses anchors to avoid.
+  const src = source.replace(/^\ufeff/, "").split(/\r\n|\n|\r/);
+  src.forEach((raw, i) => {
     const no = i + 1;
     if (/^\t/.test(raw) || /^ *\t/.test(raw)) {
       throw fail(where, no, "a tab in the indentation — YAML indentation must be spaces");
@@ -81,14 +89,19 @@ export function parseYaml(source: string, opts: ParseYamlOptions = {}): unknown 
     }
     if (/^\.\.\.\s*$/.test(stripped.trim())) return;
 
+    // AGAINST THE LINE WITH ITS QUOTED SPANS BLANKED, because these four patterns are about
+    // YAML SYNTAX and a quoted string is not syntax. `d: "Tom &Jerry x"` was refused as an
+    // anchor and `d: "2 *3 x"` as an alias — two false refusals in the loud direction, in the
+    // check whose whole argument is that a loud refusal beats a silent mis-read.
+    const bare = blankQuoted(stripped);
     for (const r of REFUSED) {
-      if (r.test.test(stripped)) throw fail(where, no, `${r.what}, which this subset does not support`);
+      if (r.test.test(bare)) throw fail(where, no, `${r.what}, which this subset does not support`);
     }
     lines.push({ indent: stripped.length - stripped.trimStart().length, text: stripped.trimEnd(), no });
   });
 
   if (lines.length === 0) return null;
-  const [value, next] = parseBlock(lines, 0, lines[0]!.indent, where);
+  const [value, next] = parseBlock(lines, 0, lines[0]!.indent, where, src);
   if (next < lines.length) throw fail(where, lines[next]!.no, "content after the document ended; check the indentation");
   return value;
 }
@@ -106,15 +119,15 @@ export function parseYamlSpec(source: string, opts: ParseYamlOptions = {}): Reco
 // Block structure
 // ---------------------------------------------------------------------------
 
-function parseBlock(lines: readonly Line[], start: number, indent: number, where: string): [unknown, number] {
+function parseBlock(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [unknown, number] {
   const first = lines[start];
   if (first === undefined) return [null, start];
   return first.text.trimStart().startsWith("- ") || first.text.trim() === "-"
-    ? parseSequence(lines, start, indent, where)
-    : parseMapping(lines, start, indent, where);
+    ? parseSequence(lines, start, indent, where, src)
+    : parseMapping(lines, start, indent, where, src);
 }
 
-function parseSequence(lines: readonly Line[], start: number, indent: number, where: string): [unknown[], number] {
+function parseSequence(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [unknown[], number] {
   const out: unknown[] = [];
   let i = start;
 
@@ -134,7 +147,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
         i++;
         continue;
       }
-      const [value, next] = parseBlock(lines, i + 1, child.indent, where);
+      const [value, next] = parseBlock(lines, i + 1, child.indent, where, src);
       out.push(value);
       i = next;
       continue;
@@ -149,7 +162,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
         synthetic.push(lines[j]!);
         j++;
       }
-      const [value, consumed] = parseMapping(synthetic, 0, inner, where);
+      const [value, consumed] = parseMapping(synthetic, 0, inner, where, src);
       if (consumed < synthetic.length) throw fail(where, synthetic[consumed]!.no, "unexpected content in a sequence item");
       out.push(value);
       i = j;
@@ -162,7 +175,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
   return [out, i];
 }
 
-function parseMapping(lines: readonly Line[], start: number, indent: number, where: string): [Record<string, unknown>, number] {
+function parseMapping(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [Record<string, unknown>, number] {
   const out: Record<string, unknown> = {};
   let i = start;
 
@@ -192,14 +205,14 @@ function parseMapping(lines: readonly Line[], start: number, indent: number, whe
         i++;
         continue;
       }
-      const [value, next] = parseBlock(lines, i + 1, child.indent, where);
+      const [value, next] = parseBlock(lines, i + 1, child.indent, where, src);
       put(out, key, value);
       i = next;
       continue;
     }
 
     if (rest === "|" || rest === ">" || rest === "|-" || rest === ">-") {
-      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"));
+      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"), src, where);
       put(out, key, text);
       i = next;
       continue;
@@ -229,13 +242,70 @@ function put(out: Record<string, unknown>, key: string, value: unknown): void {
   out[key] = value;
 }
 
-function blockScalar(lines: readonly Line[], start: number, indent: number, folded: boolean, chomp: boolean): [string, number] {
+/**
+ * A block scalar reads the RAW source lines, not the ones `parseYaml` prepared for structure.
+ *
+ * `parseYaml` strips comments and drops blank lines before block structure is known, so three
+ * separate edits were being made to text nobody asked it to touch. Measured at 95a3dde:
+ *
+ *     d: |  /   line one # not a comment in YAML  /   line two   ->  "line one\nline two\n"
+ *     d: |  /   para one  /  (blank)  /  para two              ->  "para one\npara two\n"
+ *     d: |  /   a  /  # b  /  c                                ->  "a\nc\n"
+ *
+ * Every one is a silent mis-read producing a value no author wrote, in the module whose stated
+ * contract is that a loud refusal beats one. Inside a block scalar there IS no comment syntax and
+ * a blank line is content, so the fix is to read the source instead of the prepared line —
+ * `lines` still decides where the block ENDS, because indentation is structure.
+ *
+ * A LINE INDENTED BELOW THE BLOCK'S FIRST IS REFUSED RATHER THAN SLICED. `text.slice(firstIndent)`
+ * cut such a line mid-word: `k: |` / six-space `first` / three-space `second` produced
+ * `"first\nond\n"`, character-corrupted with no diagnostic. It is malformed YAML and this subset
+ * says so with a line number.
+ *
+ * TRAILING BLANK LINES ARE DROPPED, which is YAML's clip chomping and is also what makes the
+ * blank line BETWEEN a block and the next key not part of the block. Trailing whitespace WITHIN
+ * a line is still trimmed, which real YAML preserves; it is invisible, it is what this parser has
+ * always done, and no fixture in the tree depends on either reading.
+ */
+function blockScalar(
+  lines: readonly Line[],
+  start: number,
+  indent: number,
+  folded: boolean,
+  chomp: boolean,
+  src: readonly string[],
+  where: string,
+): [string, number] {
+  const first = lines[start];
+  if (first === undefined || first.indent <= indent) return ["", start];
+  const blockIndent = first.indent;
+
   const collected: string[] = [];
-  let i = start;
-  while (i < lines.length && lines[i]!.indent > indent) {
-    collected.push(lines[i]!.text.slice(lines[start]!.indent));
-    i++;
+  let r = first.no - 1;
+  for (; r < src.length; r++) {
+    const raw = src[r]!;
+    if (raw.trim() === "") {
+      collected.push("");
+      continue;
+    }
+    const ind = raw.length - raw.trimStart().length;
+    if (ind <= indent) break;
+    if (ind < blockIndent) {
+      throw fail(
+        where,
+        r + 1,
+        `a block scalar line indented ${String(ind)} where its first line is indented ${String(blockIndent)}; ` +
+          `every line of a block scalar must be indented at least as far as its first`,
+      );
+    }
+    collected.push(raw.slice(blockIndent).trimEnd());
   }
+  while (collected.length > 0 && collected[collected.length - 1] === "") collected.pop();
+
+  // The block ends at raw index `r`; step `lines` past everything the block consumed.
+  let i = start;
+  while (i < lines.length && lines[i]!.no <= r) i++;
+
   const joined = folded ? collected.join(" ") : collected.join("\n");
   return [chomp ? joined : joined + (collected.length > 0 ? "\n" : ""), i];
 }
@@ -436,10 +506,55 @@ function stripComment(line: string): string {
       else if (c === quote) quote = undefined;
       continue;
     }
-    if (c === '"' || c === "'") quote = c;
+    if (opensQuote(line, i)) quote = c;
     else if (c === "#" && (i === 0 || line[i - 1] === " ")) return line.slice(0, i);
   }
   return line;
+}
+
+/**
+ * A quote character only OPENS a quoted span at the start of a token.
+ *
+ * Any `\'` counted as an opening quote, so an apostrophe inside a plain scalar swallowed the
+ * rest of the line: `d: don't do this # a note` parsed as `"don't do this # a note"`, comment
+ * included, where real YAML gives `"don't do this"`. Apostrophes are ordinary in prose and a
+ * `description:` is prose, so this is the common case rather than an exotic one.
+ */
+function opensQuote(line: string, i: number): boolean {
+  const c = line[i];
+  if (c !== '"' && c !== "'") return false;
+  if (i === 0) return true;
+  const prev = line[i - 1]!;
+  return prev === " " || prev === "\t" || prev === ":" || prev === "," || prev === "[" || prev === "{" || prev === "-";
+}
+
+/**
+ * The line with every quoted span replaced by spaces — syntax only, no content.
+ *
+ * `REFUSED` looks for anchors, aliases, tags and merge keys, which are YAML SYNTAX. Applied to
+ * the raw line they also matched the same characters inside a STRING, so `d: "Tom &Jerry x"` was
+ * refused as an anchor and `d: "2 *3 x"` as an alias.
+ */
+function blankQuoted(line: string): string {
+  const out = [...line];
+  let quote: string | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote !== undefined) {
+      out[i] = " ";
+      if (c === "\\" && i + 1 < line.length) {
+        out[++i] = " ";
+        continue;
+      }
+      if (c === quote) quote = undefined;
+      continue;
+    }
+    if (opensQuote(line, i)) {
+      quote = c;
+      out[i] = " ";
+    }
+  }
+  return out.join("");
 }
 
 function describe(v: unknown): string {
