@@ -25,7 +25,7 @@ import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { HOOK_POINTS, HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, type HookBody } from "../../src/run/hooks.ts";
+import { HOOK_POINTS, HookRegistry, narrowErrorDecision, narrowGateRequest, narrowNodeDecision, runFilters, runObservers, type HookBody, type HookContext, type RegisteredHook } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import type { RunId } from "../../src/ids.ts";
 import { resolver } from "./skeleton.ts";
@@ -733,4 +733,131 @@ test("A SKIPPING HOOK DOES NOT DEFEAT A GATE — policy stops the run before `pr
     Object.values(p.gates).some((g) => g.state === "open"),
     "and a human must still be asked",
   );
+});
+
+// ---------------------------------------------------------------------------
+// The bus itself — the three contracts every point above rests on
+// ---------------------------------------------------------------------------
+//
+// The tests above drive hooks through the engine, which is the right level for "what does
+// a `preTool` hook DO". It is the wrong level for the three rules the dispatcher itself
+// keeps, because the engine never builds the inputs that distinguish them: no test above
+// runs a hook chain under a signal that is already aborted, and every filter it registers
+// returns a value. All three could be deleted with the suite green.
+//
+// They are the extension seam's floor: an inspect-only hook does not clobber the value it
+// was shown, and a cancelled run stops running extension code. The second is an oversight
+// matter as much as an extensibility one — a cancel that does not stop hook bodies is a
+// cancel that does not stop side effects.
+
+const CTX = (signal: AbortSignal): HookContext => ({ point: "preModel", runId: "run_bus" as RunId, signal });
+
+/** A hook that records that it ran, and returns whatever it was built with. */
+function probe(ref: string, ran: string[], returns: (v: unknown) => unknown = () => undefined): RegisteredHook {
+  return {
+    ref,
+    body: (v) => {
+      ran.push(ref);
+      return returns(v);
+    },
+  };
+}
+
+test("A HOOK THAT ONLY INSPECTS RETURNS `undefined`, AND THAT IS NOT A VALUE", async () => {
+  // The docstring calls this "the common case for a hook that only inspects". Without the
+  // check, `undefined` goes into the default REPLACE merge and the threaded value becomes
+  // `undefined` — every later hook, and the model call itself, see nothing.
+  const ran: string[] = [];
+  const initial = { prompt: "keep me" };
+  const out = await runFilters(
+    [probe("hook/looks@stable", ran), probe("hook/looks-again@stable", ran)],
+    initial,
+    CTX(new AbortController().signal),
+  );
+
+  assert.deepEqual(out.value, { prompt: "keep me" }, "the value the caller threads in is the value it gets back");
+  assert.equal(out.value, initial, "…the same object: nothing merged, so nothing was rebuilt");
+  assert.deepEqual(out.changedBy, [], "a hook that changed nothing is not journaled as having changed something");
+  assert.deepEqual(ran, ["hook/looks@stable", "hook/looks-again@stable"], "both still ran");
+
+  // THE ORDINARY HALF: a hook that DOES return something still replaces and is still named.
+  const rewrote = await runFilters(
+    [probe("hook/looks@stable", ran), probe("hook/writes@stable", ran, () => ({ prompt: "rewritten" }))],
+    initial,
+    CTX(new AbortController().signal),
+  );
+  assert.deepEqual(rewrote.value, { prompt: "rewritten" });
+  assert.deepEqual(rewrote.changedBy, ["hook/writes@stable"], "and only the one that did");
+});
+
+test("AN ABORTED RUN RUNS NO FILTER BODY AT ALL, AND STOPS A CHAIN WHERE IT ABORTS", async () => {
+  const already = new AbortController();
+  already.abort();
+  const ran: string[] = [];
+  const out = await runFilters([probe("hook/a@stable", ran), probe("hook/b@stable", ran)], { v: 1 }, CTX(already.signal));
+  assert.deepEqual(ran, [], "a cancelled run does not start third-party code");
+  assert.deepEqual(out.value, { v: 1 }, "and the value is handed back untouched");
+
+  // THE INTERESTING HALF: the signal aborts INSIDE the chain, which is what a cancel
+  // landing mid-dispatch looks like. Everything before the abort has run; nothing after it
+  // does.
+  const midway = new AbortController();
+  const seen: string[] = [];
+  const chain: readonly RegisteredHook[] = [
+    probe("hook/one@stable", seen),
+    {
+      ref: "hook/two@stable",
+      body: () => {
+        seen.push("hook/two@stable");
+        midway.abort();
+        return undefined;
+      },
+    },
+    probe("hook/three@stable", seen),
+  ];
+  await runFilters(chain, { v: 1 }, CTX(midway.signal));
+  assert.deepEqual(seen, ["hook/one@stable", "hook/two@stable"], "the chain stops at the abort, not at the end");
+
+  // THE ORDINARY HALF: a signal that never aborts runs every body, in registration order.
+  const all: string[] = [];
+  await runFilters(
+    [probe("hook/one@stable", all), probe("hook/two@stable", all), probe("hook/three@stable", all)],
+    { v: 1 },
+    CTX(new AbortController().signal),
+  );
+  assert.deepEqual(all, ["hook/one@stable", "hook/two@stable", "hook/three@stable"]);
+});
+
+test("AND NO OBSERVER BODY EITHER — a cancel that does not stop side effects is not a cancel", async () => {
+  // Observers are where an extension writes to something outside the run: a webhook, a
+  // metric, a file. Nothing they return is read, so the ONLY thing this check controls is
+  // whether they execute.
+  const already = new AbortController();
+  already.abort();
+  const ran: string[] = [];
+  const failed = await runObservers([probe("hook/tell@stable", ran), probe("hook/tell-too@stable", ran)], { v: 1 }, CTX(already.signal));
+  assert.deepEqual(ran, [], "a cancelled run does not start third-party code");
+  assert.deepEqual(failed, [], "and nothing can have failed, because nothing ran");
+
+  // THE ORDINARY HALF, and the one that keeps this from being satisfied by an observer bus
+  // that never runs anything: a live signal runs every body, and a thrower is REPORTED
+  // rather than swallowed.
+  const live: string[] = [];
+  const reported = await runObservers(
+    [
+      probe("hook/tell@stable", live),
+      {
+        ref: "hook/throws@stable",
+        body: () => {
+          live.push("hook/throws@stable");
+          throw new Error("no");
+        },
+      },
+      probe("hook/tell-too@stable", live),
+    ],
+    { v: 1 },
+    CTX(new AbortController().signal),
+  );
+  assert.deepEqual(live, ["hook/tell@stable", "hook/throws@stable", "hook/tell-too@stable"], "one that throws does not stop the rest");
+  assert.deepEqual(reported, ["hook/throws@stable"], "and it comes back named");
 });
