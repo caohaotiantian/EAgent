@@ -210,11 +210,14 @@ test("CONTROL · a candidate that changes a deterministic FUNCTION body still pr
   const ids: RunId[] = [];
   for (let i = 0; i < 3; i++) ids.push(await recordRun(h, graph));
 
-  // The baseline's merge drops the last digest — a real defect, and one that is entirely in
-  // a body, so the recorded model turns are untouched by fixing it.
+  // The baseline's merge MISCOUNTS the digests — a real defect, and one that is entirely in a
+  // body, so the recorded model turns are untouched by fixing it. It is a defect in `count` and
+  // not in `markdown` for a reason: `write` is called with `${merged.markdown}`, and a recorded
+  // tool result is bound to the arguments it answered (`tool.called.argsDigest`). A body whose
+  // output reaches a tool call is only judgeable offline while that call stays the recorded one.
   h.functions.register("function/merge-v1@stable", (view) => {
-    const ds = (view.get<{ path: string; summary: string }[]>("digests") ?? []).slice(0, -1);
-    return { writes: { merged: { count: ds.length, markdown: ds.map((d) => `## ${d.path}\n${d.summary}`).join("\n\n") } } };
+    const ds = view.get<{ path: string; summary: string }[]>("digests") ?? [];
+    return { writes: { merged: { count: ds.length - 1, markdown: ds.map((d) => `## ${d.path}\n${d.summary}`).join("\n\n") } } };
   });
   h.functions.register("function/merge-v2@stable", (view) => {
     const ds = view.get<{ path: string; summary: string }[]>("digests") ?? [];
@@ -342,9 +345,15 @@ test("A CANDIDATE THAT SIMPLY DOES LESS IS REFUSED — the turns it skipped are 
   const candidateGraph = withMaxTurns(1);
   const candidate = await runEvalSuite({ store: h.store, suite, graph: candidateGraph, engine: engineOf(h) });
 
-  // THE PREMISE, and it is what makes this case different from the prompt one: the requests
-  // that WERE made agreed. There is no rebound to find, so the digest cannot be the refusal.
-  assert.deepEqual(candidate.cases[0]!.replay.reboundEffects, [], "the turns it took asked what the recording asked");
+  // THE PREMISE, and it is what makes this case different from the prompt one: the MODEL requests
+  // that WERE made agreed, so the request digest cannot be the refusal. (The candidate's `write`
+  // IS rebound — fewer turns produce different summaries, so it writes a different body than the
+  // recording did — which is a second true reason and not the one this test is about.)
+  assert.deepEqual(
+    candidate.cases[0]!.replay.reboundEffects.filter((r) => r.field === "model"),
+    [],
+    "the turns it took asked what the recording asked",
+  );
   assert.ok(
     candidate.cases[0]!.replay.unservedEffects.length > 0,
     "the premise on the other side: the recording holds turns this replay never asked for",
