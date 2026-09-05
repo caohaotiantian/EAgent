@@ -6,15 +6,17 @@
  * complexity regression, and cost is what a complexity regression changes.
  *
  * These are MEASUREMENTS with assertions attached, not micro-benchmarks. The ABSOLUTE
- * bounds are set roughly an order of magnitude above the observed cost, so they fail on a
- * regression rather than on a slow machine — 3,000 ms against an observed 68, 2,000 against
- * an observed 25.
+ * bounds are set well above the observed cost, so they fail on a regression rather than on
+ * a slow machine — 3,000 ms against an observed 34.0–34.6, 2,000 against an observed
+ * 4.3–4.5 (three consecutive runs, 2026-09-05).
  *
- * `compile scales sub-quadratically` IS THE EXCEPTION TO THAT, and the header used to say
- * otherwise. It is a RATIO between two sizes, its margin is 1.4× and not 10×, and a ratio
- * amplifies load instead of tolerating it — a machine under load slows a 500-node compile
- * far more than a 100-node one. That is why it is the test that flakes, and it now carries
- * a deterministic non-clock half; its own comments hold the measurements.
+ * `compile scales sub-quadratically` IS NOT ONE OF THOSE, and no clock decides it. Every one
+ * of its assertions is a ratio of deterministic COUNTS — a proxy counts each property read
+ * the compiler makes on the spec — so they are byte-identical on any machine and under any
+ * load. A wall-clock ratio is still PRINTED beside them, because a constant-factor regression
+ * is the one class a read counter cannot see, but nothing asserts on it: a ratio of two
+ * timings amplifies load instead of tolerating it, and is likeliest to pass when its
+ * denominator sample is worst.
  *
  * What is honestly covered: compile, layout derivation, the projection fold, the
  * snapshot payload a UI would fetch, and a 500-way fan-out end to end. What is NOT
@@ -125,9 +127,9 @@ test("a 500-node graph compiles well inside a second", () => {
  * whatever else was running. `CLAUDE.md` asks tests not to depend on the wall clock; this
  * one legitimately must, so it depends on the least clock-contaminated statistic available.
  *
- * N IS 15 AND WAS 5, AND THE SPEC IS BUILT BEFORE THE TIMER STARTS. Both were measured, not
- * guessed — see the test below for the numbers. `runs` keeps a default so the two callers
- * that only want a trend need not think about it.
+ * N IS 15 AND WAS 5, AND THE SPEC IS BUILT BEFORE THE TIMER STARTS. Both were measured rather
+ * than guessed — see the test below, which says what each bought. `runs` keeps a default so
+ * the two callers that only want a trend need not think about it.
  */
 function fastest(label: string, fn: () => void, runs = 5): number {
   let best = Infinity;
@@ -141,37 +143,38 @@ function fastest(label: string, fn: () => void, runs = 5): number {
 }
 
 /**
- * Every property read the compiler performs on the spec, counted.
+ * Property reads on the spec, counted — for whatever the caller does with it.
  *
- * A COUNT AND NOT A CLOCK. The timed half of the guard below cannot be made robust by any
- * statistic, and this is why: a machine under load does not slow the two sizes equally.
- * Measured 2026-08-28 on a 16-core machine, `node --test packages/core/test/scale.test.ts`
- * against forty CPU burners, four consecutive runs — every one of them RED, at 31.3×, 41.0×,
- * 45.9× and 51.6×, while `compile 100 nodes` never moved off its ordinary 4.4–4.5 ms and
- * `compile 500 nodes` went 139.9 → 228.6 ms. The disturbance is superlinear in working-set
- * size, so a RATIO between two sizes amplifies it instead of cancelling it, and min-of-N
- * cannot dodge what lasts longer than the samples.
+ * A COUNT AND NOT A CLOCK, and the reason is that the clock carries the machine's load into
+ * the answer while the count does not. Measured 2026-09-05 on a 16-core machine, `node --test
+ * packages/core/test/scale.test.ts` against forty CPU burners, three consecutive runs: every
+ * count below was IDENTICAL, digit for digit, to the idle run — 103,200 → 325,600 → 548,000,
+ * exponents 0.988 / 0.995 / 0.990 — while the absolute timings moved (100 nodes 2.2 → 2.5 ms,
+ * 500 nodes 19.9 → 22.0–24.4 ms).
  *
- * THE NUMBER THAT MATTERS IS THE ONE BESIDE IT: in all four of those red runs the count below
- * read `314356 → 5616756 (17.87×)`, digit for digit, the same figure it gives on an idle
- * machine. The algorithm had not moved at all. That is the whole case for the count, and it is
- * why a red clock here is not on its own evidence of anything.
- *
- * A count has none of that: it is byte-identical run to run and machine to machine, because
- * it counts what the code does rather than how long the machine took to do it.
+ * WHAT THAT EXPERIMENT DID NOT REPRODUCE, said out loud because the file used to imply it
+ * always would: the wall-clock RATIO stayed put, 8.8–9.9× under load against 9.0–9.2× idle.
+ * On the pre-`2ec0b76` compiler the same experiment drove it to 31.3×, 41.0×, 45.9× and 51.6×
+ * while the count read `314356 → 5616756` in all four — but that compiler no longer exists
+ * (~1,043 spec reads per element where this one makes ~101), and a working set an order of
+ * magnitude smaller is not disturbed the same way. So the honest statement is narrower than
+ * the old one: the ratio CAN blow up under load and has, the count never can, and only one of
+ * them is fit to decide a test.
  *
  * WHY IT IS TRUSTED AS A PROXY, rather than assumed to be one: it agrees with the clock on
- * the exponent. Reads at 100/200/300/400/500 nodes give slopes of 1.729, 1.759, 1.779 and
- * 1.794 against the 100-node base, and the timed ratio of 17× over the same 5× node count is
- * n^1.75. Two independent instruments putting compile at n^1.8 is the evidence that the
- * counter sees the work.
+ * the exponent. The counts put compile at n^0.99 in the number of spec elements; the printed
+ * wall-clock ratio of ~9× over a 5.4× element count is n^1.3, which is the same algorithm plus
+ * a constant factor that grows with working-set size. An instrument reading n^1 while the
+ * clock read n^2 would be the signal that it had gone blind, and the guard below is exactly
+ * that test made explicit.
  *
- * WHAT IT CANNOT CATCH, and the reason the timed half stays: an O(n²) sweep over structures
- * the compiler BUILDS — `plans`, an internal adjacency map — never re-reads the spec, so this
- * counter would not move. The clock is the only instrument here that sees that class, so it
- * is kept despite its noise, and this counter is what makes the pair decidable at all.
+ * WHAT IT CANNOT CATCH, and the reason the timed number is still printed: an O(n²) sweep over
+ * structures the compiler BUILDS — `plans`, an internal adjacency map — never re-reads the
+ * spec, so this counter would not move. The clock is the only instrument here that sees that
+ * class; it is reported and never asserted, and the absolute bound that catches a gross one
+ * lives in its own test above.
  */
-function specReads(stages: number, width: number): number {
+function countedReads(spec: GraphSpec, use: (s: GraphSpec) => void): number {
   let reads = 0;
   const seen = new WeakMap<object, unknown>();
   const wrap = (v: unknown): unknown => {
@@ -187,66 +190,137 @@ function specReads(stages: number, width: number): number {
     seen.set(v, p);
     return p;
   };
-  compileBig(wrap(bigSpec(stages, width)) as GraphSpec);
+  use(wrap(spec) as GraphSpec);
   return reads;
 }
 
+/** Reads the compiler makes on a `stages × width` spec. */
+const specReads = (stages: number, width: number): number => countedReads(bigSpec(stages, width), compileBig);
+
+/**
+ * Reads ONE full structural traversal of the same spec makes — the calibration the blind
+ * guard below is stated against.
+ *
+ * Not a constant: it is proportional to the spec, so it moves with the fixture instead of
+ * having to be re-tuned when the fixture changes. `depth` is bounded only so a cyclic value
+ * could not spin; a GraphSpec is a tree six levels deep at most.
+ */
+function onePassReads(stages: number, width: number): number {
+  const walk = (v: unknown, depth: number): void => {
+    if (typeof v !== "object" || v === null || depth > 12) return;
+    for (const k of Object.keys(v as object)) walk((v as Record<string, unknown>)[k], depth + 1);
+  };
+  return countedReads(bigSpec(stages, width), (s) => {
+    walk(s, 0);
+  });
+}
+
+/** `log(y₂/y₁) / log(x₂/x₁)` — the exponent a power law through two points has. */
+const exponent = (x1: number, y1: number, x2: number, y2: number): number => Math.log(y2 / y1) / Math.log(x2 / x1);
+
 test("compile scales sub-quadratically from 100 to 500 nodes", () => {
-  // THE PROPERTY: 5× the nodes under an O(n²) analysis costs 25×. Both halves below assert
-  // against that same 25, because 25 is what quadratic MEANS here and not a tuned threshold.
+  // THREE SIZES, NOT TWO, and a growth EXPONENT rather than a ratio against 25.
   //
-  // The margin is NOT the order of magnitude this file's header claims for its other bounds,
-  // and pretending otherwise is how the timed half got its reputation: on this graph family
-  // compile is genuinely about n^1.8, so the true ratio is ~17× and the headroom to
-  // quadratic is 1.4×, not 10×. That is a fact about the compiler, not about the test.
-  const smallReads = specReads(10, 10);
-  const bigReads = specReads(50, 10);
-  console.log(`    spec reads: ${String(smallReads)} → ${String(bigReads)} (${(bigReads / smallReads).toFixed(2)}×)`);
+  // The old form asserted `bigReads < smallReads * 25` because "5× the nodes under an O(n²)
+  // analysis costs 25×". That 25 was never quite the property: `bigSpec` grows edges as
+  // width² per stage, so 5× the NODES is 5.4× the elements, and elements are what the counter
+  // tracks. An exponent says the thing directly — quadratic MEANS 2, whatever the fixture
+  // does — and a third size catches an ACCELERATING trend that two endpoints average away.
+  //
+  // Measured 2026-09-05, and every one of these is deterministic:
+  //
+  //     nodes  elements    reads   reads/element   exponent against the previous size
+  //       100      1,000  103,200        103.20    —
+  //       300      3,200  325,600        101.75    0.988
+  //       500      5,400  548,000        101.48    0.995
+  //
+  // So compile is now LINEAR in spec elements, at ~101 reads each. The bound of 1.5 sits
+  // halfway to quadratic: half an exponent of headroom above the observed 0.99, and half an
+  // exponent of margin below the 2.0 it exists to catch.
+  const sizes = [10, 30, 50].map((stages) => {
+    const spec = bigSpec(stages, 10);
+    return { elements: spec.nodes.length + spec.edges.length, reads: specReads(stages, 10) };
+  });
+  for (const s of sizes) {
+    console.log(
+      `    ${String(s.elements)} elements: ${String(s.reads)} spec reads (${(s.reads / s.elements).toFixed(2)} each)`,
+    );
+  }
 
   // THE COUNTER MUST NOT GO BLIND, and this is the arm that refuses when it cannot decide.
-  // If compile ever clones the spec on entry and works on the copy, every read below
-  // collapses to one pass — a few tens of thousands — and the ratio would then measure the
-  // SPEC's own growth rather than the compiler's, which is 5.4× and passes anything. A
-  // hundred reads per element is far under the ~1,000 observed and far over one pass, so
-  // this fails rather than silently certifying.
-  const elements = 500 + 4900;
-  assert.ok(
-    bigReads > elements * 100,
-    `only ${String(bigReads)} spec reads for ${String(elements)} nodes+edges — the compiler is no longer reading the ` +
-      `spec as it works, so this counter can no longer see its cost. Re-derive the instrument before trusting it.`,
+  // If compile ever clones the spec on entry and works on the copy, every read collapses to a
+  // single traversal, and the exponent below then measures the SPEC's own growth rather than
+  // the compiler's — which is n^1 and passes anything.
+  //
+  // STATED AGAINST A MEASURED ONE-PASS COST, NOT A CONSTANT, and that is the correction. The
+  // constant this used to carry (`elements * 100`) was set when compile made ~1,043 reads per
+  // element; `2ec0b76` took it to ~101 and left the tripwire 1.5% under the measurement, so
+  // the guard was one ordinary improvement away from a red that meant nothing. A constant
+  // cannot tell "the counter stopped seeing the compiler" from "the compiler got faster".
+  // `onePassReads` can: it is what a single full walk of the SAME spec costs, so the assertion
+  // reads "compile still traverses this spec many times over, not once".
+  //
+  // Measured: one pass is 29,025 reads (5.38 per element) against compile's 548,000 — 18.9×,
+  // asserted at 4×. That leaves 4.7× of headroom above the tripwire and 3.1× between the
+  // tripwire and the blind compiler simulated below; the old form had 1.5% and 20×.
+  const onePass = onePassReads(50, 10);
+  const big = sizes[2]!;
+  console.log(
+    `    one structural pass: ${String(onePass)} reads — compile makes ${(big.reads / onePass).toFixed(1)}x that`,
   );
-  assert.ok(bigReads < smallReads * 25, `100→500 nodes cost ${(bigReads / smallReads).toFixed(2)}× the spec reads`);
+  assert.ok(
+    big.reads > onePass * 4,
+    `${String(big.reads)} spec reads against ${String(onePass)} for a single traversal — the compiler is no longer ` +
+      `reading the spec as it works, so this counter can no longer see its cost. Re-derive it before trusting it.`,
+  );
 
-  // AND THE CLOCK, for the class the counter cannot see. Two things reduce its noise and were
-  // kept because they measured: the spec is built OUTSIDE the timed region (it was inside, so
-  // every sample timed 5,400 object allocations that are not compile), and `runs` is 15 rather
-  // than 5. Interleaving the two sizes was tried and measured to change nothing.
+  // AND THE CONTROL, because a guard that has never been shown to fire is a guard nobody has
+  // checked. This is the blindness itself, simulated: deep-copy the spec on entry and compile
+  // the COPY, so the proxy sees exactly one traversal however much work compile then does.
+  // A JSON round-trip and not `structuredClone`, which throws on a Proxy. Measured at 36,940
+  // reads against the 116,100 the arm above demands — it refuses, which is the answer a
+  // counter that can no longer see the compiler must give.
+  const blind = countedReads(bigSpec(50, 10), (s) => {
+    compileBig(JSON.parse(JSON.stringify(s)) as GraphSpec);
+  });
+  console.log(`    a clone-on-entry compiler would read it ${String(blind)} times — under the ${String(onePass * 4)} demanded`);
+  assert.ok(blind <= onePass * 4, `a clone-on-entry compiler read the spec ${String(blind)} times; the guard above would not have caught it`);
+
+  // THE PROPERTY. Every adjacent pair as well as the endpoints, so a cost that is linear over
+  // the first leg and quadratic over the second cannot hide inside an average.
+  const legs: [string, number][] = [
+    ["1,000->3,200", exponent(sizes[0]!.elements, sizes[0]!.reads, sizes[1]!.elements, sizes[1]!.reads)],
+    ["3,200->5,400", exponent(sizes[1]!.elements, sizes[1]!.reads, sizes[2]!.elements, sizes[2]!.reads)],
+    ["1,000->5,400", exponent(sizes[0]!.elements, sizes[0]!.reads, sizes[2]!.elements, sizes[2]!.reads)],
+  ];
+  console.log(`    growth exponent: ${legs.map(([w, k]) => `${w} n^${k.toFixed(3)}`).join(", ")}`);
+  for (const [span, k] of legs) {
+    assert.ok(k < 1.5, `spec reads grow as n^${k.toFixed(3)} over ${span} elements; quadratic is n^2`);
+  }
+
+  // AND THE CLOCK, for the class the counter cannot see — PRINTED, NEVER ASSERTED. Two things
+  // reduce its noise and were kept because they measured: the spec is built OUTSIDE the timed
+  // region (it was inside, so every sample timed 5,400 object allocations that are not
+  // compile), and `runs` is 15 rather than 5. Interleaving the two sizes was tried and
+  // measured to change nothing.
   //
-  // AND THE CLOCK — REPORTED, NOT ASSERTED, and the demotion is a measurement rather than a
-  // concession. Re-measured 2026-08-29 on an otherwise IDLE machine, three runs of each tree:
+  // It is not asserted because the ratio is t500/t100, so **a noisy-SLOW denominator is what
+  // makes it green**: a gate likeliest to pass when its baseline sample is worst is not
+  // measuring the property. What the number is still worth is that it is the only thing here
+  // that can see a CONSTANT-FACTOR regression, which a read counter cannot; the absolute bound
+  // that catches a gross one lives in its own test above, and is a single measurement rather
+  // than a ratio of two.
   //
-  //     HEAD          29.6× 42.9× 48.5×    0/3 would pass
-  //     2c36026       27.9×  ——   35.6×    1/3 would pass
-  //
-  // The middle base run "passed" at 15.5 ms for 100 nodes against 4.5–5.0 ms everywhere else:
-  // the ratio is t500/t100, so **a noisy-SLOW denominator is what makes it green.** A gate that
-  // is likeliest to pass when its baseline sample is worst is not measuring the property, and it
-  // had been failing on both trees before this session touched the compiler — the deterministic
-  // half above reads an identical 17.89× on both, which is how we know the algorithm did not move.
-  //
-  // What the timed number is still worth: it is the only thing here that can see a CONSTANT-FACTOR
-  // regression, which the read counter cannot. So it is printed on every run, and the absolute
-  // bound that catches a gross one already lives in its own test above — "a 500-node graph
-  // compiles well inside a second" — which is a single measurement rather than a ratio of two and
-  // does not have this failure mode. Between them the property keeps a check that cannot flake and
-  // a check that cannot be fooled by a slow denominator.
+  // Idle on a 16-core machine it reads 9.0-9.2x, and 8.8-9.9x under forty CPU burners — the
+  // same three runs in which every count above was byte-identical. It has read 51.6x under
+  // that load on an older compiler; see `countedReads`.
   const smallSpec = bigSpec(10, 10);
   const bigSpecOnce = bigSpec(50, 10);
-  const small = fastest("compile 100 nodes", () => compileBig(smallSpec), 15);
-  const big = fastest("compile 500 nodes", () => compileBig(bigSpecOnce), 15);
+  const t100 = fastest("compile 100 nodes", () => compileBig(smallSpec), 15);
+  const t500 = fastest("compile 500 nodes", () => compileBig(bigSpecOnce), 15);
   console.log(
-    `    wall-clock ratio: ${(big / Math.max(small, 0.01)).toFixed(1)}× (REPORTED, not asserted — ` +
-      `see the comment above; the load-immune assertion is the spec-read ratio)`,
+    `    wall-clock ratio: ${(t500 / Math.max(t100, 0.01)).toFixed(1)}x (REPORTED, not asserted — ` +
+      `see the comment above; the load-immune assertions are the two counts)`,
   );
 });
 
