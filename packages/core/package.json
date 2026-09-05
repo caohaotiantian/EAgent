@@ -3,16 +3,24 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Loom engine: journal, graph compiler, executor, scheduler. Zero runtime dependencies.",
+  "description": "Loom engine: journal, graph compiler, executor, scheduler. Zero runtime dependencies. `private` until the maintainer decides to publish; `bin` and the `./cli` subpath make a `npm pack` tarball installable in the meantime, which is what `loom --help` in a fresh directory needs.",
   "license": "MIT",
   "engines": {
     "node": ">=24.0.0"
+  },
+  "bin": {
+    "loom": "./dist/cli.js"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist"
