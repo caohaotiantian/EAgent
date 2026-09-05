@@ -124,20 +124,6 @@ function verified(runId: RunId, ref: PayloadRef, text: string | undefined): unkn
 }
 
 /**
- * Durable, and a directory rather than a table.
- *
- * A SQLite table would have meant a schema migration on the one file every running deployment
- * already has open, for bytes that are pure content-addressed blobs with no relational question
- * to ask of them. A directory of `<runId>/<sha>.json` is durable in the same way, is inspectable
- * with `ls` and `du` — which `journal/store.ts` names as the operator's only current symptom of
- * the amplification — and adds nothing to the journal's own recovery path.
- *
- * BOTH PATH SEGMENTS ARE CHECKED, not assumed. A `RunId` is a ULID and a digest is hex today,
- * and "today" is the word that makes an unchecked `join` a traversal later: this store is handed
- * ids that come out of a journal, and a journal is a file an operator can hand to a tool.
- * Refusing is always allowed.
- */
-/**
  * Makes one `put`'s temporary file its own, which `${path}.${pid}.tmp` did not.
  *
  * That name depended on the DIGEST and the PID and on nothing else, and the digest is the one
@@ -155,6 +141,20 @@ function verified(runId: RunId, ref: PayloadRef, text: string | undefined): unkn
  */
 let putOrdinal = 0;
 
+/**
+ * Durable, and a directory rather than a table.
+ *
+ * A SQLite table would have meant a schema migration on the one file every running deployment
+ * already has open, for bytes that are pure content-addressed blobs with no relational question
+ * to ask of them. A directory of `<runId>/<sha>.json` is durable in the same way, is inspectable
+ * with `ls` and `du` — which `journal/store.ts` names as the operator's only current symptom of
+ * the amplification — and adds nothing to the journal's own recovery path.
+ *
+ * BOTH PATH SEGMENTS ARE CHECKED, not assumed. A `RunId` is a ULID and a digest is hex today,
+ * and "today" is the word that makes an unchecked `join` a traversal later: this store is handed
+ * ids that come out of a journal, and a journal is a file an operator can hand to a tool.
+ * Refusing is always allowed.
+ */
 export function filePayloads(dir: string): PayloadStore {
   const cellPath = (runId: RunId, d: Digest): string => {
     const hex = d.slice("sha256:".length);

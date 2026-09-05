@@ -28,7 +28,7 @@
  *     `SqliteStateStoreOptions.synchronous` for why the journal buys the fsync.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { canonicalize } from "../canonical.ts";
 import { CODES, err } from "../errors.ts";
@@ -68,7 +68,28 @@ CREATE TABLE IF NOT EXISTS journal (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS journal_by_type ON journal (run_id, type, seq);
-CREATE INDEX IF NOT EXISTS journal_by_task ON journal (run_id, task_id, seq);
+
+-- DROPPED, NOT KEPT FOR LATER. journal_by_task (run_id, task_id, seq) cost a B-tree insert on
+-- every journal row and no statement in the tree could use it: there are exactly three
+-- FROM journal statements (read, the cursor anchor, the gated listing) and none names task_id in
+-- a WHERE or an ORDER BY. EXPLAIN QUERY PLAN on all three, over 60,000 rows after ANALYZE, is
+-- BYTE-IDENTICAL with the index present and absent. What it did cost is disk: 8,000 rows went
+-- 4,012 KiB to 3,708 KiB, 7.6% of a file whose own header measures amplification at
+-- payload x (2N+2). The write-throughput half is within this machine's noise (three A/B pairs,
+-- one inverted), so the disk figure and the structural fact are the case; the throughput is not.
+--
+-- A DROP AND NOT JUST A DELETED CREATE: this statement runs on every open, and
+-- CREATE INDEX IF NOT EXISTS means an existing journal would otherwise carry the index for the
+-- life of the file. Deliberately NOT a stamped migration -- an older binary opening a file whose
+-- schema_version this build had bumped dies in its constructor, which is a hard downgrade break
+-- to pay for removing an index. As written the downgrade is free: an older binary re-creates
+-- journal_by_task from its own SCHEMA and reads the file correctly either way.
+--
+-- If a per-task journal query is ever wanted (a task-scoped trace view is the obvious one), add
+-- the index back in the same change as the query. An index whose justification is a future query
+-- is the same debt as a guard with no caller.
+-- (No backticks in this comment: the schema is a template literal.)
+DROP INDEX IF EXISTS journal_by_task;
 
 -- GLOBAL by type, where journal_by_type above is per-run. GateSweeper has to answer
 -- "which runs raised a gate" across the whole store, and the per-run index cannot serve a
@@ -178,6 +199,28 @@ export class SqliteStateStore implements StateStore {
   readonly #pageSize: number;
   #closed = false;
 
+  /**
+   * The five statements the write path runs, compiled once per connection.
+   *
+   * `append` used to call `db.prepare(...)` for each of them INSIDE its transaction, so every
+   * durable write re-parsed and re-planned five statements while holding the write lock. That
+   * is spent out of the same budget this file's header argues for when it chooses
+   * `synchronous = FULL` over NORMAL on a 1.4x cost — measured here, 4,000 single-event
+   * appends: 311 ms (12,873/s) re-preparing, 234 ms (17,118/s) cached — which is what puts the
+   * class back on the 17.0k/s the header quotes for FULL as the reason it buys the fsync.
+   *
+   * PREPARED AFTER `#migrate`, not before: `run_head.submitted_by` only exists once the v2
+   * migration has run, and a statement naming a column the file does not yet have fails to
+   * compile. Nothing invalidates them afterwards — the schema is settled for the life of the
+   * connection, and `close()` throws for every method through `#assertOpen` before one could
+   * be reached.
+   */
+  readonly #stmtHead: StatementSync;
+  readonly #stmtFence: StatementSync;
+  readonly #stmtInsert: StatementSync;
+  readonly #stmtHeadUpsert: StatementSync;
+  readonly #stmtFenceUpsert: StatementSync;
+
   constructor(opts: SqliteStateStoreOptions) {
     this.#now = opts.now ?? Date.now;
     this.#pageSize = opts.pageSize ?? 500;
@@ -198,6 +241,26 @@ export class SqliteStateStore implements StateStore {
     this.#db.exec("PRAGMA foreign_keys = ON");
     this.#db.exec(SCHEMA);
     this.#migrate();
+
+    this.#stmtHead = this.#db.prepare("SELECT head_seq FROM run_head WHERE run_id = ?");
+    this.#stmtFence = this.#db.prepare("SELECT max_token FROM task_fence WHERE run_id = ? AND task_id = ?");
+    this.#stmtInsert = this.#db.prepare(
+      `INSERT INTO journal (run_id, seq, ts, type, actor, task_id, payload, classification)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    // `submitted_by` is absent from the DO UPDATE clause on purpose, exactly like
+    // `first_ts`: the owner is established when the row is created and no later append may
+    // rewrite it. The fold makes the same decision on the first `run.submitted` it sees,
+    // including when that first answer is "nobody" — the two must agree or the list route
+    // and the detail route answer differently about who owns a run.
+    this.#stmtHeadUpsert = this.#db.prepare(
+      `INSERT INTO run_head (run_id, head_seq, first_ts, last_ts, submitted_by) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (run_id) DO UPDATE SET head_seq = excluded.head_seq, last_ts = excluded.last_ts`,
+    );
+    this.#stmtFenceUpsert = this.#db.prepare(
+      `INSERT INTO task_fence (run_id, task_id, max_token) VALUES (?, ?, ?)
+           ON CONFLICT (run_id, task_id) DO UPDATE SET max_token = MAX(max_token, excluded.max_token)`,
+    );
   }
 
   #migrate(): void {
@@ -300,16 +363,12 @@ export class SqliteStateStore implements StateStore {
     const db = this.#db;
     db.exec("BEGIN IMMEDIATE");
     try {
-      const head = db.prepare("SELECT head_seq FROM run_head WHERE run_id = ?").get(input.runId) as
-        | { head_seq: number }
-        | undefined;
+      const head = this.#stmtHead.get(input.runId) as { head_seq: number } | undefined;
       const headSeq = head?.head_seq ?? 0;
       if (headSeq !== input.expectedSeq) seqConflict(input.runId, input.expectedSeq, headSeq);
 
       if (input.fencingToken !== undefined && input.taskId !== undefined) {
-        const fence = db
-          .prepare("SELECT max_token FROM task_fence WHERE run_id = ? AND task_id = ?")
-          .get(input.runId, input.taskId) as { max_token: number } | undefined;
+        const fence = this.#stmtFence.get(input.runId, input.taskId) as { max_token: number } | undefined;
         if (fence !== undefined && input.fencingToken < fence.max_token) {
           fencingStale(input.taskId, input.fencingToken, fence.max_token);
         }
@@ -319,31 +378,16 @@ export class SqliteStateStore implements StateStore {
       // than out of the caller's object — see `submitterOf`.
       const owner = submitterOf(rows) ?? null;
 
-      const insert = db.prepare(
-        `INSERT INTO journal (run_id, seq, ts, type, actor, task_id, payload, classification)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
       for (const r of rows) {
-        insert.run(input.runId, r.seq, r.ts, r.type, r.actorJson, r.taskId, r.payloadJson, r.classification);
+        this.#stmtInsert.run(input.runId, r.seq, r.ts, r.type, r.actorJson, r.taskId, r.payloadJson, r.classification);
       }
 
       const last = rows[rows.length - 1]!;
       const first = rows[0]!;
-      // `submitted_by` is absent from the DO UPDATE clause on purpose, exactly like
-      // `first_ts`: the owner is established when the row is created and no later append may
-      // rewrite it. The fold makes the same decision on the first `run.submitted` it sees,
-      // including when that first answer is "nobody" — the two must agree or the list route
-      // and the detail route answer differently about who owns a run.
-      db.prepare(
-        `INSERT INTO run_head (run_id, head_seq, first_ts, last_ts, submitted_by) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT (run_id) DO UPDATE SET head_seq = excluded.head_seq, last_ts = excluded.last_ts`,
-      ).run(input.runId, last.seq, first.ts, last.ts, owner);
+      this.#stmtHeadUpsert.run(input.runId, last.seq, first.ts, last.ts, owner);
 
       if (input.fencingToken !== undefined && input.taskId !== undefined) {
-        db.prepare(
-          `INSERT INTO task_fence (run_id, task_id, max_token) VALUES (?, ?, ?)
-           ON CONFLICT (run_id, task_id) DO UPDATE SET max_token = MAX(max_token, excluded.max_token)`,
-        ).run(input.runId, input.taskId, input.fencingToken);
+        this.#stmtFenceUpsert.run(input.runId, input.taskId, input.fencingToken);
       }
 
       db.exec("COMMIT");
@@ -379,9 +423,7 @@ export class SqliteStateStore implements StateStore {
 
   async head(runId: RunId): Promise<Seq> {
     this.#assertOpen();
-    const row = this.#db.prepare("SELECT head_seq FROM run_head WHERE run_id = ?").get(runId) as
-      | { head_seq: number }
-      | undefined;
+    const row = this.#stmtHead.get(runId) as { head_seq: number } | undefined;
     return row?.head_seq ?? 0;
   }
 

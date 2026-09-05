@@ -446,6 +446,23 @@ interface MutableProjection {
   suspendedReason?: "gate" | "operator" | "budget" | "backoff";
   paused: boolean;
   steers: Record<NodeId, readonly EdgeId[]>;
+  /**
+   * The last snapshot `freeze` made, valid until the next `apply`.
+   *
+   * NOT AN OPTIMISATION OF THE FOLD — of the READS of it. `GateSweeper` keeps one `RunFolder`
+   * per live run across ticks (see `#catchUp`) and asks for a projection every tick, whether or
+   * not the journal moved; an idle run therefore paid a full copy of every container, per tick,
+   * per run, for a value identical to the one it was handed last time. Measured on a run with
+   * 1,600 tasks, 500 such snapshots: 106.7 ms to 0.0 ms.
+   *
+   * `apply` is the only thing that can change the state a snapshot describes, and it clears this
+   * on entry — one line, in one place, so the cache cannot go stale by omission the way a
+   * per-container dirty bit could.
+   */
+  snapshot: RunProjection | undefined;
+  /** See `freeze`: the sorted forms, valid until the set behind each is written. */
+  sortedOpenEffects: readonly string[] | undefined;
+  sortedStartedEffects: readonly string[] | undefined;
 }
 
 /**
@@ -582,11 +599,41 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     steers: {},
     sawSubmitted: false,
     fanouts: {},
+    snapshot: undefined,
+    sortedOpenEffects: undefined,
+    sortedStartedEffects: undefined,
   };
 }
 
+/**
+ * A snapshot, and the two things it does NOT redo.
+ *
+ * The top-level maps are COPIED — see `RunFolder.projection` for why. What is not copied twice
+ * is a snapshot of state nothing has touched: `apply` clears `p.snapshot`, so a second
+ * `projection()` with no event between them hands back the object the first one made. That is
+ * the whole of the `GateSweeper` cost, and it is safe because every member of `RunProjection` is
+ * `readonly` and this function never mutates one after building it.
+ *
+ * The two sorted arrays are the other half. `everStarted` grows to one entry per effect the run
+ * has started, and sorting it cost 36 us per snapshot at 1,600 effects — 121 ms over a
+ * 1,600-branch fan-out's 3,312 snapshots — while the set itself changed between only ~100 of
+ * those snapshot pairs. So the sorted form is cached and invalidated where the sets are written,
+ * four lines in `apply`, and SHARED between snapshots rather than copied: the arrays are
+ * `readonly string[]`, are never written after they are built, and sharing them is the same
+ * decision the nested payload values already carry.
+ *
+ * WHAT THIS DOES NOT FIX, measured rather than assumed: the `{ ...p.tasks }` copy, which is the
+ * dominant term of a wide fan-out (594 ms of a 1,600-branch run's 715 ms in `freeze`). Per-
+ * container dirty bits do not reach it — instrumented over that run, `tasks` was clean for 105 of
+ * 3,312 snapshots, because the executor takes about two snapshots per task and a task changes
+ * between nearly every pair. Making it cheaper needs either fewer snapshots (the executor's
+ * call sites) or a persistent map, which would change `RunProjection.tasks`'s published type.
+ */
 function freeze(p: MutableProjection): RunProjection {
-  return {
+  if (p.snapshot !== undefined) return p.snapshot;
+  p.sortedOpenEffects ??= [...p.openEffects].sort();
+  p.sortedStartedEffects ??= [...p.everStarted].sort();
+  const out: RunProjection = {
     runId: p.runId,
     graphHash: p.graphHash,
     status: p.status,
@@ -603,8 +650,8 @@ function freeze(p: MutableProjection): RunProjection {
     escalations: { ...p.escalations },
     ceilings: { ...p.ceilings },
     outputs: { ...p.outputs },
-    unknownEffects: [...p.openEffects].sort(),
-    startedEffects: [...p.everStarted].sort(),
+    unknownEffects: p.sortedOpenEffects,
+    startedEffects: p.sortedStartedEffects,
     budgetExhausted: p.budgetExhausted,
     paused: p.paused,
     steers: { ...p.steers },
@@ -614,6 +661,8 @@ function freeze(p: MutableProjection): RunProjection {
     ...(p.error === undefined ? {} : { error: p.error }),
     ...(p.suspendedReason === undefined ? {} : { suspendedReason: p.suspendedReason }),
   };
+  p.snapshot = out;
+  return out;
 }
 
 export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefined {
@@ -797,6 +846,11 @@ const RUN_STATUS_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 function apply(p: MutableProjection, e: JournalEvent): void {
+  // The one place a fold can change, so the one place the snapshot cache is dropped. Before the
+  // guard below rather than after it: an event this function ignores has changed nothing and
+  // would keep the cache valid, but "invalidate on entry" is a rule a later arm cannot forget.
+  p.snapshot = undefined;
+
   // Silent rather than throwing, for the reason the whole fold is tolerant: a projection
   // that crashes on a strange log cannot be used to diagnose the incident that produced it.
   if (RUN_STATUS_EVENTS.has(e.type) && isTerminal(p.status)) return;
@@ -925,6 +979,7 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     // A cancel that raced an irreversible effect leaves the outcome unknown, and the
     // projection must keep saying so rather than presenting a clean stop.
     for (const key of e.payload.unknownEffects) p.openEffects.add(key);
+    p.sortedOpenEffects = undefined;
     return;
   }
 
@@ -1016,10 +1071,13 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "effect.started")) {
     p.openEffects.add(e.payload.key);
     p.everStarted.add(e.payload.key);
+    p.sortedOpenEffects = undefined;
+    p.sortedStartedEffects = undefined;
     return;
   }
   if (isEvent(e, "effect.completed") || isEvent(e, "effect.failed")) {
     p.openEffects.delete(e.payload.key);
+    p.sortedOpenEffects = undefined;
     return;
   }
   if (isEvent(e, "model.called")) {
