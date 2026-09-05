@@ -132,3 +132,26 @@ test("ORDINARY: an absent description and an absent schema are still legal", () 
   assert.equal(defs[0]?.description, 'MCP tool "search" from server "docs".');
   assert.deepEqual(defs[0]?.parameters, { type: "object" });
 });
+
+test("ORDINARY: `null` is ABSENT, for both fields — servers spell it that way", () => {
+  // Treating `null` as a bad type dropped tools from servers that write `description: null`,
+  // which is ordinary JSON and registered fine at 95a3dde. The refusal even said
+  // "description is object", which is `typeof null` and useless to whoever has to act on it.
+  const defs = mcpTools(fakeClient([{ name: "search", description: null, inputSchema: null }]));
+  assert.equal(defs[0]?.description, 'MCP tool "search" from server "docs".');
+  assert.deepEqual(defs[0]?.parameters, { type: "object" });
+});
+
+test("the NAME and the SCHEMA are bounded too — both reach the model's tool list verbatim", () => {
+  assert.throws(
+    () => mcpTools(fakeClient([{ name: "n".repeat(200_000) }])),
+    (e: Error & { code?: string }) => e.code === "E_TOOL_SCHEMA_INVALID" && /name is 200000 characters/.test(e.message),
+  );
+  assert.throws(
+    () => mcpTools(fakeClient([{ name: "a", inputSchema: { type: "object", properties: { p: { description: "x".repeat(200_000) } } } }])),
+    (e: Error & { code?: string }) => e.code === "E_TOOL_SCHEMA_INVALID" && /inputSchema is 200055 characters of JSON/.test(e.message),
+  );
+  // ORDINARY: a real schema of a few hundred bytes is untouched.
+  const ok = { type: "object", properties: { path: { type: "string" }, depth: { type: "number" } }, required: ["path"] };
+  assert.deepEqual(mcpTools(fakeClient([{ name: "a", inputSchema: ok }]))[0]?.parameters, ok);
+});

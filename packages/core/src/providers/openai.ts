@@ -20,7 +20,7 @@ import type {
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 import { producedTokens, round6, roughTokens } from "./anthropic.ts";
-import { estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
+import { billableTokens, estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
 
 export interface OpenAIOptions extends HttpOptions {
   readonly apiKey: string;
@@ -148,7 +148,7 @@ export class OpenAIAdapter implements ModelAdapter {
     }
 
     if (inputTokens === 0) inputTokens = roughTokens(req);
-    else inputTokens = Math.max(inputTokens, toleratedFloor(roughTokens(req)));
+    else inputTokens = Math.max(inputTokens, toleratedFloor(billableTokens(req)));
 
     const usage: UsageRecord = {
       inputTokens,

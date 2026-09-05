@@ -119,6 +119,8 @@ export function mcpTools(
     return {
       name,
       version: "1.0",
+      // `??` and not `||`: an empty description is one the server chose. `null` is absent, and
+      // `specProblem` has already accepted it as such.
       description: spec.description ?? `MCP tool "${spec.name}" from server "${client.name}".`,
       // One capability per SERVER, not per tool. An operator grants "this graph may use the
       // github server", which is a decision they can actually make; "this graph may use
@@ -135,7 +137,7 @@ export function mcpTools(
       // A server may advertise no schema at all. An empty object schema accepts anything,
       // which is honest: the server validates, and pretending to validate here would mean
       // rejecting calls the server would have accepted.
-      parameters: (spec.inputSchema as JSONSchema | undefined) ?? { type: "object" },
+      parameters: (spec.inputSchema as JSONSchema | null | undefined) ?? { type: "object" },
       execute: async (args): Promise<ToolResult> => {
         let raw: unknown;
         try {

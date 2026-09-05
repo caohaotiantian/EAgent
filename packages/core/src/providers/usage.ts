@@ -13,6 +13,8 @@
  * verified by running the guard against this file, which reports the surface unchanged.
  */
 
+import type { ModelRequest } from "../run/registry.ts";
+
 /**
  * A token count off the wire, or `undefined` if the remote party did not send one an adapter can
  * bill from.
@@ -63,10 +65,32 @@ export function wireCount(v: unknown): number | undefined {
  * direction. So 8 clears the rigorous worst by 2.3x and the realistic one by 6x. A maintainer who
  * wants a tighter guard can read 4 off the same table; `TODO.md` §A0.13 has it.
  *
- * WHAT IT BUYS AND WHAT IT DOES NOT. A wire that wants to pay the minimum reports exactly
- * `est / 8` and is believed, so the residual under-charge is 8x rather than 570x. That is the
- * bound, and it is a bound rather than a proof: no adapter without a tokenizer can do better than
- * its own estimate.
+ * WHAT IT BUYS, IN TOKENS AND THEN IN DOLLARS, because those are two different numbers and the
+ * sentence here used to give only the first. A wire aiming at the minimum reports exactly
+ * `est / 8` on each dimension and is believed, so the residual under-charge is **8x in TOKENS**,
+ * against the 570x it replaces.
+ *
+ * IN DOLLARS IT IS 80x ON THE ANTHROPIC INPUT DIMENSION, because the floor is checked against the
+ * SUM of `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` — three
+ * disjoint counts billed at three different rates — and a wire may declare its whole floored
+ * amount as a cache READ. Measured on an 80,000-character prompt at $3/$15/$0.30:
+ *
+ *     honest, plain                       in 20000                       $0.060000 input
+ *     "input_tokens": 1                   floored to in 2501             $0.007503   8x
+ *     "cache_read_input_tokens": 2500     floored to nothing, cr 2500    $0.000750  80x
+ *
+ * 80 is `USAGE_TOLERANCE x (input rate / cacheRead rate)`, and it is not closed here. THE EVIDENCE
+ * THAT WOULD CLOSE IT is that `#body` puts `cache_control` on the last system block, so only the
+ * tools-plus-system PREFIX is cacheable and a cache read larger than that prefix is not
+ * accountable. It was not taken, because the prefix estimate is small on exactly the request shape
+ * the existing tests call an honest full cache hit, and re-charging that turn at the uncached rate
+ * is the over-charge two earlier rounds of this same floor already had to pay back. It needs the
+ * ORDINARY half measured against real cached deployments first, which nobody here has. `TODO.md`
+ * §A0.13 carries it.
+ *
+ * AND THE SOUNDNESS CONDITION HAS A SECOND HALF the eleven fixtures do not measure: the endpoint
+ * has to have BILLED the request this adapter composed. See `billableTokens` for the one term
+ * where that routinely fails, and for the 85x honest over-charge it cost.
  */
 export const USAGE_TOLERANCE = 8;
 
@@ -91,6 +115,29 @@ export function toleratedFloor(estimated: number): number {
   return Math.max(1, Math.ceil(estimated / USAGE_TOLERANCE));
 }
 
+/**
+ * The INPUT floor's estimate, which is `roughTokens` MINUS the tool specs.
+ *
+ * `roughTokens` is what the adapter is about to SEND and is the right number to reserve against;
+ * the floor is a claim about what the endpoint BILLED, and those differ on exactly one term. An
+ * OpenAI-wire gateway in front of a model with no tool support drops `tools` silently — Ollama and
+ * llama.cpp both do, and `openai.ts`'s own header names that tier — so the endpoint honestly
+ * reports a prompt that never contained them. Measured with 20 tool specs and an 18-token prompt:
+ * the floor charged 1,529 tokens against a truthful 18, an 85x OVER-charge on an honest turn,
+ * which is the direction that makes a real run hit `E_BUDGET_EXHAUSTED` with budget left.
+ *
+ * The floor is a LOWER bound, so dropping a term it cannot vouch for costs only floor strength,
+ * and only for a request whose tool schemas dominate its prompt. `USAGE_TOLERANCE`'s soundness
+ * condition is stated over tokenization alone; this is its second half — the endpoint has to have
+ * billed the request the adapter composed — and `tools` is the one term an endpoint routinely
+ * does not receive.
+ */
+export function billableTokens(req: ModelRequest): number {
+  let chars = req.system.length;
+  for (const m of req.messages) chars += m.content.length;
+  return estimateTokens(chars);
+}
+
 /** USD per million tokens for one model, as a price table row. */
 export interface PriceRow {
   readonly input: number;
@@ -110,9 +157,22 @@ export interface PriceRow {
  * TWO RESOLUTIONS, AND THE ONE THAT IS MISSING IS THE POINT OF THIS PARAGRAPH:
  *
  *  1. The model's own row.
- *  2. The longest `-`-boundary PREFIX with a row. A dated variant is the ordinary shape of a
- *     model that silently reads as priced — a provider ships `-20260101` suffixes and an
- *     operator's table is written against the base name — and a variant bills at its base rate.
+ *  2. The base name of a DATED variant — `claude-sonnet-5-20260101` -> `claude-sonnet-5`. That is
+ *     the ordinary shape of a model that silently reads as priced: a provider ships `-20260101`
+ *     suffixes and an operator's table is written against the base name.
+ *
+ *     A DATE AND NOT ANY PREFIX, which the first version of this got wrong. `gpt-5-nano` and
+ *     `gpt-5-chat-latest` are DIFFERENT models that merely share a prefix, and matching them onto
+ *     `gpt-5` billed one of them at 100x its real rate AND took it off `cli.ts`'s unpriced-route
+ *     banner — a warning switched off in the name of a price nobody configured. A `-` followed by
+ *     8 digits, or by `YYYY-MM-DD`, is the only suffix a provider uses to mean "the same model,
+ *     dated", so it is the only one stripped. `acme-x` no longer inherits `acme`.
+ *
+ *     IT STILL COSTS THE BANNER FOR THE VARIANTS IT DOES COVER: a route on
+ *     `claude-sonnet-5-20260101` used to be named as unpriced at boot and used to make
+ *     `loom promote --against-cohort` refuse, and now passes both. That is the right trade only
+ *     because the guards' premise — "every call on it is journaled as costing 0" — is no longer
+ *     true for those routes, which is exactly what changed here.
  *
  * WHAT IS NOT HERE: a fallback that prices a wholly unknown model at the dearest row in the
  * table, so that no model is ever free. It was built and then removed, because a zero here is
@@ -128,9 +188,12 @@ export interface PriceRow {
  * It is not available from here: the price table is adapter CONSTRUCTION config that the compiler
  * never sees.
  */
+const DATED_VARIANT = /-(?:\d{8}|\d{4}-\d{2}-\d{2})$/;
+
 export function resolvePrice(tables: readonly Readonly<Record<string, PriceRow>>[], model: string): PriceRow | undefined {
   const names = [model];
-  for (let cut = model.lastIndexOf("-"); cut > 0; cut = model.lastIndexOf("-", cut - 1)) names.push(model.slice(0, cut));
+  const dated = DATED_VARIANT.exec(model);
+  if (dated !== null) names.push(model.slice(0, dated.index));
 
   // A LIST OF TABLES IN PRECEDENCE ORDER RATHER THAN ONE MERGED OBJECT, and an `undefined` row
   // falls THROUGH rather than answering. `{...defaults, ...operatorRows}` is not equivalent to
@@ -147,8 +210,12 @@ export function resolvePrice(tables: readonly Readonly<Record<string, PriceRow>>
       // answers with a function that has no `input` field — a price row out of `Object.prototype`,
       // which priced a turn at NaN and threw where an unknown model would simply be unpriced.
       if (!Object.hasOwn(table, name)) continue;
-      const row = table[name];
-      if (row !== undefined) return row;
+      // A row that is not an object is NO ROW, not a row of `undefined` rates. An own key holding
+      // `null` reached `p.input` and threw an untyped `TypeError` where the whole point of the
+      // check three lines below `priceOf`'s call is that an operator's own config gets a typed
+      // refusal — and where base simply fell through to the default row.
+      const row = table[name] as unknown;
+      if (typeof row === "object" && row !== null && !Array.isArray(row)) return row as PriceRow;
     }
   }
   return undefined;

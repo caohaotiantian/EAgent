@@ -212,7 +212,7 @@ function parseMapping(lines: readonly Line[], start: number, indent: number, whe
     }
 
     if (rest === "|" || rest === ">" || rest === "|-" || rest === ">-") {
-      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"), src, where);
+      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"), src, where, line.no);
       put(out, key, text);
       i = next;
       continue;
@@ -266,6 +266,19 @@ function put(out: Record<string, unknown>, key: string, value: unknown): void {
  * blank line BETWEEN a block and the next key not part of the block. Trailing whitespace WITHIN
  * a line is still trimmed, which real YAML preserves; it is invisible, it is what this parser has
  * always done, and no fixture in the tree depends on either reading.
+ *
+ * **THIS IS HASH-CHANGING FOR SOMEBODY ELSE'S GRAPH FILE.** Every YAML document the suite parses
+ * is byte-identical before and after, and the one that compiles keeps its `graphHash` — but that
+ * is a fact about THIS tree. A user graph whose `prompt: |` contains a `#` line or a blank line
+ * now parses to different text and therefore hashes differently, so `graphsByHash` lookups,
+ * promoted hashes and cached compiles for such a file stop matching. The new reading is the
+ * correct one and the old value was never what the author wrote; the migration is real all the
+ * same and belongs in a release note rather than only here.
+ *
+ * ONE MEMBER OF THE FAMILY IS STILL OPEN, and it is open at every sha: a `---` line INSIDE a block
+ * scalar is content, and `parseYaml`'s document scan throws "a second document (---)" before this
+ * function ever runs. `...` is fine, because that scan only DROPS it and the raw read puts it
+ * back. Closing `---` means moving the document scan behind block structure too.
  */
 function blockScalar(
   lines: readonly Line[],
@@ -275,13 +288,29 @@ function blockScalar(
   chomp: boolean,
   src: readonly string[],
   where: string,
+  headerNo: number,
 ): [string, number] {
-  const first = lines[start];
-  if (first === undefined || first.indent <= indent) return ["", start];
-  const blockIndent = first.indent;
+  // THE BLOCK'S INDENT COMES FROM THE FIRST NON-BLANK RAW LINE, not from `lines[start]`. `lines`
+  // has already dropped blank and comment-only lines, so a block whose FIRST line is a comment had
+  // that line silently deleted — `script: |` beginning `# what this does` lost it — and, worse,
+  // the indent was then measured from a LATER line, so a legal document was refused:
+  // `a: |` / two-space `# note` / four-space `x` / two-space `y` threw "line indented 2 where its
+  // first line is indented 4". Reading the raw lines fixes both, and the diagnostic then names the
+  // block's real indent.
+  const from = headerNo;
+  let blockIndent: number | undefined;
+  for (let k = from; k < src.length; k++) {
+    const raw = src[k]!;
+    if (raw.trim() === "") continue;
+    const ind = raw.length - raw.trimStart().length;
+    if (ind <= indent) break;
+    blockIndent = ind;
+    break;
+  }
+  if (blockIndent === undefined) return ["", start];
 
   const collected: string[] = [];
-  let r = first.no - 1;
+  let r = from;
   for (; r < src.length; r++) {
     const raw = src[r]!;
     if (raw.trim() === "") {
@@ -306,8 +335,34 @@ function blockScalar(
   let i = start;
   while (i < lines.length && lines[i]!.no <= r) i++;
 
-  const joined = folded ? collected.join(" ") : collected.join("\n");
+  const joined = folded ? fold(collected) : collected.join("\n");
   return [chomp ? joined : joined + (collected.length > 0 ? "\n" : ""), i];
+}
+
+/**
+ * YAML's folding rule: a single line break becomes a space, and `n` blank lines become `n` breaks.
+ *
+ * `collected.join(" ")` was right only while blank lines were being thrown away upstream. Once
+ * they were preserved it produced RUNS OF SPACES for a paragraph break — `prompt: >` with two
+ * paragraphs came out `"You are a reviewer.  Answer in one line."` and with two blank lines
+ * `"…   Be brief."` — a value no author wrote, in the fix whose whole subject is values no author
+ * wrote. `prompt: >` with paragraphs is an ordinary graph shape.
+ */
+function fold(lines: readonly string[]): string {
+  let out = "";
+  let blanks = 0;
+  let started = false;
+  for (const line of lines) {
+    if (line === "") {
+      blanks++;
+      continue;
+    }
+    if (!started) out = line;
+    else out += (blanks > 0 ? "\n".repeat(blanks) : " ") + line;
+    started = true;
+    blanks = 0;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,11 +584,17 @@ function opensQuote(line: string, i: number): boolean {
 }
 
 /**
- * The line with every quoted span replaced by spaces — syntax only, no content.
+ * The line with every CLOSED quoted span replaced by spaces — syntax only, no content.
  *
- * `REFUSED` looks for anchors, aliases, tags and merge keys, which are YAML SYNTAX. Applied to
- * the raw line they also matched the same characters inside a STRING, so `d: "Tom &Jerry x"` was
+ * `REFUSED` looks for anchors, aliases, tags and merge keys, which are YAML SYNTAX. Applied to the
+ * raw line they also matched the same characters inside a STRING, so `d: "Tom &Jerry x"` was
  * refused as an anchor and `d: "2 *3 x"` as an alias.
+ *
+ * AN UNTERMINATED QUOTE RETURNS THE LINE UNBLANKED, which is the fail-closed answer and was not
+ * the first one. Blanking to end-of-line made all four refusals reachable by leaving a quote open:
+ * `d: "abc &anc x` threw `an anchor (&name)` at 95a3dde and parsed clean here, as did the alias,
+ * tag and merge-key forms. A guard answering its undecidable case with the passing value is the
+ * lens this repo finds most of its defects with, and this was one.
  */
 function blankQuoted(line: string): string {
   const out = [...line];
@@ -554,7 +615,7 @@ function blankQuoted(line: string): string {
       out[i] = " ";
     }
   }
-  return out.join("");
+  return quote === undefined ? out.join("") : line;
 }
 
 function describe(v: unknown): string {

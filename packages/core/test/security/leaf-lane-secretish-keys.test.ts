@@ -65,20 +65,45 @@ const SECRET_KEYS: readonly string[] = [
   "encryption_key",
   "passphrase",
   "pwd",
-  "auth",
-  "bearer",
-  "session_id",
-  "sessionId",
   "jwt",
-  "otp_code",
   "shared_key",
   "master_key",
   "SECRETS",
   "cookies",
 ];
 
-/** Every name that must NOT redact. Six of these contain the substring `key`. */
+/**
+ * Every name that must NOT redact — and the first block is TAKEN FROM THE TREE, not invented.
+ *
+ * The first widening of this rule put a bare `token` in the word list and matched it against any
+ * segment, which turned every one of the token-accounting names below into the string
+ * `"[secret]"` on the operator's own event stream. They are the field names `journal/events.ts`,
+ * `run/registry.ts`, `run/policy.ts`, `run/delivery.ts` and `telemetry/spans.ts` actually declare;
+ * the invented list that stood here — `monkey`, `turkey`, `keyboard_layout` — caught none of them,
+ * which is this repo's recurring lesson about measuring the shapes you imagined.
+ */
 const ORDINARY_KEYS: readonly string[] = [
+  // declared in the tree, and all shredded by the first attempt at this rule
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "maxTokens",
+  "defaultMaxTokens",
+  "reasoningTokens",
+  "runTokens",
+  "spentTokens",
+  "amountTokens",
+  "carriesSecret",
+  "apiKeyEnv",
+  "signature",
+  "signatureHeader",
+  "signatureFormat",
+  "signedPayload",
+  "timestampHeader",
+  "sessionId",
+  "sessionStartedAt",
+  // and the `key` cases the rule was already written for
   "keyboard_layout",
   "key",
   "keys",
@@ -113,11 +138,44 @@ test("the hit list still names the arm that fired, so an alert can count it", ()
   assert.deepEqual(redact({ keyword: OPAQUE }, "internal").hits, []);
 });
 
-test("a SecretValue under a secret-ish key is still its REF, not `[secret]`", () => {
-  // The ref names WHICH secret without disclosing it, and an operator reads it. The narrow rule
-  // never met this case because `auth` was not on its list.
-  const r = redact({ headers: { auth: new SecretValue("v", "secret://env/K") } }, "internal");
-  assert.deepEqual(r.value, { headers: { auth: "secret://env/K" } });
+test("a SecretValue under a SECRET-ISH key is `[secret]`, as it always was", () => {
+  // An exception letting the REF through here was written and removed: the old rule already
+  // matched `token`, `api_key`, `password` and `authorization`, and emitted `[secret]` for all
+  // four, so the exception would have started publishing the env-var NAME at four keys that
+  // never published it — a loosening, and one justified by a premise that measurement refuted.
+  const r = redact({ token: new SecretValue("v", "secret://env/K") }, "internal");
+  assert.deepEqual(r.value, { token: "[secret]" });
+  // A key the rule does NOT name still renders the ref, which is what `SecretValue` is for.
+  const plain = redact({ headers: { upstream: new SecretValue("v", "secret://env/K") } }, "internal");
+  assert.deepEqual(plain.value, { headers: { upstream: "secret://env/K" } });
+});
+
+test("a PREDICATE about a secret is not a secret", () => {
+  // `carriesSecret` is a boolean whose whole job is to say that something ELSE carries one.
+  assert.deepEqual(redact({ carriesSecret: true, hasPassword: false, requiresToken: true }, "internal").value, {
+    carriesSecret: true,
+    hasPassword: false,
+    requiresToken: true,
+  });
+});
+
+test("the descriptor a webhook receiver needs in order to VERIFY is not a credential", () => {
+  // `run/delivery.ts` builds this. Shredding it leaves the outside party unable to check the
+  // boundary this module calls the trust boundary.
+  const sig = {
+    scheme: "hmac-sha256",
+    signedPayload: "v0:{timestamp}:{body}",
+    signatureFormat: "v0={hex}",
+    timestampHeader: "x-loom-timestamp",
+    signatureHeader: "x-loom-signature",
+    toleranceMs: 300_000,
+  };
+  assert.deepEqual(redact({ url: "https://x/cb", signature: sig }, "internal").value, { url: "https://x/cb", signature: sig });
+});
+
+test("a UsageRecord survives the operator event stream as NUMBERS", () => {
+  const usage = { inputTokens: 20_000, outputTokens: 1250, cacheReadTokens: 0, costUsd: 0.07875, wallMs: 12 };
+  assert.deepEqual(redact({ nodeId: "n1", usage, maxTokens: 4096 }, "internal").value, { nodeId: "n1", usage, maxTokens: 4096 });
 });
 
 test("the rule reaches every depth and both container kinds", () => {

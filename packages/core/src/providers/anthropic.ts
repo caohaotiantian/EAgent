@@ -32,7 +32,7 @@ import type {
   ToolSpec,
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
-import { estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
+import { billableTokens, estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
 
 export interface AnthropicOptions extends HttpOptions {
   readonly apiKey: string;
@@ -140,6 +140,9 @@ export class AnthropicAdapter implements ModelAdapter {
             const block = ev.content_block;
             if (block?.type === "tool_use" && ev.index !== undefined) {
               partial.set(ev.index, { id: block.id ?? "", name: block.name ?? "", json: "" });
+            } else if (block?.type === "redacted_thinking") {
+              // The other shape thinking arrives in: one block, no deltas, and still billed.
+              producedChars += block.data?.length ?? 0;
             }
             break;
           }
@@ -149,6 +152,14 @@ export class AnthropicAdapter implements ModelAdapter {
               text += d.text;
               producedChars += d.text.length;
               yield { type: "text_delta", text: d.text };
+            } else if (d?.type === "thinking_delta" || d?.type === "signature_delta") {
+              // THINKING IS BILLED AS OUTPUT AND WAS COUNTED NOWHERE. It never enters `text` —
+              // it is not the answer — so a 60,000-character thinking turn with no usage frame
+              // was charged `Math.max(1, 0)` = ONE output token, which is the original $0-priced
+              // turn surviving whole in the shape an extended-thinking model always takes. It is
+              // not yielded to the caller, because a `text_delta` is the answer; it is counted,
+              // because the provider charges for it.
+              producedChars += (d.thinking?.length ?? 0) + (d.signature?.length ?? 0);
             } else if (d?.type === "input_json_delta" && ev.index !== undefined) {
               const acc = partial.get(ev.index);
               if (acc !== undefined) acc.json += d.partial_json ?? "";
@@ -172,9 +183,12 @@ export class AnthropicAdapter implements ModelAdapter {
               finishReason = mapStop(ev.delta.stop_reason);
               closed = true;
             }
+            // A MAX, for the reason the three input fields below give: this wire reports usage
+            // cumulatively, so a second `message_delta` naming a smaller number is not a
+            // correction. Last-write-wins here handed that choice to whoever writes the bytes.
             const out = wireCount(ev.usage?.output_tokens);
             if (out !== undefined) {
-              outputTokens = out;
+              outputTokens = sawOutputUsage ? Math.max(outputTokens, out) : out;
               sawOutputUsage = true;
             }
             // THE UNION OF THE TWO POSITIONS, taken as a MAX per field. Anthropic's own wire
@@ -312,7 +326,7 @@ export class AnthropicAdapter implements ModelAdapter {
     if (reportedInput === 0) {
       inputTokens = roughTokens(req);
     } else {
-      const floor = toleratedFloor(roughTokens(req));
+      const floor = toleratedFloor(billableTokens(req));
       if (reportedInput < floor) inputTokens += floor - reportedInput;
     }
 
@@ -509,7 +523,6 @@ export function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
 }
 
-
 // ---------------------------------------------------------------------------
 
 interface AnthropicEvent {
@@ -518,8 +531,8 @@ interface AnthropicEvent {
   // `unknown` AND NOT `number`: these are `JSON.parse` output, so the annotation would be a
   // claim about bytes a remote party wrote. `wireCount` is what actually decides.
   message?: { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } };
-  content_block?: { type?: string; id?: string; name?: string };
-  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+  content_block?: { type?: string; id?: string; name?: string; data?: string };
+  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string; thinking?: string; signature?: string };
   // INPUT COUNTS LIVE HERE TOO, and declaring them only under `message` above was a real
   // over-charge: a wire that reports its cache hit on `message_delta` had `cache_read` invisible,
   // so the input floor saw a bare zero and charged the whole prompt at the uncached rate —

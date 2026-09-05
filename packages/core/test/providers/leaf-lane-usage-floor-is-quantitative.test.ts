@@ -148,6 +148,55 @@ test("ORDINARY: no usage frame at all still charges the WHOLE estimate, not the 
   assert.equal(d.usage.outputTokens, 1250);
 });
 
+// ── the turn shapes the floor did not see ────────────────────────────────────
+
+test("THINKING is output and is counted — the $0 turn survived whole for an extended-thinking model", async () => {
+  const think = "t".repeat(60_000);
+  const frames = [
+    `data: {"type":"message_start","message":{"usage":{"input_tokens":20000}}}`,
+    `data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}`,
+    `data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":${JSON.stringify(think)}}}`,
+    `data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"abc"}}`,
+    `data: {"type":"content_block_stop","index":0}`,
+    `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+    `data: {"type":"message_stop"}`,
+  ];
+  // NO usage frame for output at all — the gateway case this whole floor exists for.
+  const d = await anthropic(frames);
+  assert.equal(d.usage.outputTokens, 15_001, `60,000 thinking characters is not one token, got ${d.usage.outputTokens}`);
+  // …and a reported 1 beside them is floored, not believed.
+  const lying = await anthropic([...frames.slice(0, 5), `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, `data: {"type":"message_stop"}`]);
+  assert.equal(lying.usage.outputTokens, Math.ceil(15_001 / USAGE_TOLERANCE));
+});
+
+test("...and a `redacted_thinking` block, which arrives whole rather than as deltas", async () => {
+  const d = await anthropic([
+    `data: {"type":"message_start","message":{"usage":{"input_tokens":20000}}}`,
+    `data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":${JSON.stringify("z".repeat(40_000))}}}`,
+    `data: {"type":"content_block_stop","index":0}`,
+    `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+    `data: {"type":"message_stop"}`,
+  ]);
+  assert.equal(d.usage.outputTokens, 10_000);
+});
+
+test("ORDINARY: an endpoint that DROPS the tool specs is not charged for them", async () => {
+  // Ollama and llama.cpp drop `tools` for a model with no tool support, so the endpoint honestly
+  // reports a prompt that never contained them. The floor charged 1,529 tokens against a truthful
+  // 18 — an 85x over-charge on an honest turn, which is how a real run hits E_BUDGET_EXHAUSTED
+  // with budget left.
+  const tools = Array.from({ length: 20 }, (_, i) => ({
+    name: `tool_${String(i)}`,
+    description: "does a thing, at length, ".repeat(20),
+    parameters: { type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+  }));
+  const req: ModelRequest = { model: "gpt-5", system: "be brief", messages: [{ role: "user", content: "hi" }], tools: tools as never };
+  const d = await done(
+    new OpenAIAdapter({ apiKey: "k", fetch: sse(oai("ok", `,"usage":{"prompt_tokens":18,"completion_tokens":2}`)), prices: { "gpt-5": { input: 3, output: 15 } } }).stream(req, ac()),
+  );
+  assert.equal(d.usage.inputTokens, 18, "the endpoint's honest count must survive a request full of tool specs");
+});
+
 // ── the wire position the input counts were never read from ──────────────────
 
 test("an input count reported on `message_delta` is read, not answered with the whole prompt", async () => {
@@ -206,11 +255,25 @@ test("a dated model variant bills at its base row rather than at zero", async ()
   assert.equal(dated.usage.costUsd, base.usage.costUsd, "at 95a3dde the dated variant cost $0");
 });
 
-test("the LONGEST priced prefix wins, so a variant of a variant does not fall back too far", () => {
+test("only a DATE suffix is stripped — a sibling model is not billed as its prefix", () => {
+  // The first version stripped any `-` suffix, so `gpt-5-nano` billed as `gpt-5` (100x its real
+  // rate) AND vanished from `cli.ts`'s unpriced-route banner. A `-` followed by 8 digits or by
+  // `YYYY-MM-DD` is the only suffix a provider uses to mean "the same model, dated".
   const usage = { inputTokens: 1000, outputTokens: 1000 };
-  const o = new OpenAIAdapter({ apiKey: "k", prices: { "m": { input: 1, output: 1 }, "m-pro": { input: 9, output: 9 } } });
-  assert.equal(o.priceOf("m-pro-20260101", usage), o.priceOf("m-pro", usage));
-  assert.equal(o.priceOf("m-lite-20260101", usage), o.priceOf("m", usage));
+  const o = new OpenAIAdapter({ apiKey: "k" });
+  assert.equal(o.priceOf("gpt-5-20260101", usage), o.priceOf("gpt-5", usage));
+  assert.equal(o.priceOf("gpt-5-2026-01-01", usage), o.priceOf("gpt-5", usage));
+  assert.equal(o.priceOf("gpt-5-nano", usage), 0, "a different model that shares a prefix stays unpriced");
+  assert.equal(o.priceOf("gpt-5-chat-latest", usage), 0);
+  const t = new OpenAIAdapter({ apiKey: "k", prices: { acme: { input: 0.01, output: 0.01 } } });
+  assert.equal(t.priceOf("acme-x", usage), 0, "`acme-x` must not inherit `acme`");
+});
+
+test("a row that is present but not an object is NO row, not a row of undefined rates", () => {
+  const usage = { inputTokens: 1000, outputTokens: 1000 };
+  // `null` reached `p.input` and threw an untyped TypeError; base fell through to the default.
+  assert.equal(new OpenAIAdapter({ apiKey: "k", prices: { "gpt-5": null } as never }).priceOf("gpt-5", usage), 0.02);
+  assert.equal(new OpenAIAdapter({ apiKey: "k", prices: { "gpt-5": 3 } as never }).priceOf("gpt-5", usage), 0.02);
 });
 
 /**
