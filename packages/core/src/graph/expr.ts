@@ -134,6 +134,67 @@ function syntax(src: string, at: number, message: string): Error {
   });
 }
 
+/**
+ * How deeply an expression may nest before it is refused as invalid.
+ *
+ * THIS MODULE PROMISES A TOTAL, TERMINATING LANGUAGE, and the checker that decides that was
+ * not itself total. `checkExpr` caught only around `parseExpr`, so an expression that PARSES
+ * but whose AST is deeper than the remaining stack threw a bare `RangeError` out of
+ * `checkExpr`, out of `validateGraph` and out of `compile()` — which returns a result union
+ * and whose docstring says an editor may call it on every keystroke. Measured at 294e713:
+ * `when: "has(x) && has(x) && …"` with 10,000 terms threw `RangeError: Maximum call stack size
+ * exceeded`, and so did `!` repeated 5,000 times, while 5,000 nested parentheses came back as
+ * a GRAPH004_EXPR diagnostic. Same module, same class of input, two different answers.
+ *
+ * TWO WALLS, NOT ONE, and that is why a source-length cap would not have done. A left-
+ * associative chain is parsed by a LOOP, so it never troubles the parser and then builds an
+ * AST 10,000 deep for `inferType` to recurse over; nested parentheses trouble the parser
+ * first. So the parser counts its own recursion, and the finished AST is measured with an
+ * explicit stack — a measurement that cannot itself overflow.
+ *
+ * 256, THE NUMBER `canonical.ts` ALREADY USES for `E_PAYLOAD_TOO_DEEP`, and for the same
+ * argument: a bare `RangeError` on a path that is supposed to diagnose is not acceptable, and
+ * the limit has to be a property of the INPUT rather than of the caller's remaining stack.
+ * The deepest `when`/`until` written anywhere in this tree is 5 —
+ * `has(verdict) && verdict.severity > 0 && verdict.severity < 0.7` — against a limit of 256.
+ */
+const MAX_EXPR_DEPTH = 256;
+
+/**
+ * The depth of a finished AST, measured with an explicit stack.
+ *
+ * Iterative on purpose: a recursive measure of "is this too deep to recurse over" is the bug
+ * it exists to prevent. It stops as soon as the limit is passed, so the cost is bounded by the
+ * limit rather than by the expression.
+ */
+function tooDeep(e: Expr): boolean {
+  const stack: { readonly n: Expr; readonly d: number }[] = [{ n: e, d: 1 }];
+  while (stack.length > 0) {
+    const { n, d } = stack.pop()!;
+    if (d > MAX_EXPR_DEPTH) return true;
+    switch (n.k) {
+      case "member":
+        stack.push({ n: n.obj, d: d + 1 });
+        break;
+      case "index":
+        stack.push({ n: n.obj, d: d + 1 }, { n: n.idx, d: d + 1 });
+        break;
+      case "unary":
+        stack.push({ n: n.arg, d: d + 1 });
+        break;
+      case "binary":
+        stack.push({ n: n.left, d: d + 1 }, { n: n.right, d: d + 1 });
+        break;
+      case "call":
+        for (const a of n.args) stack.push({ n: a, d: d + 1 });
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Parser (precedence climbing)
 // ---------------------------------------------------------------------------
@@ -172,7 +233,18 @@ export function parseExpr(src: string): Expr {
     if (!eatOp(v)) throw syntax(src, peek().i, `expected "${v}"`);
   };
 
+  // The parser's OWN recursion, which the AST measure below cannot see: 5,000 nested
+  // parentheses overflow here before there is an AST to measure. Not restored on a throw,
+  // which is correct — the throw leaves `parseExpr` and `depth` dies with the call.
+  let depth = 0;
+  const deeper = (at: number): void => {
+    if (++depth > MAX_EXPR_DEPTH) {
+      throw syntax(src, at, `expression nests deeper than ${String(MAX_EXPR_DEPTH)}`);
+    }
+  };
+
   function parseBinary(minPrec: number): Expr {
+    deeper(peek().i);
     let left = parseUnary();
     for (;;) {
       const t = peek();
@@ -184,6 +256,7 @@ export function parseExpr(src: string): Expr {
       const right = parseBinary(prec + 1);
       left = { k: "binary", op: t.v as BinaryOp, left, right };
     }
+    depth--;
     return left;
   }
 
@@ -191,7 +264,10 @@ export function parseExpr(src: string): Expr {
     const t = peek();
     if (t.t === "op" && (t.v === "!" || t.v === "-")) {
       pos++;
-      return { k: "unary", op: t.v, arg: parseUnary() };
+      deeper(t.i);
+      const arg = parseUnary();
+      depth--;
+      return { k: "unary", op: t.v, arg };
     }
     return parsePostfix();
   }
@@ -255,6 +331,9 @@ export function parseExpr(src: string): Expr {
 
   const expr = parseBinary(1);
   if (peek().t !== "eof") throw syntax(src, peek().i, "unexpected trailing input");
+  // AND THE AST, which a left-associative chain grows without ever recursing above. Offset 0
+  // because the depth is a property of the whole expression, not of one token in it.
+  if (tooDeep(expr)) throw syntax(src, 0, `expression nests deeper than ${String(MAX_EXPR_DEPTH)}`);
   return expr;
 }
 
@@ -450,19 +529,24 @@ export function checkExpr(
   src: string,
   channels: Readonly<Record<string, Ty>>,
 ): { ok: true; expr: Expr; refs: readonly string[] } | { ok: false; errors: readonly string[] } {
-  let expr: Expr;
+  // EVERYTHING INSIDE THE TRY, and the widening is the backstop rather than the fix.
+  // `inferType` and `referencedChannels` used to recurse outside it, so a throw from either
+  // left this function as an exception where its whole contract is to return diagnostics.
+  // `MAX_EXPR_DEPTH` is what makes the answer a property of the input; this is what keeps a
+  // compiler whose job is to diagnose from being the thing that throws, for any shape the
+  // depth bound does not already cover.
   try {
-    expr = parseExpr(src);
+    const expr = parseExpr(src);
+    const typeErrors: TypeError[] = [];
+    const t = inferType(expr, channels, typeErrors);
+    if (t !== "boolean" && t !== "unknown") {
+      typeErrors.push({ message: `expression must evaluate to a boolean, got ${t}` });
+    }
+    if (typeErrors.length > 0) return { ok: false, errors: typeErrors.map((e) => e.message) };
+    return { ok: true, expr, refs: referencedChannels(expr) };
   } catch (e) {
     return { ok: false, errors: [(e as Error).message] };
   }
-  const typeErrors: TypeError[] = [];
-  const t = inferType(expr, channels, typeErrors);
-  if (t !== "boolean" && t !== "unknown") {
-    typeErrors.push({ message: `expression must evaluate to a boolean, got ${t}` });
-  }
-  if (typeErrors.length > 0) return { ok: false, errors: typeErrors.map((e) => e.message) };
-  return { ok: true, expr, refs: referencedChannels(expr) };
 }
 
 // ---------------------------------------------------------------------------
