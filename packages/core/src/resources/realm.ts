@@ -152,8 +152,14 @@ const SAFE_GLOBAL_NAMES = [
   "decodeURIComponent",
 ] as const;
 
+/**
+ * The read-back, parsed once. `safeGlobals` runs per REALM now that `compileRealm` builds one per
+ * call, and re-parsing a sixteen-name object literal each time was a third of that call's cost.
+ */
+const READ_INTRINSICS = new vm.Script(`({ ${SAFE_GLOBAL_NAMES.join(", ")} })`, { filename: "loom:safeGlobals" });
+
 function safeGlobals(context: object): Record<string, unknown> {
-  const own = vm.runInContext(`({ ${SAFE_GLOBAL_NAMES.join(", ")} })`, context) as Record<string, unknown>;
+  const own = READ_INTRINSICS.runInContext(context) as Record<string, unknown>;
   // The two clocks, shadowed together because they ARE one concern — see the docstring. An own
   // data property set to `undefined` beats the context's, so `Date` and `Intl` are genuinely
   // gone from a body's reach rather than merely discouraged.
@@ -600,62 +606,106 @@ function thrownName(e: unknown): string {
   }
 }
 
+/**
+ * ONE REALM PER CALL, compiled once.
+ *
+ * This built one `vm` context and every call ran in it, and both loaders cache what it returns
+ * for the life of the process — so a body's writes to `globalThis`, to an intrinsic's prototype,
+ * or to its own definition-time closure survived from one call to the next, across tasks and
+ * across RUNS, while the body stayed branded realm-bounded. Measured at 95a3dde through
+ * `createFunctionLoader` on `(view, ctx) => { globalThis.__n = (globalThis.__n || 0) + 1; … }`:
+ * `{n:1}`, `{n:2}`, then `{n:3}` on a fresh `load` of the same ref, and the hook loader the same.
+ * Under `loom serve`, run #2 of that graph journals `{n:2}`; a replay in a fresh process
+ * re-executes the body and gets `{n:1}`; and `hermetic` was `true` — the one direction that field
+ * may not be wrong in. `HOOK_BRIDGE` had closed this for exactly one name, re-installing
+ * `Math.random` per call, and left the namespace open.
+ *
+ * So a call gets a context of its own: created empty, given its intrinsics back plus the
+ * embedder's globals, the body and the bridge evaluated into it, the entry invoked, the context
+ * dropped. Nothing a call does to its realm can reach the next call, because the next call's
+ * realm does not exist yet. What IS shared is the compiled code — two `vm.Script`s built once
+ * here — so the parse still happens once per digest, and the (digest, deadline) cache in
+ * `functions.ts` and the per-digest cache in `hook-loader.ts` still bound the number of compiles.
+ *
+ * WHAT IT COSTS, measured on one machine over 2,000 calls of a trivial body: through the function
+ * loader, 0.049 ms per call with the shared context and 0.32–0.36 ms with a realm per call. Broken
+ * down on the bare `vm` API, per call: `createContext` 153 µs, reading the intrinsics back and
+ * assigning them 4 µs, evaluating the body and bridge scripts 98 µs, the invoke itself 45 µs —
+ * against 42 µs for the invoke alone in a shared realm. So a `function` task pays about a quarter
+ * of a millisecond more, all of it V8 building a context, against the journal appends the same
+ * task already makes. `test/resources/replay-lane-realm-fresh-per-call.test.ts` pins an absolute
+ * bound with an order-of-magnitude margin.
+ *
+ * THE BRAND IS DECIDED ON THE FIRST REALM AND RE-CHECKED ON EVERY ONE. The three properties
+ * `onlyGovernedCrossed`'s header names are functions of the source, the bridge and the globals,
+ * so a realm that passed at compile passes at every call — unless the body's definition-time code
+ * is itself nondeterministic, and then the call is REFUSED rather than run unbranded: a body the
+ * replay report has vouched for does not get to become one it has not.
+ *
+ * WHAT THIS DOES NOT CLOSE: `opts.globals` are host values and are the same objects in every
+ * realm, so an embedder that hands a body a mutable object has handed it cross-call state. That is
+ * the hazard `RealmOptions.globals` already names, and such a realm carries no brand.
+ */
 export function compileRealm(opts: RealmOptions): RealmCall {
-  // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
-  // Seeding it with host objects is what opened the bridge the first time.
-  const context = vm.createContext(Object.create(null));
-  // Read from the PRISTINE context, before anything the embedder sent can be seen by it: this
-  // reads the 16 names back out of the context, so assigning `opts.globals` first would make it
-  // re-read the embedder's copies and launder them into the "own intrinsics" set.
-  const governed = safeGlobals(context);
-  refuseGovernedGlobals(governed, opts.globals, opts.label);
-  // `Math.random` AS THE CONTEXT SHIPPED IT, captured before one line of body or bridge text has
-  // run. `shadowsHeld` compares against this identity; taking it later would compare a stub
-  // against itself. `governed["Math"]` is the context's own `Math`, so this is a plain read of a
-  // pristine object and no user code can be behind it.
-  const pristineRandom = (governed["Math"] as { random?: unknown } | undefined)?.random;
-  // SHADOWS LAST — the order every docstring here has claimed and none had. This is the line that
-  // actually closes the hole; `refuseGovernedGlobals` above is what makes ignoring an embedder's
-  // argument audible instead of silent. Measured with that call deleted: the escape, `Date` and
-  // `Intl` all stay closed. See `refuseGovernedGlobals`.
-  Object.assign(context, opts.globals, governed);
-  // DERIVED HERE, AT THE ONE MOMENT THE SANDBOX HOLDS EXACTLY WHAT CROSSED FROM THE HOST. See
-  // `onlyGovernedCrossed` for what is decided and why it is decided by a check. After this line
-  // the body and the bridge run, and both write their own names onto `globalThis` — so a check
-  // placed after them would have to whitelist those names and would grow a hole per bridge.
-  const namespaceIsOwn = onlyGovernedCrossed(context, governed);
-  let value: unknown;
+  // PARSED ONCE. A body that does not parse fails here, before any realm exists.
+  let bodyScript: vm.Script;
+  let bridgeScript: vm.Script;
   try {
     // The content IS a function expression — no `module.exports` ceremony, no wrapper to get
     // wrong. It is KEPT IN THE CONTEXT rather than handed back, because the call happens in
     // there too.
-    vm.runInContext(`globalThis.__loomBody = (${opts.source});`, context, {
-      timeout: opts.compileTimeoutMs,
-      filename: opts.label,
-    });
-    vm.runInContext(opts.bridge, context, {
-      timeout: opts.compileTimeoutMs,
-      filename: `${opts.label} (bridge)`,
-    });
-    value = (context as Record<string, unknown>)["__loomBody"];
+    bodyScript = new vm.Script(`globalThis.__loomBody = (${opts.source});`, { filename: opts.label });
+    bridgeScript = new vm.Script(opts.bridge, { filename: `${opts.label} (bridge)` });
   } catch (e) {
-    throw err.validation(
-      CODES.E_RESOURCE_INVALID,
-      `${opts.what} resource "${opts.label}" did not evaluate: ${(e as Error).message}` +
-        // GATED ON `.name`, NEVER `instanceof`. The error is constructed by the VM CONTEXT'S
-        // SyntaxError, whose prototype is not the host's, so `e instanceof SyntaxError` is FALSE
-        // for both `module.exports = …;` and `export default …` — measured, both spellings, both
-        // false, both `name === "SyntaxError"`. The obvious form would compile, pass review, and
-        // silently never fire, which is worse than not adding the sentence.
-        //
-        // Gated at all, because this arm also catches errors the body itself raised while
-        // evaluating. A body that throws on line 1 is not a shape mistake and must not be told it
-        // is one. The residual: `module.exports = f` with no trailing semicolon parses and fails
-        // as a ReferenceError, `module is not defined` — the same mistake, and it does NOT get
-        // this sentence. Widening the gate to name that case is a separate judgement; it is
-        // recorded here rather than guessed at.
-        ((e as Error).name === "SyntaxError" ? ` — ${SHAPE_RULE}` : ""),
-    );
+    throw didNotEvaluate(opts, e);
+  }
+
+  /** An empty context and the intrinsics read back out of it, before anything else can be seen. */
+  const fresh = (): { context: vm.Context; governed: Record<string, unknown>; pristineRandom: unknown } => {
+    // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
+    // Seeding it with host objects is what opened the bridge the first time.
+    const context = vm.createContext(Object.create(null));
+    // Read from the PRISTINE context, before anything the embedder sent can be seen by it: this
+    // reads the 16 names back out of the context, so assigning `opts.globals` first would make it
+    // re-read the embedder's copies and launder them into the "own intrinsics" set.
+    const governed = safeGlobals(context);
+    // `Math.random` AS THE CONTEXT SHIPPED IT, captured before one line of body or bridge text has
+    // run. `shadowsHeld` compares against this identity; taking it later would compare a stub
+    // against itself. `governed["Math"]` is the context's own `Math`, so this is a plain read of a
+    // pristine object and no user code can be behind it.
+    const pristineRandom = (governed["Math"] as { random?: unknown } | undefined)?.random;
+    return { context, governed, pristineRandom };
+  };
+
+  /**
+   * Populate a fresh realm: globals, then body, then bridge. Returns whether only governed names
+   * crossed from the host — decided at the one moment the sandbox holds exactly what crossed.
+   */
+  const populate = (realm: ReturnType<typeof fresh>, timeoutMs: number): boolean => {
+    // SHADOWS LAST — the order every docstring here has claimed and none had. This is the line
+    // that actually closes the hole; `refuseGovernedGlobals` is what makes ignoring an embedder's
+    // argument audible instead of silent. Measured with that call deleted: the escape, `Date` and
+    // `Intl` all stay closed. See `refuseGovernedGlobals`.
+    Object.assign(realm.context, opts.globals, realm.governed);
+    // DERIVED HERE, AT THE ONE MOMENT THE SANDBOX HOLDS EXACTLY WHAT CROSSED FROM THE HOST. See
+    // `onlyGovernedCrossed` for what is decided and why it is decided by a check. After this line
+    // the body and the bridge run, and both write their own names onto `globalThis` — so a check
+    // placed after them would have to whitelist those names and would grow a hole per bridge.
+    const namespaceIsOwn = onlyGovernedCrossed(realm.context, realm.governed);
+    bodyScript.runInContext(realm.context, { timeout: timeoutMs });
+    bridgeScript.runInContext(realm.context, { timeout: timeoutMs });
+    return namespaceIsOwn;
+  };
+
+  const first = fresh();
+  refuseGovernedGlobals(first.governed, opts.globals, opts.label);
+  let namespaceIsOwn: boolean;
+  let value: unknown;
+  try {
+    namespaceIsOwn = populate(first, opts.compileTimeoutMs);
+    value = (first.context as Record<string, unknown>)["__loomBody"];
+  } catch (e) {
+    throw didNotEvaluate(opts, e);
   }
   if (typeof value !== "function") {
     throw err.validation(
@@ -669,17 +719,37 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   // ONE RULE, BOTH LOADERS. See `ASYNC_RULE`. Checked here rather than in each bridge because
   // `functions.ts` had it and `hook-loader.ts` did not, which is the SHAPE_RULE argument three
   // paragraphs up playing out on a second rule.
-  if (isAsyncBody(context, value)) {
+  if (isAsyncBody(first.context, value)) {
     throw err.validation(CODES.E_RESOURCE_INVALID, `${opts.what} resource "${opts.label}": ${ASYNC_RULE}.`);
   }
-  if (typeof (context as Record<string, unknown>)[opts.entry] !== "function") {
+  if (typeof (first.context as Record<string, unknown>)[opts.entry] !== "function") {
     // A bridge that did not define its entry would fail later as `__loomInvoke is not
     // defined`, from inside a run, attributed to the body rather than to the bridge.
     throw err.internal(CODES.E_INTERNAL, `bridge for "${opts.label}" did not define ${opts.entry}`);
   }
+  // THE BRAND IS DECIDED FROM A CHECK, ON THE REALM THAT ACTUALLY EXISTS. The three properties it
+  // vouches for are named in `onlyGovernedCrossed`'s header: that function decided the second one
+  // above, and `shadowsHeld` decides the first and third here. See `REALM_BOUND` for what
+  // membership means and `isRealmBounded` for how it is read.
+  const branded = namespaceIsOwn && shadowsHeld(first.context, first.governed, first.pristineRandom);
 
   const where = `${opts.what} resource "${opts.label}"`;
   const call: RealmCall = (payload) => {
+    // A REALM OF ITS OWN, built the way the first one was. Its definition-time code is bounded by
+    // the compile deadline, as it was at compile; the call itself by the call deadline below.
+    const realm = fresh();
+    const own = populate(realm, opts.compileTimeoutMs);
+    if (branded && !(own && shadowsHeld(realm.context, realm.governed, realm.pristineRandom))) {
+      // The compile-time realm passed and this one did not, so the body's definition-time code
+      // did something on this call it did not do then. Refused rather than run: the brand on
+      // `call` is what `ReplayReport.hermetic` rests on, and it cannot be revoked per call.
+      throw err.validation(
+        CODES.E_RESOURCE_INVALID,
+        `${where} no longer passes the realm's determinism checks at call time — its definition-time code ` +
+          `did something on this call that it did not do when it was compiled and branded, so the call is refused ` +
+          `rather than run unvouched-for`,
+      );
+    }
     // ONLY JSON CROSSES *HERE*. Every value this call hands the body is rebuilt from this string
     // INSIDE the context, so no host object reaches it BY THIS ROUTE. `opts.globals` is the route
     // that is not this one, and it is not rebuilt — see `RealmOptions.globals`.
@@ -687,7 +757,7 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     try {
       // WRAPPED, not read afterwards: the return guard is part of the expression `timeout`
       // bounds. See `THENABLE_RULE`.
-      out = vm.runInContext(guardingReturn(`${opts.entry}(${JSON.stringify(JSON.stringify(payload))})`), context, {
+      out = vm.runInContext(guardingReturn(`${opts.entry}(${JSON.stringify(JSON.stringify(payload))})`), realm.context, {
         timeout: opts.callTimeoutMs,
         filename: opts.label,
       });
@@ -706,13 +776,33 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     if (crossedAsThenable(host, where)) refuseThenable(where);
     return host;
   };
-  // THE ONLY PLACE THE BRAND IS APPLIED, AND IT IS APPLIED FROM A CHECK. The three properties it
-  // vouches for are named in `onlyGovernedCrossed`'s header: that function decided the second one
-  // above, and `shadowsHeld` decides the first and third here, on the realm that actually exists
-  // rather than on the arguments it was built from. See `REALM_BOUND` for what membership means
-  // and `isRealmBounded` for how it is read.
-  if (namespaceIsOwn && shadowsHeld(context, governed, pristineRandom)) REALM_BOUND.add(call);
+  // THE ONLY PLACE THE BRAND IS APPLIED, AND IT IS APPLIED FROM A CHECK.
+  if (branded) REALM_BOUND.add(call);
   return call;
+}
+
+/**
+ * The refusal for a body that did not evaluate — at parse, or while its definition-time code ran.
+ *
+ * GATED ON `.name`, NEVER `instanceof`. A parse failure is the host's `SyntaxError` now that the
+ * scripts are built with `vm.Script`, but a body that fails while EVALUATING throws from inside the
+ * context, whose intrinsics are not the host's — so `e instanceof SyntaxError` was measured `false`
+ * for both `module.exports = …;` and `export default …` when evaluation and parse were one step.
+ * The obvious form would compile, pass review, and silently never fire, which is worse than not
+ * adding the sentence.
+ *
+ * Gated at all, because this also catches errors the body itself raised while evaluating. A body
+ * that throws on line 1 is not a shape mistake and must not be told it is one. The residual:
+ * `module.exports = f` with no trailing semicolon parses and fails as a ReferenceError, `module is
+ * not defined` — the same mistake, and it does NOT get this sentence. Widening the gate to name
+ * that case is a separate judgement; it is recorded here rather than guessed at.
+ */
+function didNotEvaluate(opts: RealmOptions, e: unknown): Error {
+  return err.validation(
+    CODES.E_RESOURCE_INVALID,
+    `${opts.what} resource "${opts.label}" did not evaluate: ${(e as Error).message}` +
+      ((e as Error).name === "SyntaxError" ? ` — ${SHAPE_RULE}` : ""),
+  );
 }
 
 /**
@@ -883,7 +973,10 @@ function shadowsHeld(context: object, governed: Record<string, unknown>, pristin
  * read as total. A branded body is realm-bounded; it is not proven deterministic. Two ambient
  * routes to a value replay cannot reproduce are still open inside the realm and are pinned as
  * PASSING tests in `test/resources/realm-has-no-clock.test.ts` — `THE HOST'S DEFAULT LOCALE IS
- * AMBIENT` and `GARBAGE COLLECTION IS OBSERVABLE`. So `hermetic: true` with this conjunct means
+ * AMBIENT` and `GARBAGE COLLECTION IS OBSERVABLE`. A THIRD ROUTE WAS OPEN AND UNNAMED, and it was
+ * inside the runtime's own control: one context served every call, so a body's globals carried
+ * its previous calls' state across tasks and runs. `compileRealm` builds a realm per call now, and
+ * `test/resources/replay-lane-realm-fresh-per-call.test.ts` pins it. So `hermetic: true` with this conjunct means
  * "no body ran that the runtime could not vouch for", not "nothing nondeterministic happened".
  * The direction is what makes it progress rather than motion: the old inaccuracy over-claimed,
  * this one under-claims, and an under-claiming guard is the only kind that is safe to be wrong.
