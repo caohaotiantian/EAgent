@@ -252,6 +252,28 @@ function spend(out: string[], budget: Budget, text: string, path: string): void 
   out.push(text);
 }
 
+/**
+ * `JSON.stringify` of a string, refused BEFORE the quoted copy is built when the raw text alone
+ * already overruns the bound.
+ *
+ * `spend` charges what it is handed, and it is handed the OUTPUT of `JSON.stringify` — so for one
+ * escape-heavy leaf the refusal came a full allocation too late. Measured at 95a3dde:
+ * `canonicalize("\n".repeat(300_000_000))` died inside `JSON.stringify` with a bare
+ * `RangeError: Invalid string length`, `code` undefined, after 702 ms — the untyped failure on the
+ * durable write path that `tooLong` exists to have removed, reachable from `fs.read`, which reads a
+ * whole file as UTF-8 before slicing to `maxBytes`.
+ *
+ * The raw length is a LOWER bound on the quoted length (two quotes, and every escape only grows
+ * it), so refusing on it never refuses a value `spend` would have accepted; `spend` still makes
+ * the exact check on what is actually emitted. And a string that passes here cannot overflow the
+ * quoting: the worst escape is six characters per one (`\u0001`), so a raw text under 64 MiB
+ * quotes to under 403 M characters, inside V8's 536,870,888.
+ */
+function quoted(text: string, budget: Budget, path: string): string {
+  if (budget.chars + text.length > MAX_OUTPUT_CHARS) throw tooLong(budget.chars + text.length, path);
+  return JSON.stringify(text);
+}
+
 export class CanonicalizationError extends Error {
   override readonly name = "CanonicalizationError";
   readonly path: string;
@@ -316,7 +338,7 @@ function write(
       return;
     }
     case "string":
-      spend(out, budget, JSON.stringify(value), path);
+      spend(out, budget, quoted(value, budget, path), path);
       return;
     case "undefined":
       throw new CanonicalizationError("undefined is not representable here", path);
@@ -413,7 +435,7 @@ function write(
     if (v === undefined) continue; // omit, matching JSON.stringify's object behaviour
     if (!first) spend(out, budget, ",", path);
     first = false;
-    spend(out, budget, JSON.stringify(key), path);
+    spend(out, budget, quoted(key, budget, path), path);
     spend(out, budget, ":", path);
     write(v, path ? `${path}.${key}` : key, seen, out, depth + 1, budget);
   }
