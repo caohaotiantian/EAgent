@@ -48,6 +48,13 @@ const channels = {
   amount: { type: "number", reduce: "replace" },
   doubled: { type: "number", reduce: "replace" },
   ok: { type: "array", reduce: "append_ordered" },
+  // CLASSIFIED ON THE LEAF AND CARRIED IN ON AN UNCLASSIFIED PARENT CHANNEL, so the redaction
+  // test below has something the CHILD's own graph classifies. Declaring it sensitive on the
+  // parent instead would raise the parent's posture and gate the `subgraph` node before the
+  // child run is ever minted — measured: `gate.raised`, `run.suspended`, and no
+  // `subgraph.started` at all.
+  secret: { type: "string", reduce: "replace", classification: "secret_ref" },
+  carrier: { type: "string", reduce: "replace" },
 } as const;
 
 /** A leaf that asks a person before it does its work — the gate this file is about. */
@@ -58,7 +65,7 @@ function leafSpec(): GraphSpec {
     metadata: { name: "leaf", project: "lane-p", version: 1 },
     policy,
     channels,
-    inputs: ["amount"],
+    inputs: ["amount", "secret"],
     outputs: ["doubled"],
     nodes: [
       { id: n("ask"), type: "human_gate", reads: ["amount"], writes: ["ok"], humanGate: { ref: "oversight/ship@stable" } },
@@ -75,15 +82,15 @@ function parentSpec(): GraphSpec {
     metadata: { name: "top", project: "lane-p", version: 1 },
     policy,
     channels,
-    inputs: ["amount"],
+    inputs: ["amount", "carrier"],
     outputs: ["doubled"],
     nodes: [
       {
         id: n("delegate"),
         type: "subgraph",
-        reads: ["amount"],
+        reads: ["amount", "carrier"],
         writes: ["doubled"],
-        subgraph: { ref: LEAF_REF, inputs: { amount: "amount" }, outputs: { doubled: "doubled" }, budgetShare: 0.5 },
+        subgraph: { ref: LEAF_REF, inputs: { amount: "amount", secret: "carrier" }, outputs: { doubled: "doubled" }, budgetShare: 0.5 },
       },
     ],
     edges: [],
@@ -128,7 +135,11 @@ async function rig(opts: { readonly declareSubgraph: boolean }): Promise<Rig> {
   });
   const graph = compileOrThrow({ spec: parentSpec(), resolver, tools: {}, tenantCapabilities: [] });
   const leaf = compileOrThrow({ spec: leafSpec(), resolver, tools: {}, tenantCapabilities: [] });
-  const parentRunId = await engine.submit({ graph, inputs: { amount: 21 }, submittedBy: { kind: "human", subject: "owner", method: "bearer-token" } });
+  const parentRunId = await engine.submit({
+    graph,
+    inputs: { amount: 21, carrier: "the vault passphrase" },
+    submittedBy: { kind: "human", subject: "owner", method: "bearer-token" },
+  });
   const p = await engine.advance(parentRunId);
   assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
 
@@ -215,6 +226,39 @@ test("THE CONTROL IS THE SAME PLANE WITHOUT THE SUBGRAPH DECLARED — it still r
     assert.match((await res.text()).toString(), /is not attached/);
   } finally {
     await r.close();
+  }
+});
+
+test("DECLARING THE SUBGRAPH WIDENS WHAT A CHILD RUN'S OWNER SEES, and the graph's own classification still binds", async () => {
+  // THE COST OF THE FIX ABOVE, MEASURED AND PINNED RATHER THAN LEFT AS A SIDE EFFECT. `summarise`
+  // redacts a projection with the graph THAT run compiled, and `redactChannels` treats a missing
+  // graph as `secret_ref` for every channel — fail-closed, because the plane could not read the
+  // graph rather than because anything decided about delegation. So a child run's channels used
+  // to reach its own owner as "[secret]" across the board, and now reach them exactly as the same
+  // graph's channels would on a top-level run. Measured on this rig, same request, same token:
+  //
+  //     subgraphs absent  {"amount":"[secret]","secret":"[secret]"}
+  //     subgraphs present {"amount":21,"secret":"[secret]"}
+  //
+  // The half that must not move is the third column: a channel the CHILD GRAPH declares
+  // `secret_ref` is still withheld, so what widened is the fail-closed default and not the
+  // graph's own declaration. Ownership is untouched either way — `ownsRun` is what admits this
+  // request, and the child carries the parent's `submittedBy`.
+  for (const declareSubgraph of [false, true]) {
+    const r = await rig({ declareSubgraph });
+    try {
+      const res = await fetch(`${r.base}/runs/${encodeURIComponent(r.childRunId)}`, { headers: as(OWNER) });
+      assert.equal(res.status, 200, await res.clone().text());
+      const seen = (await res.json()) as { channels: Record<string, unknown> };
+      assert.equal(seen.channels["secret"], "[secret]", "a channel the child graph declares secret_ref is withheld either way");
+      assert.equal(
+        seen.channels["amount"],
+        declareSubgraph ? 21 : "[secret]",
+        `an unclassified channel is served exactly when the plane can read the graph that declared it (declared=${String(declareSubgraph)})`,
+      );
+    } finally {
+      await r.close();
+    }
   }
 });
 
