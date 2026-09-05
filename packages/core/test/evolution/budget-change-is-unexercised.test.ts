@@ -149,7 +149,7 @@ test("A LOWERED CEILING THE CORPUS NEVER REACHED IS REFUSED — and it is the on
   assert.equal(baseline.passRate, 1, JSON.stringify(baseline.cases.map((c) => c.reasons)));
   assert.equal(candidate.passRate, 1, JSON.stringify(candidate.cases.map((c) => c.reasons)));
   assert.deepEqual(candidate.cases[0]!.reasons, [], "the case has nothing to say about it");
-  assert.deepEqual(candidate.cases[0]!.replay.unservedEffects, [], "nothing went unasked — this is not the maxTurns shape");
+  assert.deepEqual(candidate.cases[0]!.replay!.unservedEffects, [], "nothing went unasked — this is not the maxTurns shape");
   assert.equal(candidate.totalCostUsd, baseline.totalCostUsd, "and the replay spends the recording's money either way");
 
   // THE REFUSAL, at the door that has both specs.
@@ -265,6 +265,7 @@ const report = (budgets: EvalReport["budgets"]): EvalReport => ({
   suiteValid: true,
   suiteIssues: [],
   budgets,
+  evaluators: {},
 });
 
 test("CONTROL · a scope the candidate ADDED is not a moved ceiling — which is the shape mutate.ts produces", () => {
@@ -421,8 +422,8 @@ test("WHY THERE IS NO EVIDENCE BRANCH — a ceiling the corpus DOES cross fails 
 
   const crossed = await runEvalSuite({ store: h.store, suite, graph: withBudget(0.0005), engine: engineOf(h) });
   assert.equal(crossed.passRate, 0);
-  assert.equal(crossed.cases[0]!.replay.replayed.status, "failed");
-  assert.ok(crossed.cases[0]!.replay.unservedEffects.length > 0, "the turns past the refusal go unasked");
+  assert.equal(crossed.cases[0]!.replay!.replayed.status, "failed");
+  assert.ok(crossed.cases[0]!.replay!.unservedEffects.length > 0, "the turns past the refusal go unasked");
   assert.ok(
     crossed.cases[0]!.reasons.some((r) => r.includes("never asked for")),
     `the existing reason already fires; got ${JSON.stringify(crossed.cases[0]!.reasons)}`,

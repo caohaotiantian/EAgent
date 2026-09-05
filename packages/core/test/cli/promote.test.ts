@@ -172,7 +172,7 @@ async function promotionRows(dir: string, runId: RunId): Promise<{ kind: string;
   }
 }
 
-test("loom promote: a winning candidate passes thirteen checks, exits 0, and the decision is journaled", async () => {
+test("loom promote: a winning candidate passes fifteen checks, exits 0, and the decision is journaled", async () => {
   const w = workspace();
   try {
     const ids = await record(w.dir, 6);
@@ -199,7 +199,7 @@ test("loom promote: a winning candidate passes thirteen checks, exits 0, and the
       caseRunIds: string[];
     };
     assert.equal(decision.promote, true);
-    assert.equal(decision.checks.length, 13, "every promotion check is reported, not just the failing ones");
+    assert.equal(decision.checks.length, 15, "every promotion check is reported, not just the failing ones");
     assert.equal(decision.checks.every((c) => c.pass), true, JSON.stringify(decision.checks.filter((c) => !c.pass)));
     // The improvement is REAL and strictly positive. `gateCandidate` is a non-inferiority test
     // and passes at Δ 0, so `promote === true` on its own does not mean anything was measured.

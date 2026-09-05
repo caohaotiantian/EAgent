@@ -274,7 +274,7 @@ test("A CANDIDATE IS PROMOTED OVER THAT COHORT, BECAUSE IT MEASURABLY BEAT THE B
     deterministic: sameOutcome(candidate, await runEvalSuite({ store: b.store, suite, graph: candidateGraph, engine: b.engineOpts })),
   });
   assert.equal(verdict.promote, true, JSON.stringify(verdict.checks.filter((x) => !x.pass)));
-  assert.equal(verdict.checks.length, 13);
+  assert.equal(verdict.checks.length, 15);
   assert.equal(verdict.checks.every((x) => x.pass), true);
 });
 
@@ -283,7 +283,7 @@ function sameOutcome(a: Awaited<ReturnType<typeof runEvalSuite>>, b: Awaited<Ret
     a.cases.length === b.cases.length &&
     a.cases.every((x, i) => {
       const y = b.cases[i];
-      return y !== undefined && x.id === y.id && JSON.stringify(x.replay.replayed.channels) === JSON.stringify(y.replay.replayed.channels);
+      return y !== undefined && x.id === y.id && JSON.stringify(x.replay?.replayed.channels) === JSON.stringify(y.replay?.replayed.channels);
     })
   );
 }

@@ -100,7 +100,14 @@ export interface CaseResult {
   readonly reasons: readonly string[];
   readonly costUsd: number;
   readonly wallMs: number;
-  readonly replay: ReplayReport;
+  /**
+   * ABSENT when the replay itself failed — `E_REPLAY_DIVERGENCE`, a missing seed, a graph the
+   * recording cannot serve. The type used to say `ReplayReport` and the failure arm stored
+   * `undefined as unknown as ReplayReport`, so every consumer that read `case.replay.graph` on
+   * a failed case threw a `TypeError` the type had promised could not happen. `reasons` carries
+   * the failure; a reader that wants the report checks for it.
+   */
+  readonly replay?: ReplayReport;
 }
 
 export interface EvalReport {
@@ -143,6 +150,19 @@ export interface EvalReport {
    * operator cannot reach it, and a hand-authored candidate that edits a child graph can.
    */
   readonly budgets: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  /**
+   * Every evaluator node the graph this report ran against declares, with the body it resolved
+   * to — the same projection-of-the-graph-on-a-report device `budgets` is, for the same reason:
+   * `12-grader-unchanged` is a question about two SPECS, and the two reports are where the two
+   * specs meet.
+   *
+   * Keys are `"node:<id>"`; `digest` is the `resolutionManifest` entry for `evaluator.ref`, and is
+   * absent when the compile did not resolve the ref (a compile refuses that, so absence is only
+   * reachable from a hand-built report — and the check fails closed on it).
+   */
+  readonly evaluators: Readonly<
+    Record<string, { readonly kind: "assertion" | "rubric"; readonly ref: string; readonly digest?: string; readonly reads: readonly string[] }>
+  >;
 }
 
 export interface EvalOptions {
@@ -191,7 +211,24 @@ export async function runEvalSuite(opts: EvalOptions): Promise<EvalReport> {
     suiteValid,
     suiteIssues,
     budgets: budgetsOf(opts.graph),
+    evaluators: evaluatorsOf(opts.graph),
   };
+}
+
+/** `EvalReport.evaluators` for one graph — see that field for the key shape. */
+function evaluatorsOf(graph: RunGraph): EvalReport["evaluators"] {
+  const out: Record<string, { kind: "assertion" | "rubric"; ref: string; digest?: string; reads: readonly string[] }> = {};
+  for (const node of graph.spec.nodes) {
+    if (node.type !== "evaluator" || node.evaluator === undefined) continue;
+    const resolved = graph.resolutionManifest.find((r) => r.ref === node.evaluator?.ref);
+    out[`node:${String(node.id)}`] = {
+      kind: node.evaluator.kind,
+      ref: node.evaluator.ref,
+      ...(resolved === undefined ? {} : { digest: resolved.digest }),
+      reads: [...(node.reads ?? [])].sort(),
+    };
+  }
+  return out;
 }
 
 /**
@@ -273,7 +310,6 @@ async function runCase(c: EvalCase, opts: EvalOptions): Promise<CaseResult> {
       reasons: [`replay failed: ${(e as Error).message}`],
       costUsd: 0,
       wallMs: 0,
-      replay: undefined as unknown as ReplayReport,
     };
   }
 
@@ -578,6 +614,13 @@ export interface PromotionInput {
   readonly postureDiffNonNegative: boolean;
   /** Two replays of the candidate produced identical state hashes. */
   readonly deterministic: boolean;
+  /**
+   * Whether the baseline's workflow has an operator-attested exam (`evolution/exam.ts`), measured
+   * by the caller from the journal and passed in, the way `postureDiffNonNegative` is. ABSENT IS
+   * FALSE: with no exam the in-graph evaluator is the only ground truth this workflow has, and
+   * `12-grader-unchanged` applies. A caller that does not answer has not loosened anything.
+   */
+  readonly examAttested?: boolean;
   readonly criteria?: PromotionCriteria;
 }
 
@@ -593,7 +636,7 @@ export interface PromotionVerdict {
 }
 
 /**
- * THIRTEEN checks, all of which must hold. Count the entries of the `checks` array this
+ * FIFTEEN checks, all of which must hold. Count the entries of the `checks` array this
  * function returns, not this sentence: it said "eight" for three waves while the body
  * pushed eleven, until `99-DOD.md` row 8 had to name the discrepancy as a defect — and then
  * it said "eleven" while the body pushed TWELVE, which is how it stood until `11-budget-
@@ -605,8 +648,10 @@ export interface PromotionVerdict {
  * the exam rather than the student, plus `2a-candidate-earned-it`, the absolute floor under
  * `2-non-inferior`'s ratio, plus the two suite-provenance rules that replaced
  * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`), plus
- * `11-budget-exercised`, which refuses a ceiling this corpus never reached. The ids carry
- * the numbering; the push order does not.
+ * `11-budget-exercised`, which refuses a ceiling this corpus never reached, plus
+ * `12-grader-unchanged`, which refuses a grader change on a workflow whose only ground truth is
+ * that grader, plus `13-replay-verified`, which refuses a case whose replay had to invent what the
+ * recording could not say. The ids carry the numbering; the push order does not.
  *
  * THREE OF THE EIGHT ARE WEAKER THAN D10.d ONCE READ AS ENGLISH, and the table in
  * 06-EVOLUTION.md now says so rather than this file quietly disagreeing with it.
@@ -864,7 +909,121 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
           `loom promote --against-cohort <runId>`,
   });
 
+  // ── the grader, which a replayed suite never reads ──────────────────────────
+  //
+  // THE DEFECT, DRIVEN THROUGH THE SHIPPED VERBS. `freezeSuite` excludes every channel an
+  // evaluator node wrote from the pin BY CONSTRUCTION — a suite that read the grader would pass a
+  // candidate that rewrote it — so the one node the exam cannot see is the one a candidate may
+  // freely rewrite. A candidate identical to the baseline except `evaluator.ref: check →
+  // check-rigged` (a body that writes `{pass:true}` unconditionally) promoted with all thirteen
+  // checks green: work channels byte-identical, grader excluded, every ratio 1.00×. Publish it and
+  // `loom score` reads S1 off the rigged grader, `isGolden` marks garbage golden, and the next
+  // `loom suite freeze` pins that garbage as must-pass ground truth.
+  //
+  // WHAT IS COMPARED: the two graphs' evaluator sets — id, kind, ref, resolved digest, `reads` —
+  // at EVERY scope, additions included. `11-budget-exercised` skips candidate-only scopes because
+  // the loop's mutation operator adds nodes; an ADDED always-pass evaluator inflates k/n in `loom
+  // score`, so the same latitude here would be the hole one step over, and `compileMutation` adds
+  // no evaluator. If it ever does, that is the moment to revisit this line.
+  //
+  // WHERE AN EXAM IS ATTESTED THE CHECK IS SKIPPED AND SAYS SO. Once an operator has attested an
+  // exam for this workflow (`evolution/exam.ts`), nothing that decides reads the in-graph grader —
+  // `loom score` and the live gate take S1 from the exam — so refusing a change to it protects
+  // nothing and costs the honest strengthening `aabdc63` recorded as a 6-of-6 false negative.
+  // Where no exam exists the in-graph grader IS the only ground truth this workflow has, and it
+  // may not change without a human act; the refusal names that act.
+  const attested = input.examAttested === true;
+  const evalStated = shaped(input.baseline.evaluators) && shaped(input.candidate.evaluators);
+  const graderDiff = attested || !evalStated ? [] : movedEvaluators(input.baseline.evaluators, input.candidate.evaluators);
+  checks.push({
+    id: "12-grader-unchanged",
+    pass: attested || (evalStated && graderDiff.length === 0),
+    detail: attested
+      ? "skipped: this workflow has an operator-attested exam, so the in-graph evaluator decides nothing and may change freely"
+      : !evalStated
+        ? "a report did not say which evaluators its graph declares, so the graders could not be compared — a guard that cannot decide fails closed"
+        : graderDiff.length === 0
+          ? `the evaluator set is unchanged (${String(Object.keys(input.baseline.evaluators).length)} evaluator node(s))`
+          : `${String(graderDiff.length)} grader change(s): ${graderDiff.join("; ")}. A replayed suite grades work channels and ` +
+            `never the grader, so a grader change is a change this exam cannot see and this workflow has no other ground ` +
+            `truth. Strengthening a grader is an operator's act, not a candidate's: attest the stronger grader as this ` +
+            `workflow's exam (loom exam attest) and judge candidates live`,
+  });
+
+  // ── what the replay had to invent ───────────────────────────────────────────
+  //
+  // `runCase` reads three of `ReplayReport`'s refusals into case reasons (`unexercised`). Two more
+  // arrived with the report and had no reader here. `unverifiedToolEffects` names recorded tool
+  // calls with no `argsDigest` — journals before 2026-08-27 — so a replay against a DIFFERENT graph
+  // cannot say whether the candidate called the tool with the recording's arguments or was handed
+  // its result for another call; that is refused, with the same-graph exemption `unexercised`
+  // gives its model twin, because nothing could have changed the call on the recorded graph.
+  //
+  // `derivedSeeds` IS REPORTED AND NOT REFUSED, and the reason is what every entry in it is. A
+  // recorded body whose journal holds no seed is already `E_REPLAY_DIVERGENCE` — the case fails
+  // before it reaches here — so every seed that survives to this list belongs to a node the
+  // recording NEVER RAN: a body the candidate ADDED. That is the shape `compileMutation` produces
+  // and the shape `11-budget-exercised` argues must promote; its draws came from a seed derived
+  // from the key, which is one deterministic sample of the candidate and not a measurement of the
+  // recording. Refusing it would be the guard that cannot be satisfied — driven: a candidate that
+  // adds one `function` node with a `random` effect passes its cases with exactly one entry here
+  // (`test/run/replay-lane-seed-not-served.test.ts`). The count is on the page so a reader knows
+  // how much of the candidate was sampled rather than served.
+  //
+  // `hermetic`'s remaining term, `liveBodies`, is NOT read here — it says the RUNTIME could not
+  // vouch for a body's realm, which is a fact about the deployment and not about the candidate,
+  // and every in-tree harness that registers a closure by hand would refuse.
+  const unverified: string[] = [];
+  let derived = 0;
+  for (const c of input.candidate.cases) {
+    const r = c.replay;
+    if (r === undefined) continue;
+    derived += (r.derivedSeeds ?? []).length;
+    const tools = r.unverifiedToolEffects ?? [];
+    if (!r.graph.match && tools.length > 0) {
+      unverified.push(`${c.id}: ${String(tools.length)} recorded tool effect(s) carry no argsDigest, so a different graph cannot be shown to have made the same call (${tools.slice(0, 3).join(", ")})`);
+    }
+  }
+  const derivedNote = derived === 0 ? "" : ` ${String(derived)} seed(s) for node(s) the recording never ran were derived from the key — added bodies, sampled once rather than served.`;
+  checks.push({
+    id: "13-replay-verified",
+    pass: unverified.length === 0,
+    detail:
+      unverified.length === 0
+        ? `every recorded effect the replay served can be shown to belong to the call that asked for it.${derivedNote}`
+        : `${String(unverified.length)} case(s) measured something the recording could not vouch for — ${unverified.slice(0, 5).join("; ")}. ` +
+          `Re-record the corpus, or judge this candidate live.${derivedNote}`,
+  });
+
   return { promote: checks.every((x) => x.pass), checks };
+}
+
+/**
+ * Every difference between two graphs' evaluator sets, in English. Both directions and every
+ * scope — see `12-grader-unchanged` for why an added evaluator is a change and not an addition.
+ */
+function movedEvaluators(baseline: EvalReport["evaluators"], candidate: EvalReport["evaluators"]): string[] {
+  const out: string[] = [];
+  const scopes = [...new Set([...Object.keys(baseline), ...Object.keys(candidate)])].sort();
+  for (const scope of scopes) {
+    const b = baseline[scope];
+    const c = candidate[scope];
+    if (b === undefined) {
+      out.push(`${scope} added (${c!.kind} ${c!.ref})`);
+      continue;
+    }
+    if (c === undefined) {
+      out.push(`${scope} removed (${b.kind} ${b.ref})`);
+      continue;
+    }
+    if (b.kind !== c.kind) out.push(`${scope} kind ${b.kind} → ${c.kind}`);
+    if (b.ref !== c.ref) out.push(`${scope} ${b.ref} → ${c.ref}`);
+    else if (b.digest !== c.digest) out.push(`${scope} ${b.ref} body ${b.digest ?? "(unresolved)"} → ${c.digest ?? "(unresolved)"}`);
+    const br = [...b.reads].sort().join(",");
+    const cr = [...c.reads].sort().join(",");
+    if (br !== cr) out.push(`${scope} reads [${br}] → [${cr}]`);
+  }
+  return out;
 }
 
 /** Throwing form, for a promotion pipeline that should abort rather than branch. */

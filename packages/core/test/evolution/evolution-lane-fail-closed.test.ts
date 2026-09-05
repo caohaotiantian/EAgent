@@ -159,6 +159,7 @@ function report(over: Partial<EvalReport> = {}): EvalReport {
     suiteValid: true,
     suiteIssues: [],
     budgets: {},
+    evaluators: {},
     ...over,
   };
 }
