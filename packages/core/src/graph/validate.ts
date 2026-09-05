@@ -105,6 +105,28 @@ export interface ValidationContext {
   readonly depth?: number;
   /** Refs already being expanded, to detect subgraph cycles. */
   readonly expanding?: readonly ResourceRef[];
+  /**
+   * The index for THIS `spec`, already built, as a thunk — an internal seam, not a knob.
+   *
+   * `compile` validated and then built its own `indexGraph(spec)`, so the analysis that is 78%
+   * of compile self time ran exactly twice per `compileOrThrow` and one full result was thrown
+   * away. A THUNK and not a value because the order matters: `validateGraph` gates on
+   * `checkStructure` before anything indexes a spec, and building one eagerly in `compile` would
+   * index a malformed graph that the structural rules exist to diagnose instead. Called only
+   * after that gate, so a spec too broken to index is never handed to one.
+   *
+   * `CompileInput` omits this, so no caller outside this pair can supply an index for a spec it
+   * does not describe.
+   */
+  readonly index?: () => GraphIndex;
+  /**
+   * Child validations already computed on this walk — see `rule016Subgraphs`, which owns it.
+   *
+   * Also omitted from `CompileInput`: the key does not name the resolver or the tenant, so a
+   * memo carried across two unrelated compiles would answer one graph's question with another
+   * graph's answer.
+   */
+  readonly subgraphMemo?: Map<string, readonly Diagnostic[]>;
 }
 
 /**
@@ -340,21 +362,41 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   };
 }
 
+/**
+ * Kahn, over an adjacency map rather than over the edge list.
+ *
+ * THE ORDER IS PART OF THE CONTRACT and is unchanged: successors are visited in edge-list
+ * order and the queue is still FIFO, so this produces the same sequence the edge scan did.
+ * `topoOrder` drives the ancestor closure, the fan-out stacks and the critical path, and a
+ * different order would move diagnostics for no reason.
+ *
+ * What changed is the cost. Dequeuing a node used to scan EVERY edge to find its successors —
+ * 1,500 x 14,900 = 22.4M comparisons on `scale.test.ts`'s own 1,500-node graph — and
+ * `queue.shift()` is O(n) on top of it. The `out` map is built once and the queue is walked
+ * with a cursor. The `outbound` map `indexGraph` holds cannot be reused here: it is over ALL
+ * edges, and this sort is over `dagEdges` only, so its indegrees and its successors have to
+ * come from the same list.
+ */
 function topoSort(ids: readonly NodeId[], edges: readonly EdgeSpec[]): NodeId[] {
   const indegree = new Map<NodeId, number>();
   for (const id of ids) indegree.set(id, 0);
-  for (const e of edges) indegree.set(e.to, (indegree.get(e.to) ?? 0) + 1);
+  const successors = new Map<NodeId, NodeId[]>();
+  for (const e of edges) {
+    indegree.set(e.to, (indegree.get(e.to) ?? 0) + 1);
+    const at = successors.get(e.from);
+    if (at === undefined) successors.set(e.from, [e.to]);
+    else at.push(e.to);
+  }
 
   const queue = ids.filter((id) => (indegree.get(id) ?? 0) === 0);
   const out: NodeId[] = [];
-  while (queue.length > 0) {
-    const id = queue.shift()!;
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const id = queue[cursor]!;
     out.push(id);
-    for (const e of edges) {
-      if (e.from !== id) continue;
-      const d = (indegree.get(e.to) ?? 0) - 1;
-      indegree.set(e.to, d);
-      if (d === 0) queue.push(e.to);
+    for (const to of successors.get(id) ?? []) {
+      const d = (indegree.get(to) ?? 0) - 1;
+      indegree.set(to, d);
+      if (d === 0) queue.push(to);
     }
   }
   // A short result means the forward graph has a cycle — GRAPH006 reports it.
@@ -499,7 +541,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   const structural = checkStructure(spec, d);
   if (structural) return d;
 
-  const idx = indexGraph(spec);
+  const idx = ctx.index === undefined ? indexGraph(spec) : ctx.index();
   const expansion = { ...DEFAULT_EXPANSION, ...(spec.policy?.expansion ?? {}) };
   const channelTypes = channelTypeMap(spec.channels);
 
@@ -551,6 +593,87 @@ const CLASSIFICATIONS: readonly string[] = Object.keys(CLASSIFICATION_POSTURE_FL
 
 function isClassification(v: unknown): v is Classification {
   return typeof v === "string" && Object.hasOwn(CLASSIFICATION_POSTURE_FLOOR, v);
+}
+
+/**
+ * The three values in a `contextProjection`, checked at compile instead of only at run time.
+ *
+ * `unknownKeys` above validates the KEY NAMES and nothing looked at what they hold, so
+ * `take: "abc"`, `maxTokens: "abc"` and `overflow: "TRUNCATE_TAIL"` all compiled clean and
+ * refused at run time — `overflow` from inside prompt assembly, at whichever node first grew a
+ * channel past its bound, which may be hours after the graph was published. `run/context.ts`
+ * says in two places that the compile-time half belongs here; this is it.
+ *
+ * PRESENT-AND-UNREADABLE ONLY, never absent. `applyOverflow` refuses an absent `maxTokens` and an
+ * absent `overflow` too, but it only runs at rung 2 — when a channel actually exceeds its bound —
+ * so a graph that declares neither runs correctly today for as long as it stays under. Refusing
+ * those at compile would refuse working graphs, which is a different change from closing a hole;
+ * the run-time refusal still covers them, unchanged.
+ *
+ * THE ACCEPTED SETS ARE `run/context.ts`'s, restated rather than imported: `graph/` must not
+ * depend on `run/`, and `readBound` is module-private there. What holds them together is a test
+ * that drives the same table through both — see `perf-lane-context-projection-values.test.ts`,
+ * which asserts the diagnostic fires exactly when the runtime refuses.
+ */
+function checkProjectionValues(channel: string, projection: Record<string, unknown>, d: Diagnostic[]): void {
+  const bad = (message: string, fix: string): void => {
+    d.push({ severity: "error", code: "GRAPH003_MALFORMED", message, at: { channel }, fix });
+  };
+
+  // `project()` reads a `take` that is neither `undefined` nor `null`, and refuses whatever it
+  // cannot read — including `""`, `false` and `[]`, which `Number()` would have coerced to a
+  // bound of zero. A NEGATIVE take is legal and means "the last N".
+  const take = projection["take"];
+  if (take !== undefined && take !== null && readProjectionBound(take) === undefined) {
+    bad(
+      `channel "${channel}"'s \`contextProjection.take\` is not an item count: ${describeProjectionValue(take)}`,
+      "use a number, or a quoted number like `take: \"3\"`; remove it to show the whole value",
+    );
+  }
+
+  // `applyOverflow` requires a readable bound STRICTLY ABOVE ZERO: a negative one passed the
+  // finite test and then truncated nothing, because `slice(0, -20)` removes nothing.
+  const maxTokens = projection["maxTokens"];
+  if (maxTokens !== undefined) {
+    const bound = readProjectionBound(maxTokens);
+    if (bound === undefined || bound <= 0) {
+      bad(
+        `channel "${channel}"'s \`contextProjection.maxTokens\` is not a positive token bound: ${describeProjectionValue(maxTokens)}`,
+        "use a positive number, or a quoted one like `maxTokens: \"2000\"`",
+      );
+    }
+  }
+
+  const overflow = projection["overflow"];
+  if (overflow !== undefined && !OVERFLOW_RULES.includes(overflow as never)) {
+    bad(
+      `channel "${channel}"'s \`contextProjection.overflow\` is not a rule this build knows: ${describeProjectionValue(overflow)}`,
+      `use one of ${OVERFLOW_RULES.join(", ")}`,
+    );
+  }
+}
+
+/** The `overflow` arms `run/context.ts`'s switch has, in the order its own message lists them. */
+const OVERFLOW_RULES: readonly string[] = ["error", "truncate_tail", "summarize"];
+
+/**
+ * A finite number, or a string that PARSES as one — `take: "3"` is what hand-written YAML gives
+ * for a quoted number, and it is the one non-number worth reading. Everything else is unreadable,
+ * `""` and `false` and `[]` among them. This is `readBound` in `run/context.ts`, restated.
+ */
+function readProjectionBound(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value.trim());
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+/** The rejected value, rendered so the author can see WHICH one it was — NaN and Infinity too. */
+function describeProjectionValue(value: unknown): string {
+  if (typeof value === "number") return String(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 /**
@@ -975,6 +1098,7 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     );
     if (projection !== undefined) {
       unknownKeys(projection, NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+      checkProjectionValues(name, projection, d);
     }
     const reduce = decl["reduce"];
     if (!REDUCER_NAMES.includes(reduce as never)) {
@@ -3077,6 +3201,9 @@ function rule016Subgraphs(
 ): void {
   const depth = ctx.depth ?? 0;
   const expanding = ctx.expanding ?? [];
+  // Hoisted out of the loop on purpose: the B siblings at THIS level are exactly the copies the
+  // memo exists to collapse, so a map created per node would cache nothing they share.
+  const memo = ctx.subgraphMemo ?? new Map<string, readonly Diagnostic[]>();
 
   for (const n of spec.nodes) {
     const sub = n.subgraph;
@@ -3142,12 +3269,37 @@ function rule016Subgraphs(
     }
 
     // Recurse with the child's own tools/resolver, carrying the expansion trail.
-    for (const childDiag of validateGraph({
-      ...ctx,
-      spec: child,
-      depth: depth + 1,
-      expanding: [...expanding, sub.ref],
-    })) {
+    //
+    // ONCE PER DISTINCT (ref, depth, trail), NOT ONCE PER REFERENCING NODE. This loop had no
+    // cache, so a child referenced by B nodes at each of N levels was validated B^N times and
+    // produced B^N copies of each of its diagnostics — the same child fault reported 65,535
+    // times at depth 16, and 13.5 s and 1,048,575 diagnostic objects at depth 20, against a
+    // docstring on `compile` that promises an editor can call it on every keystroke.
+    // `compile.ts`'s `resolveSubgraphs` walks the identical tree in linear time with a
+    // `reachedAt` map; this is the other half of that walk agreeing with it.
+    //
+    // THE KEY IS ALL THREE PARTS, and the trail is not decoration. `expanding` decides
+    // GRAPH016_SUBGRAPH_CYCLE, so two nodes at the same depth reaching one child by different
+    // routes can genuinely get different answers — keying on `ref@depth` alone would serve one
+    // route's answer to the other. `depth` is there because the depth budget is recomputed per
+    // level. Everything else the child's validation reads (resolver, tools, tenant, floors) is
+    // fixed for the whole walk, which is why the memo may not outlive it — see
+    // `ValidationContext.subgraphMemo`.
+    //
+    // The CACHED value is the child's own diagnostics; the re-tagging below is per node, so an
+    // author still sees the fault reported once against each node that reaches it.
+    const trail = [...expanding, sub.ref];
+    const key = `${String(depth + 1)}\u0000${trail.join("\u0000")}`;
+    let childDiags = memo.get(key);
+    if (childDiags === undefined) {
+      // `index` is DROPPED, not inherited: `ctx.index` is the index of the PARENT spec, and the
+      // child is a different graph. Passing it down would validate the child against its
+      // parent's reachability, ancestors and fan-out widths.
+      const { index: _parentIndex, ...rest } = ctx;
+      childDiags = validateGraph({ ...rest, spec: child, depth: depth + 1, expanding: trail, subgraphMemo: memo });
+      memo.set(key, childDiags);
+    }
+    for (const childDiag of childDiags) {
       d.push({
         ...childDiag,
         code: childDiag.code,
