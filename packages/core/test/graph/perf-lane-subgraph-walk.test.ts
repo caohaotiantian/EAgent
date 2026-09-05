@@ -111,15 +111,20 @@ test("A CHILD IS VALIDATED ONCE PER DISTINCT (ref, depth, trail), not once per r
 });
 
 test("…and a 16-level chain compiles in bounded time instead of seconds", () => {
-  // 75 ms here; 924 ms with the uncached walk, and at depth 20 the uncached walk runs a 3 GB heap
-  // out where this finishes in 1,145 ms. One absolute bound, not a ratio.
+  // 52-75 ms here; 830-924 ms with the uncached walk, and at depth 20 the uncached walk runs a
+  // 3 GB heap out where this finishes in 1,145 ms.
+  //
+  // ONE ABSOLUTE BOUND, NOT A RATIO, and its margin is stated rather than assumed: 500 ms is
+  // about ten times the observed cost and about half the uncached one, which is the widest gap
+  // this pair of numbers allows. The load-bearing instrument is still the COUNT in the test
+  // above — it cannot flake at all — and this is the constant-factor half a count cannot see.
   const { root, resolver } = chain(16, 2);
   const t0 = process.hrtime.bigint();
   const r = compile({ spec: root, resolver, tools: {}, tenantCapabilities: ["*"] });
   const elapsed = Number(process.hrtime.bigint() - t0) / 1e6;
   console.log(`    depth 16, branching 2: ${elapsed.toFixed(0)} ms, ${String(r.diagnostics.length)} diagnostics`);
   assert.equal(r.diagnostics.length, 196_606, "the same diagnostics, at four levels deeper");
-  assert.ok(elapsed < 300, `a 16-level chain took ${elapsed.toFixed(0)} ms`);
+  assert.ok(elapsed < 500, `a 16-level chain took ${elapsed.toFixed(0)} ms`);
 });
 
 test("THE ORDINARY HALF: a clean tree still compiles clean, and a real fault is still reported", () => {

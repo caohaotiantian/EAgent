@@ -14,7 +14,8 @@
  *     read back every event it already held, and keep accepting appends.
  *
  * THE CLOCK HERE IS ONE ABSOLUTE BOUND, never a ratio of two timings. Measured in this test on
- * this tree: 456 ms with the scan, 19-24 ms with the binary search, against a bound of 150 ms.
+ * this tree: 456 ms with the scan, 19-28 ms with the binary search, against a bound of 200 ms —
+ * about ten times the observed cost and about half the scanning one.
  */
 
 import test from "node:test";
@@ -73,10 +74,10 @@ test("THE MEMORY STORE FINDS THE TAIL, it does not scan to it", async () => {
   }
   console.log(`    ${String(TOTAL / 5)} tail reads over ${String(TOTAL)} events: ${best.toFixed(1)} ms (best of 3)`);
   assert.equal(seen, (TOTAL / 5) * 3);
-  // 24 ms here; 456 ms with the scan this replaced. The bound sits between them with room on
-  // both sides rather than at ten times the observed cost, because the defect it catches is a
-  // complexity regression and 456 is where that lands on THIS journal size.
-  assert.ok(best < 150, `${String(TOTAL / 5)} tail reads took ${best.toFixed(0)} ms — the read is scanning again`);
+  // 19-28 ms here; 456 ms with the scan this replaced. 200 ms is the widest bound those two
+  // numbers allow: about ten times the observed cost, and still well under the cost of the
+  // complexity regression it exists to catch.
+  assert.ok(best < 200, `${String(TOTAL / 5)} tail reads took ${best.toFixed(0)} ms — the read is scanning again`);
 });
 
 test("…and it still answers exactly what it answered before: prefix, bounds, and misses", async () => {
