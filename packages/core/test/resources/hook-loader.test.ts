@@ -602,7 +602,13 @@ test("A HOOK BODY CANNOT WRITE A BYTE — `console` is bound in the realm, and g
     );
     assert.equal(stdout.includes("HOOK-BYTES-MARKER"), false, "console.log in a hook must not reach fd 1");
     assert.equal(stderr.includes("HOOK-BYTES-MARKER"), false, "console.error in a hook must not reach fd 2");
-    assert.equal(stderr, "", "and nothing else may appear there either");
+    // Nothing else may appear there either — except `loom run`'s own announcement of the run id,
+    // which every invocation of that verb writes before it drives.
+    assert.deepEqual(
+      stderr.split("\n").filter((l) => l !== "" && !/^run \S+ — inspect it with: loom trace \S+$/.test(l)),
+      [],
+      "and nothing else may appear there either",
+    );
   } finally {
     w.dispose();
   }

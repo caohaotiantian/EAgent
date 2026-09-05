@@ -207,7 +207,7 @@ import { canonicalize } from "../canonical.ts";
 import { httpStatusFor, isLoomError, toLoomError, CODES, err } from "../errors.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
-import type { StateStore } from "../journal/store.ts";
+import type { RunSummary, StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
@@ -1048,6 +1048,26 @@ export interface ControlPlaneOptions {
   readonly requestTimeoutMs?: number;
   /** Graphs the control plane will accept by name. Compiled ahead of time. */
   readonly graphs?: Readonly<Record<string, RunGraph>>;
+  /**
+   * Graphs this plane may ATTACH but will never SUBMIT — the subgraphs its own runs delegate to.
+   *
+   * A `subgraph` node makes `Engine` mint a delegated run of its own, and that CHILD compiles the
+   * subgraph resource: a spec that lives under `resources/`, never in `graphs/`. So a gate raised
+   * inside a subgraph was listed by `GET /gates`, rendered with approve and reject buttons by the
+   * console, and answerable by nothing — `#bindFromIndex` searched `graphs` for a hash that was
+   * not in it, returned silently, and `resolveGate` answered 404 `E_RUN_NOT_FOUND "… is not
+   * attached"`. Measured over a real socket after a restart, with `loom approve --graph <the
+   * subgraph file>` succeeding on the same gate one command later: the operator had to hand-name
+   * a file the ENGINE chose.
+   *
+   * A SECOND FIELD RATHER THAN MORE ENTRIES IN `graphs`, because `graphs` is three things at
+   * once: the attach index, the inventory `GET /graphs` publishes, and the set `POST /runs`
+   * accepts by name. A subgraph is a component of a workflow and not a workflow, so widening that
+   * field would let a caller submit a leaf directly and would put every internal step in the
+   * console's workflow list. `#graphByHash` is the only reader, which also means a child run's
+   * channel values are redacted by the graph THAT run compiled rather than by `undefined`.
+   */
+  readonly subgraphs?: readonly RunGraph[];
   readonly now?: () => number;
   /**
    * Request body cap. Default 1 MiB; a whole number from 0 to V8's max string length.
@@ -1829,6 +1849,7 @@ export class ControlPlane {
   readonly #hotWindow: number | undefined;
   readonly #requestTimeoutMs: number | undefined;
   readonly #graphs: Readonly<Record<string, RunGraph>>;
+  readonly #subgraphs: readonly RunGraph[];
   readonly #engine: Engine;
   readonly #store: StateStore;
   readonly #bus: EventBus | undefined;
@@ -1981,6 +2002,7 @@ export class ControlPlane {
     // `#streamEvents` and `#refuseUnidentifiedApproval` long after the routes had already
     // closed over them. `graphs` defaults to `{}` HERE so no use site has to remember to.
     this.#graphs = opts.graphs ?? {};
+    this.#subgraphs = opts.subgraphs ?? [];
     this.#engine = opts.engine;
     this.#store = opts.store;
     this.#bus = opts.bus;
@@ -2202,6 +2224,39 @@ export class ControlPlane {
     });
     this.#server = server;
     try {
+      // BEFORE THE SOCKET ACCEPTS, and the comment on `#armGatedRuns` that says "BEFORE THE FIRST
+      // REQUEST" used to sit AFTER `server.listen` had resolved — so every route answered while
+      // the arming was still running, including the unauthenticated callback route the arming
+      // exists to serve. Measured on the tree before this change, with a store whose `listRuns`
+      // takes 200 ms: `GET /health` on the port `listen` was given answered **200** mid-scan; it
+      // now refuses the connection until the scan is done. `server.listen` starts accepting
+      // immediately and this method
+      // awaits, so a scan after it is a scan with the door open; there is no third position. The
+      // cost is that a probe arriving during boot gets a refused connection rather than a 200,
+      // which is the honest answer and the one every load balancer already understands. The
+      // alternative — answer 503 on every route until armed — puts a second state machine in
+      // front of the whole plane to report the same fact less clearly.
+      //
+      // AFTER `#server` IS CLAIMED, which is the part that is easy to get wrong and was. An await
+      // above that assignment leaves a window in which `#server` is `undefined` while a `listen`
+      // is genuinely in progress — so the already-listening guard does not hold, and `close()`
+      // resolves against a socket that does not exist yet and then one gets bound that nothing
+      // holds a handle to. MEASURED with the scan above the assignment: `close()` 50 ms into a
+      // 200 ms scan, and `listen()` went on to answer "bound"; `http.test.ts` completed all 128
+      // of its assertions and the process never exited, holding one `TCPServerWrap`. Pinned by
+      // *close() DURING THE ARMING SCAN LEAVES NOTHING BOUND* in
+      // `test/server/product-lane-watch-and-stop.test.ts`, with the second-`listen` refusal
+      // beside it as the other half of the same claim.
+      await this.#armGatedRuns();
+      // AND `close()` MAY HAVE WON WHILE IT RAN. It clears `#server` and resolves without waiting
+      // for a socket that does not exist yet, so binding now would leave one bound that nothing
+      // holds a handle to. Same answer as the `'close'` race below and for the same reason: the
+      // caller asked for the socket to go away, and it never arrived.
+      if (this.#server !== server) {
+        throw err.cancelled(`listen(${host}:${port}) was ended by close() before the socket began listening; nothing is bound`, {
+          details: { host, port },
+        });
+      }
       await new Promise<void>((resolve, reject) => {
         // ONE detach for all three, because there are now three of them and the pairwise
         // version was already one edit from being wrong: `onError` removed `onListening`
@@ -2281,9 +2336,6 @@ export class ControlPlane {
     // protect. Set before the first request can arrive — `listening` has fired, but the
     // event loop has not yet reached an accepted connection.
     this.#allowedHosts = this.#configuredHosts ?? loopbackHosts(host, bound);
-    // BEFORE THE FIRST REQUEST, for the one write route that cannot bind lazily. See
-    // `#armGatedRuns`.
-    await this.#armGatedRuns();
     // THE ADDRESS, READ BACK OFF THE SOCKET, for the reason `port` is: `listen(0)` learns
     // its port from the OS and `listen(port, "localhost")` learns its address from the
     // resolver, so what the caller ASKED for is not what a boot banner may print. `cli.ts`
@@ -2699,7 +2751,13 @@ export class ControlPlane {
    * redaction test in the tree. Every one of those rigs held exactly one graph.
    */
   #graphByHash(hash: string | undefined): RunGraph | undefined {
-    return hash === undefined ? undefined : Object.values(this.#graphs).find((g) => g.graphHash === hash);
+    if (hash === undefined) return undefined;
+    // THE DEPLOYMENT'S WORKFLOWS FIRST, then the subgraphs those workflows delegate to. The
+    // second list exists because a delegated CHILD run compiles a `resources/subgraph/` spec that
+    // is in no `graphs/` directory, so every hash lookup for a child — the attach on the gate
+    // route, and the redaction pass on every projection that reaches the wire — used to miss.
+    // See `ControlPlaneOptions.subgraphs` for why they are two fields and not one.
+    return Object.values(this.#graphs).find((g) => g.graphHash === hash) ?? this.#subgraphs.find((g) => g.graphHash === hash);
   }
 
   /**
@@ -2920,6 +2978,16 @@ export class ControlPlane {
             // ONLY RUNS STILL WAITING. Attaching a finished run would cost a `RunContext`
             // apiece that nothing ever frees — and it is what the un-paged version spent its
             // entire budget deciding.
+            //
+            // THE FOLD IS THE COST, AND MOST ROWS DO NOT NEED IT. `raisedAGate` accumulates
+            // forever, so on the only deployments this method is for — the ones that use gates
+            // — the candidate set is dominated by runs that gated once and FINISHED, and the
+            // whole read budget was spent folding their journals to conclude "not awaiting a
+            // gate". Measured on an all-decided gated set: `MAX_ARM_SCAN` folds for zero arms,
+            // inside `listen()`. `#endedAtHead` answers the same question for those rows from
+            // ONE indexed row instead, and it only ever skips a run it has PROVEN terminal —
+            // everything else falls through to the fold below, so no undecided gate is missed.
+            if (await this.#endedAtHead(summary)) continue;
             if ((await this.#engine.projection(summary.runId))?.status !== "awaiting_gate") continue;
             await this.#bindFromIndex(summary.runId);
           } catch {
@@ -2940,6 +3008,49 @@ export class ControlPlane {
     } catch {
       /* unarmed, not unbootable — see above */
     }
+  }
+
+  /**
+   * Remember that this run had no open gate at this head, so the next poll skips the fold.
+   *
+   * Bounded and evicted in insertion order, oldest first, following `#idempotency` and
+   * `GateCallbackRouter.#admitRow`. It is a CACHE and nothing decides on it: an entry that a
+   * restart erases costs one fold, and a head that has moved does not match, so the miss is
+   * always the expensive answer rather than a wrong one.
+   */
+  #rememberGateless(summary: RunSummary): void {
+    if (this.#gatelessAt.size >= MAX_QUEUE_SCAN) {
+      const oldest = this.#gatelessAt.keys().next();
+      if (oldest.done !== true) this.#gatelessAt.delete(oldest.value);
+    }
+    this.#gatelessAt.set(summary.runId, summary.headSeq);
+  }
+
+  /**
+   * Did this run END at the seq the listing says is its head? A cheap, one-sided answer.
+   *
+   * `succeeded`, `failed` and `cancelled` are terminal and `run/projection.ts` refuses every
+   * status transition out of them, so a run whose LAST event is one of the three cannot be
+   * awaiting a gate — and answering that costs one indexed row rather than a fold of the whole
+   * journal. `RunSummary` already carries `headSeq`, so there is not even a `head()` call.
+   *
+   * ONE-SIDED ON PURPOSE, AND THAT IS WHAT MAKES IT SAFE. `true` means "proven terminal";
+   * `false` means "not proven", which includes a genuinely terminal run whose journal happens to
+   * carry a later row (a `gate.decided` appended after a cancel), a `headSeq` that has moved
+   * since the listing was taken, and a store that threw. Every one of those falls through to the
+   * fold that was always there. So this can make the scan cheaper and cannot make it miss a gate
+   * — a guard that cannot decide answers with the expensive truth, never the cheap one.
+   */
+  async #endedAtHead(summary: RunSummary): Promise<boolean> {
+    if (summary.headSeq < 1) return false;
+    try {
+      for await (const e of this.#store.read(summary.runId, summary.headSeq, summary.headSeq)) {
+        return e.type === "run.completed" || e.type === "run.failed" || e.type === "run.cancelled";
+      }
+    } catch {
+      /* not proven — the caller folds */
+    }
+    return false;
   }
 
   /**
@@ -3547,6 +3658,11 @@ export class ControlPlane {
          * poll #1 read 1184 journal events and polls #2 and #3 read 0. Warm, `Engine.#project`
          * was already incremental and this changes nothing.
          *
+         * AND POLL #1 IS PAID BY `#endedAtHead`, because that map is empty by construction on a
+         * cold process — which is the poll a restarted deployment makes, and the one where the
+         * candidate set is at its worst. A run whose LAST event is terminal is skipped on one
+         * indexed row instead of a fold; anything not proven terminal still folds.
+         *
          * WHAT IS LEFT IS `openGates`, and it is the bigger half whenever a gate IS open:
          * `HumanGateBroker.list` calls `project(log)`, which does `log.read(1)` with no cursor
          * at all, so the route folds from seq 1 the same journal it folded incrementally one
@@ -3596,16 +3712,18 @@ export class ControlPlane {
             // reach this run; skipped before the fold because the fold's answer is known. See
             // `#gatelessAt`.
             if (this.#gatelessAt.get(summary.runId) === summary.headSeq) continue;
+            // AND ON THE FIRST POLL OF A COLD PROCESS, where that map is empty by construction,
+            // the run's last event answers the same question for the candidate set's dominant
+            // member — a run that gated once and finished. One indexed row instead of a fold,
+            // and one-sided: only a run PROVEN terminal is skipped. See `#endedAtHead`.
+            if (await this.#endedAtHead(summary)) {
+              this.#rememberGateless(summary);
+              continue;
+            }
             const p = await engine.projection(summary.runId);
             if (p === undefined) continue;
             if (!Object.values(p.gates).some((g) => g.state === "open")) {
-              // Insertion order, oldest first, following `#idempotency` and
-              // `GateCallbackRouter.#admitRow`.
-              if (this.#gatelessAt.size >= MAX_QUEUE_SCAN) {
-                const oldest = this.#gatelessAt.keys().next();
-                if (oldest.done !== true) this.#gatelessAt.delete(oldest.value);
-              }
-              this.#gatelessAt.set(summary.runId, summary.headSeq);
+              this.#rememberGateless(summary);
               continue;
             }
             const mine = ownsRun(p, who);
@@ -4544,6 +4662,17 @@ export class ControlPlane {
       connection: "keep-alive",
       "x-accel-buffering": "no",
     });
+    // AND SENT, NOT MERELY SET. `writeHead` fills a buffer that Node flushes with the first body
+    // write, and this handler's first body write is the first EVENT — so a client that reconnects
+    // caught up at head got a socket with a request on it and nothing coming back. Measured with
+    // `curl -sN -D -` and `last-event-id: <head>`: five seconds, ZERO bytes, not even the status
+    // line; with `last-event-id: 0` the headers came out at once, because a backlog existed to
+    // push them. Two things follow from that and only the second is cosmetic: an intermediary
+    // with an idle-response timeout cuts a stream that has emitted nothing, and the console's
+    // connection pill never reaches "live" because `follow` sets it after `res.ok`, which is
+    // after the headers arrive. `x-accel-buffering: no` one line up is the same intention aimed
+    // at a proxy; this is the one aimed at the process's own socket.
+    res.flushHeaders();
 
     // FALSE MEANS "STOP", and it is the last write's answer because the three are one
     // frame: once the buffer is over its high-water mark every write in the frame answers

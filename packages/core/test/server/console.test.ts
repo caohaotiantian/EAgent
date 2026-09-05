@@ -270,7 +270,9 @@ test("THE OVERSIGHT PANEL IS READ FROM THE RANKED QUEUE, not from the run summar
   // seeds from the run summary, then `loadGates` corrects. Both halves matter — the seed is
   // what keeps a failed queue request from blanking the panel.
   assert.match(CONSOLE_HTML, /async function loadGates\(runId, mine\)/);
-  assert.match(CONSOLE_HTML, /api\("\/runs\/" \+ runId \+ "\/gates"\)/, "the ranked endpoint, by name");
+  // Through `path(...)`, which percent-encodes every segment: a delegated run's id carries a
+  // hash, and concatenated raw the browser truncates the URL at it.
+  assert.match(CONSOLE_HTML, /api\(path\("runs", runId, "gates"\)\)/, "the ranked endpoint, by name");
   assert.match(CONSOLE_HTML, /await loadGates\(runId, mine\);/, "…called on selection");
   assert.match(CONSOLE_HTML, /"gate\.raised" \|\| data\.type === "gate\.decided"\) void loadGates/, "…and whenever the queue's membership moves");
 

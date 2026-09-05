@@ -12,10 +12,10 @@
  * JSON belongs in a CLI-only package that may take the dependency.
  */
 
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, type Dirent } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, existsSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { InProcessEventBus, type EventBus } from "./bus.ts";
 import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
@@ -3464,14 +3464,28 @@ function loadGraph(ws: Workspace, file: string, introducing = true): RunGraph {
     // three capabilities — so a graph could compile `ok` and be denied at run time.
     tenantCapabilities: ws.granted,
   });
+  // EVERY DIAGNOSTIC NAMES ITS FILE, and until it did, the loudest lines in this binary were
+  // about a file nobody could identify. `graphsByHash` compiles EVERY file in `<workspace>/graphs/`
+  // to find the one a run recorded, and each of those compiles wrote its diagnostics here — so
+  // `loom approve <run> <gate>`, the highest-consequence command in the product, printed
+  // `✗ GRAPH017_CAPABILITY_NOT_GRANTED: …` about an unrelated graph, above a successful approval,
+  // and exited 0. The approver could not tell whether they had just approved a gate on a broken
+  // graph. `recordedGraph`'s own docstring states the rule this broke — "SAY WHAT IT RESOLVED. A
+  // verb that silently picks a file out of a directory is a verb whose output an operator cannot
+  // check" — and the not-found path already did it right (`1 would not compile — slow.json: …`).
+  //
+  // `basename`, matching the two places that already attribute a graph failure: `graphsByHash`'s
+  // `failed` entries and `discoverGraphs`' skip line. An operator reading three of these wants the
+  // same token in all three.
+  const where = basename(file);
   if (!result.ok) {
     for (const d of result.diagnostics) {
-      process.stderr.write(`${d.severity === "error" ? "✗" : "!"} ${d.code}: ${d.message}\n`);
+      process.stderr.write(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}\n`);
       if (d.fix !== undefined) process.stderr.write(`   fix: ${d.fix}\n`);
     }
     throw result.error;
   }
-  for (const d of result.diagnostics) process.stderr.write(`! ${d.code}: ${d.message}\n`);
+  for (const d of result.diagnostics) process.stderr.write(`! ${where}: ${d.code}: ${d.message}\n`);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
@@ -3855,9 +3869,67 @@ export async function driveToRest(ws: Workspace, runId: RunId, first: RunProject
 async function startAndDrive(
   ws: Workspace,
   input: { graph: RunGraph; inputs: Record<string, unknown>; submittedBy?: SubmittedBy; budgetUsd?: number },
+  // CALLED BETWEEN THE SUBMIT AND THE FIRST ADVANCE, and that instant is the whole point. The
+  // run id is the only durable coordinate a run has, and `loom run` printed it only once the
+  // run had reached rest — so an interrupt, a crash or a `kill` at any point before that left a
+  // real run in the journal that nothing on screen had ever named. See `announceRun`.
+  submitted?: (runId: RunId) => void,
 ): Promise<{ runId: RunId; projection: RunProjection }> {
   const runId = await ws.engine.submit(input);
+  submitted?.(runId);
   return { runId, projection: await driveToRest(ws, runId, await ws.engine.advance(runId)) };
+}
+
+/**
+ * SAY THE RUN ID BEFORE THE RUN CAN BE LOST, and answer an interrupt by stopping the run.
+ *
+ * Measured on the tree before this existed: `loom run` against a slow endpoint, `kill -INT` four
+ * seconds in — exit 130, **zero bytes on stdout and zero on stderr**, and a journal holding
+ * `run.submitted … effect.started` for a run whose id had never been displayed. The operator was
+ * left with a durable, half-executed run they could not name: `loom cancel <id>` would stop it and
+ * `loom trace <id>` would explain it, and neither has an id to be given. That is the "stop it, and
+ * trust what it did" half of THE GOAL failing at the first interrupt.
+ *
+ * TWO SEPARABLE HALVES, and the first is the one that matters. **The line on stderr** is
+ * unconditional and costs nothing: it is written the instant `submit` returns, so every later
+ * failure — an interrupt, a `kill -9`, a provider hang, a crash — leaves the id on the terminal.
+ * It goes to stderr because stdout carries a JSON document `loom run` callers pipe.
+ *
+ * **The handler** then makes the ordinary interrupt tidy rather than merely survivable: SIGINT and
+ * SIGTERM both journal an operator cancel, so the journal records that a HUMAN stopped this run
+ * rather than leaving it looking abandoned mid-effect. `cancel` is the same call the `cancel` verb
+ * makes, with the same actor, so the two doors write the same row.
+ *
+ * IT DOES NOT `process.exit`. Exiting from the handler would skip `main`'s `finally`, which closes
+ * the MCP children and the SQLite store — the very leak this file fixes one function over. The
+ * cancel makes the run terminal, `driveToRest` returns, and the command exits through its normal
+ * path with the projection printed and the status `cancelled`. So the exit code is 1, the
+ * vocabulary `serveUntilInterrupt` argues for, and not 130.
+ *
+ * A SECOND SIGNAL IS THE IMPATIENT ONE and it is left to Node's default disposition — the
+ * listeners are removed, so the next SIGINT ends the process the way it did before this function
+ * existed. An operator whose in-flight effect will not return must not have to find another
+ * terminal to kill the process from.
+ *
+ * `disarm` IS RETURNED RATHER THAN THE CALLER REMEMBERING THE HANDLER: a listener left on
+ * `process` after the run has finished would answer a later Ctrl-C by cancelling a run that has
+ * already ended, and `main` runs one command per process only by convention.
+ */
+function announceRun(ws: Workspace, runId: RunId, subject: string): () => void {
+  process.stderr.write(`run ${runId} — inspect it with: loom trace ${runId}\n`);
+  const onStop = (): void => {
+    for (const sig of STOP_SIGNALS) process.removeListener(sig, onStop);
+    process.stderr.write(`! interrupted — cancelling run ${runId}; another interrupt ends this process outright\n`);
+    void ws.engine.cancel(runId, "interrupted", { kind: "human", subject, via: "cli" }).catch((e: unknown) => {
+      // The run is still in the journal and still named on the line above, which is what the
+      // operator needs; a failed cancel must not become an unhandled rejection on top of it.
+      process.stderr.write(`! could not cancel run ${runId}: ${toLoomError(e).message}\n`);
+    });
+  };
+  for (const sig of STOP_SIGNALS) process.on(sig, onStop);
+  return () => {
+    for (const sig of STOP_SIGNALS) process.removeListener(sig, onStop);
+  };
 }
 
 /**
@@ -3954,26 +4026,74 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * AND THE FILE THAT SUPPLIED EACH HASH comes back too. A verb that resolves a graph the operator
  * did not name has to be able to SAY which file it picked — `recordedGraph` prints it, and the
  * refusal below it lists the candidates it rejected. A hash alone names nothing an operator can
- * open.
+ * open. The value is the path RELATIVE TO THE WORKSPACE, not a bare basename, because there is
+ * more than one directory in it now.
+ *
+ * **AND `resources/subgraph/` IS IN IT, WHICH IS THE WHOLE OF A CHILD RUN'S ANSWERABILITY.**
+ * `Engine` mints a delegated run of its own for a `subgraph` node, and that child compiles the
+ * SUBGRAPH RESOURCE — a spec that lives under `resources/`, never in `graphs/`. So a gate raised
+ * inside a subgraph was listed by `GET /gates`, rendered with approve and reject buttons by the
+ * console, and answerable by nothing: the hash was in no index, `#bindFromIndex` found no graph,
+ * and the decision came back `E_RUN_NOT_FOUND "… is not attached"`. Measured before this line:
+ *
+ *     loom approve '<parent>~delegate@root#0' gate_… --as u:alice
+ *     → E_RUN_NOT_FOUND: … compiled graph sha256:ae21ee…, and no graph in <ws>/graphs has that
+ *       hash (1 searched).
+ *     loom approve '<parent>~delegate@root#0' gate_… --as u:alice --graph resources/subgraph/leaf.json
+ *     → the decision lands.
+ *
+ * The operator had to hand-name a file the engine chose. `SPEC_KINDS` is the same list
+ * `readResources` publishes specs from, so this reads the directories the workspace already
+ * defines rather than a second opinion about where a graph may live.
+ *
+ * `graphs/` IS SCANNED FIRST AND WINS A HASH COLLISION, which keeps `recordedGraph`'s message
+ * naming the top-level file whenever one exists. Two files with one hash are the same bytes, so
+ * the choice is only about which name an operator is shown.
  */
-function graphsByHash(ws: Workspace): { index: Map<string, RunGraph>; files: Map<string, string>; failed: readonly string[] } {
-  const dir = join(ws.root, "graphs");
+function graphsByHash(ws: Workspace): GraphIndex {
+  return indexGraphs(ws, ["graphs", ...subgraphDirs()]);
+}
+
+/** The workspace directories a SPEC resource is published from — `readResources`' own list. */
+function subgraphDirs(): readonly string[] {
+  return SPEC_KINDS.map((k) => join("resources", k));
+}
+
+interface GraphIndex {
+  index: Map<string, RunGraph>;
+  files: Map<string, string>;
+  failed: readonly string[];
+}
+
+/**
+ * The walk itself, taking the directories — so the plane's ATTACH-ONLY inventory and the CLI's
+ * full lookup are one implementation with two arguments rather than two loops that drift.
+ *
+ * `controlPlaneOptions` asks for the resource directories alone. Asking for all of them there
+ * would recompile `graphs/` a second time at `loom serve` boot, and `loadGraph` writes its
+ * diagnostics to stderr — so every warning in that directory would be printed twice in the boot
+ * banner, which is how an operator learns to stop reading it.
+ */
+function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
   const failed: string[] = [];
-  if (!existsSync(dir)) return { index, files, failed };
-  for (const file of readdirSync(dir).sort()) {
-    if (!/\.(json|ya?ml)$/i.test(file)) continue;
-    try {
-      // `false`: every caller of this function is re-attaching a graph to a run that already
-      // exists — the run clock, and the door an approver answers a gate through.
-      const graph = loadGraph(ws, join(dir, file), false);
-      if (!index.has(graph.graphHash)) {
-        index.set(graph.graphHash, graph);
-        files.set(graph.graphHash, file);
+  for (const rel of dirs) {
+    const dir = join(ws.root, rel);
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir).sort()) {
+      if (!/\.(json|ya?ml)$/i.test(file)) continue;
+      try {
+        // `false`: every caller of this function is re-attaching a graph to a run that already
+        // exists — the run clock, and the door an approver answers a gate through.
+        const graph = loadGraph(ws, join(dir, file), false);
+        if (!index.has(graph.graphHash)) {
+          index.set(graph.graphHash, graph);
+          files.set(graph.graphHash, join(rel, file));
+        }
+      } catch (e) {
+        failed.push(`${join(rel, file)}: ${(e as Error).message}`);
       }
-    } catch (e) {
-      failed.push(`${file}: ${(e as Error).message}`);
     }
   }
   return { index, files, failed };
@@ -4046,21 +4166,35 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
   if (found !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
-    process.stderr.write(`${verb}: graph ${named(found)} — the hash run ${runId} recorded, from graphs/${files.get(wanted) ?? "?"}\n`);
+    process.stderr.write(`${verb}: graph ${named(found)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
     return found;
   }
   // ABSENCE IS NOT ZERO. An empty `graphs/` and a `graphs/` full of other people's graphs are
   // different diagnoses with different fixes, so they get different sentences.
-  const others = [...index.values()].map((g) => `graphs/${files.get(g.graphHash) ?? "?"} ${named(g)}`);
+  const others = [...index.values()].map((g) => `${files.get(g.graphHash) ?? "?"} ${named(g)}`);
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
-    `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash. ` +
+    `run ${runId} compiled graph ${wanted}, and no graph ${ws.root} publishes has that hash — not in graphs/, ` +
+      `resources/subgraph/ or resources/graph/. ` +
       (others.length === 0
-        ? `That directory publishes no graph this process can compile`
+        ? `It publishes no graph this process can compile`
         : `It publishes ${String(others.length)}, and none is this run's — ${others.join("; ")}`) +
       `${failed.length === 0 ? "" : ` (${String(failed.length)} would not compile — ${failed.join("; ")})`}. ` +
       `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
-      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.`,
+      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.` +
+      // THE FIX LINE IS WRONG FOR THE COMMONEST INSTANCE OF THIS REFUSAL, and this is the sentence that
+      // says so. A graph is compiled HERE with THIS invocation's grants, so `graphs/slow.json` declaring
+      // `net:fetch` compiles under `loom run --egress 127.0.0.1` and not under a bare `loom trace` —
+      // which drops it out of the index and produces this message about a graph that is published, is
+      // unedited, and needs no `--graph`. Measured through the binary: `loom trace <that run>` exits 1
+      // with the parenthetical above naming GRAPH017, and the same command with `--egress 127.0.0.1`
+      // exits 0. Only said when something actually failed to compile, so the ordinary refusal is
+      // unchanged.
+      (failed.length === 0
+        ? ""
+        : ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
+          `flags on THIS command line, so a graph declaring net:fetch needs the same --egress, and one declaring ` +
+          `proc:exec the same --allow-exec.`),
     { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
   );
 }
@@ -4171,6 +4305,12 @@ export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOpti
     store: ws.store,
     bus: ws.bus,
     graphs,
+    // THE SUBGRAPHS ITS OWN RUNS DELEGATE TO — attachable, never submittable, and what makes a
+    // child run's gate answerable over HTTP rather than only through `loom approve --graph <the
+    // subgraph file>`. The RESOURCE directories only: `discoverGraphs` has already compiled
+    // `graphs/` one line up, and compiling it again here would print every diagnostic in it twice
+    // in the boot banner. See `ControlPlaneOptions.subgraphs` for why the two lists stay separate.
+    subgraphs: [...indexGraphs(ws, subgraphDirs()).index.values()],
     ...(tokenFlag === undefined ? {} : { token: String(tokenFlag) }),
     ...(identity === undefined ? {} : { identity }),
     // THE UNAUTHENTICATED ROUTE EXISTS ONLY IF SOMEBODY CAN ANSWER ON IT.
@@ -5466,7 +5606,7 @@ function announce(
 }
 
 /**
- * Wait for Ctrl-C, stop, and RETURN WHAT A SUPERVISOR SHOULD BELIEVE.
+ * Wait for a stop signal, stop, and RETURN WHAT A SUPERVISOR SHOULD BELIEVE.
  *
  * The exit code is the only thing anything above this process reads. `serve` used to
  * print `! SHUTDOWN INCOMPLETE — close() failed: …` and then return **0**, so the one
@@ -5502,10 +5642,28 @@ function announce(
  * one must reach a handler while the first `close()` is still in flight (it joins that
  * promise rather than resolving early). The listener is removed once the wait has SETTLED,
  * which is a different instant — without that, every caller leaves one behind.
+ *
+ * **SIGTERM IS THE ONE A SUPERVISOR ACTUALLY SENDS, and it used to reach no handler here at
+ * all.** `systemctl stop`, `docker stop`, a Kubernetes eviction and a plain `kill` all send
+ * SIGTERM, and at Node's default disposition that ends the process where it stands: no
+ * `plane.close()` so in-flight requests are cut rather than drained, no `clock.stop()`, and
+ * `main`'s `finally` — which closes the MCP children and the SQLite store — never runs.
+ * Measured before this line existed: `kill -TERM` on `loom serve` exited **143**, a code
+ * outside the 0/1/2 vocabulary above, so a supervisor configured to restart on failure read a
+ * deliberate stop as a crash. The two signals mean the same thing to this process, so they get
+ * the same handler and the same exit code; the argument for 0-or-1 over 128+n is unchanged and
+ * is the paragraph above.
+ *
+ * BOTH LISTENERS ARE REMOVED WHEN EITHER FIRES, for the reason the single one was removed:
+ * a caller that returns having left a listener on `process` has leaked one, and a SIGINT
+ * arriving after a SIGTERM has already settled the promise would call `resolveCode` on a
+ * promise nobody is waiting on and close a plane that is already closed.
  */
+const STOP_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
 export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clock: { stop(): void }): Promise<number> {
   return new Promise<number>((resolveCode) => {
-    const onSigint = (): void => {
+    const onStop = (): void => {
       let incomplete = false;
       void plane
         .close()
@@ -5515,11 +5673,11 @@ export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clo
         })
         .finally(() => {
           clock.stop();
-          process.removeListener("SIGINT", onSigint);
+          for (const sig of STOP_SIGNALS) process.removeListener(sig, onStop);
           resolveCode(incomplete ? 1 : 0);
         });
     };
-    process.on("SIGINT", onSigint);
+    for (const sig of STOP_SIGNALS) process.on(sig, onStop);
   });
 }
 
@@ -5560,23 +5718,40 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // BEFORE THE CONNECT, so an operator sees what they declared even when a server fails to start.
   for (const line of mcpLoweringWarnings(mcpServers)) process.stderr.write(line);
   const mcp = mcpServers.length === 0 ? [] : await startMcp(mcpServers);
-  // BEFORE THE WORKSPACE, for the reason `mcp` is and one reason more: `openWorkspace` reads
-  // `--models-file` on its first line, and a `routes` row may name an adapter an extension
-  // module registered. `await import()` is why this cannot happen inside that function.
-  //
-  // ONLY IN `main`. `--extension-module` is argv and nothing else — no file, no resource ref,
-  // no directory scan — which is the entire trust argument at `loadExtensionModules`.
-  //
-  // AND A REPEAT IS REFUSED, not resolved last-wins: see `refuseRepeated` for the measurement.
-  refuseRepeated(
-    args,
-    "extension-module",
-    "a module named on argv would not be loaded, and the plane would come up as a deployment " +
-      "the operator believes is extended and is not.",
-  );
-  const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
-  const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
-  const ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
+  // THE CHILDREN ARE CLOSED FROM TWO PLACES BECAUSE THERE ARE TWO WAYS OUT, and until this
+  // existed there was one. `main`'s `finally` closes them when the workspace has been opened;
+  // everything between `startMcp` and `openWorkspace` returning is a refusal path that used to
+  // leave every spawned server running and reparented to PID 1. `loadExtensionModules` throws on a
+  // module that registers nothing, and `openWorkspace` refuses eight ways (`--max-parallelism 0`,
+  // a bad `--egress`, `--models-file`, `--channels-file`, `--budget-usd`, `--workspace`) —
+  // measured, one orphan per refusal, so the fail-closed path was the expensive one and an
+  // operator iterating on a config accumulated them. One function so the two exits cannot drift.
+  const closeMcp = (): void => {
+    for (const c of mcp) c.client.close();
+  };
+  let ws: Workspace;
+  try {
+    // BEFORE THE WORKSPACE, for the reason `mcp` is and one reason more: `openWorkspace` reads
+    // `--models-file` on its first line, and a `routes` row may name an adapter an extension
+    // module registered. `await import()` is why this cannot happen inside that function.
+    //
+    // ONLY IN `main`. `--extension-module` is argv and nothing else — no file, no resource ref,
+    // no directory scan — which is the entire trust argument at `loadExtensionModules`.
+    //
+    // AND A REPEAT IS REFUSED, not resolved last-wins: see `refuseRepeated` for the measurement.
+    refuseRepeated(
+      args,
+      "extension-module",
+      "a module named on argv would not be loaded, and the plane would come up as a deployment " +
+        "the operator believes is extended and is not.",
+    );
+    const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
+    const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
+    ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
+  } catch (e) {
+    closeMcp();
+    throw e;
+  }
   try {
     switch (args.command) {
       case "compile": {
@@ -5646,6 +5821,10 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // more importantly it must not be diagnosed as something the graph did.
         const inputs = runInputs(args);
         const graph = loadGraph(ws, requirePositional(args, 0, "a graph file"));
+        // AFTER the compile, because the declared set is what this checks against, and BEFORE
+        // the submit, because a typo must not cost a journal row or a provider call. See
+        // `assertDeclaredInputs`.
+        assertDeclaredInputs(graph, inputs);
         // `--budget` composes by MIN with the graph's own declaration and the deployment's cap —
         // it can only ever lower. `positive` for the reason it exists: a budget of `NaN` compares
         // false against everything, so it is not a loose cap, it is no cap.
@@ -5656,12 +5835,28 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           warnAboutModels(ws.models, "run");
         }
         const budgetUsd = budgetFlag(args);
-        const { runId, projection: p } = await startAndDrive(ws, {
-          graph,
-          inputs,
-          ...submitterFlag(args),
-          ...(budgetUsd === undefined ? {} : { budgetUsd }),
-        });
+        let disarm: (() => void) | undefined;
+        let p: RunProjection;
+        let runId: RunId;
+        try {
+          ({ runId, projection: p } = await startAndDrive(
+            ws,
+            {
+              graph,
+              inputs,
+              ...submitterFlag(args),
+              ...(budgetUsd === undefined ? {} : { budgetUsd }),
+            },
+            // THE ID, AND THE INTERRUPT — see `announceRun`. The `finally` disarms even when the
+            // drive throws, because a listener that outlives the run would answer the operator's
+            // next Ctrl-C by cancelling a run that ended minutes ago.
+            (id) => {
+              disarm = announceRun(ws, id, subjectFlag(args));
+            },
+          ));
+        } finally {
+          disarm?.();
+        }
         // THE ERROR, WHEN THERE IS ONE. A failed run printed `"status": "failed"` and nothing
         // else, so every carefully-worded refusal in this file — `RoutingAdapter.#resolve`'s
         // "no route for model X; routed: …" most of all — reached nobody through the door
@@ -6715,7 +6910,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   } finally {
     // Children first: a server left running outlives the process that spawned it, and a
     // stdio server holds the pipe open, so `loom run` would not exit.
-    for (const c of mcp) c.client.close();
+    closeMcp();
     ws.close();
   }
 }
@@ -8685,8 +8880,90 @@ function runInputs(args: Args): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-// Entry point. Kept at the bottom so importing this module for tests runs nothing.
-if (process.argv[1] !== undefined && import.meta.url.endsWith(basename(process.argv[1]))) {
+/**
+ * `--input` KEYS, CHECKED AGAINST THE GRAPH — the half `runInputs` cannot do.
+ *
+ * `runInputs` refuses a value that is not a JSON object and nothing else, so a MISSPELLED channel
+ * name was accepted, submitted, journaled, executed and only then failed. Measured before this
+ * existed, on a graph declaring `document`:
+ *
+ *     loom run graphs/fan-out-join.json --input '{"documnet":"alpha beta"}'
+ *     → "status": "failed",
+ *       "code": "E_INTERNAL",
+ *       "message": "Error: E_CHANNEL_UNDECLARED: channel \"document\" is not in this node's declared reads"
+ *
+ * Three things wrong with that, and they are why this is a refusal and not a warning. It names
+ * `document`, a channel the operator did not type, instead of `documnet`, which they did. It is
+ * classed `E_INTERNAL` — this system's word for "a bug in Loom" — for a caller's typo, which is
+ * the misfiling `runInputs`' own docstring calls out. And it costs a real run: against a live
+ * provider the graph is submitted and SPENDS before the missing binding is discovered.
+ *
+ * SEPARATE FROM `runInputs` AND AFTER `loadGraph`, because it needs the compiled graph and
+ * `runInputs` deliberately runs before the compile so a flag typo does not cost one. Two checks,
+ * two moments, one flag.
+ *
+ * THIS IS A NEW REFUSAL AND IT IS THE CLI'S DOOR ONLY. `POST /runs` takes its inputs from a
+ * caller's program rather than a caller's keyboard, and widening a wire contract is not what a
+ * typo in an argv is evidence for. The engine's own binding check is unchanged and still runs.
+ *
+ * THE DECLARED SET IS ALWAYS PRINTED, not only the guess: `assertKnownFlags`' same-first-two-
+ * letters heuristic catches `documnet` and misses a wrong name that is not a transposition, and
+ * an operator who was never going to guess needs the list rather than a shrug.
+ */
+function assertDeclaredInputs(graph: RunGraph, inputs: Record<string, unknown>): void {
+  const declared = graph.spec.inputs ?? [];
+  const undeclared = Object.keys(inputs).filter((k) => !declared.includes(k));
+  if (undeclared.length === 0) return;
+  const near = (k: string): string => {
+    const head = k.toLowerCase().slice(0, 2);
+    const guesses = declared.filter((d) => d.toLowerCase().startsWith(head) && d !== k);
+    return guesses.length === 0 ? "" : ` (did you mean ${guesses.map((g) => `"${g}"`).join(" or ")}?)`;
+  };
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `--input names ${undeclared.length === 1 ? "a channel" : "channels"} this graph does not declare as an input: ` +
+      `${undeclared.map((k) => `"${k}"${near(k)}`).join(", ")}. ` +
+      `It declares ${declared.length === 0 ? "no inputs at all" : declared.map((d) => `"${d}"`).join(", ")}. ` +
+      `A channel nothing reads is dropped in silence and the run then fails four layers below the mistake, ` +
+      `having already been submitted and — against a real provider — already spent.`,
+  );
+}
+
+/**
+ * Is this module the thing the user asked to run?
+ *
+ * Kept at the bottom so importing this module for tests runs nothing — and the question is
+ * genuinely awkward, because the same file is started three ways.
+ *
+ *   - `node packages/core/src/cli.ts` and `node dist/cli.js`: `argv[1]` IS this file.
+ *   - `node_modules/.bin/loom`, which is what `package.json`'s `bin` field produces: on POSIX
+ *     npm writes a SYMLINK, so `argv[1]` is `…/.bin/loom` and its basename is `loom`. The old
+ *     test — does `import.meta.url` end with `basename(argv[1])` — compared "loom" against a
+ *     URL ending in "cli.js" and answered no, so an installed `loom --help` printed **nothing
+ *     at all** and exited 0. That is the whole of "Install it" failing quietly.
+ *   - The single-file binary: `scripts/build-binary.mjs` defines `import.meta.url` as
+ *     `file:///loom`, and a SEA's `argv[1]` is the executable, so the basename test is what
+ *     makes the binary run itself. `/loom` is not a path on any machine, so a realpath-only
+ *     test would break it.
+ *
+ * So: resolve both sides and compare, which is exact for the first two and follows the symlink
+ * for the second; fall back to the basename test, which is what the binary needs and what every
+ * pre-existing caller already matched on. `realpathSync` throws on a path that does not exist —
+ * `/loom`, and an `argv[1]` that is not a file at all — so the throw is the fallback's trigger
+ * rather than a failure.
+ */
+function startedAsTheEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    if (realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) return true;
+  } catch {
+    /* not a path this filesystem has; the basename test below is the answer */
+  }
+  return import.meta.url.endsWith(basename(entry));
+}
+
+if (startedAsTheEntryPoint()) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code))
     .catch((e: unknown) => {
