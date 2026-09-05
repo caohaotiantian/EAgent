@@ -112,13 +112,13 @@ test("FIVE RUNS OVER FIVE DIFFERENT INPUTS ASSEMBLE INTO ONE COHORT", async () =
   assert.deepEqual(trajectories.map((t) => scoreTrajectory(t, cohort).outcome), [1, 1, 1, 1, 1]);
   assert.deepEqual(
     trajectories.map((t) => Number(scoreTrajectory(t, cohort).score.toFixed(3))),
-    [0.833, 0.767, 0.7, 0.7, 0.7],
+    [0.733, 0.667, 0.6, 0.6, 0.6],
     "the cost term now separates runs the old rule could not…",
   );
   const alone = trajectories.map((t) => scoreTrajectory(t, measureCohort(cohortKeyOf(t), [t])));
   assert.deepEqual(
     alone.map((x) => Number(x.score.toFixed(3))),
-    [0.7, 0.7, 0.7, 0.7, 0.7],
+    [0.6, 0.6, 0.6, 0.6, 0.6],
     "…and a cohort of one never could, whatever the run spent",
   );
   assert.deepEqual(alone.map((x) => x.components.costNormalized), [1, 1, 1, 1, 1], "a run is always exactly at its own median");
@@ -436,16 +436,18 @@ test("loom score folds EVERY cohort member with its own graph, or the promotion 
     const ids: string[] = [];
     for (let n = 1; n <= 12; n++) ids.push(await driveJson(w.dir, w.graphFile, { problem: { n } }));
 
-    // Six runs pass their assertion and six fail; the failing ones score 0.400, the passing
-    // ones 1.000. p90 over twelve is the eleventh ascending, so the honest bar is 1.000.
+    // Six runs pass their assertion and six fail; the failing ones score 0.000, the passing
+    // ones 0.600 — a function-only cohort has a $0 / 0 ms / gateless median, and a run at a
+    // zero median earns no efficiency credit. p90 over twelve is the eleventh ascending, so
+    // the honest bar is 0.600.
     const failing = await score(w.dir, ids[1]!); // n = 2, even, `solve` is wrong
     assert.equal(failing.outcome, 0, "the premise: this run's assertion really did fail");
-    assert.equal(failing.score, 0.4);
+    assert.equal(failing.score, 0);
     assert.equal(failing.cohort.n, 12);
     assert.equal(
       failing.cohort.p90Score,
-      1,
-      "folded without their graphs every peer reports outcome 0 and scores 0.400, which is this " +
+      0.6,
+      "folded without their graphs every peer reports outcome 0 and scores 0.000, which is this " +
         "run's own score — so it would tie the bar it is measured against",
     );
     assert.ok(
@@ -455,7 +457,7 @@ test("loom score folds EVERY cohort member with its own graph, or the promotion 
 
     const passing = await score(w.dir, ids[0]!); // n = 1, odd
     assert.equal(passing.outcome, 1);
-    assert.equal(passing.cohort.p90Score, 1, "the bar does not move with which member is being judged");
+    assert.equal(passing.cohort.p90Score, 0.6, "the bar does not move with which member is being judged");
   } finally {
     w.dispose();
   }
