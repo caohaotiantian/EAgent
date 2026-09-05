@@ -883,6 +883,35 @@ function isSafeId(id: unknown): boolean {
 }
 
 /**
+ * The names a CHANNEL may not take, because `Object.prototype` already carries them.
+ *
+ * `SAFE_ID` keeps `__proto__` out and stops there, so `toString`, `constructor`,
+ * `hasOwnProperty`, `valueOf`, `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString` and
+ * the four `__define`/`__lookup` accessors all compiled clean — and then the RUN died on
+ * `E_INTERNAL channel "toString": expected array, got function`, because a channel name keys
+ * `ChannelState`, the reducer table and the projection, and a raw read off any of them answers
+ * with the prototype's member for a channel nobody declared. `state/channels.ts` closed the
+ * runtime half by asking `hasOwnProperty` at every such site; this is the other half, which is
+ * that the compiler should have refused the graph before a run existed.
+ *
+ * READ OFF `Object.prototype`, NOT WRITTEN DOWN. The hazard is exactly "this name is on
+ * `Object.prototype`", so a hand-kept list would be a second definition of that set, free to
+ * drift from the one the engine actually collides with. Twelve names on Node 24; `__proto__`
+ * is among them and is already unreachable through `SAFE_ID`, which costs nothing and leaves
+ * the set complete on its face if `SAFE_ID` ever widens.
+ *
+ * CHANNELS ONLY. Node and edge ids key objects too, and `plans["toString"]` has the same
+ * shape — but they are not the reported defect, `plans` is built by the compiler rather than
+ * from author-supplied keys, and widening a refusal is not something to do on a guess.
+ */
+const PROTOTYPE_NAMES: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
+
+const RESERVED_LIST = [...PROTOTYPE_NAMES]
+  .sort()
+  .map((r) => `\`${r}\``)
+  .join(", ");
+
+/**
  * The largest delay a Node timer holds. A FOURTH local copy, matching `cli.ts`, `providers/http.ts`
  * and `server/http.ts` — the tree copies a bare constant rather than exporting it, because an
  * export from a barrelled module lands on the pinned public surface (`store.ts`'s `storeDenyLists`
@@ -1163,7 +1192,22 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   for (const e of spec.edges) if (!isSafeId(e.id)) badId("edge id", e.id, typeof e.id === "string" ? { edgeId: e.id } : undefined);
   // A channel name is an object key in `ChannelState`, and `initialState` assigns it with
   // `out[name] = …` — which for `__proto__` writes the prototype and declares nothing.
-  for (const name of Object.keys(spec.channels ?? {})) if (!isSafeId(name)) badId("channel name", name, { channel: name });
+  for (const name of Object.keys(spec.channels ?? {})) {
+    if (!isSafeId(name)) {
+      badId("channel name", name, { channel: name });
+      continue;
+    }
+    if (PROTOTYPE_NAMES.has(name)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_RESERVED_CHANNEL",
+        message: `channel "${name}" is a name \`Object.prototype\` already carries, so no object keyed by channel name can hold it`,
+        at: { channel: name },
+        fix: `rename the channel; the reserved names are ${RESERVED_LIST}`,
+      });
+      fatal = true;
+    }
+  }
 
   const seenNodes = new Set<string>();
   for (const n of spec.nodes) {
