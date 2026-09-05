@@ -64,6 +64,9 @@ async function recorded() {
   });
   resources.promote(ref, "canary", ACTOR);
   resources.promote(ref, "stable", ACTOR);
+  const ref2 = resources.publish({ kind: "function", name: "draws2", content: `() => ({ writes: { out2: Math.random() < 2 ? "ok" : "no" } })`, actor: ACTOR });
+  resources.promote(ref2, "canary", ACTOR);
+  resources.promote(ref2, "stable", ACTOR);
   const loader = createFunctionLoader({ store: resources });
   const functions = new FunctionRegistry({ loader: (ref) => loader.load(ref) });
   const engine = new Engine({ store, bus, tools: new ToolRegistry(), functions, models: new ModelRegistry(), resolver: resources });
@@ -80,7 +83,7 @@ async function recorded() {
   for await (const e of old.read(runId, 1 as never)) if (String((e.payload as { key?: unknown }).key ?? "") === SEED_KEY) seedEvents++;
   assert.equal(seedEvents, 0, "the fixture really holds no seed");
 
-  return { store, old, graph, renamed, runId, replayEngine: { tools: new ToolRegistry(), functions, models: new ModelRegistry() } };
+  return { store, old, graph, renamed, runId, resources, replayEngine: { tools: new ToolRegistry(), functions, models: new ModelRegistry() } };
 }
 
 test("A RECORDING WITH NO SEED REPLAYS TO E_REPLAY_DIVERGENCE AT THE DEFAULT SETTING — it does not invent one", async () => {
@@ -91,8 +94,8 @@ test("A RECORDING WITH NO SEED REPLAYS TO E_REPLAY_DIVERGENCE AT THE DEFAULT SET
   assert.equal(report.match, false);
   assert.equal(report.replayed.status, "failed", "the body could not be given a seed, so its task could not run");
   assert.equal(report.replayed.error?.code, CODES.E_REPLAY_DIVERGENCE);
-  assert.match(String(report.replayed.error?.message), /holds no seed/);
-  assert.match(String(report.replayed.error?.message), /only for a graph that is not the recorded one/, "the refusal says which door exists");
+  assert.match(String(report.replayed.error?.message), /holds no seed for any task, so the journal predates the random effect/);
+  assert.match(String(report.replayed.error?.message), /on a graph that is not the recorded one/, "the refusal says which door exists");
   assert.deepEqual(report.derivedSeeds, [], "nothing was derived — refusing is not deriving");
   assert.ok(
     report.frames.some((f) => f.kind === "run.completed" && !f.match && f.actual === `failed:${CODES.E_REPLAY_DIVERGENCE}`),
@@ -110,19 +113,39 @@ test("THE OPT-OUT DOES NOT BUY A SEED ON THE RECORDED GRAPH — `onGraphChange: 
   assert.deepEqual(report.derivedSeeds, []);
 });
 
-test("A GRAPH THAT IS NOT THE RECORDED ONE DERIVES THE SEED, NAMES IT, AND COSTS `hermetic`", async () => {
+test("A GRAPH THAT DIFFERS BUT HOLDS THE RECORDED NODE STILL REFUSES — a recorded node with no seed is an old journal, not a new node", async () => {
   const h = await recorded();
   assert.notEqual(h.renamed.graphHash, h.graph.graphHash, "the premise: a different graph hash over the same nodes");
 
-  // The DEFAULT setting, which is what `runEvalSuite` uses: the derivation is keyed on the graph
-  // differing, not on the caller having opted out of the graph-hash frame.
   const report = await replayRun({ store: h.old, runId: h.runId, graph: h.renamed, engine: h.replayEngine });
 
+  assert.equal(report.replayed.status, "failed", "the recording LEASED `draw`; a graph rename does not explain its missing seed");
+  assert.equal(report.replayed.error?.code, CODES.E_REPLAY_DIVERGENCE);
+  assert.match(String(report.replayed.error?.message), /holds no seed for any task, so the journal predates the random effect/);
+  assert.deepEqual(report.derivedSeeds, []);
+});
+
+test("A NODE THE RECORDING NEVER HAD, ON A GRAPH THAT IS NOT THE RECORDED ONE, GETS A DERIVED SEED — NAMED, AND COSTING `hermetic`", async () => {
+  const h = await recorded();
+  const added = compileOrThrow({
+    spec: {
+      ...spec(),
+      channels: { ...spec().channels, out2: { type: "string", reduce: "replace" } },
+      nodes: [...spec().nodes, { id: "draw2" as NodeId, type: "function", writes: ["out2"], function: { ref: "function/draws2@stable" } }],
+    },
+    resolver: h.resources,
+    tools: {},
+    tenantCapabilities: [],
+  });
+
+  // The DEFAULT setting, which is what `runEvalSuite` uses, over the UNTOUCHED journal: the
+  // recorded node is served its seed and only the new one derives.
+  const report = await replayRun({ store: h.store, runId: h.runId, graph: added, engine: h.replayEngine });
+
   assert.equal(report.replayed.status, "succeeded");
-  assert.equal(report.replayed.channels["out"], "ok", "the second input: the draw never reaches the channel…");
-  assert.deepEqual(report.derivedSeeds, [SEED_KEY], "…and the report still says the seed was invented");
-  assert.equal(report.hermetic, false, "a replay that derived its entropy is not hermetic");
-  assert.deepEqual(report.liveBodies, [], "the body IS branded — hermetic is false for the seed, not for the body");
+  assert.deepEqual(report.derivedSeeds, ["draw2@root#0:random:0"], "the new node, and only the new node");
+  assert.equal(report.hermetic, false, "a replay that derived any entropy is not hermetic");
+  assert.deepEqual(report.liveBodies, [], "the bodies ARE branded — hermetic is false for the seed, not for the body");
 });
 
 test("ORDINARY HALF — the untouched journal serves its seed, derives nothing, and is hermetic", async () => {
