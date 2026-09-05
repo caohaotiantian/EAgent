@@ -124,7 +124,16 @@ test("FAILING FAST BUYS NO CHEAPNESS CREDIT — the audit's own fixture", () => 
     c,
   );
 
-  assert.equal(succeeded.score, 0.1);
+  // The success sits exactly AT the cohort median on cost and wall and the cohort raised no
+  // gates, so it earns no efficiency credit and has no ladder: 0. It used to read 0.100 — the
+  // human-effort term paying full credit against a gateless median, a constant every member
+  // got. A success BELOW the median still out-scores the failure, which is the claim.
+  assert.equal(succeeded.score, 0);
+  const cheaper = scoreTrajectory(
+    trajectory({ usage: { costUsd: 0.0005, tokens: 150, wallMs: 125, modelCalls: 1, toolCalls: 0, subgraphRuns: 0 } }),
+    c,
+  );
+  assert.ok(cheaper.score > 0 && failed.score < cheaper.score, `failing ${failed.score} must lose to a cheap success ${cheaper.score}`);
   assert.equal(failed.score, 0, "spending nothing is not efficiency when nothing was delivered");
   assert.equal(failed.components.completed, false);
   assert.equal(succeeded.components.completed, true);
@@ -136,7 +145,8 @@ test("cancelled and incomplete are not success either, and an unterminated journ
     const scored = scoreTrajectory(trajectory({ outcome: signals({ runStatus }) }), c);
     assert.equal(scored.score, 0, `${runStatus} must not score`);
   }
-  assert.ok(scoreTrajectory(trajectory(), c).score > 0, "…and `succeeded` still does");
+  const belowMedian = trajectory({ usage: { costUsd: 0.0005, tokens: 150, wallMs: 125, modelCalls: 1, toolCalls: 0, subgraphRuns: 0 } });
+  assert.ok(scoreTrajectory(belowMedian, c).score > 0, "…and `succeeded` still does");
 });
 
 test("a failed run is never golden, whatever evidence it collected before it died", () => {
@@ -214,7 +224,10 @@ test("A NO-SIGNAL COHORT STILL RANKS ITS MEMBERS — the over-correction, and th
     c,
   );
   assert.equal(noop.score, 0);
-  assert.ok(noop.score < dear, "the cheapest possible no-op still loses to the dearest real run");
+  // The dearest real run is above the median on every term and this cohort raised no gates, so
+  // it too earns nothing: the two tie at 0, and what tells them apart is `delivered`.
+  assert.ok(noop.score <= dear, "the cheapest possible no-op never out-scores the dearest real run");
+  assert.equal(noop.components.delivered, false);
 });
 
 test("A NO-OP SUCCESS CANNOT MOVE THE RULER EITHER — it is not a cohort member", () => {
@@ -255,7 +268,7 @@ test("delivering something CHEAP still earns the credit — this gates on eviden
   const median = scoreTrajectory(trajectory({ outcome: evidence }), c);
 
   assert.equal(cheap.components.delivered, true);
-  assert.equal(cheap.score, 1, "outcome 0.6 + cost 0.2 + latency 0.1 + human effort 0.1");
+  assert.equal(cheap.score, 0.9, "outcome 0.6 + cost 0.2 + latency 0.1; a gateless cohort pays no human-effort credit");
   assert.ok(cheap.score > median.score, "cheaper is still better, given both delivered");
 });
 
@@ -352,6 +365,8 @@ test("AN UNMEASURED RUN IS TOLD APART FROM A RUN THAT FAILED EVERY ASSERTION", (
   const c = cohort();
   const failedEveryAssertion = trajectory({
     outcome: signals({ assertions: [{ nodeId: n("v"), pass: false }] }),
+    // Below the cohort median on cost and wall, so it has efficiency terms to keep.
+    usage: { costUsd: 0.0005, tokens: 150, wallMs: 125, modelCalls: 1, toolCalls: 0, subgraphRuns: 0 },
   });
   // What the fold produces without the graph: `extractSignals` keys on node types and has
   // none, so the assertion that DID run leaves no trace at all.
@@ -419,7 +434,7 @@ test("AN UNMEASURED PEER IS NOT A MEMBER — it neither counts toward n nor sets
   const good = measureCohort("k", measured);
   assert.deepEqual(
     { n: good.n, p50Cost: Number(good.p50Cost.toFixed(4)), p90Score: Number(good.p90Score.toFixed(3)) },
-    { n: 30, p50Cost: 0.015, p90Score: 0.34 },
+    { n: 30, p50Cost: 0.015, p90Score: 0.24 },
     "the control, and the row every other row is read against",
   );
 

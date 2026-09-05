@@ -65,7 +65,15 @@
  * ungated          0.340    0.398   0.100    0.400   ← the no-op wins outright
  * signal-gated     0.100    0.100   0.100    0.100   ← nothing can be told from anything
  * work-gated       0.340    0.398   0.100    0.000
+ * + zero-median    0.240    0.298   0.000    0.000   ← what this file computes now
  * ```
+ *
+ * The fourth row is the third with one more rule: a term whose cohort median is 0 pays nothing
+ * (see `scoreTrajectory`). This fixture raised no gates, so its `p50Gates` is 0 and the 0.100
+ * of human-effort credit that every row above paid to every member — the dear run's whole
+ * score — was a constant nobody had measured. Removing it moves every member by the same
+ * amount and no rank; the dear run now ties the no-op at 0 on the NUMBER and is told apart by
+ * `delivered`, which is the field that carries that fact.
  *
  * A metric that returns the same number for a $10 run and a $0.0001 run has stopped measuring,
  * and `isGolden` condition 2 (`score >= cohort.p90Score`) is vacuous under it: every member ties
@@ -461,10 +469,25 @@ export function scoreTrajectory(
   const measured = t.specResolved;
   const outcome = completed && measured ? outcomeOf(signals) : 0;
 
-  const costNormalized = cohort.p50Cost > 0 ? clamp01(t.usage.costUsd / cohort.p50Cost) : 0;
-  const latencyNormalized = cohort.p50Wall > 0 ? clamp01(t.usage.wallMs / cohort.p50Wall) : 0;
+  // A ZERO MEDIAN IS NOT A FREE MEDIAN. Each term is a ratio to the cohort's p50, and when
+  // that p50 is 0 the ratio is undefined — so these three lines used to answer with the value
+  // that MAXIMISES the score: `costNormalized 0`, `latencyNormalized 0`, `humanEffortSaved 1`.
+  // Measured over thirty free members, a $1,000 / 1-hour / 99-gate run scored 0.400, the whole
+  // efficiency budget, identical to a $0 / 0 ms / 0-gate run. Every offline workflow has that
+  // cohort shape, and so does any cohort where more than half the runs are free.
+  //
+  // The answer is the LIMIT of the ratio, which is the rule `pairedCostRatio` (live.ts) already
+  // takes for a $0 baseline: 0 / 0 is "at the median", and x / 0 for x > 0 is unbounded. Neither
+  // is BELOW the median, and credit is paid only for being below it — so both land on the
+  // ceiling, and a run in a gateless cohort raised no FEWER gates than its median, so it saved
+  // nothing. A true statement about every such run, where the old value was a number nobody
+  // measured. Within a free cohort this is a constant offset and the rank is untouched; a run
+  // scored AGAINST a free cohort no longer collects 0.4 for free, which is what the live gate's
+  // work-deleting candidate was banking. Refusing is always allowed; paying is not.
+  const costNormalized = cohort.p50Cost > 0 ? clamp01(t.usage.costUsd / cohort.p50Cost) : 1;
+  const latencyNormalized = cohort.p50Wall > 0 ? clamp01(t.usage.wallMs / cohort.p50Wall) : 1;
   const humanEffortSaved =
-    cohort.p50Gates > 0 ? clamp01(1 - t.policy.gatesRaised / cohort.p50Gates) : 1;
+    cohort.p50Gates > 0 ? clamp01(1 - t.policy.gatesRaised / cohort.p50Gates) : 0;
 
   // EFFICIENCY IS A RATIO TO WORK DELIVERED — see the header — and `runStatus === "succeeded"`
   // is not that work. Measured on this tree before the gate existed: a no-op success banked the

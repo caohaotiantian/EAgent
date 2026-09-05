@@ -271,7 +271,10 @@ test("A DELEGATED RUN SCORES LIKE THE SAME WORK INLINE — the multi-agent shape
   // run, and must not be dropped from its own cohort.
   assert.equal(d.components.delivered, true, "a run that delegated its work still delivered it");
   assert.equal(d.score, i.score, `delegated ${d.score} must score as the inline control ${i.score}`);
-  assert.ok(d.score > 0, `and that score must be a real one, got ${d.score}`);
+  // In a cohort of ONE the run is its own median, so no efficiency term pays out and a graph
+  // with no ladder scores 0 — `delivered` is what says it worked, and it is asserted above.
+  assert.equal(d.components.costNormalized, 1, "a cohort of one is compared against itself: at the median, no credit");
+  assert.deepEqual(d.components, i.components, "…and every component agrees with the inline control");
 
   // The child's spend crossed the boundary too, once — not twice, and not zero.
   assert.equal(delegated.trajectory.usage.costUsd, inline.trajectory.usage.costUsd);
@@ -300,7 +303,11 @@ test("A FUNCTION-ONLY GRAPH DID WORK — writing the declared output is the evid
     "the committed channel is the whole evidence, and it is a NAME not a value",
   );
   assert.equal(scored.components.delivered, true, "a function node that commits its declared output is work");
-  assert.ok(scored.score > 0, `a graph that produced its output scores, got ${scored.score}`);
+  // A cohort of one has nothing to be cheaper than and this graph has no ladder, so the NUMBER
+  // is 0 and `delivered` is the evidence. It used to read 0.100, which was the human-effort
+  // term paying full credit against a gateless median — a constant every member got.
+  assert.equal(scored.score, 0);
+  assert.equal(measureCohort("k", [fn.trajectory]).n, 1, "…and it is a member of its own cohort, which the no-op below is not");
 });
 
 test("…AND A BODY THAT WRITES NOTHING IS STILL A NO-OP — the line the previous round drew, kept", async () => {
@@ -319,7 +326,10 @@ test("…AND A BODY THAT WRITES NOTHING IS STILL A NO-OP — the line the previo
   assert.equal(scored.components.completed, true);
   assert.equal(scored.components.delivered, false, "nothing was produced for the cheapness to be a ratio to");
   assert.equal(scored.score, 0);
-  assert.ok(soloScore(fn.trajectory).score > scored.score, "real work out-scores the no-op");
+  // Both are 0 in a cohort of one with no ladder; what separates them is `delivered` and
+  // membership, never a credit the no-op could have earned.
+  assert.ok(soloScore(fn.trajectory).score >= scored.score, "the no-op never out-scores real work");
+  assert.equal(soloScore(fn.trajectory).components.delivered, true);
   assert.equal(measureCohort("k", [noop.trajectory]).n, 0, "…and it cannot move the ruler either");
 });
 
