@@ -33,7 +33,7 @@ import { SYSTEM_ACTOR, type Actor, type JournalEvent, type NewEvent } from "../j
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { GateDispatcher, formatRecipients, nextTier, tierRecipients, type DeliverySpec } from "./delivery.ts";
-import { RunFolder, foldRun, gateOf, isTerminal, openGates, type GateRecord, type RunProjection } from "./projection.ts";
+import { RunFolder, gateOf, isTerminal, openGates, type GateRecord, type RunProjection } from "./projection.ts";
 import { RunLog } from "./log.ts";
 
 export type TimeoutAction = "escalate" | "default_action" | "fail";
@@ -288,6 +288,16 @@ const SEQ_CONFLICT = Symbol("gate-decision-seq-conflict");
 const MAX_DECISION_LAPS = 8;
 
 /**
+ * How many runs' folds `project` keeps between calls.
+ *
+ * The same number as `DEFAULT_SWEEP_LIMIT` and for the same reason: it is what a tick and the
+ * gate queue each look at, so a broker that remembers fewer would evict exactly the runs the
+ * next poll asks about. Evicting costs a re-fold and never an answer, so the number decides
+ * memory against reads and nothing else.
+ */
+const MAX_FOLD_CACHE = 500;
+
+/**
  * In-process gate broker over the journal.
  *
  * Its non-durable state is deliberately minimal — and, since the authorization defect,
@@ -303,6 +313,13 @@ export class HumanGateBroker {
   readonly #ephemeral = new Map<GateId, EphemeralGate>();
   /** `(gateId, approverId)` → decision, so a double-click collapses to one decision. */
   readonly #idempotency = new Map<string, GateDecisionKind>();
+  /**
+   * runId → the fold `project` has already reached. Pure cache; see `project`.
+   *
+   * LRU by construction — `project` deletes before it sets — and holding only NON-terminal
+   * runs, so the ordinary long-lived process keeps one projection per live gated run.
+   */
+  readonly #folds = new Map<RunId, RunFolder>();
   readonly #dispatcher: GateDispatcher | undefined;
 
   constructor(opts: GateBrokerOptions = {}) {
@@ -2161,10 +2178,81 @@ export class HumanGateBroker {
     );
   }
 
+  /**
+   * The run as this broker's every decision reads it — folded FORWARD from where it left off.
+   *
+   * This did `log.read(1)` on every call and folded the whole journal, which made it the most
+   * expensive thing in the gate subsystem and the only part of it with no cursor at all.
+   * `GateSweeper.#catchUp` has kept one since it was written and its docstring says why —
+   * "O(Δ), not O(history)" — and it then reaches this method through `sweepTimeouts` and pays
+   * the full fold anyway. `resolve` pays it once per lap. `GET /gates` pays it once per run
+   * per poll, on a journal the same handler folded incrementally one line earlier: measured
+   * on 8 runs each parked on an open gate, 1,056 journal events read on poll #1 and 1,056
+   * again on poll #2, every one of them from here.
+   *
+   * WHAT IS CACHED IS A FOLD, NOT AN ANSWER, and that distinction is the whole safety
+   * argument. Every call still reads the tail, so a gate raised one event ago is in the very
+   * next projection this returns; what is skipped is re-reading events already folded, whose
+   * meaning cannot change. Nothing here is authoritative — the journal is — and a process
+   * that starts with an empty map folds from seq 1, which is what this method did for
+   * everyone before. A restart therefore costs correctness nothing and cost everything.
+   *
+   * IT IS TAKEN OUT OF THE MAP FOR THE DURATION OF THE FOLD. Two callers on one run — a poll
+   * racing a decision — must not share one folder across an `await`: `restart()` puts
+   * `lastSeq` back to 0, and a concurrent push of a TAIL onto a folder somebody else has just
+   * rewound would produce a projection missing everything before that tail. Whoever finds the
+   * map empty builds their own and folds from seq 1, which is correct and merely slower. The
+   * delete-then-set also makes the eviction order LRU rather than insertion order, which is
+   * the order worth having.
+   *
+   * ONE BROKER SERVES ONE STORE, and this is the first thing in the class that depends on it:
+   * `#ephemeral` is keyed by a ULID gate id and cannot collide, a fold is keyed by run id and
+   * would. Nothing in `src/` violates it — `Engine` builds its own broker when none is given,
+   * and `replayRun` deletes `gates` from the options it forwards so the shadow store gets a
+   * fresh one, for a reason it states in full. An embedder handing one broker to two engines
+   * over two DIFFERENT journals that both hold the same run id would be the exception, and
+   * that run id would have to have been minted twice.
+   *
+   * The re-fold loop is `#catchUp`'s, including the bound: a `while (folder.stale)` whose
+   * termination rests on `RunFolder` keeping its promise about learning each marker once is a
+   * loop that livelocks the moment that promise breaks, so `reached` measures it. Refusing is
+   * the direction a guard is allowed to fail in; here it also drops the folder, so the next
+   * call starts over rather than inheriting a fold that could not be finished.
+   */
   async project(log: RunLog): Promise<RunProjection | undefined> {
-    const events = [];
-    for await (const e of log.read(1)) events.push(e);
-    return foldRun(events);
+    const folder = this.#folds.get(log.runId) ?? new RunFolder();
+    this.#folds.delete(log.runId);
+
+    folder.push(await this.#tail(log, (folder.lastSeq + 1) as Seq));
+    let reached = -1;
+    while (folder.stale) {
+      if (folder.lastSeq <= reached) {
+        throw err.internal(
+          CODES.E_TRACE_INCONSISTENT,
+          `run ${log.runId} did not fold past its rewind marker at seq ${folder.lastSeq + 1} on a second pass`,
+          { details: { runId: log.runId, lastSeq: folder.lastSeq } },
+        );
+      }
+      reached = folder.lastSeq;
+      folder.restart();
+      folder.push(await this.#tail(log, 1 as Seq));
+    }
+
+    const p = folder.projection();
+    // A FINISHED RUN KEEPS NOTHING. `raisedAGate` accumulates for the life of a deployment and
+    // most of what it holds is finished, so remembering those is the one way this map could
+    // grow without bound in the process that most needs it not to.
+    if (p !== undefined && !isTerminal(p.status)) {
+      if (this.#folds.size >= MAX_FOLD_CACHE) this.#folds.delete(this.#folds.keys().next().value!);
+      this.#folds.set(log.runId, folder);
+    }
+    return p;
+  }
+
+  async #tail(log: RunLog, fromSeq: Seq): Promise<readonly JournalEvent[]> {
+    const out: JournalEvent[] = [];
+    for await (const e of log.read(fromSeq)) out.push(e);
+    return out;
   }
 }
 
