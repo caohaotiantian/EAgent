@@ -110,7 +110,7 @@ export class AnthropicAdapter implements ModelAdapter {
     let closed = false;
     // CHARACTERS THIS FUNCTION RECEIVED, counted from the RAW fragments rather than from the
     // parsed calls. `safeJson` turns a cut-off argument into `{}`, so the output floor priced a
-    // turn that burned its whole `max_tokens` allowance on one call at ~$0.00015 — see
+    // turn that burned its whole `max_tokens` allowance on one call at 5 output tokens — see
     // `producedTokens`. Text is added at its delta; a tool block's id, name and raw argument text
     // are added at its stop, and any block the stream never closed is added at the end.
     let producedChars = 0;
@@ -369,7 +369,7 @@ export class AnthropicAdapter implements ModelAdapter {
    * length why that zero cannot be closed from inside this file.
    */
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number {
-    const p = resolvePrice({ ...DEFAULT_PRICES, ...(this.#opts.prices ?? {}) } as Record<string, PriceRow>, model);
+    const p = resolvePrice([this.#opts.prices ?? {}, DEFAULT_PRICES] as Record<string, PriceRow>[], model);
     if (p === undefined) return 0;
     const cost = round6(
       (usage.inputTokens / 1e6) * p.input +
@@ -489,12 +489,15 @@ export function roughTokens(req: ModelRequest): number {
  * generated tokens.
  *
  * IT READS THE PARSED CALLS, AND `safeJson` HAS ALREADY REPLACED A CUT-OFF ARGUMENT WITH `{}` by
- * the time it runs — so a turn that spent its whole `max_tokens` allowance on one tool call was
- * priced at ~$0.00015, a ~227x under-charge, while a COMPLETE turn was right (2,267 tokens for
- * 9,032 characters). Both adapters therefore count the RAW argument text alongside this, from the
- * fragments as they arrive and including a block the stream never closed — `producedChars` in
- * each `stream`. This function stays the estimate for a caller holding parsed calls and nothing
- * else, and re-serialising with `JSON.stringify` is still not the provider's own whitespace.
+ * the time it runs. Measured on a `max_tokens` turn whose one `fs.write` call was cut after 9,030
+ * characters of argument JSON, at $15 per million output tokens: the output side cost $0.000075
+ * where the raw text says $0.033900 — 5 tokens against 2,262, a 452x under-charge on the turn
+ * shape an agent loop mostly takes. The COMPLETE version of the same turn was already right and
+ * is unchanged by this, 2,262 tokens either way. Both adapters therefore count the RAW argument
+ * text alongside this, from the fragments as they arrive and including a block the stream never
+ * closed — `producedChars` in each `stream`. This function stays the estimate for a caller
+ * holding parsed calls and nothing else, and re-serialising with `JSON.stringify` is still not
+ * the provider's own whitespace.
  */
 export function producedTokens(text: string, toolCalls: readonly ModelToolCall[]): number {
   let chars = text.length;

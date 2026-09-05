@@ -128,15 +128,28 @@ export interface PriceRow {
  * It is not available from here: the price table is adapter CONSTRUCTION config that the compiler
  * never sees.
  */
-export function resolvePrice(table: Readonly<Record<string, PriceRow>>, model: string): PriceRow | undefined {
-  // `Object.hasOwn`, because an operator's `prices` is ordinary JSON and `table["constructor"]`
-  // answers with a function that has no `input` field — a price row out of `Object.prototype`,
-  // which priced a turn at NaN and threw where an unknown model would simply have been unpriced.
-  if (Object.hasOwn(table, model)) return table[model] as PriceRow;
+export function resolvePrice(tables: readonly Readonly<Record<string, PriceRow>>[], model: string): PriceRow | undefined {
+  const names = [model];
+  for (let cut = model.lastIndexOf("-"); cut > 0; cut = model.lastIndexOf("-", cut - 1)) names.push(model.slice(0, cut));
 
-  for (let cut = model.lastIndexOf("-"); cut > 0; cut = model.lastIndexOf("-", cut - 1)) {
-    const base = model.slice(0, cut);
-    if (Object.hasOwn(table, base)) return table[base] as PriceRow;
+  // A LIST OF TABLES IN PRECEDENCE ORDER RATHER THAN ONE MERGED OBJECT, and an `undefined` row
+  // falls THROUGH rather than answering. `{...defaults, ...operatorRows}` is not equivalent to
+  // the `operatorRows?.[m] ?? defaults[m]` this replaced: a spread copies an own key whose value
+  // is `undefined`, so an operator row explicitly set to `undefined` shadowed the default and
+  // priced the model at $0 — measured, `{prices: {"claude-sonnet-5": undefined}}` went from
+  // $0.018 to $0 on a 1,000/1,000-token turn.
+  //
+  // EXACT BEATS PREFIX ACROSS ALL TABLES, which is why the name loop is outside: an operator's
+  // `m-pro` row must not outrank a default `m-pro-20260101` one.
+  for (const name of names) {
+    for (const table of tables) {
+      // `Object.hasOwn`, because an operator's `prices` is ordinary JSON and `table["constructor"]`
+      // answers with a function that has no `input` field — a price row out of `Object.prototype`,
+      // which priced a turn at NaN and threw where an unknown model would simply be unpriced.
+      if (!Object.hasOwn(table, name)) continue;
+      const row = table[name];
+      if (row !== undefined) return row;
+    }
   }
   return undefined;
 }

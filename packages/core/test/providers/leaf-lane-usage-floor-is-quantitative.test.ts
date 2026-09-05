@@ -230,6 +230,26 @@ test("...but a wholly unknown model still prices 0, because two guards two level
   assert.ok(o.priceOf("known", usage) > 0);
 });
 
+test("an operator row is still preferred to the default, and an `undefined` one falls through", () => {
+  // `{...DEFAULT_PRICES, ...opts.prices}` is NOT equivalent to `opts.prices?.[m] ?? DEFAULTS[m]`:
+  // a spread copies an own key whose value is `undefined`, so an operator row set to `undefined`
+  // shadowed the default and priced the model at $0. Measured, this turn went $0.018 -> $0.
+  const usage = { inputTokens: 1000, outputTokens: 1000 };
+  const own = new OpenAIAdapter({ apiKey: "k", prices: { "gpt-5": { input: 1, output: 1 } } });
+  assert.equal(own.priceOf("gpt-5", usage), 0.002, "the operator's own row wins over the default");
+  const gap = new OpenAIAdapter({ apiKey: "k", prices: { "gpt-5": undefined } as never });
+  assert.equal(gap.priceOf("gpt-5", usage), (1000 / 1e6) * 5 + (1000 / 1e6) * 15, "an undefined row is no row");
+});
+
+test("...and an EXACT row beats a prefix one, whichever table each lives in", () => {
+  const usage = { inputTokens: 1000, outputTokens: 1000 };
+  // The default table holds `claude-haiku-4-5-20251001`; an operator row for the shorter
+  // `claude-haiku-4-5` must not outrank it for the exact dated name.
+  const a = new AnthropicAdapter({ apiKey: "k", prices: { "claude-haiku-4-5": { input: 99, output: 99 } } });
+  assert.equal(a.priceOf("claude-haiku-4-5-20251001", usage), 0.0048, "the default table's exact dated row");
+  assert.equal(a.priceOf("claude-haiku-4-5-20260101", usage), 0.198, "no exact row, so the operator's prefix answers");
+});
+
 test("`constructor` is not a price row — the table is operator JSON and is read as own keys", () => {
   const o = new OpenAIAdapter({ apiKey: "k", prices: { only: { input: 2, output: 4 } } });
   const usage = { inputTokens: 1000, outputTokens: 1000 };

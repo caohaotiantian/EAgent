@@ -408,8 +408,10 @@ test("an unreadable usage number is `not reported`, and the record it produces i
 
 test("...and both adapters answer the same malformed frame with the same number", async () => {
   // The property the shared `producedTokens`/`roughTokens` import protects, held over the
-  // validator too — which is duplicated rather than exported, because `index.ts` re-exports both
-  // adapters with `export *` and every name there is on the pinned public surface.
+  // validator too — which both adapters now import from `providers/usage.ts` rather than writing
+  // out twice. The reason recorded for the duplication was that sharing it would widen the pinned
+  // public surface, and that was false: `index.ts` re-exports four provider modules BY NAME, and
+  // a fifth it does not name is not on the pin.
   const a = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(GARBAGE_TAIL(`"abc"`)) }).stream(REQ, ac()));
   const o = new OpenAIAdapter({
     apiKey: "k",

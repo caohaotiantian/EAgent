@@ -178,7 +178,7 @@ export class OpenAIAdapter implements ModelAdapter {
 
   /** See `AnthropicAdapter.priceOf` and `resolvePrice`: a model with no table row is not free. */
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
-    const p = resolvePrice({ ...DEFAULT_PRICES, ...(this.#opts.prices ?? {}) } as Record<string, PriceRow>, model);
+    const p = resolvePrice([this.#opts.prices ?? {}, DEFAULT_PRICES] as Record<string, PriceRow>[], model);
     if (p === undefined) return 0;
     const cost = round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
     // See `AnthropicAdapter.priceOf`: a cost that is not a non-negative number is refused
