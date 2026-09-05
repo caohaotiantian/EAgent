@@ -87,18 +87,23 @@ function chain(levels: number, branching: number): { root: GraphSpec; resolver: 
 
 test("A CHILD IS VALIDATED ONCE PER DISTINCT (ref, depth, trail), not once per referencing node", () => {
   // The deterministic instrument. At depth 12 with two-way branching the uncached walk resolves
-  // child specs 40,902 times; the memoized one 336. The number is a count of work, not of time,
-  // so it is identical on any machine.
+  // child specs 40,902 times; the memoized one 336, and 102 once the SECOND walk over the same
+  // tree is memoized too. The number is a count of work, not of time, so it is identical on any
+  // machine.
   //
-  // 336 AND NOT 24, and the difference is worth knowing: `rule017Capabilities` calls
-  // `reachableToolNamesThrough` once per node and that walk has no cache of its own, so it is
-  // the residue. It is bounded by `expansion.maxDepth` rather than by the reference count, which
-  // is why it is a constant here and not the exponential this test is about.
+  // WHAT THE RESIDUE WAS: `rule017Capabilities` and the GRAPH014 posture floor each call
+  // `reachableToolNamesThrough` once per node, and that walk had no cache of its own, so the
+  // subtree under every reference was re-walked from scratch. It shares
+  // `ValidationContext.toolReachMemo` with the whole validation walk now, keyed
+  // `(maxDepth, ref)`. Both numbers are asserted: the loose bound is what keeps the
+  // exponential from coming back, and the tight one is what keeps the memo from being
+  // silently dropped.
   const { root, resolver, calls } = chain(12, 2);
   const r = compile({ spec: root, resolver, tools: {}, tenantCapabilities: ["*"] });
   const resolved = calls();
   console.log(`    depth 12, branching 2: ${String(resolved)} subgraph() resolutions, ${String(r.diagnostics.length)} diagnostics`);
   assert.ok(resolved < 2000, `${String(resolved)} subgraph resolutions for a 12-level chain — the walk is exponential again`);
+  assert.equal(resolved, 102, "one walk per (maxDepth, ref), not one per referencing node");
 
   // AND THE AUTHOR SEES EXACTLY WHAT THEY SAW. The leaf's single fault is still reported once
   // per node that reaches it, which is what makes the count exponential in the OUTPUT while the

@@ -195,6 +195,9 @@ export function compileMutation(input: MutateInput): MutationResult {
   // case this rule exists for, and `resolveSubgraphs` walks the merged spec, so it is in there.
   // The fallback is the older-`RunGraph` guard `#runSubgraph` uses, not a second policy.
   const childSpec = (ref: string): GraphSpec | undefined => result.graph.subgraphs?.[ref] ?? input.resolver.subgraph?.(ref);
+  // One memo across the whole filter: several added nodes may delegate to the same ref, and
+  // each `reachableToolNamesThrough` call would otherwise re-walk that subtree from scratch.
+  const reachMemo = new Map<string, readonly string[]>();
   const gatedNodes = mutation.addNodes
     .filter((n) =>
       // Reachable, not named. A proposed `agent` node names no tool, so keying on
@@ -208,7 +211,7 @@ export function compileMutation(input: MutateInput): MutationResult {
       // gated on its own floor, so this is not an oversight hole — what it fixes is a parent
       // trajectory that could not be read, and a human asked after the child had already done
       // reversible work.
-      reachableToolNamesThrough(n, childSpec, result.graph.expansion.maxDepth).some((name) => {
+      reachableToolNamesThrough(n, childSpec, result.graph.expansion.maxDepth, reachMemo).some((name) => {
         const manifest = input.tools[name];
         // `isHardToUndo`, never the two names spelled out: the positive form falls through as
         // EASY for a class this binary cannot read, which is the one direction a gate may not
