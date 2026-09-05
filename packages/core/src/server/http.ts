@@ -2225,21 +2225,28 @@ export class ControlPlane {
     this.#server = server;
     try {
       // BEFORE THE SOCKET ACCEPTS, and the comment on `#armGatedRuns` that says "BEFORE THE FIRST
-      // REQUEST" used to sit AFTER `server.listen` had resolved — so `/health` answered 200 while
-      // the arming was still running (measured: 200 after 52 of 5,000 folds, `listen()` still
-      // pending), and so did every other route, including the unauthenticated callback route the
-      // arming exists to serve. `server.listen` starts accepting immediately and this method
+      // REQUEST" used to sit AFTER `server.listen` had resolved — so every route answered while
+      // the arming was still running, including the unauthenticated callback route the arming
+      // exists to serve. Measured on the tree before this change, with a store whose `listRuns`
+      // takes 200 ms: `GET /health` on the port `listen` was given answered **200** mid-scan; it
+      // now refuses the connection until the scan is done. `server.listen` starts accepting
+      // immediately and this method
       // awaits, so a scan after it is a scan with the door open; there is no third position. The
       // cost is that a probe arriving during boot gets a refused connection rather than a 200,
       // which is the honest answer and the one every load balancer already understands. The
       // alternative — answer 503 on every route until armed — puts a second state machine in
       // front of the whole plane to report the same fact less clearly.
       //
-      // AFTER `#server` IS CLAIMED, which is the part that is easy to get wrong and was: with the
-      // await above that assignment, two concurrent `listen()` calls both passed the
-      // already-listening guard and the first socket was leaked exactly as it was before that
-      // guard existed. Measured as a `node --test` run that completed every assertion and never
-      // exited, holding one `TCPServerWrap`.
+      // AFTER `#server` IS CLAIMED, which is the part that is easy to get wrong and was. An await
+      // above that assignment leaves a window in which `#server` is `undefined` while a `listen`
+      // is genuinely in progress — so the already-listening guard does not hold, and `close()`
+      // resolves against a socket that does not exist yet and then one gets bound that nothing
+      // holds a handle to. MEASURED with the scan above the assignment: `close()` 50 ms into a
+      // 200 ms scan, and `listen()` went on to answer "bound"; `http.test.ts` completed all 128
+      // of its assertions and the process never exited, holding one `TCPServerWrap`. Pinned by
+      // *close() DURING THE ARMING SCAN LEAVES NOTHING BOUND* in
+      // `test/server/product-lane-watch-and-stop.test.ts`, with the second-`listen` refusal
+      // beside it as the other half of the same claim.
       await this.#armGatedRuns();
       // AND `close()` MAY HAVE WON WHILE IT RAN. It clears `#server` and resolves without waiting
       // for a socket that does not exist yet, so binding now would leave one bound that nothing
