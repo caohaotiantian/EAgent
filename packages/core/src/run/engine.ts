@@ -5492,21 +5492,14 @@ export class Engine {
     // a different span tree and the conformance check reports a mismatch it caused. Measured
     // while writing this — 44 spans against the original's 46. Serving the recorded value and
     // then recording it is what keeps a shadow journal structurally identical to its original.
-    // THE MISS IS NOT A DIVERGENCE HERE, and this is the one place in the engine where that is
-    // true. `onGraphChange: "allow"` exists so a CANDIDATE graph can be replayed against a
-    // recording — that is what `runEvalSuite` does — and a candidate's new `function` node has a
-    // taskId the recording never held, so no seed was ever written for it. A model or a tool
-    // result cannot be invented, which is why `require` is right to throw for those; a seed can,
-    // and deriving it from the key keeps the candidate's OWN replay reproducible rather than
-    // making it entropy. Measured before this line existed: a candidate that computes where the
-    // original wrote failed outright, and `report.replayed.channels` lost the channel the test
-    // compares.
-    const seed =
-      this.#replay !== undefined
-        ? this.#replay.has(key)
-          ? Number(this.#replay.require(key).result)
-          : seedFromKey(key)
-        : randomInt(0, 2 ** 32);
+    // WHETHER A MISS MAY DERIVE IS NOT THIS ENGINE'S TO DECIDE. This branched on `has(key)` and
+    // derived on every miss, on the argument that a miss can only be a candidate's new node under
+    // `onGraphChange: "allow"` — an option no code in this file can see. `ReplayEffects.seed`
+    // holds the decision now, beside the report that has to name what it did: a miss is
+    // `E_REPLAY_DIVERGENCE` unless the replayed graph is not the recorded one AND the journal
+    // does not predate the seed effect, and a derived seed is counted against `hermetic`.
+    // `seedFromKey` is only the derivation.
+    const seed = this.#replay !== undefined ? this.#replay.seed(key, seedFromKey) : randomInt(0, 2 ** 32);
     await this.#serialize(() =>
       ctx.log.append(
         [

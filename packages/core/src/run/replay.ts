@@ -14,8 +14,10 @@
  * `✗ state.reduced : expected {"out":"0.534…"}, got {"out":"0.108…"}`, `match: false`. The engine
  * now journals a seed per task under `effectKey(taskId, "random", 0)` and the bridge builds the
  * body's `Math.random` from it, so the draws are SERVED here like any other effect. A key this
- * replay's graph asks for that the recording never held is the one case that derives rather than
- * serves — see `seedFromKey`, and the reason is `onGraphChange: "allow"`. An embedder passing
+ * replay's graph asks for that the recording never held is `E_REPLAY_DIVERGENCE` like any other
+ * missing effect — unless this replay runs a graph that is NOT the recorded one, in which case a
+ * seed is DERIVED from the key (`seedFromKey`, in `engine.ts`), `derivedSeeds` names it and
+ * `hermetic` is false. See `ReplayEffects.seed`. An embedder passing
  * `opts.globals`, or registering a body directly on `FunctionRegistry`, still gets a genuine live
  * side effect. See `the design notes` B11. If replay needs an effect the journal does not contain, that is
  * `E_REPLAY_DIVERGENCE`, a loud failure, never a silent live call.
@@ -30,9 +32,10 @@
  * re-execution but the REPORT: see `ReplayReport.hermetic` and `ReplayEffects.liveBodies`.
  *
  * Three uses, one mechanism: debugging (step a run), regression evaluation (D10
- * replays a frozen suite against a candidate), and verification (CI replays fixtures
- * and asserts every `state.hash` matches — which is how a reducer regression is
- * caught).
+ * replays a frozen suite against a candidate), and verification (`loom replay` re-executes a run
+ * and grades it: task states, gate decisions, the final channel map, the per-step
+ * `state.reduced` hashes — see `stateHashFrame` — and why the run ended). Nothing in `scripts/`
+ * replays fixtures in CI; this paragraph used to say it did.
  *
  * THE VERDICT IS OVER TWO QUESTIONS, not one: did the projections agree, and was the
  * recording actually consumed? The second is not implied by the first — a recorded result
@@ -139,6 +142,14 @@ export class ReplayEffects {
    * is keyed by an effect key, which is exactly why `hermetic` could not see either of them.
    */
   readonly #liveBodies = new Set<string>();
+  /** `random` keys this replay DERIVED because the recording held no seed. See `seed`. */
+  readonly #seedsDerived = new Set<string>();
+  /** Every task the recording leased. See `seed` for what a leased task with no seed can mean. */
+  readonly #leasedTasks = new Set<string>();
+  /** Whether the recording wrote ANY `random` seed — i.e. was written by an engine that seeds bodies. */
+  #recordingSeeds = false;
+  /** Whether `seed` may derive at all. Off until `replayRun` says the graph is not the recorded one. */
+  #deriveSeeds = false;
 
   static fromEvents(events: Iterable<JournalEvent>): ReplayEffects {
     const r = new ReplayEffects();
@@ -147,6 +158,7 @@ export class ReplayEffects {
       // the recording already holds it — so replay serves it here rather than journaling a new
       // `clock` effect, which would be replay appending nondeterminism to reach determinism.
       if (isEvent(e, "task.leased") && e.taskId !== undefined) {
+        r.#leasedTasks.add(String(e.taskId));
         const k = `${e.taskId}#${e.payload.attempt}`;
         const q = r.#leases.get(k);
         if (q === undefined) r.#leases.set(k, [e.ts]);
@@ -156,6 +168,7 @@ export class ReplayEffects {
       if (isEvent(e, "effect.started")) r.#unknown.add(e.payload.key);
       else if (isEvent(e, "effect.completed")) {
         r.#unknown.delete(e.payload.key);
+        if (kindOf(e.payload.key) === "random") r.#recordingSeeds = true;
         r.#completed.set(e.payload.key, {
           key: e.payload.key,
           result: e.payload.result,
@@ -195,8 +208,8 @@ export class ReplayEffects {
    *     than silently redefine what a recorded run was.
    *
    * WHAT IT DOES NOT CLAIM: the digest is over the RESULT only. It says nothing about
-   * which call produced it (`reboundEffects`), about arguments (there is no input digest —
-   * see `reboundEffects`' docstring), or about a journal rewritten CONSISTENTLY, digest
+   * which call produced it or with what arguments — both are graded after the run by
+   * `reboundEffects`, from `tool.called` and `model.called` — or about a journal rewritten CONSISTENTLY, digest
    * included, by anyone who can run `digest`. It is an integrity check against edits and
    * drift, never an authenticity check against an adversary; the journal is not signed.
    *
@@ -289,6 +302,87 @@ export class ReplayEffects {
   }
 
   /**
+   * Let `seed` derive a value for a key the recording never held.
+   *
+   * Called by `replayRun` when the graph it was handed is NOT the graph the journal records —
+   * by hash or by resolved resources — and by nothing else in this tree. That fact, not the
+   * caller's `onGraphChange` setting, is the first half of what makes a missing seed explicable:
+   * a node the recording never had has no seed to serve. It was keyed on `onGraphChange: "allow"`
+   * first, and that broke the one caller the derivation exists for — `evolution/gate.ts`'s
+   * `runEvalSuite` replays a candidate at the DEFAULT setting, so a candidate that added a
+   * `function` node failed every case `E_REPLAY_DIVERGENCE`. The second half is `seed`'s own,
+   * from the journal: a graph can differ by a renamed metadata field or a re-pointed body and
+   * still hold every recorded node, and a recorded body with no seed is an old journal whatever
+   * the graph did. This only ever widens
+   * what is REPORTED, never what is served: a derived seed is named in `derivedSeeds` and costs
+   * `ReplayReport.hermetic`. The method is public because the class is; an embedder who calls
+   * it has chosen to, and the report still names every seed it bought.
+   */
+  allowDerivedSeeds(): void {
+    this.#deriveSeeds = true;
+  }
+
+  /**
+   * The `random` seed for `key` — served from the record, or DERIVED and said so, or refused.
+   *
+   * THIS USED TO BE AN ENGINE BRANCH THAT DERIVED UNCONDITIONALLY. `Engine.#randomSeedEffect`
+   * tested `has(key)` and fell through to `seedFromKey` on every miss, on the argument that a miss
+   * can only be a candidate's new node under `onGraphChange: "allow"` — an option the Engine
+   * cannot see. Measured at 95a3dde on a recording written before the seed effect existed,
+   * replayed against the byte-identical graph at the default `onGraphChange`: the body drew from
+   * a seed the record never held and the report said `match: true, hermetic: true` whenever the
+   * draw did not reach a channel. A replay that invents its entropy is not a replay.
+   *
+   * So a miss is a DIVERGENCE unless BOTH halves hold. First, this replay runs a graph that is
+   * not the recorded one (see `allowDerivedSeeds`). Second, the miss is explained by the graph
+   * change and not by the journal's age: the key's task is one the recording never LEASED, or
+   * the recording wrote a seed for SOME task — because the engine seeds every `function` and
+   * `evaluator{assertion}` body, so on a journal that holds any seed a leased task with none is
+   * read as a node of another type that the candidate has turned into a body
+   * (`test/run/replay.test.ts` replaces the `write` tool with a function). READ AS, not proven: a
+   * seeding journal that lost exactly one body's seed satisfies the same test and derives — the
+   * derivation is then named and costs `hermetic`, which is the direction that may be wrong. On a
+   * journal that holds no seed at all, a leased task with none is indistinguishable from a body
+   * the journal predates, and refuses. Measured
+   * with the first half alone: a metadata-only rename of a one-node graph over a seedless journal
+   * derived the recorded node's seed and ran, `match: false` on `graph.bound` only — and
+   * `evolution/gate.ts` reads neither `hermetic` nor `derivedSeeds`. Even when both halves hold it
+   * is recorded: `derivedSeeds` names the key and `hermetic` counts it. Deriving from the key
+   * rather than drawing keeps two replays of one candidate on one stream, which is what
+   * `runEvalSuite` needs to be measuring the candidate and not the entropy.
+   *
+   * `derive` is a parameter rather than an import because the derivation lives in `engine.ts`
+   * beside the bridge that consumes the seed; this class decides whether to SERVE, not how to
+   * seed a PRNG. A key that started and never completed goes through `require`, which already
+   * says so.
+   */
+  seed(key: string, derive: (key: string) => number): number {
+    if (this.has(key) || this.#unknown.has(key)) return Number(this.require(key).result);
+    const task = taskOf(key);
+    const recordedTask = task !== undefined && this.#leasedTasks.has(task);
+    const predates = recordedTask && !this.#recordingSeeds;
+    if (!this.#deriveSeeds || predates) {
+      throw err.internal(
+        CODES.E_REPLAY_DIVERGENCE,
+        `effect "${key}" is not in the journal — ` +
+          (predates
+            ? `the recording leased this task and holds no seed for any task, so the journal predates the random effect`
+            : `nothing says this graph differs from the recorded one, so a missing seed is a missing effect`) +
+          `. A replay derives a seed only for a body the recording never ran, on a graph that is not the recorded ` +
+          `one, and the report then names it in derivedSeeds`,
+        { details: { key, recordedTask, recordingSeeds: this.#recordingSeeds } },
+      );
+    }
+    this.#seedsDerived.add(key);
+    return derive(key);
+  }
+
+  /** `random` keys this replay derived from the key instead of serving. See `seed`. */
+  get derivedSeeds(): readonly string[] {
+    return [...this.#seedsDerived].sort();
+  }
+
+  /**
    * Record that a replay reached a `function` or `evaluator{assertion}` body, and whether the
    * runtime can vouch for it. See `liveBodies` for what the answer is for.
    *
@@ -360,6 +454,7 @@ export interface ReplayFrame {
   readonly seq: number;
   readonly kind:
     | "state.reduced"
+    | "state.hash"
     | "task.committed"
     | "gate.decided"
     | "run.completed"
@@ -429,16 +524,32 @@ export interface ReplayReport {
    */
   readonly liveBodies: readonly string[];
   /**
+   * `random` effect keys this replay DERIVED from the key because the recording held no seed.
+   *
+   * Reachable only when the replayed graph is not the recorded one AND the miss is explained by
+   * that change rather than by the journal's age — see `ReplayEffects.seed` for the two-part
+   * test. A recorded body whose journal predates the seed effect is `E_REPLAY_DIVERGENCE`
+   * whatever the graph did. Named, for the reason `liveBodies` gives: a false `hermetic` without
+   * the keys sends its reader to the wrong file. `ReplayEffects.seed` decides it and carries the
+   * argument, including the measurement of what the unconditional derivation used to certify.
+   */
+  readonly derivedSeeds: readonly string[];
+  /**
    * Nothing this replay needed had to be RE-DERIVED instead of served from the record.
    *
-   * Three things can falsify it. Two are "the journal could not answer":
+   * Four things can falsify it. Three are "the journal could not answer":
    *   - a recorded effect that started and never recorded an outcome (`unknownOutcomes`) — the
    *     original process died mid-call, and replay cannot invent what the world did;
    *   - a body clock the recording has no lease for (`ReplayEffects.derivedClocks`) — the replay
    *     ran a `function` or `evaluator{assertion}` body the recording did not lease at that
-   *     attempt, so `ctx.now()` came from the shadow's own lease rather than from history.
+   *     attempt, so `ctx.now()` came from the shadow's own lease rather than from history;
+   *   - a PRNG seed the recording never wrote (`derivedSeeds`) — the replay ran a body under a
+   *     candidate graph and derived the seed from the effect key, so the body's draws came from
+   *     the key rather than from history. This was the unnamed fourth member: the derivation ran
+   *     on EVERY miss and nothing counted it, so a replay that invented its entropy reported
+   *     `hermetic: true`.
    *
-   * The third is "the RUNTIME could not answer", and it is a different question:
+   * The fourth is "the RUNTIME could not answer", and it is a different question:
    *   - `liveBodies` — a body re-executed that the runtime cannot vouch for. Bodies re-execute
    *     on purpose; what this term adds is whether the one that ran was realm-bounded.
    *
@@ -509,6 +620,15 @@ export interface ReplayReport {
    * the request — which is why the graph-hash test belongs at the reader and not here.
    */
   readonly unverifiedModelEffects: readonly string[];
+  /**
+   * Tool effect keys where the RECORDING predates `tool.called.argsDigest` (journals written
+   * before 2026-08-27), so whether the replay made the same call is not decidable from these two
+   * journals. The same third state as `unverifiedModelEffects`, one effect kind over, and kept as
+   * its own list rather than folded into that one because a reader refusing on "different graph
+   * and cannot tell" has to say WHAT it could not tell. `evolution/gate.ts` reads the model list
+   * today; it is owed this one under the same condition.
+   */
+  readonly unverifiedToolEffects: readonly string[];
 }
 
 /**
@@ -645,6 +765,12 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
   const refsBound = recordedManifest === "" || recordedManifest === replayedManifest;
 
   const graphBound = (recordedGraph === "" || recordedGraph === opts.graph.graphHash) && refsBound;
+  // HALF THE PERMISSION TO DERIVE RATHER THAN SERVE, and it is a fact about the graph rather than
+  // a setting: a graph that is not the recorded one may hold a `function` node the recording
+  // never seeded. The other half — the miss must be explained by that change and not by the
+  // journal's age — is `ReplayEffects.seed`'s, from the journal. On the recorded graph a missing
+  // seed stays a divergence.
+  if (!graphBound) effects.allowDerivedSeeds();
   if (!graphBound && opts.onGraphChange === "throw") {
     const what = recordedGraph !== "" && recordedGraph !== opts.graph.graphHash ? "graph" : "resolved resources";
     throw err.internal(
@@ -775,12 +901,16 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 
   const replayedEvents: JournalEvent[] = [];
   for await (const e of shadow.read(replayRunId, 1)) replayedEvents.push(e);
-  const { rebound, unverified } = reboundEffects(events, replayedEvents);
+  const { rebound, unverifiedModels, unverifiedTools } = reboundEffects(events, replayedEvents);
 
   const frames = compare(original, replayed, effects);
   // Appended after `compare`, so the frame seq numbers of the three original kinds are
   // untouched by whether a binding held.
   let seq = frames.length;
+  // THE TRAJECTORY, NOT ONLY WHERE IT ENDED — see `stateHashFrame`. Unconditional, including
+  // under `onGraphChange: "allow"`: that opt-out is about which GRAPH may run, and a candidate
+  // that reaches the recorded end state by a different route has still not reproduced the run.
+  frames.push({ seq: seq++, ...stateHashFrame(events, replayedEvents) });
   if (!graphBound && opts.onGraphChange !== "allow") {
     // WHICH CONJUNCT MOVED, because reporting the graph hash for a RESOURCE change printed the
     // same string twice. `graphBound` is `specBound && refsBound`, and `loom replay`'s only
@@ -830,17 +960,21 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     replayed,
     unservedEffects: unserved,
     liveBodies: effects.liveBodies,
+    derivedSeeds: effects.derivedSeeds,
     // Non-hermetic when the recorded run had effects with no outcome: replay cannot
     // invent what the world did while the process was dying — or when a body read a clock
-    // this recording could not answer, which is the same statement one field over — or when a
-    // body re-executed that the runtime cannot vouch for. The third conjunct has no producer in
-    // this tree and is therefore inert; `ReplayReport.hermetic` names the two lines that give it
-    // one, and why it is published before them. See also `ReplayEffects.derivedClocks`.
+    // this recording could not answer, or drew from a seed it never wrote, which are the same
+    // statement two fields over — or when a body re-executed that the runtime cannot vouch for.
+    // `ReplayReport.hermetic` names all four and what each one means.
     hermetic:
-      effects.unknownOutcomes.length === 0 && effects.derivedClocks.length === 0 && effects.liveBodies.length === 0,
+      effects.unknownOutcomes.length === 0 &&
+      effects.derivedClocks.length === 0 &&
+      effects.derivedSeeds.length === 0 &&
+      effects.liveBodies.length === 0,
     graph: { recorded: recordedGraph, replayed: opts.graph.graphHash, match: graphBound },
     reboundEffects: rebound,
-    unverifiedModelEffects: unverified,
+    unverifiedModelEffects: unverifiedModels,
+    unverifiedToolEffects: unverifiedTools,
   };
 }
 
@@ -856,14 +990,25 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
  * result and, before this, nothing anywhere said so.
  *
  * Derived from the two journals rather than checked at serve time, because that is what is
- * possible from here: the journal records a call's TYPE SHAPE and never its argument
- * VALUES (`tool.called.argsShape`, and see the comment there for why). For a TOOL that is
- * still all there is, so a tool entry catches a different tool, a different tool version and
- * a different argument shape, and does NOT catch the same tool with a different argument
- * VALUE — caught today by the graph hash, and only by it, which means not at all under
- * `onGraphChange: "allow"`.
+ * possible from here: the replay Engine hands `require` a key and nothing else, and journals
+ * the `tool.called` that says what it asked for only after the result is in hand.
  *
- * FOR A MODEL IT IS NOW THE WHOLE REQUEST. This used to compare the model NAME alone, and
+ * FOR A TOOL IT IS THE CALL AND ITS ARGUMENTS. `tool.called` carries `argsShape`, a TYPE shape,
+ * and `argsDigest`, a digest of the argument VALUES — never the values themselves, for the
+ * reason that event gives. This compared the shape alone and its own text said "that is still
+ * all there is", which was false the day `argsDigest` landed beside it. Measured at 95a3dde: a
+ * candidate that changed `fs.write`'s `path` from `out/summary.md` to somewhere else kept the
+ * key `write@root#0:tool:0` and the shape `{body:string,path:string}`, was served the recorded
+ * write, and replayed `match: true, reboundEffects: []` under `onGraphChange: "allow"` —
+ * certified by `evolution/gate.ts` as measured, against a transcript of a write it never made.
+ * The digest is the whole sha256, not a prefix: a shortened one could render two identities
+ * that compare unequal as the same string in a frame.
+ *
+ * A RECORDING WITH NO `argsDigest` IS NOT EVIDENCE OF SAMENESS EITHER. Journals written before
+ * that field (2026-08-27) carry none; those keys go to `unverifiedToolEffects`, exactly as the
+ * model arm below does for a missing `requestDigest`, and the reader decides.
+ *
+ * FOR A MODEL IT IS THE WHOLE REQUEST. This used to compare the model NAME alone, and
  * named the missing piece in its own text: an input digest per effect. `model.called` carries
  * one — `requestDigest`, a digest of the shaped `ModelRequest` — so a candidate that re-points
  * `agent.prompt`, rewrites the system document, or changes which tools the model is offered
@@ -882,12 +1027,17 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
 function reboundEffects(
   recorded: readonly JournalEvent[],
   replayed: readonly JournalEvent[],
-): { rebound: ReplayReport["reboundEffects"]; unverified: readonly string[] } {
-  const index = (events: readonly JournalEvent[]): Map<string, { field: "tool" | "model"; call: string }> => {
-    const out = new Map<string, { field: "tool" | "model"; call: string }>();
+): { rebound: ReplayReport["reboundEffects"]; unverifiedModels: readonly string[]; unverifiedTools: readonly string[] } {
+  // `verified` is whether the RECORDING carried the input digest this identity rests on. Both
+  // arms keep `undefined` as `undefined` rather than normalising to a string, so "no digest was
+  // written" is never mistaken for "a digest that happens to differ".
+  const index = (events: readonly JournalEvent[]): Map<string, { field: "tool" | "model"; call: string; verified: boolean }> => {
+    const out = new Map<string, { field: "tool" | "model"; call: string; verified: boolean }>();
     for (const e of events) {
       if (isEvent(e, "tool.called")) {
-        out.set(e.payload.key, { field: "tool", call: `${e.payload.name}@${e.payload.version}(${e.payload.argsShape})` });
+        const d = (e.payload as { argsDigest?: string }).argsDigest;
+        const call = `${e.payload.name}@${e.payload.version}(${e.payload.argsShape})`;
+        out.set(e.payload.key, { field: "tool", call: d === undefined ? call : `${call} ${d}`, verified: d !== undefined });
       } else if (isEvent(e, "model.called")) {
         // The MODEL and the REQUEST, and deliberately not the provider. A replay reaches no
         // adapter, so it journals `provider: "replay"` — a fact about the replay, not about
@@ -897,30 +1047,29 @@ function reboundEffects(
         // `undefined` is kept as `undefined` rather than normalised to a string, so the
         // caller can tell "no digest was written" from "a digest that happens to differ".
         const d = (e.payload as { requestDigest?: string }).requestDigest;
-        out.set(e.payload.key, { field: "model", call: d === undefined ? e.payload.model : `${e.payload.model} ${d}` });
+        out.set(e.payload.key, {
+          field: "model",
+          call: d === undefined ? e.payload.model : `${e.payload.model} ${d}`,
+          verified: d !== undefined,
+        });
       }
     }
     return out;
-  };
-  const digestOf = (events: readonly JournalEvent[], key: string): string | undefined => {
-    for (const e of events) {
-      if (isEvent(e, "model.called") && e.payload.key === key) return (e.payload as { requestDigest?: string }).requestDigest;
-    }
-    return undefined;
   };
 
   const before = index(recorded);
   const after = index(replayed);
   const out: { key: string; field: "tool" | "model"; recorded: string; replayed: string }[] = [];
-  const unverified: string[] = [];
+  const unverifiedModels: string[] = [];
+  const unverifiedTools: string[] = [];
   for (const [key, a] of before) {
     const b = after.get(key);
     if (b === undefined) continue;
-    if (a.field === "model" && digestOf(recorded, key) === undefined) {
+    if (!a.verified) {
       // The recording cannot answer the question, so this key is neither rebound nor clean.
       // Reporting it as clean is the loosening; reporting it as rebound would claim a
       // difference nothing measured.
-      unverified.push(key);
+      (a.field === "model" ? unverifiedModels : unverifiedTools).push(key);
       continue;
     }
     if (b.call === a.call) continue;
@@ -928,8 +1077,63 @@ function reboundEffects(
   }
   return {
     rebound: out.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0)),
-    unverified: unverified.sort(),
+    unverifiedModels: unverifiedModels.sort(),
+    unverifiedTools: unverifiedTools.sort(),
   };
+}
+
+/**
+ * The per-step state hashes of the two runs, compared in journal order — one frame, naming the
+ * first step that differs.
+ *
+ * `compare` grades the FINAL channel map, and for as long as that was the only state frame the
+ * module docstring claimed verification "asserts every `state.hash` matches" while nothing read
+ * `stateHashAfter` at all. Measured at 95a3dde: channel `out` with `reduce: "sum"`, bodies `a`
+ * then `b` writing 1 then 2 in the recording and 2 then 1 in the candidate — the journals hold
+ * `afb1ca2872` against `56f2fff5c7` at the first step, the end state is 3 both ways, and the
+ * report said `match: true`. Function bodies re-execute on replay PRECISELY so that a body
+ * regression is caught, and the only comparison happened after the fold had collapsed the
+ * trajectory into one map. The evidence was in hand — both event arrays are collected before
+ * `compare` runs — and unread, the same shape as `resultDigest` written at four sites and
+ * compared nowhere.
+ *
+ * ORDER IS COMPARED, AND HERE IS WHAT WAS CHECKED. `Engine.#runWaveInner` runs a wave in parallel
+ * and commits it in `compareBranch` order, so within a wave the sequence does not depend on which
+ * task's tool answered first. Across waves the partition is the scheduler's, and one attempt to
+ * make it differ did not: two independent chains recorded at `maxParallelism: 1` and replayed at
+ * the default, and the reverse, walked the same four steps. The skeleton's five-way fan-out
+ * replays to the same sequence in `test/run/replay.test.ts`. NOT CHECKED, and named so the next
+ * false divergence has somewhere to start: a retried task whose backoff elapsed during a slow
+ * recorded tool call and not during the instantaneous replay would partition differently, and
+ * whether its step then moves depends on its order against its neighbours. This frame reads the
+ * raw journal where `compare` reads the fold, so a rewound span is visible here and suppressed
+ * there; the one rewound run tried (its task never re-ran) diverged on `task.committed` already.
+ *
+ * WHAT IT DOES NOT SEE: a hash is over the channel map AS THE FOLD BUILDS IT, so a divergence in
+ * a value the fold never touches (a tool result that only reaches a transcript) is `reboundEffects`'
+ * and `unservedEffects`' to find, not this frame's.
+ */
+function stateHashFrame(recorded: readonly JournalEvent[], replayed: readonly JournalEvent[]): Omit<ReplayFrame, "seq"> {
+  const steps = (events: readonly JournalEvent[]): { taskId: string; hash: string }[] => {
+    const out: { taskId: string; hash: string }[] = [];
+    for (const e of events) {
+      if (isEvent(e, "state.reduced")) out.push({ taskId: String(e.taskId ?? "(no task)"), hash: e.payload.stateHashAfter });
+    }
+    return out;
+  };
+  const render = (s: { taskId: string; hash: string } | undefined): string => (s === undefined ? "(no step)" : `${s.taskId} ${s.hash}`);
+  const a = steps(recorded);
+  const b = steps(replayed);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x !== undefined && y !== undefined && x.taskId === y.taskId && x.hash === y.hash) continue;
+    // `(x ?? y)!`: the loop only reaches here past the shorter sequence's end or on a mismatch,
+    // and in both cases at least one side has a step.
+    const at = (x ?? y)!;
+    return { kind: "state.hash", taskId: at.taskId, match: false, expected: render(x), actual: render(y) };
+  }
+  return { kind: "state.hash", match: true, expected: `${a.length} steps`, actual: `${b.length} steps` };
 }
 
 /**

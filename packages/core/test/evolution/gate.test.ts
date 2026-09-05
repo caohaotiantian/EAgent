@@ -110,11 +110,24 @@ test("a channel expectation that does not hold fails the case", async () => {
 
 // ── what the gate actually compares ──────────────────────────────────────────
 
-/** The skeleton with `merge` swapped for a body that produces a different digest. */
+/**
+ * The skeleton with `merge` swapped for a body that produces a different `merged` value.
+ *
+ * The COUNT moves and the MARKDOWN does not, on purpose: `write` is called with
+ * `${merged.markdown}`, and a recorded tool result is bound to the arguments it answered
+ * (`tool.called.argsDigest`). A body that changed the markdown would make the candidate's write a
+ * call the recording never made, and the gate would rightly refuse the case as measured against
+ * the recording — a different test, `replay-lane-tool-args-rebound.test.ts`. This one is about a
+ * candidate whose divergence stays in the channels.
+ */
 function rewrittenMerge(h: ReturnType<typeof harness>): GraphSpec {
   h.functions.register("function/merge-digests-v2@stable", (view) => {
     const digests = (view.get<{ path: string; summary: string }[]>("digests") ?? []).slice();
-    return { writes: { merged: { count: digests.length, markdown: digests.map((d) => `- ${d.path}`).join("\n") } } };
+    return {
+      writes: {
+        merged: { count: digests.length * 100, markdown: digests.map((d) => `## ${d.path}\n${d.summary}`).join("\n\n") },
+      },
+    };
   });
   const base = skeletonSpec();
   return {

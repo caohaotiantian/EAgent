@@ -217,9 +217,13 @@ test("CONTROL · a candidate that changes a deterministic FUNCTION body still pr
   // change itself is a function body, which re-executes under replay and is therefore the one
   // kind of candidate this gate really measures.
   const h = harness();
+  // The defect is in `count` and not in `markdown` on purpose: `write` is called with
+  // `${merged.markdown}`, and a recorded tool result is bound to the arguments it answered
+  // (`tool.called.argsDigest`) — a body whose output reaches a tool call is judgeable offline
+  // only while that call stays the recorded one.
   h.functions.register("function/merge-v1@stable", (view) => {
-    const ds = (view.get<{ path: string; summary: string }[]>("digests") ?? []).slice(0, -1);
-    return { writes: { merged: { count: ds.length, markdown: ds.map((d) => `## ${d.path}\n${d.summary}`).join("\n\n") } } };
+    const ds = view.get<{ path: string; summary: string }[]>("digests") ?? [];
+    return { writes: { merged: { count: ds.length - 1, markdown: ds.map((d) => `## ${d.path}\n${d.summary}`).join("\n\n") } } };
   });
   h.functions.register("function/merge-v2@stable", (view) => {
     const ds = view.get<{ path: string; summary: string }[]>("digests") ?? [];
