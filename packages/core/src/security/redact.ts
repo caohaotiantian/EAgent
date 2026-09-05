@@ -558,7 +558,7 @@ function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): un
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         // A key that names a secret redacts its value whatever the declared
         // classification says — belt and braces for hand-built payloads.
-        if (SECRETISH_KEY.test(k)) {
+        if (isSecretishKey(k)) {
           put(out, k, "[secret]");
           st.hits.push("secretish-key");
           continue;
@@ -601,7 +601,148 @@ function walk(value: unknown, hiding: boolean, depth: number, st: WalkState): un
   return typeof value === "string" ? sweep(value, st.hits, st.maxSweep) : value;
 }
 
+/**
+ * Whether a key NAMES a credential, so its value is hidden whatever the classification says.
+ *
+ * THE OLD RULE ANCHORED THE WORD AT THE END OF THE KEY and tolerated only an underscore-
+ * terminated prefix — `/^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|
+ * credential)s?$/i`. It caught `db_password` and `totp_secret` and missed most real credential
+ * names, because a key is written in camelCase and with dashes as often as with underscores.
+ * Measured at 95a3dde over 43 keys carrying a 32-hex value no DETECTOR matches — the shape where
+ * this arm is the only thing between the value and the reader — 32 leaked, including:
+ *
+ *     x-api-key  private_key  secret_key  signing_key  ssh_key  encryption_key  secretKey
+ *     accessToken  refreshToken  sessionToken  authToken  bearerToken  clientSecret
+ *     cookie  Set-Cookie  passphrase  pwd
+ *
+ * `private_key` and `secret_key` leaking while `totp_secret` redacts is the worst shape of
+ * partial coverage: it looks like it works. The live sinks are `server/http.ts`'s operator event
+ * stream, `telemetry/spans.ts`'s OTLP export and `run/delivery.ts`'s webhook channel — the last
+ * of which this module itself calls "outside the trust boundary".
+ *
+ * **AND THE FIRST WIDENING SHREDDED THE JOURNAL'S OWN NUMBERS.** A bare `token` in the word list,
+ * matched against any segment, turned `inputTokens`, `outputTokens`, `cacheReadTokens`,
+ * `maxTokens`, `runTokens`, `spentTokens` and `reasoningTokens` into the string `"[secret]"` on
+ * every `model.called` frame the operator console renders — the same wave's other half spent
+ * three hundred lines making those numbers trustworthy. `apiKeyEnv` went too, which is the NAME
+ * of an environment variable and whose own docstring says "THE KEY IS NEVER IN THE FILE"; so did
+ * `run/delivery.ts`'s `signature` descriptor, which is the instructions a webhook receiver needs
+ * in order to VERIFY, and `carriesSecret`, a boolean whose whole job is to say that something
+ * else carries one. "Ordinary prose is NOT redacted — false positives train people to ignore
+ * this" is this module's own line, and a redactor that hides a token COUNT is one nobody reads.
+ *
+ * So the rule is three narrow ones, and each exists because of a name above:
+ *
+ *  1. **The word must be the LAST segment.** `password` and `db_password` yes; `passwordRequired`
+ *     and `tokenBudget` and `cookieBannerShown` no.
+ *  2. **The ambiguous words need a QUALIFIER before them.** `key` was already treated this way for
+ *     `keyboard_layout` and `monkey`; `token`, `signature`, `otp` and `mac` need it for
+ *     `inputTokens` and `signatureHeader`. `accessToken` and `x-api-key` still match.
+ *  3. **A boolean or a predicate prefix is not a credential.** `carriesSecret`, `hasPassword`,
+ *     `requiresToken` — the value is a claim ABOUT a secret, not one.
+ *
+ * THE OLD REGEX IS KEPT AS A FLOOR, `||`-ed with the new rule, so that nothing the narrow rule
+ * declines to match is a name the old one caught: `slack_token` has no qualifier and would fall
+ * out of rule 2, and dropping it would be a loosening rather than a correction.
+ *
+ * `test/security/leaf-lane-secretish-keys.test.ts` enumerates both halves — every credential name
+ * and every ordinary one, the ordinary list taken from the field names `journal/events.ts`,
+ * `run/registry.ts` and `telemetry/spans.ts` actually write rather than from names invented here.
+ */
 const SECRETISH_KEY = /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i;
+
+/** Names that are a credential wherever they are the last segment of a key. */
+const SECRET_WORDS: readonly string[] = [
+  "password",
+  "passwd",
+  "passphrase",
+  "pwd",
+  "secret",
+  "credential",
+  "authorization",
+  "apikey",
+  "jwt",
+  "cookie",
+  "dsn",
+  "mnemonic",
+];
+
+/**
+ * Names that are a credential only next to a qualifier.
+ *
+ * Each is here because of a name it would otherwise shred: `key` for `keyboard_layout` and
+ * `monkey`, `token` for `inputTokens` and `maxTokens`, `signature` for `signatureHeader` and for
+ * `run/delivery.ts`'s `signature` descriptor object, `mac` for `formatMac`.
+ */
+const QUALIFIED_WORDS: readonly string[] = ["key", "token", "signature", "sig", "otp", "mac", "hmac"];
+
+/** What makes a neighbouring `key`, `token` or `signature` mean a credential. */
+const QUALIFIERS: readonly string[] = [
+  "api",
+  "private",
+  "secret",
+  "signing",
+  "sign",
+  "ssh",
+  "gpg",
+  "pgp",
+  "encryption",
+  "encrypt",
+  "access",
+  "shared",
+  "master",
+  "license",
+  "refresh",
+  "bearer",
+  "auth",
+  "session",
+  "oauth",
+  "sso",
+  "csrf",
+  "xsrf",
+  "webhook",
+  "client",
+  "personal",
+  "id",
+];
+
+/** A prefix that makes the key a CLAIM about a secret rather than the secret. */
+const PREDICATE_PREFIXES: readonly string[] = ["carries", "has", "is", "was", "requires", "needs", "uses", "contains", "with", "no", "any"];
+
+/**
+ * The key's segments, lowercased: `_`, `-`, `.`, space and camelCase boundaries all split.
+ *
+ * `x-api-key` is three segments, `accessToken` is two, `clientSecret` is two. That is the whole of
+ * why the suffix anchor missed them.
+ */
+function keySegments(key: string): readonly string[] {
+  return key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[_\-. ]+/)
+    .map((part) => part.toLowerCase())
+    .filter((part) => part !== "");
+}
+
+/** A plural is the same word: `credentials`, `secrets`, `cookies`, `tokens`. */
+function singular(part: string): string {
+  return part.endsWith("s") ? part.slice(0, -1) : part;
+}
+
+function isSecretishKey(key: string): boolean {
+  if (SECRETISH_KEY.test(key)) return true;
+
+  const parts = keySegments(key);
+  const last = parts[parts.length - 1];
+  if (last === undefined) return false;
+  const word = SECRET_WORDS.includes(last) || SECRET_WORDS.includes(singular(last)) ? singular(last) : undefined;
+  const qualified = QUALIFIED_WORDS.includes(last) || QUALIFIED_WORDS.includes(singular(last));
+  if (word === undefined && !qualified) return false;
+
+  const before = parts.length > 1 ? parts[parts.length - 2] : undefined;
+  if (before !== undefined && PREDICATE_PREFIXES.includes(before)) return false;
+  if (word !== undefined) return true;
+  return before !== undefined && QUALIFIERS.includes(before);
+}
 
 /**
  * Copy one key onto the rebuilt object — as a PROPERTY, even when it is named `__proto__`.

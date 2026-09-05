@@ -31,6 +31,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { CODES, err } from "../errors.ts";
+import { specProblem } from "./spec-shape.ts";
 
 /** The MCP revision this client speaks. Sent on `initialize` and not negotiated. */
 const PROTOCOL_VERSION = "2024-11-05";
@@ -38,7 +39,7 @@ const PROTOCOL_VERSION = "2024-11-05";
 /** A tool as an MCP server describes it. Every field is a claim, not a fact. */
 export interface McpToolSpec {
   readonly name: string;
-  readonly description?: string;
+  readonly description?: string | null;
   readonly inputSchema?: unknown;
 }
 
@@ -122,6 +123,7 @@ export class McpClient {
   readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   readonly #opts: McpClientOptions;
   #tools: readonly McpToolSpec[] = [];
+  #rejectedTools: readonly { readonly name: string; readonly reason: string }[] = [];
   #closed = false;
 
   constructor(opts: McpClientOptions) {
@@ -132,6 +134,22 @@ export class McpClient {
   /** What the server said it has, after `start`. Empty before it, and after a failure. */
   get tools(): readonly McpToolSpec[] {
     return this.#tools;
+  }
+
+  /**
+   * What `tools/list` offered and this client refused, with the reason.
+   *
+   * A dropped tool is a fact about a third party, and a drop nobody can see is the same silence
+   * the unvalidated forward had. `start` records rather than throws; see the comment there.
+   *
+   * NOTHING IN `cli.ts` OR `server/` READS THIS YET, so the fact is available to a library
+   * embedder and not to the operator the paragraph above invokes: under `loom serve` a legitimate
+   * server whose description runs past `MAX_DESCRIPTION_CHARS` simply stops offering that tool,
+   * with no line anywhere. The missing half is one stderr line per entry in the CLI's MCP
+   * registration loop, which is not this module's to add.
+   */
+  get rejectedTools(): readonly { readonly name: string; readonly reason: string }[] {
+    return this.#rejectedTools;
   }
 
   /**
@@ -178,11 +196,43 @@ export class McpClient {
 
     const listed = (await this.request("tools/list", {})) as { tools?: unknown } | undefined;
     const raw = Array.isArray(listed?.tools) ? listed.tools : [];
-    // Re-validated, not trusted. A nameless entry would register as `mcp__srv__undefined`
-    // and shadow nothing usefully; dropping it is the honest answer.
-    this.#tools = raw.filter(
-      (t): t is McpToolSpec => typeof t === "object" && t !== null && typeof (t as McpToolSpec).name === "string" && (t as McpToolSpec).name.length > 0,
-    );
+    // RE-VALIDATED, NOT TRUSTED — and this used to check the NAME and nothing else, in the file
+    // whose headline claim is that foreign code is not trusted to describe itself. `description`
+    // is typed `string` and `inputSchema` is typed as a schema, and a server answering
+    // `{name:"search", description:{evil:"…"}, inputSchema:42}` had both forwarded into the
+    // provider request the model reads, past `checkManifest`, with the type annotations stopping
+    // nothing. A duplicate `name` was the third: two entries registered, the second silently
+    // shadowing the first, so the manifest the compiler used to compute a posture floor need not
+    // describe the definition that executes.
+    //
+    // DROPPED RATHER THAN THROWN, because one malformed entry must not cost an operator every
+    // other tool the server offers — the goal is a runtime somebody can install and use. The
+    // drops are recorded on `rejectedTools` so the fact is available rather than silent, and
+    // `mcpTools` re-checks and THROWS, because a spec that fails there came from a caller who
+    // built the client by hand, which is a programming error and not a third party.
+    const rejected: { name: string; reason: string }[] = [];
+    const kept = new Map<string, McpToolSpec>();
+    for (const entry of raw) {
+      const t = entry as Record<string, unknown> | null;
+      const name = typeof t === "object" && t !== null ? t["name"] : undefined;
+      if (typeof name !== "string" || name.length === 0) {
+        rejected.push({ name: String(name), reason: "name is not a non-empty string" });
+        continue;
+      }
+      const bad = specProblem(t as unknown as McpToolSpec);
+      if (bad !== undefined) {
+        rejected.push({ name, reason: bad });
+        continue;
+      }
+      // FIRST WINS, so a server cannot shadow an entry after this enumeration has read it.
+      if (kept.has(name)) {
+        rejected.push({ name, reason: "a duplicate of an earlier entry from the same server" });
+        continue;
+      }
+      kept.set(name, t as unknown as McpToolSpec);
+    }
+    this.#tools = [...kept.values()];
+    this.#rejectedTools = rejected;
   }
 
   /** One JSON-RPC request, with a deadline. */

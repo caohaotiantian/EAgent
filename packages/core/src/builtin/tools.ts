@@ -670,9 +670,26 @@ const SCAN_SCRIPT = new Script(
  *
  * `fs.glob` sees one path per `visit`, so without this it would pay the 43 µs fixed cost per
  * FILE. Measured over this repo's `packages/core/src` (62 files), unbuffered
- * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms. The batch
- * also delays `capped` by at most one buffer, which only means a few more paths are walked
- * before the cap stops the search.
+ * `fs.glob "**​/*.ts"` cost 22.6 ms against a 0.8 ms baseline; buffered it is 1.4 ms.
+ *
+ * IT DELAYS `capped` BY A WHOLE BATCH, WHICH IS NOT "a few more paths" — the sentence that stood
+ * here. `capped` is only observable at a flush, so a search that hits `SEARCH_RESULT_CAP` walks to
+ * the end of the current buffer first. COUNTED, not reasoned about, on a 60,000-file tree of
+ * two-line files, against the same code with both batch constants set to 1:
+ *
+ *                            walked   read    ms        unbatched: walked   read    ms
+ *     fs.glob "**​/*.ts"         512      0   3.7                      101      0   7.9
+ *     fs.grep "needle"         1536   1366  32.2                      101    101   9.1
+ *
+ * Both constants are in `fs.grep`'s number and the attribution matters: `GREP_LINE_BATCH` decides
+ * when the CONTENT scan flushes, which is 4,096 lines ≈ 1,366 of these files, and the walk then
+ * overshoots to the next multiple of THIS constant, 1,536. So the cap costs ~1,270 extra file
+ * READS on that tree and a 3.5x slowdown on `fs.grep`'s capped fast path — while still being a
+ * 2x WIN for `fs.glob`, whose cost is the per-call watchdog rather than the reads.
+ *
+ * Both numbers are tens of milliseconds and neither scales with the workspace, so the trade is
+ * worth making; the cost is worth stating, because "a few more paths" reads as a rounding error
+ * and 1,366 file reads is not one.
  *
  * SHARED WITH `fs.grep`'s `include` FILTER, which this docstring used to say needed no buffer.
  * That sentence — "`fs.grep` hands a whole file's lines over at once and needs no buffer" — was

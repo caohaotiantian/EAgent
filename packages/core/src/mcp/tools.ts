@@ -41,6 +41,7 @@ import type { JSONSchema } from "../schema.ts";
 import type { ToolDefinition, ToolResult } from "../run/registry.ts";
 import type { IrreversibilityClass } from "../vocab.ts";
 import type { McpClient } from "./client.ts";
+import { specProblem } from "./spec-shape.ts";
 
 /**
  * `mcp__<server>__<tool>` — flat, and collision-proof across servers.
@@ -90,11 +91,36 @@ export function mcpTools(
   client: McpClient,
   irreversibility: IrreversibilityClass = "irreversible",
 ): readonly ToolDefinition[] {
+  const seen = new Set<string>();
   return client.tools.map((spec): ToolDefinition => {
+    // RE-CHECKED HERE TOO, and LOUDLY, which is the difference between this site and the client's.
+    // `McpClient.start` DROPS a malformed entry, because one bad tool must not cost an operator
+    // the rest of the server's. A spec that reaches this function malformed did not come through
+    // that filter, so it came from a caller who built the client by hand — a programming error,
+    // and the honest answer to a programming error is a typed refusal rather than a tool
+    // registered with a non-string description sitting in the model's prompt.
+    const bad = specProblem(spec);
+    if (bad !== undefined) {
+      throw err.validation(CODES.E_TOOL_SCHEMA_INVALID, `mcp server "${client.name}" tool "${spec.name}": ${bad}`, {
+        details: { server: client.name, tool: spec.name },
+      });
+    }
+    // A DUPLICATE NAME IS A REFUSAL AND NOT A SHADOW. `ToolRegistry.register` overwrites on
+    // collision, so a second entry with the same name replaced the first AFTER the compiler had
+    // read the manifest — the posture floor was computed over a definition that no longer
+    // executes.
+    if (seen.has(spec.name)) {
+      throw err.validation(CODES.E_TOOL_SCHEMA_INVALID, `mcp server "${client.name}" offers "${spec.name}" twice`, {
+        details: { server: client.name, tool: spec.name },
+      });
+    }
+    seen.add(spec.name);
     const name = mcpToolName(client.name, spec.name);
     return {
       name,
       version: "1.0",
+      // `??` and not `||`: an empty description is one the server chose. `null` is absent, and
+      // `specProblem` has already accepted it as such.
       description: spec.description ?? `MCP tool "${spec.name}" from server "${client.name}".`,
       // One capability per SERVER, not per tool. An operator grants "this graph may use the
       // github server", which is a decision they can actually make; "this graph may use
@@ -111,7 +137,7 @@ export function mcpTools(
       // A server may advertise no schema at all. An empty object schema accepts anything,
       // which is honest: the server validates, and pretending to validate here would mean
       // rejecting calls the server would have accepted.
-      parameters: (spec.inputSchema as JSONSchema | undefined) ?? { type: "object" },
+      parameters: (spec.inputSchema as JSONSchema | null | undefined) ?? { type: "object" },
       execute: async (args): Promise<ToolResult> => {
         let raw: unknown;
         try {

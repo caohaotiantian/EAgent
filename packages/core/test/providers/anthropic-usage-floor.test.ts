@@ -188,13 +188,18 @@ test("a MIXED turn counts both the prose and the call", async () => {
 });
 
 test("...and a REPORTED usage still wins on a tool turn too", async () => {
+  // A PLAUSIBLE report. This fixture used to say 7 — for a tool call of TOOL_JSON.length
+  // characters, which no tokenizer produces — and asserted the adapter believed it. That
+  // assertion WAS the loosening `USAGE_TOLERANCE` closes: a wire buys a whole turn by naming a
+  // small number. A reported count still wins; it has to be one the bytes could have produced.
+  const plausible = Math.ceil(TOOL_JSON.length / 4);
   const reported = [
     ...TOOL_ONLY.slice(0, 4),
-    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}`,
+    `event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":${String(plausible)}}}`,
     `event: message_stop\ndata: {"type":"message_stop"}`,
   ];
   const d = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(reported) }).stream(REQ, ac()));
-  assert.equal(d.usage.outputTokens, 7, "the estimate must only run when the counter is still at its initial 0");
+  assert.equal(d.usage.outputTokens, plausible, "the estimate must only run where the report is contradicted by the bytes");
 });
 
 // ── the floor's own undecidable case, answered with the passing value ─────────
@@ -403,8 +408,10 @@ test("an unreadable usage number is `not reported`, and the record it produces i
 
 test("...and both adapters answer the same malformed frame with the same number", async () => {
   // The property the shared `producedTokens`/`roughTokens` import protects, held over the
-  // validator too — which is duplicated rather than exported, because `index.ts` re-exports both
-  // adapters with `export *` and every name there is on the pinned public surface.
+  // validator too — which both adapters now import from `providers/usage.ts` rather than writing
+  // out twice. The reason recorded for the duplication was that sharing it would widen the pinned
+  // public surface, and that was false: `index.ts` re-exports four provider modules BY NAME, and
+  // a fifth it does not name is not on the pin.
   const a = await done(new AnthropicAdapter({ apiKey: "k", fetch: sseFetch(GARBAGE_TAIL(`"abc"`)) }).stream(REQ, ac()));
   const o = new OpenAIAdapter({
     apiKey: "k",

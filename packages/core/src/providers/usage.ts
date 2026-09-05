@@ -1,0 +1,222 @@
+/**
+ * What an adapter is allowed to believe about the numbers a remote party wrote.
+ *
+ * Every value in a provider's `usage` frame arrives through `JSON.parse` on bytes somebody else
+ * chose, and each one is an input to `PolicyEngine`'s running total. This module holds the three
+ * decisions that answer to that, in one place so two adapters cannot answer them differently.
+ *
+ * NOT RE-EXPORTED BY `index.ts`, WHICH IS THE WHOLE REASON IT CAN EXIST. `wireCount` used to be
+ * written out twice, in `anthropic.ts` and again in `openai.ts`, and both copies carried a
+ * comment saying sharing it would widen the pinned public surface. That was checkable and false:
+ * `scripts/check-surface.mjs` pins the exports of `packages/core/dist/index.d.ts`, and `index.ts`
+ * re-exports four provider modules BY NAME. A fifth it does not name adds nothing to the pin —
+ * verified by running the guard against this file, which reports the surface unchanged.
+ */
+
+import type { ModelRequest } from "../run/registry.ts";
+
+/**
+ * A token count off the wire, or `undefined` if the remote party did not send one an adapter can
+ * bill from.
+ *
+ * `UsageRecord` is typed `number`, but a type annotation stops nothing at runtime. An
+ * `{"output_tokens":"abc"}` frame made `costUsd` NaN, and NaN is the value that DISABLES a budget
+ * rather than tripping it: `PolicyEngine` accumulates it into `#spentUsd`, every later
+ * `committed > limit` is `NaN > limit` = false, and the run's ceiling is gone for the rest of its
+ * life. `-5` is the same defect with the sign flipped — it CREDITS the budget.
+ *
+ * So a value that is not a finite, non-negative number counts as NOT REPORTED, and the floor
+ * charges the estimate instead. That is the conservative answer of the two available: failing the
+ * whole turn would throw away a completed answer over an accounting field and hand the retry
+ * ladder a licence to buy it a second time, while the estimate is a number that refuses
+ * eventually. What this function guarantees is the part that matters — no arithmetic downstream
+ * of it can produce a NaN out of a value the provider wrote.
+ */
+export function wireCount(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
+/**
+ * How far below its own estimate an adapter will believe a reported count.
+ *
+ * THE RULES THAT ONLY CLOSED THE ZERO WERE DEFEATED BY ASSERTING `1`. Measured at 95a3dde on an
+ * 80,000-character prompt priced $3/$15/$0.30 per million: `"cache_read_input_tokens": 1` bought
+ * the whole turn for $0.000105 against $0.006105 honest, `"input_tokens": 1` for $0.000108
+ * against $0.078750, and `"output_tokens": 1` charged $0.060015 against $0.078750 — a ~570x
+ * under-charge on the input dimension, from adding one. Under-charging is the LOOSENING direction
+ * for `budget.runUsd` and `budget.runTokens`, so the quantitative rule is the one that matters
+ * and the tolerance is the whole of it.
+ *
+ * 8, AND IT IS MEASURED RATHER THAN PICKED. The estimator is `ceil(chars/4)`, so a floor at
+ * `est / K` never fires on an honest turn as long as `K >= chars_per_token / 4` for every shape a
+ * real request or answer takes. `chars_per_token` was bounded two ways over eleven fixtures
+ * (prose, TypeScript, pretty JSON, Chinese, a YAML graph, markdown with rule lines, a base64
+ * blob, 24-space-indented code, tab-and-space runs, and two one-line requests):
+ *
+ *   (A) A RIGOROUS UPPER BOUND. A GPT-2/cl100k-style BPE never merges across the pretokenizer's
+ *       boundaries and no vocabulary entry exceeds MAXTOK characters, so the true token count is
+ *       at least `sum over pretokens of ceil(len / MAXTOK)`. Worst `est / lower_bound` over the
+ *       eleven: 2.40 at MAXTOK 16, 3.51 at MAXTOK 32.
+ *   (B) PUBLISHED AVERAGE chars-per-token for the shape — prose 4.0, code 3.3, JSON 3.2, CJK 1.2,
+ *       an assumption and named as one. Worst `est / that`: 1.30.
+ *
+ * The two rows that drive (A)'s worst — Chinese and long whitespace runs — are where the LOWER
+ * BOUND is loosest, and (B) says the estimator under-counts both by 3x, which is the safe
+ * direction. So 8 clears the rigorous worst by 2.3x and the realistic one by 6x. A maintainer who
+ * wants a tighter guard can read 4 off the same table; `TODO.md` §A0.13 has it.
+ *
+ * WHAT IT BUYS, IN TOKENS AND THEN IN DOLLARS, because those are two different numbers and the
+ * sentence here used to give only the first. A wire aiming at the minimum reports exactly
+ * `est / 8` on each dimension and is believed, so the residual under-charge is **8x in TOKENS**,
+ * against the 570x it replaces.
+ *
+ * IN DOLLARS IT IS 80x ON THE ANTHROPIC INPUT DIMENSION, because the floor is checked against the
+ * SUM of `input_tokens`, `cache_read_input_tokens` and `cache_creation_input_tokens` — three
+ * disjoint counts billed at three different rates — and a wire may declare its whole floored
+ * amount as a cache READ. Measured on an 80,000-character prompt at $3/$15/$0.30:
+ *
+ *     honest, plain                       in 20000                       $0.060000 input
+ *     "input_tokens": 1                   floored to in 2501             $0.007503   8x
+ *     "cache_read_input_tokens": 2500     floored to nothing, cr 2500    $0.000750  80x
+ *
+ * 80 is `USAGE_TOLERANCE x (input rate / cacheRead rate)`, and it is not closed here. THE EVIDENCE
+ * THAT WOULD CLOSE IT is that `#body` puts `cache_control` on the last system block, so only the
+ * tools-plus-system PREFIX is cacheable and a cache read larger than that prefix is not
+ * accountable. It was not taken, because the prefix estimate is small on exactly the request shape
+ * the existing tests call an honest full cache hit, and re-charging that turn at the uncached rate
+ * is the over-charge two earlier rounds of this same floor already had to pay back. It needs the
+ * ORDINARY half measured against real cached deployments first, which nobody here has. `TODO.md`
+ * §A0.13 carries it.
+ *
+ * AND THE SOUNDNESS CONDITION HAS A SECOND HALF the eleven fixtures do not measure: the endpoint
+ * has to have BILLED the request this adapter composed. See `billableTokens` for the one term
+ * where that routinely fails, and for the 85x honest over-charge it cost.
+ */
+export const USAGE_TOLERANCE = 8;
+
+/** The repo's tokenizer-free estimator: four characters to a token, and never zero. */
+export function estimateTokens(chars: number): number {
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
+/**
+ * The least an adapter will charge for a dimension it estimated at `estimated` tokens.
+ *
+ * `ceil(estimated / USAGE_TOLERANCE)` AND NOT `estimated`, when the rule fires. The two have
+ * identical adversarial strength — a wire aiming at the minimum reports the threshold and is
+ * believed either way — so charging the full estimate buys nothing against a hostile report and
+ * costs an 8x over-charge on an honest turn that trips a threshold measured wrong. It is the
+ * smaller of the two claims the evidence supports, which is the one to make.
+ *
+ * This never lowers a charge the zero rules already make: those fire where the adapter holds
+ * evidence against a reported zero, and they still charge the whole estimate.
+ */
+export function toleratedFloor(estimated: number): number {
+  return Math.max(1, Math.ceil(estimated / USAGE_TOLERANCE));
+}
+
+/**
+ * The INPUT floor's estimate, which is `roughTokens` MINUS the tool specs.
+ *
+ * `roughTokens` is what the adapter is about to SEND and is the right number to reserve against;
+ * the floor is a claim about what the endpoint BILLED, and those differ on exactly one term. An
+ * OpenAI-wire gateway in front of a model with no tool support drops `tools` silently — Ollama and
+ * llama.cpp both do, and `openai.ts`'s own header names that tier — so the endpoint honestly
+ * reports a prompt that never contained them. Measured with 20 tool specs and an 18-token prompt:
+ * the floor charged 1,529 tokens against a truthful 18, an 85x OVER-charge on an honest turn,
+ * which is the direction that makes a real run hit `E_BUDGET_EXHAUSTED` with budget left.
+ *
+ * The floor is a LOWER bound, so dropping a term it cannot vouch for costs only floor strength,
+ * and only for a request whose tool schemas dominate its prompt. `USAGE_TOLERANCE`'s soundness
+ * condition is stated over tokenization alone; this is its second half — the endpoint has to have
+ * billed the request the adapter composed — and `tools` is the one term an endpoint routinely
+ * does not receive.
+ */
+export function billableTokens(req: ModelRequest): number {
+  let chars = req.system.length;
+  for (const m of req.messages) chars += m.content.length;
+  return estimateTokens(chars);
+}
+
+/** USD per million tokens for one model, as a price table row. */
+export interface PriceRow {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead?: number;
+  readonly cacheWrite?: number;
+}
+
+/**
+ * The row to bill `model` at, or nothing if the table does not price it.
+ *
+ * `priceOf` returned 0 for a model with no table entry, so `claude-sonnet-5-20260101` cost $0 on
+ * the turn `claude-sonnet-5` cost $0.135, measured at 95a3dde. Tokens still floored, so
+ * `budget.runTokens` bound and `budget.runUsd` did not: the same "zero is the passing value" shape
+ * the usage floor exists for, two lines below it.
+ *
+ * TWO RESOLUTIONS, AND THE ONE THAT IS MISSING IS THE POINT OF THIS PARAGRAPH:
+ *
+ *  1. The model's own row.
+ *  2. The base name of a DATED variant — `claude-sonnet-5-20260101` -> `claude-sonnet-5`. That is
+ *     the ordinary shape of a model that silently reads as priced: a provider ships `-20260101`
+ *     suffixes and an operator's table is written against the base name.
+ *
+ *     A DATE AND NOT ANY PREFIX, which the first version of this got wrong. `gpt-5-nano` and
+ *     `gpt-5-chat-latest` are DIFFERENT models that merely share a prefix, and matching them onto
+ *     `gpt-5` billed one of them at 100x its real rate AND took it off `cli.ts`'s unpriced-route
+ *     banner — a warning switched off in the name of a price nobody configured. A `-` followed by
+ *     8 digits, or by `YYYY-MM-DD`, is the only suffix a provider uses to mean "the same model,
+ *     dated", so it is the only one stripped. `acme-x` no longer inherits `acme`.
+ *
+ *     IT STILL COSTS THE BANNER FOR THE VARIANTS IT DOES COVER: a route on
+ *     `claude-sonnet-5-20260101` used to be named as unpriced at boot and used to make
+ *     `loom promote --against-cohort` refuse, and now passes both. That is the right trade only
+ *     because the guards' premise — "every call on it is journaled as costing 0" — is no longer
+ *     true for those routes, which is exactly what changed here.
+ *
+ * WHAT IS NOT HERE: a fallback that prices a wholly unknown model at the dearest row in the
+ * table, so that no model is ever free. It was built and then removed, because a zero here is
+ * LOAD-BEARING TWO LEVELS UP. `cli.ts` decides which routes are unpriced by probing
+ * `priceOf(model, {1e6, 1e6}) === 0` and banners them at boot, and a live promotion judgement is
+ * REFUSED on an adapter that answers 0 — so a total `priceOf` silently switches off an operator
+ * warning and an oversight refusal, which is a strictly worse trade than the hole it closes. What
+ * that fallback needs first is a way for a caller to ask "is this model priced?" separately from
+ * "what does it cost" — a predicate on `ModelAdapter`, in `run/registry.ts`, with `cli.ts`'s two
+ * probes moved onto it. `TODO.md` §A0.14 and this lane's report carry the handoff.
+ *
+ * Refusing an unpriced model at submit or compile time is the third option and is louder still.
+ * It is not available from here: the price table is adapter CONSTRUCTION config that the compiler
+ * never sees.
+ */
+const DATED_VARIANT = /-(?:\d{8}|\d{4}-\d{2}-\d{2})$/;
+
+export function resolvePrice(tables: readonly Readonly<Record<string, PriceRow>>[], model: string): PriceRow | undefined {
+  const names = [model];
+  const dated = DATED_VARIANT.exec(model);
+  if (dated !== null) names.push(model.slice(0, dated.index));
+
+  // A LIST OF TABLES IN PRECEDENCE ORDER RATHER THAN ONE MERGED OBJECT, and an `undefined` row
+  // falls THROUGH rather than answering. `{...defaults, ...operatorRows}` is not equivalent to
+  // the `operatorRows?.[m] ?? defaults[m]` this replaced: a spread copies an own key whose value
+  // is `undefined`, so an operator row explicitly set to `undefined` shadowed the default and
+  // priced the model at $0 — measured, `{prices: {"claude-sonnet-5": undefined}}` went from
+  // $0.018 to $0 on a 1,000/1,000-token turn.
+  //
+  // EXACT BEATS PREFIX ACROSS ALL TABLES, which is why the name loop is outside: an operator's
+  // `m-pro` row must not outrank a default `m-pro-20260101` one.
+  for (const name of names) {
+    for (const table of tables) {
+      // `Object.hasOwn`, because an operator's `prices` is ordinary JSON and `table["constructor"]`
+      // answers with a function that has no `input` field — a price row out of `Object.prototype`,
+      // which priced a turn at NaN and threw where an unknown model would simply be unpriced.
+      if (!Object.hasOwn(table, name)) continue;
+      // A row that is not an object is NO ROW, not a row of `undefined` rates. An own key holding
+      // `null` reached `p.input` and threw an untyped `TypeError` where the whole point of the
+      // check three lines below `priceOf`'s call is that an operator's own config gets a typed
+      // refusal — and where base simply fell through to the default row.
+      const row = table[name] as unknown;
+      if (typeof row === "object" && row !== null && !Array.isArray(row)) return row as PriceRow;
+    }
+  }
+  return undefined;
+}

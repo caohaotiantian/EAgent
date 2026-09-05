@@ -32,6 +32,7 @@ import type {
   ToolSpec,
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
+import { billableTokens, estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
 
 export interface AnthropicOptions extends HttpOptions {
   readonly apiKey: string;
@@ -107,6 +108,12 @@ export class AnthropicAdapter implements ModelAdapter {
     // The provider's own statement that this message is over. See the docstring's third
     // point: without it, "the model stopped" and "the socket did" are the same bytes.
     let closed = false;
+    // CHARACTERS THIS FUNCTION RECEIVED, counted from the RAW fragments rather than from the
+    // parsed calls. `safeJson` turns a cut-off argument into `{}`, so the output floor priced a
+    // turn that burned its whole `max_tokens` allowance on one call at 5 output tokens — see
+    // `producedTokens`. Text is added at its delta; a tool block's id, name and raw argument text
+    // are added at its stop, and any block the stream never closed is added at the end.
+    let producedChars = 0;
 
     try {
       for await (const frame of modelFrames(res, signal)) {
@@ -133,6 +140,9 @@ export class AnthropicAdapter implements ModelAdapter {
             const block = ev.content_block;
             if (block?.type === "tool_use" && ev.index !== undefined) {
               partial.set(ev.index, { id: block.id ?? "", name: block.name ?? "", json: "" });
+            } else if (block?.type === "redacted_thinking") {
+              // The other shape thinking arrives in: one block, no deltas, and still billed.
+              producedChars += block.data?.length ?? 0;
             }
             break;
           }
@@ -140,7 +150,16 @@ export class AnthropicAdapter implements ModelAdapter {
             const d = ev.delta;
             if (d?.type === "text_delta" && d.text !== undefined) {
               text += d.text;
+              producedChars += d.text.length;
               yield { type: "text_delta", text: d.text };
+            } else if (d?.type === "thinking_delta" || d?.type === "signature_delta") {
+              // THINKING IS BILLED AS OUTPUT AND WAS COUNTED NOWHERE. It never enters `text` —
+              // it is not the answer — so a 60,000-character thinking turn with no usage frame
+              // was charged `Math.max(1, 0)` = ONE output token, which is the original $0-priced
+              // turn surviving whole in the shape an extended-thinking model always takes. It is
+              // not yielded to the caller, because a `text_delta` is the answer; it is counted,
+              // because the provider charges for it.
+              producedChars += (d.thinking?.length ?? 0) + (d.signature?.length ?? 0);
             } else if (d?.type === "input_json_delta" && ev.index !== undefined) {
               const acc = partial.get(ev.index);
               if (acc !== undefined) acc.json += d.partial_json ?? "";
@@ -152,6 +171,7 @@ export class AnthropicAdapter implements ModelAdapter {
             const acc = partial.get(ev.index);
             if (acc === undefined) break;
             partial.delete(ev.index);
+            producedChars += acc.id.length + acc.name.length + acc.json.length;
             toolCalls.push({ id: acc.id, name: acc.name, arguments: safeJson(acc.json) });
             break;
           }
@@ -163,11 +183,25 @@ export class AnthropicAdapter implements ModelAdapter {
               finishReason = mapStop(ev.delta.stop_reason);
               closed = true;
             }
+            // A MAX, for the reason the three input fields below give: this wire reports usage
+            // cumulatively, so a second `message_delta` naming a smaller number is not a
+            // correction. Last-write-wins here handed that choice to whoever writes the bytes.
             const out = wireCount(ev.usage?.output_tokens);
             if (out !== undefined) {
-              outputTokens = out;
+              outputTokens = sawOutputUsage ? Math.max(outputTokens, out) : out;
               sawOutputUsage = true;
             }
+            // THE UNION OF THE TWO POSITIONS, taken as a MAX per field. Anthropic's own wire
+            // reports usage cumulatively on `message_delta`, so summing would double-count the
+            // same tokens and a last-write-wins would believe whichever frame happened to come
+            // last. A max is right for both a wire that repeats and a wire that only ever says it
+            // here — and it cannot lower a count `message_start` already established.
+            const dInp = wireCount(ev.usage?.input_tokens);
+            if (dInp !== undefined) inputTokens = Math.max(inputTokens, dInp);
+            const dCr = wireCount(ev.usage?.cache_read_input_tokens);
+            if (dCr !== undefined) cacheReadTokens = Math.max(cacheReadTokens ?? 0, dCr);
+            const dCw = wireCount(ev.usage?.cache_creation_input_tokens);
+            if (dCw !== undefined) cacheWriteTokens = Math.max(cacheWriteTokens ?? 0, dCw);
             break;
           }
           case "message_stop": {
@@ -220,11 +254,12 @@ export class AnthropicAdapter implements ModelAdapter {
     // is `AgentOptions.budgetUsd`'s "an agent loop with no ceiling is the classic incident".
     // An estimate that is roughly right refuses eventually; a zero never does.
     //
-    // The same two lines and the same estimators as `OpenAIAdapter` — which imports both of them
-    // from THIS file — so the two adapters cannot answer a missing usage frame differently.
+    // The same rules and the same estimators as `OpenAIAdapter` — which imports the tolerance and
+    // the token estimate from `usage.ts` and the two request-side estimators from THIS file — so
+    // the two adapters cannot answer a missing usage frame differently.
     //
-    // `producedTokens` AND NOT `text.length`, because on this turn `text` is usually "": see
-    // that function for the measurement of what the text-only floor charged for a tool call.
+    // NOT `text.length`, because on this turn `text` is usually "": see `producedTokens` for the
+    // measurement of what the text-only floor charged for a tool call.
     //
     // A REPORTED ZERO IS BELIEVED ONLY WHERE THIS ADAPTER HOLDS NO EVIDENCE AGAINST IT, and the
     // two dimensions hold different evidence, so they are two rules rather than one flag.
@@ -240,24 +275,29 @@ export class AnthropicAdapter implements ModelAdapter {
     // charged $0.000105 against $0.060111. Under-charging is the loosening direction for
     // `budget.runUsd` and `budget.runTokens`.
     //
-    // **WHAT THIS DOES AND DOES NOT BUY, because the sentence that stood here overstated it.**
-    // It said the passing value "must not be reachable by anything the remote party can simply
-    // assert". Each rule below has exactly ONE disproof and a wire can assert it: measured on an
-    // 80,000-character prompt, `"cache_read_input_tokens": 1` prices the whole turn at $0.000105
-    // against an estimate of $0.060111, and `"input_tokens": 1` and `"output_tokens": 1` do the
-    // same on their own dimensions — a ~570x under-charge, from adding one. What the rules
-    // actually close is the ZERO, which is what a gateway that does not implement usage
-    // accounting emits by default and what every measured instance of this defect looked like.
-    // The version that is not defeated by adding 1 is quantitative — compare the reported total
-    // against `roughTokens(req)` and floor when it cannot account for a prompt this adapter
-    // demonstrably sent — and it needs a tolerance nobody has measured yet. `TODO.md` §A0.13 has
-    // the reproduction; do not read the rules below as more than they are.
+    // **THE ZERO RULES WERE DEFEATED BY ASSERTING 1, so there is a second, QUANTITATIVE rule.**
+    // Each zero rule has exactly one disproof and a wire can simply assert past it: measured on
+    // an 80,000-character prompt, `"cache_read_input_tokens": 1` priced the whole turn at
+    // $0.000105 against $0.006105 honest, and `"input_tokens": 1` and `"output_tokens": 1` did
+    // the same on their own dimensions — a ~570x under-charge, from adding one. What the zero
+    // rules close is the ZERO, which is what a gateway with no usage accounting emits by default
+    // and what every measured instance of the original defect looked like; they are kept for
+    // exactly that and are unchanged. What closes the rest is comparing the REPORTED TOTAL
+    // against evidence this adapter holds locally, with a tolerance, because both sides are
+    // estimates. `USAGE_TOLERANCE` carries the measurement that chose the tolerance and
+    // `toleratedFloor` the argument for charging the threshold rather than the estimate;
+    // `TODO.md` §A0.13 has the reproduction.
+    //
+    // THE TWO ARE ORDERED AND THE ORDER MATTERS: the zero rules charge the WHOLE estimate and run
+    // first, so nothing here lowers a charge that the zero rules already made. The quantitative
+    // rule only ever raises a number a wire reported.
     //
     // OUTPUT — the adapter RECEIVED what it is pricing. A zero beside non-empty `text` or a
     // parsed tool call contradicts bytes this function is holding, so the estimate wins there;
-    // a zero on a turn that really produced nothing is believed and charged 0. A missing usage
+    // a zero on a turn that really produced nothing is believed and charged 0, and the
+    // quantitative rule is skipped for the same reason rather than floored to 1. A missing usage
     // frame is still the original case and still floors, which is why the flag survives on this
-    // side: with no frame at all, an empty turn has to cost `producedTokens`' `Math.max(1, …)`
+    // side: with no frame at all, an empty turn has to cost the estimate's `Math.max(1, …)`
     // rather than nothing.
     //
     // INPUT — the adapter SENT what it is pricing, and `roughTokens(req)` reads it locally. The
@@ -266,11 +306,28 @@ export class AnthropicAdapter implements ModelAdapter {
     // cache tokens beside it is refused whatever produced it, and a flag distinguishing "did not
     // say" from "said zero" would answer the same question twice — with no usage frame at all,
     // `inputTokens` is 0 and both cache counts are absent, which is this condition already.
-    if (!sawOutputUsage || (outputTokens === 0 && (text !== "" || toolCalls.length > 0))) {
-      outputTokens = producedTokens(text, toolCalls);
+    //
+    // A SHORTFALL IS CHARGED TO `inputTokens` AND NOT TO A CACHE COUNT, which is the fail-closed
+    // choice of the three available: uncached input is the most expensive of the three rates, and
+    // tokens a wire declined to account for are not tokens it may have billed at the cache rate.
+    for (const acc of partial.values()) producedChars += acc.id.length + acc.name.length + acc.json.length;
+    // `producedTokens` reads the PARSED calls and `producedChars` the RAW argument text. The raw
+    // count is the larger whenever a call was cut off, and nothing on the wire guarantees the
+    // ordering the other way round, so the floor takes both.
+    const produced = Math.max(producedTokens(text, toolCalls), estimateTokens(producedChars));
+    const producedAnything = text !== "" || toolCalls.length > 0 || producedChars > 0;
+    if (!sawOutputUsage || (outputTokens === 0 && producedAnything)) {
+      outputTokens = produced;
+    } else if (producedAnything) {
+      outputTokens = Math.max(outputTokens, toleratedFloor(produced));
     }
-    if (inputTokens === 0 && (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0) === 0) {
+
+    const reportedInput = inputTokens + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+    if (reportedInput === 0) {
       inputTokens = roughTokens(req);
+    } else {
+      const floor = toleratedFloor(billableTokens(req));
+      if (reportedInput < floor) inputTokens += floor - reportedInput;
     }
 
     const usage: UsageRecord = {
@@ -317,9 +374,16 @@ export class AnthropicAdapter implements ModelAdapter {
    *
    * A table row without the cache rates falls back to the input rate, which is the old
    * behaviour exactly: an operator who has not priced their cache is not silently given one.
+   *
+   * A DATED VARIANT IS NO LONGER FREE. `return 0` made the dollar floor moot for
+   * `claude-sonnet-5-20260101` where `claude-sonnet-5` cost $0.135 on the same turn — tokens
+   * floored, so `budget.runTokens` bound and `budget.runUsd` did not. `resolvePrice` matches it
+   * onto its base row; the operator's own rows still win over the defaults, per model, exactly as
+   * before. A model with no row and no priced prefix STILL prices 0, and `resolvePrice` says at
+   * length why that zero cannot be closed from inside this file.
    */
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number {
-    const p = this.#opts.prices?.[model] ?? DEFAULT_PRICES[model];
+    const p = resolvePrice([this.#opts.prices ?? {}, DEFAULT_PRICES] as Record<string, PriceRow>[], model);
     if (p === undefined) return 0;
     const cost = round6(
       (usage.inputTokens / 1e6) * p.input +
@@ -423,7 +487,7 @@ export function roughTokens(req: ModelRequest): number {
   let chars = req.system.length;
   for (const m of req.messages) chars += m.content.length;
   for (const t of req.tools) chars += t.name.length + t.description.length + JSON.stringify(t.parameters).length;
-  return Math.max(1, Math.ceil(chars / 4));
+  return estimateTokens(chars);
 }
 
 /**
@@ -436,48 +500,27 @@ export function roughTokens(req: ModelRequest): number {
  * surviving in the majority case. The estimate has to read the tool calls too.
  *
  * `name` and the SERIALISED arguments, and the id with them: all three came down the wire as
- * generated tokens. Two honest limits, stated rather than papered over — `safeJson` has already
- * replaced an unparseable argument fragment with `{}`, so a truncated call is under-estimated;
- * and re-serialising with `JSON.stringify` is not the provider's own whitespace. Both are
- * bounded errors in an estimate whose job is only to be non-zero and roughly right, which is
- * the argument the floor itself rests on: "an estimate that is roughly right refuses eventually;
- * a zero never does."
+ * generated tokens.
+ *
+ * IT READS THE PARSED CALLS, AND `safeJson` HAS ALREADY REPLACED A CUT-OFF ARGUMENT WITH `{}` by
+ * the time it runs. Measured on a `max_tokens` turn whose one `fs.write` call was cut after 9,030
+ * characters of argument JSON, at $15 per million output tokens: the output side cost $0.000075
+ * where the raw text says $0.033900 — 5 tokens against 2,262, a 452x under-charge on the turn
+ * shape an agent loop mostly takes. The COMPLETE version of the same turn was already right and
+ * is unchanged by this, 2,262 tokens either way. Both adapters therefore count the RAW argument
+ * text alongside this, from the fragments as they arrive and including a block the stream never
+ * closed — `producedChars` in each `stream`. This function stays the estimate for a caller
+ * holding parsed calls and nothing else, and re-serialising with `JSON.stringify` is still not
+ * the provider's own whitespace.
  */
 export function producedTokens(text: string, toolCalls: readonly ModelToolCall[]): number {
   let chars = text.length;
   for (const c of toolCalls) chars += c.id.length + c.name.length + JSON.stringify(c.arguments).length;
-  return Math.max(1, Math.ceil(chars / 4));
+  return estimateTokens(chars);
 }
 
 export function round6(n: number): number {
   return Math.round(n * 1e6) / 1e6;
-}
-
-/**
- * A token count off the wire, or `undefined` if the remote party did not send one this
- * adapter can bill from.
- *
- * `UsageRecord` is typed `number`, but its values come out of `JSON.parse` on bytes a remote
- * party wrote, and a type annotation stops nothing at runtime. An `{"output_tokens":"abc"}`
- * frame made `costUsd` NaN, and NaN is the value that DISABLES a budget rather than tripping
- * it: `PolicyEngine` accumulates it into `#spentUsd`, every later `committed > limit` is
- * `NaN > limit` = false, and the run's ceiling is gone for the rest of its life. `-5` is the
- * same defect with the sign flipped — it CREDITS the budget.
- *
- * So a value that is not a finite, non-negative number counts as NOT REPORTED, and the floor
- * below charges the estimate instead. That is the conservative answer of the two available:
- * failing the whole turn would throw away a completed answer over an accounting field and hand
- * the retry ladder a licence to buy it a second time, while the estimate is a number that
- * refuses eventually. What this function guarantees is the part that matters — no arithmetic
- * downstream of it can produce a NaN out of a value the provider wrote.
- *
- * NOT EXPORTED, AND DUPLICATED IN `openai.ts` rather than shared, because `index.ts` re-exports
- * both adapters with `export *` and every name here lands on the pinned public surface. The
- * property the sharing was protecting — that the two adapters answer the same malformed frame
- * the same way — is held by a test that drives both of them, not by the import.
- */
-function wireCount(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -488,8 +531,18 @@ interface AnthropicEvent {
   // `unknown` AND NOT `number`: these are `JSON.parse` output, so the annotation would be a
   // claim about bytes a remote party wrote. `wireCount` is what actually decides.
   message?: { usage?: { input_tokens?: unknown; cache_read_input_tokens?: unknown; cache_creation_input_tokens?: unknown } };
-  content_block?: { type?: string; id?: string; name?: string };
-  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
-  usage?: { output_tokens?: unknown };
+  content_block?: { type?: string; id?: string; name?: string; data?: string };
+  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string; thinking?: string; signature?: string };
+  // INPUT COUNTS LIVE HERE TOO, and declaring them only under `message` above was a real
+  // over-charge: a wire that reports its cache hit on `message_delta` had `cache_read` invisible,
+  // so the input floor saw a bare zero and charged the whole prompt at the uncached rate —
+  // `{"in":20002,"usd":0.060111}` against `{"in":0,"cr":20000,"usd":0.006105}` for the same
+  // numbers on `message_start`. Not a loosening, and still wrong.
+  usage?: {
+    output_tokens?: unknown;
+    input_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+  };
   error?: { message?: string };
 }
