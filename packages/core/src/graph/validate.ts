@@ -370,12 +370,15 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
  * `topoOrder` drives the ancestor closure, the fan-out stacks and the critical path, and a
  * different order would move diagnostics for no reason.
  *
- * What changed is the cost. Dequeuing a node used to scan EVERY edge to find its successors —
- * 1,500 x 14,900 = 22.4M comparisons on `scale.test.ts`'s own 1,500-node graph — and
- * `queue.shift()` is O(n) on top of it. The `out` map is built once and the queue is walked
- * with a cursor. The `outbound` map `indexGraph` holds cannot be reused here: it is over ALL
- * edges, and this sort is over `dagEdges` only, so its indegrees and its successors have to
- * come from the same list.
+ * What changed is the cost. Dequeuing a node used to scan EVERY edge to find its successors, so
+ * the sort was O(V x E): 500 x 4,900 = 2.45M comparisons on `scale.test.ts`'s own largest
+ * fixture, and 1,500 x 14,900 = 22.4M on a 1,500-node member of the SAME family — which is a
+ * benchmark size, not a fixture this repo holds. `queue.shift()` is O(n) on top of it. The
+ * `successors` map is built once and the queue is walked with a cursor instead.
+ *
+ * The `outbound` map `indexGraph` holds cannot be reused here: it is over ALL edges, and this
+ * sort is over `dagEdges` only, so its indegrees and its successors have to come from the same
+ * list.
  */
 function topoSort(ids: readonly NodeId[], edges: readonly EdgeSpec[]): NodeId[] {
   const indegree = new Map<NodeId, number>();
