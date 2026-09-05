@@ -404,12 +404,24 @@ export function outcomeOf(signals: readonly SignalReading[]): number {
  * returns `{}` writes nothing and is still worth nothing, which is exactly the no-op the
  * paragraph above refuses.
  *
- * "But then a trivial graph that writes one constant channel scores near 1" — it does, and it
- * beats nothing by doing so. `cohortKeyOf` keys on `graphHash`, so that graph is measured
- * against OTHER RUNS OF ITSELF and never against the workflow it would be gaming; the cross-
- * cohort comparison this predicate would have to corrupt does not exist. Within one cohort the
- * predicate is the same for every member, and what separates them is spend, latency and the
- * ladder.
+ * "But then a trivial graph that writes one constant channel scores near 1" — it does. WITHIN
+ * ITS OWN COHORT it beats nothing by doing so: `cohortKeyOf` keys on `graphHash`, the predicate
+ * is the same for every member, and what separates them is spend, latency and the ladder. That
+ * half of the argument stands.
+ *
+ * THE OTHER HALF WAS FALSE, and this paragraph used to end on it: "the cross-cohort comparison
+ * this predicate would have to corrupt does not exist". It exists twice. `scoreTrajectory`
+ * checks that `cohort` was measured under these weights and never that `t` is a member of it, so
+ * a trivial graph scored against another graph's `CohortStats` is accepted — measured in
+ * `test/evolution/evolution-lane-fail-closed.test.ts`: one committed channel, no calls, graded
+ * pass by its own evaluator, `delivered: true`, and a score above the OTHER graph's p90. And
+ * `promoteAgainstCohort` (`cli.ts`) is exactly that call: `scoreTrajectory(candT, cohort)` with
+ * the candidate's trajectory and the BASELINE's cohort, decided on `candidateScore −
+ * baselineScore`. So this predicate is load-bearing across cohorts, by the product's own
+ * promotion path, and its looseness there is not fenced by the cohort key. What fences it has
+ * to be a property of that gate — a grade the candidate did not write, which is
+ * `docs/design-property3-2026-09-05.md`'s subject — and not of this predicate, whose job is
+ * still only to tell "did nothing" from "did something".
  *
  * Two deliberate exclusions:
  *

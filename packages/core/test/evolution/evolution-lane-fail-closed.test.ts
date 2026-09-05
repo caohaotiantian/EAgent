@@ -221,3 +221,19 @@ test("ORDINARY: a priced baseline is divided as before", () => {
   assert.match(check(v, "4-latency").detail, /1\.10×/);
   assert.equal(v.promote, true);
 });
+
+// ── the measurement behind `didWork`'s corrected docstring ──────────────────────────────────
+
+test("`scoreTrajectory` DOES compare across cohorts — a trivial graph scored against another graph's cohort is not refused", () => {
+  // `didWork`'s docstring used to say "the cross-cohort comparison this predicate would have to
+  // corrupt does not exist". It exists twice: here, because `scoreTrajectory` checks only the
+  // weights digest and never that `t` belongs to `cohort`; and in `promoteAgainstCohort`, which
+  // is that call with the candidate's trajectory and the baseline's cohort.
+  const baseline = Array.from({ length: 30 }, (_, i) => trajectory(`b_${i}`, { graphHash: "A", costUsd: 0.01, wallMs: 1000, pass: i % 2 === 0 }));
+  const cohort = measureCohort("w|A|default|b", baseline);
+  const trivial = trajectory("trivial", { graphHash: "B", pass: true });
+  assert.notEqual(cohortKeyOf(trivial), cohort.key, "the premise: two different cohorts");
+  const s = scoreTrajectory(trivial, cohort);
+  assert.equal(s.components.delivered, true, "one committed channel is work, by the predicate's own rule");
+  assert.ok(s.score > cohort.p90Score, `${s.score} beats the other graph's p90 ${cohort.p90Score}`);
+});
