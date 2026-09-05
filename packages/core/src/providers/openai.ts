@@ -20,6 +20,7 @@ import type {
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
 import { producedTokens, round6, roughTokens } from "./anthropic.ts";
+import { estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
 
 export interface OpenAIOptions extends HttpOptions {
   readonly apiKey: string;
@@ -73,6 +74,9 @@ export class OpenAIAdapter implements ModelAdapter {
     // See `AnthropicAdapter.stream`: the counter starts at 0, so "the provider did not say" and
     // "the provider said zero" are the same bytes until something else remembers which.
     let sawOutputUsage = false;
+    // CHARACTERS THIS FUNCTION RECEIVED, counted from the RAW argument fragments rather than from
+    // the parsed calls — `safeJson` turns a cut-off argument into `{}`. See `producedTokens`.
+    let producedChars = 0;
 
     try {
       for await (const frame of modelFrames(res, signal)) {
@@ -83,6 +87,7 @@ export class OpenAIAdapter implements ModelAdapter {
         const delta = choice?.delta;
         if (delta?.content !== undefined && delta.content !== null && delta.content !== "") {
           text += delta.content;
+          producedChars += delta.content.length;
           yield { type: "text_delta", text: delta.content };
         }
         for (const tc of delta?.tool_calls ?? []) {
@@ -128,10 +133,22 @@ export class OpenAIAdapter implements ModelAdapter {
     // account for a prompt the adapter demonstrably sent — there is no cache count to make a
     // zero honest, as there is on the Anthropic side. `prompt_tokens: 0` is therefore refused
     // outright, and an endpoint that wants its cache read believed has to report it as input.
-    if (!sawOutputUsage || (outputTokens === 0 && (text !== "" || toolCalls.length > 0))) {
-      outputTokens = producedTokens(text, toolCalls);
+    //
+    // AND THE ZERO RULES ARE NOT THE WHOLE FLOOR, because a wire defeats each of them by
+    // asserting 1. The quantitative rule that follows each of them is the same one the Anthropic
+    // adapter runs, off the same constant: `USAGE_TOLERANCE` in `usage.ts` carries the
+    // measurement that chose it.
+    for (const acc of partial.values()) producedChars += acc.id.length + acc.name.length + acc.args.length;
+    const produced = Math.max(producedTokens(text, toolCalls), estimateTokens(producedChars));
+    const producedAnything = text !== "" || toolCalls.length > 0 || producedChars > 0;
+    if (!sawOutputUsage || (outputTokens === 0 && producedAnything)) {
+      outputTokens = produced;
+    } else if (producedAnything) {
+      outputTokens = Math.max(outputTokens, toleratedFloor(produced));
     }
+
     if (inputTokens === 0) inputTokens = roughTokens(req);
+    else inputTokens = Math.max(inputTokens, toleratedFloor(roughTokens(req)));
 
     const usage: UsageRecord = {
       inputTokens,
@@ -159,8 +176,9 @@ export class OpenAIAdapter implements ModelAdapter {
     yield { type: "done", message, provider: this.provider, finishReason: truncated || toolCalls.length === 0 ? finishReason : "tool_use", usage };
   }
 
+  /** See `AnthropicAdapter.priceOf` and `resolvePrice`: a model with no table row is not free. */
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
-    const p = this.#opts.prices?.[model] ?? DEFAULT_PRICES[model];
+    const p = resolvePrice({ ...DEFAULT_PRICES, ...(this.#opts.prices ?? {}) } as Record<string, PriceRow>, model);
     if (p === undefined) return 0;
     const cost = round6((usage.inputTokens / 1e6) * p.input + (usage.outputTokens / 1e6) * p.output);
     // See `AnthropicAdapter.priceOf`: a cost that is not a non-negative number is refused
@@ -259,18 +277,6 @@ function safeJson(text: string): Record<string, unknown> {
 
 // ---------------------------------------------------------------------------
 
-/**
- * A token count off the wire, or `undefined` if the remote party did not send one this adapter
- * can bill from — the twin of `wireCount` in `anthropic.ts`, where the reasoning is written out.
- *
- * DUPLICATED RATHER THAN IMPORTED: `index.ts` re-exports both adapters with `export *`, so
- * exporting it from there would widen the pinned public surface for a four-line predicate. The
- * property that matters — the two adapters answer the same malformed frame the same way — is
- * held by a test that drives both, not by the import.
- */
-function wireCount(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
-}
 
 interface OpenAIChunk {
   choices?: {
