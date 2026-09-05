@@ -198,7 +198,10 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
       const engine = SRC("run/engine.ts");
       assert.match(engine, /kind: "random"/, "the engine must journal a random effect");
       assert.match(engine, /effectKey\(w\.task\.taskId, "random", 0\)/, "under a derived key");
-      assert.match(engine, /Number\(this\.#replay\.require\(key\)\.result\)/, "and replay must SERVE the recorded seed rather than draw a new one");
+      // The serve-or-refuse decision lives in `ReplayEffects.seed`: the engine hands over the key
+      // and the derivation, and replay serves the recorded seed rather than drawing a new one.
+      assert.match(engine, /this\.#replay\.seed\(key, seedFromKey\)/, "and replay must decide the seed — served, derived and named, or refused");
+      assert.match(SRC("run/replay.ts"), /Number\(this\.require\(key\)\.result\)/, "serving the recorded one rather than drawing a new one");
       assert.match(SRC("resources/functions.ts"), /Math\.random = function \(\)/, "the bridge must install the seeded PRNG");
     },
   },
