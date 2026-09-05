@@ -655,8 +655,21 @@ test("THE INCREMENTAL FOLD IS IDEMPOTENT UNDER A RE-PUSHED TAIL", () => {
   // `RunFolder.push` skips an event whose seq it has already folded. Every caller in `src/`
   // reads from `lastSeq + 1`, so nothing exercises it — and the day one overlaps by a single
   // event, the guard is all that stands between the journal and a projection that has
-  // counted a Task's usage twice. `usage` is the accumulating field, so it is the one that
-  // shows: everything else in the fold is an assignment and would look identical.
+  // counted a Task's usage twice.
+  //
+  // THIS CASE DOES NOT PIN THAT GUARD, and the sentence here used to claim it did: "`usage`
+  // is the accumulating field, so it is the one that shows". Backwards for `task.committed`,
+  // which is the one usage arm that is idempotent WITHOUT the guard —
+  // `chargeUsage(p, taskId, excessUsage(p.usageSeen[taskId] ?? ZERO, stated))` charges only
+  // what the stated total EXCEEDS what this task has already been seen to use, so a second
+  // application of the same event charges zero. Measured: with
+  // `if (e.seq <= this.#lastSeq) continue;` deleted from `projection.ts`, this file is 16/16
+  // green and `p.usage.costUsd` is still 0.25.
+  //
+  // The arms that DO show are the ones that add a raw payload with no seen-set behind them —
+  // `model.called` and `subgraph.completed` — and `perf-lane-runfolder-dedup.test.ts` is where
+  // they are pinned. What is left here is the agreement between the two folds, which is worth
+  // asserting on its own and is what the last line checks.
   const evs = journal(
     { type: "run.started", payload: { posture: "out" } },
     {
