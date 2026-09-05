@@ -2,10 +2,12 @@
  * The subgraph half of validation walks the tree once per distinct child, not once per reference.
  *
  * `rule016Subgraphs` recursed `validateGraph` inside `for (const n of spec.nodes)` with no cache,
- * so a child referenced by B nodes at each of N levels was validated B^N times: measured on this
- * tree, a depth-20 chain of two-way delegations took 13,525 ms and then ran the heap out at
- * depth 20 with a 3 GB limit, while `compile.ts`'s `resolveSubgraphs` walks the identical tree in
- * linear time with a `reachedAt` map. `compile`'s own docstring promises an editor can call it on
+ * so a child referenced by B nodes at each of N levels was validated B^N times. Measured on this
+ * tree, a chain of two-way delegations at `--max-old-space-size=3072`: depth 16 took 773 ms,
+ * depth 18 took 3,807 ms, and depth 20 ran the heap out — where the memoized walk does the same
+ * three in 44 ms, 208 ms and 1,145 ms with byte-identical diagnostics. `compile.ts`'s
+ * `resolveSubgraphs` already walks that identical tree in linear time with a `reachedAt` map, so
+ * the two halves of one walk had different complexity. `compile`'s own docstring promises an editor can call it on
  * every keystroke, and `openWorkspace` puts it on `loom compile`, `loom run`, `loom gates` and
  * `loom approve`.
  *
