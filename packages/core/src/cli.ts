@@ -4050,11 +4050,34 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * naming the top-level file whenever one exists. Two files with one hash are the same bytes, so
  * the choice is only about which name an operator is shown.
  */
-function graphsByHash(ws: Workspace): { index: Map<string, RunGraph>; files: Map<string, string>; failed: readonly string[] } {
+function graphsByHash(ws: Workspace): GraphIndex {
+  return indexGraphs(ws, ["graphs", ...subgraphDirs()]);
+}
+
+/** The workspace directories a SPEC resource is published from — `readResources`' own list. */
+function subgraphDirs(): readonly string[] {
+  return SPEC_KINDS.map((k) => join("resources", k));
+}
+
+interface GraphIndex {
+  index: Map<string, RunGraph>;
+  files: Map<string, string>;
+  failed: readonly string[];
+}
+
+/**
+ * The walk itself, taking the directories — so the plane's ATTACH-ONLY inventory and the CLI's
+ * full lookup are one implementation with two arguments rather than two loops that drift.
+ *
+ * `controlPlaneOptions` asks for the resource directories alone. Asking for all of them there
+ * would recompile `graphs/` a second time at `loom serve` boot, and `loadGraph` writes its
+ * diagnostics to stderr — so every warning in that directory would be printed twice in the boot
+ * banner, which is how an operator learns to stop reading it.
+ */
+function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
   const failed: string[] = [];
-  const dirs = ["graphs", ...SPEC_KINDS.map((k) => join("resources", k))];
   for (const rel of dirs) {
     const dir = join(ws.root, rel);
     if (!existsSync(dir)) continue;
@@ -4269,12 +4292,12 @@ export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOpti
     store: ws.store,
     bus: ws.bus,
     graphs,
-    // THE SUBGRAPHS ITS OWN RUNS DELEGATE TO — attachable, never submittable. `graphsByHash`
-    // already indexes `resources/subgraph/` and `resources/graph/`; this hands the plane the
-    // members of that index `discoverGraphs` does not publish by name, which is what makes a
-    // child run's gate answerable over HTTP rather than only through `loom approve --graph`.
-    // See `ControlPlaneOptions.subgraphs` for why the two lists stay separate.
-    subgraphs: [...graphsByHash(ws).index.values()].filter((g) => !Object.values(graphs).some((top) => top.graphHash === g.graphHash)),
+    // THE SUBGRAPHS ITS OWN RUNS DELEGATE TO — attachable, never submittable, and what makes a
+    // child run's gate answerable over HTTP rather than only through `loom approve --graph <the
+    // subgraph file>`. The RESOURCE directories only: `discoverGraphs` has already compiled
+    // `graphs/` one line up, and compiling it again here would print every diagnostic in it twice
+    // in the boot banner. See `ControlPlaneOptions.subgraphs` for why the two lists stay separate.
+    subgraphs: [...indexGraphs(ws, subgraphDirs()).index.values()],
     ...(tokenFlag === undefined ? {} : { token: String(tokenFlag) }),
     ...(identity === undefined ? {} : { identity }),
     // THE UNAUTHENTICATED ROUTE EXISTS ONLY IF SOMEBODY CAN ANSWER ON IT.
