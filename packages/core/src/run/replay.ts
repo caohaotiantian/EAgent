@@ -337,10 +337,13 @@ export class ReplayEffects {
    * not the recorded one (see `allowDerivedSeeds`). Second, the miss is explained by the graph
    * change and not by the journal's age: the key's task is one the recording never LEASED, or
    * the recording wrote a seed for SOME task — because the engine seeds every `function` and
-   * `evaluator{assertion}` body, so on a journal that holds any seed a leased task with none was
-   * a node of another type, which the candidate has turned into a body (`test/run/replay.test.ts`
-   * replaces the `write` tool with a function). On a journal that holds no seed at all, a leased
-   * task with none is indistinguishable from a body the journal predates, and refuses. Measured
+   * `evaluator{assertion}` body, so on a journal that holds any seed a leased task with none is
+   * read as a node of another type that the candidate has turned into a body
+   * (`test/run/replay.test.ts` replaces the `write` tool with a function). READ AS, not proven: a
+   * seeding journal that lost exactly one body's seed satisfies the same test and derives — the
+   * derivation is then named and costs `hermetic`, which is the direction that may be wrong. On a
+   * journal that holds no seed at all, a leased task with none is indistinguishable from a body
+   * the journal predates, and refuses. Measured
    * with the first half alone: a metadata-only rename of a one-node graph over a seedless journal
    * derived the recorded node's seed and ran, `match: false` on `graph.bound` only — and
    * `evolution/gate.ts` reads neither `hermetic` nor `derivedSeeds`. Even when both halves hold it
