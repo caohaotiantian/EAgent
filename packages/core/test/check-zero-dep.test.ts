@@ -2,9 +2,10 @@
  * The zero-dep guard, driven rather than read.
  *
  * Invariant 1 has exactly one automatic enforcer — `scripts/check-zero-dep.mjs`. (The
- * esbuild metafile backstop in `build-binary.mjs` is the second layer on paper, but
- * `build:binary` is not in `ci.yml`, so nothing runs it unattended; and esbuild cannot see
- * a runtime `require` either, so both layers were blind to the same shapes at once.)
+ * esbuild metafile backstop in `build-binary.mjs` is a real second layer and ci.yml's
+ * `binary` job does run it — this comment used to say it did not — but that is a separate
+ * job, and esbuild cannot see a runtime `require` either, so both layers were blind to the
+ * same shapes at once.)
  *
  * A guard with one enforcer needs its failures reproduced, not asserted. Every row below was
  * watched to PASS the guard before the rules that catch it existed — the four source shapes
@@ -132,6 +133,27 @@ const CASES: readonly Case[] = [
     refusal: undefined,
   },
 
+  // ── check 1b: a field npm EXECUTES is a dependency field ───────────────────
+  //
+  // Check 1 iterated `Object.entries(pkg)` and only ever looked at `/ependencies$/i`, so the
+  // one field npm runs unasked was invisible to it. Driven against the real guard at 294e713
+  // with this exact postinstall in `packages/core/package.json`: `zero-dep guard ok`, exit 0.
+  {
+    how: "a postinstall that installs a package — npm runs it on every install",
+    fixture: { manifest: { scripts: { postinstall: "npm i -g leftpad" } } },
+    refusal: /lifecycle script "postinstall"/,
+  },
+  {
+    how: "prepare, the lifecycle name that runs on a git-dependency install",
+    fixture: { manifest: { scripts: { prepare: "node ./tools/setup.js" } } },
+    refusal: /lifecycle script "prepare"/,
+  },
+  {
+    how: "an ordinary `build` script, which npm never runs unasked",
+    fixture: { manifest: { scripts: { build: "tsc -b --force" } } },
+    refusal: undefined,
+  },
+
   // ── check 2: what a source file can load ───────────────────────────────────
   {
     how: "a static bare import (the control)",
@@ -163,6 +185,39 @@ const CASES: readonly Case[] = [
       files: { "index.ts": 'import { createRequire as cr } from "node:module";\nexport const lodash = cr(import.meta.url)("lodash");\n' },
     },
     refusal: /createRequire/,
+  },
+  // The two shapes that walked past every callee rule, because the function is CAPTURED and
+  // never appears as a callee under a name the guard knew. Both were watched to pass the real
+  // guard at 294e713 with `typescript` genuinely loaded at runtime by the first one.
+  {
+    how: "createRequire captured off a namespace import and called under a new name",
+    fixture: {
+      files: {
+        "index.ts":
+          'import * as mod from "node:module";\nconst cr = mod.createRequire;\nconst req = cr(import.meta.url);\nexport const lodash = req("lodash");\n',
+      },
+    },
+    refusal: /node:module|createRequire/,
+  },
+  {
+    how: "createRequire destructured under a new name off a dynamic import of node:module",
+    fixture: {
+      files: {
+        "index.ts":
+          'const m = await import("node:module");\nconst { createRequire: cr } = m;\nexport const lodash = cr(import.meta.url)("lodash");\n',
+      },
+    },
+    refusal: /node:module/,
+  },
+  {
+    // THE OTHER DIRECTION, and it is why the rule reads `isTypeOnly`: `import type` is erased
+    // by the time anything runs, so it hands out no value and loads no module. A rule that
+    // refused it would be a false positive on the one construct that cannot be the defect.
+    how: "a type-only import of node:module, which is erased and hands out nothing",
+    fixture: {
+      files: { "index.ts": 'import type { NodeRequire } from "node:module";\nexport const x: NodeRequire | undefined = undefined;\n' },
+    },
+    refusal: undefined,
   },
   // ── check 4: a relative specifier is not automatically an internal one ─────
   //

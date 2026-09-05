@@ -4,11 +4,13 @@
  *
  * This is the constraint that keeps the single-binary deployment possible and keeps a
  * library embedder from downloading a UI framework. It is the ONLY automatic enforcement of
- * invariant 1: the esbuild metafile backstop in `build-binary.mjs` is a second layer on
- * paper, but `build:binary` is not in `ci.yml`, and esbuild cannot resolve a runtime
- * `require` either — so for the shapes check 3 covers, both layers were blind at once.
+ * invariant 1 that runs on EVERY commit: `.github/workflows/ci.yml` does run `build:binary`,
+ * whose esbuild metafile backstop is a real second layer, but it is a separate job and esbuild
+ * cannot resolve a runtime `require` either — so for the shapes check 3 covers, both layers
+ * were blind at once. (This paragraph said `build:binary` is not in `ci.yml` at all; it is,
+ * at ci.yml's `binary` job, and has been since that job was added.)
  *
- * Three checks, because any one alone is bypassable:
+ * Four checks, because any one alone is bypassable:
  *
  *   1. EVERY npm dependency field in packages/core/package.json must be empty, not just
  *      `dependencies` and `peerDependencies`. `optionalDependencies` is installed BY
@@ -16,6 +18,15 @@
  *      fields let it through. The rule is now an allowlist over `/ependencies$/i`: exactly
  *      one field, `devDependencies`, may be non-empty. That is total against fields that do
  *      not exist yet, which a denylist can never be.
+ *   1b. AND NO npm LIFECYCLE SCRIPT, because check 1 asks the wrong question on its own.
+ *      `Object.entries(pkg)` only ever reached fields matching `/ependencies$/i`, and
+ *      `scripts.postinstall` is a field npm EXECUTES on every `npm install` of this package.
+ *      Reproduced at 294e713: adding `"postinstall": "npm i -g leftpad && node -e
+ *      \"require('commander')\""` to `packages/core/package.json` left this guard printing
+ *      `zero-dep guard ok` and exiting 0. A package that installs something on install has a
+ *      runtime dependency whatever `dependencies` says, so the rule is that this package
+ *      declares NONE of npm's lifecycle names at all — see `LIFECYCLE_SCRIPTS` for the set
+ *      and for why a content test on the command would be the wrong rule.
  *   2. No source file under packages/core/src may import a bare specifier that is not a
  *      `node:`-prefixed builtin — and EVERY file under src/ is a source file. The walk used
  *      to yield only `.ts`, so a `.mjs` beside it was skipped in silence; an unparseable
@@ -26,6 +37,25 @@
  *      literal is NOT a string literal to the parser), `module._load`, `process.binding`,
  *      `process.dlopen`. Check 2 answers "which modules are named"; check 3 answers "is
  *      naming them the only way in", and without it check 2's silence means nothing.
+ *
+ * CHECK 3 USED TO KEY ON THE CALL, AND THE VALUE IS WHAT MATTERS. Every rule it had fired on
+ * `createRequire` being CALLED (bare identifier, whole dotted name, or dotted tail) or on the
+ * literal text of an `ImportDeclaration` — and none of those shapes is present when the
+ * function is merely CAPTURED first. Reproduced at 294e713, guard exit 0 with a real
+ * third-party package loaded at runtime:
+ *
+ *     import * as mod from "node:module";
+ *     const cr = mod.createRequire;            // property ACCESS, never a call
+ *     const req = cr(import.meta.url);         // a bare identifier with an innocent name
+ *     export const x = req("typescript");
+ *
+ * The rule is now keyed to the ORIGIN instead: `node:module` is the only place
+ * `createRequire` comes from, core imports it nowhere, so naming that module in any position
+ * that HANDS OUT A VALUE — `import`, `export … from`, `import()` — is unauditable, and every
+ * aliasing shape dies with one rule rather than one rule per spelling. `import type` is exempt
+ * because it is erased before anything runs; see `isErasedImport`. A property access
+ * whose name is `createRequire` or `getBuiltinModule` is unauditable whether or not it is
+ * the callee of a call, for the same reason.
  *
  * Checks 2 and 3 use the TypeScript PARSER, not a regex. The regex version reported
  * `from "${branch}"` inside an error-message template literal as a dependency — a guard with
@@ -79,6 +109,48 @@ for (const [field, value] of Object.entries(pkg)) {
   }
 }
 
+// ── 1b. lifecycle scripts: a field npm EXECUTES is a dependency field ─────────
+
+/**
+ * npm's own lifecycle names, as of npm 10 (`npm help scripts`), plus the two `npm-` prefixed
+ * spellings npm still honours. Anything here runs without the installing user asking for it.
+ *
+ * THE RULE IS THE NAME, NOT THE COMMAND, and that is the whole design. A rule that inspected
+ * what the script DOES would have to decide whether `node ./tools/prepare.js` installs
+ * something, which is the halting problem wearing a shell — and a guard whose undecidable case
+ * has a passing answer is the shape this repo keeps finding. A zero-runtime-dependency package
+ * has nothing it needs to do at install time, so the honest rule is that it declares none of
+ * these at all. `build` and `test` are not lifecycle names and are untouched.
+ */
+const LIFECYCLE_SCRIPTS = new Set([
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepublish",
+  "prepublishOnly",
+  "prepare",
+  "prepack",
+  "postpack",
+  "publish",
+  "postpublish",
+  "preuninstall",
+  "uninstall",
+  "postuninstall",
+  "preversion",
+  "version",
+  "postversion",
+  "dependencies",
+]);
+
+for (const name of Object.keys(pkg.scripts ?? {})) {
+  if (!LIFECYCLE_SCRIPTS.has(name)) continue;
+  failures.push(
+    `${CORE}/package.json declares the npm lifecycle script "${name}": ${JSON.stringify(pkg.scripts[name])} — ` +
+      `npm runs it on every install of this package, so whatever it fetches or loads is a runtime dependency ` +
+      `however empty "dependencies" is`,
+  );
+}
+
 // ── 2 & 3. the source tree, via the parser ────────────────────────────────────
 
 /**
@@ -96,6 +168,26 @@ function walk(dir) {
     else failures.push(`${full}: non-source file under ${CORE}/src — the zero-dep guard cannot parse it, and core/src is TypeScript-only`);
   }
   return out;
+}
+
+/**
+ * Whether an `import`/`export … from` is type-only, in either of the two places TypeScript
+ * writes that: on the whole clause (`import type { X } from …`) or per specifier
+ * (`import { type X } from …`). A clause whose every named binding is `type` is erased too.
+ */
+function isErasedImport(node) {
+  const clause = ts.isImportDeclaration(node) ? node.importClause : undefined;
+  if (ts.isExportDeclaration(node)) {
+    if (node.isTypeOnly) return true;
+    const named = node.exportClause;
+    return named !== undefined && ts.isNamedExports(named) && named.elements.every((e) => e.isTypeOnly);
+  }
+  if (clause === undefined) return false; // `import "x"` — a side-effect import, never erased
+  if (clause.isTypeOnly) return true;
+  if (clause.name !== undefined) return false; // a default binding is a value
+  const bindings = clause.namedBindings;
+  if (bindings === undefined || !ts.isNamedImports(bindings)) return false; // `* as ns` is a value
+  return bindings.elements.every((e) => e.isTypeOnly);
 }
 
 /** `a.b.c` for a property-access chain rooted at a plain identifier; otherwise undefined. */
@@ -122,6 +214,19 @@ const QUALIFIED_LOADERS = new Set(["module._load", "module.createRequire", "proc
  * either of these names, so keying on the tail costs nothing and closes the aliases.
  */
 const TAIL_LOADERS = new Set(["createRequire", "getBuiltinModule"]);
+/**
+ * The MODULE a runtime loader comes from, matched wherever its name is written.
+ *
+ * `createRequire` has exactly one origin, so keying on the origin closes every spelling at
+ * once — the alias, the namespace import, the destructure off a dynamic `import()`, the
+ * property access that never becomes a call. Keying on the CALLEE could not, and did not:
+ * three rules each matched one shape and a fourth shape walked past all three.
+ *
+ * Core imports neither spelling anywhere, so this refuses nothing that exists. If a legitimate
+ * need for `node:module` ever arrives it belongs in `AUDITED_RUNTIME_LOADS` beside the
+ * `--extension-module` entry, with the same three pins and the same argument written down.
+ */
+const LOADER_MODULES = new Set(["node:module", "module"]);
 
 /**
  * Every module specifier a file names, plus every load it performs that names nothing this
@@ -131,13 +236,27 @@ function auditFile(file) {
   const source = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.ESNext, true);
   const specifiers = [];
   const unauditable = [];
+  /**
+   * Every place a module is NAMED, whatever syntax named it — see `LOADER_MODULES`.
+   *
+   * `erased` is the one exemption and it is not a courtesy: `import type … from "node:module"`
+   * and `import("node:module").NodeRequire` are gone before anything runs, so they hand out no
+   * value and load nothing. Refusing them would be a false positive on the one construct that
+   * cannot be the defect, and a guard with false positives gets switched off.
+   */
+  const named = (spec, erased = false) => {
+    specifiers.push(spec);
+    if (!erased && LOADER_MODULES.has(spec)) {
+      unauditable.push(`names "${spec}", the module \`createRequire\` comes from — every value it hands out loads a module this guard cannot follow`);
+    }
+  };
   const visit = (node) => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier &&
       ts.isStringLiteral(node.moduleSpecifier)
     ) {
-      specifiers.push(node.moduleSpecifier.text);
+      named(node.moduleSpecifier.text, isErasedImport(node));
       // Aliasing and re-export: `import { createRequire as cr } from "node:module"` passes
       // the specifier check (it IS a builtin) and then hands the file a loader under a name
       // no callee rule knows. `getText` starts past leading trivia, so a comment mentioning
@@ -146,11 +265,16 @@ function auditFile(file) {
         unauditable.push("imports createRequire, which loads a module by a name this guard cannot follow");
       }
     } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
-      specifiers.push(node.argument.literal.text);
+      named(node.argument.literal.text, true);
+    } else if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name) && TAIL_LOADERS.has(node.name.text)) {
+      // KEYED TO THE VALUE, NOT THE CALL. `const cr = mod.createRequire` is a
+      // PropertyAccessExpression that is nobody's callee, so every callee rule below missed
+      // it while the captured function loaded `typescript` at runtime.
+      unauditable.push(`reads .${node.name.text} — a runtime module loader this guard cannot follow once it is captured`);
     } else if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
         const arg = node.arguments[0];
-        if (arg && ts.isStringLiteral(arg)) specifiers.push(arg.text);
+        if (arg && ts.isStringLiteral(arg)) named(arg.text);
         else unauditable.push("dynamic import() with a specifier this guard cannot read (a template literal is not a string literal)");
       } else if (ts.isIdentifier(node.expression) && BARE_LOADERS.has(node.expression.text)) {
         unauditable.push(`calls ${node.expression.text}(…) — a runtime module load this guard cannot audit`);

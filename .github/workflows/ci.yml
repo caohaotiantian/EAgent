@@ -78,8 +78,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # `build:binary` and not `build-binary.mjs`: the script alone does not compile, and a
-      # binary bundled from a stale `dist` would certify sources it does not contain. The
-      # script refuses that case rather than trusting the caller — see `distIsBehindSources`.
+      # The script COMPILES `dist` itself now, so `build:binary` and `build-binary.mjs` are the
+      # same thing and neither can bundle a stale `dist`. It used to be `npm run build && …`,
+      # and the hazard was running the script directly: `distIsBehindSources` decided on mtime
+      # alone, so a touched or cache-restored `dist` let a binary certify sources it does not
+      # contain. `dist` is now a function of `src` by construction — see build-binary.mjs §0.
       - run: npm run build:binary
       - run: node scripts/verify-binary.mjs

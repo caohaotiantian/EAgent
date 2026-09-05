@@ -23,7 +23,7 @@
     },
     {
       "path": "packages/core/src/graph/spec.ts",
-      "why": "The single source artifact, consumed by all six layers with no layer keeping a private representation. It is the vocabulary the kernel and every extension both speak; graphHash = digest(spec) is the compiler's contract with the journal."
+      "why": "The single source artifact, consumed by all six layers with no layer keeping a private representation. It is the vocabulary the kernel and every extension both speak; graphHash = digest(spec) is the compiler's contract with the journal. The two calls that COMPUTE it are in graph/compile.ts and are deliberately not pinned — see its notKernel entry, which is here so a reader of this line does not go looking for a pin that was never intended."
     },
     {
       "path": "packages/core/src/journal/events.ts",
@@ -51,21 +51,25 @@
     },
     {
       "path": "packages/core/src/run/engine.ts",
-      "why": "The executor. Three rules are enforced by construction rather than review: one tool dispatch path, work parallel but commits serialized through one queue with an explicit expectedSeq, and a fan-out's writes held until its join folds siblings in branch order. It is also the file this guard exists because of: 1,375 to 7,740 lines in 21 days, 28 of 69 feat commits."
+      "why": "The executor. Three rules are enforced by construction rather than review: one tool dispatch path, work parallel but commits serialized through one queue with an explicit expectedSeq, and a fan-out's writes held until its join folds siblings in branch order. It is also the file this guard exists because of: 1,375 lines to 10,570, and 38 of its commits are feat."
     }
   ],
   "notKernel": [
     {
       "path": "packages/core/src/errors.ts",
-      "why": "Highest fan-in in the package (38 importers) and still not kernel: it is data, not invariant. Adding an error code IS adding capability, and gating it would tax exactly the correct additions EAgent's line-count pin taxed. Same for vocab.ts."
+      "why": "Highest fan-in in the package (39 importers) and still not kernel: it is data, not invariant. Adding an error code IS adding capability, and gating it would tax exactly the correct additions EAgent's line-count pin taxed. Same for vocab.ts."
+    },
+    {
+      "path": "packages/core/src/graph/compile.ts",
+      "why": "WHERE `graphHash = digest(spec)` IS ACTUALLY COMPUTED — twice, at the compiler's `graphHash: digest(spec)` and in `graphHashOf` — and still not kernel, recorded here because the spec.ts entry sends a reader looking for it. The criterion is 'the MECHANISM that makes a non-negotiable true', and for a DERIVED key that mechanism is two files that ARE pinned: canonical.ts decides the bytes two equal values produce, and graph/spec.ts decides what a spec IS. compile.ts contributes a call site. Pinning it would repeat validate.ts's mistake one file over: it is the file every compile-time feature lands in — expansion budgets, retry defaults, layout ranks, the subgraph class floor — so it is supposed to grow one arm per feature, and a pin there would fire on every one. THE RESIDUAL RISK, NAMED: a commit that changed the digest's ARGUMENT rather than its algorithm moves every graphHash in the tree with no pinned file touched. Changing ONE of the two calls is caught by test/graph/compile.test.ts ('graphHash covers the spec only'); changing BOTH is caught by nothing in the tree, and would surface as E_GRAPH_MISMATCH against every journal already written. A byte-literal hash fixture is what would close it, and belongs beside that test rather than in this list."
     },
     {
       "path": "packages/core/src/graph/validate.ts",
-      "why": "2,913 lines and 13 feat touches — the largest exclusion, and deliberate. It ENFORCES the spec but is not the spec, and its rules are supposed to grow one per feature. Pinning it would fire on every rule and teach nobody anything."
+      "why": "3,396 lines and 13 feat touches — the largest exclusion, and deliberate. It ENFORCES the spec but is not the spec, and its rules are supposed to grow one per feature. Pinning it would fire on every rule and teach nobody anything."
     },
     {
       "path": "packages/core/src/run/delivery.ts",
-      "why": "3,791 lines, and no non-negotiable names it. It is a mechanism the engine uses, replaceable in principle. Listed here so the omission is a recorded decision rather than an oversight."
+      "why": "3,823 lines, and no non-negotiable names it. It is a mechanism the engine uses, replaceable in principle. Listed here so the omission is a recorded decision rather than an oversight."
     },
     {
       "path": "packages/core/src/journal/sqlite.ts",
