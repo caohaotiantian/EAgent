@@ -88,7 +88,9 @@ function graphJson(promptRef: string, name = "ask-bench"): string {
       verdict: { type: "object", reduce: "replace" },
     },
     inputs: ["question"],
-    outputs: ["verdict"],
+    // `answer` is an OUTPUT so the exam can read it: the exam grades terminal outputs, and a work
+    // channel the graph does not declare is one the exam cannot see.
+    outputs: ["answer", "verdict"],
     nodes: [
       {
         id: "answer",
@@ -108,6 +110,36 @@ function graphJson(promptRef: string, name = "ask-bench"): string {
     edges: [{ id: "e", from: "answer", to: "check", kind: "seq" }],
   });
 }
+
+/**
+ * THE EXAM — the same rule as CHECK, but attested by an operator and run by the binary over the
+ * recording's `question` and the run's terminal `answer`. `loom score`, `suite freeze` and
+ * `promote --against-cohort` refuse a workflow with none, because without it the only S1 is the
+ * graph's own evaluator, which a candidate authors.
+ */
+const EXAM_ASK = `(view) => {
+  const q = String(view.get("question") || "");
+  const a = String(view.get("answer") || "");
+  const ok = a.indexOf("ANSWER:" + q) >= 0;
+  return { writes: { verdict: { pass: ok, score: ok ? 1 : 0, confidence: 1, detail: ok ? "answered " + q : "did not answer " + q } } };
+}`;
+
+const EXAM_GRAPH = JSON.stringify({
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "ask-exam", project: "demo", version: 1 },
+  policy: { posture: "out", capabilities: [] },
+  channels: {
+    subject: { type: "string", reduce: "replace" },
+    question: { type: "string", reduce: "replace" },
+    answer: { type: "string", reduce: "replace" },
+    verdict: { type: "object", reduce: "replace" },
+  },
+  inputs: ["subject", "question", "answer"],
+  outputs: ["verdict"],
+  nodes: [{ id: "grade", type: "evaluator", reads: ["question", "answer"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-ask@stable", threshold: 0 } }],
+  edges: [],
+});
 
 const MODELS_FILE = JSON.stringify({
   adapters: [
@@ -197,6 +229,9 @@ function seed(dir: string): void {
   mkdirSync(join(dir, "resources", "prompt"), { recursive: true });
   mkdirSync(join(dir, "resources", "agent_profile"), { recursive: true });
   writeFileSync(join(dir, "resources", "function", "check.js"), CHECK);
+  writeFileSync(join(dir, "resources", "function", "exam-ask.js"), EXAM_ASK);
+  mkdirSync(join(dir, "exams"), { recursive: true });
+  writeFileSync(join(dir, "exams", "ask-exam.json"), EXAM_GRAPH);
   writeFileSync(join(dir, "resources", "prompt", "base.md"), BASE_PROMPT);
   writeFileSync(join(dir, "resources", "prompt", "better.md"), BETTER_PROMPT);
   writeFileSync(join(dir, "resources", "agent_profile", "x.md"), "a helper profile\n");
@@ -239,6 +274,14 @@ async function corpus(): Promise<{ dir: string; runIds: RunId[] }> {
     assert.equal(parsed.status, "succeeded", r.out);
     runIds.push(parsed.runId as RunId);
   }
+  // THE OPERATOR ATTESTS THE EXAM, then one score grades every recording under it. Both live in
+  // the template so every copy starts with a graded corpus and no test pays for thirty exam runs.
+  // Anchored on the NEWEST recording: every promotion below journals its decision on the OLDEST
+  // selected run, and the tests that read that run's rows expect to find promotions alone.
+  const attested = await cli(["exam", "attest", join(dir, "exams", "ask-exam.json"), "--cohort", runIds[runIds.length - 1]!, "--as", "u:operator", "--workspace", dir]);
+  assert.equal(attested.code, 0, `${attested.out}\n${attested.err}`);
+  const scored = await cli(["score", runIds[0]!, "--workspace", dir]);
+  assert.equal(scored.code, 0, `${scored.out}\n${scored.err}`);
   TEMPLATE = { dir, runIds };
   return TEMPLATE;
 }
@@ -488,6 +531,8 @@ test("a candidate that is WORSE is refused, and the refusal is journaled too", a
       ids.push((JSON.parse(run.out) as { runId: string }).runId as RunId);
     }
 
+    const attested = await cli(["exam", "attest", join(dir, "exams", "ask-exam.json"), "--cohort", ids[ids.length - 1]!, "--as", "u:operator", "--workspace", dir]);
+    assert.equal(attested.code, 0, `${attested.out}\n${attested.err}`);
     const r = await cli(liveArgs(dir, ids[0]!, ["--runs", "6"]));
     assert.equal(r.code, 1, `${r.out}\n${r.err}`);
     const d = decisionOf(r.out);
@@ -572,6 +617,10 @@ test("a cohort too small to be a population, and a candidate that is the baselin
       ]);
       ids.push((JSON.parse(r.out) as { runId: string }).runId as RunId);
     }
+    // Attested, so the refusal below is about the POPULATION and not about the missing exam —
+    // that refusal comes first, and has its own test in exam-lane-acceptance.test.ts.
+    const attested = await cli(["exam", "attest", join(small, "exams", "ask-exam.json"), "--cohort", ids[ids.length - 1]!, "--as", "u:operator", "--workspace", small]);
+    assert.equal(attested.code, 0, `${attested.out}\n${attested.err}`);
     await assert.rejects(
       () => cli(liveArgs(small, ids[0]!)),
       (e: unknown) => isLoomError(e) && /n = 4 comparable runs/.test(e.message) && /at least 30/.test(e.message),

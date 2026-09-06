@@ -70,7 +70,8 @@ const spec = (ref: string): unknown => ({
     verdict: { type: "object", reduce: "replace" },
   },
   inputs: ["items"],
-  outputs: ["verdict"],
+  // `picked` is an OUTPUT so the attested exam can read it: the exam grades terminal outputs.
+  outputs: ["picked", "verdict"],
   nodes: [
     { id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref } },
     {
@@ -131,6 +132,38 @@ async function corpus(runs: number, opts: { score: boolean }): Promise<Fixture> 
       return { writes: { verdict: { pass: picked.length === items.length, confidence: 1, detail: picked.length + "/" + items.length } } };
     }`,
   );
+  fn(
+    "exam-pick",
+    `(view) => {
+      const want = view.get("items") ?? [];
+      const got = view.get("picked") ?? [];
+      const ok = JSON.stringify(got) === JSON.stringify(want);
+      return { writes: { verdict: { pass: ok, score: ok ? 1 : 0, confidence: 1, detail: ok ? "kept every item" : "dropped an item" } } };
+    }`,
+  );
+  mkdirSync(join(dir, "exams"), { recursive: true });
+  // THE OPERATOR'S EXAM: the grader outside every candidate graph. `suite freeze` refuses a
+  // workflow with none, because `golden` — what selects a must-pass case — would otherwise rest
+  // on the graph's own evaluator, which a candidate authors.
+  writeFileSync(
+    join(dir, "exams", "pick-exam.json"),
+    JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "pick-exam", project: "demo", version: 1 },
+      policy: { posture: "out", capabilities: [] },
+      channels: {
+        subject: { type: "string", reduce: "replace" },
+        items: { type: "array", reduce: "replace" },
+        picked: { type: "array", reduce: "replace" },
+        verdict: { type: "object", reduce: "replace" },
+      },
+      inputs: ["subject", "items", "picked"],
+      outputs: ["verdict"],
+      nodes: [{ id: "grade", type: "evaluator", reads: ["items", "picked"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-pick@stable", threshold: 0 } }],
+      edges: [],
+    }),
+  );
   writeFileSync(join(dir, "graphs", "pick.json"), JSON.stringify(spec("function/pick@stable")));
   // NOT in graphs/: a candidate is by definition not published, and `loom score` reads that
   // directory as the promoted set.
@@ -148,6 +181,9 @@ async function corpus(runs: number, opts: { score: boolean }): Promise<Fixture> 
     assert.equal(p.status, "succeeded", `run ${String(n)} did not finish`);
     ids.push(p.runId);
   }
+  // Attested BEFORE any score, so every journaled verdict is under the exam's ruler.
+  const attested = await cli(["exam", "attest", join(dir, "exams", "pick-exam.json"), "--cohort", ids[0]!, "--as", "u:operator", "--workspace", dir]);
+  assert.equal(attested.code, 0, attested.err);
   if (opts.score) {
     for (const id of ids) assert.equal((await cli(["score", id, "--workspace", dir])).code, 0);
   }
