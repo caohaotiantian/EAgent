@@ -4452,8 +4452,17 @@ export class Engine {
   }
 
   async #runWaveInner(ctx: RunContext, wave: readonly Wave[]): Promise<void> {
-    // Work in parallel …
-    const outcomes = await Promise.all(
+    // EVERY LEASE FIRST, THEN ONE SNAPSHOT, THEN THE BODIES.
+    //
+    // Each task used to lease and then re-project for itself, so a wave of k tasks took k
+    // snapshots that differed from one another only by which siblings' leases had landed yet —
+    // and each snapshot is a `{...p.tasks}` copy of every task the run has ever created. On a
+    // 3,200-branch fan-out that was half of 6,612 snapshots, the term that made the run
+    // quadratic. What a body needs from the post-lease projection is its OWN lease — the
+    // `task.leased` row's `ts` is the body clock and its `attempt` is what replay keys the
+    // recorded clock on (`#bodyClock`) — and one projection taken after the last lease holds
+    // every task's. Nothing in execution reads a sibling's lease state.
+    await Promise.all(
       wave.map(async (w) => {
         // THE TOKEN IS THE SEQ OF THE LEASE ITSELF.
         //
@@ -4477,8 +4486,15 @@ export class Engine {
           ),
         );
         ctx.leases.set(w.task.taskId, leasedAt);
+      }),
+    );
+    const leased = (await this.#project(ctx))!;
+
+    // Work in parallel …
+    const outcomes = await Promise.all(
+      wave.map(async (w) => {
         try {
-          return { w, outcome: await this.#executeTask(ctx, w) };
+          return { w, outcome: await this.#executeTask(ctx, leased, w) };
         } catch (e) {
           const le = toLoomError(e);
           return {
@@ -4583,7 +4599,12 @@ export class Engine {
       : { values: kept, external, projected };
   }
 
-  async #executeTask(ctx: RunContext, w: Wave): Promise<NodeOutcome> {
+  async #executeTask(ctx: RunContext, leased: RunProjection, w: Wave): Promise<NodeOutcome> {
+    // `leased` IS THE WAVE'S ONE POST-LEASE SNAPSHOT — see `#runWaveInner` for why it is taken
+    // once per wave rather than once per task. It holds this task's own `task.leased` row, which
+    // `#bodyClock` reads, and that is the only thing execution needs that the selection snapshot
+    // did not have.
+    //
     // HERE, AND ONLY HERE, is where a handle becomes a value. Everything downstream of this
     // line — the policy decision, the gate payload a human reads, the gate BINDING that
     // decision is compared against, `#dispatch` and every node body it reaches — takes `p`
@@ -4596,7 +4617,7 @@ export class Engine {
     // AND WHAT THIS TASK'S OWN BRANCH HAS ALREADY WRITTEN, which is not in `p.channels` while a
     // fan-out is open — see `#withBranchWrites`. After `#resolveReads`, so a branch-local write
     // wins over an externalised value of the same channel resolved from an earlier state.
-    const p = this.#withBranchWrites(ctx, await this.#resolveReads(ctx, (await this.#project(ctx))!, w), w.task.branch);
+    const p = this.#withBranchWrites(ctx, await this.#resolveReads(ctx, leased, w), w.task.branch);
     const { node, task } = w;
     const spec = ctx.graph.spec;
 
@@ -5367,7 +5388,7 @@ export class Engine {
 
   async #servedEffect(ctx: RunContext, p: RunProjection, key: string): Promise<{ readonly result: unknown } | undefined> {
     if (this.#replay !== undefined) return undefined;
-    if (!p.startedEffects.includes(key)) return undefined;
+    if (!sortedHas(p.startedEffects, key)) return undefined;
     const done = await this.#completedEffects(ctx, (k) => k === key);
     return done.has(key) ? { result: done.get(key) } : undefined;
   }
@@ -8398,9 +8419,12 @@ export class Engine {
    */
   #withBranchWrites(ctx: RunContext, p: RunProjection, branch: BranchCoordinate): RunProjection {
     if (!writesHeldForJoin(branch)) return p;
-    const path = encodeBranch(branch);
-    const held = Object.values(p.tasks)
-      .filter((t) => t.state === "succeeded" && encodeBranch(t.branch) === path && Object.keys(t.writes).length > 0)
+    // `branchIndexOf`, not a scan: this ran once per task over every task in the run, with an
+    // `encodeBranch` per visit — 21.7% of a 3,200-branch fan-out's CPU once the snapshots were
+    // halved. The index groups the snapshot's tasks by path once and is shared by every task in
+    // the wave, which all read the same post-lease snapshot.
+    const held = (branchIndexOf(p).byPath.get(encodeBranch(branch)) ?? [])
+      .filter((t) => t.state === "succeeded" && Object.keys(t.writes).length > 0)
       // The lease's seq IS the journal position it was taken at, so this is journal order and not
       // map order — the same fact `task.leased`'s fencing token is.
       .sort((a, b) => (a.lease?.fencingToken ?? 0) - (b.lease?.fencingToken ?? 0));
@@ -8765,9 +8789,11 @@ export class Engine {
     const edge = ctx.index.edgeById.get(last.edgeId as EdgeId);
     if (plan === undefined || edge === undefined) return [];
 
-    const siblings = Object.values(p.tasks).filter(
-      (t) => t.nodeId === plan.nodeId && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
-    );
+    // FROM THE SNAPSHOT'S BRANCH INDEX, not a scan. This built `encodeBranch(...)` for every task
+    // in the run on every branch commit — 3,200 string builds per commit at 3,200 branches, four
+    // times over between here and `#maybeFireJoin`, and 24% of that run's CPU. The index groups
+    // tasks by their parent path once per snapshot; what is left is the siblings themselves.
+    const siblings = (branchIndexOf(p).byParentPath.get(parentPath) ?? []).filter((t) => t.nodeId === plan.nodeId);
     const materialised = siblings.length;
     if (materialised >= plan.width) return [];
 
@@ -8825,18 +8851,22 @@ export class Engine {
     // Members are the DECLARED branch nodes under or at this instance's coordinate — the
     // same set `#foldJoin` folds. Counting one set and folding another is the shape
     // invariant 6 forbids for tools, reproduced one subsystem over.
-    const siblings = Object.values(p.tasks).filter((t) => {
-      if (!join.branches.includes(t.nodeId)) return false;
-      const b = encodeBranch(t.branch);
-      return b === parentPath || isDescendantBranch(parentPath, b);
-    });
+    //
+    // ONE PASS OVER THE SNAPSHOT'S INDEX, NO STRINGS — see `#topUpFanout`. `members` is a `Set`
+    // because `join.branches` was asked `includes` once per task per commit, and
+    // `isAtOrUnderBranch` replaces an `encodeBranch` per task with a segment walk over the record
+    // the fold already decoded. `all` is the index's one materialised task list, so the two scans
+    // below share it instead of each allocating `Object.values(p.tasks)`.
+    const members = new Set<string>(join.branches);
+    const all = branchIndexOf(p).all;
+    const siblings = all.filter((t) => members.has(t.nodeId) && isAtOrUnderBranch(t.branch, parent));
 
     // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
     // materialisation a sibling count is "how many have started", so using it would
     // fire the barrier as soon as the first wave finished — silently dropping every
     // branch that had not been created yet.
     const planned = Object.entries(p.fanouts)
-      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && join.branches.includes(plan.nodeId))
+      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && members.has(plan.nodeId))
       .reduce((a, [, plan]) => a + plan.width, 0);
     const expected = planned > 0 ? planned : siblings.length;
 
@@ -8855,7 +8885,7 @@ export class Engine {
     const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
       (t.taskId === w.task.taskId ? take : t.take).some((id) => {
         const to = ctx.index.edgeById.get(id as EdgeId)?.to;
-        return to !== undefined && join.branches.includes(to);
+        return to !== undefined && members.has(to);
       });
 
     // QUIESCENCE: a barrier may not fire while an arrival is still possible.
@@ -8866,19 +8896,26 @@ export class Engine {
     // when the outer branches finish — so the barrier fired over an empty member set and
     // committed nothing, and the result depended on how many branches a wave happened to
     // hold. A node still reaches a member if it IS one or is one of its ancestors.
-    const reachesMember = (nodeId: NodeId): boolean =>
-      join.branches.some((bn) => bn === nodeId || (ctx.index.ancestors.get(bn as NodeId)?.has(nodeId) ?? false));
+    // Memoised per node for this decision: the question is asked once per live task under the
+    // barrier, and its answer depends on the graph alone.
+    const reaches = new Map<NodeId, boolean>();
+    const reachesMember = (nodeId: NodeId): boolean => {
+      const hit = reaches.get(nodeId);
+      if (hit !== undefined) return hit;
+      const out = join.branches.some((bn) => bn === nodeId || (ctx.index.ancestors.get(bn as NodeId)?.has(nodeId) ?? false));
+      reaches.set(nodeId, out);
+      return out;
+    };
 
     // This Task's own hand-off is not in `p` yet, so read it from `take`.
     const handingOff = take.some((id) => {
       const to = ctx.index.edgeById.get(id)?.to;
       return to !== undefined && reachesMember(to);
     });
-    const stillLive = Object.values(p.tasks).some((t) => {
+    const stillLive = all.some((t) => {
       if (t.taskId === w.task.taskId) return false;
       if (isTerminalState(t.state)) return false;
-      const b = encodeBranch(t.branch);
-      if (!(b === parentPath || isDescendantBranch(parentPath, b))) return false;
+      if (!isAtOrUnderBranch(t.branch, parent)) return false;
       return reachesMember(t.nodeId);
     });
     const quiescent = !handingOff && !stillLive;
@@ -9367,6 +9404,116 @@ function writesHeldForJoin(branch: BranchCoordinate): boolean {
 
 function isDescendantBranch(prefix: string, candidate: string): boolean {
   return candidate !== prefix && candidate.startsWith(prefix === "root" ? "root/" : `${prefix}/`);
+}
+
+/**
+ * `isDescendantBranch` over the decoded record, without building the string.
+ *
+ * `branch` is at or below `parent` when `parent`'s segments are a prefix of its own. The
+ * two answer identically for every branch the fold can hold: `encodeBranch` is injective over
+ * compiled ids (`SAFE_ID` admits neither `/` nor `[`), and `TaskRecord.branch` IS the decoded
+ * form of the `branchPath` the string version re-encoded — so comparing segments compares the
+ * same information and skips a string build per task per commit.
+ */
+function isAtOrUnderBranch(branch: BranchCoordinate, parent: BranchCoordinate): boolean {
+  if (branch.segments.length < parent.segments.length) return false;
+  for (let i = 0; i < parent.segments.length; i++) {
+    const a = branch.segments[i]!;
+    const b = parent.segments[i]!;
+    if (a.edgeId !== b.edgeId || a.index !== b.index) return false;
+  }
+  return true;
+}
+
+/**
+ * A snapshot's tasks, grouped by branch — built once per snapshot, shared by every reader of it.
+ *
+ * Three readers asked the same question of `p.tasks` in three passes per commit and one more per
+ * executed task: which tasks sit AT this branch (`#withBranchWrites`), which sit one level UNDER
+ * it (`#topUpFanout`), and which sit at or under it (`#maybeFireJoin`). Each pass built a string
+ * per task to answer. The index encodes each task's path once and files it under its own path and
+ * its parent's; readers then touch only the group they asked about, or `all` when the question is
+ * genuinely about every task.
+ *
+ * KEYED BY SNAPSHOT IDENTITY, which is what makes sharing safe: a `RunProjection` is frozen at
+ * `freeze` and never mutated, so an index built over one describes it for as long as it exists,
+ * and a `WeakMap` lets it go when the snapshot does. A derived projection (`withResolved`) is a
+ * different object and gets its own — the readers here are handed the wave's shared snapshot, so
+ * that costs one build per wave, not per task.
+ *
+ * The parent path is the encoded path minus its last segment. Node and edge ids are `SAFE_ID`
+ * (no `/`), so the last `/` is the segment boundary; a depth-one task's parent is `root`.
+ */
+interface BranchIndex {
+  readonly all: readonly TaskRecord[];
+  readonly byPath: ReadonlyMap<string, readonly TaskRecord[]>;
+  readonly byParentPath: ReadonlyMap<string, readonly TaskRecord[]>;
+}
+
+const BRANCH_INDEX = new WeakMap<RunProjection, BranchIndex>();
+
+/**
+ * `encodeBranch(t.branch)`, once per TASK RECORD rather than once per snapshot.
+ *
+ * The fold replaces a record only when the task changes (`{...existing, ...patch}`), so the same
+ * object appears in every snapshot between two of its transitions — a few times per task over its
+ * life against once per commit for the run. Building the index still visits every task per
+ * snapshot, but a visit is a `WeakMap` lookup instead of a string build; measured at 3,200
+ * branches, the build fell from 26% of the run's CPU to a fraction of that.
+ */
+const BRANCH_PATH = new WeakMap<TaskRecord, string>();
+
+function pathOf(t: TaskRecord): string {
+  const hit = BRANCH_PATH.get(t);
+  if (hit !== undefined) return hit;
+  const path = encodeBranch(t.branch);
+  BRANCH_PATH.set(t, path);
+  return path;
+}
+
+function branchIndexOf(p: RunProjection): BranchIndex {
+  const hit = BRANCH_INDEX.get(p);
+  if (hit !== undefined) return hit;
+  const all = Object.values(p.tasks);
+  const byPath = new Map<string, TaskRecord[]>();
+  const byParentPath = new Map<string, TaskRecord[]>();
+  for (const t of all) {
+    const path = pathOf(t);
+    const at = byPath.get(path);
+    if (at === undefined) byPath.set(path, [t]);
+    else at.push(t);
+    if (t.branch.segments.length === 0) continue;
+    const parent = t.branch.segments.length === 1 ? "root" : path.slice(0, path.lastIndexOf("/"));
+    const under = byParentPath.get(parent);
+    if (under === undefined) byParentPath.set(parent, [t]);
+    else under.push(t);
+  }
+  const built: BranchIndex = { all, byPath, byParentPath };
+  BRANCH_INDEX.set(p, built);
+  return built;
+}
+
+/**
+ * `includes` over an array `freeze` hands back SORTED.
+ *
+ * `RunProjection.startedEffects` is `[...everStarted].sort()` — default order, UTF-16 code units,
+ * the order `<` gives — and it grows to one entry per effect the run ever started, so a linear
+ * `includes` on every lookup was O(effects) per served-effect question, six questions per task.
+ * The sort is `projection.ts`'s, not this file's, which is why
+ * `engine-lane-started-effects-sorted.test.ts` pins it from a real fold: a projection that stops
+ * sorting fails a test there rather than a lookup here.
+ */
+function sortedHas(sorted: readonly string[], key: string): boolean {
+  let lo = 0;
+  let hi = sorted.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const at = sorted[mid]!;
+    if (at === key) return true;
+    if (at < key) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return false;
 }
 
 /** Channel state as seen at a branch, for a join's fold baseline. */
