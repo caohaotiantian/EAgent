@@ -145,6 +145,61 @@ export function compileMutation(input: MutateInput): MutationResult {
     }
   }
 
+  // ── 2b. and the region an existing node sits in may not shrink ───────────
+  //
+  // THE THIRD EDGE DIRECTION, which the two clauses above do not name. `added -> existing` is
+  // neither "into an added node from a stranger" nor "between two existing nodes", so it was
+  // accepted with no diagnostic at all — and because seq edges are OR-joined (`task.ready` is
+  // emitted per satisfied edge; only `kind: "join"` is a barrier), it is a SECOND path to the
+  // node it points at. Point it at a node an authored `human_gate` stands in front of and the
+  // gate is no longer on every path to it: the human rejects, `gate.decided` carries an
+  // unconditional `run.resumed`, and the grafted task is ready. A rejection releases the action
+  // it was meant to stop. Measured at 294e713 on a `human_gate` in front of a
+  // `reversible_write` tool, with no operator de-escalation anywhere: the graft ran the tool
+  // (`charged=1`) where the unmutated control did not (`charged=0`).
+  //
+  // DOMINATOR PRESERVATION, not a ban on the direction. The invariant oversight actually rests
+  // on is "every path to this node still passes through what it passed through before", which
+  // is what this module's opening claim — a model "cannot propose one that weakens oversight" —
+  // already promises. A ban would refuse by shape and would have to be reopened the first time
+  // a mutation legitimately feeds an existing node; this admits exactly the cases that keep the
+  // property, such as a step added in front of a node only the proposer dominated.
+  //
+  // PROPOSER-DOMINANCE WOULD NOT HAVE WORKED, and it was the obvious rule: the proposer of a
+  // mutation is almost always an ancestor of everything it could graft onto — in the measured
+  // repro `plan` is the entry node — so "is the target already dominated by the proposer" is
+  // satisfied by the exact graph the rule exists to refuse.
+  //
+  // ONLY WHEN SUCH AN EDGE EXISTS, which is what keeps this free for every other mutation. An
+  // existing node's inbound edges can only change through an `added -> existing` edge, and a
+  // path that leaves the added region can only come back through one, so with none of them
+  // present no existing node's dominators can move.
+  const grafts = mutation.addEdges.filter((e) => added.has(e.from) && !added.has(e.to) && existingNodes.has(e.to));
+  if (grafts.length > 0) {
+    const before = dominators(spec.nodes, indexGraph(spec).dagEdges);
+    const grafted: GraphSpec = {
+      ...spec,
+      nodes: [...spec.nodes, ...mutation.addNodes],
+      edges: [...spec.edges, ...mutation.addEdges],
+    };
+    const after = dominators(grafted.nodes, indexGraph(grafted).dagEdges);
+    const named = grafts.map((e) => `"${e.id}"`).join(", ");
+    for (const v of spec.nodes) {
+      const lost = [...(before.get(v.id) ?? [])].filter((id) => !(after.get(v.id)?.has(id) ?? false));
+      if (lost.length === 0) continue;
+      const which = lost.map((id) => `"${id}"`).join(", ");
+      diagnostics.push({
+        severity: "error",
+        code: "MUT003_NOT_DOMINATED",
+        message:
+          `edge ${named} gives "${v.id}" a path that does not pass through ${which}; a mutation may not take ` +
+          `an existing node out of the region that already dominated it`,
+        at: { nodeId: v.id },
+        fix: `re-enter downstream of ${which}, or drop the edge into "${v.id}"`,
+      });
+    }
+  }
+
   // ── 3. expansion budget ──────────────────────────────────────────────────
   const wouldConsume = budget.consumedNodes + mutation.addNodes.length;
   if (wouldConsume > budget.expansion.maxNodes) {
@@ -229,6 +284,53 @@ export function compileMutation(input: MutateInput): MutationResult {
     gatedNodes,
     addedNodes: mutation.addNodes.map((n) => n.id),
   };
+}
+
+/**
+ * Which nodes every path to each node must pass through.
+ *
+ * The textbook iterative fixpoint, and it is here rather than in `validate.ts` because one
+ * caller needs it: nothing else in the compiler asks a dominance question, and a second export
+ * on a pinned surface for a single use is a cost with no buyer.
+ *
+ * A node with no inbound edge is an entry and dominates only itself. Everything else starts at
+ * "every node dominates me" and shrinks, which is what makes the fixpoint converge from the
+ * safe side — a node the walk never reaches keeps the full set rather than the empty one, so an
+ * unreachable region cannot report a LOST dominator it never had.
+ *
+ * Callers compare the result against the same computation over a graph with edges ADDED. That
+ * direction is one-way: adding an edge can only remove dominators, never add one, so a base
+ * node whose set is unchanged is one whose oversight region is intact.
+ */
+function dominators(nodes: readonly NodeSpec[], edges: readonly EdgeSpec[]): ReadonlyMap<NodeId, ReadonlySet<NodeId>> {
+  const ids = nodes.map((n) => n.id);
+  const preds = new Map<NodeId, NodeId[]>();
+  for (const id of ids) preds.set(id, []);
+  for (const e of edges) preds.get(e.to)?.push(e.from);
+
+  const dom = new Map<NodeId, Set<NodeId>>();
+  for (const id of ids) dom.set(id, preds.get(id)!.length === 0 ? new Set([id]) : new Set(ids));
+
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const id of ids) {
+      const p = preds.get(id)!;
+      if (p.length === 0) continue;
+      let next: Set<NodeId> | undefined;
+      for (const q of p) {
+        const dq = dom.get(q);
+        if (dq === undefined) continue; // an edge from an id no node declares; `compile` reports it
+        next = next === undefined ? new Set(dq) : new Set([...next].filter((x) => dq.has(x)));
+      }
+      if (next === undefined) continue;
+      next.add(id);
+      const cur = dom.get(id)!;
+      if (next.size === cur.size && [...next].every((x) => cur.has(x))) continue;
+      dom.set(id, next);
+      changed = true;
+    }
+  }
+  return dom;
 }
 
 /** Nodes reachable from a node, for a caller checking a proposer's region. */
