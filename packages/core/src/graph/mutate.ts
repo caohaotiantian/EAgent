@@ -174,6 +174,17 @@ export function compileMutation(input: MutateInput): MutationResult {
   // existing node's inbound edges can only change through an `added -> existing` edge, and a
   // path that leaves the added region can only come back through one, so with none of them
   // present no existing node's dominators can move.
+  //
+  // OVER `dagEdges`, so `loop` and `compensation` are excluded — and that is not the hole it
+  // looks like. Measured on the gated graph above, every other kind is caught here (`seq`,
+  // `conditional`, `error`, `join`, `fanout` all report MUT003), and the two excluded ones
+  // cannot form the shape at all: a `loop` edge whose target cannot reach its source is
+  // GRAPH006_STUCK_LOOP, and reaching an added node from an existing one needs an
+  // `existing -> added` edge, which clause 1 above already refuses for everything but the
+  // proposer. So the only loop a mutation can add re-enters AT OR ABOVE the proposer — `hop ->
+  // plan` compiles, `hop -> gate` and `hop -> pay` are refused — and a path through the
+  // proposer passes through every dominator the proposer has, which is a superset of the ones
+  // its own ancestors need.
   const grafts = mutation.addEdges.filter((e) => added.has(e.from) && !added.has(e.to) && existingNodes.has(e.to));
   if (grafts.length > 0) {
     const before = dominators(spec.nodes, indexGraph(spec).dagEdges);

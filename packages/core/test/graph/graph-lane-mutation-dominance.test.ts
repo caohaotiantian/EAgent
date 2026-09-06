@@ -181,6 +181,62 @@ test("AND SO IS AN `added -> existing` EDGE THAT KEEPS THE REGION, which is why 
   assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
 });
 
+test("EVERY EDGE KIND, because the check runs over `dagEdges` and two kinds are not in it", () => {
+  // `seq`, `conditional`, `error`, `join` and `fanout` are all in `dagEdges`, so the graft is
+  // caught for each. `loop` and `compensation` are not — and cannot form the shape: a `loop`
+  // edge whose target cannot reach its source is GRAPH006_STUCK_LOOP, and reaching an added
+  // node from an existing one needs an `existing -> added` edge, which the older MUT003 clause
+  // already refuses for everything but the proposer.
+  const base = compiled();
+  const extra = (kind: string): Record<string, unknown> => {
+    if (kind === "conditional") return { when: "has(plan)" };
+    if (kind === "error") return { codes: ["*"] };
+    if (kind === "loop") return { until: "has(plan)", maxIterations: 2 };
+    if (kind === "join") return { branches: [n("hop")] };
+    if (kind === "fanout") return { over: "plan", as: "plan", maxWidth: 2 };
+    return {};
+  };
+  for (const kind of ["seq", "conditional", "error", "join", "fanout"]) {
+    const r = attempt(
+      base,
+      mutation({
+        addEdges: [
+          { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+          { id: e("m1"), from: n("hop"), to: n("pay"), kind, ...extra(kind) } as unknown as EdgeSpec,
+        ],
+      }),
+    );
+    assert.equal(r.ok, false, kind);
+    assert.ok(
+      r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "pay"),
+      `${kind}: ${r.diagnostics.filter((d) => d.severity === "error").map((d) => d.code).join(", ")}`,
+    );
+  }
+
+  // AND THE TWO THAT ARE NOT IN `dagEdges`. A loop back to the PROPOSER is the only one that
+  // compiles, and it takes nothing away: a path through the proposer passes through every
+  // dominator the proposer has.
+  const loopTo = (to: string) =>
+    attempt(
+      base,
+      mutation({
+        addEdges: [
+          { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+          { id: e("m1"), from: n("hop"), to: n(to), kind: "loop", until: "has(plan)", maxIterations: 2 } as unknown as EdgeSpec,
+        ],
+      }),
+    );
+  assert.equal(loopTo("plan").ok, true, "a loop back to the proposer is legal and harmless");
+  for (const to of ["gate", "pay"]) {
+    const r = loopTo(to);
+    assert.equal(r.ok, false, to);
+    assert.ok(
+      r.diagnostics.some((d) => d.code === "GRAPH006_STUCK_LOOP"),
+      `${to}: ${r.diagnostics.filter((d) => d.severity === "error").map((d) => d.code).join(", ")}`,
+    );
+  }
+});
+
 // ── end to end, through the engine ───────────────────────────────────────────
 
 interface Rig {
