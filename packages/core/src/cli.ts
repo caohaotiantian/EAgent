@@ -8346,9 +8346,10 @@ async function foldPeer(
  * of the cohort's baseline graph, reads at least one baseline input, does not read ONLY
  * evaluator-written outputs (grading the grader — `review-bench` as shipped), and — `examShape`'s
  * fifth rule — actually READS from some node every input it declares, since declaring the run's
- * answer and never reading it grades as blind as never declaring it. An EDGE CONDITION is not a
- * read: a body returning `take` makes a `when` inert and no check of the spec can rule that out,
- * so the rule fails closed and the exam must read the channel in a node. `--as` is REQUIRED
+ * answer and never reading it grades as blind as never declaring it. An EDGE CONDITION does not
+ * count: the rule cannot tell which conditions the executor evaluates — a body may return `take`
+ * and the `when` is then never read — so it counts none of them, and the exam must name the
+ * channel in a node's `reads` or a fanout's `over` instead. `--as` is REQUIRED
  * and may not be the synthetic `cli`: a person is deciding what counts as ground truth, and the
  * row names them.
  *
@@ -8377,7 +8378,7 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
       CODES.E_CONFIG_INVALID,
       `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
         `inputs, READS every one of the GRADED channels from some node's \`reads\` or a fanout's \`over\` ("subject" ` +
-        `excepted — no node may read it, and an edge condition is not a read), has exactly one output "verdict", and runs ` +
+        `excepted — no node may read it, and an edge condition never counts), has exactly one output "verdict", and runs ` +
         `deterministic bodies ending in an evaluator{kind:"assertion"} that writes it.`,
     );
   }

@@ -219,11 +219,12 @@ test("a channel a FANOUT edge fans over is read, though no node declares it", ()
  * with `when` never evaluated. Driven at `5b46f86`: the graded node ran and wrote a verdict with
  * `picked.ok` false, having never seen `picked`.
  *
- * Whether a body does that is not decidable from the spec, and CLAUDE.md says a guard that cannot
- * decide FAILS CLOSED. So the rule counts only reads the executor performs without consulting a
- * condition, and this exam is refused. THE COST IS REAL AND STATED: an exam whose only read of the
- * run's answer is an edge condition must move that read into a node's `reads`, and the refusal
- * tells the operator exactly that.
+ * Whether a body does that is not decidable from the spec, so the rule cannot tell which conditions
+ * the executor evaluates and counts NONE of them — including the ones the spec could settle, such
+ * as an edge leaving a bodyless `join`; that is the rule's choice of one predicate over a set of
+ * per-source carve-outs, not a thing it cannot see. THE COST IS REAL AND STATED: an exam whose only
+ * mention of the run's answer is an edge condition must name it in a node's `reads`, and the
+ * refusal tells the operator exactly that.
  */
 test("an edge condition is NOT a read — a producing body's `take` can skip it, so the rule fails closed", () => {
   const spec = examSpec();
@@ -240,7 +241,7 @@ test("an edge condition is NOT a read — a producing body's `take` can skip it,
   const problems = examShape(viaExpr);
   assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
   // AND THE REFUSAL SAYS WHAT TO DO, because this is the shape the design call knowingly costs.
-  assert.ok(problems.some((p) => /EDGE CONDITION does not count/.test(p) && /Read it in a node/.test(p)), `the refusal must name the cost: ${problems.join("\n")}`);
+  assert.ok(problems.some((p) => /EDGE CONDITION does not count either/.test(p) && /Name it where a read happens/.test(p)), `the refusal must name the cost: ${problems.join("\n")}`);
 });
 
 /**
@@ -269,11 +270,10 @@ test("the `take`-bypass shape is refused — and the spec that produces it is in
 
 /**
  * EVERY OTHER PLACEMENT OF A CONDITION, refused for the same one reason rather than for four.
- * `seq`/`fanout`/`join` never read `when`; a conditional never reads `until`; a conditional
- * leaving a ROUTER is chosen by the router's `take` and its `when` is skipped; and a `loop`'s
- * `until` — the one condition the executor does evaluate on both the switch AND the `take` path —
- * is still not counted, because the loop edge itself may be absent from a body's `take`.
- * ONE rule now covers what a placement filter used to enumerate, which is why the filter is gone.
+ * The rule does not ask where the condition sits or whether this particular one would be evaluated;
+ * it counts no condition at all. ONE rule now covers what a placement filter used to enumerate,
+ * which is why the filter is gone — and it refuses some conditions the executor would certainly
+ * have evaluated, which is the stated cost rather than an oversight.
  */
 test("no placement of a condition counts, whatever the edge kind", () => {
   const spec = examSpec();
@@ -300,9 +300,10 @@ test("no placement of a condition counts, whatever the edge kind", () => {
 });
 
 /**
- * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The two
- * routes the executor performs without consulting a condition still count, on the same fixture
- * shape that the conditions above are refused on.
+ * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The two places
+ * the rule DOES count a channel — a node's own `reads` and a fanout's `over` — still count, on the
+ * same fixture shape the conditions above are refused on. This test passes at base too: it is the
+ * control, and it cannot fail. Its job is to be read beside the refusals, not to detect anything.
  */
 test("the reads that DO count still count — a node's `reads` and a fanout's `over`", () => {
   const spec = examSpec();

@@ -99,13 +99,17 @@ export interface ExamOutcome {
  * what an exam DECLARES, and an exam declaring `picked` whose grading node reads only `items` is
  * as blind as the one that never declared it — at `3d05cff` it attested exit 0.
  *
- * WHAT "READ" MEANS, AND THE ONE SENTENCE IT RESTS ON: a channel counts as read only where the
- * executor reads it WITHOUT CONSULTING A CONDITION. Two routes satisfy that, and `observedChannels`
- * — reused rather than re-derived, because a second reader would drift from the one the engine acts
- * on (`applyTaint`, `dataFloorOf` and `#gatePayload` all call it) — is the first of them:
+ * WHAT THE RULE CHECKS, STATED AS WHAT IT DOES AND NOT AS A CLAIM ABOUT THE EXECUTOR: a declared
+ * baseline output must be NAMED in a node's own `reads` or in a fanout edge's `over`. Edge
+ * conditions never count — not a `conditional`'s `when`, not a `loop`'s `until`, not a `router`
+ * case's `when` — because the rule cannot tell which of them the executor evaluates (a node body
+ * may return `take`, and the spec carries a resource ref rather than a body), so it counts none.
+ * That is the whole predicate. `observedChannels` supplies the first half and is reused rather than
+ * re-derived, because a second reader would drift from the one the engine acts on (`applyTaint`,
+ * `dataFloorOf` and `#gatePayload` all call it):
  *
  * 1. `node.reads`, plus the `${…}` templates in `tool.args` that `observedChannels` folds in. The
- *    declaration is the one that matters, because a `function` or `assertion` BODY is opaque and
+ *    declaration is what can be checked, because a `function` or `assertion` BODY is opaque and
  *    does not need to be read: the engine builds its `StateView` from `node.reads` alone
  *    (`viewFor(p, …, w.node.reads ?? [])`, at `#runFunction` and at the assertion arm) and
  *    `makeStateView` slices state to that list, so a channel outside `reads` is one the body
@@ -117,29 +121,34 @@ export interface ExamOutcome {
  * 2. A fanout edge's `over`. Not covered by `reads`: `rule007` checks `e.over` against
  *    `spec.channels` alone (`GRAPH007_UNKNOWN_OVER`), never against the source node's, and the
  *    executor resolves it out of the whole scope (`const items = scope[e.over ?? ""]`). An exam
- *    that fans out over `picked` genuinely consumes it while no node declares it.
+ *    that fans out over `picked` names it while no node declares it.
  *
- * AN EDGE CONDITION IS NOT A READ, and that is the design call this rule was rebuilt around rather
- * than a gap in it. A `when` or an `until` names a channel the executor reads only if it reaches
- * the condition at all, and it need not: `#edgesToTake` skips the whole `switch` whenever
- * `outcome.take !== undefined`, and `conditional` and `loop` are both in `TAKEABLE_EDGE_KINDS`. A
- * `function` body and an `assertion` body — both node types an exam permits — may return `take`,
- * so the edge is taken with its condition never evaluated. Driven at `5b46f86`: a body returning
- * `{writes:{picked:{ok:false}}, take:["e"]}` behind `when: "picked.ok"` ran the graded node anyway,
- * which read only `items` and never saw `picked`.
+ * WHY CONDITIONS ARE EXCLUDED, and the honest form of the argument. A `when` or an `until` is
+ * evaluated only if the executor reaches the condition, and it need not: `#edgesToTake` skips its
+ * whole `switch` whenever `outcome.take !== undefined`, and `conditional` and `loop` are both in
+ * `TAKEABLE_EDGE_KINDS`. A `function` body and an `assertion` body — both node types an exam
+ * permits — may return `take`, so the edge is taken with its condition never evaluated. Driven at
+ * `5b46f86`: a body returning `{writes:{picked:{ok:false}}, take:["e"]}` behind `when: "picked.ok"`
+ * ran the graded node anyway, which read only `items` and never saw `picked`.
  *
- * WHETHER A BODY DOES THAT IS NOT DECIDABLE FROM THE SPEC — the spec carries a resource ref, not a
- * body — and CLAUDE.md's rule for a guard that cannot decide is that it fails closed. So no
- * condition counts, in any placement: not a `seq` edge's inert `when`, not a `conditional`'s, not a
- * `loop`'s `until`, and not a `router` case's. That last one costs nothing anyway and is worth
- * saying once so nobody re-adds it: a router may not declare `writes` (`GRAPH005_ROUTER_WRITES`),
- * so GRAPH004 forces every case's free variable into the router's own `reads`, where route 1
- * already has it.
+ * FOR SOME SOURCES THE SPEC DOES SETTLE IT, AND THEY ARE STILL NOT COUNTED. A `join` has no body —
+ * `#dispatchBody`'s `case "join":` returns `{status:"succeeded", writes:{}, usage}` with no `take`
+ * — so a `conditional` edge leaving one is always evaluated, and the node's `type` is right there
+ * in the spec. Not counting it is the rule's own CHOICE, not a thing it cannot see: one predicate
+ * with no per-source-type carve-out is what four review rounds of carve-outs bought. A router's
+ * case is excluded on the same terms and costs nothing anyway — a router may not declare `writes`
+ * (`GRAPH005_ROUTER_WRITES`), so GRAPH004 forces every case's free variable into the router's own
+ * `reads`, where route 1 already has it.
  *
- * THE COST IS REAL, AND THE REFUSAL STATES IT. An exam whose only read of the run's answer is an
- * edge condition is refused, and must move that read into some node's `reads` — which is a change
- * to the exam and not merely to its annotation, because the condition genuinely may not run. The
- * refusal says so in those words rather than leaving the operator to infer it.
+ * AND THE RULE DOES NOT CHECK REACHABILITY AT ALL, which is the other half of the same honesty. A
+ * node it counts may itself sit behind a `conditional` edge, or behind an edge a producing body's
+ * `take` omits, or down an `error` edge that never runs on the success path — and the rule does not
+ * look. "Named in a node's `reads`" is a fact about the spec; "the executor read it" is a fact about
+ * the run, and this predicate only ever claimed the first.
+ *
+ * THE COST IS REAL, AND THE REFUSAL STATES IT. An exam whose only mention of the run's answer is an
+ * edge condition is refused, and must name that channel in some node's `reads` instead. The refusal
+ * says so rather than leaving the operator to infer it.
  *
  * WHY THIS SHAPE, AFTER FOUR REVIEW ROUNDS SPENT ON THE OTHER ONE. The rule first counted only
  * `node.reads`, then grew a term per route somebody found: a fanout `over`, then an edge condition,
@@ -147,25 +156,24 @@ export interface ExamOutcome {
  * found the enumeration wrong — twice refusing an exam that genuinely reads (the refusal said "read
  * by no node" of a graph that read it), once admitting one that does not. A list of the executor's
  * evaluation sites is a second copy of the executor, and it drifted every time it was written down.
- * One predicate that does not need the list is what replaced it, and the enumeration it still keeps
- * — two routes — is small enough to hold and is checked by the tests beside each.
+ * One predicate that does not need the list is what replaced it.
  *
- * WHAT IT STILL DOES NOT CLOSE. The rule asks whether the channel is read, never whether the value
- * reaches the VERDICT, and no list closes that gap:
+ * WHAT IT STILL DOES NOT CLOSE. The rule asks whether the channel is NAMED where a read would
+ * happen, never whether the value reaches the VERDICT, and no list closes that gap:
  * - A node may declare `reads: ["picked"]` and its body ignore the value. A fact about the body;
  *   nothing static can see it.
- * - Something may read it and drop it: a body that discards; a `join` node, which has a `reads`
+ * - Something may name it and drop it: a body that discards; a `join` node, which has a `reads`
  *   list and no body at all; a node reachable only down an `error` edge, which never runs on the
  *   success path and is not terminal (`error` edges are in `dagEdges`, so the one-terminal rule
- *   does not catch it).
- * - Even route 2 is "unconditional" only in the sense that no CONDITION gates it — a body's `take`
- *   that omits the fanout edge skips the `over` read too, and `maxWidth: 0` names an `over` whose
- *   branches never materialise. Route 2 is kept because it is how a fanout exam reads at all and
- *   because the alternative refuses every one of them; the residue is stated rather than denied.
+ *   does not catch it); or, per the paragraph above, any counted node the run does not reach.
+ * - Route 2 is named-not-guaranteed in the same way: a body's `take` that omits the fanout edge
+ *   skips the `over`, and `maxWidth: 0` names an `over` whose branches never materialise. It is
+ *   kept because it is how a fanout exam names the channel at all and the alternative refuses every
+ *   one of them; the residue is stated rather than denied.
  * SO SAY THE GENERAL THING RATHER THAN THE LIST: this rule refuses MECHANICAL blindness — an exam
- * with no unconditional route to the channel — and it does not and cannot refuse an author who
- * wants to be blind. Closing the reachability half is a dataflow analysis from each declared input
- * to the terminal node, deliberately not built here.
+ * that never names the channel anywhere a read could happen — and it does not and cannot refuse an
+ * author who wants to be blind. Closing the reachability half is a dataflow analysis from each
+ * declared input to the terminal node, deliberately not built here.
  * `test/evolution/exam-lane-exam-predicate.test.ts` PINS the discarding shape with a `sink` node,
  * so that hole is a checked fact and fails loudly the day somebody closes it.
  * Both join `attestationProblems`'s "NONE OF THESE RULES IS ABOUT QUALITY" set.
@@ -211,10 +219,12 @@ export function examShape(graph: RunGraph): string[] {
     ...spec.nodes.flatMap((n) => [...observedChannels(n)]),
     // Route 2: a fanout edge consumes its `over` out of the whole scope; no node's `reads` names it.
     ...spec.edges.flatMap((e) => (e.kind === "fanout" && e.over !== undefined ? [e.over] : [])),
-    // AND NO THIRD TERM FOR CONDITIONS. `e.when`, `e.until` and a router case's `when` are all
-    // absent on purpose — see the docstring. This is also where a fail-open `idx.get(e.from)`
-    // used to live, on the router half of the placement filter; the filter is gone and the
-    // lookup with it, so there is nothing left here to answer undefined.
+    // AND NO THIRD TERM FOR CONDITIONS. `e.when`, `e.until` and a router case's `when` are absent
+    // on purpose: the rule cannot tell which conditions the executor evaluates, so it counts none
+    // — including the ones the spec could settle, which is a choice and not a blind spot. See the
+    // docstring. This is also where a fail-open `idx.get(e.from)` used to live, on the router half
+    // of the placement filter; the filter is gone and the lookup with it, so there is nothing left
+    // here to answer undefined.
   ]);
   // `Set` over the filter's result: `spec.inputs` may carry a name twice (the compiler admits it),
   // and naming the same channel twice in one refusal reads as two problems.
@@ -224,10 +234,10 @@ export function examShape(graph: RunGraph): string[] {
       `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and read by no node — a node body's ` +
         `state view is built from its \`reads\`, so a channel named by no node's \`reads\`, no \`\${…}\` in its tool args and ` +
         `no fanout edge's \`over\` is one no body can see, and an exam that declares the run's answer and never reads it ` +
-        `grades exactly as blind as one that never declared it. Naming it in an EDGE CONDITION does not count: a \`when\` or ` +
-        `an \`until\` is evaluated only if the executor reaches it, and a node body returning \`take\` makes it inert, which ` +
-        `no check of the spec can rule out — so this refuses rather than guesses. Read it in a node: add it to the ` +
-        `\`reads\` of the node that grades it, or stop declaring it`,
+        `grades exactly as blind as one that never declared it. Naming it in an EDGE CONDITION does not count either: this ` +
+        `rule cannot tell which conditions the executor evaluates — a node body may return \`take\` and the edge is then ` +
+        `taken with its \`when\` never read — so it counts none of them, including the ones a spec could settle. Name it ` +
+        `where a read happens: add it to the \`reads\` of the node that grades it, or stop declaring it`,
     );
   }
   if (graph.terminalNodes.length !== 1) {
