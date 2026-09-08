@@ -19,7 +19,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
-import { CODES } from "../../src/errors.ts";
+import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
@@ -240,4 +240,153 @@ test("THE OTHER DIRECTION IS UNCHANGED — approving the MIRROR still forwards i
   const decidedBySystem = Object.values(p.gates).filter((g: GateRecord) => g.decidedBy === "system");
   assert.deepEqual(decidedBySystem, [], "every parent-side decision here was the human's");
   void (null as unknown as GateId);
+});
+
+test("A TRANSIENT CONFLICT ON THE PARENT'S LOG IS RETRIED BY THE NEXT ADVANCE — the gate is marked answered, never merely looked at", async () => {
+  // `#forwardToParentMirrors` marks a decided child gate in `ctx.mirrorsChecked` so the parent is
+  // not re-folded on every pass. Marking the whole batch BEFORE trying the appends made the set a
+  // record of what had been looked at rather than what had been answered, and the two differ on
+  // the one path that matters: `RunLog.append` retries `E_SEQ_CONFLICT` internally
+  // (MAX_APPEND_RETRIES = 8), so one that escapes to this method's catch means the retries were
+  // EXHAUSTED — transient, and lost. Swallowed and marked, the mirror was never tried again and
+  // the parent sat `awaiting_gate` on an `open` mirror for the life of the process: exactly the
+  // 294e713 defect this file exists to close, restored under contention.
+  //
+  // THE LIAR IS BOUNDED — it refuses the parent's appends for one burst and then stops — so the
+  // guarded tree and an unguarded one both terminate and differ, rather than one of them hanging.
+  let refuseParent = false;
+  let refusals = 0;
+  class ContendedStore extends MemoryStateStore {
+    override async append(input: Parameters<MemoryStateStore["append"]>[0]): ReturnType<MemoryStateStore["append"]> {
+      // A child id is `${parentRunId}~${taskId}`, so an id with no `~` is the parent's log.
+      if (refuseParent && !String(input.runId).includes("~")) {
+        refusals++;
+        throw err.conflict(CODES.E_SEQ_CONFLICT, `synthetic contention on ${String(input.runId)}`);
+      }
+      return super.append(input);
+    }
+  }
+  const store = new ContendedStore({ now: () => NOW });
+
+  const r = rig(store);
+  const { runId, childRunId, mirror, childGate } = await parked(r);
+
+  // The human answers in the child's console while the parent's log is under contention.
+  refuseParent = true;
+  const childP = await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+  assert.equal(childP.status, "awaiting_gate", "the child's own advance is not failed by the PARENT's contention");
+  assert.ok(refusals >= 8, `the internal retries were exhausted, not merely brushed: ${String(refusals)} refusals`);
+  assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open", "the append genuinely did not land");
+
+  // Contention clears, and the very next advance of the child answers the mirror.
+  refuseParent = false;
+  await r.engine.advance(childRunId);
+  assert.equal(
+    (await r.engine.projection(runId))!.gates[mirror.gateId]?.state,
+    "decided",
+    "the mirror was retried after the transient conflict, not written off as checked",
+  );
+});
+
+test("A MIRROR THAT LANDS ON AN ALREADY-DECIDED CHILD GATE IS ANSWERED BY THE SAME ADVANCE THAT RAISED IT", async () => {
+  // THE RACE THE CHILD-SIDE FORWARD CANNOT SEE. `#runSubgraph` decides to raise a mirror while
+  // its body runs, and the `gate.raised` is not appended until the parent's whole wave commits.
+  // A human answering the CHILD's gate inside that window is forwarded by the child, which finds
+  // no mirror — there is none yet — and the mirror then lands OPEN on a gate already decided.
+  //
+  // AND NOTHING COMES BACK FOR IT. The child is terminal by then, so it is retired, and
+  // `#advanceSerially` answers a retired terminal run from the fold and returns before the
+  // forward ever runs; the parent is `awaiting_gate`, which no run clock counts as due. Both ends
+  // stop. Measured before the parent-side half existed, driving the parent five more times:
+  // `parent status: awaiting_gate  open mirror: gate_…RY  mirrorOf: gate_…RX  child gate state:
+  // decided`.
+  //
+  // THE SLOW SIBLING IS THE WINDOW, held open by hand so the race is a fact rather than a timing
+  // hope: the wave cannot commit the mirror until `t.slow` returns, and the test decides the
+  // child's gate first and releases it after.
+  const store = new MemoryStateStore({ now: () => NOW });
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const r = rig(store);
+  r.engine.tools.register({
+    name: "t.slow",
+    version: "1.0",
+    // `pay`, because that is what this rig's engine GRANTS — a `*` here fails the task
+    // E_CAP_DENIED before it can hold the wave open, and then there is no window and no race.
+    capabilities: ["pay"],
+    irreversibility: "read_only",
+    idempotent: true,
+    description: "wait",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      await held;
+      return { content: "ok", writes: { slow: "ok" } };
+    },
+  } as ToolDefinition);
+
+  const racy = JSON.parse(JSON.stringify(parent)) as {
+    policy: { capabilities: string[] };
+    channels: Record<string, unknown>;
+    nodes: unknown[];
+  };
+  racy.policy.capabilities = ["pay"];
+  racy.channels["slow"] = { type: "string", reduce: "replace" };
+  racy.nodes.push({ id: n("wait"), type: "tool", reads: ["total"], writes: ["slow"], tool: { name: "t.slow", version: "1.0", args: {} } });
+  // THE CHARGE IS READ-ONLY IN THIS FIXTURE ONLY, because the parent's own compile floor —
+  // raised by the child's irreversible tool — would park the parent on a gate of its OWN before
+  // it ever delegates, and this test is about the mirror. The child's `human_gate` is untouched:
+  // it is the gate the race is run on.
+  const manifests = {
+    "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "read_only", idempotent: true },
+    "t.slow": { name: "t.slow", version: "1.0", capabilities: ["pay"], irreversibility: "read_only", idempotent: true },
+  } as unknown as Record<string, ToolManifestLite>;
+  r.engine.tools.register({
+    ...manifests["pay.charge"]!,
+    description: "Take money.",
+    parameters: { type: "object", properties: { amount: { type: "number" } } },
+    execute: (args: Record<string, unknown>) => {
+      r.charges.push(Number(args["amount"]));
+      return { content: "charged", writes: { receipt: { ok: true, amount: Number(args["amount"]) } } };
+    },
+  } as ToolDefinition);
+  const graph = compileOrThrow({
+    spec: racy as unknown as GraphSpec,
+    resolver,
+    tools: manifests,
+    tenantCapabilities: ["pay"],
+  });
+
+  const runId = await r.engine.submit({ graph, inputs: { total: 10 } });
+  const driving = r.engine.advance(runId);
+  const childRunId = `${runId}~delegate@root#0` as RunId;
+  // Park the child on its gate while the parent's wave is still held open by `t.slow`.
+  let childGate: GateRecord | undefined;
+  for (let i = 0; i < 500 && childGate === undefined; i++) {
+    await new Promise((res) => setImmediate(res));
+    const cp = await r.engine.projection(childRunId);
+    if (cp !== undefined) childGate = open(cp);
+  }
+  if (childGate === undefined) {
+    release();
+    await driving.catch(() => undefined);
+  }
+  assert.ok(childGate !== undefined, "the child parked on its gate inside the parent's commit window");
+
+  // The human answers in the child's console BEFORE the parent's mirror exists.
+  await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+  release();
+  const p = await driving;
+
+  // The advance that raised the mirror is the one that answered it — no second driver, and no
+  // advance of the child, which is retired and could not forward anything anyway.
+  const stranded = Object.values(p.gates).find((g) => g.state === "open" && g.mirrorOf !== undefined);
+  assert.equal(stranded, undefined, `no mirror is left open on a decided child gate: ${JSON.stringify(stranded ?? {})}`);
+  assert.equal(p.gates[childGate.gateId] as unknown, undefined, "the child's gate is the CHILD's record, not the parent's");
+  const mirror = Object.values(p.gates).find((g) => g.mirrorOf === childGate.gateId);
+  assert.equal(mirror?.state, "decided");
+  assert.equal(mirror?.decidedBy, "system");
+  assert.equal((await r.engine.projection(childRunId))!.status, "succeeded");
+  assert.deepEqual(r.charges, [20], "charged once");
 });

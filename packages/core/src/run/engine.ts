@@ -1194,6 +1194,8 @@ export class Engine {
   readonly #chains = new Map<RunId, Promise<unknown>>();
   /** graphHash → the graph a retired run was attached with. See `#retire` and `#reattach`. */
   readonly #graphs = new Map<string, RunGraph>();
+  /** Runs THIS engine retired, to the graph hash they retired with. See `#retire` and `#retainedGraphOf`. */
+  readonly #retiredRuns = new Map<RunId, string>();
   /** Runs an explicit `forget` released; `#reattach` leaves them alone until `attach`. */
   readonly #forgotten = new Set<RunId>();
 
@@ -2326,6 +2328,12 @@ export class Engine {
       // it — see `#forwardToParentMirrors`. Before the terminal check below: the decision that
       // finished this child is the one its parent is most often waiting on.
       await this.#forwardToParentMirrors(ctx, p);
+      // AND THE SAME QUESTION FROM THE OTHER SIDE, because neither half covers the other's gap.
+      // See `#answerMirrorsTheChildAlreadyDecided`. A write here makes `p` stale — the run has
+      // just stopped waiting on that gate — so the pass restarts rather than deciding anything
+      // else from a projection taken before it. It cannot spin: the mirror it answered is no
+      // longer `open`, so the next pass writes nothing.
+      if (await this.#answerMirrorsTheChildAlreadyDecided(ctx, p)) continue;
       // RETIRED ON EVERY TERMINAL EXIT, not only on the call AFTER the one that finished. A
       // comment here used to say the finishing call could not retire because `openGates` and
       // `rewind` read `#runs` — that was true once and had stopped being true: both answer a
@@ -2492,12 +2500,32 @@ export class Engine {
     const parentRunId = id.slice(0, at) as RunId;
     const parent = await this.projection(parentRunId);
     if (parent === undefined) return;
-    for (const gate of decided) ctx.mirrorsChecked.add(gate.gateId);
-    if (isTerminal(parent.status)) return;
+    // A TERMINAL PARENT WILL NEVER RAISE A MIRROR, so these gates are finished with for good.
+    if (isTerminal(parent.status)) {
+      for (const gate of decided) ctx.mirrorsChecked.add(gate.gateId);
+      return;
+    }
     const log = this.#runs.get(parentRunId)?.log ?? this.#logFor(parentRunId);
     for (const gate of decided) {
-      const mirror = Object.values(parent.gates).find((g) => g.state === "open" && g.mirrorOf === gate.gateId);
+      // MARKED WHEN THE WORK IS DONE, NEVER BEFORE IT IS TRIED. Marking the whole batch up front
+      // made the set a record of what had been LOOKED AT rather than what had been ANSWERED, and
+      // the two differ on exactly the path that matters: a mirror this pass could not resolve was
+      // never retried by a later one, so the parent stayed `awaiting_gate` on an `open` mirror —
+      // the defect this method exists to close, restored under contention. Only a restart
+      // re-derived it, and a live `loom serve` does not restart.
+      //
+      // NO MIRROR RECORD AT ALL IS NOT AN ANSWER EITHER. The parent raises a mirror of the gate
+      // the child is WAITING on, so the common shape is that it never mirrors this one and there
+      // is nothing to do — but "has not raised it yet" and "will never raise it" are the same
+      // absence here, and only one of them is finished. Left unmarked so the next pass asks
+      // again; the cost is one parent fold per advance of a child whose gates the parent does not
+      // mirror, which is the fold this set was introduced to avoid and not one anybody waits on.
+      const mirror = Object.values(parent.gates).find((g) => g.mirrorOf === gate.gateId);
       if (mirror === undefined) continue;
+      if (mirror.state !== "open") {
+        ctx.mirrorsChecked.add(gate.gateId);
+        continue;
+      }
       try {
         await this.#gates.resolve(log, {
           gateId: mirror.gateId,
@@ -2505,10 +2533,80 @@ export class Engine {
           actor: SYSTEM_ACTOR("executor:subgraph"),
           idempotencyKey: `child:${gate.gateId}`,
         });
+        ctx.mirrorsChecked.add(gate.gateId);
       } catch (e) {
-        if (!isLoomError(e) || (e.code !== CODES.E_GATE_ALREADY_RESOLVED && e.code !== CODES.E_SEQ_CONFLICT)) throw e;
+        if (!isLoomError(e)) throw e;
+        // ALREADY RESOLVED IS AN ANSWER — a concurrent human got there first, and the mirror has
+        // the decision it needed. Done with it.
+        if (e.code === CODES.E_GATE_ALREADY_RESOLVED) {
+          ctx.mirrorsChecked.add(gate.gateId);
+          continue;
+        }
+        // A SEQ CONFLICT IS NOT. `RunLog.append` already retries one internally
+        // (`MAX_APPEND_RETRIES`), so one reaching here means the retries were EXHAUSTED — a
+        // transient failure under contention, not an idempotent no-op. Swallowed so the child's
+        // own advance is not failed by the parent's contention, and deliberately left UNMARKED so
+        // the next pass tries again. This is the one case where marking and swallowing together
+        // would strand the parent for the life of the process.
+        if (e.code === CODES.E_SEQ_CONFLICT) continue;
+        throw e;
       }
     }
+  }
+
+  /**
+   * Answer THIS run's open mirrors whose child gate is already decided — the other half of
+   * `#forwardToParentMirrors`, and neither half covers the other's gap.
+   *
+   * THE GAP IS A RACE WITH A COMMIT WINDOW. `#runSubgraph` decides to raise a mirror while the
+   * body runs; the `gate.raised` is not appended until the whole wave commits. A human who
+   * answers the child's own gate inside that window is forwarded by the child — which finds no
+   * mirror yet, because there is none — and the mirror then lands OPEN on a gate that is already
+   * decided. Reproduced deterministically with a slow sibling task holding the wave open:
+   * `parent status: awaiting_gate  open mirror: gate_…RY  mirrorOf: gate_…RX  child gate state:
+   * decided`. The window is as long as the slowest task in the parent's wave.
+   *
+   * AND THE CHILD CANNOT COME BACK FOR IT. `#advanceSerially` answers a RETIRED terminal run from
+   * the fold and returns before this loop, so once the child has finished and been retired — item
+   * 7's own change — no later `advance` of it forwards anything. The child-side half is
+   * structurally unable to close this, and the parent-side half is structurally unable to close
+   * the case the child-side half exists for (a parked parent is not `due`, so nothing drives it).
+   * Both are needed, and this is why.
+   *
+   * ASKED OF THE FOLD, in the same `for(;;)` pass that committed the raise: the advance that
+   * creates the race is the one that resolves it, so no external driver is required and a parked
+   * parent is never waiting on one. The child run id is derived the way `#runSubgraph` derives it
+   * (`${runId}~${taskId}`), so this reads the same run the mirror was raised for and no other.
+   *
+   * EVERY OTHER TERM IS `#forwardToParentMirrors`'s, deliberately: `approve` only, on the same
+   * "wait for the child" argument, by `executor:subgraph` on the same inheritance argument, and
+   * the same two swallowed codes for the same reasons. A mirror whose child gate is open, absent,
+   * or belongs to a run this engine cannot fold is left alone — refusing to answer is always
+   * allowed.
+   */
+  async #answerMirrorsTheChildAlreadyDecided(ctx: RunContext, p: RunProjection): Promise<boolean> {
+    const mirrors = Object.values(p.gates).filter((g) => g.state === "open" && g.mirrorOf !== undefined);
+    if (mirrors.length === 0) return false;
+    let wrote = false;
+    for (const mirror of mirrors) {
+      const childP = await this.projection(`${String(ctx.runId)}~${String(mirror.taskId)}` as RunId);
+      if (childP === undefined) continue;
+      if (childP.gates[mirror.mirrorOf!]?.state !== "decided") continue;
+      try {
+        await this.#gates.resolve(ctx.log, {
+          gateId: mirror.gateId,
+          decision: { kind: "approve" },
+          actor: SYSTEM_ACTOR("executor:subgraph"),
+          idempotencyKey: `child:${String(mirror.mirrorOf)}`,
+        });
+        wrote = true;
+      } catch (e) {
+        if (!isLoomError(e)) throw e;
+        if (e.code === CODES.E_GATE_ALREADY_RESOLVED || e.code === CODES.E_SEQ_CONFLICT) continue;
+        throw e;
+      }
+    }
+    return wrote;
   }
 
   /**
@@ -2835,6 +2933,24 @@ export class Engine {
       const oldest = this.#graphs.keys().next().value;
       if (oldest !== undefined) this.#graphs.delete(oldest);
     }
+    // AND WHICH RUNS THOSE WERE, keyed by RUN, because "did this run finish here?" is a question
+    // about a run and `#graphs` cannot answer it: one graph is shared by every run that names it,
+    // so a hash lookup says yes for a run this engine never saw the moment any sibling of it
+    // retires. That difference is load-bearing — `#retiredHere` gates the door that answers a
+    // redelivered gate decision from the journal instead of `E_RUN_NOT_FOUND`, and
+    // `cancel-cascade.test.ts` pins the refusal for a run this engine never attached. Measured
+    // before this map existed: engine A, having retired its OWN run of graph G, answered a gate
+    // decision for a DIFFERENT run of G it had never seen — `E_GATE_ALREADY_RESOLVED` where a
+    // fresh engine said `E_RUN_NOT_FOUND`.
+    //
+    // BOUNDED THE SAME WAY AND FOR THE SAME REASON, oldest out. Past the bound a rewind of an old
+    // run needs an explicit `attach`, which a restart needs anyway.
+    this.#retiredRuns.delete(runId);
+    this.#retiredRuns.set(runId, graph.graphHash);
+    if (this.#retiredRuns.size > RETAINED_GRAPHS) {
+      const oldest = this.#retiredRuns.keys().next().value;
+      if (oldest !== undefined) this.#retiredRuns.delete(oldest);
+    }
     this.#runs.delete(runId);
   }
 
@@ -2856,11 +2972,21 @@ export class Engine {
     return this.#runs.get(runId);
   }
 
-  /** The graph `#retire` kept for this run, unless `forget` said not to: what `#reattach` re-attaches. */
+  /**
+   * The graph `#retire` kept FOR THIS RUN, unless `forget` said not to: what `#reattach`
+   * re-attaches.
+   *
+   * `#retiredRuns` is asked first and is what makes this a question about the run rather than
+   * about its graph; the journal's `compiledGraphHash` is then checked against it, so a run whose
+   * journal names a different compile than the one this engine retired is not re-attached with
+   * the wrong graph.
+   */
   async #retainedGraphOf(runId: RunId): Promise<RunGraph | undefined> {
     if (this.#forgotten.has(runId)) return undefined;
+    const retired = this.#retiredRuns.get(runId);
+    if (retired === undefined) return undefined;
     const hash = await this.compiledGraphHash(runId);
-    return hash === undefined ? undefined : this.#graphs.get(hash);
+    return hash === retired ? this.#graphs.get(hash) : undefined;
   }
 
   /** Whether this engine could re-attach the run — i.e. it ran here and was retired, not never seen. */
@@ -3519,10 +3645,19 @@ export class Engine {
    */
   async planRewind(runId: RunId, atSeq: Seq, by: HumanActor): Promise<RewindPlan> {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
-    const { p, live, ctx } = await this.#rewindRefusals(runId, atSeq);
-    const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
-    await this.#journalPlanShown(ctx, plan, by);
-    return plan;
+    const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
+    try {
+      const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+      await this.#journalPlanShown(ctx, plan, by);
+      return plan;
+    } finally {
+      // A PREVIEW RELEASES WHAT IT INSTALLED. This verb is the read half of `rewind` and must
+      // leave the engine holding exactly what it held before — otherwise an operator previewing
+      // rewinds of finished runs re-attaches one per call, for the life of the process, which is
+      // the leak `#retire` exists to close. Only what THIS call attached: a run something else
+      // holds on purpose is not this verb's to release.
+      if (attachedHere) this.#retire(runId);
+    }
   }
 
   /** The human floor `rewind` and `planRewind` share, so the two cannot drift on who may ask. */
@@ -3694,17 +3829,28 @@ export class Engine {
   async #rewindRefusals(
     runId: RunId,
     atSeq: Seq,
-  ): Promise<{ readonly p: RunProjection; readonly live: RunContext | undefined; readonly ctx: { readonly log: RunLog } }> {
+  ): Promise<{
+    readonly p: RunProjection;
+    readonly live: RunContext | undefined;
+    readonly ctx: { readonly log: RunLog };
+    readonly attachedHere: boolean;
+  }> {
     // A rewind reads the log and appends a marker, and needs nothing else from a live
     // context — which matters because the runs most worth rewinding are the FINISHED ones,
     // and requiring a context meant a completed run could be rewound only for as long as
     // something held it. `#logFor` is the writer for exactly this case.
-    // The live context, when this engine still holds one. Kept separately from `ctx` because a
-    // rewind can DISPATCH now — see the compensation block below — and dispatching needs the
-    // graph, the policy engine and the abort signal, none of which are in the journal.
-    // A FINISHED RUN IS THE RUN MOST WORTH REWINDING, and it has been retired — see `#retire`.
-    const live = await this.#reattach(runId);
-    const ctx = { log: live?.log ?? this.#logFor(runId) };
+    //
+    // AND NOTHING IS RE-ATTACHED UNTIL THE REFUSALS HAVE PASSED. `#reattach` calls `attach`,
+    // which enters the run into `#runs` — where only a terminal exit takes it out again, and a
+    // finished or cancelled run has no terminal exit left to reach. Doing it above the refusals
+    // meant that `planRewind`, whose whole contract is that it is the READ half of the verb, and
+    // every `rewind` that was then refused, each re-attached a retired run permanently: the
+    // graph, the branch index, the taint sets and the expression cache that item 7 exists to
+    // release, re-installed by a preview. Measured with a spy on `attach`: one call per
+    // `planRewind` of a finished run and one per `E_RESTORE_ILLEGAL` refusal on a cancelled one.
+    // Every refusal below reads the fold or the log, and neither needs a context.
+    const held = this.#runs.get(runId);
+    const ctx = { log: held?.log ?? this.#logFor(runId) };
 
     // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
     //
@@ -3918,7 +4064,14 @@ export class Engine {
       );
     }
 
-    return { p, live, ctx };
+    // EVERY REFUSAL HAS PASSED, so a context is now worth installing. `attachedHere` is what the
+    // caller needs to undo it: `planRewind` is a preview and releases what it caused, `rewind`
+    // keeps it because dispatching compensations needs the graph, the policy engine and the abort
+    // signal — none of which are in the journal.
+    const live = held ?? (await this.#reattach(runId));
+    // ONE LOG PER RUN when there is a context, which is what this was before the attach moved:
+    // two `RunLog`s over one run keep two cached heads, and `commit` does not retry a stale one.
+    return { p, live, ctx: live === undefined ? ctx : { log: live.log }, attachedHere: held === undefined && live !== undefined };
   }
 
   /**
@@ -7549,12 +7702,48 @@ export class Engine {
     let summary = "";
     let finish = "stop";
     let usage: UsageRecord = { ...ZERO_USAGE };
-    for await (const ev of adapter.stream(req, ctx.abort.signal)) {
-      if (ev.type === "done") {
-        summary = ev.message.content;
-        finish = ev.finishReason;
-        usage = ev.usage;
+    try {
+      for await (const ev of adapter.stream(req, ctx.abort.signal)) {
+        if (ev.type === "done") {
+          summary = ev.message.content;
+          finish = ev.finishReason;
+          usage = ev.usage;
+        }
       }
+    } catch (e) {
+      // A CALL THAT DIED STILL RELEASES ITS PROMISE, AND THE RELEASE IS DURABLE — the same
+      // pairing `#runAgent`'s turn makes, for the same reason it gives. `projection.ts` folds
+      // `budget.reserved` with no matching `budget.settled`, so an orphan here is not memory
+      // drift: it is a run that has permanently promised away money it never spent, re-seeded
+      // that way by `PolicyEngine.restore` after every restart. Measured before this arm existed,
+      // on a compaction whose provider threw with an `error` edge carrying the run past the
+      // failed task — `succeeded`, 4 reserved rows against 3 settled, `reservedUsd 0.001856` in a
+      // COLD fold. The reservation is appended before the call precisely so a crash cannot hide
+      // it; leaving it standing after a failure the process DID see is the same hole with better
+      // manners.
+      //
+      // IN ONE BATCH WITH THE FAILURE, again as the turn does: the two are one fact, and a crash
+      // between two appends leaves the fold holding a promise for a call the journal already
+      // says died. `actualUsd: 0` is `settle`'s bare-number arm — "this cost nothing" — and not
+      // an unknown, because no usage frame ever arrived.
+      ctx.policy.settle(reservation, 0);
+      const le = toLoomError(e);
+      await this.#serialize(ctx.runId, () =>
+        ctx.log.append(
+          [
+            {
+              type: "budget.settled",
+              payload: { scope, reservedUsd: reservation.amountUsd, actualUsd: 0 },
+              actor: SYSTEM_ACTOR("policy"),
+              taskId: w.task.taskId,
+            },
+            { type: "effect.started", payload: { key, kind: "summarize", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+            { type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+          ],
+          { taskId: w.task.taskId },
+        ),
+      );
+      throw le;
     }
     ctx.policy.settle(reservation, usage);
 
