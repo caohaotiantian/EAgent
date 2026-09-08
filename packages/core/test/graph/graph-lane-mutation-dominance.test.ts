@@ -121,15 +121,26 @@ const mutation = (over: Partial<GraphMutation> = {}): GraphMutation => ({
   ...over,
 });
 
-const attempt = (base: RunGraph, m: GraphMutation) =>
+const attempt = (base: RunGraph, m: GraphMutation, tools: Record<string, ToolManifestLite> = { "note.append": NOTE }) =>
   compileMutation({
     base,
     mutation: m,
     budget: { consumedNodes: 0, expansion: base.expansion },
     resolver: resolver(),
-    tools: { "note.append": NOTE },
+    tools,
     tenantCapabilities: CAPS,
   });
+
+/**
+ * `note.append` with a rollback declared, and the tool that performs it.
+ *
+ * Only the compensation arm below needs it: GRAPH012 refuses a compensation edge whose target
+ * declares no undo, which is what kept that arm from ever reaching the rule under test.
+ */
+const COMPENSABLE: Record<string, ToolManifestLite> = {
+  "note.append": { ...NOTE, compensation: { tool: "note.undo" } },
+  "note.undo": { name: "note.undo", version: "1.0", capabilities: ["fs:write"], irreversibility: "reversible_write", idempotent: true },
+};
 
 test("AN ADDED EDGE THAT ROUTES PAST A HUMAN GATE IS REFUSED, and the diagnostic names the gate", () => {
   const r = attempt(compiled(), mutation());
@@ -255,10 +266,46 @@ test("EVERY EDGE KIND THE EXECUTOR CAN TAKE, which is not `dagEdges`", () => {
     backToProposer.ok ? "" : JSON.stringify(backToProposer.diagnostics.filter((d) => d.severity === "error")),
   );
 
-  // `compensation` IS THE ONE KIND THE CHECK MAY DROP, and not because of anything about
-  // cycles: `#edgesToTake` answers `case "compensation": break;`, so nothing ever traverses one
-  // and it is not a path. It is refused here by GRAPH012 for its own unrelated reason.
+  // `compensation` IS THE ONE KIND THIS CHECK MAY DROP, AND THE REASON IS IN THE EXECUTOR, NOT
+  // HERE. This arm used to build the edge WITHOUT `compensates`, so it stopped on
+  // GRAPH012_NO_COMPENSATES and never reached a compiling compensation graft — green for the
+  // wrong reason, and the reason the bypass survived four review rounds: a router naming that
+  // edge DID carry control past the gate, because `#edgesToTake` filtered a producer's `take`
+  // for a spent `loop` bound and for nothing else.
+  //
+  // With `compensates` supplied it compiles, and that is now CORRECT: `run/engine.ts` refuses
+  // the route at the moment a producer selects it — `TAKEABLE_EDGE_KINDS`, pinned by
+  // `test/run/take-may-not-select-any-kind.test.ts`, which is the bound this arm is not. What
+  // this arm asserts is the division of labour: the compiler admits the edge, so if the engine
+  // ever stops refusing it there is nothing else in the way.
   const comp = attempt(
+    base,
+    mutation({
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "compensation", compensates: n("pay") } as unknown as EdgeSpec,
+      ],
+    }),
+    COMPENSABLE,
+  );
+  assert.equal(
+    comp.ok,
+    true,
+    comp.ok ? "" : JSON.stringify(comp.diagnostics.filter((d) => d.severity === "error")),
+  );
+  assert.equal(
+    comp.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED"),
+    false,
+    "the dominance rule deliberately does not treat a compensation edge as a path",
+  );
+
+  // AND THE CONTROL THAT KEEPS THAT HONEST: the same graft one kind over, `seq`, IS refused —
+  // so the arm above passes because of the edge KIND and not because the fixture stopped
+  // compiling for some unrelated reason.
+  // AND THE ARM THIS ONE REPLACED IS KEPT, because it was the tree's only assertion on
+  // GRAPH012_NO_COMPENSATES: without `compensates` the graft never compiles at all, which is
+  // why it could not see the rule under test.
+  const noCompensates = attempt(
     base,
     mutation({
       addEdges: [
@@ -266,9 +313,23 @@ test("EVERY EDGE KIND THE EXECUTOR CAN TAKE, which is not `dagEdges`", () => {
         { id: e("m1"), from: n("hop"), to: n("pay"), kind: "compensation" } as unknown as EdgeSpec,
       ],
     }),
+    COMPENSABLE,
   );
-  assert.equal(comp.ok, false);
-  assert.ok(comp.diagnostics.some((d) => d.code === "GRAPH012_NO_COMPENSATES"));
+  assert.equal(noCompensates.ok, false);
+  assert.ok(noCompensates.diagnostics.some((d) => d.code === "GRAPH012_NO_COMPENSATES"));
+
+  const compControl = attempt(
+    base,
+    mutation({
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "seq" } as unknown as EdgeSpec,
+      ],
+    }),
+    COMPENSABLE,
+  );
+  assert.equal(compControl.ok, false);
+  assert.ok(compControl.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED"));
 });
 
 /**

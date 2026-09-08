@@ -61,7 +61,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
 import { observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
-import type { BatchingSpec, DedupeSpec, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
+import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
 import { InProcessScheduler, type Scheduler } from "./scheduler.ts";
@@ -413,12 +413,12 @@ const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIM
 /**
  * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
  *
- * FIVE MEMBERS, and the criterion they share is one sentence: *no other node's answer is
+ * SIX MEMBERS, and the criterion they share is one sentence: *no other node's answer is
  * worth anything, because what broke is the run's ability to say something true.* An
  * ordinary failed Task takes an `error` edge, and a join with `onBranchError: "skip"`
  * absorbs it — so a code that belongs here and is missing produces a run reporting
  * **succeeded** with a rescue arm's value in its output channel. That is the shape below,
- * and each of these five has been measured in it.
+ * and each of these six has been measured in it.
  *
  *   `E_BUDGET_EXHAUSTED` · a verdict about the RUN's resources, not about this node's work.
  *      Routing past it spends more of what has already run out. It is the floor of the D6.5
@@ -454,6 +454,21 @@ const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIM
  *      it stayed out of this set for as long as it did because it is raised deep inside an
  *      effect serve rather than by a policy check.
  *
+ *   `E_ROUTE_INVALID` · THE ROUTE THIS NODE CHOSE IS NOT ONE IT MAY TAKE, and leaving it out
+ *      made the refusal ornamental. A refused `take` fails the Task, a failed Task routes its
+ *      `error` edges, and `#errorEdges` returns every catch-all error edge the node has —
+ *      INCLUDING one pointing at the node the refusal was protecting. Measured on the
+ *      compensation bypass this set was extended for: a router with `take: ["m1"]` (a
+ *      `compensation` edge into a gated tool) and a second, catch-all `error` edge to the same
+ *      tool ran `note.append` after the human REJECTED, byte-identical to the behaviour before
+ *      the refusal existed — `["hop","failed","E_ROUTE_INVALID"]`, `["pay","succeeded"]`,
+ *      `ran = ["note.append"]`. The refusal was recorded and not obeyed.
+ *      It is the same argument `E_GATE_REQUIRED` and `E_EFFECT_UNRECORDED` are here for, and it
+ *      is NOT the `E_CAP_DENIED` case below: "this node cannot do this" leaves the graph's own
+ *      handler a sensible answer, while "this node tried to route somewhere it may not" is a
+ *      producer or a journal disagreeing with the compiled graph — and routing the failure is
+ *      the very act being refused. `#strayRoute`'s invented-edge half is the same fact.
+ *
  * WHAT IS DELIBERATELY OUT, because a named set needs its boundary:
  *   - `E_LEASE_LOST` / `E_FENCING_STALE` — another worker owns this Task. The RUN is fine;
  *     THIS WORKER is not, and ending the run would be one process killing another's work.
@@ -469,6 +484,7 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_GATE_REQUIRED,
   CODES.E_PAYLOAD_UNRESOLVED,
   CODES.E_EFFECT_UNRECORDED,
+  CODES.E_ROUTE_INVALID,
 ]);
 
 /**
@@ -482,6 +498,114 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
  * two different constants would let the refusal see a call the rollback could not reach.
  */
 const COMPENSATION_MAX_DEPTH = 16;
+
+/**
+ * The edge kinds a producer's `take` may select, and the reason the engine answers this.
+ *
+ * A `take` is a SELECTION among the edges control could flow along from this node — and the
+ * definition of that set is the `switch` in `#edgesToTake`, which traverses `seq`, `fanout` and
+ * `join` unconditionally, `conditional` (a router's own choice standing in for the `when`) and
+ * `loop` while `#loopMayContinue` allows it. It breaks on `error` and on `compensation`, and its
+ * `default:` refuses a kind this build cannot read. Nothing but the `loop` bound filtered a
+ * `take`, so the take path and the switch disagreed about the same question, and a producer
+ * could name a kind the switch would never have taken.
+ *
+ * `compensation` is what that cost. It is a DECLARATION the compiler proves (GRAPH012) and
+ * never a route — `graph/mutate.ts` drops it from `traversable` for exactly that reason — so a
+ * router naming one carries control to a node the graph put behind a human gate. Reproduced by
+ * the `wave2-graph` lane at `8fd58f5`: the human REJECTED and `ran = ["note.append"]`, against
+ * `ran = []` in the unmutated control. No mutation is needed; an authored graph reaches it.
+ *
+ * `error` is refused for the same reason one kind over: an error edge is selected by a FAILURE,
+ * through `#errorEdges`, which is the only place the EXECUTOR reads `EdgeSpec.codes`
+ * (`graph/validate.ts` reads it too, at compile). A succeeded
+ * outcome routing down a handler arm is the graph handling a failure that did not happen, and
+ * two mechanisms for one kind is how they come to disagree.
+ *
+ * A KIND THIS BUILD CANNOT READ IS REFUSED BY BEING ABSENT from the set rather than by a case,
+ * which is the failing-closed direction and the same answer `#edgesToTake`'s `default:` gives.
+ *
+ * AN OLD JOURNAL BEHAVES TWO DIFFERENT WAYS, AND BOTH WERE DRIVEN. This paragraph said one
+ * thing and there are two, which a reviewer caught by running the verb the sentence named.
+ *
+ *   ATTACH AND ADVANCE — the bypass SURVIVES, silently. A `task.ready` an older build appended
+ *   is durable and the fold serves it; nothing re-derives the route. Over one SQLite file: the
+ *   old binary advanced to `awaiting_gate` with `pay` READY, the new binary attached to the same
+ *   file, the human REJECTED, and `note.append` ran anyway (`ran = ["note.append", "note.undo"]`
+ *   — the rollback is what limits it, and only for a tool that declares one). Making that loud
+ *   would mean a fold refusing an event a previous build legitimately wrote, which is the one
+ *   thing "the journal is the only authoritative state" does not allow.
+ *
+ *   `replayRun` — a pre-fix recording DIVERGES, loudly, because that verb re-executes into a
+ *   fresh store rather than folding (`run/replay.ts`'s "Re-execute a recorded run into a
+ *   throwaway journal and compare"). THREE RECORDINGS, THREE ANSWERS, and the first version of
+ *   this paragraph quoted all three as if they were one — the mistake this whole comment is
+ *   about, made inside it. Measured, each recorded at `ce9e7b4` and replayed at HEAD:
+ *     · the run above, still `awaiting_gate` — `replayRun` does not report, it THROWS
+ *       `E_REPLAY_DIVERGENCE`, "replay raised a gate on node \"gate\" … that the recorded run
+ *       never decided", because the refusal now ends the run before the gate is reached.
+ *     · that same run after the human REJECTED — `match: false`, `task.committed hop@root#0
+ *       expected succeeded actual failed`, and the terminal frame is `run.failed expected
+ *       failed:E_HUMAN_APPROVAL_REQUIRED actual failed:E_ROUTE_INVALID`.
+ *     · a sibling run of the SAME GRAPH that the human APPROVED, so the recording succeeded —
+ *       `run.completed expected succeeded actual failed:E_ROUTE_INVALID`.
+ *   All three are the honest answer: the recorded run really did take a route this build
+ *   refuses. And it is a real cost — `runEvalSuite` and the promote ladder read those reports,
+ *   so a suite pinned on such a run now reports divergence rather than a pass.
+ *
+ * The bound is on runs submitted from here on, and `graph/mutate.ts` discloses the same limit
+ * for the mutation rule beside it.
+ */
+const TAKEABLE_EDGE_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>(["seq", "conditional", "fanout", "join", "loop"]);
+
+/**
+ * The edges in a `take` that name a kind control may not flow along — the refusal's evidence.
+ *
+ * ONE PREDICATE, FOUR DOORS, because four producers write a `take` and they do not all pass the
+ * same check. `#strayRoute` covers a router or `function` body, and an operator `steer` too —
+ * the override is folded in by `#dispatch` before that check. `#applyGateDecision` covers a
+ * `human_gate` redirect, which is answered in `#executeTask` and never goes near `#strayRoute`.
+ * `Engine.steer` refuses at its own door as well, so the operator is told before anything is
+ * journaled. And `#edgesToTake` filters on the same predicate as the last word. "A check
+ * applied per-caller is a check the next producer forgets" is written two screens up about the
+ * stray-edge rule, which had exactly that history — and the door COUNT is the thing to
+ * re-derive from the call sites rather than trust: this line said three until a reviewer
+ * counted four.
+ *
+ * AN EDGE ID THIS GRAPH DOES NOT HAVE IS NOT THIS FUNCTION'S REFUSAL: the stray-edge check
+ * beside it names those, and answering the same fact with two codes only tells a caller which
+ * of two ways they were wrong.
+ */
+function untakeableEdges(
+  edgeById: ReadonlyMap<EdgeId, EdgeSpec>,
+  take: readonly EdgeId[],
+): readonly EdgeSpec[] {
+  const bad: EdgeSpec[] = [];
+  const seen = new Set<EdgeId>();
+  for (const id of take) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const e = edgeById.get(id);
+    if (e !== undefined && !TAKEABLE_EDGE_KINDS.has(e.kind)) bad.push(e);
+  }
+  return bad;
+}
+
+/**
+ * The one sentence the THREE REFUSING doors share, so they cannot drift on what they mean:
+ * `Engine.steer`, `#strayRoute` and `#applyGateDecision`. The fourth door that applies
+ * `TAKEABLE_EDGE_KINDS` is not one of them — `#edgesToTake` DROPS the edge and says nothing,
+ * because it runs inside `#commit` and a throw there would reject `advance()`; its own comment
+ * argues that a silent drop is the only shape available to it. Four doors apply the predicate,
+ * three of them speak.
+ */
+function untakeableMessage(nodeId: NodeId, bad: readonly EdgeSpec[]): string {
+  return (
+    `node "${nodeId}" selected ${bad.map((e) => `"${e.id}" (kind "${e.kind}")`).join(", ")} — ` +
+    `an edge of that kind is not a route this node may take. A "compensation" edge is a ` +
+    `declaration the compiler checks, and an "error" edge is selected by a failure, not by a choice`
+  );
+}
 
 interface Wave {
   readonly task: TaskRecord;
@@ -3489,7 +3613,13 @@ export class Engine {
    * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
    * operator surface would be oversight routing around itself.
    *
-   * FOUR REFUSALS, in the order they are checked and in the order of what each would break:
+   * SEVEN REFUSALS, and the count moved twice while this docstring was being corrected — it is
+   * the number a reader should re-derive from the code rather than trust. The four numbered
+   * below are in the order of what each would break; the other three are stated at their own
+   * check. THE CHECK ORDER IS NOT THIS LIST'S ORDER: a run that has already ended
+   * (`E_ILLEGAL_TRANSITION`, from `#requireLive`) and a `human_gate` node, whose route the
+   * DECISION decides, are both refused before 3 and 4, and an edge of a kind control does not
+   * flow along is refused after them.
    *
    *   1. A NON-HUMAN CALLER — `E_HUMAN_APPROVAL_REQUIRED`, and there is deliberately no
    *      `SYSTEM_ACTOR` default the way `cancel` has one. Confinement to the declared set is
@@ -3498,7 +3628,9 @@ export class Engine {
    *      the oversight this run would otherwise have had. A HUMAN MAY DO THAT — "a human may
    *      lower a posture" — and no automated path may, which is why the actor is the first
    *      thing checked rather than a parameter with a convenient default.
-   *   2. A RUN THIS PROCESS HOLDS NO GRAPH FOR — `E_RUN_NOT_FOUND`, via `#require`. This is
+   *   2. A RUN THIS PROCESS HOLDS NO GRAPH FOR — `E_RUN_NOT_FOUND`, from `#require`. A run with
+   *      no JOURNAL at all raises the same code one step earlier, from `#requireLive`; this
+   *      clause is the narrower case, a journal that exists with no graph attached. This is
    *      where `steer` parts company with `cancel` and `pause`, which work detached on purpose
    *      because they are a projection and two appends. The declared edge set lives in the
    *      COMPILED graph; with no graph there is nothing to confine the operator to, and a
@@ -3569,6 +3701,18 @@ export class Engine {
           : `node "${route.nodeId}" has no outgoing edge ${invented.map((i) => `"${i}"`).join(", ")} (declared: ${outbound.map((o) => `"${o}"`).join(", ") || "none"})`,
         { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
       );
+    }
+    // AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`. The LAST of the seven
+    // refusals in the docstring's list to be checked, and its own refusal rather than a clause
+    // on the one above, because it is a different fact: the edge leaves this node and the
+    // executor still has no route along it. `#strayRoute` would refuse it at the moment it
+    // would be taken; refusing here is what tells the operator at the door, which is the reason
+    // the ownership check is made twice as well.
+    const untakeable = untakeableEdges(ctx.index.edgeById, route.take);
+    if (untakeable.length > 0) {
+      throw err.policy(CODES.E_ROUTE_INVALID, untakeableMessage(route.nodeId, untakeable), {
+        details: { runId, nodeId: route.nodeId, take: route.take, refused: untakeable.map((e) => ({ edgeId: e.id, kind: e.kind })) },
+      });
     }
     await this.#serialize(runId, () =>
       ctx.log.append([
@@ -5105,7 +5249,7 @@ export class Engine {
       // exists for. `reject`, `edit`, and `redirect` all resolve WITHOUT executing:
       // each is the human substituting their own outcome for the node's.
       if (node.type === "human_gate" || settled.decision !== "approve") {
-        return this.#applyGateDecision(settled, node, ctx.graph.plans[node.id]?.outboundEdges ?? []);
+        return this.#applyGateDecision(ctx, settled, node, ctx.graph.plans[node.id]?.outboundEdges ?? []);
       }
       const stale = this.#approvalStillCovers(ctx, p, node, task, settled);
       if (stale !== undefined) return stale;
@@ -5361,7 +5505,21 @@ export class Engine {
     if (outcome.take === undefined) return undefined;
     const outbound = (ctx.index.outbound.get(w.node.id) ?? []).map((e) => e.id);
     const invented = outcome.take.filter((id) => !outbound.includes(id));
-    if (invented.length === 0) return undefined;
+    if (invented.length === 0) {
+      // ITS OWN EDGE IS NOT ENOUGH: a `take` also has to name a kind control can flow along.
+      // `TAKEABLE_EDGE_KINDS` says which and why. Same shape of refusal, and deliberately the
+      // same code — both are "this run has no such route from here".
+      const bad = untakeableEdges(ctx.index.edgeById, outcome.take);
+      if (bad.length === 0) return undefined;
+      return {
+        status: "failed",
+        writes: {},
+        usage: outcome.usage,
+        error: err.policy(CODES.E_ROUTE_INVALID, untakeableMessage(w.node.id, bad), {
+          details: { node: w.node.id, take: outcome.take, refused: bad.map((e) => ({ edgeId: e.id, kind: e.kind })) },
+        }),
+      };
+    }
     return {
       status: "failed",
       writes: {},
@@ -5687,7 +5845,7 @@ export class Engine {
    * A failed Task stops the run and names the gate, which is what an operator holding a
    * journal they cannot account for actually needs.
    */
-  #applyGateDecision(gate: GateRecord, node: NodeSpec, outbound: readonly EdgeId[]): NodeOutcome {
+  #applyGateDecision(ctx: RunContext, gate: GateRecord, node: NodeSpec, outbound: readonly EdgeId[]): NodeOutcome {
     if (
       gate.decision !== "approve" &&
       gate.decision !== "reject" &&
@@ -5735,6 +5893,22 @@ export class Engine {
           `node "${node.id}" has no outgoing edge ${invented.map((i) => `"${i}"`).join(", ")}`,
           { details: { gateId: gate.gateId, take: gate.take, declared: outbound } },
         ),
+      };
+    }
+
+    // AND THE KIND, which `#strayRoute` checks for every OTHER producer and which this path
+    // never reaches — a gate's outcome is returned straight to `#commit` from `#executeTask`.
+    // A human may lower a posture; a human may not turn a compensation DECLARATION into a
+    // route, because the executor has no such route to give.
+    const untakeable = untakeableEdges(ctx.index.edgeById, (gate.take ?? []) as readonly EdgeId[]);
+    if (untakeable.length > 0) {
+      return {
+        status: "failed",
+        writes: {},
+        usage: { ...ZERO_USAGE },
+        error: err.policy(CODES.E_ROUTE_INVALID, untakeableMessage(node.id, untakeable), {
+          details: { gateId: gate.gateId, take: gate.take, refused: untakeable.map((e) => ({ edgeId: e.id, kind: e.kind })) },
+        }),
       };
     }
 
@@ -7323,7 +7497,7 @@ export class Engine {
         // gate, or cancelled when that gate was already answered elsewhere. Nothing is
         // left suspended behind a refusal.
         await this.#endChildRun(childRunId, `the parent rejected this delegation: ${forwarded.justification ?? "no reason given"}`);
-        return this.#applyGateDecision(forwarded, w.node, ctx.graph.plans[w.node.id]?.outboundEdges ?? []);
+        return this.#applyGateDecision(ctx, forwarded, w.node, ctx.graph.plans[w.node.id]?.outboundEdges ?? []);
       }
     }
 
@@ -9100,9 +9274,26 @@ export class Engine {
       const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
       // Route confinement is checked in `#dispatch`, where an invalid one becomes a FAILED TASK
       // rather than a throw out of `#commit` — see `#strayRoute`.
+      // AND THE KIND, the same question the switch below answers. THE LOUD HALF IS
+      // `#strayRoute` (and `#applyGateDecision` for a gate redirect), which fails the Task and
+      // names the edge.
+      //
+      // THIS ARM IS UNREACHABLE TODAY AND IS KEPT ANYWAY, which is a weaker claim than the one
+      // it first carried and the honest one. Every outcome that reaches `#commit` comes from
+      // `#executeTask`, which returns through `#dispatch` (→ `#strayRoute`) or through
+      // `#applyGateDecision`, and both now check; `#preNode`, the one early return that skips
+      // `#strayRoute`, never produces a `take`. It does NOT catch a `take` from an older journal
+      // either: an ATTACHED run is served the `task.ready` that was already appended and never
+      // gets here, and `replayRun` re-executes through the doors above rather than through this
+      // filter — both measured, see `TAKEABLE_EDGE_KINDS`. What it does is make the FIFTH
+      // producer, whenever somebody writes one, fail closed rather than take the edge, and a
+      // silent drop is the only shape available: nothing throws from `#edgesToTake`, which runs
+      // inside `#commit`.
       return outcome.take.filter((id) => {
         const e = ctx.index.edgeById.get(id);
-        return e === undefined || e.kind !== "loop" || this.#loopMayContinue(ctx, e, w, scope);
+        if (e === undefined) return true;
+        if (!TAKEABLE_EDGE_KINDS.has(e.kind)) return false;
+        return e.kind !== "loop" || this.#loopMayContinue(ctx, e, w, scope);
       });
     }
 
