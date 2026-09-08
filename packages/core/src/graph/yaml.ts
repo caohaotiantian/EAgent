@@ -323,7 +323,12 @@ function put(out: Record<string, unknown>, key: string, value: unknown): void {
  * correct one and the old value was never what the author wrote; the migration is real all the
  * same and belongs in a release note rather than only here.
  *
- * AND `---` IS CONTENT IN HERE TOO, which was the last member of the family still open. The
+ * AND `---` IS CONTENT IN HERE TOO, which was the last member of the family this function can
+ * reach. One shape outside it survives, and naming it is cheaper than implying it does not
+ * exist: a block scalar opened by a BARE sequence item (`- |`) is not part of this subset at
+ * all, so `---` under one is still reported as a second document rather than as unsupported
+ * syntax. Nothing legitimate is lost — `- |` does not parse either way — but the message is
+ * the wrong one for that input. The
  * document scan runs before block structure is known, so it could not tell a second document
  * from a line of somebody's prompt; it now RECORDS the question and this function answers it,
  * by reporting the raw lines it took into `doc.blocks`. That keeps one definition of where a

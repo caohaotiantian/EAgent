@@ -7,8 +7,9 @@
  *
  * These are MEASUREMENTS with assertions attached, not micro-benchmarks. The ABSOLUTE
  * bounds are set well above the observed cost, so they fail on a regression rather than on
- * a slow machine — 3,000 ms against an observed 34.0–34.6, 2,000 against an observed
- * 4.3–4.5 (three consecutive runs, 2026-09-05).
+ * a slow machine — 3,000 ms against 34–38, and 2,000 against 4.3–4.8, over eight runs on two
+ * days. A RANGE and not a pair of digits: these read a clock, so a number quoted to one decimal
+ * is a number the next run disagrees with, and this line already carried one that did.
  *
  * `compile scales sub-quadratically` IS NOT ONE OF THOSE, and no clock decides it. Every one
  * of its assertions is a ratio of deterministic COUNTS — a proxy counts each property read

@@ -157,6 +157,12 @@ function syntax(src: string, at: number, message: string): Error {
  * the limit has to be a property of the INPUT rather than of the caller's remaining stack.
  * The deepest `when`/`until` written anywhere in this tree is 5 —
  * `has(verdict) && verdict.severity > 0 && verdict.severity < 0.7` — against a limit of 256.
+ *
+ * WHAT 256 MEANS FOR A FLAT CHAIN, said plainly because "nests deeper than 256" reads more
+ * permissive than it is: the operators here are left-associative, so `a && b && c` is a
+ * left-leaning spine and its DEPTH is its term count. 255 `&&` terms compile; 257 do not. That
+ * is a behaviour change on the graph-compile path — such an expression compiled at 294e713 —
+ * and it is a deliberate one, because the same shape at 10,000 terms crashed the compiler.
  */
 const MAX_EXPR_DEPTH = 256;
 
