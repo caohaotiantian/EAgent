@@ -372,7 +372,7 @@ scripts/           build and the three guards that are worth their cost:
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records: audit findings and backlog re-checks, with reproductions
-                   START HERE: `handoff-2026-09-08.md`, then `audit-2026-09-02.md`
+                   START HERE: `handoff-2026-09-08-evening.md`, then `audit-2026-09-02.md`
 .agent/<task>/     per-task working state (gitignored)
 ```
 
