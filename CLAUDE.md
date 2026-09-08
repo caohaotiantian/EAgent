@@ -74,7 +74,8 @@ Read it from the guard and nowhere else, and know what the guard leaves out. Cou
 says **13**, and git's own trailer parser reads only the final paragraph. Three commands, three
 answers. The two extra rows in the grep are of opposite kinds: `2a9eda8` is a `docs:` commit whose
 PROSE quotes the trailer and declares nothing, while **`fbbdac4` is a real declaration the guard
-does not count — the `phase1-taint` merge, naming three journal words**, and the guard judges
+does not count — the `merge: phase1-taint` commit itself, naming three journal words**, and it
+reached `loom` inside `02a5e84`, which is why the two shas name one arrival. The guard judges
 `feat:` subjects only, so a seam declared on a `merge:` commit is in the history and outside the
 census. Neither number is wrong; the ledger a reviewer watches in the diff is the one that has to
 include both. `check-kernel.mjs`'s failure text used to recommend the grep and no longer does —
@@ -265,7 +266,7 @@ implementation forced on the design, and the residue it left, are dated at the t
   `test/run/rewind-applies-the-parents-bound.test.ts` is the pin, with the control that makes it
   mean something. **Ask of every new bound: which verbs reach the guard, and does it hold on all
   of them?**
-  **MEMBER NINE arrived with the `phase1-taint` merge (`02a5e84`), and it is the first whose state
+  **MEMBER NINE arrived on `loom` with the taint lane (`02a5e84`), and it is the first whose state
   IS journaled** — which is why "which verbs reach this guard" is the question and "is this value
   journaled" is not. The state is the E12 `fanout_skipped_gate` escalation, raised by
   `Engine.#fireEmptyJoin` when a fan-out of width zero passes over a `human_gate` on its branch;
@@ -363,11 +364,12 @@ wave-1 lanes (`294e713`) and now ALL SIX wave-2 lanes**: `wave2-taint` (`9b45c7c
 finished — the decisions, including the three caps raised 3 → 4 and the one blocking finding merged
 knowingly as `TODO.md` §A0.21, are in `.agent/wave2-review-2026-09-08/plan.md` (this checkout only
 — `.agent/` is gitignored; `TODO.md` §A0.21 is the tracked half). `phase1-taint`
-**is MERGED too, at `02a5e84` on 2026-09-08**, on the recommendation of
+**is MERGED too — it arrived on `loom` at `02a5e84` on 2026-09-08**, on the recommendation of
 `docs/design-taint-rc6-2026-09-05.md` — which measured that RC-6 is not a scope defect and asked
 for the merge to carry a `Kernel-seam:` trailer. The design predicted three conflict hunks; `loom`
-had moved and there were **six**, in three files, resolved as `git log -1 fbbdac4` records. That
-trailer names the three journal words the branch added: `run.submitted.taintedInputs` — "the
+had moved and there were **six**, in three files. The merge commit that resolved them is
+`fbbdac4`, one commit inside the lane rather than `02a5e84` itself, and it is `fbbdac4` that carries
+the `Kernel-seam:` trailer — `git log -1 --format=%B fbbdac4`. That trailer names the three journal words the branch added: `run.submitted.taintedInputs` — "the
 journal could not say which inputs a delegation handed over already untrusted";
 `task.committed.takeSuppliedByProducer` — "It could not say WHO chose a `take`"; and "the
 `fanout_skipped_gate` escalation rule, E12" — "it had no word for the oversight a fan-out of width
