@@ -270,3 +270,20 @@ test("…and `jail` is undefined for a library embedder that does not supply one
   await loadExtensionModules([m]);
   assert.equal(String(readFileSync(seen, "utf8")), "true");
 });
+
+test("A REF THAT IS NOT `kind/name@ver` SEEDS NOTHING, rather than a pin of a made-up kind", async () => {
+  // `FunctionRegistry` keys by an arbitrary string, so a module may register one this seeding
+  // cannot address. Splitting `"stamp"` on `/` yields kind `"stam"` (indexOf answers -1, so
+  // slice(0,-1) drops a character) — a resource `ResourceStore` accepts and `list({kind})`
+  // never finds again. The body is still registered; what must not happen is a pin nothing
+  // reads, so the graph fails the same way it would with no module at all.
+  const d = dir();
+  const g = graph(d, "bare", {
+    ...FUNCTION_GRAPH,
+    nodes: [{ id: "root", type: "function", function: { ref: "stamp" }, writes: ["note"] }],
+  });
+  const m = mod(d, "bare.mjs", `export default ({ functions }) => { functions.register("stamp", () => ({ writes: {} })); };\n`);
+  const r = await cli(["compile", g, "--workspace", d, "--extension-module", m]);
+  assert.notEqual(r.code, 0, r.out + r.err);
+  assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND|GRAPH0/, r.out + r.err);
+});

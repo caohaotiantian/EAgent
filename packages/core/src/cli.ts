@@ -1424,13 +1424,21 @@ export function openWorkspace(
   // landed last and the module's entries go FIRST. That is the same direction the registries
   // take one paragraph down, for the same reason: between a body an operator can open and one a
   // module supplied, the file is the one they can read.
+  //
+  // ONLY A WELL-FORMED `function/<name>@<ver>` OR `hook/<name>@<ver>` IS SEEDED, and the check
+  // is here rather than in the loader because a `FunctionRegistry` key is an arbitrary string —
+  // an embedder may use any, and `register` does not care. Splitting an unshaped one on `/`
+  // produces a `kind` of whatever precedes the first slash (`"stam"` for `"stamp"`, since
+  // `indexOf` answers -1 and `slice(0, -1)` drops the last character), which `ResourceStore`
+  // accepts and no `list({kind})` ever finds again: a pin nothing reads, which is the shape this
+  // file refuses everywhere else. An unshaped ref simply is not seeded — its body is still
+  // registered, and a graph naming it still fails GRAPH015_RESOURCE_NOT_FOUND, which is honest.
   const published = readResources(root);
+  const SEEDABLE = /^(function|hook)\/([^/@]+)@[^/@]+$/;
   const moduleRefs = [...(extensions?.functionRefs ?? []), ...(extensions?.hookRefs ?? [])]
-    .map((ref) => ({
-      ref,
-      kind: ref.slice(0, ref.indexOf("/")) as ResourceKind,
-      name: ref.slice(ref.indexOf("/") + 1).split("@")[0] ?? ref,
-    }))
+    .map((ref) => ({ ref, m: SEEDABLE.exec(ref) }))
+    .filter((r): r is { ref: string; m: RegExpExecArray } => r.m !== null)
+    .map((r) => ({ ref: r.ref, kind: r.m[1] as ResourceKind, name: r.m[2]! }))
     .filter((r) => !published.some((p) => p.kind === r.kind && p.name === r.name));
   const documents = new ResourceStore({ seed: [...moduleRefs.map((r) => ({ kind: r.kind, name: r.name, content: r.ref })), ...published] });
   /** The refs whose only body is a module's, so the two loaders below do not try to compile a pin. */
