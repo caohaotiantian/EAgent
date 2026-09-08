@@ -345,20 +345,21 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
   });
 
   r.store.failEveryChildRead = true;
-  let p: RunProjection | undefined;
+  let outcome = "";
   let passes = 0;
   const seen = await warningsWhile(async () => {
-    p = await r.engine.advance(runId);
-    for (passes = 1; passes < 60 && p.status !== "succeeded" && p.status !== "failed"; passes++) {
+    // THROUGH `outcomeOf`, so a base that THROWS out of the verb fails this test by ASSERTION
+    // rather than by escaping it. At `c54b0c2` this loop's first pass rejects.
+    for (passes = 1; passes < 60; passes++) {
+      outcome = await outcomeOf(async () => r.engine.advance(runId));
+      if (!outcome.startsWith("running") && !outcome.startsWith("awaiting_gate")) break;
       clock += 60_000;
-      p = await r.engine.advance(runId);
     }
   });
 
   // IT ENDS. A retryable class is not a licence to spin: the deferral budget is spent, the
   // charged retries follow, and the run reaches a terminal state on its own.
-  assert.equal(p!.status, "failed", `the run terminates rather than deferring forever: ${p!.status}`);
-  assert.equal(p!.error?.code, "E_SUBGRAPH_FAILED", "and it says what could not be reached");
+  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the run terminates rather than deferring forever, and says what it could not reach: ${outcome}`);
   assert.ok(passes < 60, `it did not need the loop's own ceiling to stop: ${passes} passes`);
 
   // AND IT IS BOUNDED IN VOLUME, one line per refusal — an absolute bound with room, never a
