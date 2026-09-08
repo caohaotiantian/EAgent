@@ -2276,6 +2276,29 @@ now replays as a loud divergence under `replayRun` (attach-and-advance of the sa
 still folds and keeps the old bypass, silently); the compiler stays silent — the refusal is
 per-task at run time, not a compile-time diagnostic.
 
+**Closed 2026-09-08, `exam-reads` merged (`3b983f7`).** CLAUDE.md §3's fifth `examShape` rule:
+every declared exam input other than `subject` must be NAMED in a node's own `reads`, in a `${…}`
+template root in a node's tool args, or in a fanout edge's `over`; edge conditions never count,
+because the rule cannot tell which of them the executor evaluates — a producing body's `take` makes
+a `when` inert and no check of the spec can rule that out — so it counts none (`2eeea6b`..`5caee87`,
+merged at `3b983f7`; the three residue items fixed at `8c86559`). Driven on the binary: an exam
+declaring `picked` and reading only `items` is refused `E_CONFIG_INVALID` naming the channel and
+journals nothing, the same exam with `picked` in its grader's `reads` attests exit 0, and
+`examples/exams/review-bench-exam.json` attests exit 0 against a real `review-bench` cohort. Eight
+review rounds, nine reviewers; the predicate has not changed since `6898a8d` and every finding after
+it was in PROSE — four wrong enumerations of the executor's evaluation sites, then a count made
+wrong by shortening. **The lesson, which is worth more than the rule: a prose contract that must
+stay true of a 10,000-line executor is a second copy of that executor and drifts as fast; where a
+comment is load-bearing the replacement is a TEST, not a shorter comment.** Residue, disclosed:
+the rule checks NAMES, not use, so an exam naming the channel in `reads` and ignoring it still
+attests (driven — `names-only.json`, an always-pass body, attested exit 0 and replaced the honest
+ruler); closing that is a dataflow analysis from each declared input to the terminal node, and the
+five other shapes it would also close are listed in the lane report's Residue. The COST is stated
+in the refusal: an exam whose only mention of the answer is an edge condition must move it into a
+node's `reads`. And there is a migration effect — the predicate also runs on the READ side, so an
+exam attested before this rule makes `loom score`, `promote --against-cohort` and `suite freeze`
+throw rather than fall back to in-graph S1; the refusal names the re-attest command.
+
 **Closed 2026-09-08, three more reviewed branches merged.** §A0.16 the three injection paths —
 control-flow taint, brought on with `phase1-taint` and five fix commits closing five confirmed
 blocking findings over three review rounds (`fbbdac4`..`ca1a43c`, merged at `02a5e84`; gate 3539

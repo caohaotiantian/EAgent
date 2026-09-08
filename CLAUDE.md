@@ -223,9 +223,29 @@ footnote:**
 - **One operator.** `loom exam attest` is a verb; `--as` is an argv string written into a row with
   `actor.kind: "human"` by construction. Whoever can run the binary owns the exam, and also writes
   `graphs/` and `resources/`.
-- **An exam that reads the run's answer — enforced by SHAPE only.** An exam declaring no baseline
-  output is refused (above). An exam that DECLARES `picked` and never READS it still attests.
-  Closing that needs a fifth `examShape` rule; it is the next thing to do here.
+- **An exam that reads the run's answer — enforced by NAME only.** An exam declaring no baseline
+  output is refused (above), and since the `exam-reads` merge a fifth `examShape` rule refuses one
+  that DECLARES the answer and names it nowhere. Driven on the binary built at `8c86559`, a
+  `pick-bench` workspace of six recordings:
+
+  ```
+  exam attest exams/unread-exam.json  (inputs [subject, items, picked]; `grade` reads ["items"])
+    E_CONFIG_INVALID: unread-exam.json is not an exam: exam input(s) "picked" are declared as
+    inputs and named in no node's `reads`, no `${…}` in a node's tool args, and no fanout edge's
+    `over` — the three places this rule counts — add the channel to the `reads` of the node that
+    grades it, or stop declaring it.                                                        exit 1
+  exam attest exams/pick-exam.json           (the same exam, `picked` in `grade`'s reads) exit 0
+  exam attest examples/exams/review-bench-exam.json                                        exit 0
+    (the shipped exam, against three review-bench recordings taken from a local stub adapter —
+     attested sha256:83de18ae…, corpusThrough the third run)
+  ```
+
+  **The gap that remains, and it is the whole of what "by NAME" concedes: the rule checks NAMES,
+  so an exam that names the channel in `reads` and ignores it still attests.** Driven in the same
+  workspace: `exams/names-only.json` is `pick-exam` with `picked` still in `grade`'s `reads` and a
+  body `() => ({writes:{verdict:{pass:true,…,detail:"never looked"}}})` — attested exit 0,
+  `sha256:8404a420…`, replacing the honest ruler. Closing it is a dataflow analysis from each
+  declared input to the terminal node, not a fifth rule.
 - **The exam-gated doors are `promote --against-cohort` and `suite freeze`.** `promote --suite`
   still decides on the frozen suite and `12-grader-unchanged`, not on the exam.
 - **No `subgraph` child grader.** `evaluatorsOf` walks the parent spec's nodes, so an evaluator
