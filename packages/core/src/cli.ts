@@ -22,7 +22,7 @@ import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
 import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
-import { mcpTools } from "./mcp/tools.ts";
+import { mcpToolName, mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
@@ -1576,6 +1576,62 @@ export function openWorkspace(
   // THE SECOND ARGUMENT IS THE ONLY PATH TO A LOWERED MCP GATE IN THIS BINARY, and it reaches
   // here from a `--mcp-file` row and from nowhere else. See `MCP_SERVER_FIELDS` for why a file
   // named on argv is allowed to do that when `loadExtensionModules` says a file may not.
+  // THE THIRD REGISTRAR, AND THE COLLISION REFUSAL ABOVE DID NOT REACH IT.
+  //
+  // `openWorkspace` fills ONE `ToolRegistry` from three places, in this order: the
+  // `--extension-module` modules, this binary's built-ins, and every connected MCP server. The
+  // check at the top of this function covers exactly one of the three pairs — an extension
+  // naming a BUILT-IN — and `mcp__<server>__<tool>` is a name an extension module can spell,
+  // because `ToolRegistry.register` takes any string. So an extension tool named
+  // `mcp__docs__search` was registered, held the capability it declared, contributed it to the
+  // grant list `capabilitiesOf` derives below, appeared in the manifest the compiler computes an
+  // agent node's posture floor over — and was then silently overwritten here. Measured at
+  // 3d05cff: `loom compile … --extension-module … --mcp-file …` printed `ok` and exited 0.
+  //
+  // NOBODY SHADOWS ANYBODY, which is the same answer a duplicate adapter name, a duplicate
+  // channel name, a duplicate `--mcp-file` server name and a duplicate tool within one server
+  // already get. Picking a winner by precedence would loosen: whichever side loses is a tool the
+  // operator installed and cannot call, and a warning on stderr at boot is not oversight. The
+  // operator renames one; a guard that cannot decide fails closed.
+  //
+  // AND IT COVERS MCP × MCP TOO, by folding each server's names in as it goes. A server name may
+  // contain `_` (`MCP_SERVER_FIELDS` allows `[A-Za-z0-9_-]+`) and a tool name is whatever the
+  // server says, so server `a` offering `b__x` and server `a__b` offering `x` both flatten to
+  // `mcp__a__b__x` — two DIFFERENT servers, so `readMcpServers`' duplicate-name refusal never
+  // sees it.
+  //
+  // BEFORE ANY OF THEM IS REGISTERED, so a refusal leaves the registry exactly as it found it
+  // rather than half of one server's tools. `main`'s `closeMcp` already closes the children on
+  // every refusal path out of this function, so this one spawns no orphan.
+  //
+  // A SERVER THAT IS UNREACHABLE NEVER GETS HERE: `startMcp` aborts the whole boot with
+  // `E_TOOL_SOURCE_UNAVAILABLE` if any `client.start()` throws, so there is no partial connect
+  // and no name set this check has to guess at. `McpClient.#tools` is assigned once, at the end
+  // of `start()`, so a server rewriting its `tools/list` reply afterwards cannot introduce a
+  // name after the check.
+  const claimed = new Map<string, string>();
+  for (const t of tools.list()) {
+    const owner = extensions?.toolOwners.get(t.name);
+    claimed.set(t.name, owner === undefined ? "a built-in of this binary" : `--extension-module ${owner}`);
+  }
+  for (const { client } of mcp) {
+    for (const spec of client.tools) {
+      const name = mcpToolName(client.name, spec.name);
+      const by = claimed.get(name);
+      if (by !== undefined) {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `mcp server "${client.name}" offers the tool "${spec.name}", which this binary registers as "${name}" — ` +
+            `and that name is already registered by ${by}. MCP tools are registered AFTER the extension modules ` +
+            `and the built-ins, and ToolRegistry.register shadows on collision, so the existing definition would ` +
+            `keep its capability in the grant list and its entry in the compiler's manifest and would never be ` +
+            `dispatched. Rename one of them — an MCP tool's id is mcp__<server>__<tool>, so renaming the server ` +
+            `in the --mcp-file works too.`,
+        );
+      }
+      claimed.set(name, `mcp server "${client.name}"`);
+    }
+  }
   for (const { client, irreversibility } of mcp) {
     for (const t of mcpTools(client, irreversibility)) tools.register(t);
   }

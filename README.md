@@ -291,7 +291,15 @@ registered AFTER the extension modules and `ToolRegistry.register` shadows on co
 extension tool named `fs.read` was registered, held its capability, appeared in the grant list, and
 was **never dispatched** — driven at 294e713 against a `tool` node calling `fs.read`, the run
 succeeded with the built-in's answer and printed no warning, while the identical collision on an
-adapter or channel name refused to boot. It refuses now, naming the module and the built-in names.
+adapter or channel name refused to boot. It refuses now, naming the module and the built-in names. **And the refusal reaches all THREE
+registrars, not two.** `mcpTools` registers after both the modules and the built-ins, and
+`mcp__<server>__<tool>` is a name an extension module can spell — `ToolRegistry.register` takes
+any string — so at 3d05cff an extension tool named `mcp__docs__search` beside an `--mcp-file`
+server `docs` offering `search` compiled `ok`, exit 0, with the extension's definition holding a
+capability in the grant list and never being dispatched. It refuses now, naming both claimants;
+so does the MCP × MCP case `readMcpServers`' duplicate-server-name check cannot see (server `a`
+offering `b__x` and server `a__b` offering `x` both flatten to `mcp__a__b__x`).
+`test/cli/mcp-registrar-collision.test.ts` is the reproduction.
 And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
 apply the operator's own guards; the module is handed the same frozen
 jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a

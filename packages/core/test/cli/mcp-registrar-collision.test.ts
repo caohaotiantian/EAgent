@@ -220,3 +220,31 @@ test("THE ORDINARY HALF — a unique extension tool and a unique MCP tool both d
   assert.equal(status.outputs?.["fromExt"], "ext:house.ping", r.out);
   assert.equal(status.outputs?.["fromMcp"], "mcp:lookup", r.out);
 });
+
+test("TWO MCP SERVERS WHOSE FLATTENED IDS COLLIDE REFUSE TOO — `readMcpServers` never sees this one", async () => {
+  const d = dir();
+  // A server name may contain `_` (`MCP_SERVER_FIELDS`: `[A-Za-z0-9_-]+`) and a tool name is
+  // whatever the server says, so `a` offering `b__x` and `a__b` offering `x` both flatten to
+  // `mcp__a__b__x`. The server names DIFFER, so the duplicate-name refusal in `readMcpServers`
+  // is not the guard here and the second registration would have shadowed the first.
+  const one = mcpServer(d, "one.mjs", ["b__x"]);
+  const two = mcpServer(d, "two.mjs", ["x"]);
+  const p = join(d, "mcp.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      servers: [
+        { name: "a", command: process.execPath, args: [one], envAllow: ["PATH", "HOME"] },
+        { name: "a__b", command: process.execPath, args: [two], envAllow: ["PATH", "HOME"] },
+      ],
+    }),
+  );
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--mcp-file", p]);
+  const said = r.out + r.err;
+  assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
+  assert.match(said, /E_CONFIG_INVALID/, said);
+  assert.match(said, /mcp__a__b__x/, said);
+  assert.match(said, /mcp server "a"/, said);
+  assert.match(said, /mcp server "a__b"/, said);
+});
