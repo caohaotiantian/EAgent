@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
-import { CODES } from "../../src/errors.ts";
+import { CODES, isLoomError } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import type { ToolManifestLite } from "../../src/graph/validate.ts";
@@ -160,7 +160,12 @@ const GATE = { id: "gate", type: "human_gate", reads: ["plan"], writes: [], huma
 const PAY = { id: "pay", type: "tool", reads: ["plan"], writes: ["out"], tool: { name: "note.append", version: "1.0", args: {} } };
 
 /** `plan -> gate -> pay`, with `plan` a function so nothing here needs a model. */
-function authored(hopEdgeKind: string, extra: Record<string, unknown> = {}, hopTo = "pay"): GraphSpec {
+function authored(
+  hopEdgeKind: string,
+  extra: Record<string, unknown> = {},
+  hopTo = "pay",
+  moreEdges: readonly Record<string, unknown>[] = [],
+): GraphSpec {
   return {
     ...BASE,
     nodes: [
@@ -181,6 +186,7 @@ function authored(hopEdgeKind: string, extra: Record<string, unknown> = {}, hopT
       { id: "a1", from: "gate", to: "pay", kind: "seq" },
       { id: "m0", from: "plan", to: "hop", kind: "seq" },
       { id: "m1", from: "hop", to: hopTo, kind: hopEdgeKind, ...extra },
+      ...moreEdges,
     ],
   } as unknown as GraphSpec;
 }
@@ -336,4 +342,110 @@ test("THE OTHER ORDINARY HALF: a compensation still fires through the mechanism 
   assert.equal(status, "failed");
   assert.deepEqual(r.ran.filter((x) => x === "note.append"), ["note.append"], "the tool ran, so there is something to undo");
   assert.deepEqual(r.undone, ["note.undo"], "and the failed run undid it — journal-driven, not edge-driven");
+});
+
+test("A REFUSED ROUTE MAY NOT BE ROUTED — the node's own `error` edge is not a second door to it", async () => {
+  // THE REFUSAL WAS ORNAMENTAL WITHOUT THIS, and it is the shape a fresh reviewer found. A
+  // refused `take` fails the Task; a failed Task routes its `error` edges; and `#errorEdges`
+  // returns every CATCH-ALL error edge the node has — including one pointing at the node the
+  // refusal was protecting. Measured on this exact graph before `E_ROUTE_INVALID` joined
+  // `RUN_FATAL_CODES`: `["hop","failed","E_ROUTE_INVALID"]`, `["pay","succeeded"]`,
+  // `ran = ["note.append"]` after the human REJECTED — byte-identical to the behaviour the
+  // refusal was added to stop.
+  const r = rig();
+  const graph = compiled(
+    authored("compensation", { compensates: "pay" }, "pay", [{ id: "m2", from: "hop", to: "pay", kind: "error" }]),
+  );
+  const { status } = await rejectAtTheGate(r, graph);
+
+  assert.deepEqual(
+    r.ran.filter((x) => x === "note.append"),
+    [],
+    "an error edge beside the refused one must not carry the refusal to the guarded node",
+  );
+  assert.notEqual(status, "succeeded", `the run must not report success: ${status}`);
+});
+
+test("…AND THE ORDINARY HALF OF THAT: an `error` edge still handles an ordinary failure", async () => {
+  // The control that keeps the line above from being a ban on error edges. `bad` throws
+  // `E_PROVIDER_UNAVAILABLE`, which is nobody's route refusal, and its error edge must still
+  // reach the rescue node.
+  const r = rig();
+  const graph = compiled({
+    ...BASE,
+    nodes: [
+      { id: "plan", type: "function", reads: ["goal"], writes: ["plan"], function: { ref: "function/plan@stable" } },
+      { id: "bad", type: "tool", reads: ["plan"], writes: ["out"], tool: { name: "boom", version: "1.0", args: {} }, retry: { maxAttempts: 1 } },
+      { id: "done", type: "function", reads: ["plan"], writes: [], function: { ref: "function/detail@stable" } },
+    ],
+    edges: [
+      { id: "a0", from: "plan", to: "bad", kind: "seq" },
+      { id: "a1", from: "bad", to: "done", kind: "error" },
+    ],
+  } as unknown as GraphSpec);
+  const runId = await r.engine.submit({ graph, inputs: { goal: "go" } });
+  for (let i = 0; i < 12; i++) {
+    const p = await r.engine.advance(runId);
+    if (p.status === "succeeded" || p.status === "failed") break;
+  }
+  assert.ok(r.ran.includes("done"), "a rescue arm for an ordinary failure must still run");
+});
+
+test("THE SECOND DOOR: a human's gate `redirect` may not name a refused kind either", async () => {
+  // `#applyGateDecision` is answered in `#executeTask` and never passes `#strayRoute`, which is
+  // why the predicate is shared rather than written per producer. A human may lower a posture;
+  // a human may not turn a compensation DECLARATION into a route the executor does not have.
+  const r = rig();
+  const graph = compiled({
+    ...BASE,
+    nodes: [
+      { id: "plan", type: "function", reads: ["goal"], writes: ["plan"], function: { ref: "function/plan@stable" } },
+      GATE,
+      PAY,
+    ],
+    edges: [
+      { id: "a0", from: "plan", to: "gate", kind: "seq" },
+      { id: "a1", from: "gate", to: "pay", kind: "seq" },
+      { id: "a2", from: "gate", to: "pay", kind: "compensation", compensates: "pay" },
+    ],
+  } as unknown as GraphSpec);
+  const runId = await r.engine.submit({ graph, inputs: { goal: "go" } });
+  let p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", JSON.stringify(p.error ?? {}));
+
+  const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+  p = await r.engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "redirect", take: ["a2"] },
+    actor: { kind: "human", subject: "u:a", via: "console" },
+    idempotencyKey: "k",
+  });
+  const codes = Object.values(p.tasks)
+    .filter((t) => t.state === "failed")
+    .map((t) => t.error?.code ?? "");
+  assert.ok(codes.includes(CODES.E_ROUTE_INVALID), `the redirect must be refused: ${codes.join(", ") || "no failed task"}`);
+  assert.deepEqual(r.ran.filter((x) => x === "note.append"), [], "and the guarded tool must not have run");
+});
+
+test("THE THIRD DOOR: an operator `steer` onto a refused kind is refused at the door", async () => {
+  // Told BEFORE anything is journaled, which is the reason the invented-edge rule is checked
+  // twice as well: `#strayRoute` would catch it at the moment it would be taken, and an
+  // operator who is told "done" for an intervention with no effect stops looking.
+  const r = rig();
+  const graph = compiled(authored("compensation", { compensates: "pay" }));
+  const runId = await r.engine.submit({ graph, inputs: { goal: "go" } });
+  await r.engine.pause(runId, "look at this", { kind: "human", subject: "u:a", via: "console" });
+
+  let code = "no refusal";
+  try {
+    await r.engine.steer(
+      runId,
+      { nodeId: "hop" as never, take: ["m1"] as never },
+      "route it there",
+      { kind: "human", subject: "u:a", via: "console" },
+    );
+  } catch (e) {
+    code = isLoomError(e) ? e.code : String(e);
+  }
+  assert.equal(code, CODES.E_ROUTE_INVALID);
 });

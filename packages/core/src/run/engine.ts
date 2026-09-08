@@ -454,6 +454,21 @@ const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIM
  *      it stayed out of this set for as long as it did because it is raised deep inside an
  *      effect serve rather than by a policy check.
  *
+ *   `E_ROUTE_INVALID` · THE ROUTE THIS NODE CHOSE IS NOT ONE IT MAY TAKE, and leaving it out
+ *      made the refusal ornamental. A refused `take` fails the Task, a failed Task routes its
+ *      `error` edges, and `#errorEdges` returns every catch-all error edge the node has —
+ *      INCLUDING one pointing at the node the refusal was protecting. Measured on the
+ *      compensation bypass this set was extended for: a router with `take: ["m1"]` (a
+ *      `compensation` edge into a gated tool) and a second, catch-all `error` edge to the same
+ *      tool ran `note.append` after the human REJECTED, byte-identical to the behaviour before
+ *      the refusal existed — `["hop","failed","E_ROUTE_INVALID"]`, `["pay","succeeded"]`,
+ *      `ran = ["note.append"]`. The refusal was recorded and not obeyed.
+ *      It is the same argument `E_GATE_REQUIRED` and `E_EFFECT_UNRECORDED` are here for, and it
+ *      is NOT the `E_CAP_DENIED` case below: "this node cannot do this" leaves the graph's own
+ *      handler a sensible answer, while "this node tried to route somewhere it may not" is a
+ *      producer or a journal disagreeing with the compiled graph — and routing the failure is
+ *      the very act being refused. `#strayRoute`'s invented-edge half is the same fact.
+ *
  * WHAT IS DELIBERATELY OUT, because a named set needs its boundary:
  *   - `E_LEASE_LOST` / `E_FENCING_STALE` — another worker owns this Task. The RUN is fine;
  *     THIS WORKER is not, and ending the run would be one process killing another's work.
@@ -469,6 +484,7 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
   CODES.E_GATE_REQUIRED,
   CODES.E_PAYLOAD_UNRESOLVED,
   CODES.E_EFFECT_UNRECORDED,
+  CODES.E_ROUTE_INVALID,
 ]);
 
 /**
@@ -501,7 +517,8 @@ const COMPENSATION_MAX_DEPTH = 16;
  * `ran = []` in the unmutated control. No mutation is needed; an authored graph reaches it.
  *
  * `error` is refused for the same reason one kind over: an error edge is selected by a FAILURE,
- * through `#errorEdges`, which is also the only place `EdgeSpec.codes` is read. A succeeded
+ * through `#errorEdges`, which is the only place the EXECUTOR reads `EdgeSpec.codes`
+ * (`graph/validate.ts` reads it too, at compile). A succeeded
  * outcome routing down a handler arm is the graph handling a failure that did not happen, and
  * two mechanisms for one kind is how they come to disagree.
  *
@@ -541,7 +558,10 @@ function untakeableEdges(
   take: readonly EdgeId[],
 ): readonly EdgeSpec[] {
   const bad: EdgeSpec[] = [];
+  const seen = new Set<EdgeId>();
   for (const id of take) {
+    if (seen.has(id)) continue;
+    seen.add(id);
     const e = edgeById.get(id);
     if (e !== undefined && !TAKEABLE_EDGE_KINDS.has(e.kind)) bad.push(e);
   }
@@ -3563,7 +3583,9 @@ export class Engine {
    * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
    * operator surface would be oversight routing around itself.
    *
-   * FIVE REFUSALS, in the order they are checked and in the order of what each would break:
+   * SIX REFUSALS, in the order they are checked and in the order of what each would break. Two of
+ * them are stated at their check rather than here — a `human_gate` node, whose route the
+ * DECISION decides, and an edge of a kind control does not flow along (5 below).
    *
    *   1. A NON-HUMAN CALLER — `E_HUMAN_APPROVAL_REQUIRED`, and there is deliberately no
    *      `SYSTEM_ACTOR` default the way `cancel` has one. Confinement to the declared set is
@@ -3644,7 +3666,7 @@ export class Engine {
         { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
       );
     }
-    // 5. AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`, and this is the
+    // 5 (of the six above). AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`, and this is the
     //    fifth refusal rather than a fourth clause because it is a different fact: the edge
     //    leaves this node and the executor still has no route along it. `#strayRoute` would
     //    refuse it at the moment it would be taken; refusing here is what tells the operator
@@ -9217,10 +9239,17 @@ export class Engine {
       // rather than a throw out of `#commit` — see `#strayRoute`.
       // AND THE KIND, the same question the switch below answers. THE LOUD HALF IS
       // `#strayRoute` (and `#applyGateDecision` for a gate redirect), which fails the Task and
-      // names the edge; this arm is what holds for a `take` that reached this line anyway — a
-      // journal written by a build without the refusal, replayed here. A silent drop is the
-      // honest answer at that point: nothing throws from `#edgesToTake`, which runs inside
-      // `#commit`, and the alternative is taking an edge the switch would not have taken.
+      // names the edge.
+      //
+      // THIS ARM IS UNREACHABLE TODAY AND IS KEPT ANYWAY, which is a weaker claim than the one
+      // it first carried and the honest one. Every outcome that reaches `#commit` comes from
+      // `#executeTask`, which returns through `#dispatch` (→ `#strayRoute`) or through
+      // `#applyGateDecision`, and both now check; `#preNode`, the one early return that skips
+      // `#strayRoute`, never produces a `take`. It does NOT catch a `take` from an older
+      // journal — replay serves the `task.ready` that was already appended and never gets here,
+      // measured over one SQLite file. What it does is make the FIFTH producer, whenever
+      // somebody writes one, fail closed rather than take the edge, and a silent drop is the
+      // only shape available: nothing throws from `#edgesToTake`, which runs inside `#commit`.
       return outcome.take.filter((id) => {
         const e = ctx.index.edgeById.get(id);
         if (e === undefined) return true;

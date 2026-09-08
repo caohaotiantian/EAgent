@@ -302,6 +302,22 @@ test("EVERY EDGE KIND THE EXECUTOR CAN TAKE, which is not `dagEdges`", () => {
   // AND THE CONTROL THAT KEEPS THAT HONEST: the same graft one kind over, `seq`, IS refused —
   // so the arm above passes because of the edge KIND and not because the fixture stopped
   // compiling for some unrelated reason.
+  // AND THE ARM THIS ONE REPLACED IS KEPT, because it was the tree's only assertion on
+  // GRAPH012_NO_COMPENSATES: without `compensates` the graft never compiles at all, which is
+  // why it could not see the rule under test.
+  const noCompensates = attempt(
+    base,
+    mutation({
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "compensation" } as unknown as EdgeSpec,
+      ],
+    }),
+    COMPENSABLE,
+  );
+  assert.equal(noCompensates.ok, false);
+  assert.ok(noCompensates.diagnostics.some((d) => d.code === "GRAPH012_NO_COMPENSATES"));
+
   const compControl = attempt(
     base,
     mutation({
