@@ -278,14 +278,23 @@ export class ToolRegistry {
     // on. Both throw, and neither mutates the stack — a refused registration leaves whatever
     // was already there as the live definition.
     checkManifest(tool);
+    // READ EXACTLY ONCE, AFTER THE MANIFEST CHECK, AND USED FOR EVERYTHING BELOW. `tool.name` is
+    // an ordinary property of a caller-supplied object, and nothing stops a caller from making it
+    // a GETTER that returns one string to a check and a different one to whatever acts on the
+    // result — measured: a getter returning an innocuous name on odd reads and `mcp__docs__search`
+    // on the even read that used to key the stack registered the impersonation under a name the
+    // reservation loop, reading `tool.name` a THIRD time, never saw. Every decision this method
+    // makes from here on — the reservation check, the stack key, and the `dispose` closure's key —
+    // reads this one binding and nothing else touches `tool.name` again.
+    const name: string = tool.name;
     // THE RESERVATION IS CHECKED AT THE DOOR ITSELF, not by a scan run once elsewhere — see the
     // class docstring's "RESERVED PREFIXES" paragraph for why a one-shot scan cannot catch a
     // registration made later, from a timer or any other path a caller controls.
     for (const [prefix, claim] of this.#reserved) {
-      if (claim.owner !== owner && tool.name.startsWith(prefix)) {
+      if (claim.owner !== owner && name.startsWith(prefix)) {
         throw err.validation(
           CODES.E_CONFIG_INVALID,
-          `tool name ${label(tool.name)} uses the "${prefix}" prefix, which is ${claim.reservedFor}.`,
+          `tool name ${label(name)} uses the "${prefix}" prefix, which is ${claim.reservedFor}. Rename it.`,
         );
       }
     }
@@ -296,26 +305,26 @@ export class ToolRegistry {
     if (this.#sealed && this.#afterSeal === "deny") {
       throw err.policy(
         CODES.E_NOT_AUTHORIZED,
-        `tool registration is closed: "${tool.name}" was NOT registered. This registry was ` +
+        `tool registration is closed: "${name}" was NOT registered. This registry was ` +
           `constructed with { registerAfterSeal: "deny" } and seal() has been called, so tools may ` +
           `only be registered while the host is wiring up. Register it before seal(), or construct ` +
           `the registry with { registerAfterSeal: "allow" } (the default) to permit registration ` +
           `during a run.`,
       );
     }
-    const stack = this.#stacks.get(tool.name) ?? [];
+    const stack = this.#stacks.get(name) ?? [];
     stack.push(tool);
-    this.#stacks.set(tool.name, stack);
+    this.#stacks.set(name, stack);
     let disposed = false;
     return {
       dispose: () => {
         if (disposed) return;
         disposed = true;
-        const s = this.#stacks.get(tool.name);
+        const s = this.#stacks.get(name);
         if (s === undefined) return;
         const i = s.lastIndexOf(tool);
         if (i >= 0) s.splice(i, 1);
-        if (s.length === 0) this.#stacks.delete(tool.name);
+        if (s.length === 0) this.#stacks.delete(name);
       },
     };
   }

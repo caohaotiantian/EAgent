@@ -433,6 +433,18 @@ const NO_MODULE_CALLED_TRUE =
   'and this process would try to import a module called "true". Omit the flag entirely to run unextended.';
 
 /**
+ * `ToolRegistry.reservePrefix("mcp__", …)`'s `reservedFor` clause, ONE COPY — `openWorkspace` and
+ * `loadExtensionModules` each construct a `ToolRegistry` and each has to reserve the prefix on it,
+ * so the sentence a caller reads in the refusal must not drift into two independently-edited ones.
+ */
+const MCP_PREFIX_RESERVED_FOR =
+  "reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is " +
+  "registered by this binary from a server an operator named, carries the capability " +
+  "mcp:<server>, and is irreversible unless that server's row says otherwise. A tool spelling " +
+  "one is read by an operator as that server's, under whatever oversight class it chose for " +
+  "itself";
+
+/**
  * `--take`'s own consequence. `steer` registers nothing either; the route would be confined to an
  * edge id no graph declares, and `Engine.steer` would refuse against the compiled edge set.
  */
@@ -1371,16 +1383,7 @@ export function openWorkspace(
   // already — this is the only other place a `tools` registry is constructed. When `extensions`
   // exists, `loadExtensionModules` reserved the prefix before any module's factory ran, and
   // `extensions.mcpRegistrar` is that same claim; there is nothing to reserve twice.
-  const mcpRegistrar =
-    extensions?.mcpRegistrar ??
-    tools.reservePrefix(
-      "mcp__",
-      "reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is " +
-        "registered by this binary from a server an operator named, carries the capability " +
-        "mcp:<server>, and is irreversible unless that server's row says otherwise. A tool spelling " +
-        "one is read by an operator as that server's, under whatever oversight class it chose for " +
-        "itself",
-    );
+  const mcpRegistrar = extensions?.mcpRegistrar ?? tools.reservePrefix("mcp__", MCP_PREFIX_RESERVED_FOR);
   // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`.
   const jail = jailFor(args);
   const execPrograms = jail.execAllowlist;
@@ -2412,8 +2415,14 @@ export interface ExtensionModules {
    * deliberately NOT part of the public `ToolRegistry` API surface an embedder can reach by
    * holding the registry: see `ToolRegistry.reservePrefix`'s docstring for why a public bypass
    * method would defeat the reservation as completely as a boolean flag would.
+   *
+   * OPTIONAL, deliberately: `ExtensionModules` is a published interface (`loadExtensionModules`
+   * is a pinned export a library embedder can call directly), and an embedder who builds this
+   * object by hand rather than through `loadExtensionModules` should not be broken by a member
+   * added after they wrote their integration. `openWorkspace` falls back to reserving the prefix
+   * itself when this is absent, the same way it does when `extensions` itself is absent.
    */
-  readonly mcpRegistrar: { register(tool: ToolDefinition): LoomDisposable };
+  readonly mcpRegistrar?: { register(tool: ToolDefinition): LoomDisposable };
   /** Channel names the modules registered, for the boot banner. Order matches `channels`. */
   readonly channelNames: readonly string[];
   /** Resolved paths, in load order, for the boot banner. */
@@ -2641,14 +2650,7 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
   // `mcp__` prefix is still open. `mcpRegistrar` is handed back on `ExtensionModules` for
   // `openWorkspace` to use once real MCP servers connect; it is never passed to a module. See
   // `ToolRegistry.reservePrefix`'s docstring for why this must be a capability and not a flag.
-  const mcpRegistrar = tools.reservePrefix(
-    "mcp__",
-    "reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is " +
-      "registered by this binary from a server an operator named, carries the capability " +
-      "mcp:<server>, and is irreversible unless that server's row says otherwise. A tool spelling " +
-      "one is read by an operator as that server's, under whatever oversight class it chose for " +
-      "itself",
-  );
+  const mcpRegistrar = tools.reservePrefix("mcp__", MCP_PREFIX_RESERVED_FOR);
   const channels = new CollectedChannels();
   const identity = new CollectedIdentity();
   // The engine looks up by ref in THESE objects, so a module registering into them is a module

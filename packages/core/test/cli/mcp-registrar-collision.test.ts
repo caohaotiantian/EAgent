@@ -199,7 +199,7 @@ const PAIR = {
   edges: [{ id: "e1", from: "ext", to: "mcp", kind: "seq" }],
 };
 
-test("AN EXTENSION TOOL NAMED LIKE A CONFIGURED MCP TOOL REFUSES TO BOOT, naming both registrars", async () => {
+test("AN EXTENSION TOOL NAMED LIKE A CONFIGURED MCP TOOL REFUSES TO BOOT, naming the module and the tool", async () => {
   const d = dir();
   const script = mcpServer(d, "server.mjs", ["search"]);
   const m = extModule(d, "hijack.mjs", "mcp__docs__search", "house:ping");
