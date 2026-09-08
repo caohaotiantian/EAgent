@@ -608,3 +608,64 @@ test("POLLING A FINISHED CHILD STILL ANSWERS WHEN THE PARENT'S LOG IS BROKEN —
   );
   assert.equal(String(answered.runId), String(childRunId));
 });
+
+test("A BROKEN PARENT LOG NEVER FAILS THE CHILD'S OWN VERB — the live forward refuses, it does not propagate", async () => {
+  // THE SAME DEFECT ONE CALL SITE OVER. `396767c` closed the retired-child poll path and stated
+  // the principle — "Refusing to forward is always allowed; refusing to ANSWER is not" — while the
+  // LIVE forward at the top of the drive loop still rethrew. So a failure on the PARENT's store
+  // came back as the answer to `resolveGate` on the CHILD, and to `advance` on the child: two
+  // verbs about one run reporting another run's disk.
+  //
+  // THE HUMAN'S DECISION LANDS FIRST, which is what makes this a reporting defect rather than a
+  // loss — the child's `gate.decided` is durable before the forward is attempted — but a caller
+  // that sees a throw has every reason to believe its decision did not take, and to retry it.
+  //
+  // THE DOUBLE FAILS DURING ITERATION, not at the call, because that is how a store actually
+  // breaks: `read` is an async generator and a disk error surfaces when the first row is pulled.
+  let breakParent = false;
+  class BrokenParentReads extends MemoryStateStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (breakParent && !String(runId).includes("~")) throw new Error("sqlite: disk I/O error");
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const warnings: { code?: string; message: string }[] = [];
+  const onWarning = (w: Error & { code?: string }): void => {
+    warnings.push({ ...(w.code === undefined ? {} : { code: w.code }), message: w.message });
+  };
+  process.on("warning", onWarning);
+  try {
+    const r = rig(new BrokenParentReads({ now: () => NOW }));
+    const { runId, childRunId, mirror, childGate } = await parked(r);
+
+    breakParent = true;
+    // The child's own verb, about the child's own gate.
+    const childP = await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+    assert.equal(childP.status, "awaiting_gate", "the child answered its own question while the parent's store was down");
+    // And the child's other verb.
+    assert.equal((await r.engine.advance(childRunId)).status, "awaiting_gate");
+    assert.equal(
+      (await r.engine.projection(childRunId))!.gates[childGate.gateId]?.state,
+      "decided",
+      "the human's decision landed durably, which is why propagating the parent's error would mislead",
+    );
+
+    // IT IS SAID OUT LOUD, on the channel this branch already chose for the structurally identical
+    // hook case. A forward that could not happen is not nothing: the parent may still be waiting.
+    // `process.emitWarning` defers to the next tick, so a warning raised by an earlier test in
+    // this file can land in this listener — hence the filter is by THIS run, not by position.
+    await new Promise((res) => setImmediate(res));
+    const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_FORWARD_FAILED" && w.message.includes(String(childRunId)));
+    assert.ok(mine.length >= 1, `the refusal is announced and names the run: ${JSON.stringify(warnings)}`);
+    assert.match(mine[0]!.message, /disk I\/O error/);
+    assert.match(mine[0]!.message, /parent may still be waiting/);
+
+    // The ordinary half: with the parent healthy again the very next pass forwards, so nothing was
+    // lost by refusing — the gate was left unmarked precisely so a later pass would retry it.
+    breakParent = false;
+    await r.engine.advance(childRunId);
+    assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "decided", "the next pass forwarded it");
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
