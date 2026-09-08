@@ -107,7 +107,7 @@ async function coldFold(b: Bench): Promise<readonly GateId[]> {
   return openIds(await fresh.list(b.log));
 }
 
-test("A REPEAT POLL COSTS NOTHING, and the first one costs the journal exactly once", async () => {
+test("A REPEAT POLL COSTS ONE EVENT, and the first one costs the journal exactly once", async () => {
   const b = bench();
   const one = await b.broker.raise(b.log, request(b));
   const two = await b.broker.raise(b.log, request(b));
@@ -121,13 +121,59 @@ test("A REPEAT POLL COSTS NOTHING, and the first one costs the journal exactly o
   assert.deepEqual(openIds(await cold.list(b.log)), [one, two].sort());
   assert.equal(b.store.events, total, "the whole journal, once");
 
+  // ONE EVENT, NOT ZERO, and the one is the mark: `project` re-reads the last event it folded
+  // to check this journal is still the one the fold describes. O(1) per poll rather than
+  // O(history), and the price of a cache that cannot answer about somebody else's journal.
   b.store.events = 0;
   assert.deepEqual(openIds(await cold.list(b.log)), [one, two].sort());
-  assert.equal(b.store.events, 0, "and the second poll reads nothing, because nothing was appended");
+  assert.equal(b.store.events, 1, "the second poll re-reads the mark and nothing else");
 
   b.store.events = 0;
   assert.deepEqual(openIds(await cold.list(b.log)), [one, two].sort());
-  assert.equal(b.store.events, 0, "nor the third — the cost is per EVENT, not per poll");
+  assert.equal(b.store.events, 1, "and so does the third — the cost is per EVENT, not per poll");
+  assert.ok(total > 1, "…against a journal with more than one event in it");
+});
+
+test("A FOLD IS NEVER SERVED TO A JOURNAL THAT IS NOT THE ONE IT DESCRIBES", async () => {
+  // The cache is keyed by run id, which is the only handle a `RunLog` offers, so a broker
+  // handed logs over two DIFFERENT stores that both hold the same run id would — keyed on that
+  // alone — answer about the wrong journal. Not a crash: the second caller would be handed the
+  // FIRST journal's gates, for a run that never raised them, which is the cache inventing a
+  // question. Nothing in `src/` does this (`Engine` builds its own broker; `replayRun` deletes
+  // `gates` from the options it forwards), but "no caller does it" is a fact about callers, not
+  // a property of the cache.
+  const now = (): number => NOW;
+  const runId = newRunId(NOW);
+  const one = new CountingStore(new MemoryStateStore({ now }));
+  const two = new CountingStore(new MemoryStateStore({ now }));
+  const broker = new HumanGateBroker({ now });
+  const logOne = new RunLog(runId, { store: one, now });
+  const logTwo = new RunLog(runId, { store: two, now });
+
+  const gateId = await broker.raise(logOne, {
+    runId,
+    taskId: "approve@root#0" as TaskId,
+    nodeId: "approve" as NodeId,
+    policyRef: "oversight/restart-pod@stable",
+    payload: { host: "web-1" },
+    approvers: ["u:alice"],
+    allowEdit: [],
+  });
+  assert.deepEqual(openIds(await broker.list(logOne)), [gateId], "store one has the question");
+
+  // THE SAME RUN ID, AN EMPTY JOURNAL. The answer is what that journal says, which is nothing.
+  assert.equal(await broker.project(logTwo), undefined, "an empty journal folds to nothing");
+  assert.deepEqual(await broker.list(logTwo), [], "and holds no gates at all");
+
+  // AND THE FIRST JOURNAL IS UNDISTURBED — the check drops a fold, it does not corrupt one.
+  assert.deepEqual(openIds(await broker.list(logOne)), [gateId]);
+
+  // The same rule for a journal that CONTRADICTS the fold rather than lacking it: store two
+  // now has an event at the marked seq, and it is a different event.
+  await logTwo.append([{ type: "run.started", payload: { posture: "out" }, actor: alice }]);
+  const folded = await broker.project(logTwo);
+  assert.equal(folded?.status, "running", "store two's own history, folded from seq 1");
+  assert.deepEqual(Object.keys(folded?.gates ?? {}), [], "and no gate borrowed from store one");
 });
 
 test("A GATE RAISED AFTER A CACHED POLL IS IN THE NEXT ONE — the only thing this cache may never do", async () => {

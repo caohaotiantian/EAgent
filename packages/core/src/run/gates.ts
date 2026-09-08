@@ -298,6 +298,25 @@ const MAX_DECISION_LAPS = 8;
 const MAX_FOLD_CACHE = 500;
 
 /**
+ * An incremental fold, and the last event it consumed.
+ *
+ * The mark is what makes the fold's identity checkable. A `RunLog` offers a run id and nothing
+ * else, so a cache keyed on that alone cannot tell two journals apart; re-reading the marked
+ * event says whether THIS journal is the one the fold describes. `(seq, ts, type)` is enough —
+ * the seq is where to look, and a store that answers there with a different instant or a
+ * different event type is not continuing the history this fold holds.
+ */
+interface CachedFold {
+  readonly folder: RunFolder;
+  readonly at: { readonly seq: number; readonly ts: number; readonly type: string };
+}
+
+/** Whether the event a journal answers with is the one a fold last consumed. */
+function describes(e: JournalEvent | undefined, at: CachedFold["at"]): boolean {
+  return e !== undefined && e.seq === at.seq && e.ts === at.ts && e.type === at.type;
+}
+
+/**
  * In-process gate broker over the journal.
  *
  * Its non-durable state is deliberately minimal — and, since the authorization defect,
@@ -314,12 +333,12 @@ export class HumanGateBroker {
   /** `(gateId, approverId)` → decision, so a double-click collapses to one decision. */
   readonly #idempotency = new Map<string, GateDecisionKind>();
   /**
-   * runId → the fold `project` has already reached. Pure cache; see `project`.
+   * runId → the fold `project` has already reached, and the mark that proves whose it is.
    *
    * LRU by construction — `project` deletes before it sets — and holding only NON-terminal
    * runs, so the ordinary long-lived process keeps one projection per live gated run.
    */
-  readonly #folds = new Map<RunId, RunFolder>();
+  readonly #folds = new Map<RunId, CachedFold>();
   readonly #dispatcher: GateDispatcher | undefined;
 
   constructor(opts: GateBrokerOptions = {}) {
@@ -2205,13 +2224,20 @@ export class HumanGateBroker {
    * delete-then-set also makes the eviction order LRU rather than insertion order, which is
    * the order worth having.
    *
-   * ONE BROKER SERVES ONE STORE, and this is the first thing in the class that depends on it:
-   * `#ephemeral` is keyed by a ULID gate id and cannot collide, a fold is keyed by run id and
-   * would. Nothing in `src/` violates it — `Engine` builds its own broker when none is given,
-   * and `replayRun` deletes `gates` from the options it forwards so the shadow store gets a
-   * fresh one, for a reason it states in full. An embedder handing one broker to two engines
-   * over two DIFFERENT journals that both hold the same run id would be the exception, and
-   * that run id would have to have been minted twice.
+   * A RUN ID IS NOT A JOURNAL, AND THE FOLD RE-READS ONE EVENT TO PROVE IT. This map is keyed
+   * by run id, which is the only handle a `RunLog` offers — so a broker handed logs over two
+   * DIFFERENT stores that both hold the same run id would, keyed on that alone, answer about
+   * the wrong journal. Not a crash: the second store's caller would be handed the FIRST
+   * store's gates, for a run that never raised them, which is this method inventing a question
+   * out of a cache. That direction is not one a guard is allowed to fail in, and "no caller in
+   * `src/` does it" is a fact about today's callers rather than a property of the cache.
+   *
+   * So the tail is read from `lastSeq`, not `lastSeq + 1`, and the first event it returns must
+   * be the one this fold last consumed — same seq, same ts, same type. It costs ONE event per
+   * call and no extra round trip (the same read, one lower bound), `RunFolder.push` skips it as
+   * already folded, and a journal that disagrees about its own history — a different store, a
+   * truncated one, a rewritten one — drops the fold and starts from seq 1. The cache can be
+   * cold or stale; it cannot be somebody else's.
    *
    * The re-fold loop is `#catchUp`'s, including the bound: a `while (folder.stale)` whose
    * termination rests on `RunFolder` keeping its promise about learning each marker once is a
@@ -2220,10 +2246,19 @@ export class HumanGateBroker {
    * call starts over rather than inheriting a fold that could not be finished.
    */
   async project(log: RunLog): Promise<RunProjection | undefined> {
-    const folder = this.#folds.get(log.runId) ?? new RunFolder();
+    const cached = this.#folds.get(log.runId);
     this.#folds.delete(log.runId);
 
-    folder.push(await this.#tail(log, (folder.lastSeq + 1) as Seq));
+    let folder = cached?.folder ?? new RunFolder();
+    let events = await this.#tail(log, (cached === undefined ? 1 : cached.at.seq) as Seq);
+    if (cached !== undefined && !describes(events[0], cached.at)) {
+      // NOT THE JOURNAL THIS FOLD DESCRIBES. Everything folded so far is about some other run
+      // of events, so none of it may be carried forward.
+      folder = new RunFolder();
+      events = await this.#tail(log, 1 as Seq);
+    }
+
+    folder.push(events);
     let reached = -1;
     while (folder.stale) {
       if (folder.lastSeq <= reached) {
@@ -2235,16 +2270,21 @@ export class HumanGateBroker {
       }
       reached = folder.lastSeq;
       folder.restart();
-      folder.push(await this.#tail(log, 1 as Seq));
+      events = await this.#tail(log, 1 as Seq);
+      folder.push(events);
     }
 
     const p = folder.projection();
     // A FINISHED RUN KEEPS NOTHING. `raisedAGate` accumulates for the life of a deployment and
     // most of what it holds is finished, so remembering those is the one way this map could
     // grow without bound in the process that most needs it not to.
-    if (p !== undefined && !isTerminal(p.status)) {
+    //
+    // AND NOTHING IS KEPT WITHOUT A MARK TO CHECK IT AGAINST: the fold is remembered only when
+    // the last event pushed is the last event folded, which is what the next call re-reads.
+    const last = events[events.length - 1];
+    if (p !== undefined && !isTerminal(p.status) && last !== undefined && last.seq === folder.lastSeq) {
       if (this.#folds.size >= MAX_FOLD_CACHE) this.#folds.delete(this.#folds.keys().next().value!);
-      this.#folds.set(log.runId, folder);
+      this.#folds.set(log.runId, { folder, at: { seq: last.seq, ts: last.ts, type: last.type } });
     }
     return p;
   }
