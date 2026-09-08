@@ -955,20 +955,28 @@ function isSafeId(id: unknown): boolean {
  * is among them and is already unreachable through `SAFE_ID`, which costs nothing and leaves
  * the set complete on its face if `SAFE_ID` ever widens.
  *
- * CHANNELS AND NODE IDS. `plans["toString"]` has the exact same shape as `channels["toString"]`
- * — `compile.ts` builds `plans` as a plain object literal, one own-property write per
- * spec-declared node id, read back with raw bracket access all over `run/engine.ts` and
- * `run/scheduler.ts` with no `hasOwnProperty` guard — so the node-id half of TODO.md §A0.19
- * closes the same way, in the same loop (`checkStructure`'s node-id check, above the channel
- * check). EDGE IDS ARE NOT: `edgeById`/`inbound`/`outbound` are all `Map`, and a `Map` does not
- * consult `Object.prototype` on `get`/`set`, so an edge named `toString` is an ordinary key with
- * no collision. SUBGRAPH REFS ARE NOT EITHER, though `subgraphs` (`compile.ts`'s
- * `resolveSubgraphs`) is also a plain object assigned by bracket access: a ref is not a
- * spec-declared id like a node/edge/channel name, it is resolved through the WORKSPACE'S
- * resolver first (`out[ref] = child` only runs once `resolver.subgraph(ref)` already answered
- * with a real subgraph), so exploiting it needs a workspace that publishes a subgraph literally
- * named `toString` — a second trust boundary the other three don't have, and TODO.md §A0.19
- * names `plans` by name, not `subgraphs`. Left open rather than widened on a guess.
+ * CHANNELS AND NODE IDS, THOUGH FOR NODE IDS THE REACHABLE HAZARD ISN'T `plans`. TODO.md §A0.19
+ * names `plans["toString"]`, which has the same plain-object shape as `channels["toString"]` —
+ * but every site that reads `ctx.graph.plans[nodeId]` (`run/engine.ts`, `run/scheduler.ts`) does
+ * it as `?.field ?? default`, and that degrades a prototype FUNCTION to the same default an
+ * absent plan gives, so `plans` alone is not exploitable today. The hazard that IS reachable is
+ * one own object over: `ctx.baselinePostures?.[n.id]`, read a few hundred lines below in THIS
+ * file and fed to `isLoosening`, which fails closed — by design — on a baseline it cannot read
+ * as a `Posture`. A node named `toString` makes that baseline `Object.prototype.toString`, not a
+ * `Posture`, and fabricates `GRAPH014_OVERSIGHT_LOOSENED` — which `compile` turns into a POLICY
+ * refusal (`err.policy`/`E_OVERSIGHT_LOOSENED`) rather than a validation one, for a spec that
+ * never reached policy. The node-id check (`checkStructure`, the loop above the channel loop)
+ * refuses fatally, which is what stops `validateGraph` from ever reaching that later rule for
+ * this node — see the comment there and `graph-lane-reserved-node-id.test.ts`. EDGE IDS ARE NOT
+ * a hazard at all: `edgeById`/`inbound`/`outbound` are all `Map`, and a `Map` does not consult
+ * `Object.prototype` on `get`/`set`, so an edge named `toString` is an ordinary key with no
+ * collision. SUBGRAPH REFS ARE NOT EITHER, and the bound is grammatical rather than a trust
+ * argument: `subgraphs` (`compile.ts`'s `resolveSubgraphs`, `out[ref] = child`) is a plain object
+ * too, but `rule016Subgraphs`/`GRAPH015_RESOURCE_NOT_FOUND` refuses any `subgraph.ref` the
+ * resolver won't resolve before `resolveSubgraphs` ever runs, and a resolvable ref is shaped
+ * `kind/name@selector` (`resources/store.ts`) — `/` and `@` are both outside
+ * `Object.getOwnPropertyNames(Object.prototype)`, so no resolvable ref can equal a reserved
+ * name. Left uncovered rather than widened on a guess.
  *
  * THE SET IS READ OFF THE RUNNING V8, AND THAT HAS A PRICE worth naming: the compiler's answer
  * stops being a pure function of its input. A future Node that adds an `Object.prototype` member
@@ -980,11 +988,13 @@ function isSafeId(id: unknown): boolean {
  * runtime that changes the set turns that test red before it surprises anyone.
  *
  * AND IT IS REPLAY-VISIBLE. `#rehydrateGraph` calls `compile`, and a non-`ok` result there
- * raises `E_REPLAY_DIVERGENCE`, so a journal whose graph declares a `toString` channel can no
- * longer be attached or replayed. No graph in this tree does; the runtime half (lane T's
- * `state/channels.ts` fix) means such a run was already broken where it mattered; and refusing
- * is the direction a guard may move. Said out loud because "the graph stopped compiling" and
- * "the run stopped folding" are different costs and only the first is obvious.
+ * raises `E_REPLAY_DIVERGENCE`, so a journal whose graph declares a `toString` channel — or,
+ * since this file's node-id rule, a `toString` NODE — can no longer be attached or replayed. No
+ * graph in this tree does either (checked directly: no tracked graph's `channels` or node `id`
+ * is on this set); the runtime half (lane T's `state/channels.ts` fix) means such a run was
+ * already broken where it mattered for channels; and refusing is the direction a guard may move.
+ * Said out loud because "the graph stopped compiling" and "the run stopped folding" are
+ * different costs and only the first is obvious.
  */
 const PROTOTYPE_NAMES: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
 
@@ -1270,12 +1280,28 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     d.push(at === undefined ? base : { ...base, at });
     fatal = true;
   };
-  // A node id is an object key in `plans` — `compile.ts` builds `plans[n.id] = {…}` as a plain
-  // object literal, one own-property write per node, exactly `channels`' shape below — and
-  // `run/engine.ts` reads it back with raw bracket access (`ctx.graph.plans[nodeId]?.posture`,
-  // `.outboundEdges`, `.timeoutMs`, `.retry`) at every call site, none guarded by
-  // `hasOwnProperty`. A node named `valueOf` compiled clean and handed the engine
-  // `Object.prototype.valueOf` for a node nobody declared.
+  // A node id is an object key in more than one plain object, and the REACHABLE hazard is not
+  // the one it looks like. `compile.ts` builds `plans[n.id] = {…}`, but every consuming read —
+  // `ctx.graph.plans[nodeId]?.posture`, `.outboundEdges`, `.timeoutMs`, `.retry`, in both
+  // `run/engine.ts` and `run/scheduler.ts` — is `?.field ?? default`, and `?.` on a function
+  // (what `plans["toString"]` answers when node "toString" is never declared) reads no such
+  // field either, so it degrades to the same default an absent plan would give. `plans` alone
+  // is not exploitable today.
+  //
+  // THE ONE THAT IS: `ctx.baselinePostures?.[n.id]` a few hundred lines below, in THIS file,
+  // feeding `isLoosening(baseline, effective)` for `GRAPH014_OVERSIGHT_LOOSENED`.
+  // `isLoosening` fails closed on a baseline it cannot read as a `Posture` — deliberately, by
+  // its own docstring — so a node named `toString` with ANY `baselinePostures` supplied (the
+  // promotion path in `cli.ts` and the model-proposed-mutation path in `mutate.ts` both supply
+  // one) reads `Object.prototype.toString`, which is not a `Posture`, and fabricates a
+  // loosening error for a graph that loosened nothing. That is not merely a wrong code: `compile`
+  // raises `err.policy`/`E_OVERSIGHT_LOOSENED` rather than `err.validation`/`E_GRAPH_INVALID`
+  // whenever a `GRAPH014_OVERSIGHT_LOOSENED` is present, so the caller sees a POLICY refusal for
+  // a spec that never reached policy. Refusing the id here, and FATALLY (`fatal = true` below,
+  // matching `badId`'s own early return), matters because `validateGraph` returns as soon as
+  // `checkStructure` reports fatal — the GRAPH014 rule, which runs later in the same function,
+  // never executes for this spec at all. See `graph-lane-reserved-node-id.test.ts`'s
+  // "…AND SUPPRESSES A FABRICATED GRAPH014" for the pin.
   for (const n of spec.nodes) {
     if (!isSafeId(n.id)) {
       badId("node id", n.id, typeof n.id === "string" ? { nodeId: n.id } : undefined);
