@@ -169,8 +169,8 @@
  * Pinned by *EVERY CREDENTIAL READS THE GRAPH INVENTORY* in
  * `test/server/plane-watch-and-stop.test.ts`.
  *
- * **AND `POST /runs`'s DECLARED-INPUTS REFUSAL IS THE THIRD ROUTE, added knowingly.** Since
- * `TODO.md` §A0.17 was closed, a body naming a channel the graph does not declare comes back
+ * **AND `POST /runs`'s DECLARED-INPUTS REFUSAL IS THE THIRD ROUTE, added knowingly.** Since the
+ * change `TODO.md` §A0.17 asks for, a body naming a channel the graph does not declare comes back
  * 400 with the graph's whole declared input SET in the message — which is more than either
  * graph route hands out: `GET /graphs` returns `{name, graphHash, nodes: count, edges: count}`
  * and `by-hash` returns layout `{id, type}` plus `{layoutRank, maxInstances, posture}`, and
@@ -3552,10 +3552,17 @@ export class ControlPlane {
             // the declared ones — `{"document":"a b","notes":"extra"}` — answered 202 and
             // SUCCEEDED at `c54b0c2`, seeding `notes` as a run channel that is durable on
             // `run.submitted`, read by nothing, and rendered `[secret]` in every projection
-            // forever. That caller now gets a 400 naming the key. The trade is one loud break
-            // against unread durable state and unbounded spend; `packages/core` is `private` at
-            // version `0.0.0`, so the contract is published inside this repository only, and
-            // CLAUDE.md's "refusing is always allowed; loosening never is" decides the rest.
+            // forever. That caller now gets a 400 naming the key. Two things it is NOT: it is not
+            // "nobody can be broken because `packages/core` is `private` at version `0.0.0`" —
+            // that is a fact about npm, and a running `loom serve` has whatever scripts an
+            // operator already pointed at it, which nothing in this repository can enumerate. And
+            // it is not "these runs fail anyway" — the extra-key run SUCCEEDED. What decides it is
+            // that `cli.ts` has refused this exact body since `8c734ce`, that two doors onto one
+            // engine disagreeing about a legal submission is the whole of §A0.17, and CLAUDE.md's
+            // "refusing is always allowed; loosening never is". A `spec.channels` rule would have
+            // spared a graph that compiles with a GRAPH005_UNPRODUCED_READ warning and is seeded
+            // over the wire; `graph/declared-inputs.ts` records why `spec.inputs` was kept
+            // instead, and that graph is the residue.
             const undeclared = undeclaredInputsMessage(`"inputs"`, graph.spec, (inputs ?? {}) as Record<string, unknown>);
             if (undeclared !== undefined) throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, undeclared);
 

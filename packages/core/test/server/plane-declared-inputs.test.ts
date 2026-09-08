@@ -163,7 +163,7 @@ test("a prototype key is compared as the string it is — refused, not a crash a
   }
 });
 
-test("the message is bounded in BOTH dimensions — key count and key length", async () => {
+test("the message is bounded in the two dimensions the CALLER supplies — key count and key length", async () => {
   const r = await rig();
   try {
     // COUNT. Eight named, the rest counted. Without the cap this string carries all 500 names,
@@ -186,6 +186,65 @@ test("the message is bounded in BOTH dimensions — key count and key length", a
     assert.ok(long.length < 1000, `the refusal must not grow with the key LENGTH: ${long.length} chars`);
     assert.match(long, /x{120}…/, "the key is shown, clipped at 120 characters with an ellipsis");
 
+    // CONTROL CHARACTERS, which neither cap gives either. On the wire this is JSON-escaped and
+    // inert; the SAME shared string is written to a terminal by `loom run`, where an ANSI escape
+    // in a key rewrites the operator's screen. `http.ts`'s `truncate` bounds length and does not
+    // sanitise, so borrowing only its length half would have made the two gaps one gap too.
+    const nasty = await post(r, { workflow: "skeleton-summarize", inputs: { "a\u001b[31mb\u000ac": 1 } });
+    assert.equal(nasty.status, 400);
+    const shown = errorOf(nasty.body).message ?? "";
+    assert.doesNotMatch(shown, /[\u0000-\u001f\u007f-\u009f]/, `no control character may reach the message: ${JSON.stringify(shown)}`);
+    assert.match(shown, /"a\ufffd\[31mb\ufffdc"/, "each one is replaced rather than dropped, so the operator sees something was there");
+
+    assert.equal(await runCount(r), 0);
+  } finally {
+    await r.close();
+  }
+});
+
+test("THE THIRD DIMENSION: the near-miss guess cannot multiply the declared set by the key count", async () => {
+  // The first version of this rule claimed to be "bounded in both dimensions" and was not, because
+  // `near` re-ran the whole declared list per named key and appended every prefix match. The real
+  // size was `MAX_NAMED × |declared|`, and `MAX_NAMED` is the multiplier a CALLER controls.
+  // Measured on that version and on this one, same inputs:
+  //
+  //                                                    before        after
+  //     1 declared, 1 bad key (the baseline)              589          333
+  //     40 declared, 8 keys with head "ch"               4168          892
+  //     2000 declared, 1 key "zz" (no guesses at all)   19443          493
+  //     2000 declared, 8 keys with head "so"           202748          894   ← ~200-byte request
+  //     2000 declared, the EMPTY key                    42344          491
+  //
+  // The empty key was the sharpest form: `"".slice(0,2)` is `""` and `d.startsWith("")` is true of
+  // everything, so `{"":1}` alone guessed the WHOLE declared set. That case was already in this
+  // file — under the prototype-keys test — and it asserted only the STATUS, never the length,
+  // which is why it did not catch this.
+  const wide = Array.from({ length: 400 }, (_, i) => `so${i}`);
+  const r = await rig({
+    inputs: wide,
+    // Declared as channels too, or the graph does not compile — the rule under test is about the
+    // MESSAGE's size, so the graph has to be a legal one.
+    channels: { ...skeletonSpec().channels, ...Object.fromEntries(wide.map((c) => [c, { type: "string", reduce: "replace" } as const])) },
+  });
+  try {
+    const eight: Record<string, unknown> = {};
+    for (let i = 0; i < 8; i++) eight[`so_bad${i}`] = 1;
+    for (const [label, body] of [
+      ["8 keys sharing a prefix with 400 declared", eight],
+      ["the empty key", { "": 1 }],
+      ["a single key sharing the prefix", { so_typo: 1 }],
+    ] as const) {
+      const res = await post(r, { workflow: "skeleton-summarize", inputs: body });
+      assert.equal(res.status, 400, label);
+      const m = errorOf(res.body).message ?? "";
+      assert.ok(m.length < 1000, `${label}: the refusal must not grow with the DECLARED set either: ${m.length} chars`);
+    }
+    // The guess still fires where it helps, and names at most three.
+    const one = errorOf((await post(r, { workflow: "skeleton-summarize", inputs: { so_typo: 1 } })).body).message ?? "";
+    assert.match(one, /did you mean "so0" or "so1" or "so2"\?/, one);
+    // And it declines below two characters, where a two-character heuristic is not a suggestion —
+    // it is the declared list again.
+    assert.doesNotMatch(errorOf((await post(r, { workflow: "skeleton-summarize", inputs: { "": 1 } })).body).message ?? "", /did you mean/);
     assert.equal(await runCount(r), 0);
   } finally {
     await r.close();
@@ -222,10 +281,13 @@ test("A GRAPH THAT COMPILES AND READS THE CHANNEL IS REFUSED TOO — the break's
     // beside a hard 400 tells the operator the compiler stopped them when it did not.
     assert.match(message, /GRAPH005_UNPRODUCED_READ warns about at compile time without refusing/, message);
     assert.match(message, /Nothing was submitted/, "and not claim a run was made — a 400 makes none");
-    // AND NOT ASSERT A FAILURE THAT DID NOT HAPPEN. The extra-key body succeeded at `c54b0c2` at
-    // $0, so "the run fails … after it has spent" cannot be unconditional; it is introduced by
-    // "where", scoped to the caller who meant a channel the graph needs.
-    assert.match(message, /where the name you meant was one the graph needs, the run\s+fails/, message);
+    // AND IT ASSERTS NO CONSEQUENCE AT ALL. Two successive readers found a false clause here: first
+    // "having already been submitted … already spent" (nothing was), then "read by nothing", which a
+    // reviewer refuted by driving THIS graph — the first node's view carried `visible:["hint",…]`,
+    // so the channel IS read. A refusal that has to cover both a typo and a legitimately-read
+    // channel can honestly assert neither outcome, so it names the fix and stops. An operator who
+    // checks a refusal's claim and finds it false stops reading refusals.
+    assert.doesNotMatch(message, /read by nothing|already spent|after it has spent/, `the refusal must assert no consequence: ${message}`);
     assert.equal(await runCount(r), 0);
   } finally {
     await r.close();
@@ -253,6 +315,17 @@ test("a refusal does not poison an idempotency slot — the same key, corrected,
     assert.equal(again.status, 202);
     assert.equal(again.body["runId"], good.body["runId"]);
     assert.equal(await runCount(r), 1);
+
+    // AND THE ORDER THAT MAKES THE CHECK UNREACHABLE, said out loud rather than left as a hole a
+    // reader has to find. The check sits AFTER both idempotency short-circuits, so once a key has
+    // answered successfully, a later send of that key with a typo'd body replays the original 202
+    // and never reaches the rule. That is correct idempotency — a key names a submission, not a
+    // body — and it is also the one shape in which this refusal does not fire. Pinned so a future
+    // reader meets it here rather than in production.
+    const replayed = await post(r, { workflow: "skeleton-summarize", inputs: { pahts: DOCS } }, key);
+    assert.equal(replayed.status, 202, "a settled idempotency key replays its answer, typo or not");
+    assert.equal(replayed.body["runId"], good.body["runId"]);
+    assert.equal(await runCount(r), 1, "and still creates nothing");
   } finally {
     await r.close();
   }
@@ -260,11 +333,9 @@ test("a refusal does not poison an idempotency slot — the same key, corrected,
 
 /** The tail both doors share, written once so the two assertions below cannot drift apart. */
 const TAIL =
-  `Nothing was submitted. A channel the graph does not declare is seeded and then read by nothing, so ` +
-  `the value would have done nothing; and where the name you meant was one the graph needs, the run ` +
-  `fails four layers below the mistake — against a real provider, after it has spent. Correct the ` +
-  `spelling, or — if a node is meant to read this channel — add it to the graph's "inputs" list, which ` +
-  `is what GRAPH005_UNPRODUCED_READ warns about at compile time without refusing.`;
+  `Nothing was submitted. Correct the spelling, or — if a node is meant to read this channel — add it ` +
+  `to the graph's "inputs" list, which is what GRAPH005_UNPRODUCED_READ warns about at compile time ` +
+  `without refusing.`;
 
 test("ONE RULE, TWO DOORS: the CLI and the wire render the same sentence under different nouns", () => {
   // `cli.ts`'s `assertDeclaredInputs` is now three lines over this function, so the pin on what an

@@ -50,9 +50,9 @@ import type { GraphSpec } from "./spec.ts";
  * for. Eight is enough to show the operator a typo and its neighbours; past that the problem is
  * not which key, it is the shape of the request.
  *
- * `spec.inputs` is NOT capped: it comes from the graph the deployment published, not from the
- * caller, so its length is the graph author's own choice and a truncated declared set would
- * withhold the one thing the caller needs to fix the request.
+ * It is NOT the whole bound. `MAX_NAMED` is also the MULTIPLIER on everything each named key
+ * pulls in, which is what made the first version's "bounded in both dimensions" claim false —
+ * see `MAX_GUESSES`.
  */
 const MAX_NAMED = 8;
 
@@ -70,7 +70,68 @@ const MAX_NAMED = 8;
  */
 const MAX_KEY_CHARS = 120;
 
-const clip = (k: string): string => (k.length <= MAX_KEY_CHARS ? k : `${k.slice(0, MAX_KEY_CHARS)}…`);
+/**
+ * HOW MANY NEAR-MISSES ONE KEY MAY PULL IN, AND HOW MUCH OF THE DECLARED SET IS PRINTED.
+ *
+ * THE FIRST VERSION OF THIS FILE CLAIMED THE MESSAGE WAS "BOUNDED IN BOTH DIMENSIONS" AND IT WAS
+ * NOT, because `near` re-ran the declared list per named key and appended every prefix match
+ * unbounded — so the real size was `MAX_NAMED × |declared|`, and `MAX_NAMED` is exactly the
+ * multiplier a caller controls. Driven on that version:
+ *
+ *        589 chars  1 declared, 1 bad key                     (the baseline)
+ *       4168 chars  40 declared, 8 caller keys with head "ch"
+ *      19443 chars  2000 declared, 1 key "zz" (no guesses at all)
+ *     202748 chars  2000 declared, 8 caller keys with head "so"   ← from a ~200-byte request
+ *      42344 chars  2000 declared, the EMPTY key
+ *
+ * The empty key is the sharpest form and it was reachable: `"".slice(0, 2)` is `""`, and
+ * `d.startsWith("")` is true of everything, so `{"": 1}` alone guessed the WHOLE declared set.
+ * `near` now declines to guess below two characters — a two-character heuristic on a
+ * zero- or one-character key is not a suggestion, it is the list again — and names at most three.
+ *
+ * AND THE DECLARED SET IS CAPPED AFTER ALL, which reverses this file's first argument. That
+ * argument was "it comes from the graph the deployment published, not from the caller, so a
+ * truncated declared set would withhold the one thing the caller needs". The first half is true
+ * and the conclusion does not follow: a message that must be bounded cannot carry an unbounded
+ * component, whoever chose its size, and the 19,443-char row above is that component with the
+ * caller contributing two bytes. Twenty-four names is past any graph in this repository — the
+ * largest declares five — so the truncation is unreachable in practice and the bound is real.
+ */
+const MAX_GUESSES = 3;
+const MAX_DECLARED = 24;
+
+/**
+ * A caller-supplied key on its way into a message: length-bounded and control-character-free.
+ *
+ * THE CONTROL-CHARACTER HALF IS FOR THE CLI DOOR. On the wire the key is JSON-escaped and inert,
+ * but the same shared string is written to a TERMINAL by `loom run`, where a key containing
+ * `[31m` or a newline rewrites the operator's screen. `server/http.ts`'s `truncate` — the
+ * function whose 120 this borrows — bounds length and does not sanitise, so adopting only its
+ * length half would have made the two gaps one gap as well as the two bounds one bound.
+ *
+ * THE SLICE IS OVER UTF-16 UNITS, so a key whose 120th and 121st units are a surrogate PAIR loses
+ * its low half. That is left alone deliberately: the bound holds at 121 units, `JSON.stringify`
+ * escapes the lone surrogate so the response stays well-formed JSON, and the cost is one
+ * replacement glyph in a message about a key the caller mistyped.
+ */
+const clip = (k: string): string => {
+  const cut = k.length <= MAX_KEY_CHARS ? k : `${k.slice(0, MAX_KEY_CHARS)}…`;
+  // The C0 and C1 control ranges plus DEL, replaced rather than dropped so the operator can see
+  // that something was there. `\u0080-\u009f` matters because a terminal reads those too.
+  return cut.replace(/[\u0000-\u001f\u007f-\u009f]/g, "\ufffd");
+};
+
+/** `did you mean …?`, or nothing. Bounded by `MAX_GUESSES`, and silent below two characters. */
+function near(declared: readonly string[], k: string): string {
+  if (k.length < 2) return "";
+  const head = k.toLowerCase().slice(0, 2);
+  const guesses: string[] = [];
+  for (const d of declared) {
+    if (d !== k && d.toLowerCase().startsWith(head)) guesses.push(d);
+    if (guesses.length === MAX_GUESSES) break;
+  }
+  return guesses.length === 0 ? "" : ` (did you mean ${guesses.map((g) => `"${clip(g)}"`).join(" or ")}?)`;
+}
 
 /**
  * The keys of `inputs` that `spec` does not declare as inputs, in the order they were given.
@@ -85,8 +146,13 @@ const clip = (k: string): string => (k.length <= MAX_KEY_CHARS ? k : `${k.slice(
  * surface nobody asked for.
  */
 function undeclaredInputs(spec: GraphSpec, inputs: Readonly<Record<string, unknown>>): string[] {
-  const declared = spec.inputs ?? [];
-  return Object.keys(inputs).filter((k) => !declared.includes(k));
+  // A SET, NOT `Array.includes`, and the difference is measurable rather than stylistic. The body
+  // cap is 1 MiB (`server/http.ts`), which buys a caller roughly 150,000 keys, and the linear scan
+  // made this `keys × declared`: 100,000 keys against 5,000 declared inputs blocked the event loop
+  // for 439 ms in one request. The whole array is still built, because `and N more` has to count
+  // what it is not naming — a filter that stopped at `MAX_NAMED` would have to say "some".
+  const declared = new Set(spec.inputs);
+  return Object.keys(inputs).filter((k) => !declared.has(k));
 }
 
 /**
@@ -145,24 +211,20 @@ export function undeclaredInputsMessage(
   spec: GraphSpec,
   inputs: Readonly<Record<string, unknown>>,
 ): string | undefined {
+  const declared = spec.inputs;
   const undeclared = undeclaredInputs(spec, inputs);
   if (undeclared.length === 0) return undefined;
-  const declared = spec.inputs ?? [];
-  const near = (k: string): string => {
-    const head = k.toLowerCase().slice(0, 2);
-    const guesses = declared.filter((d) => d.toLowerCase().startsWith(head) && d !== k);
-    return guesses.length === 0 ? "" : ` (did you mean ${guesses.map((g) => `"${g}"`).join(" or ")}?)`;
-  };
   const shown = undeclared.slice(0, MAX_NAMED);
   const rest = undeclared.length - shown.length;
+  const namedDeclared = declared.slice(0, MAX_DECLARED);
+  const restDeclared = declared.length - namedDeclared.length;
   return (
     `${subject} names ${undeclared.length === 1 ? "a channel" : "channels"} this graph does not declare as an input: ` +
-    `${shown.map((k) => `"${clip(k)}"${near(k)}`).join(", ")}${rest === 0 ? "" : ` and ${rest} more`}. ` +
-    `It declares ${declared.length === 0 ? "no inputs at all" : declared.map((d) => `"${d}"`).join(", ")}. ` +
-    `Nothing was submitted. A channel the graph does not declare is seeded and then read by nothing, so ` +
-    `the value would have done nothing; and where the name you meant was one the graph needs, the run ` +
-    `fails four layers below the mistake — against a real provider, after it has spent. Correct the ` +
-    `spelling, or — if a node is meant to read this channel — add it to the graph's "inputs" list, which ` +
-    `is what GRAPH005_UNPRODUCED_READ warns about at compile time without refusing.`
+    `${shown.map((k) => `"${clip(k)}"${near(declared, k)}`).join(", ")}${rest === 0 ? "" : ` and ${rest} more`}. ` +
+    `It declares ${declared.length === 0 ? "no inputs at all" : namedDeclared.map((d) => `"${clip(d)}"`).join(", ")}` +
+    `${restDeclared === 0 ? "" : ` and ${restDeclared} more`}. ` +
+    `Nothing was submitted. Correct the spelling, or — if a node is meant to read this channel — add it ` +
+    `to the graph's "inputs" list, which is what GRAPH005_UNPRODUCED_READ warns about at compile time ` +
+    `without refusing.`
   );
 }
