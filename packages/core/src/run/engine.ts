@@ -8397,9 +8397,11 @@ export class Engine {
         });
       } catch (e) {
         // THE CANCELLATION GUARD THAT USED TO STAND HERE IS GONE, and its removal is the most
-        // useful thing this line has to say. Three versions of it shipped: `isLoomError(e) &&
-        // e.code === E_CANCELLED`, then `toLoomError(e).code === E_CANCELLED`, then
-        // `ctx.abort.signal.aborted`. The second was a defect — `toLoomError` maps any `Error`
+        // useful thing this line has to say. FOUR predicates shipped, not three as this sentence
+        // first said — `isLoomError(e) && e.code === E_CANCELLED`, then `loomCodeOf(e) ===
+        // E_CANCELLED`, then `toLoomError(e).code === E_CANCELLED`, then
+        // `ctx.abort.signal.aborted`; the omitted one is the sha the table below gives its own
+        // row, which is how a reviewer caught it. The THIRD was a defect — `toLoomError` maps any `Error`
         // named `"AbortError"` to `E_CANCELLED`, which is what any deadline-backed `StateStore`
         // rejects with, so a third party's error NAME decided a parent run's fate:
         //

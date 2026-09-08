@@ -61,7 +61,7 @@
  *                   NOT wrapped, and the reason is SCOPE: it is not one of the five sites this
  *                   lane was authorised for, and wrapping a whole nested drive is a much wider
  *                   behaviour change. This paragraph said "because it would swallow a cancel" for
- *                   three rounds; that argument is measured and dead — see the cancel-race test.
+ *                   four rounds; that argument is measured and dead — see the cancel-race test.
  *                   This lane's recorded residue, on the honest reason.
  *     read #7  `#answerMirrorsTheChildAlreadyDecided` — already wrapped; warns and continues.
  *
@@ -607,8 +607,11 @@ test("D · A STORE THAT REJECTS WITH AN `AbortError` IS NOT THIS RUN BEING CANCE
   //   fdeeb1a      → running                7f908a4 → failed:E_CANCELLED
   //
   // The middle two are the shape-narrow guard; the outer two are base and the round-3 commit that
-  // widened it back. `ctx.abort.signal.aborted` is what the guard reads now, and nothing an
-  // extension can reach influences it.
+  // widened it back. THERE IS NO GUARD AT ALL NOW — the sentence here used to describe the
+  // signal-reading version and outlived it by one commit, which is the same stale-prose defect
+  // this file has corrected four times. What makes this green is simply that nothing at that site
+  // inspects the thrown value any more: every foreign failure is refused alike, so no error name
+  // can be a verdict about this run.
   class AbortingAppendStore extends BreakableChildStore {
     override async append(input: AppendInput): Promise<AppendResult> {
       if (isChild(input.runId) && this.failAppendAt !== undefined) {
@@ -659,8 +662,9 @@ test("D · A STORE THAT REJECTS WITH AN `AbortError` IS NOT THIS RUN BEING CANCE
 });
 
 test("D · A CANCEL RACING THE FORWARD ends the run, and no re-class can change that", async () => {
-  // THE TEST THAT DELETED A GUARD. Three rounds argued that converting a foreign failure into a
-  // retryable refusal could "swallow a cancel", and two of them shipped a guard against it. This
+  // THE TEST THAT DELETED A GUARD. Four review rounds argued that converting a foreign failure
+  // into a retryable refusal could "swallow a cancel", and three of them shipped a predicate for
+  // it — the argument first appears with no guard at all, in this file's own header. This
   // drives the race the argument was about — `cancel` aborts OUTSIDE the per-run drive lock, so
   // the signal really can flip inside this catch — and the answer is that the re-class cannot
   // matter: `cancel` decides the run's status by journaling `run.cancelled`, so a task deferred
@@ -672,6 +676,11 @@ test("D · A CANCEL RACING THE FORWARD ends the run, and no re-class can change 
   //
   // It is kept as the ORDINARY HALF of that interaction: an operator's stop, landing mid-forward,
   // still ends the run and still charges nothing.
+  //
+  // AND IT IS GREEN AT EVERY SHA THIS LANE PRODUCED — base included — so it pins no behaviour any
+  // version of this change altered. That is stated here rather than left for the next reader to
+  // discover, because a test in a defect file that cannot go red is exactly the thing somebody
+  // later mistakes for the pin.
   let engineRef: Engine | undefined;
   let parentRef: RunId | undefined;
   class CancelRacingStore extends BreakableChildStore {
