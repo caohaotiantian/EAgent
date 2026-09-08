@@ -807,6 +807,14 @@ function loomCodeOf(e: unknown): string | undefined {
  * shape the code does not currently produce, kept rather than deleted because the argument that
  * motivates it is the same one that keeps `#runSubgraph`'s own `advance(childRunId)` unwrapped —
  * and that argument is correspondingly weaker than this lane first stated it.
+ *
+ * ITS SHAPE TABLE WAS DRIVEN AGAINST A COPY, NOT AGAINST THIS FUNCTION, and that is the honest
+ * limit of the evidence. Seven shapes through an identical body: a `LoomError` carrying
+ * `E_CANCELLED` → true, a bare `AbortError` → true, an ordinary store rejection → false, a
+ * `LoomError` carrying another code → false, a hostile `Proxy` → false, a null-prototype object →
+ * false, `undefined` → false. Nothing throws. A copy that agrees today can drift, and no test in
+ * the suite reaches the shipped function's `true` arm, because nothing in the tree produces the
+ * input that would.
  */
 function isCancellation(e: unknown): boolean {
   try {
