@@ -75,37 +75,64 @@ The test of this property is not "can you add a tool". It is **"can somebody who
 commit access build the thing they need, and can they do it without forking?"**
 
 **Today the answer is a named set, not "yes", and the set lives in `README.md`'s "Extending it,
-and where that stops"** — the same escape-hatch-and-ledger shape as §1's kernel list: twelve things
-need no fork (a graph, a prompt/profile/skill, a subgraph, a `function` body, a `hook` body, an
-MCP tool, an OpenAI-wire provider, an ANY-wire provider, an in-process tool, an HTTP delivery
-endpoint, a non-webhook delivery transport, an identity source) and **three** do: the schema sets
-— a node type, a reducer, a ninth hook point. Every entry there is quoted from the refusal the
-binary actually prints. All three are closed for ONE reason, replay: a fold can only reproduce a
-decision whose vocabulary the folding binary already knows. **Shrinking that second list is what
-this property means in practice; the list moving the other way is the alarm.** It went six → seven,
-then to five when `--extension-module` gave the CLI the door onto `ModelRegistry` and `ToolRegistry`
-a library embedder always had, then to **three** on 2026-09-01 when the same flag's object widened
-to `{models, tools, channels, identity}` — deleting two rows that were forks *from the CLI only*
-and were therefore never bounds, only debts. The trust argument that bounds the widening is stated
-at `loadExtensionModules`: the module path comes from ARGV and nowhere else, because a path read
-out of a file would let a FILE decide who may approve.
+and where that stops"** — the same escape-hatch-and-ledger shape as §1's kernel list. **Counted on
+`loom` today rather than carried:**
 
-**"What is left has no debts in it" was the claim, and the 2026-09-02 audit falsified it by driving
-all twelve rows through the shipped binary.** All twelve genuinely work — that half survived. But
-`EngineOptions` takes five more members whose types are all already on `scripts/surface.json` and
-which `openWorkspace` constructs unconditionally with no `extensions?.` fallback: `functions`
+```bash
+sed -n '/^## Extending it, and where that stops$/,/^## Why this exists$/p' README.md \
+  | /usr/bin/grep -a -c '^| '     # → 18: a header row and SEVENTEEN things that need no fork
+sed -n '/^## Extending it, and where that stops$/,/^## Why this exists$/p' README.md \
+  | /usr/bin/grep -a -c '^- \*\*' # → 3: the schema sets that DO need one
+```
+
+The three are a node type, a reducer, a ninth hook point. Every entry on either list is quoted
+from the refusal the binary actually prints. All three are closed for ONE reason, replay: a fold
+can only reproduce a decision whose vocabulary the folding binary already knows. **Shrinking that
+second list is what this property means in practice; the list moving the other way is the alarm.**
+It went six → seven, then to five when `--extension-module` gave the CLI the door onto
+`ModelRegistry` and `ToolRegistry` a library embedder always had, then to **three** on 2026-09-01
+when the same flag's object widened to `{models, tools, channels, identity}` — deleting two rows
+that were forks *from the CLI only* and were therefore never bounds, only debts. The trust argument
+that bounds the widening is stated at `loadExtensionModules`: the module path comes from ARGV and
+nowhere else, because a path read out of a file would let a FILE decide who may approve. That
+argument is what a future widening has to re-earn; if the module path ever becomes loadable from
+anywhere but argv, the seam has to move behind a process boundary first.
+
+**The FIRST number moved too, twelve → seventeen, and that is a debt paid rather than a bound
+moving.** The 2026-09-02 audit found five more `EngineOptions` members — `functions`
 (`FunctionRegistry`), `hooks` (`HookRegistry`), `resolver` (`ResourceResolver`), `store`
-(`StateStore`), `payloads` (`PayloadStore`). A library embedder reaches all five; argv reaches
-none. **Those are debts of exactly the shape the 5 → 3 change paid off, so the published number is
-an undercount — correct it before shrinking it.** Measured consequence: a host-realm async function
-body with `Date` runs from a library embedder and cannot be supplied from the CLI at all.
+(`StateStore`), `payloads` (`PayloadStore`) — whose types were all already on `scripts/surface.json`
+and which a library embedder reached while argv reached none. All five are argv rows now. Driven
+today through `./bin/loom` on the sharpest of them, the one the audit named as the measured
+consequence: a module calling `functions.register("function/stamp@stable", async () => …)` with a
+host-realm `new Date(0)` and an `await` runs from the CLI —
 
-The audit also found two privileged built-ins: `builtinTools(jail)` registers AFTER extension
-modules and `ToolRegistry.register` shadows on collision, so an extension tool sharing a built-in's
-name is silently never dispatched (the identical collision on an adapter or channel name refuses to
-boot); and the extension registrar carries no jail, so an outsider's filesystem or network tool
-cannot apply the operator's own guards even if it wants to. `README.md`'s section is the ledger and
-is owed both corrections.
+```
+loom run g.json --workspace WS --extension-module ext.mjs
+→ "status": "succeeded",  "outputs": { "note": "stamped at epoch 0" }     exit 0
+```
+
+and the registrar the module is handed prints its own key set:
+`channels,functions,hooks,identity,jail,models,payloads,resolver,store,tools`.
+
+**Both privileged built-ins are gone, and the collision one was driven today.** `builtinTools`
+still registers AFTER the extension modules and `ToolRegistry.register` still shadows on collision
+— so instead of letting the extension's tool be registered and never dispatched, the boot refuses:
+
+```
+loom run graphs/g.json --workspace WS --extension-module shadow.mjs   # shadow.mjs registers "fs.read"
+E_CONFIG_INVALID: --extension-module …/shadow.mjs registers the tool name "fs.read", which is a
+built-in of this binary. The built-ins are registered after the modules and ToolRegistry shadows
+on collision, so the extension's definition would be registered, would hold its capability, and
+would never be dispatched. Rename it — the built-in names are: fs.edit, fs.glob, fs.grep, fs.read,
+fs.restore, fs.write.                                                                     exit 1
+```
+
+The second was the registrar carrying no jail, so an outsider's filesystem or network tool could
+not apply the operator's own guards. It carries one now: the `jail` key above is present, and it
+holds whichever of `root`, `deny`, `egressAllowlist`, `execAllowlist`, `execEnvAllow` the operator
+set — `["deny","egressAllowlist","execAllowlist","root"]` under `--egress example.com --allow-exec
+echo`, `["deny","execAllowlist","execEnvAllow","root"]` under `--allow-exec echo --exec-env FOO`.
 
 ### 3 · Endless self-improvement
 
@@ -116,26 +143,64 @@ This is the property most easily faked. Capturing trajectories is not improvemen
 not improvement. **Improvement is when a later run is measurably better because of an earlier one**,
 and the measurement has to be one that cannot be gamed by the thing being measured.
 
-**It is currently faked, and this was driven end to end through the shipped verbs on 2026-09-02.**
-A candidate that DELETES the work node and returns `{pass:true}` promotes through
-`loom promote --against-cohort` at paired mean Δscore **+0.4000 over 30 pairs**, all eight checks
-green. A candidate whose only change is swapping its own grader promotes through
-`loom promote --suite` with **all thirteen** checks green. The reason is one sentence: the whole
-ladder rests on S1, and `extractSignals` reads S1 out of the CANDIDATE'S OWN graph — any
-`evaluator` step whose commit carries `{pass:true}` and made no model call. **A candidate owns its
-graph, so it owns S1**, and with it the outcome, the promotion ceiling and the ground-truth
-condition. `freezeSuite` compounds it by excluding grader-written channels from the pin by
-construction, so the one node the exam cannot see is the one a candidate may freely rewrite.
+**It WAS faked, and the mechanism was one sentence.** The whole ladder rested on S1, and
+`extractSignals` read S1 out of the CANDIDATE'S OWN graph — any `evaluator` step whose commit
+carried `{pass:true}` and made no model call. **A candidate owns its graph, so it owned S1**, and
+with it the outcome, the promotion ceiling and the ground-truth condition. Driven end to end
+through the shipped verbs on 2026-09-02: a candidate that DELETES the work node and returns
+`{pass:true}` promoted through `loom promote --against-cohort` at paired mean Δscore **+0.4000 over
+30 pairs**; a candidate whose only change was swapping its own grader promoted through
+`loom promote --suite` with **all thirteen** checks green. `docs/audit-2026-09-02.md` has the
+reproductions. Three earlier attempts to pin a verifier are recorded at `aabdc63`, and the shape
+that defeated all three is that the candidate owns both sides of any channel the graph produces.
 
-Do not treat this as a bug list. **Until a measurement exists whose inputs the candidate provably
-cannot write, this property is aspirational**, and the audit found none in the tree. The three
-defeated attempts to pin a verifier are recorded at `aabdc63`; the shape that defeated all three is
-that the candidate owns both sides of any channel the graph produces. `docs/audit-2026-09-02.md`
-has the reproductions. **The design for such a measurement is merged** —
-`docs/design-property3-2026-09-05.md`, an operator-attested exam graph the runtime runs — and its
-implementation exists only on the unmerged `wave2-exam` branch, whose own report claims both
-reproductions are refused through the shipped binary; that claim is the lane's, not yet verified
-by a fresh agent on `loom`, and this paragraph stays true of `loom` until it is.
+**The answer is an operator-attested exam — a grader outside every candidate graph, run by the
+runtime** — designed in `docs/design-property3-2026-09-05.md` and merged at `ec2ad88`. **Verified on
+`loom` at `ce9e7b4` on 2026-09-08 by a fresh agent that had not read the implementing lane's
+report**, given only design §6 and a binary built from this tree. On §6's `pick-bench` fixture (30
+recordings; `pick` is wrong on even-length inputs), after `loom exam attest exams/pick-exam.json
+--cohort <last> --as haotian` → exit 0:
+
+```
+promote candidates/noop.json   --against-cohort   ✗ L1-paired-improvement Δ -0.2000 (sd 0.2877, n 30) 0W/10L/20T
+   (deletes the work node, returns {pass:true})   ✗ L5-candidate-earned-it "scored 0 on every input"   exit 1
+promote candidates/rigged.json --against-cohort   ✗ L1-paired-improvement Δ  0.0000 (sd 0.0000, n 30) 0W/0L/30T
+   (swaps its own grader for {pass:true})         ✓ L5 "scored above 0 on 10 of 30 input(s)"           exit 1
+promote candidates/fixed.json  --against-cohort   ✓ L1-paired-improvement Δ +0.4000 (sd 0.2877, n 30) 20W/0L/10T
+   (the HONEST candidate — the ordinary half)     t 0.3108, Wilcoxon 0.3000, ✓ L5 30/30, promote true  exit 0
+
+exam attest exams/blind-exam.json   (inputs [subject, items] only, always-pass body)
+  E_CONFIG_INVALID: … the exam reads no baseline OUTPUT (baseline outputs ["picked","verdict"]) —
+  an exam over inputs alone sees the question and never the run's answer, so it measures nothing
+  about the run it grades                                                                        exit 1
+exam attest exams/pick-exam.json   (the honest exam, same workspace, straight after — the control) exit 0
+```
+
+Both audit reproductions refuse; the honest candidate promotes at the same Δ that used to certify
+the fake. The one line that says the property is working: `rigged.json`'s grader returns
+`{pass:true}` on all thirty and the candidate still scored above 0 on ten — the exam's answer, not
+the graph's.
+
+**That is not "property 3 holds". It holds under five assumptions, and they are the claim, not a
+footnote:**
+
+- **One operator.** `loom exam attest` is a verb; `--as` is an argv string written into a row with
+  `actor.kind: "human"` by construction. Whoever can run the binary owns the exam, and also writes
+  `graphs/` and `resources/`.
+- **An exam that reads the run's answer — enforced by SHAPE only.** An exam declaring no baseline
+  output is refused (above). An exam that DECLARES `picked` and never READS it still attests.
+  Closing that needs a fifth `examShape` rule; it is the next thing to do here.
+- **The exam-gated doors are `promote --against-cohort` and `suite freeze`.** `promote --suite`
+  still decides on the frozen suite and `12-grader-unchanged`, not on the exam.
+- **No `subgraph` child grader.** `evaluatorsOf` walks the parent spec's nodes, so an evaluator
+  frozen into `RunGraph.subgraphs` is invisible to check 12.
+- **The 60/40 split accepted.** The exam owns the 60% outcome term only, so a cheaper worse
+  candidate can still win on the other 40%. Not driven above — the fixture's runs are $0 and 0 ms,
+  which is also why every pair count there is exact.
+
+**And the exam's quality is the operator's**, which no mechanism can supply. The corrections the
+implementation forced on the design, and the residue it left, are dated at the top of
+`docs/design-property3-2026-09-05.md`.
 
 ## What follows from those, and is not negotiable
 
@@ -169,6 +234,16 @@ by a fresh agent on `loom`, and this paragraph stays true of `loom` until it is.
   enumeration's discipline about growing** — the sixth member landed in a file the citation did not
   name, and the cited one still said five. Seven and eight are named in
   `oversight-survives-restart.test.ts`'s header, where a reader of the other six will find them.
+  **The four 2026-09-08 wave-2 merges did not add a ninth, and that was checked rather than
+  assumed.** `git diff 8d43127..ce9e7b4 -- packages/core/src/journal/events.ts` prints NOTHING: no
+  new event kind and no new durable payload field across all four, which is why property 3's
+  attestation rides on the `operator.command{kind, args}` vocabulary that already existed. The
+  nearest candidate is recorded and is deliberately NOT a member — `wave2-engine`'s residue 1:
+  `#resolveOnce`'s seen-key map and the broker's idempotency map are in memory, so a repeat
+  redelivery of an identical decision answers 200 in the deciding process and 409 after a restart.
+  Right shape, wrong outcome for this list — it fails CLOSED, nothing runs twice, and the journal
+  is identical either way, so no guard was silently switched off. Closing it means journaling
+  idempotency keys, which is new vocabulary, a kernel `feat`, and a seam argument.
   **The lens that finds these:** ask of every `Map`, `Set`, class field and closure in `run/`,
   `server/` and `resources/` — what decision reads this, and what does it do when a restart hands
   it back empty? Then look where the existing tests do not: at a CHILD run.
@@ -230,8 +305,12 @@ docs/              dated records: audit findings and backlog re-checks, with rep
 
 **The three phase-2-4 branches are MERGED into `loom`** — `phase2-4-engine`, `phase2-4-plane`
 and `phase2-4-subsystems` went in with zero conflicts, as predicted — **and so are the five
-wave-1 lanes (`294e713`) and two of six wave-2 lanes (`9b45c7c`, `8d43127`).** Four wave-2
-branches hold part-reviewed work and are not merged; the handoff §6 is the list. `phase1-taint`
+wave-1 lanes (`294e713`) and now ALL SIX wave-2 lanes**: `wave2-taint` (`9b45c7c`), `wave2-gates`
+(`8d43127`), and on 2026-09-08 `wave2-graph` (`3cfd363`), `wave2-engine` (`6b3513b`),
+`wave2-guards` (`3656d69`) and `wave2-exam` (`ec2ad88`), each after its stopped review round was
+finished — the decisions, including the three caps raised 3 → 4 and the one blocking finding merged
+knowingly as `TODO.md` §A0.21, are in `.agent/wave2-review-2026-09-08/plan.md` (this checkout only
+— `.agent/` is gitignored; `TODO.md` §A0.21 is the tracked half). `phase1-taint`
 is still unmerged, and the design its parking waited for now exists:
 `docs/design-taint-rc6-2026-09-05.md` measured that RC-6 is not a scope defect and recommends
 merging the branch with a `Kernel-seam:` trailer (handoff §5).
