@@ -177,12 +177,15 @@ const gateResolver: ResourceResolver = {
 class BreakableChildStore extends MemoryStateStore {
   failReadAt: number | undefined;
   failAppendAt: number | undefined;
+  /** Not one-shot: the disk that does not come back, for the bounded-rate measurement. */
+  failEveryChildRead = false;
   reads = 0;
   appends = 0;
 
   override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
     if (isChild(runId)) {
       this.reads++;
+      if (this.failEveryChildRead) throw new Error("sqlite: child disk I/O error");
       if (this.failReadAt === this.reads) {
         this.failReadAt = undefined;
         throw new Error("sqlite: child disk I/O error");
@@ -322,6 +325,52 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
 
   // The ordinary half: nothing else was disturbed. One child, one journal, one outcome.
   assert.deepEqual(p.outputs, { result: { ok: true, amount: 20 } });
+});
+
+test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate is bounded", async () => {
+  // THE OTHER HALF OF B, AND THE ONE THE ONE-SHOT FIXTURES CANNOT SHOW. Making the refusal
+  // retryable buys a patient re-entry; the question that buys is "for how long, and how loud".
+  // Both are claims in `childUnavailable`'s docstring, so both are measured here rather than
+  // asserted there. The contrast that makes it matter: the SIBLING warning at
+  // `#answerMirrorsTheChildAlreadyDecided` has no bound at all — a parent parked on a mirror is
+  // re-driven by verbs rather than by a budget, so it warns once per verb forever.
+  const r = gateRig(new BreakableChildStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.failEveryChildRead = true;
+  let p: RunProjection | undefined;
+  let passes = 0;
+  const seen = await warningsWhile(async () => {
+    p = await r.engine.advance(runId);
+    for (passes = 1; passes < 60 && p.status !== "succeeded" && p.status !== "failed"; passes++) {
+      clock += 60_000;
+      p = await r.engine.advance(runId);
+    }
+  });
+
+  // IT ENDS. A retryable class is not a licence to spin: the deferral budget is spent, the
+  // charged retries follow, and the run reaches a terminal state on its own.
+  assert.equal(p!.status, "failed", `the run terminates rather than deferring forever: ${p!.status}`);
+  assert.equal(p!.error?.code, "E_SUBGRAPH_FAILED", "and it says what could not be reached");
+  assert.ok(passes < 60, `it did not need the loop's own ceiling to stop: ${passes} passes`);
+
+  // AND IT IS BOUNDED IN VOLUME, one line per refusal — an absolute bound with room, never a
+  // ratio, and never an exact count that a change in the backoff curve would make a false alarm.
+  // FILTERED BY RUN, not just by code. `process.emitWarning` defers to the next tick, so a
+  // warning raised by the test BEFORE this one can land inside this listener's window — which is
+  // exactly what an earlier version of this assertion tripped over, reading `mine[0]` and finding
+  // another run's id in it.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.ok(mine.length >= 1, `the refusals are said out loud: ${JSON.stringify(seen.map((w) => w.code))}`);
+  assert.ok(mine.length <= 40, `and stderr is not a firehose: ${mine.length} warnings over ${passes} passes`);
+  assert.match(mine[0]!.message, /the delegation is deferred and the next pass will try again/);
 });
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {

@@ -787,7 +787,20 @@ function describeThrown(e: unknown): string {
  * That is the same argument `#forwardToParentMirrorsQuietly` makes for its own warning — a
  * failure nobody can see is indistinguishable from one that did not happen — so all five
  * cross-run sites now say something out loud, and this one adds NO journal vocabulary to do it.
- * The rate is one per deferral, bounded by `DEFERRAL_BUDGET_MS`.
+ *
+ * THE RATE IS ONE PER REFUSAL AND IT IS BOUNDED, measured on a PERMANENTLY broken child store
+ * rather than the one-shot the tests use:
+ *
+ *   outcome=failed/E_SUBGRAPH_FAILED  passes=20  simulatedMs=1140000
+ *   warnings={"LOOM_CHILD_UNREACHABLE":20,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
+ *   task attempt=3 deferrals=19 deferredMs=843000
+ *
+ * Nineteen uncharged deferrals inside the 900 s budget, then the charged retries, then the run
+ * ENDS — which is the fact worth having, because the sibling warning at
+ * `#answerMirrorsTheChildAlreadyDecided` has no such bound (a parent parked on a mirror is
+ * re-driven by verbs, not by a budget, and warns once per verb forever). Twenty lines of stderr
+ * for a quarter hour of a broken disk is the right order of magnitude; a dedupe set would be
+ * memory a restart hands back empty whose only reader is "do we print".
  *
  * WHAT ACTUALLY RESCUES THE RUN IS THE DEFERRAL ARM, NOT THE GRAPH'S `retry` — measured, because
  * the first version of this docstring said the opposite ("a node with no `retry` policy still
