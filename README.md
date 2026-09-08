@@ -266,9 +266,12 @@ Read this before you fork, not after. Loom's stated property is *unlimited exten
 honest version of that sentence names its set. **Seventeen things need no fork. Three do**, and the
 two lists below were each driven through the shipped binary rather than read off a header.
 
-Both counts moved on 2026-09-01, in the same direction, from one change. The fork list has been six,
-then seven when an undercount was found, then five, and is now **three** — every row that was there
-because *nobody built the seam* is gone, and what is left is three rows that are there for a reason.
+The two counts moved separately, and this paragraph used to say they moved together on 2026-09-01
+from one change — false of the first number, which was still twelve then. The FORK list has been
+six, then seven when an undercount was found, then five, and reached **three** on 2026-09-01 when
+`--extension-module`'s object widened: every row that was there because *nobody built the seam* is
+gone, and what is left is three rows that are there for a reason. The NO-FORK list went twelve →
+**seventeen** on 2026-09-06, from a different change, described next.
 
 **THE FIRST NUMBER WAS AN UNDERCOUNT, AND ON 2026-09-06 IT WAS PAID RATHER THAN RESTATED.**
 `EngineOptions` takes five more members — `functions` (`FunctionRegistry`), `hooks`
@@ -291,8 +294,12 @@ succeeded with the built-in's answer and printed no warning, while the identical
 adapter or channel name refused to boot. It refuses now, naming the module and the built-in names.
 And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
 apply the operator's own guards; the module is handed the same frozen
-`{root, deny, egressAllowlist, execAllowlist, execEnvAllow}` the built-ins get, from one derivation
-(`jailFor`) both callers share.
+jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a
+fixed five-member shape and a module must not assume one: it carries `root` and `deny` always, and
+`egressAllowlist`, `execAllowlist`, `execEnvAllow` only where the operator passed the matching flag.
+Measured, printing `Object.keys(jail).sort()` from inside a module: no flags → `["deny","root"]`;
+`--egress example.com --allow-exec echo` → `["deny","egressAllowlist","execAllowlist","root"]`;
+`--allow-exec echo --exec-env FOO` → `["deny","execAllowlist","execEnvAllow","root"]`.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 
@@ -318,11 +325,20 @@ apply the operator's own guards; the module is handed the same frozen
 
 **An exam is a graph, and that is why property 3 needed no fork.** `loom exam attest <exam.json>`
 takes an ordinary `apiVersion: loom.dev/v1` / `kind: GraphSpec` file — the same shape as anything in
-`graphs/` — so it is the first row above and not a row of its own. Driven on 2026-09-08 by an agent
-that had never seen the implementation, from design §6 alone: `loom compile exams/pick-exam.json` →
-`ok  deadline grade (default): timeoutMs=600000`; `loom exam attest exams/pick-exam.json --cohort
-<last> --as haotian` → exit 0, the attestation row echoing the spec back with the same
-`apiVersion` / `kind` / `channels` / `nodes` keys. What IS refused is a shape, not a format — an
+`graphs/` — so it is the first row above and not a row of its own. The exam this workspace ships is
+`examples/exams/review-bench-exam.json`, and it compiles like any other graph:
+
+```
+$ loom compile examples/exams/review-bench-exam.json --workspace examples
+ok
+  deadline grade (default): timeoutMs=600000
+```
+
+`loom exam attest` was driven on 2026-09-08 by an agent that had never seen the implementation,
+from design §6 alone, on a hand-built scratch fixture that is deliberately NOT in this tree (§6
+says how to build it): `loom exam attest exams/pick-exam.json --cohort <last> --as haotian` → exit
+0, the attestation row echoing the spec back with the same `apiVersion` / `kind` / `channels` /
+`nodes` keys. What IS refused is a shape, not a format — an
 exam over the baseline's inputs alone:
 
 ```

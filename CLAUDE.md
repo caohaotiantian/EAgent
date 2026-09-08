@@ -102,8 +102,10 @@ sed -n '/^## Extending it, and where that stops$/,/^## Why this exists$/p' READM
   | /usr/bin/grep -a -c '^- \*\*' # → 3: the schema sets that DO need one
 ```
 
-The three are a node type, a reducer, a ninth hook point. Every entry on either list is quoted
-from the refusal the binary actually prints. All three are closed for ONE reason, replay: a fold
+The three are a node type, a reducer, a ninth hook point, and each of THOSE three is quoted from
+the refusal the binary actually prints — that is README's own promise and it is scoped to the fork
+list. It does not hold of the other list: 8 of the 17 no-fork rows quote a binary refusal and the
+other 9 cite a test, a section of `examples/README.md`, or the row above them. All three are closed for ONE reason, replay: a fold
 can only reproduce a decision whose vocabulary the folding binary already knows. **Shrinking that
 second list is what this property means in practice; the list moving the other way is the alarm.**
 It went six → seven, then to five when `--extension-module` gave the CLI the door onto
@@ -167,16 +169,20 @@ with it the outcome, the promotion ceiling and the ground-truth condition. Drive
 through the shipped verbs on 2026-09-02: a candidate that DELETES the work node and returns
 `{pass:true}` promoted through `loom promote --against-cohort` at paired mean Δscore **+0.4000 over
 30 pairs**; a candidate whose only change was swapping its own grader promoted through
-`loom promote --suite` with **all thirteen** checks green. `docs/audit-2026-09-02.md` has the
-reproductions. Three earlier attempts to pin a verifier are recorded at `aabdc63`, and the shape
+`loom promote --suite` with **all thirteen** checks green — thirteen was that day's count, and the
+binary's help says fifteen now. `docs/audit-2026-09-02.md` has the reproductions. Three earlier attempts to pin a verifier are recorded at `aabdc63`, and the shape
 that defeated all three is that the candidate owns both sides of any channel the graph produces.
 
 **The answer is an operator-attested exam — a grader outside every candidate graph, run by the
 runtime** — designed in `docs/design-property3-2026-09-05.md` and merged at `ec2ad88`. **Verified on
 `loom` at `ce9e7b4` on 2026-09-08 by a fresh agent that had not read the implementing lane's
-report**, given only design §6 and a binary built from this tree. On §6's `pick-bench` fixture (30
+report**, given only design §6 and a binary built from this tree. **The fixture is not in the tree
+and the block below is not copy-pasteable**: `pick-bench` is built by hand in a scratch workspace
+from the shapes design §6 lists, which is what §6 asks for. The shipped workspace exam is
+`examples/exams/review-bench-exam.json` — `loom compile examples/exams/review-bench-exam.json
+--workspace examples` → `ok` — and it grades `review-bench`, not this. On the §6 fixture (30
 recordings; `pick` is wrong on even-length inputs), after `loom exam attest exams/pick-exam.json
---cohort <last> --as haotian` → exit 0:
+--cohort <last> --as haotian --workspace WS` → exit 0:
 
 ```
 promote candidates/noop.json   --against-cohort   ✗ L1-paired-improvement Δ -0.2000 (sd 0.2877, n 30) 0W/10L/20T
@@ -193,8 +199,10 @@ exam attest exams/blind-exam.json   (inputs [subject, items] only, always-pass b
 exam attest exams/pick-exam.json   (the honest exam, same workspace, straight after — the control) exit 0
 ```
 
-Both audit reproductions refuse; the honest candidate promotes at the same Δ that used to certify
-the fake. The one line that says the property is working: `rigged.json`'s grader returns
+Both audit reproductions refuse AT THE `--against-cohort` DOOR, which is the one driven above, and
+the honest candidate promotes at the same Δ that used to certify the fake. Reproduction 2's own
+door, `promote --suite`, refuses the grader swap by `12-grader-unchanged` rather than by the exam —
+that is the lane's measurement and was NOT re-driven here. The one line that says the property is working: `rigged.json`'s grader returns
 `{pass:true}` on all thirty and the candidate still scored above 0 on ten — the exam's answer, not
 the graph's.
 
