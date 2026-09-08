@@ -329,10 +329,14 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
   r.store.reads = 0;
   r.store.failReadAt = 1;
 
-  let p: RunProjection;
+  // NARROWED ONCE, then read plainly — so the assertions below say `p` rather than `p!`, and a
+  // future edit that stops assigning it trips the `ok` rather than asserting on `undefined`.
+  let settled: RunProjection | undefined;
   const seen = await warningsWhile(async () => {
-    p = await settle(r.engine, runId);
+    settled = await settle(r.engine, runId);
   });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  const p = settled;
 
   // THE SITE IS ASSERTED, NOT ASSUMED. Breaking the Nth read is a positional fixture, and every
   // assertion below would also pass if the failure had landed at C, D or E — a reviewer measured
@@ -346,13 +350,13 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
   // AT `c54b0c2`: `failed` / `E_INTERNAL` — the parent run destroyed by one read of another run's
   // disk. The retry the graph declared was unreachable, because `internal` is not a retryable
   // class.
-  assert.notEqual(p!.status, "failed", `the parent must survive a transient child read: ${p!.status}/${p!.error?.code ?? ""} ${p!.error?.message ?? ""}`);
-  assert.equal(p!.status, "succeeded", "and the delegation completes when the store comes back");
+  assert.notEqual(p.status, "failed", `the parent must survive a transient child read: ${p.status}/${p.error?.code ?? ""} ${p.error?.message ?? ""}`);
+  assert.equal(p.status, "succeeded", "and the delegation completes when the store comes back");
   assert.deepEqual(r.charges, [20], "the child's charge ran exactly once — a retry is not a second child run");
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
 
   // The ordinary half: nothing else was disturbed. One child, one journal, one outcome.
-  assert.deepEqual(p!.outputs, { result: { ok: true, amount: 20 } });
+  assert.deepEqual(p.outputs, { result: { ok: true, amount: 20 } });
 });
 
 test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate is bounded", async () => {
@@ -587,6 +591,69 @@ test("D · the cross-run WRITE — answering the child's gate — refuses retrya
   const done = await settle(r.engine, runId);
   assert.equal(done.status, "succeeded", `the delegation completes once the child's gate is answered: ${done.error?.message ?? ""}`);
   assert.deepEqual(r.charges, [20], "exactly one charge — nothing was decided twice");
+});
+
+test("D · A STORE THAT REJECTS WITH AN `AbortError` IS NOT THIS RUN BEING CANCELLED", async () => {
+  // THE VERDICT MUST COME FROM THIS RUN'S SIGNAL, NOT FROM THE VALUE'S NAME. `toLoomError` maps
+  // any `Error` whose `name` is `"AbortError"` to `E_CANCELLED` — and that is the shape ANY
+  // fetch- or deadline-backed `StateStore` rejects with, Node's own `DOMException` included. So a
+  // cancellation guard that asks the THROWN VALUE hands a third party the power to end a parent
+  // run by choosing an error name.
+  //
+  // Measured across this lane's own history, on this fixture:
+  //   c54b0c2 base → failed:E_CANCELLED     1b37ef2 → running
+  //   fdeeb1a      → running                7f908a4 → failed:E_CANCELLED
+  //
+  // The middle two are the shape-narrow guard; the outer two are base and the round-3 commit that
+  // widened it back. `ctx.abort.signal.aborted` is what the guard reads now, and nothing an
+  // extension can reach influences it.
+  class AbortingAppendStore extends BreakableChildStore {
+    override async append(input: AppendInput): Promise<AppendResult> {
+      if (isChild(input.runId) && this.failAppendAt !== undefined) {
+        this.appends++;
+        if (this.failAppendAt === this.appends) {
+          this.failAppendAt = undefined;
+          // A DEADLINE INSIDE THE STORE, not a cancellation of this run. The name is the only
+          // thing that made the old guard call it one.
+          throw Object.assign(new Error("sqlite: internal deadline, request aborted"), { name: "AbortError" });
+        }
+      }
+      return super.append(input);
+    }
+  }
+  const r = gateRig(new AbortingAppendStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const mirror = openGate((await r.engine.projection(runId))!)!;
+
+  r.store.appends = 0;
+  r.store.failAppendAt = 1;
+
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    outcome = await outcomeOf(async () =>
+      r.engine.resolveGate(runId, {
+        gateId: mirror.gateId,
+        decision: { kind: "approve" },
+        actor: { kind: "human", subject: LEAD, via: "console" },
+        idempotencyKey: "mirror",
+      }),
+    );
+  });
+
+  assert.equal(r.store.failAppendAt, undefined, "the fixture's one-shot failure really did fire");
+  assert.notEqual(outcome, "failed:E_CANCELLED", `a store's error NAME must not cancel this run: ${outcome}`);
+  assert.equal(outcome, "running", `it is deferred like any other foreign failure: ${outcome}`);
+
+  // AND IT IS REPORTED AS WHAT IT IS — the WRITE site's own sentence, not a cancellation.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused write, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /answering gate .* failed/, `the WRITE, named as itself: ${mine[0]!.message}`);
+  assert.match(mine[0]!.message, /request aborted/, "carrying the store's own words");
+
+  // The run is still THIS run's to end: nothing was cancelled, and the parent is still alive.
+  const p = (await r.engine.projection(runId))!;
+  assert.notEqual(p.status, "cancelled", "the parent was never cancelled");
+  assert.deepEqual(r.charges, [], "and nothing was charged on the refused pass");
 });
 
 test("E · `#endChildRun` cannot overturn the human's REJECTION — it warns, and the refusal stands", async () => {
