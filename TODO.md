@@ -152,20 +152,33 @@ waves of 2026-09-05 → 09-08 closed ten of them and half of three more, and eve
 `8d43127` — plus five rows the waves found and recorded rather than fixed. Where a fix exists on
 an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a closure.
 
-- **A0.5 · A channel named `toString` still compiles clean.** The runtime half — `reduceState`,
+**Re-measured 2026-09-08, after the four reviewed wave-2 branches merged** (`3cfd363`,
+`6b3513b`, `3656d69`, `ec2ad88`). Four more rows closed and are struck in place with their
+merge sha, their argument moved to §Z: §A0.5 (its compile half, which was the remaining one),
+§A0.8, §A0.14 (its loud half, likewise) and §A0.20 — so the count of rows the waves recorded
+and did not fix is now §A0.12, §A0.13, §A0.16–A0.19 and the one row those merges ADDED, §A0.21,
+which `wave2-graph` reproduced and handed to whoever owns `run/engine.ts`. The struck rows stay
+here rather than being deleted, for the reason §Z's header gives.
+
+- ~~**A0.5 · A channel named `toString` still compiles clean.**~~ CLOSED at `3cfd363` (the
+  `wave2-graph` merge), which brought `3fd7ad5` onto `loom`; both halves are now shut and the
+  row is in §Z. The record of what it was: the runtime half — `reduceState`,
   `foldPartial` and the `__proto__` put in `state/channels.ts` — closed at `29e32b1` (§Z), so
   the run no longer dies with `E_INTERNAL`; the graph is still accepted:
   `/usr/bin/grep -a -c GRAPH003_RESERVED_CHANNEL packages/core/src/graph/validate.ts` → `0`.
   **Fix on `wave2-graph`, unmerged** (`3fd7ad5`): `GRAPH003_RESERVED_CHANNEL`, the set read off
   `Object.getOwnPropertyNames(Object.prototype)` rather than hand-kept, with the lane's probe
   `toString channel: ok= true diags= []` → `ok= false diags= ["GRAPH003_RESERVED_CHANNEL"]`.
-  Closes when that branch is reviewed and merged.
-- **A0.8 · `#edgesToTake`'s exhaustiveness claim is false.** Adding a member to `EdgeKind` and
+  The NODE-id half is a separate row and is still open: §A0.19.
+- ~~**A0.8 · `#edgesToTake`'s exhaustiveness claim is false.**~~ CLOSED at `6b3513b` (the
+  `wave2-engine` merge), which brought `3622ca4` onto `loom`. The record of what it was: Adding a member to `EdgeKind` and
   typechecking flags ONE site, `compile.ts:289`; neither `engine.ts` site. `#assertBound` refuses
   at run time — fail-closed, unflagged at build time.
   `/usr/bin/grep -a -c 'satisfies never' packages/core/src/run/engine.ts` → `0`.
   **Fix on `wave2-engine`, unmerged** (`3622ca4`): `e.kind satisfies never` in the `default:`
-  arm; the lane measured `| "probe"` → one error at base, two at head. Closes with that merge.
+  arm; the lane measured `| "probe"` → one error at base, two at head. What the compiler now
+  flags is the KIND SET; which kinds `#edgesToTake` may actually TAKE is §A0.21, and that is a
+  different question.
 - **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every
   tick.** This one IS caused by the merge's fix round, and is recorded rather than fixed because
   the cheap fixes are wrong and the right one is a cache-invalidation design. `runClockTick`'s
@@ -199,7 +212,9 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   Anthropic input dimension. `USAGE_TOLERANCE`'s docstring names the evidence that would close
   it and why it was not taken. Closes with a per-rate floor, or a measurement showing the
   cache-read dimension is bounded elsewhere.
-- **A0.14 · A model with no price row and no dated base still prices 0.** The silent half closed
+- ~~**A0.14 · A model with no price row and no dated base still prices 0.**~~ CLOSED at
+  `3656d69` (the `wave2-guards` merge), which brought `cb1df3a`/`ce14397` onto `loom`; both
+  halves are now shut and the row is in §Z. The record of what it was: the silent half closed
   at `49624c0` (§Z): `claude-sonnet-5-20260101` prices at `claude-sonnet-5`'s row by longest
   `-`-boundary prefix. The loud half — `my-gateway-model` at $0 — is left to the boot banner,
   which probes `priceOf(m, {1e6, 1e6}) === 0` (`cli.ts:2747`, the only such probe in `cli.ts` on
@@ -207,8 +222,9 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   (`test/cli/promote-live.test.ts:507` pins it); pricing at the dearest row was built and removed
   because it switched both off.
   `/usr/bin/grep -a -c hasPrice packages/core/src/run/registry.ts` → `0`.
-  **Fix on `wave2-guards`, unmerged** (`cb1df3a`/`ce14397`): `ModelAdapter.hasPrice`, optional,
-  and an unpriced route refusing at the model call. Closes with that merge.
+  The fix, now merged (`cb1df3a`/`ce14397`): `ModelAdapter.hasPrice`, optional, and an unpriced
+  route refusing at the model call — the guard fails closed at the call rather than pricing a
+  route at $0, and `test/cli/guards-lane-unpriced-route-fails-closed.test.ts` is the pin.
 
 - **A0.16 · Three injection paths are live on `loom`, on no register row.**
   `docs/design-taint-rc6-2026-09-05.md` §4 names them with the graph shape and the three-arm
@@ -248,7 +264,14 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   `graph/validate.ts` loop, and the decision is whether `plans` and the projection's per-id maps
   need the channel treatment. Closes with a compile refusal, or a recorded argument that a
   compiler-built map is safe.
-- **A0.20 · The mirror-gate asymmetry.** For a `subgraph` node whose child raises a human gate,
+- ~~**A0.20 · The mirror-gate asymmetry.**~~ CLOSED at `6b3513b` (the `wave2-engine` merge),
+  which brought `d4115c9` onto `loom` and then held the forward on every verb that reaches it —
+  the child's last advance (`9a0568c`) and its retired-terminal poll (`396767c`) — with both
+  cross-run call sites wrapped so a parent store failure is never the answer to a verb about the
+  child (`946a8c8`). Driven end to end on a real `loom serve`: the mirror was raised 929 ms after
+  the child had finished and self-answered in 2 ms by `executor:subgraph`. **What stays open is
+  the listing, not the door:** `GET /gates` still shows both rows (`server/http.ts`), and the
+  decision on that is unmade. The record of what it was: for a `subgraph` node whose child raises a human gate,
   the engine raises a mirror on the parent; `GET /gates` lists BOTH rows. Since `8c734ce` +
   `60ff53d` made the child's row answerable, approving it leaves the parent stranded — lane P's
   behaviour check (f): child `succeeded`, parent `awaiting_gate` with the mirror `open` through
@@ -259,9 +282,55 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   pointer). **Fix on `wave2-engine`, unmerged** (`d4115c9`): journal-driven, every decided child
   gate whose parent mirror is open is answered `approve` by `executor:subgraph` from
   `#advanceSerially`, so the door that decided the child does not matter.
-  `/usr/bin/grep -a -c forwardToParentMirrors packages/core/src/run/engine.ts` → `0`. What stays
-  open after that merge: `GET /gates` still lists both rows (`server/http.ts`). Closes with the
-  merge plus a decision on the listing.
+  `/usr/bin/grep -a -c forwardToParentMirrors packages/core/src/run/engine.ts` → `0` at
+  `8d43127`, non-zero on `loom` now. **The operator note this owes:** a parent's mirror may be
+  decided `approve` by `executor:subgraph` after a human answered the CHILD's gate — including
+  after a human REJECTED it, because the refusal is the child's to handle through its own graph;
+  `mirrorOf` and `decidedBy: "system"` are what tell that row from a human's approval. And the
+  parent-side operator can no longer reject a delegation once any door has decided the child's
+  gate — `cancel` is the remaining parent-side brake.
+- **A0.21 · A router's `take` selects a `compensation` edge and walks past a human gate.**
+  Recorded by the `wave2-graph` lane in its fourth review round and merged knowingly at
+  `3cfd363` rather than fixed, because the mechanism is not in the file that lane owns.
+  `graph/mutate.ts`'s `traversable` drops `compensation` on the claim that "nothing ever
+  traverses one; `#edgesToTake` answers `case 'compensation': break;`" — and that switch is
+  never reached when a producer supplies a `take`. `run/engine.ts`'s take path returns
+  `outcome.take` filtered ONLY for spent `loop` edges; `#strayRoute` and `rule005RouterEdges`
+  check that the edge leaves the node and never its KIND; `#activate` falls through to the
+  generic `task.ready`. The code is dated 2026-08-19 and needs no mutation to reach — it is a
+  hole for AUTHORED graphs too. Reproduced at `8fd58f5`
+  (`node --test /private/tmp/rev5/comp.test.ts` → 1 pass 1 fail):
+
+      mutation = addNodes: [ hop, type "router", router{cases:[{when:"has(plan)", take:["m1"]}],
+                             fallbackEdge:"m1"} ]
+                 addEdges: [ {m0: plan->hop seq},
+                             {m1: hop->pay kind "compensation", compensates: "pay"} ]
+         (note.append declares compensation {tool:"note.undo"}, so GRAPH012 is satisfied)
+
+      ok = true    [only GRAPH002_DEAD_END, GRAPH009_UNBOUNDED_NODE — both warnings]
+      status after advance: awaiting_gate
+      final status: failed   ran = ["note.append"]        <- the human REJECTED
+      control (the diff's own rejection control): ran = []
+
+  A second finding rides with it: the branch's `EVERY EDGE KIND THE EXECUTOR CAN TAKE` test
+  builds its compensation case WITHOUT `compensates`, so it stops on
+  `GRAPH012_NO_COMPENSATES` and never reaches a compiling compensation graft — green for the
+  wrong reason, and it should go red with the fix rather than alone.
+  **The lane's recommendation, and the reason this row exists instead of a one-line patch:** fix
+  it in `#edgesToTake`'s `take` path, NOT by adding a sixth bounding sentence to
+  `graph/mutate.ts`. An enumeration maintained in the compiler of behaviour defined in the
+  executor has now been wrong five times out of five — "join edges cannot hide an AND-barrier
+  dominator", "the join node itself was the one hole", "nothing ever traverses a compensation
+  edge" — each correct about the shape its author had seen and wrong about the set. A graph-side
+  patch would make MUT003 refuse the mutation while leaving the engine free to traverse a
+  compensation edge on an authored graph. The engine should answer "which edges can carry
+  control to this node, and what can satisfy a barrier without executing what stands in front of
+  it" rather than have the compiler guess. Two neighbours belong with the same decision: a node
+  whose only inbound edge is `compensation` is seeded `{itself}` by `dominators` while
+  `indexGraph.entryNodes` deliberately does not treat it as an entry (round 3's N2, not
+  reproduced), and a dead `conditional` edge shrinks `before` (round 2's N1, measured through an
+  authored `when:"false"`). Closes with a refusal in `run/engine.ts`, its ordinary half measured,
+  and the vacuous test arm made load-bearing.
 
 ## A · Open defects and unguarded behaviour
 
@@ -2168,6 +2237,24 @@ the `message_start` and `message_delta` positions (`49624c0`). And the two compi
 a present-and-unreadable `take`/`overflow`/`maxTokens`, an absent one still refusing at rung 2
 by design (`086fe75`). **None of these was caused by the two waves; what the waves found and
 did not fix is §A0.16–A0.20.**
+
+**Closed 2026-09-08, the four reviewed wave-2 branches merged.** §A0.5's compile half —
+`GRAPH003_RESERVED_CHANNEL`, its set read off `Object.getOwnPropertyNames(Object.prototype)`
+rather than hand-kept (`3fd7ad5`, merged at `3cfd363`); with the runtime half already shut at
+`29e32b1` the row is closed, and the NODE-id question stays §A0.19. §A0.8 `e.kind satisfies
+never` in `#edgesToTake`'s `default:` arm, measured `| "probe"` → one error at base and two at
+head (`3622ca4`, merged at `6b3513b`) — the KIND SET is flagged at build time now; which kinds
+may be TAKEN is the new §A0.21. §A0.14's loud half — `ModelAdapter.hasPrice` and an unpriced
+route refusing at the model call rather than pricing it $0 (`cb1df3a`/`ce14397`, merged at
+`3656d69`), pinned by `test/cli/guards-lane-unpriced-route-fails-closed.test.ts`; with the
+silent half already shut at `49624c0` the row is closed. §A0.20 the mirror-gate asymmetry —
+journal-driven, every decided child gate whose parent mirror is open answered `approve` by
+`executor:subgraph`, and held on every verb that reaches it (`d4115c9`, `9a0568c`, `396767c`,
+`946a8c8`, merged at `6b3513b`), observed on a real `loom serve` as a mirror raised 929 ms after
+the child finished and self-answered in 2 ms; `GET /gates` listing both rows is the residue and
+is stated on the row. **What these merges did NOT close, and recorded instead, is §A0.21** — a
+router's `take` selecting a `compensation` edge past a human gate, merged knowingly at `3cfd363`
+because the fix belongs in `run/engine.ts` and not in the compiler that guessed at it.
 
 **Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
 paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
