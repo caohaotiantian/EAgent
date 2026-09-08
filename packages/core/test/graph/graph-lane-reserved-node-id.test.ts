@@ -68,10 +68,9 @@ const run = (nodeId: string, extra?: { baselinePostures?: Record<string, string>
 test("A NODE ID `toString` IS REFUSED AT COMPILE, and the diagnostic names it — and it is the ONLY diagnostic", () => {
   const r = run("toString");
   assert.equal(r.ok, false);
-  // Exactly one diagnostic, not merely "includes the reserved one" — pins that the refusal is
-  // FATAL (checkStructure's `fatal = true`) and so `validateGraph` never reaches a later rule
-  // for this node. Without `fatal = true` this would still pass a weaker "includes" assertion
-  // while a second, fabricated diagnostic rode along (see the next test for the concrete one).
+  // Exactly one diagnostic, not merely "includes the reserved one" — this spec supplies no
+  // `baselinePostures`, so this assertion alone does not pin `fatal = true` (the next test does:
+  // it supplies one, and is the one that goes red under a mutation that drops `fatal = true`).
   assert.equal(r.diagnostics.length, 1);
   const reserved = r.diagnostics[0]!;
   assert.equal(reserved.code, "GRAPH003_RESERVED_NODE_ID");
@@ -183,8 +182,28 @@ test("A CHILD SPEC'S NODE ID IS COVERED TOO — `rule016Subgraphs` recurses `val
     tenantCapabilities: ["*"],
   });
   assert.equal(r.ok, false);
-  assert.ok(
-    r.diagnostics.some((d) => d.code === "GRAPH003_RESERVED_NODE_ID"),
-    `expected a reserved-node-id diagnostic bubbled from the child, got ${r.diagnostics.map((d) => d.code).join(", ")}`,
+  const bubbled = r.diagnostics.filter((d) => d.code === "GRAPH003_RESERVED_NODE_ID");
+  assert.equal(bubbled.length, 1, `got codes ${r.diagnostics.map((d) => d.code).join(", ")}`);
+  // `rule016Subgraphs` rewrites a bubbled diagnostic's `at` to the PARENT's subgraph node
+  // ("work"), not the child's ("toString") — the child's id survives only in the message text,
+  // which this also pins so the rewrite isn't mistaken for the reserved-id check silently
+  // finding nothing and a different rule coincidentally firing.
+  assert.equal(bubbled[0]?.at?.nodeId, "work");
+  assert.match(bubbled[0]!.message, /in subgraph "subgraph\/child@stable": node id "toString"/);
+
+  // CONTROL: an otherwise-identical child whose node is named ordinarily compiles clean through
+  // the same subgraph machinery, so the refusal above is the reserved id and not some other
+  // consequence of nesting.
+  const cleanParent: GraphSpec = { ...parent, nodes: [{ ...parent.nodes[0]!, id: "work2" as NodeId }] } as GraphSpec;
+  const clean = compile({
+    spec: cleanParent,
+    resolver: stubResolver({ subgraphs: { "subgraph/child@stable": spec("work") } }),
+    tools: {},
+    tenantCapabilities: ["*"],
+  });
+  assert.deepEqual(
+    clean.diagnostics.filter((d) => d.severity === "error"),
+    [],
   );
+  assert.equal(clean.ok, true);
 });
