@@ -179,7 +179,11 @@
  * about this run, over recorded inputs and terminal outputs the candidate did not get to
  * rearrange. With one present, S1 is that verdict and `t.outcome.assertions` is NOT read: an
  * assertion the optimiser wrote is the graph's opinion of itself, one rung above S5, and `didWork`
- * stops counting it as work for the same reason. `delivered` additionally needs the run to have
+ * stops counting it as work for the same reason. NEITHER IS S4, for the same reason again — a
+ * rubric is a model the graph chose grading a prompt the graph wrote, and because `outcomeOf`
+ * averages over the signals PRESENT, adding one raises the outcome of a run the exam failed
+ * (measured: 0 → 0.2308) rather than diluting it. S2 and S3 stay: a human's gate decision and a
+ * downstream fact are not the candidate's to write. `delivered` additionally needs the run to have
  * been GRADABLE — a run whose outputs the exam could not read delivered nothing and earns no
  * efficiency credit either, so the work-deleting candidate scores exactly 0 rather than the cost
  * and latency credit it would keep in a priced cohort.
@@ -394,7 +398,19 @@ export function readSignals(t: Trajectory, downstream?: DownstreamOutcome, exam?
       evidence: accepted ? "no rework, no reopened incident" : "reworked or reopened",
     });
   }
-  if (o.rubrics.length > 0) {
+  // S4 IS THE CANDIDATE'S TOO, AND UNDER AN EXAM IT IS NOT READ EITHER — the same clause the
+  // assertion branch above and `didWork` below already make, arrived at one rung later. A rubric
+  // is a model the graph chose grading a prompt the graph wrote; it is candidate-owned in exactly
+  // the way an in-graph assertion is. `outcomeOf` divides by the weights PRESENT, so pushing a
+  // 0.3-weight 1.0 beside a 1.0-weight 0 does not dilute the exam's verdict, it raises it:
+  // measured, `outcome` 0 → 0.2308 for a candidate the operator's exam failed on every input,
+  // which is +0.1385 of score on every pair and enough for `L1-paired-improvement` and
+  // `L5-candidate-earned-it`. That is CLAUDE.md §3's shape — the candidate owning both sides of a
+  // channel its own graph produces — surviving inside the average after S1 was taken away from it.
+  // Without an exam nothing changes: S4 is then one rung of the only ladder there is, capped at
+  // `canary` by `promotionCeiling` and excluded from `GROUND_TRUTH_SIGNALS`, which is the older
+  // and weaker protection this replaces where an exam exists.
+  if (exam === undefined && o.rubrics.length > 0) {
     const avg = o.rubrics.reduce((a, r) => a + r.score, 0) / o.rubrics.length;
     out.push({ id: "S4", value: clamp01(avg), weight: SIGNAL_WEIGHTS.S4, evidence: `${o.rubrics.length} rubric verdict(s)` });
   }

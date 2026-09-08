@@ -230,3 +230,39 @@ test("measureCohort under an exam: members are the GRADED runs; ungradable and u
   // Control: without an exam all five are members.
   assert.equal(measureCohort("w|h|default|b", runs).n, 5);
 });
+
+// ── the rung one over: S4 ────────────────────────────────────────────────────
+
+/**
+ * A CANDIDATE THAT CANNOT WRITE S1 ANY MORE CAN STILL ADD A SIGNAL BESIDE IT, and `outcomeOf`
+ * averages over the signals PRESENT — so a `evaluator{kind:"rubric"}` node the candidate adds to
+ * its own graph, grading a prompt the candidate wrote, does not dilute the exam's verdict, it
+ * RAISES it. Measured at `0bd1be7` before this was closed: a run the operator's exam failed on
+ * every input scored `outcome` 0.2308 instead of 0, which is +0.1385 of paired Δscore on every
+ * pair — enough for `L1-paired-improvement` and `L5-candidate-earned-it` in any workflow whose
+ * cost ratio a rubric's one model call does not move.
+ *
+ * This is CLAUDE.md §3's shape ("the candidate owns both sides of any channel the graph
+ * produces") surviving inside the average after S1 was taken away from it, so under an exam S4 is
+ * not read — the same clause the assertion branch and `didWork` already make.
+ */
+test("UNDER AN EXAM A RUBRIC THE CANDIDATE ADDED IS NOT A SIGNAL — it cannot raise the outcome of a run the exam failed", () => {
+  const failed = trajectory({ outcome: signals({ rubrics: [{ nodeId: n("selfjudge"), score: 1, pass: true }] }) });
+  const s = scoreTrajectory(failed, examCohort(), { exam: graded(false) });
+  assert.deepEqual(s.signals.map((x) => x.id), ["S1"], "the exam's verdict, and nothing the candidate wrote beside it");
+  assert.equal(s.outcome, 0, "a run the exam failed scores 0 outcome however it judged itself");
+
+  // The control that makes it mean something: WITHOUT an exam every byte is what it was — S4 is
+  // then one rung of the only ladder there is, capped at `canary` by `promotionCeiling`.
+  const noExam = scoreTrajectory(failed, cohort(), {});
+  assert.deepEqual(noExam.signals.map((x) => x.id), ["S4"], "the rubric is read, and is the whole ladder this run has");
+  assert.equal(noExam.signals.find((x) => x.id === "S4")?.value, 1);
+  assert.equal(noExam.outcome, 1, "which is exactly the S4-only run `promotionCeiling` caps at canary");
+
+  // And the second control: an honest run the exam PASSED scores the same with the rubric and
+  // without it, so this drops a lever rather than moving the ruler.
+  const passedWith = scoreTrajectory(failed, examCohort(), { exam: graded(true) });
+  const passedWithout = scoreTrajectory(trajectory({ outcome: signals({}) }), examCohort(), { exam: graded(true) });
+  assert.equal(passedWith.outcome, passedWithout.outcome);
+  assert.equal(passedWith.outcome, 1);
+});
