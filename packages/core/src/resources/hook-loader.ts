@@ -119,19 +119,22 @@ const HOOK_BRIDGE = `
  * `abs` with it (deterministic, and a memo hook wants them) and would fail with `Cannot read
  * properties of undefined (reading 'random')`, which reads like the author's own typo.
  *
- * ## THE REFUSAL IS LOUD AT SEVEN POINTS AND SILENT AT `onComplete`, and that is not this file
+ * ## THE REFUSAL WAS LOUD AT SEVEN POINTS AND SILENT AT `onComplete`, AND THAT IS NOW CLOSED
  *
- * Measured through `main()` on a graph declaring `hooks: {onComplete: […]}` whose body draws:
- * exit `0`, `"status": "succeeded"`, stderr empty. The stub fires — the throw is identical to the
- * one the other seven produce — and nothing downstream looks at it.
+ * Measured through `main()` on a graph declaring `hooks: {onComplete: […]}` whose body drew:
+ * exit `0`, `"status": "succeeded"`, stderr empty. The stub fired — the throw is identical to the
+ * one the other seven produce — and nothing downstream looked at it.
  *
- * The swallow is at `engine.ts`'s `onComplete` dispatch, which `await`s `runObservers(...)` and
- * DISCARDS the array it returns. `run/hooks.ts` already decided this correctly and wrote it down:
- * `runObservers` "Returns the refs that threw, so the caller can surface them without failing the
- * run — a silently swallowed extension failure is indistinguishable from an extension that did
- * nothing." The promise is kept by the producer and dropped by the consumer, so the fix is one
- * expression in `engine.ts` — bind the result, and journal or warn a non-empty one. Not making
- * observers fatal: rule 3 is right, and the run is over by then anyway.
+ * The swallow was at `engine.ts`'s `onComplete` dispatch, which `await`ed `runObservers(...)` and
+ * DISCARDED the array it returns. `run/hooks.ts` had already decided this correctly and written it
+ * down: `runObservers` "Returns the refs that threw, so the caller can surface them without
+ * failing the run — a silently swallowed extension failure is indistinguishable from an extension
+ * that did nothing." The promise was kept by the producer and dropped by the consumer, and the fix
+ * was the one expression this paragraph asked for: `engine.ts` binds the result and reports a
+ * non-empty one through `process.emitWarning` under the code `LOOM_HOOK_FAILED`, naming the run
+ * and the refs. Not a journal row — the vocabulary has no member for it and
+ * `hook.applied{changed:false}` would describe a hook that ran and did nothing — and not fatal,
+ * because rule 3 is right and the run is over by then anyway.
  *
  * WHAT WAS REJECTED, so the next reader does not re-propose it: letting `Math.random` through
  * when `ctx.point` is an observer point (`OBSERVER_POINTS` is `{onComplete}` and nothing else), on

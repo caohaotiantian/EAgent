@@ -24,7 +24,7 @@ import { SYSTEM_ACTOR, type Actor, type JournalEvent } from "../../src/journal/e
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { RunLog } from "../../src/run/log.ts";
-import type { GateRecord, RunProjection } from "../../src/run/projection.ts";
+import { isTerminal, type GateRecord, type RunProjection } from "../../src/run/projection.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
@@ -785,13 +785,24 @@ test("A MIRROR ANSWERS THE GATE IT WAS RAISED FOR, not whichever is open when th
     idempotencyKey: "direct",
   });
 
-  // Also legitimate: the mirror names nobody either, because that is what it inherited.
-  await r.engine.resolveGate(runId, {
-    gateId: mirror.gateId,
-    decision: { kind: "approve" },
-    actor: mallory,
-    idempotencyKey: "mirror",
-  });
+  // The mirror names nobody either, because that is what it inherited — but by now it is
+  // SPENT: the child's own decision reached it off the journal when the child advanced
+  // (`#forwardToParentMirrors`), so there is no open mirror left for anyone to answer. The
+  // question mallory could answer was answered once, in the child, and the executor's record of
+  // that on the parent side is an `approve` that means "wait for the child" and nothing more.
+  const spent = (await r.engine.projection(runId))!.gates[mirror.gateId];
+  assert.equal(spent?.state, "decided");
+  assert.equal(spent?.decidedBy, "system");
+  await assert.rejects(
+    () =>
+      r.engine.resolveGate(runId, {
+        gateId: mirror.gateId,
+        decision: { kind: "approve" },
+        actor: mallory,
+        idempotencyKey: "mirror",
+      }),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_GATE_ALREADY_RESOLVED,
+  );
 
   const after = (await r.engine.projection(childRunId))!;
   assert.equal(
@@ -819,12 +830,9 @@ test("…and the parent then asks again, bound to the gate the child is ACTUALLY
     actor: mallory,
     idempotencyKey: "direct",
   });
-  let p = await r.engine.resolveGate(runId, {
-    gateId: mirror.gateId,
-    decision: { kind: "approve" },
-    actor: mallory,
-    idempotencyKey: "mirror",
-  });
+  // The spent mirror was decided off the child's journal and the parent is `running`; driving
+  // it — the run clock's job in a deployment — is what raises the next mirror.
+  let p = await r.engine.advance(runId);
 
   assert.equal(p.status, "awaiting_gate");
   const second = await openGate(r, runId);
@@ -868,7 +876,7 @@ test("a rejection whose child gate was already answered elsewhere still ENDS the
   // human's "no" is still the parent's answer, and walking away from it would leave the
   // child suspended on its remaining gate for good. Every such run leaked a suspended run
   // and its journal permanently.
-  const { r, runId, childRunId, mirror, chatty } = await twoGateRig();
+  const { r, runId, childRunId, chatty, guard } = await twoGateRig();
   await r.engine.resolveGate(childRunId, {
     gateId: chatty.gateId,
     decision: { kind: "approve" },
@@ -876,17 +884,25 @@ test("a rejection whose child gate was already answered elsewhere still ENDS the
     idempotencyKey: "direct",
   });
 
+  // The first mirror is spent (decided off the child's journal); the parent asks again, bound to
+  // `guard`, and the human's "no" lands on THAT mirror — the one that still has a question.
+  assert.equal((await r.engine.advance(runId)).status, "awaiting_gate");
+  const second = await openGate(r, runId);
   const p = await r.engine.resolveGate(runId, {
-    gateId: mirror.gateId,
+    gateId: second.gateId,
     decision: { kind: "reject", reason: "not this quarter" },
-    actor: mallory,
+    actor: lead,
     idempotencyKey: "no",
   });
 
   assert.equal(p.status, "failed");
   assert.equal(p.error?.code, CODES.E_HUMAN_APPROVAL_REQUIRED);
+  // The "no" travelled into the child's own gate, so the child ended through its own graph —
+  // `failed` on the refused gate — rather than being cancelled from outside. Either way it is
+  // stopped, not abandoned; `#endChildRun` still cancels a child a rejection reaches too late.
   const childP = (await r.engine.projection(childRunId))!;
-  assert.equal(childP.status, "cancelled", "the delegated run is stopped, not abandoned");
+  assert.ok(isTerminal(childP.status), `the delegated run is stopped, not abandoned: ${childP.status}`);
+  assert.equal(childP.gates[guard.gateId]?.decision, "reject", "the refusal is on the child's own gate");
   assert.deepEqual(r.charges, []);
 });
 
@@ -897,23 +913,24 @@ test("…AND THE CANCELLED CHILD CANNOT BE RESURRECTED THROUGH ITS LEFTOVER GATE
   // appended the `gate.cancelled` D7.3 has specified since it was drawn. The parent had
   // just REFUSED this delegation. Answering the gate it left behind put the child back to
   // `running` and took the money anyway: a cancel that the thing it cancelled can undo.
-  const { r, runId, childRunId, mirror, chatty, guard } = await twoGateRig();
+  const { r, runId, childRunId, chatty, guard } = await twoGateRig();
   await r.engine.resolveGate(childRunId, {
     gateId: chatty.gateId,
     decision: { kind: "approve" },
     actor: mallory,
     idempotencyKey: "direct",
   });
+  assert.equal((await r.engine.advance(runId)).status, "awaiting_gate");
   await r.engine.resolveGate(runId, {
-    gateId: mirror.gateId,
+    gateId: (await openGate(r, runId)).gateId,
     decision: { kind: "reject", reason: "not this quarter" },
-    actor: mallory,
+    actor: lead,
     idempotencyKey: "no",
   });
 
   const stopped = (await r.engine.projection(childRunId))!;
-  assert.equal(stopped.status, "cancelled");
-  assert.equal(stopped.gates[guard.gateId]?.state, "cancelled", "the child's remaining gate was closed WITH the run");
+  assert.ok(isTerminal(stopped.status), stopped.status);
+  assert.equal(stopped.gates[guard.gateId]?.state, "decided", "the child's gate carries the refusal that ended it");
 
   // The security lead is on this gate's approvers list, so every authorization check here
   // passes. The only thing standing between them and the charge is that the run is over.
@@ -932,7 +949,7 @@ test("…AND THE CANCELLED CHILD CANNOT BE RESURRECTED THROUGH ITS LEFTOVER GATE
     },
   );
 
-  assert.equal((await r.engine.projection(childRunId))!.status, "cancelled", "the cancelled run stayed cancelled");
+  assert.equal((await r.engine.projection(childRunId))!.status, stopped.status, "the ended run stayed ended");
   assert.deepEqual(r.charges, [], "AND THE REFUSED CHARGE STILL DID NOT HAPPEN");
 });
 

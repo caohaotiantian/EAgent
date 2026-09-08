@@ -782,10 +782,17 @@ function upsertTask(p: MutableProjection, id: TaskId, patch: Partial<TaskRecord>
  * differ on purpose, and a `wallMs` here that is smaller than the trajectory's is not a
  * disagreement.** A run's elapsed duration is `endedAt − startedAt`, which is neither.
  *
- * STILL NOT COUNTED ANYWHERE, and out of this fold's reach because no event carries the
- * money: `#summarizeEffect` (`engine.ts` 4074) calls the provider and journals
- * `effect.started`/`effect.completed` with no `usage`, and a failed subgraph's child spend
- * is only recoverable through the commit as above.
+ * THE SUMMARISER USED TO BE THE HOLE HERE, and this paragraph said so: `#summarizeEffect`
+ * called the provider and journaled `effect.started`/`effect.completed` with no `usage`, so its
+ * tokens and dollars reached no total this fold could see. It now reserves, calls, settles and
+ * returns its usage, which `#runAgent` adds to the TASK's own — carried by `task.committed` and
+ * folded right here, as the excess over what the turn's `model.called` rows already charged.
+ * There is deliberately no `model.called` row for it (`journal/audit.ts`'s
+ * `call-pairs-with-its-effect` wants an effect of kind `model`, and the summary's is
+ * `summarize`), which is why the spend arrives through the commit rather than through a call row.
+ *
+ * A FAILED SUBGRAPH'S CHILD SPEND IS THE ONE THAT IS STILL ONLY RECOVERABLE THROUGH THE COMMIT,
+ * as above.
  */
 function chargeUsage(p: MutableProjection, taskId: TaskId | undefined, u: UsageRecord): void {
   const amount = finiteUsage(u);

@@ -3605,12 +3605,28 @@ function assertDefaultActionIsSatisfiable(req: GateRequest): void {
  *
  *   - `gate-broker:timeout` carries the gate's own declared `defaultAction`, which the
  *     graph author pre-authorized and GRAPH014 already proved safe for the action class.
- *   - `executor:subgraph` forwards a decision a human made on the PARENT's mirror gate.
- *     The mirror inherits THIS gate's approvers and is journaled with `mirrorOf` pointing
- *     at it, and the forward resolves that one gate or none — so the human who answered
- *     was checked against this very list, and cannot have been checked against another.
- *     Both halves are required: the inheritance alone left a mirror raised for a
+ *   - `executor:subgraph` carries a decision a human made across the parent/child boundary,
+ *     IN BOTH DIRECTIONS, and one argument covers both because the mirror and the gate it
+ *     mirrors carry the same approvers.
+ *
+ *     PARENT TO CHILD: a human answers the parent's MIRROR and the decision is forwarded into
+ *     the child's own gate. The mirror inherits THIS gate's approvers and is journaled with
+ *     `mirrorOf` pointing at it, and the forward resolves that one gate or none — so the human
+ *     who answered was checked against this very list, and cannot have been checked against
+ *     another. Both halves are required: the inheritance alone left a mirror raised for a
  *     permissive gate free to forward into a restricted one.
+ *
+ *     CHILD TO PARENT: a human answers the CHILD's own gate — in the child's console, where
+ *     `GET /gates` lists it beside the mirror — and the parent's still-open mirror of it is
+ *     decided `approve`, meaning "the delegation may proceed, the child has answered". Read off
+ *     the JOURNAL rather than from whichever door decided the child gate
+ *     (`Engine.#forwardToParentMirrors`, and `#answerMirrorsTheChildAlreadyDecided` for the
+ *     mirror that lands after the decision). The entitlement argument is the SAME one, run
+ *     backwards: `mirrorAuthorizationOf` gave the mirror this gate's approvers, so the human
+ *     who decided here was checked against the list the mirror carries. Always `approve`, never
+ *     `reject` — a refusal is the child's to handle through its own graph, and the parent then
+ *     reads the child's terminal status. Without this direction the parent sat on an open mirror
+ *     nobody would ever answer.
  *   - `replay` re-serves a decision already in the original run's journal. It never
  *     originates one, and it only ever writes to a shadow store.
  *   - `gate-broker:dedupe` carries a decision A HUMAN MADE on a gate IN THIS RUN whose
@@ -3633,8 +3649,13 @@ function assertDefaultActionIsSatisfiable(req: GateRequest): void {
  *     1000 s past a declared 60 s window. `humanDecided` in `#inheritable` is the check.
  *     The other three names are unreachable as sources by construction, which is worth
  *     writing down because it is why this one needed a check and they did not:
- *     `executor:subgraph` only ever decides a MIRROR and `sameAuthority` refuses a mirror
- *     on either side; `replay` writes to a shadow store, which is a different journal from
+ *     `executor:subgraph` never decides as a HUMAN — `gate.decided`'s actor kind is `system`,
+ *     so `humanDecided` above refuses it as a source whichever gate it decided. That is the
+ *     whole reason, and it is worth stating precisely because a shorter one was written here
+ *     first and is false: "it only ever decides a MIRROR, and `sameAuthority` refuses a mirror
+ *     on either side" covers the child-to-parent direction, where the gate it decides IS a
+ *     mirror, and not the parent-to-child one, where it decides the CHILD's own ordinary gate.
+ *     `replay` writes to a shadow store, which is a different journal from
  *     the one a duplicate is raised in.
  *
  * Adding a name here is granting a component the right to satisfy a human approval. It
