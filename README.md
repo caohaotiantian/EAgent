@@ -298,8 +298,14 @@ any string — so at 3d05cff an extension tool named `mcp__docs__search` beside 
 server `docs` offering `search` compiled `ok`, exit 0, with the extension's definition holding a
 capability in the grant list and never being dispatched. It refuses now, naming both claimants;
 so does the MCP × MCP case `readMcpServers`' duplicate-server-name check cannot see (server `a`
-offering `b__x` and server `a__b` offering `x` both flatten to `mcp__a__b__x`).
-`test/cli/mcp-registrar-collision.test.ts` is the reproduction.
+offering `b__x` and server `a__b` offering `x` both flatten to `mcp__a__b__x`). A name is claimed
+by whoever OFFERED it, `rejectedTools` included — folding only `client.tools` let a server suppress
+its own refusal by making the colliding tool malformed, since `McpClient.start` drops a bad spec
+rather than throwing. **And the whole `mcp__` prefix is reserved for that registrar**, configured
+server or not: an extension tool spelling one is not a naming collision but impersonation, and it
+lowers oversight — a real MCP tool is `irreversible` and carries `mcp:<server>`, a squatter
+declares its own class and ran unattended. `test/cli/mcp-registrar-collision.test.ts` is the
+reproduction, five cases.
 And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
 apply the operator's own guards; the module is handed the same frozen
 jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a

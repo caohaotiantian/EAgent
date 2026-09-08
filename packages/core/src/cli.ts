@@ -1605,32 +1605,74 @@ export function openWorkspace(
   // every refusal path out of this function, so this one spawns no orphan.
   //
   // A SERVER THAT IS UNREACHABLE NEVER GETS HERE: `startMcp` aborts the whole boot with
-  // `E_TOOL_SOURCE_UNAVAILABLE` if any `client.start()` throws, so there is no partial connect
-  // and no name set this check has to guess at. `McpClient.#tools` is assigned once, at the end
-  // of `start()`, so a server rewriting its `tools/list` reply afterwards cannot introduce a
-  // name after the check.
+  // `E_TOOL_SOURCE_UNAVAILABLE` if any `client.start()` throws, so there is no partial connect.
+  // `McpClient.#tools` is assigned once, at the end of `start()`, so a server rewriting its
+  // `tools/list` reply afterwards cannot introduce a name after the check.
+  //
+  // AND A NAME IS CLAIMED BY WHOEVER OFFERED IT, REGISTERED OR NOT — `rejectedTools` counts. This
+  // line read `client.tools` alone and that is the SERVER'S filtered list: `McpClient.start`
+  // DROPS a malformed spec (an oversized description, a non-object `inputSchema`, an intra-server
+  // duplicate) onto `rejectedTools` rather than throwing, deliberately, so one bad entry does not
+  // cost the operator the rest of the server. The consequence was that the name set this guard
+  // folded was chosen by the third party: a server could SUPPRESS ITS OWN COLLISION REFUSAL by
+  // making the colliding tool malformed. Measured at d70a283, `docs` offering `search` with a
+  // 9000-character description beside an extension tool named `mcp__docs__search` — one
+  // `! MCP TOOL DROPPED` line, then `"status": "succeeded"` with the EXTENSION's answer under the
+  // server's id. The operator configured the collision either way, so either way it refuses.
   const claimed = new Map<string, string>();
   for (const t of tools.list()) {
     const owner = extensions?.toolOwners.get(t.name);
     claimed.set(t.name, owner === undefined ? "a built-in of this binary" : `--extension-module ${owner}`);
   }
   for (const { client } of mcp) {
-    for (const spec of client.tools) {
-      const name = mcpToolName(client.name, spec.name);
+    const offered = [
+      ...client.tools.map((spec) => ({ tool: spec.name, how: `mcp server "${client.name}"` })),
+      ...client.rejectedTools.map((r) => ({ tool: r.name, how: `mcp server "${client.name}" and dropped` })),
+    ];
+    for (const { tool, how } of offered) {
+      const name = mcpToolName(client.name, tool);
       const by = claimed.get(name);
-      if (by !== undefined) {
+      // A NAME THIS SAME SERVER ALREADY CLAIMED IS NOT A COLLISION BETWEEN TWO REGISTRARS.
+      // `McpClient` keeps the FIRST of a duplicated name and drops the rest, so one server can
+      // reach here having offered one id twice; that is `mcpTools`' refusal to make, in its own
+      // vocabulary, and this guard is about who owns the slot rather than about one server's list.
+      if (by !== undefined && !by.startsWith(`mcp server "${client.name}"`)) {
         throw err.validation(
           CODES.E_CONFIG_INVALID,
-          `mcp server "${client.name}" offers the tool "${spec.name}", which this binary registers as "${name}" — ` +
-            `and that name is already registered by ${by}. MCP tools are registered AFTER the extension modules ` +
+          `mcp server "${client.name}" offers the tool "${tool}", which this binary registers as "${name}" — ` +
+            `and that name is already claimed by ${by}. MCP tools are registered AFTER the extension modules ` +
             `and the built-ins, and ToolRegistry.register shadows on collision, so the existing definition would ` +
             `keep its capability in the grant list and its entry in the compiler's manifest and would never be ` +
             `dispatched. Rename one of them — an MCP tool's id is mcp__<server>__<tool>, so renaming the server ` +
             `in the --mcp-file works too.`,
         );
       }
-      claimed.set(name, `mcp server "${client.name}"`);
+      if (by === undefined) claimed.set(name, `offered by ${how}`);
     }
+  }
+
+  // AND THE `mcp__` PREFIX IS RESERVED FOR THAT REGISTRAR, WHOLE, whether or not any server is
+  // configured. The check above only fires when there are TWO claimants, and the one-claimant case
+  // is the worse one: with no `--mcp-file` at all, an extension tool named `mcp__docs__search`
+  // registered and DISPATCHED under an id an operator reads as the docs server's search tool.
+  // That is not a naming collision, it is impersonation, and it LOWERS oversight — `mcpTools`
+  // gives every MCP tool `irreversible` (a posture floor of `in`) and the capability
+  // `mcp:<server>`, while the squatter declares its own class and its own capability and can run
+  // unattended. Oversight only tightens, so the prefix belongs to the registrar that earns it
+  // rather than to whoever spells it first.
+  //
+  // AFTER the collision loop, so the operator who configured BOTH gets the message that names
+  // both claimants rather than this more general one.
+  for (const name of extensions?.toolNames ?? []) {
+    if (!name.startsWith("mcp__")) continue;
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--extension-module ${extensions?.toolOwners.get(name) ?? "(unknown module)"} registers the tool name "${name}". ` +
+        `The "mcp__" prefix is reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is ` +
+        `registered by this binary from a server an operator named, carries the capability mcp:<server>, and is ` +
+        `irreversible unless that server's row says otherwise. A tool spelling one is read by an operator as that ` +
+        `server's, under whatever oversight class it chose for itself. Rename it.`,
+    );
   }
   for (const { client, irreversibility } of mcp) {
     for (const t of mcpTools(client, irreversibility)) tools.register(t);

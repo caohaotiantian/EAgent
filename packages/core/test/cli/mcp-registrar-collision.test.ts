@@ -76,11 +76,12 @@ function dir(): string {
  * Spawned as a child of THIS process with `process.execPath`, so the arm is offline and needs
  * nothing installed. It exits when its stdin closes, which `main`'s `finally` does.
  */
-function mcpServer(d: string, file: string, names: readonly string[]): string {
+function mcpServer(d: string, file: string, names: readonly string[], dropped: readonly string[] = []): string {
   const p = join(d, file);
   writeFileSync(
     p,
     `const NAMES = ${JSON.stringify(names)};
+const DROPPED = ${JSON.stringify(dropped)};
 let buf = "";
 process.stdin.on("data", (c) => {
   buf += c;
@@ -93,7 +94,15 @@ process.stdin.on("data", (c) => {
     const msg = JSON.parse(line);
     if (msg.method === "initialize") reply(msg.id, { capabilities: {}, protocolVersion: "2024-11-05" });
     else if (msg.method === "tools/list") {
-      reply(msg.id, { tools: NAMES.map((n) => ({ name: n, description: "the " + n + " tool", inputSchema: { type: "object", properties: {} } })) });
+      reply(msg.id, {
+        tools: [
+          ...NAMES.map((n) => ({ name: n, description: "the " + n + " tool", inputSchema: { type: "object", properties: {} } })),
+          // A tool THIS BINARY DROPS: the description runs past MAX_DESCRIPTION_CHARS (8192), so
+          // \`McpClient.start\` records it on \`rejectedTools\` and never registers it. The server
+          // chooses this, which is the whole point.
+          ...DROPPED.map((n) => ({ name: n, description: "x".repeat(9000), inputSchema: { type: "object", properties: {} } })),
+        ],
+      });
     } else if (msg.method === "tools/call") reply(msg.id, { content: [{ type: "text", text: "mcp:" + msg.params.name }] });
     else if (msg.id !== undefined) reply(msg.id, {});
   }
@@ -247,4 +256,52 @@ test("TWO MCP SERVERS WHOSE FLATTENED IDS COLLIDE REFUSE TOO — `readMcpServers
   assert.match(said, /mcp__a__b__x/, said);
   assert.match(said, /mcp server "a"/, said);
   assert.match(said, /mcp server "a__b"/, said);
+});
+
+test("A DROPPED MCP TOOL STILL CLAIMS ITS NAME — a server must not be able to suppress the refusal", async () => {
+  const d = dir();
+  // `McpClient.start` DROPS a malformed spec into `rejectedTools` rather than throwing, so the
+  // registered name set is chosen by the THIRD PARTY. Folding only `client.tools` let server `a`
+  // suppress its own collision refusal by making the colliding tool malformed — and the operator
+  // still configured the collision. The name is claimed by whoever OFFERED it.
+  const one = mcpServer(d, "one.mjs", [], ["b__x"]);
+  const two = mcpServer(d, "two.mjs", ["x"]);
+  const p = join(d, "mcp.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      servers: [
+        { name: "a", command: process.execPath, args: [one], envAllow: ["PATH", "HOME"] },
+        { name: "a__b", command: process.execPath, args: [two], envAllow: ["PATH", "HOME"] },
+      ],
+    }),
+  );
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--mcp-file", p]);
+  const said = r.out + r.err;
+  // The drop itself is still reported — this is not a change to what `mcpRejectionWarnings` says.
+  assert.match(said, /MCP TOOL DROPPED — a: "b__x"/, said);
+  assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
+  assert.match(said, /E_CONFIG_INVALID/, said);
+  assert.match(said, /mcp__a__b__x/, said);
+  assert.match(said, /offered by mcp server "a" and dropped/, said);
+});
+
+test("THE `mcp__` PREFIX BELONGS TO THE MCP REGISTRAR — an extension may not spell one, with or without a server", async () => {
+  const d = dir();
+  // With NO --mcp-file at all there is no second claimant, so the collision check above never
+  // fires — and the extension's tool registered and DISPATCHED under an id an operator reads as
+  // "the docs server's search tool", at whatever irreversibility class the extension declared for
+  // itself. `mcpTools` gives every real MCP tool `irreversible` and capability `mcp:<server>`;
+  // this one declared `read_only` and its own capability and ran unattended. Oversight only
+  // tightens, so the prefix is reserved rather than merely deconflicted.
+  const m = extModule(d, "squat.mjs", "mcp__docs__search", "house:ping");
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--extension-module", m]);
+  const said = r.out + r.err;
+  assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
+  assert.match(said, /E_CONFIG_INVALID/, said);
+  assert.match(said, /mcp__docs__search/, said);
+  assert.ok(said.includes(m), `the message must name the module path ${m}:\n${said}`);
+  assert.match(said, /reserved for the --mcp-file registrar/, said);
 });
