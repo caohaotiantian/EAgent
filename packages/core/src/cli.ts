@@ -2450,7 +2450,14 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
     const identityBefore = identity.sources.length;
     const functionsBefore = functions.calls.length;
     const hooksBefore = hooks.calls.length;
-    const slotsBefore = resolver.claims.length + store.claims.length + payloads.claims.length;
+    // ONE MARK PER SLOT, not just their sum: the sum answers "did this module claim any of the
+    // three", which is what the "registered nothing" check needs, and cannot answer "did THIS
+    // module claim THIS slot", which is what the collision check needs. Reading the sum for the
+    // second question is what made a module refuse for a slot it never touched.
+    const resolverBefore = resolver.claims.length;
+    const storeBefore = store.claims.length;
+    const payloadsBefore = payloads.claims.length;
+    const slotsBefore = resolverBefore + storeBefore + payloadsBefore;
     let mod: { default?: unknown };
     try {
       // `pathToFileURL`, not the bare path: a relative specifier would resolve against
@@ -2566,16 +2573,30 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
     // THE THREE SUBSTITUTABLE SLOTS, same rule and same reason. A second `store` is a second
     // journal, and the journal is the only authoritative state there is: which one a run is
     // written to must not be decided by the order two paths appeared on argv.
-    for (const [slot, collected] of [
-      ["resolver", resolver],
-      ["store", store],
-      ["payloads", payloads],
+    //
+    // PER-MODULE DELTA, LIKE THE FOUR LOOPS ABOVE IT, and this was the one that was not.
+    // `claims` is CUMULATIVE across modules, so `claims.length === 0` only skips a module when
+    // NOBODY has claimed the slot yet. After module A registered a store, module B — which
+    // registers only a tool — did not skip, found `slotOwner.get("store") === A`, and was
+    // refused with a message that is FALSE about B. Driven both ways:
+    //
+    //   loadExtensionModules([a.mjs, b.mjs])  → E_CONFIG_INVALID: … b.mjs: registers a store,
+    //                                            and … a.mjs already registered one
+    //   loadExtensionModules([b.mjs, a.mjs])  → boots
+    //
+    // …which is the load-order dependence the refusal exists to prevent, produced by the
+    // refusal itself. `slotsBefore` above is a SUM of the three, so it cannot attribute a claim
+    // to a slot either; each slot's own mark is taken here.
+    for (const [slot, collected, before] of [
+      ["resolver", resolver, resolverBefore],
+      ["store", store, storeBefore],
+      ["payloads", payloads, payloadsBefore],
     ] as const) {
-      if (collected.claims.length === 0) continue;
+      if (collected.claims.length === before) continue;
       const first = slotOwner.get(slot);
-      if (collected.claims.length > 1 || (first !== undefined && first !== path)) {
+      if (collected.claims.length - before > 1 || first !== undefined) {
         refuse(
-          `registers a ${slot}, and ${first ?? path} already registered one. That is an EngineOptions member this ` +
+          `registers a ${slot}, and ${first ?? "it"} already registered one. That is an EngineOptions member this ` +
             `deployment has exactly one of: a second would make which one a run uses depend on load order.`,
         );
       }

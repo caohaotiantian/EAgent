@@ -314,3 +314,81 @@ test("A REF THAT IS NOT `kind/name@ver` SEEDS NOTHING, rather than a pin of a ma
   assert.notEqual(r.code, 0, r.out + r.err);
   assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND|GRAPH0/, r.out + r.err);
 });
+
+/**
+ * A SECOND MODULE THAT CLAIMS NOTHING IS NOT A SECOND CLAIM, and this is the case the slot
+ * refusal above could not see.
+ *
+ * `CollectedSlot.claims` is cumulative across modules, so the loop's `claims.length === 0` skip
+ * only fired while NOBODY had claimed the slot. Once module A registered a store, module B —
+ * registering a tool and nothing else — fell through it, found `slotOwner.get("store") === A`,
+ * and was refused by a message that is false about B. Measured at ce14397, both orders:
+ *
+ *     loadExtensionModules([a.mjs, b.mjs]) → E_CONFIG_INVALID: … b.mjs: registers a store,
+ *                                             and … a.mjs already registered one
+ *     loadExtensionModules([b.mjs, a.mjs]) → boots
+ *
+ * A refusal whose answer depends on argv order is the exact defect it was written to prevent,
+ * and it made every multi-module deployment that substitutes a store, resolver or payload store
+ * unbootable in one of the two orders. The four loops above this one all take a per-module
+ * delta (`tools.calls.slice(toolsBefore)`); this one now does too.
+ */
+test("A SECOND MODULE THAT CLAIMS NO SLOT BOOTS, in either argv order", async () => {
+  const d = dir();
+  const a = mod(
+    d,
+    "store.mjs",
+    `import { MemoryStateStore } from ${JSON.stringify(new URL("../../src/journal/memory.ts", import.meta.url).href)};
+     export default ({ store }) => { store.register(new MemoryStateStore()); };\n`,
+  );
+  const b = mod(
+    d,
+    "tool.mjs",
+    `export default ({ tools }) => { tools.register({ name: "house.ping", version: "1.0", description: "d",
+       capabilities: ["house:ping"], irreversibility: "read_only", idempotent: true,
+       parameters: { type: "object", properties: {} }, execute: () => ({ content: [{ type: "text", text: "ok" }] }) }); };\n`,
+  );
+  // BOTH ORDERS, because one of them passed at ce14397 and a bound that holds on one order is
+  // not a bound — the same question this repo asks of a guard reached by two verbs.
+  for (const paths of [
+    [a, b],
+    [b, a],
+  ]) {
+    const ext = await loadExtensionModules(paths);
+    assert.equal(ext.store !== undefined, true, `no store survived from ${paths.join(", ")}`);
+    assert.equal(ext.tools.list().length, 1, `no tool survived from ${paths.join(", ")}`);
+  }
+});
+
+/** The control: two modules that BOTH claim the slot still refuse, in either order. */
+test("…and two modules that both claim one slot still refuse, in either order", async () => {
+  const d = dir();
+  const body = `import { MemoryStateStore } from ${JSON.stringify(new URL("../../src/journal/memory.ts", import.meta.url).href)};
+     export default ({ store }) => { store.register(new MemoryStateStore()); };\n`;
+  const a = mod(d, "one.mjs", body);
+  const b = mod(d, "two.mjs", body);
+  for (const paths of [
+    [a, b],
+    [b, a],
+  ]) {
+    await assert.rejects(
+      () => loadExtensionModules(paths),
+      (e: unknown) => isLoomError(e) && /registers a store, and .* already registered one/.test(e.message),
+    );
+  }
+});
+
+/** And ONE module claiming the same slot twice is still a second claim, with nothing before it. */
+test("…and one module registering two stores refuses on its own", async () => {
+  const d = dir();
+  const m = mod(
+    d,
+    "twice.mjs",
+    `import { MemoryStateStore } from ${JSON.stringify(new URL("../../src/journal/memory.ts", import.meta.url).href)};
+     export default ({ store }) => { store.register(new MemoryStateStore()); store.register(new MemoryStateStore()); };\n`,
+  );
+  await assert.rejects(
+    () => loadExtensionModules([m]),
+    (e: unknown) => isLoomError(e) && /registers a store, and it already registered one/.test(e.message),
+  );
+});
