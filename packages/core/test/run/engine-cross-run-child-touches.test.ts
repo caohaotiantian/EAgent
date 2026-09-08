@@ -37,10 +37,22 @@
  * child yet" and the parent would submit a SECOND child run over the first one's effects.
  *
  * THE FIXTURES BREAK THE STORE BY CAUSE WHERE THEY CAN AND BY COUNT WHERE THEY CANNOT, and where
- * they must count, the test ALSO asserts something only the intended site produces — a warning
- * code emitted from one method, or an error only one path can raise — so a future reordering of
- * the reads fails the test loudly instead of quietly measuring a different site. Two orders were
- * measured on the gate fixture, and they differ because the two passes do different work.
+ * they must count, the test ALSO asserts something only the intended site produces, so a future
+ * reordering of the reads fails the test loudly instead of quietly measuring a different site.
+ * That sentence was a false universal for two rounds — B and C broke the Nth read and then
+ * asserted only outcomes any of the five fixes would satisfy, and C's title promised it named its
+ * site while its body named nothing. It is true now because each of the three retryable sites
+ * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B and C assert theirs: "could not read
+ * the journal" is `#runSubgraph`'s probe, "could not be forwarded — reading the journal failed" is
+ * `#forwardGateDecision`'s read, "answering gate … failed" is the WRITE. E asserts its own code,
+ * `LOOM_CHILD_STOP_FAILED`, which one method emits.
+ *
+ * EVERY SUCH FILTER IS BY RUN ID AS WELL AS BY CODE. `process.emitWarning` defers to the next
+ * tick, so a preceding test's warnings land inside the next listener's window — measured, twenty
+ * of them at once — and an assertion reading `mine[0]` without filtering reads another run's.
+ *
+ * Two orders were measured on the gate fixture, and they differ because the passes do different
+ * work.
  *
  *   The pass that RESUMES a child whose gate was answered in its own console:
  *     read #1  `#runSubgraph`          (B)
@@ -317,18 +329,30 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
   r.store.reads = 0;
   r.store.failReadAt = 1;
 
-  const p = await settle(r.engine, runId);
+  let p: RunProjection;
+  const seen = await warningsWhile(async () => {
+    p = await settle(r.engine, runId);
+  });
+
+  // THE SITE IS ASSERTED, NOT ASSUMED. Breaking the Nth read is a positional fixture, and every
+  // assertion below would also pass if the failure had landed at C, D or E — a reviewer measured
+  // exactly that gap in this test and in C's. Each of the three retryable sites gives
+  // `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, so the warning is what says which one refused:
+  // "could not read the journal" is `#runSubgraph`'s and nobody else's.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused read, one warning: ${JSON.stringify(seen.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not read the journal/, `and it is #runSubgraph's own probe: ${mine[0]!.message}`);
 
   // AT `c54b0c2`: `failed` / `E_INTERNAL` — the parent run destroyed by one read of another run's
   // disk. The retry the graph declared was unreachable, because `internal` is not a retryable
   // class.
-  assert.notEqual(p.status, "failed", `the parent must survive a transient child read: ${p.status}/${p.error?.code ?? ""} ${p.error?.message ?? ""}`);
-  assert.equal(p.status, "succeeded", "and the delegation completes when the store comes back");
+  assert.notEqual(p!.status, "failed", `the parent must survive a transient child read: ${p!.status}/${p!.error?.code ?? ""} ${p!.error?.message ?? ""}`);
+  assert.equal(p!.status, "succeeded", "and the delegation completes when the store comes back");
   assert.deepEqual(r.charges, [20], "the child's charge ran exactly once — a retry is not a second child run");
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
 
   // The ordinary half: nothing else was disturbed. One child, one journal, one outcome.
-  assert.deepEqual(p.outputs, { result: { ok: true, amount: 20 } });
+  assert.deepEqual(p!.outputs, { result: { ok: true, amount: 20 } });
 });
 
 test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate is bounded", async () => {
@@ -478,26 +502,39 @@ test("B · A HOSTILE REJECTION does not defeat the guard that catches it — `in
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {
   const r = gateRig(new BreakableChildStore({ now: () => clock }));
-  const { runId } = await parked(r);
+  const { runId, childRunId } = await parked(r);
   const mirror = openGate((await r.engine.projection(runId))!)!;
 
   // Child read #2 of the pass that forwards the decision is `#forwardGateDecision`'s. Once.
   r.store.reads = 0;
   r.store.failReadAt = 2;
 
-  const outcome = await outcomeOf(async () =>
-    r.engine.resolveGate(runId, {
-      gateId: mirror.gateId,
-      decision: { kind: "approve" },
-      actor: { kind: "human", subject: LEAD, via: "console" },
-      idempotencyKey: "mirror",
-    }),
-  );
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    outcome = await outcomeOf(async () =>
+      r.engine.resolveGate(runId, {
+        gateId: mirror.gateId,
+        decision: { kind: "approve" },
+        actor: { kind: "human", subject: LEAD, via: "console" },
+        idempotencyKey: "mirror",
+      }),
+    );
+  });
 
   // AT `c54b0c2` this is `failed:E_INTERNAL`: the human's approval landed durably on the parent
   // and the parent then died on the child's disk.
   assert.notEqual(outcome, "failed:E_INTERNAL", "a foreign store must not be a permanent verdict on this run");
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // "AND NAMES ITS OWN SITE" — which this test's title promised for two rounds while its body
+  // named nothing, and a reviewer said so. Breaking the SECOND read is positional; the assertion
+  // that makes it a test OF THIS SITE is the sentence only `#forwardGateDecision`'s read produces.
+  // FILTERED BY RUN, because `process.emitWarning` defers to the next tick and a preceding test's
+  // warnings land inside this listener's window — measured, twenty of them from the permanent-store
+  // test two above.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused read, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not be forwarded — reading the journal failed/, `the forward's READ, not the probe and not the write: ${mine[0]!.message}`);
 
   const p = await settle(r.engine, runId);
   assert.equal(p.status, "succeeded", `the forward is re-entered and the delegation completes: ${p.error?.message ?? ""}`);
@@ -886,7 +923,7 @@ test("A · THE GUARD'S OWN FAILURE PATH PRINTS STORE-SUPPLIED VALUES, and they a
 test("A · WHICH VERBS REACH IT — the rewind door refuses EARLIER, at a SIXTH cross-run read, and this diff did not open it", async () => {
   // WHICH VERBS REACH THE GUARD, ASKED RATHER THAN ASSUMED — and the answer was not the one the
   // wrap's own docstring first claimed. `#planRollbackChild` sits under two doors: `#failRun` →
-  // `#compensate` (the test above, through `advance`) and `#rewindWalk`, which `rewind` and
+  // `#compensate` (the test above, through `advance`) and `#rewindPlanOf`, which `rewind` and
   // `planRewind` share. Driven here, the second door does NOT reach it while the child is
   // unreadable, because `#rewindRefusals` runs first and `#uncompensatedIrreversible` — which
   // follows `subgraph.started` into the CHILD's journal — throws before the walk is ever planned:

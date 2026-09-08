@@ -785,6 +785,38 @@ function loomCodeOf(e: unknown): string | undefined {
 }
 
 /**
+ * Was this thrown value a cancellation, whatever shape it arrived in?
+ *
+ * TWO SHAPES, NOT ONE, and the first version of the guard that uses this knew only about the
+ * second. `errors.ts` shows a cancellation normally ARRIVING as a bare `AbortError` and being
+ * converted by `toLoomError`; a `LoomError` carrying `E_CANCELLED` is what it becomes, not what
+ * it starts as. So `isLoomError(e) && e.code === E_CANCELLED` missed the raw shape entirely, and
+ * a raw abort escaping a nested drive would have been converted into a retryable refusal — the
+ * loosening this lane's non-goals exist to refuse.
+ *
+ * `toLoomError` KNOWS BOTH SHAPES AND IS STILL NOT SAFE TO CALL BARE HERE: its own first line is
+ * `isLoomError(e)`, and its `AbortError` arm is `e instanceof Error`. Both are trappable, so the
+ * whole call goes inside the `try` and the catch does nothing trappable.
+ *
+ * FALSE IS THE FAIL-CLOSED ANSWER. An undescribable value is not claimed as a cancellation; it
+ * gets the same retryable refusal every other foreign failure gets, which is bounded, and which
+ * is strictly better than the permanent verdict base gave it.
+ *
+ * NO PATH WAS FOUND THAT RAISES `E_CANCELLED` OUT OF A DRIVE — a reviewer searched, and both
+ * abort checks in this file RETURN an outcome rather than throwing. So this is a guard against a
+ * shape the code does not currently produce, kept rather than deleted because the argument that
+ * motivates it is the same one that keeps `#runSubgraph`'s own `advance(childRunId)` unwrapped —
+ * and that argument is correspondingly weaker than this lane first stated it.
+ */
+function isCancellation(e: unknown): boolean {
+  try {
+    return toLoomError(e).code === CODES.E_CANCELLED;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A cross-run touch that could not happen, as a RETRYABLE failure of the task that tried it.
  *
  * THE OTHER HALF OF `describeThrown`'S RULE, for the sites where swallowing is not available.
@@ -860,20 +892,25 @@ function loomCodeOf(e: unknown): string | undefined {
  *   The vice the instruction guards against is a SILENT join, and silence is what this paragraph
  *   and the one now in `DEFERRABLE_CODES` remove.
  *
- *   WHAT IT COSTS, named rather than waved past. `E_SUBGRAPH_FAILED` now carries three meanings —
- *   "the child has not finished", "the child ended failed", and "the child's journal is
- *   unreachable" — so a graph's `retry.onlyIf` cannot separate them, and neither can an operator
- *   filtering by code. `details.childRunId` and the message separate them; a code would separate
+ *   WHAT IT COSTS, named rather than waved past, and COUNTED rather than carried: the code now
+ *   carries FOUR meanings, not three as this paragraph said for a round — `DEFERRABLE_CODES`
+ *   enumerates three pre-existing arms ("has not finished", "ended failed", "awaiting a gate it
+ *   does not have") and this adds "the child's journal is unreachable". So a graph's
+ *   `retry.onlyIf` cannot separate them, and neither can an operator filtering by code.
+ *   `details.childRunId`, `details.cause` and the message separate them; a code would separate
  *   them better. The split was not taken because it needs a new member of `CODES` in `errors.ts`,
  *   which is outside this lane's authorised file set — see the lane report, where it is the
  *   recommended follow-up rather than a thing quietly left undone.
  *
- * THE STORE'S OWN TEXT GOES IN `details`, NOT IN `message`. `errorRecord` copies `message`
- * verbatim into the durable `task.committed` row and `security/redact.ts` never redacts a journal
- * payload, and `errors.ts`'s own header says implementations "never leak provider payloads into
- * `message` (they may contain secrets)" — a store whose error text carries a DSN or a URL with
- * userinfo would otherwise land it in the log. The message says which act failed and which child;
- * `details.error` says why.
+ * THE STORE'S OWN TEXT GOES IN `details.error`, AND THE MESSAGE NAMES THE ACT — which is a choice
+ * about what an operator reads first, and NOT the secrets argument this paragraph used to make.
+ * That argument was wrong twice over and a reviewer took it apart: `errorRecord` puts the message
+ * on `task.failed`, not on `task.committed` (which has no error field at all — this docstring says
+ * so correctly further up), and `details` is journaled in that same row and redacted no more than
+ * `message` is. Splitting the text across the two fields hides it from nobody, and the warning one
+ * line above prints it to stderr regardless. It is kept split because "which act failed, for which
+ * child" is the sentence a failed delegation should lead with, and the store's own words are the
+ * detail underneath it.
  */
 function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomError {
   const why = describeThrown(e);
@@ -2083,7 +2120,7 @@ export class Engine {
    * dispatched and the run left `running` after a walk that had already failed some of it.
    *
    * WHICH VERBS REACH IT — DRIVEN, NOT ASSUMED, and the answer is ONE DOOR, not two. Statically
-   * there are two callers: `#failRun` → `#compensate`, and `#rewindWalk`, which `rewind` and
+   * there are two callers: `#failRun` → `#compensate`, and `#rewindPlanOf`, which `rewind` and
    * `planRewind` share. The first is reached by every verb that DRIVES, and that set is named
    * rather than gestured at, because a reviewer found `steer` wrongly in it: the file has ONE
    * `#advanceSerially` call site, inside `advance`, and two internal `this.advance(runId)` calls,
@@ -8400,14 +8437,15 @@ export class Engine {
         // than to widen the conversion. Cancellation travels out unchanged, so an aborted child
         // fails the parent's delegation as a cancellation and not as "come back later".
         //
-        // ARGUED FROM THE CALL GRAPH, NOT DRIVEN — no fixture here races an abort against a
-        // forward, so this is a guard placed by the same reasoning that shaped the non-goal, and
-        // it is named as such rather than presented as a measured path.
-        //
-        // THROUGH `loomCodeOf`, for the same reason: a bare `isLoomError(e)` here would be an
-        // `instanceof` on the value a hostile store threw, in the failure path of the guard that
-        // exists to survive it.
-        if (loomCodeOf(e) === CODES.E_CANCELLED) throw e;
+        // ARGUED FROM THE CALL GRAPH, NOT DRIVEN, AND WEAKER THAN IT FIRST LOOKED — a reviewer
+        // searched for a path that raises `E_CANCELLED` out of a drive and found none, because
+        // both abort checks in this file RETURN an outcome rather than throwing. So this guards a
+        // shape the code does not currently produce. It is kept rather than deleted because the
+        // argument behind it is the same one that keeps `#runSubgraph`'s own `advance(childRunId)`
+        // unwrapped, and deleting one while keeping the other would be incoherent. See
+        // `isCancellation`, which also explains why a bare `isLoomError` or a bare `toLoomError`
+        // is the wrong tool in a hostile catch.
+        if (isCancellation(e)) throw e;
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
