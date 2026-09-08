@@ -29,7 +29,7 @@ import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { HumanGateBroker } from "../../src/run/gates.ts";
 import { RunLog } from "../../src/run/log.ts";
-import type { GateRecord, RunProjection } from "../../src/run/projection.ts";
+import { isTerminal, type GateRecord, type RunProjection } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -91,7 +91,7 @@ const resolver: ResourceResolver = {
   subgraph: (ref) => (ref === "graph/double@stable" ? child : undefined),
 };
 
-function rig(store = new MemoryStateStore({ now: () => NOW })) {
+function rig(store = new MemoryStateStore({ now: () => NOW }), gates?: HumanGateBroker) {
   const tools = new ToolRegistry();
   const functions = new FunctionRegistry();
   const charges: number[] = [];
@@ -114,6 +114,7 @@ function rig(store = new MemoryStateStore({ now: () => NOW })) {
     models: new ModelRegistry(),
     now: () => NOW,
     resolver,
+    ...(gates === undefined ? {} : { gates }),
     policy: { granted: ["pay"], systemFloor: "out", budget: { runUsd: 10 } },
   });
   const graph = compileOrThrow({ spec: parent, resolver, tools: TOOLS, tenantCapabilities: ["pay"] });
@@ -500,4 +501,102 @@ test("A CONTENDED APPEND ON THE CHILD'S LAST PASS IS STILL RETRIED — a retired
   );
   assert.equal((await r.engine.advance(runId)).status, "succeeded");
   assert.deepEqual(r.charges, [20], "charged once");
+});
+
+test("A MIRROR THE BROKER ANSWERS `{resolved:false}` DOES NOT RESTART THE DRIVE PASS — the loop reads the result, not the call", async () => {
+  // `#answerMirrorsTheChildAlreadyDecided` returns whether it WROTE, and the drive loop restarts
+  // its pass on that answer. `HumanGateBroker.resolve` returns `{resolved:false}` from its
+  // in-memory idempotency map BEFORE it looks at the gate's state, so a repeat under the same key
+  // returns quietly having written nothing. Setting the flag from "resolve did not throw" made
+  // the loop restart on a pass that changed nothing, and the termination argument — "the mirror
+  // it answered is no longer open" — assumed a write that never happened. Reachable through a
+  // rewind, which suppresses the `gate.decided` while the broker keeps the idempotency entry.
+  //
+  // THE DOUBLE IS BOUNDED AND ALWAYS TERMINATES, deliberately. A liar that answers
+  // `{resolved:false}` forever is what the defect turns into an unbounded loop, and a test that
+  // HANGS at base is not a test that fails at base — worse, this loop is pure microtasks, so it
+  // starves timers and `--test-timeout` cannot rescue the suite. So the assertion is the
+  // BOUNDED one that distinguishes the two behaviours safely: with the flag read correctly, the
+  // pass is not restarted and the broker is asked about this mirror a small, bounded number of
+  // times. The unbounded half is measured out of tree, in a killable child process, and recorded
+  // in the lane report.
+  let falseAnswers = 0;
+  class LyingBroker extends HumanGateBroker {
+    override async resolve(
+      log: Parameters<HumanGateBroker["resolve"]>[0],
+      input: Parameters<HumanGateBroker["resolve"]>[1],
+    ): ReturnType<HumanGateBroker["resolve"]> {
+      // Only the executor's own cross-run answer is lied about; a human's decision is untouched.
+      if (input.actor.kind === "system" && String(input.actor.component) === "executor:subgraph" && input.gateId.startsWith("gate_")) {
+        void log;
+        falseAnswers++;
+        return { resolved: false };
+      }
+      return super.resolve(log, input);
+    }
+  }
+  const r = rig(new MemoryStateStore({ now: () => NOW }), new LyingBroker({ now: () => NOW }));
+  const { runId, childRunId, mirror, childGate } = await parked(r);
+
+  await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+  // The mirror is never written, because the broker says so. What must NOT happen is the drive
+  // loop restarting its pass on that answer for ever.
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "awaiting_gate", "the pass ended rather than restarting on a write that did not happen");
+  assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open", "nothing was written, which is the premise");
+  assert.ok(falseAnswers >= 1, "the double was actually consulted");
+  assert.ok(falseAnswers < 50, `the pass is not restarted on a `+"`{resolved:false}`"+`: ${String(falseAnswers)} calls`);
+});
+
+test("POLLING A FINISHED CHILD STILL ANSWERS WHEN THE PARENT'S LOG IS BROKEN — the forward may refuse, the answer may not", async () => {
+  // `#advanceSerially`'s retired-terminal branch exists so that a caller polling `advance` until
+  // it sees `succeeded` keeps getting an answer — "the eviction turning a completed run into a
+  // missing one" is the thing it was added to prevent. It was read-only until the mirror forward
+  // was put on it, and the forward swallows two gate codes and rethrows everything else. So a
+  // failure on the PARENT's log became the answer to a question about a finished, successful
+  // CHILD: a store I/O error, a fold that throws, anything.
+  //
+  // Refusing to forward is always allowed. Refusing to ANSWER is not, and it costs nothing to
+  // swallow here because this call site keeps no memo — the next poll asks the fold again.
+  let breakParent = false;
+  class BrokenParentStore extends MemoryStateStore {
+    override read(runId: RunId, from: Seq): AsyncIterable<JournalEvent> {
+      if (breakParent && !String(runId).includes("~")) throw new Error("sqlite: disk I/O error");
+      return super.read(runId, from);
+    }
+  }
+  const r = rig(new BrokenParentStore({ now: () => NOW }));
+  // A child with exactly one gate, so approving it finishes and retires the child — which is the
+  // state whose poll this branch answers. `charge` is read-only here for that reason only.
+  const manifests = {
+    "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "read_only", idempotent: true },
+  } as unknown as Record<string, ToolManifestLite>;
+  r.engine.tools.register({
+    ...manifests["pay.charge"]!,
+    description: "Take money.",
+    parameters: { type: "object", properties: { amount: { type: "number" } } },
+    execute: (args: Record<string, unknown>) => {
+      r.charges.push(Number(args["amount"]));
+      return { content: "charged", writes: { receipt: { ok: true, amount: Number(args["amount"]) } } };
+    },
+  } as ToolDefinition);
+  const graph = compileOrThrow({ spec: parent, resolver, tools: manifests, tenantCapabilities: ["pay"] });
+  const runId = await r.engine.submit({ graph, inputs: { total: 10 } });
+  let p = await r.engine.advance(runId);
+  const ownGate = Object.values(p.gates).find((g) => g.state === "open" && g.mirrorOf === undefined);
+  if (ownGate !== undefined) {
+    p = await r.engine.resolveGate(runId, { gateId: ownGate.gateId, decision: { kind: "approve" }, actor: { kind: "human", subject: "u:a", via: "console" }, idempotencyKey: "own" });
+  }
+  const childRunId = `${runId}~delegate@root#0` as RunId;
+  const childGate = open((await r.engine.projection(childRunId))!)!;
+  const childP = await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+  assert.equal(childP.status, "succeeded", "the child is finished and retired");
+
+  breakParent = true;
+  const answered = await r.engine.advance(childRunId);
+  assert.ok(
+    isTerminal(answered.status),
+    `a finished child answers its own poll even when the parent's log cannot be read: ${JSON.stringify(answered.error ?? answered.status)}`,
+  );
+  assert.equal(String(answered.runId), String(childRunId));
 });

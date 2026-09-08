@@ -2293,7 +2293,20 @@ export class Engine {
         //
         // NO MEMO, because there is no context to hold one — the question is asked of the fold
         // every time, which is what makes any later touch of the child a retry.
-        await this.#forwardToParentMirrors(runId, folded);
+        //
+        // AND IT CANNOT FAIL THIS ANSWER. This branch exists so that polling a finished run keeps
+        // answering, and it was read-only until the forward was added here; the forward swallows
+        // two gate codes and rethrows everything else, so without this catch a failure on the
+        // PARENT's log — a store I/O error, a fold that throws — became the answer to a question
+        // about a finished, successful CHILD. Measured: with the parent's store failing,
+        // `advance(child)` threw `sqlite: disk I/O error` where it used to return `succeeded`.
+        // Swallowing costs nothing precisely because this call site keeps no memo: the next poll
+        // asks the fold again. Refusing to forward is always allowed; refusing to ANSWER is not.
+        try {
+          await this.#forwardToParentMirrors(runId, folded);
+        } catch {
+          /* the parent's problem is not this run's answer — retried on the next touch */
+        }
         return folded;
       }
       throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
@@ -2583,12 +2596,15 @@ export class Engine {
    * `parent status: awaiting_gate  open mirror: gate_…RY  mirrorOf: gate_…RX  child gate state:
    * decided`. The window is as long as the slowest task in the parent's wave.
    *
-   * AND THE CHILD CANNOT COME BACK FOR IT. `#advanceSerially` answers a RETIRED terminal run from
-   * the fold and returns before this loop, so once the child has finished and been retired — item
-   * 7's own change — no later `advance` of it forwards anything. The child-side half is
-   * structurally unable to close this, and the parent-side half is structurally unable to close
-   * the case the child-side half exists for (a parked parent is not `due`, so nothing drives it).
-   * Both are needed, and this is why.
+   * BOTH HALVES ARE STILL NEEDED, AND THE REASON IS NOT THE ONE THIS PARAGRAPH FIRST GAVE. It
+   * said the child "cannot come back for it" because `#advanceSerially` answers a retired terminal
+   * run from the fold and returns before the drive loop — true when it was written, and made
+   * false by the very next commit, which calls the forward on that early-return path so any later
+   * touch of a retired child retries. What survives is the other half of the argument: nothing
+   * DRIVES a retired child or a parked parent. A parent `awaiting_gate` is not `due`, so no run
+   * clock advances it, and a terminal child is advanced only if something polls it. So the child
+   * side closes the case where the child is still moving, this side closes the case where the
+   * mirror lands after the child stopped, and neither reaches the other's.
    *
    * ASKED OF THE FOLD, in the same `for(;;)` pass that committed the raise: the advance that
    * creates the race is the one that resolves it, so no external driver is required and a parked
