@@ -103,7 +103,12 @@ test("A CHILD IS VALIDATED ONCE PER DISTINCT (ref, depth, trail), not once per r
   const resolved = calls();
   console.log(`    depth 12, branching 2: ${String(resolved)} subgraph() resolutions, ${String(r.diagnostics.length)} diagnostics`);
   assert.ok(resolved < 2000, `${String(resolved)} subgraph resolutions for a 12-level chain — the walk is exponential again`);
-  assert.equal(resolved, 102, "one walk per (maxDepth, ref), not one per referencing node");
+  // A CEILING AND NOT AN EQUALITY. 102 is what the memo costs today, but a test that fails when
+  // the walk gets CHEAPER is the same mistake the spec-read guard in `test/scale.test.ts` was
+  // just corrected for: it fires on an improvement, which is the one thing a cost guard must
+  // not do. `<=` still catches the memo being dropped — that is 336 — and the loose bound above
+  // still catches the exponential coming back.
+  assert.ok(resolved <= 102, `${String(resolved)} resolutions: one walk per (maxDepth, ref), not one per referencing node`);
 
   // AND THE AUTHOR SEES EXACTLY WHAT THEY SAW. The leaf's single fault is still reported once
   // per node that reaches it, which is what makes the count exponential in the OUTPUT while the
