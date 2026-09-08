@@ -2236,8 +2236,22 @@ export class HumanGateBroker {
    * be the one this fold last consumed — same seq, same ts, same type. It costs ONE event per
    * call and no extra round trip (the same read, one lower bound), `RunFolder.push` skips it as
    * already folded, and a journal that disagrees about its own history — a different store, a
-   * truncated one, a rewritten one — drops the fold and starts from seq 1. The cache can be
-   * cold or stale; it cannot be somebody else's.
+   * truncated one, a rewritten one — drops the fold and starts from seq 1.
+   *
+   * WHAT THAT CLOSES, AND WHAT IT DOES NOT, because a mark on ONE event cannot speak for a
+   * prefix. It closes every second journal that is SHORTER than the mark, or that holds a
+   * different event there — which is what "a different journal" means in every case reachable
+   * from `src/`. It does NOT close a second journal whose event at the marked seq is IDENTICAL
+   * (same seq, ts and type) while its earlier events differ: those earlier events are never
+   * re-read, so the fold's state for them stands. Reproduced deliberately, with a frozen clock
+   * and a hand-built second store — three filler events and a copied `run.suspended` at the
+   * marked seq — and the second journal came back carrying the first's gate. No content mark on
+   * a single event can close that, because the two events are byte-identical; only a running
+   * digest of the whole folded prefix could, and it would cost a hash per event on the decision
+   * path to defend a configuration nothing constructs: `Engine` builds its own broker,
+   * `replayRun` deletes `gates` from the options it forwards, and reaching the residual needs
+   * the same ULID run id minted into two stores on purpose. The cache can be cold or stale, and
+   * it can be somebody else's only for a journal built to impersonate this one.
    *
    * The re-fold loop is `#catchUp`'s, including the bound: a `while (folder.stale)` whose
    * termination rests on `RunFolder` keeping its promise about learning each marker once is a
