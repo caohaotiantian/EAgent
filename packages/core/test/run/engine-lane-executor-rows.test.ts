@@ -25,9 +25,10 @@ import { CODES, isLoomError } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
-import type { NodeId, RunId, Seq } from "../../src/ids.ts";
+import type { GateId, NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { foldRun } from "../../src/run/projection.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { HookRegistry } from "../../src/run/hooks.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type MockScript, type ToolDefinition } from "../../src/run/registry.ts";
@@ -278,6 +279,133 @@ test("AN onComplete HOOK THAT THROWS IS REPORTED AS A PROCESS WARNING NAMING THE
   }
 });
 
+test("A PREVIEW AND A REFUSAL RELEASE WHAT THEY TOUCH — `planRewind` and a refused `rewind` do not re-attach a retired run", async () => {
+  // ITEM 1'S LEAK, REOPENED BY A READ-ONLY VERB. `#rewindRefusals` re-attached before running any
+  // of its refusals, and `attach` enters the run into `#runs` where only a terminal exit takes it
+  // out — which a finished or cancelled run has already used. So an operator previewing rewinds,
+  // or poking at cancelled runs, re-installed one context per call for the life of the process:
+  // the graph, branch index, taint sets and expression cache item 1 exists to release.
+  //
+  // RESIDENCY IS THE MEASUREMENT, NOT CALL COUNT. `#reattach` returns early when the run is still
+  // held, so a SECOND preview calls `attach` again only if the first one released.
+  const seen: string[] = [];
+  const real = Engine.prototype.attach;
+  Engine.prototype.attach = function (this: Engine, id: RunId, g: Parameters<Engine["attach"]>[1]): void {
+    seen.push(String(id));
+    real.call(this, id, g);
+  };
+  try {
+    const human = { kind: "human" as const, subject: "u:a", via: "console" as const };
+
+    // A finished run, previewed twice.
+    const r = rig();
+    const finished = await r.engine.submit({ graph: r.compile(functionSpec()), inputs: { seed: "go" } });
+    assert.equal((await r.engine.advance(finished)).status, "succeeded");
+    const before = seen.length;
+    await r.engine.planRewind(finished, 1 as Seq, human);
+    const firstPreview = seen.length - before;
+    await r.engine.planRewind(finished, 1 as Seq, human);
+    const secondPreview = seen.length - before - firstPreview;
+    assert.equal(firstPreview, 1, "the preview does attach, once it has passed the refusals");
+    assert.equal(secondPreview, 1, "…and released it again, so the second preview has to attach afresh");
+
+    // A cancelled run, whose rewind is refused: nothing is attached at all.
+    const r2 = rig();
+    const gated = {
+      ...functionSpec(),
+      nodes: [
+        { id: n("gate"), type: "human_gate", reads: ["seed"], humanGate: { ref: "oversight/x@stable" } },
+        { id: n("a"), type: "function", reads: ["seed"], writes: ["out"], function: { ref: "function/one@stable" } },
+      ],
+      edges: [{ id: "g", from: n("gate"), to: n("a"), kind: "seq" }],
+    } as unknown as GraphSpec;
+    const cancelled = await r2.engine.submit({ graph: r2.compile(gated), inputs: { seed: "go" } });
+    assert.equal((await r2.engine.advance(cancelled)).status, "awaiting_gate");
+    assert.equal((await r2.engine.cancel(cancelled, "stop", human)).status, "cancelled");
+    const atCancel = seen.length;
+    await assert.rejects(
+      // The plan hash is irrelevant here: the cancelled-run refusal fires long before anything
+      // compares it, which is the point — a refusal must not have attached first.
+      () => r2.engine.rewind(cancelled, 2 as Seq, "why", human, { planHash: "sha256:unused" }),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_RESTORE_ILLEGAL,
+    );
+    assert.equal(seen.length - atCancel, 0, "a rewind that is refused attaches nothing");
+  } finally {
+    Engine.prototype.attach = real;
+  }
+});
+
+// ── 1b · a run this engine never saw is not "retired here" ───────────────────
+
+test("ANOTHER RUN OF THE SAME GRAPH IS NOT THIS ENGINE'S RETIRED RUN — the redelivery door still refuses it", async () => {
+  // `#retiredHere` decides whether a redelivered gate decision is answered from the journal or
+  // refused `E_RUN_NOT_FOUND`, and it used to ask `#graphs`, which is keyed by GRAPH HASH. One
+  // graph is shared by every run that names it, so the moment ANY run of graph G retired in this
+  // process, every terminal run of G in the store — including runs this engine never attached —
+  // was treated as "retired here" and handed to the broker, skipping the door's own refusal.
+  // Measured before the fix: engine A answered `E_GATE_ALREADY_RESOLVED` for engine B's run,
+  // where a fresh engine answered `E_RUN_NOT_FOUND`. `cancel-cascade.test.ts` pins the refusal
+  // for a run this engine never attached; it passed only because no sibling had retired.
+  //
+  // THE ORDINARY HALF IS THE SECOND ASSERTION: engine A's OWN retired run is still answered from
+  // the journal, which is what `22393c5` is for.
+  const store = new MemoryStateStore({ now: () => NOW });
+  const mk = (): Engine => {
+    const functions = new FunctionRegistry();
+    functions.register("function/one@stable", () => ({ writes: { out: 1 } }));
+    return new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: new ToolRegistry(),
+      functions,
+      models: new ModelRegistry(),
+      now: () => NOW,
+      policy: { granted: ["*"], systemFloor: "out" },
+    });
+  };
+  const gated = {
+    ...functionSpec(),
+    nodes: [
+      { id: n("gate"), type: "human_gate", reads: ["seed"], humanGate: { ref: "oversight/x@stable" } },
+      { id: n("a"), type: "function", reads: ["seed"], writes: ["out"], function: { ref: "function/one@stable" } },
+    ],
+    edges: [{ id: "g", from: n("gate"), to: n("a"), kind: "seq" }],
+  } as unknown as GraphSpec;
+
+  const a = mk();
+  const b = mk();
+  const graph = compileOrThrow({ spec: gated, resolver: resolver() as ResourceResolver, tools: {}, tenantCapabilities: ["*"] });
+  const human = { kind: "human" as const, subject: "u:a", via: "api" as const };
+  const finish = async (engine: Engine, key: string): Promise<{ runId: RunId; gateId: GateId }> => {
+    const runId = await engine.submit({ graph, inputs: { seed: "s" } });
+    const open = Object.values((await engine.advance(runId)).gates).find((g) => g.state === "open")!;
+    const done = await engine.resolveGate(runId, { gateId: open.gateId, decision: { kind: "approve" }, actor: human, idempotencyKey: key });
+    assert.equal(done.status, "succeeded");
+    return { runId, gateId: open.gateId };
+  };
+  const redeliver = async (engine: Engine, runId: RunId, gateId: GateId, key: string): Promise<string> =>
+    engine
+      .resolveGate(runId, { gateId, decision: { kind: "reject", reason: "late" }, actor: human, idempotencyKey: key })
+      .then(() => "accepted", (e: unknown) => (isLoomError(e) ? e.code : String(e)));
+
+  // Engine B's run; engine A never attaches it.
+  const theirs = await finish(b, "k2");
+  assert.equal(await redeliver(a, theirs.runId, theirs.gateId, "x1"), CODES.E_RUN_NOT_FOUND, "before any retire in A");
+
+  // Engine A now runs its OWN run of the SAME graph to completion, which retires it.
+  const mine = await finish(a, "k1");
+  assert.equal(
+    await redeliver(a, theirs.runId, theirs.gateId, "x2"),
+    CODES.E_RUN_NOT_FOUND,
+    "a sibling run of the same graph retiring in A does not make B's run A's to answer",
+  );
+  assert.equal(
+    await redeliver(a, mine.runId, mine.gateId, "x3"),
+    CODES.E_GATE_ALREADY_RESOLVED,
+    "A's OWN retired run is still answered from the journal, not 404ed",
+  );
+});
+
 // ── 5 · the summariser's spend ───────────────────────────────────────────────
 
 const MAX_TURNS = 6;
@@ -345,4 +473,68 @@ test("A BUDGET THAT CANNOT COVER THE SUMMARY REFUSES IT — E_BUDGET_EXHAUSTED, 
   assert.equal(p.status, "failed");
   assert.equal(p.error?.code, CODES.E_BUDGET_EXHAUSTED, JSON.stringify(p.error ?? {}));
   assert.equal(r.counts.compaction, 0, "refused before the call, not after");
+});
+
+test("A COMPACTION CALL THAT THROWS STILL RELEASES ITS RESERVATION — durably, the way a failed agent turn does", async () => {
+  // THE ORDINARY HALF OF ITEM 5 WAS THE ONLY HALF MEASURED. The three cases above cover a
+  // summary that succeeds, one the provider TRUNCATES (a returned refusal, not a throw) and one
+  // the budget refuses before the call. None makes the provider THROW — and `#summarizeEffect`
+  // reserved, journaled `budget.reserved`, and had no `catch` between there and its `settle`.
+  // `#runAgent`'s turn has had exactly that catch for as long as it has reserved anything, and
+  // says why: "AND THE RELEASE IS DURABLE TOO, or the fold holds the promise for the life of
+  // the run."
+  //
+  // THE ERROR EDGE IS WHAT MAKES IT REACHABLE rather than academic. Without one the failed task
+  // ends the run and the orphaned promise dies with it; with one the run SUCCEEDS carrying a
+  // reservation for a call that never returned, and `projection.ts` folds `budget.reserved` with
+  // no matching `budget.settled` — so a cold fold after `kill -9`, and `PolicyEngine.restore`
+  // with it, reads a run that has permanently promised away money it never spent.
+  const counts = { agent: 0, compaction: 0 };
+  const script: MockScript = (req) => {
+    if (req.model === "compaction") {
+      counts.compaction++;
+      throw new Error("compaction provider is down");
+    }
+    counts.agent++;
+    return counts.agent < MAX_TURNS
+      ? { toolCalls: [{ id: `c${String(counts.agent)}`, name: "t.echo", arguments: {} }], finishReason: "tool_use" }
+      : { text: JSON.stringify({ done: true }), finishReason: "stop" };
+  };
+  const r = rig({ script, contextTokens: 1_000, budgetUsd: 100, pricePerMTok: 1 });
+  r.engine.tools.register({ ...ECHO, description: "blob", parameters: { type: "object", properties: {} }, execute: () => ({ content: "x".repeat(RESULT_CHARS) }) } as ToolDefinition);
+  const schema = { type: "object", properties: { done: { type: "boolean" } }, required: ["done"] };
+  const spec = agentSpec(MAX_TURNS, schema, { policy: { budget: { costUsd: 0.5 } } }) as unknown as {
+    channels: Record<string, unknown>;
+    outputs: string[];
+    nodes: unknown[];
+    edges: unknown[];
+  };
+  // An `error` edge onto a function node, so the failed agent task does not end the run.
+  spec.channels["done"] = { type: "number", reduce: "replace" };
+  spec.outputs = ["done"];
+  r.engine.functions.register("function/done@stable", () => ({ writes: { done: 2 } }));
+  spec.nodes.push({ id: n("b"), type: "function", reads: ["seed"], writes: ["done"], function: { ref: "function/done@stable" } });
+  spec.edges.push({ id: "e1", from: n("a"), to: n("b"), kind: "error" });
+
+  const runId = await r.engine.submit({ graph: r.compile(spec as unknown as GraphSpec), inputs: { seed: "go" } });
+  const p = await r.engine.advance(runId);
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.equal(counts.compaction, 1, "the ladder must actually have called the provider");
+
+  const rows = await journal(r.store, runId);
+  const count = (t: string): number => rows.filter((e) => e.type === t).length;
+  assert.equal(
+    count("budget.settled"),
+    count("budget.reserved"),
+    `every reservation is released: ${String(count("budget.reserved"))} reserved, ${String(count("budget.settled"))} settled`,
+  );
+  // The throw is journaled where the call was, so the audit trail says the call happened and died.
+  assert.equal(
+    rows.filter((e) => e.type === "effect.failed" && String((e.payload as { key: string }).key).includes(":summarize:")).length,
+    1,
+    "the dead call is a failed effect",
+  );
+  // AND THE FOLD AGREES, which is the half a restart reads. `foldRun` over the raw journal is
+  // what `PolicyEngine.restore` re-seeds spend from.
+  assert.equal(foldRun(rows)!.reservedUsd, 0, "a cold fold holds no promise for a call that never returned");
 });
