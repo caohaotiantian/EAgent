@@ -30,20 +30,23 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ---
 
-## State — re-measured 2026-09-03 after the phase-2-4 merge, one command each
+## State — re-measured 2026-09-08 after the two waves, one command each
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,040 pass / 0 fail** | `npm test` |
+| tests on `loom` | **3,284 pass / 0 fail** | `npm test` |
 | pinned exports | 539 | `node scripts/check-surface.mjs` |
-| kernel | 10 files, 11 seams | `node scripts/check-kernel.mjs` |
-| zero runtime deps | green, 62 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8 | read every `git ls-files` path; see CLAUDE.md |
+| kernel | 10 files, 11 seams, 325 commits since `86b84c9` | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 64 files | `node scripts/check-zero-dep.mjs` |
+| NUL census | 5 files, 0 invalid UTF-8, of 426 tracked | read every `git ls-files` path; see CLAUDE.md |
 
-**The three phase-2-4 lanes are merged**, with two fix rounds on top. The surface row that used
-to sit here as a live gate failure is paid: `producedTokens` is pinned and the gate is green.
-`phase1-taint` is still unmerged and parked.
+**The five wave-1 lanes are merged at `294e713` and two of six wave-2 lanes at `9b45c7c` (the
+taint design) and `8d43127` (gates).** Four wave-2 branches — `wave2-graph`, `wave2-engine`,
+`wave2-guards`, `wave2-exam` — hold committed, part-reviewed work and are NOT merged;
+`docs/handoff-2026-09-08.md` §6 says what each holds and what its next step is. `phase1-taint`
+is still unmerged; the design its parking waited for (`docs/design-taint-rc6-2026-09-05.md`)
+recommends merging it with a `Kernel-seam:` trailer.
 
 **Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
 wave moved which number. Every one of those paragraphs was true when written and none was re-run,
@@ -58,7 +61,7 @@ one fresh skeptic per finding instructed to REFUTE it. **207 findings — 24 blo
 finding was verified; the 89 unverified are minor/opportunity plus 10 major.
 
 - The record, with what holds and what does not: **`docs/audit-2026-09-02.md`**
-- Where the branches are and what is open: **`docs/handoff-2026-09-03.md`**
+- Where the branches are and what is open: **`docs/handoff-2026-09-08.md`**
 - The full register, per-lens reports and every verdict: `.agent/full-audit-2026-09-02/`
 
 **These findings are NOT copied into the sections below.** A second copy of a dated, reproducible
@@ -68,9 +71,10 @@ that row was corrected in place.
 
 ## What is still open, by section
 
-**§A0 is the newest and reads first.** Eleven rows the phase-2-4 merge's three attackers
-reproduced and did NOT fix, because none is caused by that merge. Everything they found that IS
-caused by it was fixed in it.
+**§A0 is the newest and reads first.** What the phase-2-4 merge's three attackers reproduced and
+did not fix, minus what the two waves of 2026-09-05 → 09-08 closed (those moved to §Z with their
+shas), plus what those waves found and recorded rather than fixed. Its rows are countable with
+the first grep below using `A0` in place of `[A-Z]`.
 
 **EVERY OTHER OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
 `docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
@@ -140,93 +144,28 @@ reused — §H.2 is the record of what a renumber cost the last time one happene
 
 ---
 
-## A0 · The phase-2-4 merge — confirmed, reproduced, and NOT fixed
+## A0 · Reproduced and NOT fixed — the phase-2-4 merge's remainder, and what the two waves recorded
 
-Three agents attacked `7eaa206..the merge`: lane C's round-2 adversary (the check
-`docs/handoff-2026-09-03.md` §4 recorded as skipped, now run), a fresh diff reviewer, and a
-behavior check that drove the console, a real `kill -9` recovery and a three-level child-bounds
-chain through the shipped binary. What they found and the merge FIXED is in the commits; this is
-the remainder. **Every row below was reproduced by running, and none is caused by the merge** —
-they are pre-existing, which is why they were recorded rather than folded into it.
+Three agents attacked `7eaa206..the merge` on 2026-09-03 and recorded fifteen rows here; the two
+waves of 2026-09-05 → 09-08 closed ten of them and half of two more, and every closure is in
+§Z with its sha. What follows is the remainder — each with the command that settles it on
+`8d43127` — plus five rows the waves found and recorded rather than fixed. Where a fix exists on
+an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a closure.
 
-- **A0.1 · `canonicalize`'s string arm still throws a bare `RangeError`.** The container bound
-  made the object walk a typed refusal, but `spend` charges AFTER `JSON.stringify(value)` has
-  already built the string, so a single escape-heavy leaf escapes it:
-  `canonicalize("\n".repeat(300_000_000))` → `RangeError: Invalid string length`, `code`
-  undefined, 729 ms. Thin but not nil: `fs.read` does `readFileSync(fd, "utf8")` on the WHOLE
-  file and only then slices to `maxBytes`, and `maxBytes` has no ceiling of its own.
-  **Fix:** check `text.length` before `JSON.stringify` in `case "string"`.
-- **A0.2 · The console's connection pill is dead, because SSE sends no bytes until the first
-  event.** There is no `flushHeaders()` anywhere in `server/http.ts` (`grep -c` → 0, both shas),
-  so with a client caught up at head the handler parks and Node never flushes:
-  `curl -sN -D - -H "last-event-id: 20" …/events` → six seconds, zero bytes; with
-  `last-event-id: 0` the headers come out at once because a backlog exists. Instrumented inside
-  the page, `$("conn").textContent` was written ZERO times over 3 s on a live run, so `follow`'s
-  `= "live"` never runs. The stream works — `lastSeq` advances off it — but the page's only "am I
-  connected" signal is a lie, and an intermediary with an idle-response timeout would cut a
-  stream that has emitted nothing. **Fix:** `res.flushHeaders()` after `writeHead`.
-- **A0.3 · A child run's gate is listed by `GET /gates` and 404s on the route the console posts
-  to.** `POST /runs/<childRunId>/gates/<gateId>` answers `E_RUN_NOT_FOUND` "is not attached"
-  after a restart, identically at both shas, while the console's "Awaiting you" panel renders
-  approve/reject buttons for exactly those rows. `loom approve … --graph <the subgraph file>`
-  works. Related and worth knowing before anyone hand-writes a URL: a child run id contains `#`,
-  so an unencoded path silently truncates to `E_ROUTE_NOT_FOUND`.
-- **A0.4 · `producedTokens` under-prices a `max_tokens`-truncated tool turn ~227x.** `safeJson`
-  has already collapsed the cut-off argument JSON to `{}` by the time the floor counts it, so a
-  turn that burned its whole output allowance is priced at ~$0.00015. The COMPLETE turn is
-  correct (2,267 tokens for 9,032 chars) and a strict improvement on the `1` it used to charge.
-- **A0.5 · `state/channels.ts`'s own-key sweep names a set and leaves four members.**
-  `reduceState`, `foldPartial`, `initialState` and `makeStateView` still read and write raw, so a
-  channel named `toString` compiles clean and kills the run with
-  `E_INTERNAL channel "toString": expected array, got function`. Pre-existing, but an unswept
-  member of the set the merge claims to have swept IN THAT FILE.
-- **A0.6 · `console.ts`'s fold arms drop the terminal guard `projection.ts`'s `apply()` keeps,**
-  while their comment claims to be "THE SAME TWO LINES `foldRun()` applies". A `run.resumed`
-  after `run.cancelled` re-renders the stop controls.
-- **A0.7 · `listen()` answers `/health` before `#armGatedRuns` has finished,** though its comment
-  says "BEFORE THE FIRST REQUEST": 200 after 52 of 5,000 folds while `listen()` was still
-  pending. Separately `MAX_ARM_SCAN` pays 5,000 folds at boot for ZERO arms whenever the gated
-  set is all-decided, which is the common shape for a deployment that uses gates.
-- **A0.8 · `#edgesToTake`'s exhaustiveness claim is false.** The comment says naming the three
-  unconditional kinds "makes a new member of `EdgeKind` a compile error here", and `EDGE_KINDS`
-  says "the switch is exhaustive, so the type checker names the second site". Adding a kind and
-  typechecking flags ONE site, `compile.ts:289`; neither engine.ts site. A new kind therefore
-  compiles clean and `#assertBound` refuses every run using it at run time — fail-closed, but
-  unflagged at build time.
-- **A0.9 · `filePayloads`'s docstring was orphaned** onto the new `putOrdinal` counter.
-- **A0.10 · `GLOB_SCAN_BATCH`'s docstring understates the cap fast path.** `grep hit` on a
-  60,000-file workspace went 3 ms → 36 ms, because `capped` is only observable at a flush; "a few
-  more paths" is a batch's worth. Absolute cost 33 ms.
-- **A0.13 · The usage floor closes the ZERO, and a wire defeats it by asserting 1.** The rules
-  in both adapters test a reported count against local evidence, but each has exactly one
-  disproof. Measured on an 80,000-character prompt / 5,000-character answer at $3/$15/$0.30 per
-  million, identical at every sha in this merge — **pre-existing, not a regression, and strictly
-  better than the `=== 0` it replaced**:
-
-      ordinary/full-cache-hit  {"in":0,"out":7,"cr":20000,"usd":0.006105}   honest, believed
-      exploit/cache_read=1     {"in":0,"out":7,"cr":1,"usd":0.000105}       buys the whole prompt
-      exploit/input_tokens=1   {"in":1,"out":7,"usd":0.000108}              both adapters
-      exploit/output_tokens=1  {"in":11,"out":1,"usd":0.000048}
-      output_tokens: 1e-9      {"in":11,"out":1e-9,"usd":0.000033}
-
-  ~570x under-charge, the loosening direction for `budget.runUsd`. What the rules DO close is
-  the zero, which is what a gateway with no usage accounting emits by default and what every
-  measured instance looked like. **The version that is not defeated by adding 1 is quantitative**
-  — floor when `inputTokens + cacheRead + cacheWrite` cannot account for `roughTokens(req)`, and
-  likewise `outputTokens` against `producedTokens` — and it needs a tolerance, because both are
-  estimates. Inventing that threshold without measuring it is how a guard starts refusing honest
-  turns, so it is a decision with work behind it rather than a patch.
-- **A0.14 · An unpriced model makes the dollar floor moot entirely.** `priceOf` returns 0 for a
-  model with no price-table entry, so `claude-sonnet-5-20260101` costs $0 where
-  `claude-sonnet-5` costs $0.135 on the same turn. Tokens still floor, so `budget.runTokens`
-  binds and `budget.runUsd` does not. Identical at base; two lines below the code A0.13 is about,
-  and the same "zero is the passing value" shape.
-- **A0.15 · Anthropic input usage is read only from `message_start`.** `AnthropicEvent` declares
-  input counts under `message` only; `message_delta.usage` is typed `{output_tokens?}`. A wire
-  that reports the cache hit in `message_delta` is charged 10x — `{"in":20002,"usd":0.060111}`
-  against `{"in":0,"cr":20000,"usd":0.006105}` for the same numbers on `message_start`.
-  Over-charging, so not a loosening, and identical at base.
-
+- **A0.5 · A channel named `toString` still compiles clean.** The runtime half — `reduceState`,
+  `foldPartial` and the `__proto__` put in `state/channels.ts` — closed at `29e32b1` (§Z), so
+  the run no longer dies with `E_INTERNAL`; the graph is still accepted:
+  `/usr/bin/grep -a -c GRAPH003_RESERVED_CHANNEL packages/core/src/graph/validate.ts` → `0`.
+  **Fix on `wave2-graph`, unmerged** (`3fd7ad5`): `GRAPH003_RESERVED_CHANNEL`, the set read off
+  `Object.getOwnPropertyNames(Object.prototype)` rather than hand-kept, with the lane's probe
+  `toString channel: ok= true diags= []` → `ok= false diags= ["GRAPH003_RESERVED_CHANNEL"]`.
+  Closes when that branch is reviewed and merged.
+- **A0.8 · `#edgesToTake`'s exhaustiveness claim is false.** Adding a member to `EdgeKind` and
+  typechecking flags ONE site, `compile.ts:289`; neither `engine.ts` site. `#assertBound` refuses
+  at run time — fail-closed, unflagged at build time.
+  `/usr/bin/grep -a -c 'satisfies never' packages/core/src/run/engine.ts` → `0`.
+  **Fix on `wave2-engine`, unmerged** (`3622ca4`): `e.kind satisfies never` in the `default:`
+  arm; the lane measured `| "probe"` → one error at base, two at head. Closes with that merge.
 - **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every
   tick.** This one IS caused by the merge's fix round, and is recorded rather than fixed because
   the cheap fixes are wrong and the right one is a cache-invalidation design. `runClockTick`'s
@@ -249,12 +188,77 @@ they are pre-existing, which is why they were recorded rather than folded into i
   compile), but a hash that is unresolvable now resolves later if someone publishes that graph,
   so the memo needs a way to expire. Restricting the `leased` arm to tasks whose node declares a
   `timeoutMs` is NOT available: the clock cannot know the node's deadline without the graph,
-  which is the thing being resolved.
+  which is the thing being resolved. Untouched by both waves.
+- **A0.13 · The usage floor is quantitative now, and its residual is ~80× in dollars.** The
+  `=== 1` defeat closed at `49624c0` (§Z): the floor fires when `inputTokens + cacheRead +
+  cacheWrite` cannot account for the estimate within `USAGE_TOLERANCE = 8`
+  (`providers/usage.ts:95`, the constant chosen off a measured table). What remains, measured by
+  the lane that built it: the floor tests the SUM of three counts billed at three rates, so a
+  wire may declare the whole floored amount as a cache read — 8× in tokens, and with cache read
+  at $0.30 against input at $3 per million (the row's own price table), ~80× in dollars on the
+  Anthropic input dimension. `USAGE_TOLERANCE`'s docstring names the evidence that would close
+  it and why it was not taken. Closes with a per-rate floor, or a measurement showing the
+  cache-read dimension is bounded elsewhere.
+- **A0.14 · A model with no price row and no dated base still prices 0.** The silent half closed
+  at `49624c0` (§Z): `claude-sonnet-5-20260101` prices at `claude-sonnet-5`'s row by longest
+  `-`-boundary prefix. The loud half — `my-gateway-model` at $0 — is left to the boot banner and
+  `promote-live`'s refusal, both of which probe `priceOf(m, {1e6, 1e6}) === 0` (`cli.ts:2747`,
+  `cli.ts:7957`); pricing at the dearest row was built and removed because it switched both off.
+  `/usr/bin/grep -a -c hasPrice packages/core/src/run/registry.ts` → `0`.
+  **Fix on `wave2-guards`, unmerged** (`cb1df3a`/`ce14397`): `ModelAdapter.hasPrice`, optional,
+  and an unpriced route refusing at the model call. Closes with that merge.
 
-- **A0.11 · `wireCount` is duplicated in `openai.ts` rather than shared with `anthropic.ts`,**
-  because `index.ts` re-exports both with `export *` and sharing it would add a name to
-  `scripts/surface.json`. The property that matters is held by a test driving both adapters.
-  Sharing it is a one-line pin edit if anyone would rather.
+- **A0.16 · Three injection paths are live on `loom`, on no register row.**
+  `docs/design-taint-rc6-2026-09-05.md` §4 names them with the graph shape and the three-arm
+  measurement (dirty / page-safe / clean) for each: **`errfan`** — a clean fan whose body reads
+  the page and THROWS iff it says PAY, join `onBranchError:"skip"`, join arms on `!has(parts)`:
+  a failed body writes nothing, so the fold channel is never tainted (`dirty succeeded gates=0
+  charged=1`); **`mutedge5`** — a control-tainted `canMutate` agent grafts `agent→x→charge`;
+  `#applyMutation` consults no taint set (`dirty succeeded gates=0 charged=1`, page-safe `failed
+  E_OUTPUT_MISSING charged=0`); **`errthrow`** — a node reads the page and throws iff PAY onto a
+  catch-all `error` edge; `choiceOf` drops `error` edges so the choice space is empty (`dirty
+  succeeded gates=0 charged=1`). Identical at `a638e7d` and `294e713`. The probes were
+  `probes/rc6/{errfan,mutedge5,errthrow}.test.ts` in the taint lane's scratchpad, importing the
+  `wt-phase1` worktree, whose directory is now gone — re-create it from `phase1-taint`. Closes
+  when each is a test under `packages/core/test/run/` that refuses, with the fail-closed rule
+  design §6 item 2b states per path, on the merged `phase1-taint`.
+- **A0.17 · `POST /runs` accepts the input the CLI refuses.** Since `8c734ce`, `loom run --input
+  '{"documnet":…}'` refuses `E_CONFIG_INVALID` naming the key and the declared set, with zero
+  `run.submitted` rows. The plane does not: lane P measured `POST /runs {"workflow":
+  "fan-out-join","inputs":{"documnet":"a b"}}` → **202**, a run created, failing downstream
+  `E_CHANNEL_UNDECLARED` classed `E_INTERNAL` — the shape the CLI fix exists to prevent, and
+  against a real provider it has already spent. Kept split on purpose (a typo in argv is not
+  evidence for narrowing a wire contract — lane P's report §8.1); it is an inconsistency all the
+  same. Closes when the plane applies the same declared-inputs check and answers 400 naming the
+  key, or when a decision records that the wire stays permissive.
+- **A0.18 · A flake in `test/server/plane-watch-and-stop.test.ts`.** "THE CONSOLE'S OWN
+  command() STOPS A RUN" (its assertion is at `:935` on `8d43127`) once collected
+  `'pause,advance,cancel,pause,advance,cancel'` against `'pause,advance,cancel'` — one failure in
+  six full-suite runs at `wave2-graph`'s head, none in three at `294e713`, 21/21 in isolation on
+  both. Observation, not attribution: that lane touches nothing in the console. It reads as the
+  test collecting controls from two renders under parallel load. Closes when it is reproduced on
+  demand and the collection made single-render, or when a hundred full runs show nothing.
+- **A0.19 · A NODE id may still be an `Object.prototype` name.** `plans` is a plain object, so
+  `plans['valueOf']` is a function — a node nobody declared. Measured by the graph lane at
+  `294e713` and at its head: `node id toString: ok= true []`. The channel rule (§A0.5's compile
+  half) was scoped to channels deliberately; the rule for ids belongs in the same
+  `graph/validate.ts` loop, and the decision is whether `plans` and the projection's per-id maps
+  need the channel treatment. Closes with a compile refusal, or a recorded argument that a
+  compiler-built map is safe.
+- **A0.20 · The mirror-gate asymmetry.** For a `subgraph` node whose child raises a human gate,
+  the engine raises a mirror on the parent; `GET /gates` lists BOTH rows. Since `8c734ce` +
+  `60ff53d` made the child's row answerable, approving it leaves the parent stranded — lane P's
+  behaviour check (f): child `succeeded`, parent `awaiting_gate` with the mirror `open` through
+  5 s of sweeper ticks and an explicit `advance`; approving the mirror first resolves both. The
+  wrong door is the one the console renders buttons for. `#forwardGateDecision`'s docstring
+  (`engine.ts` ~6987) describes a re-raise nobody observed. The gates lane measured it cannot be
+  fixed from `gates.ts` (a broker holds one `RunLog`; the child's journal carries no reverse
+  pointer). **Fix on `wave2-engine`, unmerged** (`d4115c9`): journal-driven, every decided child
+  gate whose parent mirror is open is answered `approve` by `executor:subgraph` from
+  `#advanceSerially`, so the door that decided the child does not matter.
+  `/usr/bin/grep -a -c forwardToParentMirrors packages/core/src/run/engine.ts` → `0`. What stays
+  open after that merge: `GET /gates` still lists both rows (`server/http.ts`). Closes with the
+  merge plus a decision on the listing.
 
 ## A · Open defects and unguarded behaviour
 
@@ -2127,10 +2131,40 @@ Each traces to a decision in `DESIGN.md`.
 
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-02 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-08 — do not re-fix these
 
 The register. Each line names what closed and the commit carrying the argument; `git show <sha>`
 is the citation, and it is durable in a way a working-notes directory is not.
+
+**Closed 2026-09-05 → 2026-09-08, the two waves** (`docs/handoff-2026-09-08.md`; the argument for
+each is its commit, and where a number is given without a sha it was re-run on `8d43127`).
+§A0.1 the canonical string arm — raw length checked before quoting (`74b62d9`;
+`canonicalize("\n".repeat(300_000_000))` → `E_PAYLOAD_TOO_LARGE … emits over 300000000
+characters` in 0 ms). §A0.2 `flushHeaders()` after `writeHead` (`60ff53d`). §A0.3 a child run's
+gate reachable with no `--graph`: `graphsByHash` indexes `SPEC_KINDS`, a `ControlPlaneOptions.subgraphs`
+inventory that is attach-only, and every console path percent-encoded (`8c734ce`, `60ff53d`).
+§A0.4 a `max_tokens`-truncated tool turn floored from the raw argument text both adapters now
+accumulate (`49624c0`, corrected at `04586aa`). §A0.5's runtime half — `reduceState` and
+`foldPartial` read and write by own key and `__proto__` goes through `defineProperty`
+(`29e32b1`); the compile half is still §A0.5. §A0.6 the console's fold carries the same
+`TERMINAL` / `RUN_STATUS_EVENTS` pair `projection.ts` keeps, evaluated in the test rather than
+grepped (`60ff53d`). §A0.7 the arming scan inside `listen()`'s try after `#server` is claimed —
+mid-scan `GET /health` is refused, not answered — and `#endedAtHead` answering a finished run
+from one indexed row (`60ff53d`). §A0.9 `filePayloads`'s docstring (`702f785`). §A0.10
+`GLOB_SCAN_BATCH`'s docstring COUNTED: 512 paths walked by `fs.glob`, 1,536 walked / 1,366 read
+by `fs.grep` on a 60,000-file tree, both constants in `fs.grep`'s number (`61e8185`, attribution
+corrected at `04586aa`). §A0.11 `wireCount` shared through `providers/usage.ts`, not barrelled,
+surface 539 unchanged — the row's reason was false, the pin is `dist/index.d.ts`'s export set
+and a module `index.ts` does not re-export adds nothing (`49624c0`). §A0.13's `=== 1` defeat —
+the floor is quantitative, `USAGE_TOLERANCE = 8` off a measured table, a lying wire charged
+131× more through the binary and an honest one byte-identical (`49624c0`, `04586aa`); the
+dollar residual is still §A0.13. §A0.14's silent half — a date-suffixed variant prices at its
+base row (`49624c0`); the loud half is still §A0.14. §A0.15 Anthropic input usage as the MAX of
+the `message_start` and `message_delta` positions (`49624c0`). And the two compile diagnostics
+`handoff-2026-09-03-merged.md` §5 left in `graph/validate.ts` — `checkProjectionValues` refuses
+a present-and-unreadable `take`/`overflow`/`maxTokens`, an absent one still refusing at rung 2
+by design (`086fe75`). **None of these was caused by the two waves; what the waves found and
+did not fix is §A0.16–A0.20.**
 
 **Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
 paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
