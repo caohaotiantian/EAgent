@@ -147,7 +147,7 @@ reused — §H.2 is the record of what a renumber cost the last time one happene
 ## A0 · Reproduced and NOT fixed — the phase-2-4 merge's remainder, and what the two waves recorded
 
 Three agents attacked `7eaa206..the merge` on 2026-09-03 and recorded fifteen rows here; the two
-waves of 2026-09-05 → 09-08 closed ten of them and half of two more, and every closure is in
+waves of 2026-09-05 → 09-08 closed ten of them and half of three more, and every closure is in
 §Z with its sha. What follows is the remainder — each with the command that settles it on
 `8d43127` — plus five rows the waves found and recorded rather than fixed. Where a fix exists on
 an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a closure.
@@ -201,9 +201,11 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   cache-read dimension is bounded elsewhere.
 - **A0.14 · A model with no price row and no dated base still prices 0.** The silent half closed
   at `49624c0` (§Z): `claude-sonnet-5-20260101` prices at `claude-sonnet-5`'s row by longest
-  `-`-boundary prefix. The loud half — `my-gateway-model` at $0 — is left to the boot banner and
-  `promote-live`'s refusal, both of which probe `priceOf(m, {1e6, 1e6}) === 0` (`cli.ts:2747`,
-  `cli.ts:7957`); pricing at the dearest row was built and removed because it switched both off.
+  `-`-boundary prefix. The loud half — `my-gateway-model` at $0 — is left to the boot banner,
+  which probes `priceOf(m, {1e6, 1e6}) === 0` (`cli.ts:2747`, the only such probe in `cli.ts` on
+  `8d43127`) into `ws.models.unpriced`, and to `promote-live`'s refusal that reads that list
+  (`test/cli/promote-live.test.ts:507` pins it); pricing at the dearest row was built and removed
+  because it switched both off.
   `/usr/bin/grep -a -c hasPrice packages/core/src/run/registry.ts` → `0`.
   **Fix on `wave2-guards`, unmerged** (`cb1df3a`/`ce14397`): `ModelAdapter.hasPrice`, optional,
   and an unpriced route refusing at the model call. Closes with that merge.
@@ -219,7 +221,8 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   catch-all `error` edge; `choiceOf` drops `error` edges so the choice space is empty (`dirty
   succeeded gates=0 charged=1`). Identical at `a638e7d` and `294e713`. The probes were
   `probes/rc6/{errfan,mutedge5,errthrow}.test.ts` in the taint lane's scratchpad, importing the
-  `wt-phase1` worktree, whose directory is now gone — re-create it from `phase1-taint`. Closes
+  `wt-phase1` worktree — `prunable` in `git worktree list` because its `.git` link file is
+  missing, though the directory is still there. Closes
   when each is a test under `packages/core/test/run/` that refuses, with the fail-closed rule
   design §6 item 2b states per path, on the merged `phase1-taint`.
 - **A0.17 · `POST /runs` accepts the input the CLI refuses.** Since `8c734ce`, `loom run --input
@@ -251,7 +254,7 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
   behaviour check (f): child `succeeded`, parent `awaiting_gate` with the mirror `open` through
   5 s of sweeper ticks and an explicit `advance`; approving the mirror first resolves both. The
   wrong door is the one the console renders buttons for. `#forwardGateDecision`'s docstring
-  (`engine.ts` ~6987) describes a re-raise nobody observed. The gates lane measured it cannot be
+  (lane P cites `engine.ts` ~6987 in its own tree) describes a re-raise nobody observed. The gates lane measured it cannot be
   fixed from `gates.ts` (a broker holds one `RunLog`; the child's journal carries no reverse
   pointer). **Fix on `wave2-engine`, unmerged** (`d4115c9`): journal-driven, every decided child
   gate whose parent mirror is open is answered `approve` by `executor:subgraph` from
@@ -2140,7 +2143,7 @@ is the citation, and it is durable in a way a working-notes directory is not.
 each is its commit, and where a number is given without a sha it was re-run on `8d43127`).
 §A0.1 the canonical string arm — raw length checked before quoting (`74b62d9`;
 `canonicalize("\n".repeat(300_000_000))` → `E_PAYLOAD_TOO_LARGE … emits over 300000000
-characters` in 0 ms). §A0.2 `flushHeaders()` after `writeHead` (`60ff53d`). §A0.3 a child run's
+characters` in about a millisecond — 0 and 1 ms on two runs). §A0.2 `flushHeaders()` after `writeHead` (`60ff53d`). §A0.3 a child run's
 gate reachable with no `--graph`: `graphsByHash` indexes `SPEC_KINDS`, a `ControlPlaneOptions.subgraphs`
 inventory that is attach-only, and every console path percent-encoded (`8c734ce`, `60ff53d`).
 §A0.4 a `max_tokens`-truncated tool turn floored from the raw argument text both adapters now
