@@ -865,9 +865,10 @@ function openConsole(base: string, token: string, answer: () => string): Page {
   const elements = new Map<string, Record<string, unknown>>();
   const element = (): Record<string, unknown> => {
     const children: Record<string, unknown>[] = [];
-    // `innerHTML` is a real setter here, not a plain field. `drawControls` and the non-empty
-    // branch of `drawGates` each clear it to `""` and then re-populate via `appendChild` —
-    // exactly what a browser's `innerHTML = ""` does by removing every child node first.
+    // `innerHTML` is a real setter here, not a plain field. Four render functions clear it to
+    // `""` and then re-populate via `appendChild`/`append` — `drawControls`, the non-empty
+    // branch of `drawGates`, `loadRuns`, and `loadMine` — exactly what a browser's
+    // `innerHTML = ""` does by removing every child node first.
     // Without this, a SECOND render of the same cached element (this mock reuses one object
     // per id — see `getElementById` below) appends onto whatever the first render already
     // left in `children`, instead of replacing it. That is what produced
@@ -1023,12 +1024,57 @@ test("THE CONTROLS COLLECT FROM ONE RENDER EVEN WHEN drawControls() RUNS TWICE �
     // after the assertions: a failing assertion above must still drain these, or `r.close()`
     // races an in-flight `fetch` into an unhandled rejection that reports as a second, unrelated
     // failure. Polling all three writes — not just `whoami()`'s — is what makes the wait a
-    // guarantee rather than a coincidence of response ordering.
+    // guarantee rather than a coincidence of response ordering. `$("runs")` is checked by BOTH
+    // `innerHTML` (the empty-run-list and error branches set markup directly) and
+    // `children.length` (the populated branch clears `innerHTML` to `""` and appends rows,
+    // which the mock's `innerHTML` getter does not reconstruct) — checking only the former
+    // means a non-empty run list never satisfies the condition and burns the full budget below.
     for (
       let i = 0;
       i < 200 &&
       ((await page.run(`$("who").textContent`)) === "" ||
-        (await page.run(`$("runs").innerHTML`)) === "" ||
+        (await page.run(`$("runs").innerHTML === "" && $("runs").children.length === 0`)) === true ||
+        (await page.run(`$("conn").textContent`)) === "connecting");
+      i++
+    ) {
+      await new Promise((x) => setTimeout(x, 5));
+    }
+    await r.close();
+  }
+});
+
+/**
+ * A0.18, review round 2 — pins the `append` fix above deterministically.
+ *
+ * Round 1 added `append` to the mock element because `drawGates` calls
+ * `actions.append(yes, no)`, which threw `TypeError: actions.append is not a function` when a
+ * leftover `draw()` landed while a gate was open. Nothing in the suite failed if that line were
+ * removed again — the test above never populates `current.gates`, and the sibling
+ * command-driving test only reaches the non-empty branch of `drawGates` if the same
+ * nondeterministic timer race lands on a `draw()` call while a gate happens to be open. This
+ * forces that branch directly, with no rig, no timer, and no race at all.
+ */
+test("drawGates() RENDERS AN OPEN GATE WITHOUT THROWING — pins the append fix, no timer or race needed", async () => {
+  // A REAL rig, exactly like the sibling tests — not because drawGates() needs a server, but
+  // because the page's own boot sequence (`/health`, `whoami()`, `loadRuns()`, `loadGraphs()`)
+  // fires the instant its script runs, and an unreachable base would turn those into unhandled
+  // rejections at test-end instead of a clean pass.
+  const r = await rig({ identity: people() });
+  const page = openConsole(r.base, "alice-token", () => "");
+  try {
+    await page.run(
+      `(() => { current.gates = [{ gateId: "g1", nodeId: "approve", state: "open", approvers: ["u:alice"] }]; })()`,
+    );
+    const result = await page.run(`(() => { try { drawGates(); return "ok"; } catch (e) { return String(e); } })()`);
+    assert.equal(result, "ok", "drawGates() must not throw when it renders an open gate's actions");
+    assert.equal(await page.run(`$("gates").children.length`), 1, "the one open gate must have rendered a row");
+    assert.deepEqual(page.errors, [], "…and nothing must have been caught out of a repaint either");
+  } finally {
+    for (
+      let i = 0;
+      i < 200 &&
+      ((await page.run(`$("who").textContent`)) === "" ||
+        (await page.run(`$("runs").innerHTML === "" && $("runs").children.length === 0`)) === true ||
         (await page.run(`$("conn").textContent`)) === "connecting");
       i++
     ) {
