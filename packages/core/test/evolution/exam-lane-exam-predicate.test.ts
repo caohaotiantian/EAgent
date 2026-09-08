@@ -149,7 +149,7 @@ test("a declared exam input no node reads is refused, and the refusal names it",
   // arm scopes the body's view to `node.reads` (measured 2026-09-08), so `view.get("picked")` is
   // `undefined` however the body is written.
   const problems = examShape(compileOf({ ...spec, nodes: [{ ...grade, reads: ["items"] }] }));
-  assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
+  assert.ok(problems.some((p) => /named in no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
   assert.ok(!problems.some((p) => /"items"/.test(p)), `only the unread channel is named: ${problems.join("\n")}`);
 });
 
@@ -177,9 +177,9 @@ test("a TRANSITIVE read satisfies the rule — the input need not be read by the
 /**
  * A FANOUT EDGE'S `over` IS COUNTED, and it is the second place the rule looks. `rule007` checks
  * `e.over` against `spec.channels` alone (`validate.ts` GRAPH007_UNKNOWN_OVER), never against the
- * source node's `reads`, so this exam NAMES `picked` while no node declares it — and counting only
- * `reads` would refuse every fanout exam there is. The first cut of the rule refused this one and
- * told the operator "read by no node", which was a false sentence printed at a refusal.
+ * source node's `reads`, so this exam NAMES `picked` while no node declares it. The first cut of the
+ * rule refused this one and told the operator "read by no node", which was a false sentence printed
+ * at a refusal.
  */
 test("a channel a FANOUT edge fans over is read, though no node declares it", () => {
   const spec = examSpec();
@@ -233,9 +233,9 @@ test("an edge condition is NOT a read — a producing body's `take` can skip it,
     edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" }],
   });
   const problems = examShape(viaExpr);
-  assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
+  assert.ok(problems.some((p) => /named in no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
   // AND THE REFUSAL SAYS WHAT TO DO, because this is the shape the design call knowingly costs.
-  assert.ok(problems.some((p) => /EDGE CONDITION does not count either/.test(p) && /Name it where a read happens/.test(p)), `the refusal must name the cost: ${problems.join("\n")}`);
+  assert.ok(problems.some((p) => /named in no node's `reads` and no fanout edge's `over`/.test(p) && /the two places this rule counts/.test(p)), `the refusal must name the two counted places: ${problems.join("\n")}`);
 });
 
 /**
@@ -259,7 +259,7 @@ test("the `take`-bypass shape is refused — and the spec that produces it is in
     ],
     edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" }],
   });
-  assert.ok(examShape(taking).some((p) => /"picked".*read by no node/s.test(p)));
+  assert.ok(examShape(taking).some((p) => /"picked".*named in no node/s.test(p)));
 });
 
 /**
@@ -289,7 +289,7 @@ test("no placement of a condition counts, whatever the edge kind", () => {
     ["a conditional's `until`", "conditional", { until: "picked.ok" }],
     ["a conditional's `when`", "conditional", { when: "picked.ok" }],
   ] as const) {
-    assert.ok(cond(kind, over).some((p) => /read by no node/.test(p)), `${label} must not count`);
+    assert.ok(cond(kind, over).some((p) => /named in no node/.test(p)), `${label} must not count`);
   }
 });
 

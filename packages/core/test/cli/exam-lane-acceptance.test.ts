@@ -356,7 +356,7 @@ test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the
     // …and its twin one level down: DECLARED but read by no node. `blind-exam` never declares
     // `picked`; this one declares it and never reads it, and the two are the same blindness.
     const unread = await attest(w.dir, w.last, "exams/unread-exam.json");
-    refusedWith(unread, /is not an exam: .*"picked".*read by no node/s);
+    refusedWith(unread, /is not an exam: .*"picked".*named in no node/s);
     assert.equal((await journal(w.dir, w.last)).filter((e) => isEvent(e, "operator.command")).length, 1, "the refusals wrote nothing");
     // THE CONTROL, and it is the one that makes the refusal mean something: the shipped honest
     // exam still attests, on the same workspace, immediately after seven refusals.
@@ -779,10 +779,10 @@ test("AN ATTESTED ROW WHOSE EXAM DECLARES AN UNREAD INPUT STOPS ALL THREE SCORIN
       ws.close();
     }
     const scored = await cli(["score", w.last, "--workspace", w.dir]);
-    refusedWith(scored, /is not an exam as this binary reads it.*"picked".*read by no node/s);
+    refusedWith(scored, /is not an exam as this binary reads it.*"picked".*named in no node/s);
     assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was graded on the authority of that row");
-    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /"picked".*read by no node/s);
-    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "y.json"), "--workspace", w.dir]), /"picked".*read by no node/s);
+    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /"picked".*named in no node/s);
+    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "y.json"), "--workspace", w.dir]), /"picked".*named in no node/s);
   } finally {
     w.dispose();
   }

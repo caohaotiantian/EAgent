@@ -94,90 +94,18 @@ export interface ExamOutcome {
  * id. Exactly one terminal node, an assertion evaluator writing `verdict`, so the verdict a reader
  * takes off `run.completed.outputs` is the one the graph's last word wrote.
  *
- * AND EVERY OTHER DECLARED INPUT IS READ BY SOME NODE, which is the fifth rule and the one
- * `attestationProblems` named as its own residue: that function's baseline-OUTPUT rule constrains
- * what an exam DECLARES, and an exam declaring `picked` whose grading node reads only `items` is
- * as blind as the one that never declared it — at `3d05cff` it attested exit 0.
+ * AND EVERY DECLARED INPUT MUST BE NAMED SOMEWHERE THIS RULE COUNTS: a declared baseline output
+ * must be NAMED in a node's own `reads` or in a fanout edge's `over`. Edge conditions never count,
+ * because the rule cannot tell which of them the executor evaluates, so it counts none. That is the
+ * whole predicate. `subject` is exempt — the rule four lines up refuses a node that reads it.
  *
- * WHAT THE RULE CHECKS, STATED AS WHAT IT DOES AND NOT AS A CLAIM ABOUT THE EXECUTOR: a declared
- * baseline output must be NAMED in a node's own `reads` or in a fanout edge's `over`. Edge
- * conditions never count — not a `conditional`'s `when`, not a `loop`'s `until`, not a `router`
- * case's `when` — because the rule cannot tell which of them the executor evaluates (a node body
- * may return `take`, and the spec carries a resource ref rather than a body), so it counts none.
- * That is the whole predicate. `observedChannels` supplies the first half and is reused rather than
- * re-derived, because a second reader would drift from the one the engine acts on (`applyTaint`,
- * `dataFloorOf` and `#gatePayload` all call it):
+ * THE COST: an exam whose only mention of the run's answer is an edge condition is refused, and
+ * must name that channel in some node's `reads` instead.
  *
- * 1. `node.reads`, plus the `${…}` templates in `tool.args` that `observedChannels` folds in. The
- *    declaration is what can be checked, because a `function` or `assertion` BODY is opaque: the
- *    spec carries a resource ref, never a body. Requiring the DECLARATION is meaningful rather than
- *    decorative only because the runtime scopes a body's view to it — measured on 2026-09-08, and
- *    stated here as a measurement rather than as a standing guarantee about the executor, which is
- *    the kind of sentence this file has been wrong about six times. The `tool.args` half is
- *    unreachable in an exam (a `tool` node is refused two rules up, and `GRAPH020_EXTRA_BLOCK`
- *    refuses a `tool` block on any other node type) and is folded in anyway so this and
- *    `observedChannels` stay one answer.
- * 2. A fanout edge's `over`. Not covered by `reads`: `rule007` checks `e.over` against
- *    `spec.channels` alone (`GRAPH007_UNKNOWN_OVER`), never against the source node's, so an exam
- *    that fans out over `picked` names it while no node declares it, and counting only `reads`
- *    would refuse every fanout exam there is.
- *
- * WHY CONDITIONS ARE EXCLUDED. Not because the rule knows when a condition is skipped, but because
- * it does not: a node body can cause an edge to be taken with its condition unevaluated, the spec
- * carries a resource ref rather than a body, and no reading of the spec settles which conditions
- * run. Measured, rather than reasoned: at `5b46f86` a body returning
- * `{writes:{picked:{ok:false}}, take:["e"]}` behind `when: "picked.ok"` ran the graded node anyway,
- * and that node read only `items` and never saw `picked`. One observation is enough to make the
- * rule undecidable; enumerating which conditions are safe is what the four rounds before this one
- * tried, and every enumeration was wrong. So the rule counts no condition at all, in any placement,
- * and does not say which ones would in fact have run.
- *
- * A ROUTER CASE COSTS NOTHING TO EXCLUDE, and it is worth saying once so nobody re-adds it: a
- * router may not declare `writes` (`GRAPH005_ROUTER_WRITES`), so GRAPH004 forces every case's free
- * variable into the router's own `reads`, where route 1 already has it.
- *
- * AND THE RULE DOES NOT CHECK REACHABILITY AT ALL, which is the other half of the same honesty. A
- * node it counts may itself sit behind a condition, or on a path the run never takes, and the rule
- * does not look. "Named in a node's `reads`" is a fact about the spec; "the executor read it" is a
- * fact about the run, and this predicate only ever claimed the first.
- *
- * THE COST IS REAL, AND THE REFUSAL STATES IT. An exam whose only mention of the run's answer is an
- * edge condition is refused, and must name that channel in some node's `reads` instead. The refusal
- * says so rather than leaving the operator to infer it.
- *
- * WHY THIS SHAPE, AFTER FOUR REVIEW ROUNDS SPENT ON THE OTHER ONE. The rule first counted only
- * `node.reads`, then grew a term per route somebody found: a fanout `over`, then an edge condition,
- * then a placement filter on that condition. Every round
- * found the enumeration wrong — twice refusing an exam that genuinely reads (the refusal said "read
- * by no node" of a graph that read it), once admitting one that does not. A list of the executor's
- * evaluation sites is a second copy of the executor, and it drifted every time it was written down.
- * One predicate that does not need the list is what replaced it.
- *
- * WHAT IT STILL DOES NOT CLOSE. The rule asks whether the channel is NAMED where a read would
- * happen, never whether the value reaches the VERDICT, and no list closes that gap:
- * - A node may declare `reads: ["picked"]` and its body ignore the value. A fact about the body;
- *   nothing static can see it.
- * - Something may name it and drop it: a body that discards; a `join` node, which has a `reads`
- *   list and no body at all; a node reachable only down an `error` edge, which never runs on the
- *   success path and is not terminal (`error` edges are in `dagEdges`, so the one-terminal rule
- *   does not catch it); or, per the paragraph above, any counted node the run does not reach.
- * - Route 2 is named-not-guaranteed in the same way: naming a channel as a fanout's `over` does not
- *   make the fanout happen. It is kept because it is how a fanout exam names the channel at all and
- *   the alternative refuses every one of them; the residue is stated rather than denied.
- * SO SAY THE GENERAL THING RATHER THAN THE LIST: this rule refuses MECHANICAL blindness — an exam
- * that never names the channel anywhere a read could happen — and it does not and cannot refuse an
- * author who wants to be blind. Closing the reachability half is a dataflow analysis from each
- * declared input to the terminal node, deliberately not built here.
- * `test/evolution/exam-lane-exam-predicate.test.ts` PINS the discarding shape with a `sink` node,
- * so that hole is a checked fact and fails loudly the day somebody closes it.
- * Both join `attestationProblems`'s "NONE OF THESE RULES IS ABOUT QUALITY" set.
- *
- * A MIGRATION EFFECT, since this predicate also runs on the READ side (`cli.ts`, the re-check of
- * the attested row): an exam attested before this rule that declares an input no node reads now
- * makes `loom score`, `promote --against-cohort` and `suite freeze` throw `E_CONFIG_INVALID`
- * rather than fall back to in-graph S1. That is the intended direction — a ruler this binary will
- * not vouch for stops the scoring verb instead of quietly becoming the candidate's own grader —
- * and the refusal names the re-attest command.
+ * A MIGRATION EFFECT, since this predicate also runs on the READ side (`cli.ts` re-checks the
+ * attested row): an exam attested before this rule, naming a declared input in neither counted
+ * place, now makes `loom score`, `promote --against-cohort` and `suite freeze` throw
+ * `E_CONFIG_INVALID` rather than fall back to in-graph S1. The refusal names the re-attest command.
  */
 export function examShape(graph: RunGraph): string[] {
   const spec = graph.spec;
@@ -206,30 +134,20 @@ export function examShape(graph: RunGraph): string[] {
       problems.push(`node "${String(node.id)}" reads "${EXAM_SUBJECT_INPUT}" — the run id links a grade to its run and no body may grade by it`);
     }
   }
-  // THE FIFTH RULE. `subject` is exempt because the rule four lines up refuses a node that reads
-  // it; requiring it to be read would make every exam unattestable.
+  // THE FIFTH RULE.
   const seen = new Set([
     // Route 1.
     ...spec.nodes.flatMap((n) => [...observedChannels(n)]),
     // Route 2: a fanout edge consumes its `over` out of the whole scope; no node's `reads` names it.
     ...spec.edges.flatMap((e) => (e.kind === "fanout" && e.over !== undefined ? [e.over] : [])),
-    // AND NO THIRD TERM FOR CONDITIONS. `e.when`, `e.until` and a router case's `when` are absent
-    // on purpose: the rule cannot tell which conditions the executor evaluates, so it counts none.
-    // See the docstring. This is also where a fail-open `idx.get(e.from)` used to live, on the router half
-    // of the placement filter; the filter is gone and the lookup with it, so there is nothing left
-    // here to answer undefined.
   ]);
-  // `Set` over the filter's result: `spec.inputs` may carry a name twice (the compiler admits it),
-  // and naming the same channel twice in one refusal reads as two problems.
+  // `Set` because `spec.inputs` may carry a name twice.
   const unread = [...new Set(spec.inputs.filter((c) => c !== EXAM_SUBJECT_INPUT && !seen.has(c)))];
   if (unread.length > 0) {
     problems.push(
-      `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and read by no node — a node body's ` +
-        `state view is built from its \`reads\`, so a channel named by no node's \`reads\`, no \`\${…}\` in its tool args and ` +
-        `no fanout edge's \`over\` is one no body can see, and an exam that declares the run's answer and never reads it ` +
-        `grades exactly as blind as one that never declared it. Naming it in an EDGE CONDITION does not count either: this ` +
-        `rule cannot tell which conditions the executor evaluates, so it counts none of them. Name it where a read ` +
-        `happens: add it to the \`reads\` of the node that grades it, or stop declaring it`,
+      `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and named in no node's ` +
+        `\`reads\` and no fanout edge's \`over\`, the two places this rule counts — add the channel to the \`reads\` of ` +
+        `the node that grades it, or stop declaring it`,
     );
   }
   if (graph.terminalNodes.length !== 1) {
@@ -271,12 +189,8 @@ export function examShape(graph: RunGraph): string[] {
  * and this was it on the guard property 3 rests on.
  *
  * WHAT THE OUTPUT RULE DELIBERATELY DOES NOT COVER, both found by the round-four reviewer:
- * - It constrains what an exam DECLARES, not what its nodes READ — and THAT HALF IS NOW CLOSED,
- *   one function up. `examShape`'s fifth rule requires every declared input other than `subject`
- *   to be in some node's `observedChannels`; read its docstring for why that set is the compiler's
- *   own answer and for the narrower residue it leaves (a node may declare a read its body
- *   ignores). It stays named here because the two rules are one argument split across two
- *   functions: this one asks whether the ANSWER is declared, that one whether it is reached.
+ * - It constrains what an exam DECLARES, not where its nodes NAME the channel — and that half is
+ *   `examShape`'s fifth rule, one function up.
  * - A channel the baseline declares as BOTH an input and an output does not satisfy the rule, so a
  *   workflow whose outputs are a subset of its inputs — a refine loop, `inputs:["draft"],
  *   outputs:["draft"]` — cannot be attested at all, and the refusal names the very channel its exam
