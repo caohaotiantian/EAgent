@@ -12,8 +12,16 @@
  * THE CHECK ALREADY EXISTED FOR ONE OF THE THREE PRODUCERS. `#applyGateDecision` validates a
  * human's `redirect` against the node's outbound edges and raises `E_ROUTE_INVALID`; its comment
  * describes this exact bug. The router and function producers never got it — which is why the
- * runtime half now lives at `#edgesToTake`, where every producer's `take` converges. A check
+ * runtime half now lives at `#strayRoute`, on the path every body's `take` converges to. A check
  * written per-producer is a check the next producer forgets, and that is what happened.
+ *
+ * TWO THINGS ABOUT THIS REFUSAL HAVE CHANGED SINCE, and this header claimed neither. It is no
+ * longer only about OWNERSHIP — `TAKEABLE_EDGE_KINDS` refuses an edge of a kind control does not
+ * flow along, through the same door — and `E_ROUTE_INVALID` is now in `RUN_FATAL_CODES`, so the
+ * failed Task ends the run instead of taking the node's own `error` edge. A graph that used to
+ * rescue an invented-edge take no longer can; that is the tightening direction, and it is said
+ * here because this is the file a reader comes to for what the refusal means.
+ * `test/run/take-may-not-select-any-kind.test.ts` is the other half.
  */
 import assert from "node:assert/strict";
 import test from "node:test";

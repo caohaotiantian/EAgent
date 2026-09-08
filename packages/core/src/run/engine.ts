@@ -413,12 +413,12 @@ const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIM
 /**
  * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
  *
- * FIVE MEMBERS, and the criterion they share is one sentence: *no other node's answer is
+ * SIX MEMBERS, and the criterion they share is one sentence: *no other node's answer is
  * worth anything, because what broke is the run's ability to say something true.* An
  * ordinary failed Task takes an `error` edge, and a join with `onBranchError: "skip"`
  * absorbs it — so a code that belongs here and is missing produces a run reporting
  * **succeeded** with a rescue arm's value in its output channel. That is the shape below,
- * and each of these five has been measured in it.
+ * and each of these six has been measured in it.
  *
  *   `E_BUDGET_EXHAUSTED` · a verdict about the RUN's resources, not about this node's work.
  *      Routing past it spends more of what has already run out. It is the floor of the D6.5
@@ -525,16 +525,28 @@ const COMPENSATION_MAX_DEPTH = 16;
  * A KIND THIS BUILD CANNOT READ IS REFUSED BY BEING ABSENT from the set rather than by a case,
  * which is the failing-closed direction and the same answer `#edgesToTake`'s `default:` gives.
  *
- * IT IS NOT RETROACTIVE, AND THAT IS MEASURED RATHER THAN ARGUED. A `task.ready` appended by an
- * older build is durable, and replay serves the record instead of re-deriving it — so a run that
- * already took a compensation edge keeps its bypass, silently. Driven over one SQLite journal:
- * the old binary advanced to `awaiting_gate` with `pay` READY, the new binary attached to the
- * same file, the human REJECTED, and `note.append` ran anyway (`ran = ["note.append",
- * "note.undo"]` — the rollback is what limits it, and only for a tool that declares one).
- * Making that loud would mean a fold refusing an event a previous build legitimately wrote,
- * which is the one thing "the journal is the only authoritative state" does not allow. The bound
- * is on runs submitted from here on, and `graph/mutate.ts` discloses the same limit for the
- * mutation rule beside it.
+ * AN OLD JOURNAL BEHAVES TWO DIFFERENT WAYS, AND BOTH WERE DRIVEN. This paragraph said one
+ * thing and there are two, which a reviewer caught by running the verb the sentence named.
+ *
+ *   ATTACH AND ADVANCE — the bypass SURVIVES, silently. A `task.ready` an older build appended
+ *   is durable and the fold serves it; nothing re-derives the route. Over one SQLite file: the
+ *   old binary advanced to `awaiting_gate` with `pay` READY, the new binary attached to the same
+ *   file, the human REJECTED, and `note.append` ran anyway (`ran = ["note.append", "note.undo"]`
+ *   — the rollback is what limits it, and only for a tool that declares one). Making that loud
+ *   would mean a fold refusing an event a previous build legitimately wrote, which is the one
+ *   thing "the journal is the only authoritative state" does not allow.
+ *
+ *   `replayRun` — the same journal DIVERGES, loudly, because that verb re-executes into a fresh
+ *   store rather than folding (`run/replay.ts`'s "Re-execute a recorded run into a throwaway
+ *   journal and compare"). Measured on a journal recorded at `ce9e7b4` and replayed at HEAD:
+ *   `match: false`, `task.committed hop@root#0 expected succeeded actual failed`,
+ *   `run.completed expected succeeded actual failed:E_ROUTE_INVALID`. That is the honest answer
+ *   — the recorded run really did take a route this build refuses — and it is a real cost:
+ *   `runEvalSuite` and the promote ladder read those reports, so a suite pinned on such a run
+ *   now reports divergence rather than a pass.
+ *
+ * The bound is on runs submitted from here on, and `graph/mutate.ts` discloses the same limit
+ * for the mutation rule beside it.
  */
 const TAKEABLE_EDGE_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>(["seq", "conditional", "fanout", "join", "loop"]);
 
@@ -3583,9 +3595,10 @@ export class Engine {
    * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
    * operator surface would be oversight routing around itself.
    *
-   * SIX REFUSALS, in the order they are checked and in the order of what each would break. Two of
- * them are stated at their check rather than here — a `human_gate` node, whose route the
- * DECISION decides, and an edge of a kind control does not flow along (5 below).
+   * SIX REFUSALS. The four numbered below are in the order of what each would break; the other
+   * two are stated at their own check rather than here, and the CHECK order is not this list's
+   * order — a `human_gate` node, whose route the DECISION decides, is refused before 3 and 4,
+   * and an edge of a kind control does not flow along is refused after them.
    *
    *   1. A NON-HUMAN CALLER — `E_HUMAN_APPROVAL_REQUIRED`, and there is deliberately no
    *      `SYSTEM_ACTOR` default the way `cancel` has one. Confinement to the declared set is
@@ -3666,7 +3679,7 @@ export class Engine {
         { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
       );
     }
-    // 5 (of the six above). AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`, and this is the
+    // THE SIXTH REFUSAL, checked last. AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`, and this is the
     //    fifth refusal rather than a fourth clause because it is a different fact: the edge
     //    leaves this node and the executor still has no route along it. `#strayRoute` would
     //    refuse it at the moment it would be taken; refusing here is what tells the operator
@@ -9245,11 +9258,13 @@ export class Engine {
       // it first carried and the honest one. Every outcome that reaches `#commit` comes from
       // `#executeTask`, which returns through `#dispatch` (→ `#strayRoute`) or through
       // `#applyGateDecision`, and both now check; `#preNode`, the one early return that skips
-      // `#strayRoute`, never produces a `take`. It does NOT catch a `take` from an older
-      // journal — replay serves the `task.ready` that was already appended and never gets here,
-      // measured over one SQLite file. What it does is make the FIFTH producer, whenever
-      // somebody writes one, fail closed rather than take the edge, and a silent drop is the
-      // only shape available: nothing throws from `#edgesToTake`, which runs inside `#commit`.
+      // `#strayRoute`, never produces a `take`. It does NOT catch a `take` from an older journal
+      // either: an ATTACHED run is served the `task.ready` that was already appended and never
+      // gets here, and `replayRun` re-executes through the doors above rather than through this
+      // filter — both measured, see `TAKEABLE_EDGE_KINDS`. What it does is make the FIFTH
+      // producer, whenever somebody writes one, fail closed rather than take the edge, and a
+      // silent drop is the only shape available: nothing throws from `#edgesToTake`, which runs
+      // inside `#commit`.
       return outcome.take.filter((id) => {
         const e = ctx.index.edgeById.get(id);
         if (e === undefined) return true;
