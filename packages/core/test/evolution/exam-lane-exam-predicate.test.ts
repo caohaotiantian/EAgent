@@ -216,9 +216,12 @@ test("a channel a FANOUT edge fans over is read, though no node declares it", ()
  * measurement, and enough, because the rule has no way to tell that graph from this one.
  *
  * The spec carries a resource ref rather than a body, so the rule cannot tell which conditions the
- * executor evaluates and counts NONE of them. THE COST IS REAL AND STATED: an exam whose only
- * mention of the run's answer is an edge condition must name it in a node's `reads`, and the
- * refusal tells the operator exactly that.
+ * executor evaluates and counts NONE of them. THE COST IS REAL, AND WHAT THE ASSERTION BELOW PINS
+ * IS NOT THAT THE REFUSAL EXPLAINS THE CONDITION — it does not mention conditions at all, which is
+ * the round-8 loosening this docstring used to misreport. It pins that the refusal ENUMERATES the
+ * three places the rule does count (`reads`, a `${…}` in tool args, a fanout's `over`), so an
+ * operator reading it can see that an edge condition is not among them, and that it says what to
+ * do instead.
  */
 test("an edge condition is NOT a read — a producing body's `take` can skip it, so the rule fails closed", () => {
   const spec = examSpec();
@@ -235,7 +238,17 @@ test("an edge condition is NOT a read — a producing body's `take` can skip it,
   const problems = examShape(viaExpr);
   assert.ok(problems.some((p) => /named in no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
   // AND THE REFUSAL SAYS WHAT TO DO, because this is the shape the design call knowingly costs.
-  assert.ok(problems.some((p) => /named in no node's `reads` and no fanout edge's `over`/.test(p) && /the two places this rule counts/.test(p)), `the refusal must name the two counted places: ${problems.join("\n")}`);
+  assert.ok(
+    problems.some(
+      (p) =>
+        /named in no node's `reads`/.test(p) &&
+        /no `\$\{…\}` in a node's tool args/.test(p) &&
+        /no fanout edge's `over`/.test(p) &&
+        /the three places this rule\s+counts/.test(p) &&
+        /add the channel to the `reads` of/.test(p),
+    ),
+    `the refusal must enumerate all three counted places and say what to do: ${problems.join("\n")}`,
+  );
 });
 
 /**
@@ -294,8 +307,9 @@ test("no placement of a condition counts, whatever the edge kind", () => {
 });
 
 /**
- * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The two places
- * the rule DOES count a channel — a node's own `reads` and a fanout's `over` — still count, on the
+ * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The places
+ * the rule DOES count a channel — a node's own `reads` and a fanout's `over`; the third, a `${…}`
+ * in a node's tool args, has its own test below — still count, on the
  * same fixture shape the conditions above are refused on. This test passes at base too — it is the
  * control, and what it detects is either counted route ceasing to count.
  */
@@ -323,6 +337,48 @@ test("the reads that DO count still count — a node's `reads` and a fanout's `o
     ],
   });
   assert.deepEqual(examShape(fan), [], "route 2: the fanout consumes it");
+});
+
+/**
+ * THE THIRD COUNTED PLACE, WHICH HAD NO TEST UNTIL NOW — a `${…}` template root in a node's tool
+ * args. `examShape` gets it for free by spreading `observedChannels(n)` rather than `n.reads`, and
+ * before this test that spread was unpinned: replacing `observedChannels(n)` with `n.reads ?? []`
+ * left all 30 predicate tests green, so the only thing standing against the regression was prose
+ * that round 8 deleted.
+ *
+ * The fixture cannot assert an EMPTY problem list, and that is not a weakness of the test: an exam
+ * refuses a `tool` node outright, so the only graph that can reach this route is one already
+ * refused for its node type. What the assertion pins is the ABSENCE of the fifth rule's problem
+ * beside the presence of the node-type one — which is exactly what flips under the mutation, and
+ * why the route is counted at all: `observedChannels` is one answer for the whole tree, and this
+ * rule must not be the caller that gives a different one.
+ */
+test("a `${picked}` in a tool node's args counts as a read — the third place, and the node-type refusal is the only problem", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const viaToolArgs = compileOf({
+    ...spec,
+    nodes: [
+      {
+        id: "fetch" as NodeId,
+        type: "tool",
+        reads: ["items"],
+        writes: [],
+        tool: { name: "fs.read", version: "1.0", args: { path: "${picked.path}" } },
+        unhandled: true,
+      },
+      { ...grade, reads: ["items"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "fetch" as NodeId, to: "grade" as NodeId, kind: "seq" }],
+  });
+  const problems = examShape(viaToolArgs);
+  assert.ok(
+    !problems.some((p) => /named in no node/.test(p)),
+    `"picked" is named in \`fetch\`'s tool args, so the fifth rule must be silent: ${problems.join("\n")}`,
+  );
+  // The positive control that makes that absence mean something: this graph IS refused, for the
+  // node type, so a predicate that had simply stopped running would not pass this test.
+  assert.ok(problems.some((p) => /node "fetch" is a tool/.test(p)), problems.join("\n"));
 });
 
 /**

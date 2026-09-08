@@ -95,7 +95,10 @@ export interface ExamOutcome {
  * takes off `run.completed.outputs` is the one the graph's last word wrote.
  *
  * AND EVERY DECLARED INPUT MUST BE NAMED SOMEWHERE THIS RULE COUNTS: a declared baseline output
- * must be NAMED in a node's own `reads` or in a fanout edge's `over`. Edge conditions never count,
+ * must be NAMED in one of the three places `observedChannels` and the fanout term between them see
+ * — a node's own `reads`, a `${…}` template root in a node's tool args, or a fanout edge's `over`.
+ * (The tool-args place is unreachable in an exam, which refuses a `tool` node; the term is here so
+ * this rule and `observedChannels` stay one answer.) Edge conditions never count,
  * because the rule cannot tell which of them the executor evaluates, so it counts none. That is the
  * whole predicate. `subject` is exempt — the rule four lines up refuses a node that reads it.
  *
@@ -146,8 +149,8 @@ export function examShape(graph: RunGraph): string[] {
   if (unread.length > 0) {
     problems.push(
       `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and named in no node's ` +
-        `\`reads\` and no fanout edge's \`over\`, the two places this rule counts — add the channel to the \`reads\` of ` +
-        `the node that grades it, or stop declaring it`,
+        `\`reads\`, no \`${"${…}"}\` in a node's tool args, and no fanout edge's \`over\` — the three places this rule ` +
+        `counts — add the channel to the \`reads\` of the node that grades it, or stop declaring it`,
     );
   }
   if (graph.terminalNodes.length !== 1) {
