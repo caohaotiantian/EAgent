@@ -99,28 +99,52 @@ export interface ExamOutcome {
  * what an exam DECLARES, and an exam declaring `picked` whose grading node reads only `items` is
  * as blind as the one that never declared it — at `3d05cff` it attested exit 0.
  *
- * WHAT "READ" MEANS HERE IS `observedChannels`, the answer the compiler already computes, and it
- * is reused rather than re-derived because a second reader would drift from the one the engine
- * acts on (`applyTaint`, `dataFloorOf`, `#gatePayload` all call it). It is `node.reads` plus the
- * roots of every `${…}` template in `tool.args` — the second half unreachable in an exam, whose
- * `tool` nodes are refused two rules up, and kept anyway so the two stay one answer.
+ * WHAT "READ" MEANS HERE IS `observedChannels` PLUS A FANOUT EDGE'S `over`, and the routes are
+ * FOUR, named because a claim that does not name its members cannot be checked. `observedChannels`
+ * is reused rather than re-derived — a second reader would drift from the one the engine acts on
+ * (`applyTaint`, `dataFloorOf`, `#gatePayload` all call it) — and it covers two of the four:
  *
- * IT IS COMPLETE FOR THE CHANNELS AN EXAM CAN REACH, in two halves. Expressions — a `router`
- * case's `when`, an edge's `when`/`until` — are covered transitively rather than by parsing:
- * `rule004Expressions` (`GRAPH004_UNDECLARED_READ`) refuses any expression whose free variables
- * fall outside the owning node's `reads ∪ writes`, so `reads` is already a superset of what an
- * expression can name (`test/graph/expression-reads.test.ts` is the pin on that coupling). And a
- * `function` or `assertion` BODY is opaque, but it does not need to be read: the engine builds its
- * `StateView` from `node.reads` alone (`viewFor(p, …, w.node.reads ?? [])` at both call sites) and
- * `makeStateView` slices state to that list, so a channel outside `reads` is one the body cannot
- * see — `view.get(c)` is `undefined` however the body is written. `reads` is an upper bound the
- * runtime ENFORCES, which is what makes requiring membership in it meaningful.
+ * 1. `node.reads`. The direct declaration, and the one that matters, because a `function` or
+ *    `assertion` BODY is opaque and does not need to be read: the engine builds its `StateView`
+ *    from `node.reads` alone (`viewFor(p, …, w.node.reads ?? [])`, `engine.ts` at `#runFunction`
+ *    and at the assertion arm) and `makeStateView` slices state to that list, so a channel outside
+ *    `reads` is one the body CANNOT see — `view.get(c)` is `undefined` however the body is
+ *    written. `reads` is an upper bound the runtime ENFORCES, which is what makes requiring
+ *    membership in it meaningful rather than decorative.
+ * 2. `${…}` templates in `tool.args`, the other half of `observedChannels`. Unreachable in an exam
+ *    — a `tool` node is refused two rules up, and the compiler refuses a `tool` block on any other
+ *    node type (`GRAPH020_EXTRA_BLOCK`) — and folded in anyway so the two stay one answer.
+ * 3. Expressions: a `router` case's `when`, an edge's `when`/`until`. Covered transitively rather
+ *    than by parsing, because `rule004Expressions` (`GRAPH004_UNDECLARED_READ`) refuses any
+ *    expression whose free variables fall outside the owning node's `reads ∪ writes`, so `reads`
+ *    is already a superset of what an expression can name. `test/graph/expression-reads.test.ts`
+ *    is the pin on that coupling and fails if the engine grows a fourth evaluation site.
+ * 4. A fanout edge's `over` — AND THIS ONE IS NOT COVERED BY `reads`, which the first cut of this
+ *    rule got wrong. `rule007` checks `e.over` against `spec.channels` alone
+ *    (`GRAPH007_UNKNOWN_OVER`), never against the source node's, and the executor resolves it out
+ *    of the whole scope (`engine.ts`, `const items = scope[e.over ?? ""]`). So an exam that fans
+ *    out over `picked` genuinely consumes it while no node declares it, and refusing that exam
+ *    printed the operator a sentence — "read by no node" — that was false about its own graph.
+ *    Hence the `over` term below.
  *
- * WHAT IT DOES NOT CLOSE, said rather than implied: a node may declare `reads: ["picked"]` and its
- * body ignore the value, and nothing here refuses that exam. The residue moves from "declares a
- * channel no body can see", which is mechanical and checkable, to "declares a channel a body could
- * see and ignores", which is a fact about the body and joins `attestationProblems`'s
- * "NONE OF THESE RULES IS ABOUT QUALITY" set.
+ * WHAT IT DOES NOT CLOSE, and there are TWO residues, not the one this docstring first named:
+ * - A node may declare `reads: ["picked"]` and its body ignore the value. A fact about the body,
+ *   and nothing static can see it.
+ * - A node may read `picked` and DISCARD it while the terminal grader reads only `items` — the
+ *   rule asks whether SOME node reads the channel, not whether the reading REACHES the verdict.
+ *   That one IS mechanical: dataflow reachability from each declared input to the terminal node
+ *   would close it. It is not built here because it is a second analysis rather than a term in
+ *   this one, and because the rule as it stands already refuses the shape that was actually
+ *   driven. `test/evolution/exam-lane-exam-predicate.test.ts` PINS it with a `sink` node, so the
+ *   hole is a checked fact and fails loudly the day somebody closes it.
+ * Both join `attestationProblems`'s "NONE OF THESE RULES IS ABOUT QUALITY" set.
+ *
+ * A MIGRATION EFFECT, since this predicate also runs on the READ side (`cli.ts`, the re-check of
+ * the attested row): an exam attested before this rule that declares an input no node reads now
+ * makes `loom score`, `promote --against-cohort` and `suite freeze` throw `E_CONFIG_INVALID`
+ * rather than fall back to in-graph S1. That is the intended direction — a ruler this binary will
+ * not vouch for stops the scoring verb instead of quietly becoming the candidate's own grader —
+ * and the refusal names the re-attest command.
  */
 export function examShape(graph: RunGraph): string[] {
   const spec = graph.spec;
@@ -151,14 +175,21 @@ export function examShape(graph: RunGraph): string[] {
   }
   // THE FIFTH RULE. `subject` is exempt because the rule four lines up refuses a node that reads
   // it; requiring it to be read would make every exam unattestable.
-  const seen = new Set(spec.nodes.flatMap((n) => [...observedChannels(n)]));
+  const seen = new Set([
+    ...spec.nodes.flatMap((n) => [...observedChannels(n)]),
+    // Route 4: a fanout edge consumes its `over` channel out of the whole scope, and no node's
+    // `reads` has to name it. Refusing such an exam told the operator "read by no node" about a
+    // graph that reads it.
+    ...spec.edges.flatMap((e) => (e.kind === "fanout" && e.over !== undefined ? [e.over] : [])),
+  ]);
   const unread = spec.inputs.filter((c) => c !== EXAM_SUBJECT_INPUT && !seen.has(c));
   if (unread.length > 0) {
     problems.push(
       `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and read by no node — a node body's ` +
-        `state view is built from its \`reads\`, so a channel outside every node's is one no body can see, and an exam that ` +
-        `declares the run's answer and never reads it grades exactly as blind as one that never declared it. Add it to the ` +
-        `\`reads\` of the node that grades it, or stop declaring it`,
+        `state view is built from its \`reads\`, so a channel named by no node's \`reads\`, no \`\${…}\` in its tool args and ` +
+        `no fanout edge's \`over\` is one no body can see, and an exam that declares the run's answer and never reads it ` +
+        `grades exactly as blind as one that never declared it. Add it to the \`reads\` of the node that grades it, or stop ` +
+        `declaring it`,
     );
   }
   if (graph.terminalNodes.length !== 1) {

@@ -176,6 +176,62 @@ test("a TRANSITIVE read satisfies the rule — the input need not be read by the
   assert.deepEqual(examShape(twoStep), [], "`items` is read by `derive`, which is a node");
 });
 
+/**
+ * A FANOUT EDGE'S `over` IS A READ, and it is the third route to a channel rather than the second.
+ * `rule007` checks `e.over` against `spec.channels` alone (`validate.ts` GRAPH007_UNKNOWN_OVER),
+ * never against the source node's `reads`, and the executor resolves it out of the whole scope
+ * (`engine.ts` `const items = scope[e.over ?? ""]`), so this exam genuinely consumes `picked` while
+ * no node declares it. The first cut of the rule refused it and told the operator "read by no
+ * node", which was a false sentence printed at a refusal.
+ */
+test("a channel a FANOUT edge fans over is read, though no node declares it", () => {
+  const spec = examSpec();
+  const fan = compileOf({
+    ...spec,
+    channels: {
+      ...spec.channels,
+      one: { type: "object", reduce: "replace" },
+      part: { type: "array", reduce: "append_ordered" },
+    },
+    nodes: [
+      { id: "start" as NodeId, type: "function", reads: ["items"], writes: ["part"], function: { ref: "function/pick@stable" } },
+      { id: "each" as NodeId, type: "function", reads: ["one"], writes: ["part"], function: { ref: "function/pick@stable" } },
+      { id: "gather" as NodeId, type: "join", reads: ["part"], writes: [], join: { branches: ["each" as NodeId], mode: "all", onBranchError: "fail" } },
+      { id: "grade" as NodeId, type: "evaluator", reads: ["part"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-pick@stable", threshold: 0 } },
+    ],
+    edges: [
+      { id: "f" as EdgeId, from: "start" as NodeId, to: "each" as NodeId, kind: "fanout", over: "picked", as: "one", maxWidth: 4 },
+      { id: "j" as EdgeId, from: "each" as NodeId, to: "gather" as NodeId, kind: "join", branches: ["each" as NodeId] },
+      { id: "g" as EdgeId, from: "gather" as NodeId, to: "grade" as NodeId, kind: "seq" },
+    ],
+  });
+  assert.deepEqual(examShape(fan), [], "`picked` reaches the graph through edge `f`.over");
+});
+
+/**
+ * THE RESIDUE, PINNED RATHER THAN ASSERTED. The rule asks whether SOME node reads the channel, not
+ * whether the reading reaches the terminal grader. `sink` reads `picked` and writes a channel
+ * nobody reads; the assertion evaluator sees only `items`, so the grade is as blind as the exam
+ * the rule refuses — and this is admitted. Closing it needs dataflow reachability from each
+ * declared input to the terminal node, which is a second analysis and is deliberately not built
+ * here. This test exists so the hole is a checked fact and not a sentence in a docstring: if a
+ * later change closes it, this fails and the docstring is corrected with it.
+ */
+test("A NODE THAT READS AND DISCARDS SATISFIES THE RULE — the admitted residue, pinned", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const sunk = compileOf({
+    ...spec,
+    channels: { ...spec.channels, junk: { type: "array", reduce: "replace" } },
+    nodes: [
+      { id: "sink" as NodeId, type: "function", reads: ["picked"], writes: ["junk"], function: { ref: "function/sink@stable" } },
+      { ...grade, reads: ["items"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "sink" as NodeId, to: "grade" as NodeId, kind: "seq" }],
+  });
+  assert.deepEqual(examShape(sunk), [], "the grader never sees `picked`, and the fifth rule does not notice");
+});
+
 test("the SHIPPED review-bench exam reads every input it declares", () => {
   const shipped = JSON.parse(
     readFileSync(fileURLToPath(new URL("../../../../examples/exams/review-bench-exam.json", import.meta.url)), "utf8"),
