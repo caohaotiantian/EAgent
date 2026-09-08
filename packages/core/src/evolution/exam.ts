@@ -139,7 +139,7 @@ export function examShape(graph: RunGraph): string[] {
 /**
  * Why this exam may not be attested against this baseline. Empty means it may.
  *
- * Four rules about the exam and one from the journal. Every exam input other than `subject` must
+ * Four rules about what the exam reads, and two about the names it and the baseline carry. Every exam input other than `subject` must
  * be a declared `input` or `output` of the baseline graph, or the exam grades every baseline
  * recording `fail` for a channel those recordings never produced. It must read at least one
  * baseline INPUT: an exam over outputs alone is the two-sided fixture — the candidate writing both
@@ -148,17 +148,35 @@ export function examShape(graph: RunGraph): string[] {
  * as shipped declares six evaluator-written outputs and nothing else, and this rule is what
  * refuses it.
  *
- * AND IT MUST READ AT LEAST ONE BASELINE OUTPUT, which is the mirror of the INPUT rule and was
+ * AND IT MUST DECLARE AT LEAST ONE BASELINE OUTPUT, which is the mirror of the INPUT rule and was
  * missing for three review rounds while its twin stood two lines away. An exam over `[subject,
  * items]` sees the question and never the run's answer, so whatever body it carries it measures
- * nothing about the run it grades: an always-pass one attested exit 0 and graded all thirty
- * recordings `pass`, after which `L5-candidate-earned-it` certified the work-deleting candidate as
- * having "scored above 0 on 30 of 30". A guard answering its undecidable case with the passing
- * value is CLAUDE.md's first defect lens, and this was it on the guard property 3 rests on.
+ * nothing about the run it grades. Measured on the `pick-bench` fixture with an ALWAYS-PASS body:
+ * it attested exit 0 and graded all thirty recordings `pass`, after which `L5-candidate-earned-it`
+ * certified the work-deleting candidate as having "scored above 0 on 30 of 30". (The tree's own
+ * `blind-exam` fixture carries the ordinary body instead and graded all thirty FAIL — same shape,
+ * opposite grade, which is the point: the refusal is on the shape, and the grade is the body's.)
+ * A guard answering its undecidable case with the passing value is CLAUDE.md's first defect lens,
+ * and this was it on the guard property 3 rests on.
  *
- * ALL FOUR ARE ABOUT OWNERSHIP AND SHAPE, NOT QUALITY. They refuse the mechanical forms of a
- * useless exam; they cannot refuse a body that reads the right channels and grades them badly.
- * That stays the operator's, exactly as the quality of a human gate decision is. And the exam's `metadata.name` must differ from the workflow's: exam runs are
+ * WHAT THE OUTPUT RULE DELIBERATELY DOES NOT COVER, both found by the round-four reviewer:
+ * - It constrains what an exam DECLARES, not what its nodes READ. An exam that declares `picked`
+ *   and whose body never reads it attests, and is as blind as the one refused above. Closing that
+ *   needs a fifth rule in `examShape` — every declared exam input is read by some node — and it is
+ *   not made here, because this round was scoped to the mirror and an unreviewed rule is worse
+ *   than a named gap.
+ * - A channel the baseline declares as BOTH an input and an output does not satisfy the rule, so a
+ *   workflow whose outputs are a subset of its inputs — a refine loop, `inputs:["draft"],
+ *   outputs:["draft"]` — cannot be attested at all, and the refusal names the very channel its exam
+ *   reads. That is fail-closed and therefore allowed, and it is a real loss of reach: such a
+ *   workflow has no route to property 3 today. The exclusion is deliberate because
+ *   `examInputsFor` resolves the collision in favour of the RECORDED input whenever the recording
+ *   supplied one, which is the ordinary case; the exam would be handed the question under the
+ *   answer's name.
+ *
+ * NONE OF THESE RULES IS ABOUT QUALITY. They refuse mechanical forms of a useless exam; they
+ * cannot refuse a body that reads the right channels and grades them badly. That stays the
+ * operator's, exactly as the quality of a human gate decision is. And the exam's `metadata.name` must differ from the workflow's: exam runs are
  * journaled under the exam's name, and the newest recording of the WORKFLOW is what
  * `corpusThrough` is read from.
  */

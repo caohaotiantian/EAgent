@@ -163,10 +163,13 @@ function seed(dir: string): void {
   w("exams/pick-exam.json", exam("pick-exam", ["subject", "items", "picked"]));
   w("exams/bad-exam.json", exam("pick-exam-bad", ["subject", "verdict"]));
   w("exams/undeclared-exam.json", exam("pick-exam-undeclared", ["subject", "items", "chosen"]));
-  // Reads the QUESTION and never the answer: `items` is `pick-bench`'s input, and this exam sees
-  // no output at all. Its body is the ordinary `exam-pick`, but the shape is what makes it blind —
-  // `picked` is not in scope, so `view.get("picked")` is `[]` and the grade is whatever the body
-  // says about nothing. See the STEP 4 case that refuses it.
+  // Reads the QUESTION and never the answer: `items` is `pick-bench`'s input, and this exam
+  // declares no output of it. The SHAPE is the whole of what is refused, and the body is beside
+  // the point — this one is the ordinary `exam-pick`, whose `view.get("picked")` is `undefined`
+  // (the body's own `?? []` makes it `[]`) against a non-empty `want`, so at 945e54e it attested
+  // exit 0 and graded every recording FAIL. Swap the body for an always-pass one and the same
+  // shape attested exit 0 and graded every recording PASS; that is the harm, and it is a fact
+  // about the body, not about this fixture. See the STEP 4 case that refuses it.
   w("exams/blind-exam.json", exam("pick-exam-blind", ["subject", "items"]));
   w(
     "exams/agent-exam.json",
@@ -308,7 +311,7 @@ test("STEP 3 · a legacy suite refuses the grader swap with ✗ 12-grader-unchan
   }
 });
 
-// ── 4 · attest, and the five refusals ────────────────────────────────────────
+// ── 4 · attest, and the six refusals ────────────────────────────────────────
 
 test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the newest recording; six shapes are refused by name", async () => {
   const w = await workspace();
@@ -335,8 +338,11 @@ test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the
     refusedWith(await attest(w.dir, w.last, "exams/undeclared-exam.json"), /"chosen" are declared by the baseline graph neither/);
     refusedWith(await attest(w.dir, w.last, "exams/agent-exam.json"), /is not an exam: .*"judge" is a agent/);
     // AND THE BLIND EXAM — the mirror of the "reads no baseline INPUT" rule, missing until the
-    // fourth review round. It reads `items` and no output, so it sees the question and never the
-    // run's answer: at 945e54e it attested exit 0 and graded every recording `pass`.
+    // fourth review round. It declares `items` and no output of the baseline, so it sees the
+    // question and never the run's answer, and at 945e54e it attested exit 0. What it then graded
+    // is the BODY's business and not the shape's: this fixture's `exam-pick` graded every
+    // recording fail, and an always-pass body on the same shape graded every recording pass —
+    // which is the harm, and is why the refusal is on the shape rather than on any grade.
     refusedWith(await attest(w.dir, w.last, "exams/blind-exam.json"), /reads no baseline OUTPUT/);
     assert.equal((await journal(w.dir, w.last)).filter((e) => isEvent(e, "operator.command")).length, 1, "the refusals wrote nothing");
     // THE CONTROL, and it is the one that makes the refusal mean something: the shipped honest
