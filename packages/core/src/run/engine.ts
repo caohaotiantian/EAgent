@@ -1946,10 +1946,19 @@ export class Engine {
    *       at #project -> Engine.projection -> #planRollbackChild -> #planRollback
    *
    * — `advance(parent)` REJECTED, mid-compensation, with the parent's own remaining undos never
-   * dispatched and the run left `running` after a walk that had already failed some of it. Four
-   * verbs reach it and every one of them is a question about the PARENT: `advance`, `resolveGate`
-   * and `rewind` through `#failRun` → `#compensate`, and `rewind` and `planRewind` through
-   * `#rewindWalk`. Another run's disk is not an answer to any of them.
+   * dispatched and the run left `running` after a walk that had already failed some of it.
+   *
+   * WHICH VERBS REACH IT — DRIVEN, NOT ASSUMED, and the answer is ONE DOOR, not two. Statically
+   * there are two callers: `#failRun` → `#compensate`, which every verb that drives a run reaches
+   * (`advance`, `resolveGate`, `resolveGateBatch`, `steer`, the run clock), and `#rewindWalk`,
+   * which `rewind` and `planRewind` share. With an unreadable child the SECOND never arrives:
+   * `#rewindRefusals` runs first and `#uncompensatedIrreversible` follows `subgraph.started` into
+   * the child's journal below, so it throws before a walk is planned. That is a sixth cross-run
+   * read of this shape and it is deliberately NOT wrapped — it is a refusal guard, so its
+   * undecidable case must fail CLOSED, and swallowing it would answer "no uncompensated
+   * irreversible effect in that child" about a journal nobody read. Only its ATTRIBUTION is
+   * wrong: the operator sees a raw store error instead of this engine's refusal. Both halves are
+   * pinned in `engine-cross-run-child-touches.test.ts` — "WHICH VERBS REACH IT".
    *
    * AROUND THE METHOD, NOT AROUND THE READ, and the difference is not cosmetic. There are TWO
    * throwing reads here — `projection(child.runId)`, and the recursive `#planRollback`'s own
@@ -1972,11 +1981,10 @@ export class Engine {
    * again. Not a journal row: the failure is the CHILD's, and the child's log is the very journal
    * that could not be read.
    *
-   * `planRewind` REACHES IT TOO, so an operator's PREVIEW can omit a child this engine could not
-   * read. That costs nothing it did not already cost: `rewind` refuses a `planHash` that no
-   * longer matches the walk it would dispatch, so a plan taken while the store was down cannot
-   * authorise a rewind that now includes the child. The alternative is a preview that throws and
-   * shows the operator nothing at all.
+   * AND IF THE REWIND DOOR EVER DOES REACH IT — a child readable at `#rewindRefusals` and broken
+   * a moment later — the `[]` costs nothing extra: `rewind` refuses a `planHash` that no longer
+   * matches the walk it would dispatch, so a plan taken while the store was down cannot
+   * authorise a rewind that later includes the child.
    */
   async #planRollbackChild(
     parent: RunContext | undefined,

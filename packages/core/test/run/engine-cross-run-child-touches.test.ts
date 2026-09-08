@@ -518,7 +518,18 @@ class ChildJournalGone extends MemoryStateStore {
   }
 }
 
-function compRig(opts: { breakChildOnBoom?: boolean } = {}): { engine: Engine; world: World; store: ChildJournalGone; graph: ReturnType<typeof compileOrThrow> } {
+/** `ins1 → delegate`, with no failing node: a run that SUCCEEDS and is then rewound. */
+const compParentOk: GraphSpec = {
+  ...(compParent as unknown as Record<string, unknown>),
+  metadata: { name: "rewindable-tree", project: "comp", version: 1 },
+  nodes: [
+    compToolNode("ins1", "db.insert", { row: 1 }),
+    { id: "delegate", type: "subgraph", reads: ["seed"], writes: ["out"], subgraph: { ref: "graph/child@stable", inputs: { seed: "seed" }, outputs: { out: "out" } } },
+  ],
+  edges: [{ id: "e1", from: "ins1", to: "delegate", kind: "seq" }],
+} as unknown as GraphSpec;
+
+function compRig(opts: { breakChildOnBoom?: boolean; spec?: GraphSpec } = {}): { engine: Engine; world: World; store: ChildJournalGone; graph: ReturnType<typeof compileOrThrow> } {
   const breakChildOnBoom = opts.breakChildOnBoom ?? true;
   const world: World = { rows: [], undone: [] };
   const tools = new ToolRegistry();
@@ -573,7 +584,7 @@ function compRig(opts: { breakChildOnBoom?: boolean } = {}): { engine: Engine; w
     resolver,
     policy: { granted: [], systemFloor: "out", budget: { runUsd: 10 } },
   });
-  return { engine, world, store, graph: compileOrThrow({ spec: compParent, resolver, tools: COMP_TOOLS, tenantCapabilities: [] }) };
+  return { engine, world, store, graph: compileOrThrow({ spec: opts.spec ?? compParent, resolver, tools: COMP_TOOLS, tenantCapabilities: [] }) };
 }
 
 test("A · `#planRollbackChild` — an unreadable CHILD no longer aborts the PARENT's own rollback, and `advance` still answers", async () => {
@@ -619,4 +630,57 @@ test("A · THE ORDINARY HALF — with the child's journal readable, the whole tr
   assert.equal(outcome, "failed:E_TOOL_SOURCE_UNAVAILABLE");
   assert.deepEqual(r.world.rows, [], "every row in the tree is gone when nothing is broken");
   assert.deepEqual(new Set(r.world.undone), new Set([1, 7]), `the child's row too: ${JSON.stringify(r.world.undone)}`);
+});
+
+test("A · WHICH VERBS REACH IT — the rewind door refuses EARLIER, at a SIXTH cross-run read, and this diff did not open it", async () => {
+  // WHICH VERBS REACH THE GUARD, ASKED RATHER THAN ASSUMED — and the answer was not the one the
+  // wrap's own docstring first claimed. `#planRollbackChild` sits under two doors: `#failRun` →
+  // `#compensate` (the test above, through `advance`) and `#rewindWalk`, which `rewind` and
+  // `planRewind` share. Driven here, the second door does NOT reach it while the child is
+  // unreadable, because `#rewindRefusals` runs first and `#uncompensatedIrreversible` — which
+  // follows `subgraph.started` into the CHILD's journal at engine.ts:1663 — throws before the
+  // walk is ever planned:
+  //
+  //   at ChildJournalGone.read -> #uncompensatedIrreversible (engine.ts:1634)
+  //      -> #uncompensatedIrreversible (engine.ts:1663) -> #rewindRefusals (4659)
+  //      -> Engine.planRewind (4251)
+  //
+  // THAT IS A SIXTH SITE OF THE SAME SHAPE AND IT IS DELIBERATELY LEFT ALONE. It is a REFUSAL
+  // guard — it decides whether a rewind may proceed past an irreversible effect a child
+  // performed — so its undecidable case must fail CLOSED, and throwing already does. Wrapping it
+  // the way A and E are wrapped would answer "no uncompensated irreversible effect down there"
+  // about a journal nobody read, which is the loosening CLAUDE.md's first lens names. What is
+  // wrong with it is only the ATTRIBUTION — the operator sees a raw store error rather than this
+  // engine's own refusal — and that is recorded as this lane's residue, not fixed here.
+  //
+  // So this test is a CONTROL, green at `c54b0c2` and green now: it pins that the new `[]` did
+  // not turn the rewind door into a preview of a plan nobody could read.
+  const r = compRig({ spec: compParentOk });
+  const runId = await r.engine.submit({ graph: r.graph, inputs: { seed: "x" } });
+  for (let i = 0; i < 20; i++) {
+    const p = await r.engine.advance(runId);
+    if (p.status === "succeeded" || p.status === "failed") break;
+  }
+  assert.deepEqual(r.world.rows, [1, 7], "both rows were inserted and nothing has been undone yet");
+
+  const lead = { kind: "human", subject: LEAD, via: "console" } as const;
+  const before = await r.engine.planRewind(runId, 1 as Seq, lead);
+  assert.ok(
+    before.steps.some((s) => s.runId !== String(runId)),
+    `the healthy preview shows the CHILD's step: ${JSON.stringify(before.steps.map((s) => `${s.runId}:${s.tool}`))}`,
+  );
+
+  r.store.armed = true;
+  let after: Awaited<ReturnType<Engine["planRewind"]>> | undefined;
+  let threw = "";
+  try {
+    after = await r.engine.planRewind(runId, 1 as Seq, lead);
+  } catch (thrown) {
+    threw = `threw: ${(thrown as Error).message}`;
+  }
+
+  // REFUSING IS THE RIGHT ANSWER HERE, and the one thing that would be wrong is a plan that
+  // silently omits the child's irreversible step and lets an operator authorise it.
+  assert.equal(threw, "threw: sqlite: child disk I/O error", `the rewind door refuses on an unreadable child: ${threw}`);
+  assert.equal(after, undefined, "and it produced no plan for a human to authorise");
 });
