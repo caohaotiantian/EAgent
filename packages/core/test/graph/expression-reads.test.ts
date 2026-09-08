@@ -7,10 +7,21 @@
  * check, the classification floor) would under-report if such an expression could name a
  * channel the node never declared.
  *
- * It cannot, and the reason is `GRAPH004_UNDECLARED_READ`: the compiler parses every expression,
- * takes its free variables from `checkExpr(...).refs`, and refuses any that is outside the
- * owning node's `reads ∪ writes`. So by the time anything runs, `reads` IS a superset for
- * exactly the channels an expression can reach.
+ * It cannot REACH AN UNDECLARED CHANNEL, and the reason is `GRAPH004_UNDECLARED_READ`: the
+ * compiler parses every expression, takes its free variables from `checkExpr(...).refs`, and
+ * refuses any outside the owning node's `reads ∪ writes`.
+ *
+ * THIS FILE USED TO CONCLUDE "so `reads` IS a superset for exactly the channels an expression can
+ * reach", AND THAT IS FALSE — the premise says `reads ∪ WRITES` and the conclusion dropped a
+ * word. An edge condition is evaluated on POST-COMMIT state (`until: verdict.pass` leaving the
+ * node that just wrote `verdict` must be legal), so an edge's owner satisfies GRAPH004 by
+ * DECLARING the channel among its writes, and `when: "picked.ok"` then names a channel in no
+ * node's `reads`. Found on 2026-09-08 by `evolution/exam.ts`'s fifth rule, which had leaned on
+ * this sentence and wrongly refused a legitimate exam; that function now collects expression refs
+ * itself. What survives is the narrower and still load-bearing claim: `reads ∪ writes` bounds
+ * what an expression can name, so nothing an expression reaches is undeclared. The same false
+ * sentence still stands at `graph/spec.ts`'s `observedChannels` — a KERNEL file this lane's file
+ * set does not cover — and is owed the same correction.
  *
  * **That is a coupling between two files that nothing recorded.** `observedChannels` lives in
  * `graph/spec.ts` and says it does not cover expressions; `rule004Expressions` lives in

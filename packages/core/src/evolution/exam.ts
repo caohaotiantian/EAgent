@@ -28,7 +28,7 @@
  * is here yet, and a public name is a reviewed act (`scripts/surface.json`).
  */
 
-import type { GraphSpec, RunGraph } from "../graph/spec.ts";
+import { observedChannels, type GraphSpec, type RunGraph } from "../graph/spec.ts";
 
 /** The `operator.command.kind` an attestation is journaled under. */
 export const EXAM_ATTEST_KIND = "evolution.exam-attest";
@@ -93,6 +93,19 @@ export interface ExamOutcome {
  * from grade to graded run and nothing more, and a body that could read it could grade by run
  * id. Exactly one terminal node, an assertion evaluator writing `verdict`, so the verdict a reader
  * takes off `run.completed.outputs` is the one the graph's last word wrote.
+ *
+ * AND EVERY DECLARED INPUT MUST BE NAMED SOMEWHERE THIS RULE COUNTS: a declared baseline output
+ * must be NAMED in a node's own `reads` or in a fanout edge's `over`. Edge conditions never count,
+ * because the rule cannot tell which of them the executor evaluates, so it counts none. That is the
+ * whole predicate. `subject` is exempt — the rule four lines up refuses a node that reads it.
+ *
+ * THE COST: an exam whose only mention of the run's answer is an edge condition is refused, and
+ * must name that channel in some node's `reads` instead.
+ *
+ * A MIGRATION EFFECT, since this predicate also runs on the READ side (`cli.ts` re-checks the
+ * attested row): an exam attested before this rule, naming a declared input in neither counted
+ * place, now makes `loom score`, `promote --against-cohort` and `suite freeze` throw
+ * `E_CONFIG_INVALID` rather than fall back to in-graph S1. The refusal names the re-attest command.
  */
 export function examShape(graph: RunGraph): string[] {
   const spec = graph.spec;
@@ -120,6 +133,22 @@ export function examShape(graph: RunGraph): string[] {
     if ((node.reads ?? []).includes(EXAM_SUBJECT_INPUT)) {
       problems.push(`node "${String(node.id)}" reads "${EXAM_SUBJECT_INPUT}" — the run id links a grade to its run and no body may grade by it`);
     }
+  }
+  // THE FIFTH RULE.
+  const seen = new Set([
+    // Route 1.
+    ...spec.nodes.flatMap((n) => [...observedChannels(n)]),
+    // Route 2: a fanout edge consumes its `over` out of the whole scope; no node's `reads` names it.
+    ...spec.edges.flatMap((e) => (e.kind === "fanout" && e.over !== undefined ? [e.over] : [])),
+  ]);
+  // `Set` because `spec.inputs` may carry a name twice.
+  const unread = [...new Set(spec.inputs.filter((c) => c !== EXAM_SUBJECT_INPUT && !seen.has(c)))];
+  if (unread.length > 0) {
+    problems.push(
+      `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and named in no node's ` +
+        `\`reads\` and no fanout edge's \`over\`, the two places this rule counts — add the channel to the \`reads\` of ` +
+        `the node that grades it, or stop declaring it`,
+    );
   }
   if (graph.terminalNodes.length !== 1) {
     problems.push(`an exam has exactly one terminal node (found ${String(graph.terminalNodes.length)})`);
@@ -160,11 +189,8 @@ export function examShape(graph: RunGraph): string[] {
  * and this was it on the guard property 3 rests on.
  *
  * WHAT THE OUTPUT RULE DELIBERATELY DOES NOT COVER, both found by the round-four reviewer:
- * - It constrains what an exam DECLARES, not what its nodes READ. An exam that declares `picked`
- *   and whose body never reads it attests, and is as blind as the one refused above. Closing that
- *   needs a fifth rule in `examShape` — every declared exam input is read by some node — and it is
- *   not made here, because this round was scoped to the mirror and an unreviewed rule is worse
- *   than a named gap.
+ * - It constrains what an exam DECLARES, not where its nodes NAME the channel — and that half is
+ *   `examShape`'s fifth rule, one function up.
  * - A channel the baseline declares as BOTH an input and an output does not satisfy the rule, so a
  *   workflow whose outputs are a subset of its inputs — a refine loop, `inputs:["draft"],
  *   outputs:["draft"]` — cannot be attested at all, and the refusal names the very channel its exam

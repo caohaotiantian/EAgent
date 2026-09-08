@@ -171,6 +171,15 @@ function seed(dir: string): void {
   // shape attested exit 0 and graded every recording PASS; that is the harm, and it is a fact
   // about the body, not about this fixture. See the STEP 4 case that refuses it.
   w("exams/blind-exam.json", exam("pick-exam-blind", ["subject", "items"]));
+  // AND THE ONE THE SHAPE RULE COULD NOT SEE UNTIL THE FIFTH RULE: it DECLARES `picked`, so
+  // `attestationProblems`'s baseline-OUTPUT rule is satisfied, and its grading node reads only
+  // `items`, so `view.get("picked")` is `undefined` in the body whatever the body does. The
+  // declaration is a claim about the exam; `reads` is what the runtime hands the body. At 3d05cff
+  // this attested exit 0 and was as blind as `blind-exam` above.
+  w("exams/unread-exam.json", {
+    ...(exam("pick-exam-unread", ["subject", "items", "picked"]) as Record<string, unknown>),
+    nodes: [{ id: "grade", type: "evaluator", reads: ["items"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-pick@stable", threshold: 0 } }],
+  });
   w(
     "exams/agent-exam.json",
     exam("pick-exam-agent", ["subject", "items", "picked"], {
@@ -311,9 +320,9 @@ test("STEP 3 · a legacy suite refuses the grader swap with ✗ 12-grader-unchan
   }
 });
 
-// ── 4 · attest, and the six refusals ────────────────────────────────────────
+// ── 4 · attest, and the seven refusals ────────────────────────────────────────
 
-test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the newest recording; six shapes are refused by name", async () => {
+test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the newest recording; seven shapes are refused by name", async () => {
   const w = await workspace();
   try {
     const a = await attest(w.dir, w.last);
@@ -344,9 +353,13 @@ test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the
     // recording fail, and an always-pass body on the same shape graded every recording pass —
     // which is the harm, and is why the refusal is on the shape rather than on any grade.
     refusedWith(await attest(w.dir, w.last, "exams/blind-exam.json"), /reads no baseline OUTPUT/);
+    // …and its twin one level down: DECLARED but read by no node. `blind-exam` never declares
+    // `picked`; this one declares it and never reads it, and the two are the same blindness.
+    const unread = await attest(w.dir, w.last, "exams/unread-exam.json");
+    refusedWith(unread, /is not an exam: .*"picked".*named in no node/s);
     assert.equal((await journal(w.dir, w.last)).filter((e) => isEvent(e, "operator.command")).length, 1, "the refusals wrote nothing");
     // THE CONTROL, and it is the one that makes the refusal mean something: the shipped honest
-    // exam still attests, on the same workspace, immediately after six refusals.
+    // exam still attests, on the same workspace, immediately after seven refusals.
     const again = await attest(w.dir, w.last);
     assert.equal(again.code, 0, `${again.out}\n${again.err}`);
     assert.match(again.err, /the same exam re-attested: same ruler, newer questions/);
@@ -731,6 +744,50 @@ test("AN ATTESTED SPEC THAT IS NOT AN EXAM IS REFUSED ON THE READ, NOT RUN — t
  * --against-cohort` went from `✗ L1 Δ 0.0000 0W/0L/30T exit 1` to `✓ L1 Δ +0.4000 20W/0L/10T
  * "promote": true exit 0` — the audit's reproduction 2, promoting on a relayed grader.
  */
+/**
+ * THE FIFTH RULE ON THE READ DOOR, and it was owed. The plan's own Decision says "a guard that
+ * runs only on the write is a guard a future writer walks past"; the first cut tested the fifth
+ * rule at `attestExam` and on the pure predicate, and nowhere on the side that DECIDES. A row
+ * attested before this rule existed carries a spec this binary will not vouch for, and the three
+ * scoring verbs must stop rather than fall back to the candidate's own in-graph S1 — which is
+ * the whole reason the exam exists.
+ */
+test("AN ATTESTED ROW WHOSE EXAM DECLARES AN UNREAD INPUT STOPS ALL THREE SCORING VERBS", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const real = (await journal(w.dir, w.last)).findLast((e) => isEvent(e, "operator.command"))!;
+      const args = { ...(real.payload as { args: Record<string, unknown> }).args } as Record<string, unknown>;
+      const spec = JSON.parse(JSON.stringify(args["spec"])) as GraphSpec;
+      // The row an operator wrote BEFORE the fifth rule: still [subject, items, picked], but the
+      // grading node reads only `items`. It compiles, its hash and manifest are its own true ones
+      // — everything a row's writer controls is in order — so `examShape` on the read path is the
+      // only thing between it and thirty exam runs that grade nothing.
+      const blindSpec: GraphSpec = { ...spec, nodes: spec.nodes.map((n) => ({ ...n, reads: ["items"] })) };
+      const blind = compileOrThrow({ spec: blindSpec, resolver: ws.resolver, tools: (ws.engine.tools as ToolRegistry).manifests(), tenantCapabilities: ws.granted });
+      args["spec"] = blindSpec;
+      args["examGraphHash"] = blind.graphHash;
+      args["resolutionManifest"] = blind.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest }));
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args }, actor: { kind: "human", subject: "someone", via: "console" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    const scored = await cli(["score", w.last, "--workspace", w.dir]);
+    refusedWith(scored, /is not an exam as this binary reads it.*"picked".*named in no node/s);
+    assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was graded on the authority of that row");
+    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /"picked".*named in no node/s);
+    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "y.json"), "--workspace", w.dir]), /"picked".*named in no node/s);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("A RELAY EXAM IN THE ROW IS REFUSED ON THE READ — an exam that grades the grader is not an exam of this graph", async () => {
   const w = await workspace();
   try {
