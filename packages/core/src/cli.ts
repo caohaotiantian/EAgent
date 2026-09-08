@@ -8343,8 +8343,10 @@ async function foldPeer(
  * disagreement, and `promoteAgainstCohort` refuses `--baseline` on the same argument. The exam is
  * compiled from the file (`loadGraph` with `introducing`, so its bodies must be published) and
  * refused unless it IS an exam; refused unless every input it reads is a declared input or output
- * of the cohort's baseline graph, reads at least one baseline input, and does not read ONLY
- * evaluator-written outputs (grading the grader — `review-bench` as shipped). `--as` is REQUIRED
+ * of the cohort's baseline graph, reads at least one baseline input, does not read ONLY
+ * evaluator-written outputs (grading the grader — `review-bench` as shipped), and — `examShape`'s
+ * fifth rule — actually READS from some node every input it declares, since declaring the run's
+ * answer and never reading it grades as blind as never declaring it. `--as` is REQUIRED
  * and may not be the synthetic `cli`: a person is deciding what counts as ground truth, and the
  * row names them.
  *
@@ -8372,8 +8374,8 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
-        `inputs, exactly one output "verdict", and runs deterministic bodies ending in an evaluator{kind:"assertion"} ` +
-        `that writes it.`,
+        `inputs, READS every one of those channels from some node, has exactly one output "verdict", and runs ` +
+        `deterministic bodies ending in an evaluator{kind:"assertion"} that writes it.`,
     );
   }
 

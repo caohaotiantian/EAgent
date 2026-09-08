@@ -11,6 +11,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, NodeSpec, RunGraph } from "../../src/graph/spec.ts";
@@ -132,6 +134,53 @@ test("the terminal node is the assertion evaluator that writes verdict — a fun
     }),
   );
   assert.ok(problems.some((p) => /terminal node must be an evaluator/.test(p) && /"wrap", a function/.test(p)), problems.join("\n"));
+});
+
+/**
+ * THE FIFTH RULE. The baseline-OUTPUT rule in `attestationProblems` constrains what an exam
+ * DECLARES; this one constrains what its nodes READ. Recorded as the exam lane's residue
+ * (`report.md` ~410-420, "never reading it attests") and as CLAUDE.md §3's weakest assumption,
+ * "enforced by SHAPE only": an exam declaring `picked` whose grading node reads only `items` sees
+ * the question and never the answer, exactly like the `blind-exam` fixture that IS refused, and
+ * at 3d05cff it attested exit 0.
+ */
+test("a declared exam input no node reads is refused, and the refusal names it", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  // Declares [subject, items, picked]; reads ["items"]. `picked` is unreachable: the assertion
+  // arm builds the body's StateView from `node.reads` (`engine.ts` `viewFor(…, w.node.reads)`),
+  // so `view.get("picked")` is `undefined` however the body is written.
+  const problems = examShape(compileOf({ ...spec, nodes: [{ ...grade, reads: ["items"] }] }));
+  assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
+  assert.ok(!problems.some((p) => /"items"/.test(p)), `only the unread channel is named: ${problems.join("\n")}`);
+});
+
+test("`subject` is exempt — rule four already refuses a node that reads it", () => {
+  // The control that keeps the fifth rule from making every exam unattestable: `pick-exam` reads
+  // no `subject` by construction and is still silent.
+  assert.deepEqual(examShape(compileOf(examSpec())), []);
+});
+
+test("a TRANSITIVE read satisfies the rule — the input need not be read by the terminal node", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const twoStep = compileOf({
+    ...spec,
+    channels: { ...spec.channels, want: { type: "array", reduce: "replace" } },
+    nodes: [
+      { id: "derive" as NodeId, type: "function", reads: ["items"], writes: ["want"], function: { ref: "function/derive@stable" } },
+      { ...grade, reads: ["want", "picked"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "derive" as NodeId, to: "grade" as NodeId, kind: "seq" }],
+  });
+  assert.deepEqual(examShape(twoStep), [], "`items` is read by `derive`, which is a node");
+});
+
+test("the SHIPPED review-bench exam reads every input it declares", () => {
+  const shipped = JSON.parse(
+    readFileSync(fileURLToPath(new URL("../../../../examples/exams/review-bench-exam.json", import.meta.url)), "utf8"),
+  ) as GraphSpec;
+  assert.deepEqual(examShape(compileOf(shipped)), [], "the exam that ships must survive the rule it gains");
 });
 
 // ── attestationProblems ──────────────────────────────────────────────────────

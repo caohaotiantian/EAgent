@@ -28,7 +28,7 @@
  * is here yet, and a public name is a reviewed act (`scripts/surface.json`).
  */
 
-import type { GraphSpec, RunGraph } from "../graph/spec.ts";
+import { observedChannels, type GraphSpec, type RunGraph } from "../graph/spec.ts";
 
 /** The `operator.command.kind` an attestation is journaled under. */
 export const EXAM_ATTEST_KIND = "evolution.exam-attest";
@@ -93,6 +93,34 @@ export interface ExamOutcome {
  * from grade to graded run and nothing more, and a body that could read it could grade by run
  * id. Exactly one terminal node, an assertion evaluator writing `verdict`, so the verdict a reader
  * takes off `run.completed.outputs` is the one the graph's last word wrote.
+ *
+ * AND EVERY OTHER DECLARED INPUT IS READ BY SOME NODE, which is the fifth rule and the one
+ * `attestationProblems` named as its own residue: that function's baseline-OUTPUT rule constrains
+ * what an exam DECLARES, and an exam declaring `picked` whose grading node reads only `items` is
+ * as blind as the one that never declared it — at `3d05cff` it attested exit 0.
+ *
+ * WHAT "READ" MEANS HERE IS `observedChannels`, the answer the compiler already computes, and it
+ * is reused rather than re-derived because a second reader would drift from the one the engine
+ * acts on (`applyTaint`, `dataFloorOf`, `#gatePayload` all call it). It is `node.reads` plus the
+ * roots of every `${…}` template in `tool.args` — the second half unreachable in an exam, whose
+ * `tool` nodes are refused two rules up, and kept anyway so the two stay one answer.
+ *
+ * IT IS COMPLETE FOR THE CHANNELS AN EXAM CAN REACH, in two halves. Expressions — a `router`
+ * case's `when`, an edge's `when`/`until` — are covered transitively rather than by parsing:
+ * `rule004Expressions` (`GRAPH004_UNDECLARED_READ`) refuses any expression whose free variables
+ * fall outside the owning node's `reads ∪ writes`, so `reads` is already a superset of what an
+ * expression can name (`test/graph/expression-reads.test.ts` is the pin on that coupling). And a
+ * `function` or `assertion` BODY is opaque, but it does not need to be read: the engine builds its
+ * `StateView` from `node.reads` alone (`viewFor(p, …, w.node.reads ?? [])` at both call sites) and
+ * `makeStateView` slices state to that list, so a channel outside `reads` is one the body cannot
+ * see — `view.get(c)` is `undefined` however the body is written. `reads` is an upper bound the
+ * runtime ENFORCES, which is what makes requiring membership in it meaningful.
+ *
+ * WHAT IT DOES NOT CLOSE, said rather than implied: a node may declare `reads: ["picked"]` and its
+ * body ignore the value, and nothing here refuses that exam. The residue moves from "declares a
+ * channel no body can see", which is mechanical and checkable, to "declares a channel a body could
+ * see and ignores", which is a fact about the body and joins `attestationProblems`'s
+ * "NONE OF THESE RULES IS ABOUT QUALITY" set.
  */
 export function examShape(graph: RunGraph): string[] {
   const spec = graph.spec;
@@ -120,6 +148,18 @@ export function examShape(graph: RunGraph): string[] {
     if ((node.reads ?? []).includes(EXAM_SUBJECT_INPUT)) {
       problems.push(`node "${String(node.id)}" reads "${EXAM_SUBJECT_INPUT}" — the run id links a grade to its run and no body may grade by it`);
     }
+  }
+  // THE FIFTH RULE. `subject` is exempt because the rule four lines up refuses a node that reads
+  // it; requiring it to be read would make every exam unattestable.
+  const seen = new Set(spec.nodes.flatMap((n) => [...observedChannels(n)]));
+  const unread = spec.inputs.filter((c) => c !== EXAM_SUBJECT_INPUT && !seen.has(c));
+  if (unread.length > 0) {
+    problems.push(
+      `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and read by no node — a node body's ` +
+        `state view is built from its \`reads\`, so a channel outside every node's is one no body can see, and an exam that ` +
+        `declares the run's answer and never reads it grades exactly as blind as one that never declared it. Add it to the ` +
+        `\`reads\` of the node that grades it, or stop declaring it`,
+    );
   }
   if (graph.terminalNodes.length !== 1) {
     problems.push(`an exam has exactly one terminal node (found ${String(graph.terminalNodes.length)})`);
@@ -160,11 +200,12 @@ export function examShape(graph: RunGraph): string[] {
  * and this was it on the guard property 3 rests on.
  *
  * WHAT THE OUTPUT RULE DELIBERATELY DOES NOT COVER, both found by the round-four reviewer:
- * - It constrains what an exam DECLARES, not what its nodes READ. An exam that declares `picked`
- *   and whose body never reads it attests, and is as blind as the one refused above. Closing that
- *   needs a fifth rule in `examShape` — every declared exam input is read by some node — and it is
- *   not made here, because this round was scoped to the mirror and an unreviewed rule is worse
- *   than a named gap.
+ * - It constrains what an exam DECLARES, not what its nodes READ — and THAT HALF IS NOW CLOSED,
+ *   one function up. `examShape`'s fifth rule requires every declared input other than `subject`
+ *   to be in some node's `observedChannels`; read its docstring for why that set is the compiler's
+ *   own answer and for the narrower residue it leaves (a node may declare a read its body
+ *   ignores). It stays named here because the two rules are one argument split across two
+ *   functions: this one asks whether the ANSWER is declared, that one whether it is reached.
  * - A channel the baseline declares as BOTH an input and an output does not satisfy the rule, so a
  *   workflow whose outputs are a subset of its inputs — a refine loop, `inputs:["draft"],
  *   outputs:["draft"]` — cannot be attested at all, and the refusal names the very channel its exam
