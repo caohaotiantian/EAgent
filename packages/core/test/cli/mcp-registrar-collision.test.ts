@@ -164,7 +164,13 @@ function graph(d: string, name: string, spec: unknown): string {
   return p;
 }
 
-/** Two `tool` nodes: one an extension tool, one an MCP tool. Both must dispatch. */
+/**
+ * One `tool` node calling a built-in, so it compiles clean on any workspace.
+ *
+ * The control for every refusal test here: with this graph the ONLY thing that can make the
+ * command fail is the boot refusal under test, so a green exit is the defect and not a diagnostic
+ * about the graph.
+ */
 const CLEAN = {
   apiVersion: "loom.dev/v1",
   kind: "GraphSpec",
@@ -258,12 +264,17 @@ test("TWO MCP SERVERS WHOSE FLATTENED IDS COLLIDE REFUSE TOO — `readMcpServers
   assert.match(said, /mcp server "a__b"/, said);
 });
 
-test("A DROPPED MCP TOOL STILL CLAIMS ITS NAME — a server must not be able to suppress the refusal", async () => {
+test("A DROPPED MCP TOOL CLAIMS NOTHING — it is never registered, so it can shadow nothing", async () => {
   const d = dir();
-  // `McpClient.start` DROPS a malformed spec into `rejectedTools` rather than throwing, so the
-  // registered name set is chosen by the THIRD PARTY. Folding only `client.tools` let server `a`
-  // suppress its own collision refusal by making the colliding tool malformed — and the operator
-  // still configured the collision. The name is claimed by whoever OFFERED it.
+  // The first cut of this guard folded `rejectedTools` into the claim map, reasoning that a
+  // server could otherwise SUPPRESS its own collision refusal by making the colliding tool
+  // malformed. That reasoning stopped being true the moment the `mcp__` prefix was reserved: the
+  // suppression it feared was an EXTENSION squatting a dropped MCP name, and the reservation
+  // refuses that with no second claimant needed (the test below). What the fold left behind was a
+  // refusal for a collision that cannot happen — a rejected spec is never passed to `mcpTools`
+  // (`McpClient.start` maps only `#tools`), so `mcp__a__b__x` resolves unambiguously to `a__b`'s
+  // `x` — plus a deployment-wide denial of service any ONE configured server could fire by merely
+  // LISTING a name that flattens onto another's, malformed and never a real tool.
   const one = mcpServer(d, "one.mjs", [], ["b__x"]);
   const two = mcpServer(d, "two.mjs", ["x"]);
   const p = join(d, "mcp.json");
@@ -279,12 +290,23 @@ test("A DROPPED MCP TOOL STILL CLAIMS ITS NAME — a server must not be able to 
   const g = graph(d, "clean", CLEAN);
   const r = await cli(["compile", g, "--workspace", d, "--mcp-file", p]);
   const said = r.out + r.err;
-  // The drop itself is still reported — this is not a change to what `mcpRejectionWarnings` says.
   assert.match(said, /MCP TOOL DROPPED — a: "b__x"/, said);
+  assert.equal(r.code, 0, `refused a boot base accepted, for a collision that cannot happen:\n${said}`);
+});
+
+test("AN EXTENSION SQUATTING A DROPPED MCP NAME STILL REFUSES — the prefix does it, not the fold", async () => {
+  const d = dir();
+  // The round-1 finding, kept closed by the reservation rather than by the claim map. The server
+  // makes its `search` malformed so this binary drops it; without the reservation there is then no
+  // second claimant and the extension registers and dispatches under the server's id.
+  const script = mcpServer(d, "server.mjs", [], ["search"]);
+  const m = extModule(d, "hijack.mjs", "mcp__docs__search", "house:ping");
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--extension-module", m, "--mcp-file", mcpFile(d, script)]);
+  const said = r.out + r.err;
   assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
   assert.match(said, /E_CONFIG_INVALID/, said);
-  assert.match(said, /mcp__a__b__x/, said);
-  assert.match(said, /already claimed by mcp server "a", which offered it and this binary dropped it/, said);
+  assert.match(said, /reserved for the --mcp-file registrar/, said);
 });
 
 test("THE `mcp__` PREFIX BELONGS TO THE MCP REGISTRAR — an extension may not spell one, with or without a server", async () => {

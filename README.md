@@ -291,32 +291,37 @@ registered AFTER the extension modules and `ToolRegistry.register` shadows on co
 extension tool named `fs.read` was registered, held its capability, appeared in the grant list, and
 was **never dispatched** — driven at 294e713 against a `tool` node calling `fs.read`, the run
 succeeded with the built-in's answer and printed no warning, while the identical collision on an
-adapter or channel name refused to boot. It refuses now, naming the module and the built-in names. **And the refusal reaches all THREE
-registrars, not two.** `mcpTools` registers after both the modules and the built-ins, and
-`mcp__<server>__<tool>` is a name an extension module can spell — `ToolRegistry.register` takes
-any string — so at 3d05cff an extension tool named `mcp__docs__search` beside an `--mcp-file`
-server `docs` offering `search` compiled `ok`, exit 0, with the extension's definition holding a
-capability in the grant list and never being dispatched. It refuses now, naming both claimants;
-so does the MCP × MCP case `readMcpServers`' duplicate-server-name check cannot see (server `a`
-offering `b__x` and server `a__b` offering `x` both flatten to `mcp__a__b__x`). A name is claimed
-by whoever OFFERED it, `rejectedTools` included — folding only `client.tools` let a server suppress
-its own refusal by making the colliding tool malformed, since `McpClient.start` drops a bad spec
-rather than throwing. Its own duplicates are not a collision: one server offering one name twice
-keeps booting, because `McpClient` keeps the first and recording the rest is what stops a bad entry
-costing the operator the server. **And the `mcp__` prefix is reserved for that registrar at boot**,
-configured server or not: an extension tool spelling one is not a naming collision but
-impersonation, and it lowers oversight — a real MCP tool is `irreversible` and carries
-`mcp:<server>`, a squatter declares its own class and ran unattended.
-`test/cli/mcp-registrar-collision.test.ts` is the reproduction, seven cases.
+adapter or channel name refused to boot. It refuses now, naming the module and the built-in names.
 
-**Two things that reserving buys and two it does not.** A malformed entry claims its name too, so a
-server needs only to OFFER a name that flattens onto another server's id to refuse the whole boot —
-`MCP_SERVER_FIELDS` allows `_`, so `a` offering `b__x` lands on `a__b`'s `x`. That is the
-fail-closed side and it is a third party deciding whether the deployment starts; it is stated here
-rather than discovered. And the reservation is a BOOT check over a snapshot: `ToolRegistry` permits
-registration after `seal()` unless the embedder opts out (`registerAfterSeal: "deny"`), so a module
-registering from a timer rather than from its factory body is invisible to it and still shadows at
-dispatch — driven under `loom serve`. That hazard is `ToolRegistry`'s own and is not closed here.
+**And the refusal reaches all THREE registrars, not two.** `mcpTools` registers after both the
+modules and the built-ins, and `mcp__<server>__<tool>` is a name an extension module can spell —
+`ToolRegistry.register` takes any string — so at 3d05cff an extension tool named `mcp__docs__search`
+beside an `--mcp-file` server `docs` offering `search` compiled `ok`, exit 0, with the extension's
+definition holding a capability in the grant list and never being dispatched. It refuses now, naming
+both claimants; so does the MCP × MCP case `readMcpServers`' duplicate-server-name check cannot see
+(server `a` offering `b__x` and server `a__b` offering `x` both flatten to `mcp__a__b__x`). A name
+is claimed by whichever server REGISTERED it. A server's own list is not a collision: one offering a
+name twice, or a valid entry beside a malformed twin, keeps booting — `McpClient` keeps the first
+and records the rest precisely so a bad entry does not cost the operator the server. **And the
+`mcp__` prefix is reserved for that registrar at boot**, configured server or not: an extension tool
+spelling one is not a naming collision but impersonation, and it lowers oversight — a real MCP tool
+is `irreversible` and carries `mcp:<server>`, a squatter declares its own class and ran unattended.
+`test/cli/mcp-registrar-collision.test.ts` is the reproduction, eight cases.
+
+**What reserving buys, and one thing it does not.** It is what closes the case a *dropped* tool
+opened: `McpClient.start` drops a malformed spec rather than throwing, so a server could once
+suppress its own collision refusal by making the colliding tool malformed — the reservation refuses
+the squatter with no second claimant needed, which is why a dropped entry claims no name at all
+(claiming one refused boots for a collision that cannot happen, and handed any one server a
+deployment-wide denial of service). What it does not buy is dispatch-time protection: it is a BOOT
+check, and `ToolRegistry` permits registration after `seal()` unless the embedder opts out
+(`registerAfterSeal: "deny"`), so a module registering from a timer rather than from its factory
+body is invisible to it and still shadows — driven under `loom serve`. That hazard is
+`ToolRegistry`'s own and is not closed here.
+
+**A real collision still refuses**, and that is what the operator can act on: two servers whose ids
+flatten together (`MCP_SERVER_FIELDS` allows `_`, so `a` offering `b__x` lands on `a__b`'s `x`), or
+an extension and a server claiming one id. Both name both claimants.
 And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
 apply the operator's own guards; the module is handed the same frozen
 jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a

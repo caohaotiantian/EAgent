@@ -1609,16 +1609,19 @@ export function openWorkspace(
   // `McpClient.#tools` is assigned once, at the end of `start()`, so a server rewriting its
   // `tools/list` reply afterwards cannot introduce a name after the check.
   //
-  // AND A NAME IS CLAIMED BY WHOEVER OFFERED IT, REGISTERED OR NOT — `rejectedTools` counts. This
-  // line read `client.tools` alone and that is the SERVER'S filtered list: `McpClient.start`
-  // DROPS a malformed spec (an oversized description, a non-object `inputSchema`, an intra-server
-  // duplicate) onto `rejectedTools` rather than throwing, deliberately, so one bad entry does not
-  // cost the operator the rest of the server. The consequence was that the name set this guard
-  // folded was chosen by the third party: a server could SUPPRESS ITS OWN COLLISION REFUSAL by
-  // making the colliding tool malformed. Measured at d70a283, `docs` offering `search` with a
-  // 9000-character description beside an extension tool named `mcp__docs__search` — one
-  // `! MCP TOOL DROPPED` line, then `"status": "succeeded"` with the EXTENSION's answer under the
-  // server's id. The operator configured the collision either way, so either way it refuses.
+  // AND A DROPPED TOOL CLAIMS NOTHING, WHICH IS THE SECOND ANSWER THIS GUARD GAVE. The first was
+  // to fold `rejectedTools` in — `McpClient.start` DROPS a malformed spec (oversized description,
+  // non-object `inputSchema`, an intra-server duplicate) onto that list rather than throwing, so
+  // the name set here is chosen by the third party, and a server could SUPPRESS ITS OWN COLLISION
+  // REFUSAL by making the colliding tool malformed. That was measured and real. It was also the
+  // wrong place to answer it: the suppression at stake was an EXTENSION squatting a dropped MCP
+  // name, and reserving the `mcp__` prefix below refuses that with no second claimant needed. What
+  // the fold left behind was a boot refused for a collision that CANNOT HAPPEN — a rejected spec
+  // never reaches `mcpTools`, which maps `#tools` alone, so the id resolves unambiguously to the
+  // one server that validly offered it — and a deployment-wide denial of service any ONE
+  // configured server could fire by merely LISTING a name that flattens onto another's, malformed
+  // and never a real tool. A guard that fails closed on a case it has already made impossible is
+  // not tighter, it is just wrong, and 3d05cff booted these correctly.
   //
   // AND A CLAIM CARRIES WHO MADE IT, not just a sentence about them. The first cut stored a
   // LABEL and asked whether it started with `mcp server "<name>"` — and every MCP label was
@@ -1635,23 +1638,31 @@ export function openWorkspace(
     // `shipped` RATHER THAN "not an extension", because "everything else is a built-in" is true
     // only while these are the only two registrars that have run — and this whole block exists
     // because a third one was added and nobody updated the reasoning that assumed two.
-    const label =
-      owner !== undefined
-        ? `--extension-module ${owner}`
-        : shipped.has(t.name)
-          ? "a built-in of this binary"
-          : "a tool already in this workspace's registry";
-    claimed.set(t.name, { label });
+    if (owner !== undefined) {
+      claimed.set(t.name, { label: `--extension-module ${owner}` });
+      continue;
+    }
+    if (shipped.has(t.name)) {
+      claimed.set(t.name, { label: "a built-in of this binary" });
+      continue;
+    }
+    // AND AN ID THAT IS ALREADY THIS SERVER'S IS STILL THIS SERVER'S — checked only AFTER the two
+    // registrars that can own a name outright, or an extension squatting `mcp__docs__x` would be
+    // attributed to the docs server and exempted from the very collision it is. `openWorkspace` is
+    // exported and takes the registry as a parameter, so a library embedder can call it twice over
+    // one `extensions.tools`; without this the second call finds the FIRST call's MCP tools in the
+    // registry with nobody attributed and refuses each server its own names.
+    const own = mcp.find((m) => t.name.startsWith(mcpToolName(m.client.name, "")));
+    claimed.set(
+      t.name,
+      own === undefined
+        ? { label: "a tool already in this workspace's registry" }
+        : { label: `mcp server "${own.client.name}"`, server: own.client.name },
+    );
   }
   for (const { client } of mcp) {
-    const offered = [
-      ...client.tools.map((spec) => ({ tool: spec.name, label: `mcp server "${client.name}"` })),
-      ...client.rejectedTools.map((r) => ({
-        tool: r.name,
-        label: `mcp server "${client.name}", which offered it and this binary dropped it`,
-      })),
-    ];
-    for (const { tool, label } of offered) {
+    for (const spec of client.tools) {
+      const tool = spec.name;
       const name = mcpToolName(client.name, tool);
       const by = claimed.get(name);
       // A NAME THIS SAME SERVER ALREADY CLAIMED IS NOT A COLLISION BETWEEN TWO REGISTRARS.
@@ -1670,7 +1681,7 @@ export function openWorkspace(
             `in the --mcp-file works too.`,
         );
       }
-      if (by === undefined) claimed.set(name, { label, server: client.name });
+      if (by === undefined) claimed.set(name, { label: `mcp server "${client.name}"`, server: client.name });
     }
   }
 
@@ -1695,7 +1706,12 @@ export function openWorkspace(
   // dispatch — measured under `loom serve`, a `setTimeout` registering `mcp__docs__search`
   // answered a node compiled against the MCP tool's manifest. That is `ToolRegistry`'s own
   // documented hazard and it is NOT closed here; do not read this loop as more than a boot check.
-  for (const name of extensions?.toolNames ?? []) {
+  // OVER THE LIVE REGISTRY, not `extensions.toolNames`. That field is a snapshot
+  // `loadExtensionModules` took when the factory returned, and the loop above already folds
+  // `tools.list()`; reading the registry costs nothing, is strictly stronger, and keeps the two
+  // checks in this block asking the same object the same question. No built-in name carries the
+  // prefix, so nothing shipped is caught by widening it.
+  for (const { name } of tools.list()) {
     if (!name.startsWith("mcp__")) continue;
     throw err.validation(
       CODES.E_CONFIG_INVALID,
