@@ -429,3 +429,75 @@ test("CANCELLING A PARENT RELEASES THE CHILD'S CONTEXT TOO — every depth, not 
     "after the cancel the child's projection is a full re-fold from seq 1, which is what a released context means",
   );
 });
+
+test("A CONTENDED APPEND ON THE CHILD'S LAST PASS IS STILL RETRIED — a retired child answers its parent's mirror", async () => {
+  // THE FIX ROUND'S OWN GAP, and the sharpest case against "leave it unmarked so the next pass
+  // tries again": for a child whose gate decision is on its LAST pass there is no next pass.
+  // `#settled` retires the child at its terminal exit and `#advanceSerially` answers a retired
+  // terminal run from the fold, returning ABOVE the drive loop the forward lives in. The
+  // parent-side half cannot recover it either — the parent is `awaiting_gate` on the open mirror,
+  // which nothing counts as due. So a seq conflict on the final pass stranded the parent
+  // permanently: the exact state d4115c9 exists to eliminate.
+  //
+  // ONE GATE IN THE CHILD is what makes it the last pass; the suite's other contention case
+  // survives only because its child parks on a SECOND gate and therefore gets another pass.
+  let refuseParent = false;
+  let refusals = 0;
+  class ContendedStore extends MemoryStateStore {
+    override async append(input: Parameters<MemoryStateStore["append"]>[0]): ReturnType<MemoryStateStore["append"]> {
+      if (refuseParent && !String(input.runId).includes("~")) {
+        refusals++;
+        throw err.conflict(CODES.E_SEQ_CONFLICT, `synthetic contention on ${String(input.runId)}`);
+      }
+      return super.append(input);
+    }
+  }
+  const store = new ContendedStore({ now: () => NOW });
+  const r = rig(store);
+  // A child with exactly one gate: `charge` is read-only here, so it raises no posture gate of
+  // its own and the run ends on the pass that answers `approve`.
+  const manifests = {
+    "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "read_only", idempotent: true },
+  } as unknown as Record<string, ToolManifestLite>;
+  r.engine.tools.register({
+    ...manifests["pay.charge"]!,
+    description: "Take money.",
+    parameters: { type: "object", properties: { amount: { type: "number" } } },
+    execute: (args: Record<string, unknown>) => {
+      r.charges.push(Number(args["amount"]));
+      return { content: "charged", writes: { receipt: { ok: true, amount: Number(args["amount"]) } } };
+    },
+  } as ToolDefinition);
+  const graph = compileOrThrow({ spec: parent, resolver, tools: manifests, tenantCapabilities: ["pay"] });
+
+  const runId = await r.engine.submit({ graph, inputs: { total: 10 } });
+  let p = await r.engine.advance(runId);
+  const ownGate = Object.values(p.gates).find((g) => g.state === "open" && g.mirrorOf === undefined);
+  if (ownGate !== undefined) {
+    p = await r.engine.resolveGate(runId, { gateId: ownGate.gateId, decision: { kind: "approve" }, actor: { kind: "human", subject: "u:a", via: "console" }, idempotencyKey: "own" });
+  }
+  assert.equal(p.status, "awaiting_gate");
+  const mirror = open(p)!;
+  const childRunId = `${runId}~delegate@root#0` as RunId;
+  const childGate = open((await r.engine.projection(childRunId))!)!;
+  assert.equal(mirror.mirrorOf, childGate.gateId);
+
+  // The human answers the child's only gate while the parent's log is contended. The child runs
+  // to completion on this very pass and is retired.
+  refuseParent = true;
+  const childP = await r.engine.resolveGate(childRunId, { gateId: childGate.gateId, decision: { kind: "approve" }, actor: lead, idempotencyKey: "c1" });
+  assert.equal(childP.status, "succeeded", "the child finished on the pass that answered its gate — there is no later pass");
+  assert.ok(refusals >= 8, `the internal retries were exhausted: ${String(refusals)} refusals`);
+  assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open", "the append genuinely did not land");
+
+  // Contention clears. Any later touch of the retired child answers the mirror off the fold.
+  refuseParent = false;
+  assert.equal((await r.engine.advance(childRunId)).status, "succeeded", "a retired terminal run still answers from the fold");
+  assert.equal(
+    (await r.engine.projection(runId))!.gates[mirror.gateId]?.state,
+    "decided",
+    "…and forwards on the way, so the parent is not stranded by a conflict on the child's last pass",
+  );
+  assert.equal((await r.engine.advance(runId)).status, "succeeded");
+  assert.deepEqual(r.charges, [20], "charged once");
+});

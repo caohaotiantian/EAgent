@@ -2282,7 +2282,20 @@ export class Engine {
       // invariant 2 says the journal is authoritative, so "did this run finish?" is a
       // question the log can always answer, with or without a live context.
       const folded = await this.projection(runId);
-      if (folded !== undefined && isTerminal(folded.status)) return folded;
+      if (folded !== undefined && isTerminal(folded.status)) {
+        // AND A RETIRED CHILD STILL ANSWERS ITS PARENT'S MIRROR, which is the one thing this
+        // early return owes the world. `#forwardToParentMirrors` lives in the drive loop below,
+        // which this line returns above — so a child whose LAST pass could not land the append
+        // (a seq conflict under contention, or a mirror the parent had not raised yet) had no
+        // later pass to try again in, and the parent sat `awaiting_gate` on an open mirror for
+        // the life of the process. Retiring on a terminal exit is what made the last pass the
+        // last one, so the repair belongs here, on the path retirement created.
+        //
+        // NO MEMO, because there is no context to hold one — the question is asked of the fold
+        // every time, which is what makes any later touch of the child a retry.
+        await this.#forwardToParentMirrors(runId, folded);
+        return folded;
+      }
       throw err.notFound(CODES.E_RUN_NOT_FOUND, `run ${runId} is not attached to this engine`);
     }
     // BOUND BEFORE ANYTHING RUNS, and after the terminal fallback above so polling a finished
@@ -2327,7 +2340,7 @@ export class Engine {
       // A DECISION ON THIS RUN'S GATE REACHES THE PARENT WAITING ON IT, whichever door decided
       // it — see `#forwardToParentMirrors`. Before the terminal check below: the decision that
       // finished this child is the one its parent is most often waiting on.
-      await this.#forwardToParentMirrors(ctx, p);
+      await this.#forwardToParentMirrors(ctx.runId, p, ctx.mirrorsChecked);
       // AND THE SAME QUESTION FROM THE OTHER SIDE, because neither half covers the other's gap.
       // See `#answerMirrorsTheChildAlreadyDecided`. A write here makes `p` stale — the run has
       // just stopped waiting on that gate — so the pass restarts rather than deciding anything
@@ -2489,20 +2502,24 @@ export class Engine {
    * asserts that itself. A grandparent's mirror of the PARENT's mirror is answered the same way
    * when the parent next advances — recursion by journal, not by call stack.
    */
-  async #forwardToParentMirrors(ctx: RunContext, p: RunProjection): Promise<void> {
+  async #forwardToParentMirrors(runId: RunId, p: RunProjection, checked?: Set<GateId>): Promise<void> {
     // Child ids are derived — `${parentRunId}~${taskId}` — and `SAFE_ID` admits no `~`, so the
     // last one is the boundary between the parent's id and this run's task id.
-    const id = String(ctx.runId);
+    const id = String(runId);
     const at = id.lastIndexOf("~");
     if (at < 0) return;
-    const decided = Object.values(p.gates).filter((g) => g.state === "decided" && !ctx.mirrorsChecked.has(g.gateId));
+    // THE MEMO IS OPTIONAL, because the caller that needs this most has no context to keep one
+    // in: a child retired at its terminal exit is answered from the fold by `#advanceSerially`
+    // and never reaches the drive loop again. Without a memo every decided gate is re-checked,
+    // which is the correct answer and merely the slower one.
+    const decided = Object.values(p.gates).filter((g) => g.state === "decided" && checked?.has(g.gateId) !== true);
     if (decided.length === 0) return;
     const parentRunId = id.slice(0, at) as RunId;
     const parent = await this.projection(parentRunId);
     if (parent === undefined) return;
     // A TERMINAL PARENT WILL NEVER RAISE A MIRROR, so these gates are finished with for good.
     if (isTerminal(parent.status)) {
-      for (const gate of decided) ctx.mirrorsChecked.add(gate.gateId);
+      for (const gate of decided) checked?.add(gate.gateId);
       return;
     }
     const log = this.#runs.get(parentRunId)?.log ?? this.#logFor(parentRunId);
@@ -2523,7 +2540,7 @@ export class Engine {
       const mirror = Object.values(parent.gates).find((g) => g.mirrorOf === gate.gateId);
       if (mirror === undefined) continue;
       if (mirror.state !== "open") {
-        ctx.mirrorsChecked.add(gate.gateId);
+        checked?.add(gate.gateId);
         continue;
       }
       try {
@@ -2533,13 +2550,13 @@ export class Engine {
           actor: SYSTEM_ACTOR("executor:subgraph"),
           idempotencyKey: `child:${gate.gateId}`,
         });
-        ctx.mirrorsChecked.add(gate.gateId);
+        checked?.add(gate.gateId);
       } catch (e) {
         if (!isLoomError(e)) throw e;
         // ALREADY RESOLVED IS AN ANSWER — a concurrent human got there first, and the mirror has
         // the decision it needed. Done with it.
         if (e.code === CODES.E_GATE_ALREADY_RESOLVED) {
-          ctx.mirrorsChecked.add(gate.gateId);
+          checked?.add(gate.gateId);
           continue;
         }
         // A SEQ CONFLICT IS NOT. `RunLog.append` already retries one internally
@@ -2593,13 +2610,19 @@ export class Engine {
       if (childP === undefined) continue;
       if (childP.gates[mirror.mirrorOf!]?.state !== "decided") continue;
       try {
-        await this.#gates.resolve(ctx.log, {
+        // THE GATE MOVED, not merely "resolve did not throw". `HumanGateBroker.resolve` answers
+        // `{resolved:false}` from its in-memory idempotency map BEFORE it looks at the gate's
+        // state, so a repeat under the same key returns quietly having written nothing — and the
+        // caller `continue`s the drive loop on this answer. Believing the call instead of the
+        // result is how that loop becomes unbounded: rewind suppresses the `gate.decided` while
+        // the broker keeps the idempotency entry, so the fold shows the mirror `open` again, the
+        // repeat writes nothing, and every pass reaches the identical state.
+        wrote = (await this.#gates.resolve(ctx.log, {
           gateId: mirror.gateId,
           decision: { kind: "approve" },
           actor: SYSTEM_ACTOR("executor:subgraph"),
           idempotencyKey: `child:${String(mirror.mirrorOf)}`,
-        });
-        wrote = true;
+        })).resolved || wrote;
       } catch (e) {
         if (!isLoomError(e)) throw e;
         if (e.code === CODES.E_GATE_ALREADY_RESOLVED || e.code === CODES.E_SEQ_CONFLICT) continue;
