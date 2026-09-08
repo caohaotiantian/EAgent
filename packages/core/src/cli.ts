@@ -22,7 +22,7 @@ import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
 import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
-import { mcpTools } from "./mcp/tools.ts";
+import { mcpToolName, mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
@@ -1576,6 +1576,152 @@ export function openWorkspace(
   // THE SECOND ARGUMENT IS THE ONLY PATH TO A LOWERED MCP GATE IN THIS BINARY, and it reaches
   // here from a `--mcp-file` row and from nowhere else. See `MCP_SERVER_FIELDS` for why a file
   // named on argv is allowed to do that when `loadExtensionModules` says a file may not.
+  // THE THIRD REGISTRAR, AND THE COLLISION REFUSAL ABOVE DID NOT REACH IT.
+  //
+  // `openWorkspace` fills ONE `ToolRegistry` from three places, in this order: the
+  // `--extension-module` modules, this binary's built-ins, and every connected MCP server. The
+  // check at the top of this function covers exactly one of the three pairs — an extension
+  // naming a BUILT-IN — and `mcp__<server>__<tool>` is a name an extension module can spell,
+  // because `ToolRegistry.register` takes any string. So an extension tool named
+  // `mcp__docs__search` was registered, held the capability it declared, contributed it to the
+  // grant list `capabilitiesOf` derives below, appeared in the manifest the compiler computes an
+  // agent node's posture floor over — and was then silently overwritten here. Measured at
+  // 3d05cff: `loom compile … --extension-module … --mcp-file …` printed `ok` and exited 0.
+  //
+  // NOBODY SHADOWS ANYBODY, which is the same answer a duplicate adapter name, a duplicate
+  // channel name, a duplicate `--mcp-file` server name and a duplicate tool within one server
+  // already get. Picking a winner by precedence would loosen: whichever side loses is a tool the
+  // operator installed and cannot call, and a warning on stderr at boot is not oversight. The
+  // operator renames one; a guard that cannot decide fails closed.
+  //
+  // AND IT COVERS MCP × MCP TOO, by folding each server's names in as it goes. A server name may
+  // contain `_` (`MCP_SERVER_FIELDS` allows `[A-Za-z0-9_-]+`) and a tool name is whatever the
+  // server says, so server `a` offering `b__x` and server `a__b` offering `x` both flatten to
+  // `mcp__a__b__x` — two DIFFERENT servers, so `readMcpServers`' duplicate-name refusal never
+  // sees it.
+  //
+  // BEFORE ANY OF THEM IS REGISTERED, so a refusal leaves the registry exactly as it found it
+  // rather than half of one server's tools. `main`'s `closeMcp` already closes the children on
+  // every refusal path out of this function, so this one spawns no orphan.
+  //
+  // A SERVER THAT IS UNREACHABLE NEVER GETS HERE: `startMcp` aborts the whole boot with
+  // `E_TOOL_SOURCE_UNAVAILABLE` if any `client.start()` throws, so there is no partial connect.
+  // `McpClient.#tools` is assigned once, at the end of `start()`, so a server rewriting its
+  // `tools/list` reply afterwards cannot introduce a name after the check.
+  //
+  // AND A DROPPED TOOL CLAIMS NOTHING, WHICH IS THE SECOND ANSWER THIS GUARD GAVE. The first was
+  // to fold `rejectedTools` in — `McpClient.start` DROPS a malformed spec (oversized description,
+  // non-object `inputSchema`, an intra-server duplicate) onto that list rather than throwing, so
+  // the name set here is chosen by the third party, and a server could SUPPRESS ITS OWN COLLISION
+  // REFUSAL by making the colliding tool malformed. That was measured and real. It was also the
+  // wrong place to answer it: the suppression at stake was an EXTENSION squatting a dropped MCP
+  // name, and reserving the `mcp__` prefix below refuses that with no second claimant needed. What
+  // the fold left behind was a boot refused for a collision that CANNOT HAPPEN — a rejected spec
+  // never reaches `mcpTools`, which maps `#tools` alone, so the id resolves unambiguously to the
+  // one server that validly offered it — and a deployment-wide denial of service any ONE
+  // configured server could fire by merely LISTING a name that flattens onto another's, malformed
+  // and never a real tool. A guard that fails closed on a case it has already made impossible is
+  // not tighter, it is just wrong, and 3d05cff booted these correctly.
+  //
+  // THE TWO-CLAIMANT HALF, IN THE ONE SENTENCE IT IS: a name is claimed by whichever registrar
+  // will register it, and a second claimant refuses at boot. (The ONE-claimant half is the `mcp__`
+  // reservation further down; between them they are the whole rule, and neither is it alone.) A
+  // server re-listing its own tool never reaches this check — `McpClient.start` keeps the first
+  // and puts the rest on `rejectedTools`, and this loop reads `client.tools`. Deciding to REFUSE
+  // needs only to know that somebody claimed the name; the message then says who.
+  //
+  // It took three fix rounds to get back to that. Two accommodations were built for a same-server
+  // collision that cannot occur — an exemption keyed on the claiming server, and an attribution
+  // that GUESSED a name's owner from its `mcp__<server>__` prefix — and mutation proved both inert
+  // TO THE SUITE: deleting either left it at 8 pass, 0 fail. That is not the same as "nothing
+  // changed", and the difference is the one CLAUDE.md means by "a builder's own green suite is not
+  // evidence" — on the library-embedder path they changed which message an operator reads, for the
+  // better, and the suite could not have told you either way. The accretion of special cases in one
+  // predicate was the tell that the fix was mis-scoped rather than incomplete, and the answer was
+  // to delete rather than to add a fourth.
+  const claimed = new Map<string, string>();
+  for (const t of tools.list()) {
+    const owner = extensions?.toolOwners.get(t.name);
+    // `shipped` RATHER THAN "not an extension", because "everything else is a built-in" is true
+    // only while these are the only two registrars that have run — and this whole block exists
+    // because a third one was added and nobody updated the reasoning that assumed two.
+    //
+    // AND THIS BRANCH IS KEPT ON A DIFFERENT RULE FROM THE TWO DELETED ABOVE, deliberately. Those
+    // two decided whether a boot REFUSES and decided it wrongly; this one only decides which words
+    // an operator reads. No built-in name carries the `mcp__` prefix, so a built-in's label is
+    // never actually printed by the refusal below — the branch is here so the map does not
+    // MISATTRIBUTE, which is the failure a fourth registrar would inherit. A branch with no
+    // behaviour is a comment's job to justify; a branch with the wrong behaviour is a deletion.
+    claimed.set(
+      t.name,
+      owner !== undefined
+        ? `--extension-module ${owner}`
+        : shipped.has(t.name)
+          ? "a built-in of this binary"
+          : // NEITHER, WHICH ONLY A LIBRARY EMBEDDER CAN PRODUCE — `openWorkspace` takes the
+            // registry as a parameter. Saying so is the point: calling it "a built-in" was a
+            // misattribution waiting for a fourth registrar, which is exactly how this block
+            // came to exist.
+            "a tool already in this workspace's registry",
+    );
+  }
+  for (const { client } of mcp) {
+    for (const spec of client.tools) {
+      const tool = spec.name;
+      const name = mcpToolName(client.name, tool);
+      const by = claimed.get(name);
+      if (by !== undefined) {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `mcp server "${client.name}" offers the tool "${tool}", which this binary registers as "${name}" — ` +
+            `and that name is already claimed by ${by}. MCP tools are registered AFTER the extension modules ` +
+            `and the built-ins, and ToolRegistry.register shadows on collision, so the existing definition would ` +
+            `keep its capability in the grant list and its entry in the compiler's manifest and would never be ` +
+            `dispatched. Rename one of them — an MCP tool's id is mcp__<server>__<tool>, so renaming the server ` +
+            `in the --mcp-file works too.`,
+        );
+      }
+      claimed.set(name, `mcp server "${client.name}"`);
+    }
+  }
+
+  // AND THE `mcp__` PREFIX IS RESERVED FOR THAT REGISTRAR, WHOLE, whether or not any server is
+  // configured. The check above only fires when there are TWO claimants, and the one-claimant case
+  // is the worse one: with no `--mcp-file` at all, an extension tool named `mcp__docs__search`
+  // registered and DISPATCHED under an id an operator reads as the docs server's search tool.
+  // That is not a naming collision, it is impersonation, and it LOWERS oversight — `mcpTools`
+  // gives every MCP tool `irreversible` (a posture floor of `in`) and the capability
+  // `mcp:<server>`, while the squatter declares its own class and its own capability and can run
+  // unattended. Oversight only tightens, so the prefix belongs to the registrar that earns it
+  // rather than to whoever spells it first.
+  //
+  // AFTER the collision loop, so the operator who configured BOTH gets the message that names
+  // both claimants rather than this more general one.
+  //
+  // AT BOOT, AND ONLY AT BOOT — which is what this reserves and all it reserves. `ToolRegistry`
+  // permits registration after `seal()` unless the embedder asked otherwise
+  // (`registerAfterSeal: "deny"`, opt-in, see its docstring), and `extensions.toolNames` is a
+  // snapshot `loadExtensionModules` took when the factory returned. So a module that registers
+  // from a timer rather than from its factory body is invisible here and still shadows at
+  // dispatch — measured under `loom serve`, a `setTimeout` registering `mcp__docs__search`
+  // answered a node compiled against the MCP tool's manifest. That is `ToolRegistry`'s own
+  // documented hazard and it is NOT closed here; do not read this loop as more than a boot check.
+  // OVER THE LIVE REGISTRY, not `extensions.toolNames`. That field is a snapshot
+  // `loadExtensionModules` took when the factory returned, and the loop above already folds
+  // `tools.list()`; reading the registry costs nothing, is strictly stronger, and keeps the two
+  // checks in this block asking the same object the same question. No built-in name carries the
+  // prefix, so nothing shipped is caught by widening it.
+  for (const { name } of tools.list()) {
+    if (!name.startsWith("mcp__")) continue;
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--extension-module ${extensions?.toolOwners.get(name) ?? "(unknown module)"} registers the tool name "${name}". ` +
+        `The "mcp__" prefix is reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is ` +
+        `registered by this binary from a server an operator named, carries the capability mcp:<server>, and is ` +
+        `irreversible unless that server's row says otherwise. A tool spelling one is read by an operator as that ` +
+        `server's, under whatever oversight class it chose for itself. Rename it.`,
+    );
+  }
   for (const { client, irreversibility } of mcp) {
     for (const t of mcpTools(client, irreversibility)) tools.register(t);
   }
