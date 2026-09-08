@@ -2722,7 +2722,7 @@ export class Engine {
     }
     // The same journal answer for a retired run that `#resolveGateAsSystem` gives, for the same
     // redelivery reason.
-    if (this.#runs.get(runId) === undefined) {
+    if (this.#runs.get(runId) === undefined && (await this.#retiredHere(runId))) {
       const folded = await this.projection(runId);
       if (folded !== undefined && isTerminal(folded.status)) {
         await this.#gates.resolveBatch(this.#logFor(runId), input);
@@ -2743,15 +2743,18 @@ export class Engine {
    * and there is exactly one caller — the subgraph forward, bound to a mirror gate.
    */
   async #resolveGateAsSystem(runId: RunId, input: ResolveInput): Promise<RunProjection> {
-    // A RETIRED RUN IS NOT AN UNKNOWN RUN, here as in `#advanceSerially`. Terminal runs release
-    // their context, and a webhook redelivery or a double-click routinely lands after the run it
-    // decided has ended; `#require` answered those `E_RUN_NOT_FOUND`, which reads as "no such
-    // run" to a channel that just delivered a decision on it. The broker holds the honest
-    // answers — a repeat of a decision it already recorded is `{resolved: false}`, and a NEW
-    // decision on an ended run is `E_GATE_ALREADY_RESOLVED` — so a terminal run is handed to it
-    // over its own log. Nothing here runs graph code, which is what `#assertBound` protects.
-    const attached = this.#runs.get(runId);
-    if (attached === undefined) {
+    // A RUN THIS ENGINE RETIRED IS NOT AN UNKNOWN RUN, here as in `#advanceSerially`. Terminal
+    // runs release their context, and a webhook redelivery or a double-click routinely lands
+    // after the run it decided has ended; `#require` answered those `E_RUN_NOT_FOUND`, which
+    // reads as "no such run" to a channel that just delivered a decision on it. The broker holds
+    // the honest answers — a repeat of a decision it already recorded is `{resolved: false}`, and
+    // a NEW decision on an ended run is `E_GATE_ALREADY_RESOLVED` — so a retired run is handed to
+    // it over its own log. Nothing here runs graph code, which is what `#assertBound` protects.
+    //
+    // RETIRED HERE, not merely terminal: a run this engine never attached still refuses at its
+    // own door (`cancel-cascade.test.ts` pins that for a cancelled child after a restart), and
+    // `#retiredHere` is the same question `#reattach` asks.
+    if (this.#runs.get(runId) === undefined && (await this.#retiredHere(runId))) {
       const folded = await this.projection(runId);
       if (folded !== undefined && isTerminal(folded.status)) {
         await this.#gates.resolve(this.#logFor(runId), input);
@@ -2847,12 +2850,22 @@ export class Engine {
   async #reattach(runId: RunId): Promise<RunContext | undefined> {
     const live = this.#runs.get(runId);
     if (live !== undefined) return live;
-    if (this.#forgotten.has(runId)) return undefined;
-    const hash = await this.compiledGraphHash(runId);
-    const graph = hash === undefined ? undefined : this.#graphs.get(hash);
+    const graph = await this.#retainedGraphOf(runId);
     if (graph === undefined) return undefined;
     this.attach(runId, graph);
     return this.#runs.get(runId);
+  }
+
+  /** The graph `#retire` kept for this run, unless `forget` said not to: what `#reattach` re-attaches. */
+  async #retainedGraphOf(runId: RunId): Promise<RunGraph | undefined> {
+    if (this.#forgotten.has(runId)) return undefined;
+    const hash = await this.compiledGraphHash(runId);
+    return hash === undefined ? undefined : this.#graphs.get(hash);
+  }
+
+  /** Whether this engine could re-attach the run — i.e. it ran here and was retired, not never seen. */
+  async #retiredHere(runId: RunId): Promise<boolean> {
+    return (await this.#retainedGraphOf(runId)) !== undefined;
   }
 
   /**
