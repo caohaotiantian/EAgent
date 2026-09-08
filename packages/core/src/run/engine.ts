@@ -982,6 +982,8 @@ interface RunContext {
   readonly runId: RunId;
   /** Mutable: an accepted mutation swaps in a successor graph mid-run (D5.7). */
   graph: RunGraph;
+  /** The graph this context was ATTACHED with — what `#reattach` hands back after a retire. */
+  readonly attached: RunGraph;
   index: GraphIndex;
   /** Nodes added by mutations so far, against `expansion.maxNodes`. */
   addedNodes: number;
@@ -1108,6 +1110,17 @@ interface RunContext {
   readonly exprCache: Map<string, Expr>;
 }
 
+/**
+ * How many distinct attached graphs a process keeps for its retired runs.
+ *
+ * A deployment attaches a handful of graphs and runs them thousands of times, so the map is
+ * small by construction; the cap is for the embedder that compiles a fresh graph per run, where
+ * it turns "one graph per run ever seen" — the leak `#retire` exists to close — into a fixed
+ * number. Past it, a rewind of an old run needs an explicit `attach` again, which is what a
+ * restart needs anyway.
+ */
+const RETAINED_GRAPHS = 128;
+
 export class Engine {
   readonly #store: StateStore;
   readonly #bus: EventBus | undefined;
@@ -1177,6 +1190,10 @@ export class Engine {
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
   /** runId → the tail of that run's journal-write chain. See `#serialize`. */
   readonly #chains = new Map<RunId, Promise<unknown>>();
+  /** graphHash → the graph a retired run was attached with. See `#retire` and `#reattach`. */
+  readonly #graphs = new Map<string, RunGraph>();
+  /** Runs an explicit `forget` released; `#reattach` leaves them alone until `attach`. */
+  readonly #forgotten = new Set<RunId>();
 
   constructor(opts: EngineOptions) {
     this.#store = opts.store;
@@ -1188,7 +1205,20 @@ export class Engine {
     this.#now = opts.now ?? Date.now;
     this.#gates = opts.gates ?? new HumanGateBroker({ now: this.#now });
     this.#workerId = opts.workerId ?? "worker-0";
-    this.#maxParallelism = Math.max(1, opts.maxParallelism ?? 16);
+    // REFUSED, NOT CLAMPED. `Math.max(1, NaN)` is `NaN`, and a `NaN` here ran nothing: `select`
+    // sliced the wave to `NaN` (empty), `#topUpFanout` had `NaN` room, and every `advance`
+    // returned `running` with the first task `ready`, forever. `Infinity` and a fraction are
+    // the same family — a bound the operator did not choose — and `cli.ts`'s `boundedCount`
+    // already refuses them at the flag, so only a library embedder ever reaches this line.
+    const width = opts.maxParallelism ?? 16;
+    if (!Number.isInteger(width) || width < 1) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `EngineOptions.maxParallelism must be a whole number of 1 or more, not ${String(width)}; a run under it would never dispatch a task`,
+        { details: { maxParallelism: width } },
+      );
+    }
+    this.#maxParallelism = width;
     this.#policyOpts = opts.policy ?? { granted: ["*"] };
     // AT ENGINE CONSTRUCTION, EVEN THOUGH THE ENGINE IS NOT WHAT VALIDATES IT. A
     // `PolicyEngine` is built lazily per run in `#contextFor`, so an out-of-range
@@ -2290,18 +2320,14 @@ export class Engine {
       // question the journal would answer the other way. `#rewindSerially` clears the flag for
       // that reason and this loop is where it is picked up.
       await this.#seedPolicy(ctx, runId, p);
-      // NOT RETIRED HERE, and the attempt is recorded because it looks obviously right.
-      //
-      // Evicting a terminal run's context on the call that finishes it fixes the leak
-      // `forget` exists for, and breaks two public operations that legitimately act on
-      // terminal runs: `openGates` renders a payload the projection does not carry, and
-      // `rewind` forks from a completed run. Both read `#runs` and both raise
-      // `E_RUN_NOT_FOUND` without it — measured, as three suite failures.
-      //
-      // Giving each of them the journal fallback `#advanceSerially` now has is the real
-      // fix and is its own change: `openGates` in particular would have to rebuild a
-      // rendered payload from the log rather than read it from the broker. Until then
-      // retirement is the caller's call, which is why `forget` is public.
+      // RETIRED ON EVERY TERMINAL EXIT, not only on the call AFTER the one that finished. A
+      // comment here used to say the finishing call could not retire because `openGates` and
+      // `rewind` read `#runs` — that was true once and had stopped being true: both answer a
+      // retired run from the journal (`engine-lifecycle.test.ts` exercises them on one). What
+      // was left was the product path: `loom serve` never advances a finished run a second
+      // time, so every run that finished in one `advance`, and every cancelled run, kept its
+      // compiled graph, index, taint sets and expression cache for the life of the process.
+      // `#settled` is the one exit the two `#finish` paths below share; `cancel` retires too.
       // `p.paused` IS READ HERE AND NOT `p.status`. An operator pause folds the status to
       // `interrupted`, which the next clause already stops on — but a `gate.decided` landing
       // afterwards carries an unconditional `run.resumed` and folds it back to `running`, and
@@ -2321,7 +2347,7 @@ export class Engine {
       const fatal = Object.values(p.tasks).some((t) => t.state === "failed" && RUN_FATAL_CODES.has(t.error?.code ?? ""));
       if (p.budgetExhausted || fatal) {
         await this.#finish(ctx, p);
-        return (await this.#project(ctx))!;
+        return this.#settled(ctx);
       }
 
       // WHICH Tasks to run is the scheduler's question; HOW they run is not, and never
@@ -2389,8 +2415,7 @@ export class Engine {
         if (tasksInState(p, "leased").length > 0) return p;
 
         await this.#finish(ctx, p);
-        const done = await this.#project(ctx);
-        return done!;
+        return this.#settled(ctx);
       }
 
       // AN EMPTY WAVE OVER A NON-EMPTY READY SET IS NOT AN ERROR — it is a peer holding
@@ -2408,6 +2433,19 @@ export class Engine {
       const escalations = ctx.escalationWrites.splice(0);
       if (escalations.length > 0) await Promise.all(escalations);
     }
+  }
+
+  /**
+   * The projection after `#finish`, with the context released if the run is over.
+   *
+   * `#finish` can decline to end a run — a fan-out with unmaterialised branches fails it, a
+   * fatal task fails it, and either way the answer is the fold, not `#finish`'s return — so
+   * whether to retire is read off the projection rather than assumed.
+   */
+  async #settled(ctx: RunContext): Promise<RunProjection> {
+    const done = (await this.#project(ctx))!;
+    if (isTerminal(done.status)) this.#retire(ctx.runId);
+    return done;
   }
 
   /**
@@ -2606,6 +2644,15 @@ export class Engine {
         { details: { batchId: input.batchId, actor: input.actor } },
       );
     }
+    // The same journal answer for a retired run that `#resolveGateAsSystem` gives, for the same
+    // redelivery reason.
+    if (this.#runs.get(runId) === undefined) {
+      const folded = await this.projection(runId);
+      if (folded !== undefined && isTerminal(folded.status)) {
+        await this.#gates.resolveBatch(this.#logFor(runId), input);
+        return folded;
+      }
+    }
     const ctx = this.#require(runId);
     // The higher-consequence sibling of `resolveGate`: it closes N gates at once and then
     // advances. Guarding one and not the other is the shape invariant 6 exists to prevent.
@@ -2620,6 +2667,21 @@ export class Engine {
    * and there is exactly one caller — the subgraph forward, bound to a mirror gate.
    */
   async #resolveGateAsSystem(runId: RunId, input: ResolveInput): Promise<RunProjection> {
+    // A RETIRED RUN IS NOT AN UNKNOWN RUN, here as in `#advanceSerially`. Terminal runs release
+    // their context, and a webhook redelivery or a double-click routinely lands after the run it
+    // decided has ended; `#require` answered those `E_RUN_NOT_FOUND`, which reads as "no such
+    // run" to a channel that just delivered a decision on it. The broker holds the honest
+    // answers — a repeat of a decision it already recorded is `{resolved: false}`, and a NEW
+    // decision on an ended run is `E_GATE_ALREADY_RESOLVED` — so a terminal run is handed to it
+    // over its own log. Nothing here runs graph code, which is what `#assertBound` protects.
+    const attached = this.#runs.get(runId);
+    if (attached === undefined) {
+      const folded = await this.projection(runId);
+      if (folded !== undefined && isTerminal(folded.status)) {
+        await this.#gates.resolve(this.#logFor(runId), input);
+        return folded;
+      }
+    }
     const ctx = this.#require(runId);
     // EVERY DECISION BINDS, INCLUDING `reject`, and exempting it was a hole the size of the one
     // this method exists to close. The exemption's stated reason — "reject fails the run, so it
@@ -2663,7 +2725,12 @@ export class Engine {
    * no-op rather than an error — asking twice is not a mistake.
    */
   forget(runId: RunId): void {
-    this.#retire(runId);
+    // FORGET MEANS FORGET. Automatic retirement (`#retire`) keeps the run's graph by hash so a
+    // later `rewind` can re-attach it; an explicit release is the caller saying this engine holds
+    // nothing for the run, so `#reattach` declines it until `attach` says otherwise. The graph
+    // itself stays in `#graphs` — other runs may share it.
+    this.#runs.delete(runId);
+    this.#forgotten.add(runId);
   }
 
   /**
@@ -2674,7 +2741,42 @@ export class Engine {
    * run would key a shared cache by the wrong thing and recompile for every caller.
    */
   #retire(runId: RunId): void {
+    const ctx = this.#runs.get(runId);
+    if (ctx === undefined) return;
+    // THE GRAPH OUTLIVES THE CONTEXT, keyed by ITS hash and not the run's — one entry per
+    // distinct graph a process has attached, however many runs used it. Everything else in a
+    // context is derived from the journal and comes back on `attach`; the graph is the one thing
+    // that is not journaled, only its hash is, and it is what `rewind` needs to dispatch a
+    // finished run's compensations (`#rewindRefusals`). Bounded, oldest out, because a bound
+    // is the point of retiring at all.
+    const graph = ctx.attached;
+    this.#graphs.delete(graph.graphHash);
+    this.#graphs.set(graph.graphHash, graph);
+    if (this.#graphs.size > RETAINED_GRAPHS) {
+      const oldest = this.#graphs.keys().next().value;
+      if (oldest !== undefined) this.#graphs.delete(oldest);
+    }
     this.#runs.delete(runId);
+  }
+
+  /**
+   * The context for a run this engine retired, rebuilt the way a restart rebuilds it.
+   *
+   * Only the journal's compiled hash and `#graphs` are consulted: the run is re-attached with
+   * the graph it was attached with, `#rehydrateGraph` replays any mutations on the next drive,
+   * and `#seedPolicy` re-seeds oversight from the fold — the same door `loom serve` comes
+   * through after `kill -9`. `undefined` when the graph is no longer held, which is the answer
+   * a fresh process gives too; callers refuse from there, they do not guess.
+   */
+  async #reattach(runId: RunId): Promise<RunContext | undefined> {
+    const live = this.#runs.get(runId);
+    if (live !== undefined) return live;
+    if (this.#forgotten.has(runId)) return undefined;
+    const hash = await this.compiledGraphHash(runId);
+    const graph = hash === undefined ? undefined : this.#graphs.get(hash);
+    if (graph === undefined) return undefined;
+    this.attach(runId, graph);
+    return this.#runs.get(runId);
   }
 
   /**
@@ -2820,7 +2922,9 @@ export class Engine {
     }
     await this.#cancelTree(runId, reason, new Set(), by);
     const ctx = this.#runs.get(runId);
-    return ctx === undefined ? (await this.projection(runId))! : (await this.#project(ctx))!;
+    if (ctx === undefined) return (await this.projection(runId))!;
+    // A cancelled run is over; its context goes the way a finished run's does (`#settled`).
+    return this.#settled(ctx);
   }
 
   /**
@@ -3509,7 +3613,8 @@ export class Engine {
     // The live context, when this engine still holds one. Kept separately from `ctx` because a
     // rewind can DISPATCH now — see the compensation block below — and dispatching needs the
     // graph, the policy engine and the abort signal, none of which are in the journal.
-    const live = this.#runs.get(runId);
+    // A FINISHED RUN IS THE RUN MOST WORTH REWINDING, and it has been retired — see `#retire`.
+    const live = await this.#reattach(runId);
     const ctx = { log: live?.log ?? this.#logFor(runId) };
 
     // A BOUNDARY BELOW THE RUN'S FIRST EVENT ERASES THE RUN, AND NOTHING BRINGS IT BACK.
@@ -4274,9 +4379,11 @@ export class Engine {
         : inherited === undefined
           ? own
           : own.filter((c) => inherited.some((p) => (p.endsWith("*") ? c.startsWith(p.slice(0, -1)) : p === c)));
+    this.#forgotten.delete(runId);
     const ctx: RunContext = {
       runId,
       graph,
+      attached: graph,
       grantBound,
       index: indexGraph(graph.spec),
       log: new RunLog(runId, {
@@ -6046,6 +6153,18 @@ export class Engine {
     // preceded by a line about plumbing. One string, used at both sites.
     const systemPrompt = instructions === "" ? `You are node ${w.node.id}.` : `${instructions}\n\nYou are node ${w.node.id}.`;
 
+    // THE SUMMARISER'S SPEND IS THIS TASK'S SPEND, at every rung it runs: it lands in `usage`
+    // before anything else happens, so a refused summary still charges the call it made —
+    // `#summarizeEffect` returns the refusal rather than throwing it, and the task fails on it
+    // with the usage in hand.
+    let usage: UsageRecord = { ...ZERO_USAGE };
+    let compactionRefusal: LoomError | undefined;
+    const fold = async (text: string, ordinal: number): Promise<string> => {
+      const folded = await this.#summarizeEffect(ctx, p, w, text, ordinal);
+      usage = addUsage(usage, folded.usage);
+      compactionRefusal ??= folded.refusal;
+      return folded.summary;
+    };
     const assembled = await assembleContext(
       {
         // THE INSTRUCTION GOES IN THE SYSTEM SLOT, which is where a model looks for one and
@@ -6065,17 +6184,20 @@ export class Engine {
         dropBelowPriority: 35,
         // The summarizer is an EFFECT, so replay serves the same summary and rung 3
         // stays deterministic.
-        summarize: (text) => this.#summarizeEffect(ctx, p, w, text),
+        summarize: (text) => fold(text, 0),
       },
     );
+    if (compactionRefusal !== undefined) return { status: "failed", writes: {}, usage, error: compactionRefusal };
 
     // The user message carries the STATE. The instruction moved to the system slot above, so
     // `prompt` is gone from this envelope rather than duplicated into it — two copies of an
     // instruction is two things for a reader of the transcript to reconcile.
     let messages: Message[] = [{ role: "user", content: JSON.stringify({ node: w.node.id, state: assembled.channels }) }];
 
-    let usage: UsageRecord = { ...ZERO_USAGE };
     let finalText = "";
+    // Set only by the one exit that means "the model stopped asking for tools". Falling off the
+    // end of the loop with it clear means the counter ran out mid-plan.
+    let finished = false;
 
     for (let turn = 0; turn < maxTurns; turn++) {
       // BOUND WHAT IS SENT, not merely what was assembled. `assembleContext` above ran
@@ -6090,9 +6212,8 @@ export class Engine {
       // cost nothing; it is now the whole document, and leaving it out reproduced exactly the
       // defect `boundTurns` exists to close: measured, 127,513 tokens posted against a 100,000
       // budget, no rung, no `E_CONTEXT_OVERFLOW`, run `succeeded`.
-      const bounded = await boundTurns(messages, Math.max(0, this.#contextTokens - estimateTokens(systemPrompt)), (text) =>
-        this.#summarizeEffect(ctx, p, w, text, turn),
-      );
+      const bounded = await boundTurns(messages, Math.max(0, this.#contextTokens - estimateTokens(systemPrompt)), (text) => fold(text, turn));
+      if (compactionRefusal !== undefined) return { status: "failed", writes: {}, usage, error: compactionRefusal };
       messages = [...bounded.messages];
       if (bounded.overBudget) {
         // The same verdict `assembleContext` reaches when its ladder cannot fit the
@@ -6653,7 +6774,10 @@ export class Engine {
 
       finalText = assistant?.content ?? finalText;
       const calls = assistant?.toolCalls ?? [];
-      if (calls.length === 0) break;
+      if (calls.length === 0) {
+        finished = true;
+        break;
+      }
 
       messages.push(assistant!);
       // DERIVED FROM POSITION, NOT FROM DISPATCH. The ordinal is this call's index in the
@@ -6667,6 +6791,28 @@ export class Engine {
         messages.push({ role: "tool", content: result.content, toolCallId: call.id });
       }
       callsSoFar += calls.length;
+    }
+
+    // RUNNING OUT OF TURNS IS THE SAME CONDITION `turnRefusal` REFUSES ONE LEVEL UP: the answer is
+    // truncated, not finished. The loop used to exit normally when `maxTurns` was reached with
+    // the last turn still requesting tools, so `finalText` was whatever the model had said before
+    // asking — usually nothing — and the node committed `succeeded` with `""` on its channel.
+    // Nothing in the journal told an agent that finished from one that was cut off mid-plan; with
+    // an `outputSchema` it failed instead, blaming the provider for a cap the graph set. Checked
+    // AFTER the loop's appends, so every turn that ran is recorded and settled, and BEFORE
+    // `parseOutput`, so a schema never gets to grade a truncated transcript.
+    if (!finished) {
+      return {
+        status: "failed",
+        writes: {},
+        usage,
+        error: err.validation(
+          CODES.E_PROVIDER_BAD_REQUEST,
+          `node "${w.node.id}" reached its maxTurns of ${String(maxTurns)} while the model was still requesting tool calls; ` +
+            `the answer is truncated, not finished — raise maxTurns or give the agent fewer tools to call`,
+          { details: { node: w.node.id, maxTurns, turnsRun: maxTurns } },
+        ),
+      };
     }
 
     const schema = schemaOverride ?? (agent?.outputSchema as JSONSchema | undefined);
@@ -7249,14 +7395,22 @@ export class Engine {
    * asked for a different one. Invariant 3 is the general form — a key that does not
    * distinguish two calls is not derived, it is merely stable.
    */
-  async #summarizeEffect(ctx: RunContext, p: RunProjection, w: Wave, text: string, ordinal = 0): Promise<string> {
+  async #summarizeEffect(
+    ctx: RunContext,
+    p: RunProjection,
+    w: Wave,
+    text: string,
+    ordinal = 0,
+  ): Promise<{ readonly summary: string; readonly usage: UsageRecord; readonly refusal?: LoomError }> {
     const key = effectKey(w.task.taskId, "summarize", ordinal);
-    if (this.#replay !== undefined) return String(this.#replay.require(key).result);
+    // A REPLAYED OR SERVED SUMMARY COST NOTHING THIS TIME — the same rule a served turn follows
+    // in `#runAgent`: the spend was recorded when the call was made.
+    if (this.#replay !== undefined) return { summary: String(this.#replay.require(key).result), usage: { ...ZERO_USAGE } };
     // A ladder rung is a model call like any other, and a re-execution that folds the same
     // prefix asks the same question. Serving it keeps the compaction deterministic across
     // attempts — which the transcript downstream of it depends on.
     const served = await this.#servedEffect(ctx, p, key);
-    if (served !== undefined) return String(served.result);
+    if (served !== undefined) return { summary: String(served.result), usage: { ...ZERO_USAGE } };
 
     const adapter = this.models.require();
     const req: ModelRequest = {
@@ -7265,38 +7419,86 @@ export class Engine {
       messages: [{ role: "user", content: text }],
       tools: [],
     };
+    const where = `node "${w.node.id}" context summary`;
     // ASKED BEFORE THE CALL, not after it, and for the same reason `#runAgent` asks before its
     // reservation: an adapter that cannot say what ceiling it is about to send is refused
     // before it spends money, rather than after. The number is what a truncation refusal names.
-    const ceiling = outputCeilingOf(adapter, req, `node "${w.node.id}" context summary`);
-    let summary = "";
-    let finish = "stop";
-    let outputTokens = 0;
-    for await (const ev of adapter.stream(req, ctx.abort.signal)) {
-      if (ev.type === "done") {
-        summary = ev.message.content;
-        finish = ev.finishReason;
-        outputTokens = ev.usage.outputTokens;
-      }
-    }
-    // THE SECOND SITE WITH THE SAME DEFECT, and the quieter one: a truncated summary is a
-    // silent DELETION of the prior turns it was folding, and the ladder writes it in their
-    // place with nothing to say the tail is missing. FX13 was found on the agent turn; this
-    // one had never been looked at. Raised before the journal append, unlike `#runAgent`'s:
-    // there is no answer to record here, only a replacement that must not be made.
-    const refusal = turnRefusal(finish, `node "${w.node.id}" context summary ${String(ordinal)}`, summary.length, outputTokens, ceiling);
-    if (refusal !== undefined) throw refusal;
+    const ceiling = outputCeilingOf(adapter, req, where);
 
+    // PRICED, RESERVED, CALLED, SETTLED — the steps `#runAgent` gives every turn, which this call
+    // had none of. It streamed straight from the adapter and journaled only its effect pair, so
+    // its tokens and dollars reached no budget: not `PolicyEngine`'s ledger, not the run's
+    // `usage`, not the node's own ceiling. Measured on six agent turns totalling 2,947 tokens,
+    // two compactions at 5,200 tokens each ran against a $0.02 run budget that was never debited
+    // for them. `reserve` refuses over the ceiling exactly as it does for a turn, and that refusal
+    // propagates as the agent task's failure (`E_BUDGET_EXHAUSTED`, run-fatal), which is the
+    // honest answer to "the budget cannot cover folding the transcript".
+    const scope = `node:${w.node.id}`;
+    const estimateUsd = estimateUsdOf(adapter, req, where);
+    const reservation = ctx.policy.reserve(scope, estimateUsd, estimateTurnTokens(req, ceiling));
     await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
-          { type: "effect.started", payload: { key, kind: "summarize", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
-          { type: "effect.completed", payload: { key, result: summary, resultDigest: digest(summary) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+          {
+            type: "budget.reserved",
+            payload: {
+              scope,
+              amountUsd: estimateUsd,
+              ...(Number.isFinite(ctx.policy.remainingUsd) ? { remainingUsd: Number(ctx.policy.remainingUsd.toFixed(6)) } : {}),
+              warn: ctx.policy.nearLimit,
+            },
+            actor: SYSTEM_ACTOR("policy"),
+            taskId: w.task.taskId,
+          },
         ],
         { taskId: w.task.taskId },
       ),
     );
-    return summary;
+    this.#checkBudgetWarning(ctx);
+
+    let summary = "";
+    let finish = "stop";
+    let usage: UsageRecord = { ...ZERO_USAGE };
+    for await (const ev of adapter.stream(req, ctx.abort.signal)) {
+      if (ev.type === "done") {
+        summary = ev.message.content;
+        finish = ev.finishReason;
+        usage = ev.usage;
+      }
+    }
+    ctx.policy.settle(reservation, usage);
+
+    // THE SECOND SITE WITH THE SAME DEFECT, and the quieter one: a truncated summary is a
+    // silent DELETION of the prior turns it was folding, and the ladder writes it in their
+    // place with nothing to say the tail is missing. FX13 was found on the agent turn; this
+    // one had never been looked at. A refused summary is RETURNED rather than thrown so the
+    // caller can charge what the call cost before failing on it; and it is journaled as a
+    // failed effect, because the call happened.
+    const refusal = turnRefusal(finish, `${where} ${String(ordinal)}`, summary.length, usage.outputTokens, ceiling);
+
+    // NO `model.called` ROW, deliberately: `journal/audit.ts`'s `call-pairs-with-its-effect`
+    // requires that row's effect to be of kind `model`, and this effect is `summarize` — the
+    // kind is in the key and replay serves it by that key. The spend still reaches the fold:
+    // the caller adds `usage` to the task's own, which `task.committed` carries and
+    // `chargeUsage` folds as the excess over what `model.called` rows already charged.
+    await this.#serialize(ctx.runId, () =>
+      ctx.log.append(
+        [
+          {
+            type: "budget.settled",
+            payload: { scope, reservedUsd: reservation.amountUsd, actualUsd: usage.costUsd },
+            actor: SYSTEM_ACTOR("policy"),
+            taskId: w.task.taskId,
+          },
+          { type: "effect.started", payload: { key, kind: "summarize", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+          refusal === undefined
+            ? { type: "effect.completed", payload: { key, result: summary, resultDigest: digest(summary) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId }
+            : { type: "effect.failed", payload: { key, error: errorRecord(refusal) }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
+        ],
+        { taskId: w.task.taskId },
+      ),
+    );
+    return refusal === undefined ? { summary, usage } : { summary, usage, refusal };
   }
 
   async #runAgentToolCall(
@@ -9116,13 +9318,27 @@ export class Engine {
     // anything, and a throw is contained: the run is already over, so failing it would report a
     // failure that did not happen. Nothing here is journaled, because an observer that changed
     // nothing has nothing to record — `hook.applied{changed:true}` would be false.
+    //
+    // A THROW IS SAID OUT LOUD, THOUGH. `runObservers` returns the refs that threw precisely so
+    // the caller can surface them, and this caller dropped the list: a hook that failed on every
+    // run was indistinguishable from one that ran — exit 0, `succeeded`, stderr empty, nothing on
+    // the journal or in the trace. Node's warning channel is the one a library may use without
+    // owning stderr: it prints once per warning by default, and an embedder can listen on
+    // `process.on("warning")` or silence it. Not a journal row: the vocabulary has no member
+    // for it, and `hook.applied{changed:false}` would describe a hook that ran and did nothing.
     const watchers = this.#hooksFor(ctx, "onComplete");
     if (watchers.length > 0) {
-      await runObservers(watchers, { run: p }, {
+      const failed = await runObservers(watchers, { run: p }, {
         point: "onComplete",
         runId: ctx.runId,
         signal: ctx.abort.signal,
       });
+      if (failed.length > 0) {
+        process.emitWarning(
+          `onComplete hook${failed.length === 1 ? "" : "s"} ${failed.map((ref) => `"${ref}"`).join(", ")} threw on run ${ctx.runId}; the run's outcome is unchanged`,
+          { code: "LOOM_HOOK_FAILED", detail: JSON.stringify({ runId: ctx.runId, point: "onComplete", refs: failed }) },
+        );
+      }
     }
   }
 
