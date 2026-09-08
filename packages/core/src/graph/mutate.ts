@@ -246,19 +246,42 @@ export function compileMutation(input: MutateInput): MutationResult {
     // plainer reason that a named branch need not arrive at all. An under-approximated `before`
     // is safe here — it can only fail to refuse — and every node DOWNSTREAM of the join still
     // carries `j` itself in its set, so a graft that routes around the join loses `j` and is
-    // caught by the loop below. The join node itself was the one hole, and it closes by
-    // refusing rather than by guessing.
+    // caught by the loop below.
+    //
+    // AND THE BAN IS ON REPORTING TO A BARRIER, NOT ON BEING ONE, because "the join node itself
+    // was the one hole" is what this comment said for one review round and it was wrong. The
+    // fourth defeat of this rule pointed an EMPTY `fanout` edge at an ordinary BRANCH node:
+    // `#fireEmptyJoin` walks `outbound(fanout.to)` for `join` edges and readies the join at the
+    // parent branch when the item list is empty, so the barrier is satisfied with nothing
+    // executed at all — and the branch node's own dominators do not move, because the graft came
+    // from a node that already dominated it. Measured on `plan -[fanout]-> gate -[join]-> j`,
+    // `plan -[fanout]-> B -[join]-> j`, `j -> pay`, with the mutation
+    // `{plan->hop seq, hop->B fanout over an unwritten channel}`: `ok = true` with zero
+    // diagnostics, and end to end `ran = ["fn","fn","note.append"]` after a rejection against
+    // the control's `["fn"]`.
+    //
+    // So the set is read off the MECHANISM rather than off the node types. Two functions decide
+    // whether a barrier is satisfied — `#maybeFireJoin`, which counts arrivals, and
+    // `#fireEmptyJoin`, which needs none — and both reach the join through an OUTBOUND `join`
+    // edge. A node that has one is a node whose readiness reports to a barrier, and an added
+    // edge into it can move that barrier without executing what stood in front of it. That is
+    // the property, and it is why enumerating node types would be defeated a fifth time.
+    const reportsToBarrier = new Set(spec.edges.filter((x) => x.kind === "join").map((x) => x.from));
     for (const g of grafts) {
-      if (byId.get(g.to)?.type !== "join") continue;
+      const isJoin = byId.get(g.to)?.type === "join";
+      if (!isJoin && !reportsToBarrier.has(g.to)) continue;
       diagnostics.push({
         severity: "error",
         code: "MUT003_NOT_DOMINATED",
-        message:
-          `edge "${g.id}" enters the join node "${g.to}"; an edge that is not a join edge makes a join ready ` +
-          `with none of its branches arrived, so the barrier — and every gate standing in front of a branch — ` +
-          `is skipped`,
+        message: isJoin
+          ? `edge "${g.id}" enters the join node "${g.to}"; an edge that is not a join edge makes a join ready ` +
+            `with none of its branches arrived, so the barrier — and every gate standing in front of a branch — ` +
+            `is skipped`
+          : `edge "${g.id}" enters "${g.to}", which reports to a join barrier; an added edge into it can fire ` +
+            `that barrier — an empty fanout fires it with nothing executed — so the gates standing in front of ` +
+            `the other branches are skipped`,
         at: { nodeId: g.to },
-        fix: `re-enter downstream of "${g.to}", or drop the edge`,
+        fix: `re-enter downstream of the join, or drop the edge`,
       });
     }
 

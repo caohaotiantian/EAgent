@@ -425,6 +425,77 @@ test("OVER THE CEILING it refuses rather than running, and says which bound it h
   assert.ok(hit, r.diagnostics.filter((d) => d.severity === "error").map((d) => d.message).join(" | "));
 });
 
+/**
+ * THE FOURTH SHAPE, and it is neither an edge kind nor a node type: a ROLE.
+ *
+ * `#fireEmptyJoin` walks `outbound(fanout.to)` for `join` edges and readies the join at the
+ * parent branch when a fanout's item list is EMPTY. So an added `fanout` edge over a channel
+ * nobody writes, pointed at an ordinary BRANCH node, satisfies the barrier with nothing executed
+ * at all — and the branch node's own dominators do not move, because the graft comes from a node
+ * that already dominated it. Reproduced at `f3cec2b`: `ok = true` with zero diagnostics, and end
+ * to end `ran = ["fn","fn","note.append"]` after a rejection against the control's `["fn"]`.
+ *
+ * The rule now bans a graft into anything that REPORTS to a barrier — a node with an outbound
+ * `join` edge — rather than into a barrier. Both functions that decide whether a barrier is
+ * satisfied reach the join that way, which is why the property is read off the mechanism.
+ */
+function fanoutJoinSpec(): GraphSpec {
+  const base = gatedSpec();
+  const plan = base.nodes[0]!;
+  const gate = base.nodes[1]!;
+  const pay = base.nodes[2]!;
+  return {
+    ...base,
+    channels: {
+      ...base.channels,
+      b: { type: "array", reduce: "append_ordered" },
+      items: { type: "array", reduce: "replace" },
+      none: { type: "array", reduce: "replace" },
+      it: { type: "object", reduce: "replace" },
+    },
+    inputs: ["goal", "items"],
+    nodes: [
+      plan,
+      gate,
+      { id: n("B"), type: "function", reads: ["plan"], writes: ["b"], function: { ref: "function/detail@stable" } },
+      { id: n("j"), type: "join", reads: [], writes: [], join: { branches: [n("gate"), n("B")], mode: "all", onBranchError: "fail" } },
+      pay,
+    ],
+    edges: [
+      { id: e("a0"), from: n("plan"), to: n("gate"), kind: "fanout", over: "items", as: "it", maxWidth: 2 },
+      { id: e("a2"), from: n("plan"), to: n("B"), kind: "fanout", over: "items", as: "it", maxWidth: 2 },
+      { id: e("a3"), from: n("gate"), to: n("j"), kind: "join" },
+      { id: e("a4"), from: n("B"), to: n("j"), kind: "join" },
+      { id: e("a5"), from: n("j"), to: n("pay"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+const EMPTY_FANOUT_GRAFT: Partial<GraphMutation> = {
+  addNodes: [{ ...HOP, reads: [] } as unknown as NodeSpec],
+  addEdges: [
+    { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+    { id: e("m1"), from: n("hop"), to: n("B"), kind: "fanout", over: "none", as: "it", maxWidth: 2 } as unknown as EdgeSpec,
+  ],
+};
+
+test("A GRAFT INTO A NODE THAT REPORTS TO A BARRIER IS REFUSED, even though its own dominators do not move", () => {
+  const r = attempt(compiled(fanoutJoinSpec()), mutation(EMPTY_FANOUT_GRAFT));
+  assert.equal(r.ok, false, "an empty fanout into a branch node fires the join with nothing executed");
+  assert.ok(
+    r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "B"),
+    r.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.message}`).join(" | "),
+  );
+});
+
+test("…AND ITS CONTROL: on that same graph a mutation that touches neither the join nor a branch is accepted", () => {
+  const r = attempt(
+    compiled(fanoutJoinSpec()),
+    mutation({ addNodes: [{ ...HOP, reads: [] } as unknown as NodeSpec], addEdges: [{ id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" }] }),
+  );
+  assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
+});
+
 // ── end to end, through the engine ───────────────────────────────────────────
 
 interface Rig {
@@ -672,6 +743,43 @@ test("…AND THE SAME THING THROUGH A `join` NODE, where a seq edge fires the ba
       decision: { kind: "reject", reason: "no" },
       actor: { kind: "human", subject: "u:a", via: "console" },
       idempotencyKey: "k",
+    });
+  }
+  assert.notEqual(p.status, "succeeded");
+  assert.deepEqual(
+    r.ran.filter((x) => x === "note.append"),
+    [],
+    "the tool the gate stands in front of must not have run",
+  );
+});
+
+/** The empty-fanout bypass — the fourth shape, end to end. */
+const EMPTY_FANOUT_GRAFTER: MockScript = () => ({
+  text: JSON.stringify({
+    plan: { ok: true },
+    mutation: {
+      addNodes: [{ ...HOP, reads: [] }],
+      addEdges: [
+        { id: "m0", from: "plan", to: "hop", kind: "seq" },
+        { id: "m1", from: "hop", to: "B", kind: "fanout", over: "none", as: "it", maxWidth: 2 },
+      ],
+    },
+  }),
+  finishReason: "stop",
+});
+
+test("…AND THE SAME THING THROUGH AN EMPTY FANOUT INTO A BRANCH, which executes nothing and fires the join", async () => {
+  const r = rig(EMPTY_FANOUT_GRAFTER);
+  const runId = await r.engine.submit({ graph: compiled(fanoutJoinSpec()), inputs: { goal: "go", items: ["x"] } });
+  let p = await r.engine.advance(runId);
+  for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+    const gate = Object.values(p.gates).find((g) => g.state === "open");
+    if (gate === undefined) break;
+    p = await r.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "reject", reason: "no" },
+      actor: { kind: "human", subject: "u:a", via: "console" },
+      idempotencyKey: `k${String(i)}`,
     });
   }
   assert.notEqual(p.status, "succeeded");
