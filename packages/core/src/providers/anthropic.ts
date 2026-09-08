@@ -32,7 +32,7 @@ import type {
   ToolSpec,
 } from "../run/registry.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, normalizeTransport, postJson, modelFrames, type HttpOptions } from "./http.ts";
-import { billableTokens, estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
+import { billableTokens, dearestRateFloor, estimateTokens, resolvePrice, toleratedFloor, wireCount, type PriceRow } from "./usage.ts";
 
 export interface AnthropicOptions extends HttpOptions {
   readonly apiKey: string;
@@ -310,6 +310,14 @@ export class AnthropicAdapter implements ModelAdapter {
     // A SHORTFALL IS CHARGED TO `inputTokens` AND NOT TO A CACHE COUNT, which is the fail-closed
     // choice of the three available: uncached input is the most expensive of the three rates, and
     // tokens a wire declined to account for are not tokens it may have billed at the cache rate.
+    //
+    // THAT SENTENCE WAS TRUE OF THE SHORTFALL AND FALSE OF THE REST: the check below it compared
+    // the reported SUM against the floor, so a wire meeting the sum entirely out of the cheap
+    // dimensions paid nothing extra — `cache_read_input_tokens` declared at exactly the floor,
+    // `input_tokens: 0`, was believed whole. `dearestRateFloor` is the second, PER-RATE check:
+    // whatever part of the estimate the wire's own cache claim does not cover is charged at the
+    // input rate on top of whatever the sum floor already added. See its docstring in `usage.ts`
+    // for the measured before/after and why it rounds down rather than up. `TODO.md` §A0.13.
     for (const acc of partial.values()) producedChars += acc.id.length + acc.name.length + acc.json.length;
     // `producedTokens` reads the PARSED calls and `producedChars` the RAW argument text. The raw
     // count is the larger whenever a call was cut off, and nothing on the wire guarantees the
@@ -322,12 +330,19 @@ export class AnthropicAdapter implements ModelAdapter {
       outputTokens = Math.max(outputTokens, toleratedFloor(produced));
     }
 
-    const reportedInput = inputTokens + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+    const cacheCredit = (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0);
+    const reportedInput = inputTokens + cacheCredit;
     if (reportedInput === 0) {
       inputTokens = roughTokens(req);
     } else {
-      const floor = toleratedFloor(billableTokens(req));
+      const estimate = billableTokens(req);
+      const floor = toleratedFloor(estimate);
       if (reportedInput < floor) inputTokens += floor - reportedInput;
+      // PER-RATE FLOOR — §A0.13. The sum floor above lets a wire satisfy it entirely out of
+      // `cacheCredit`; this charges whatever the wire's own cache claim does not cover, at the
+      // input rate, regardless of how the wire split the rest. See `dearestRateFloor`.
+      const perRateFloor = dearestRateFloor(estimate, cacheCredit);
+      if (inputTokens < perRateFloor) inputTokens = perRateFloor;
     }
 
     const usage: UsageRecord = {
