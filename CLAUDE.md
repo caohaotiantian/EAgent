@@ -40,10 +40,14 @@ it is what a kernel is for. That trailer is the escape hatch and also the ledger
 output lists every seam declared in `since..HEAD`, with its reason.
 
 **That ledger WAS resettable three ways — measured 2026-09-02 — and `wave2-guards` (`3656d69`)
-closed all three.** Re-measured on `loom` at HEAD today rather than carried:
+closed all three.** Re-measured on `loom` rather than carried. **The `since` block below is from an
+earlier HEAD** — reproducing it means editing `scripts/kernel.json`, so it is not re-driven on every
+correction; what `node scripts/check-kernel.mjs` prints at `c2b5ff1` is
+`10 files pinned, 525 commits judged since 86b84c9, 11 declared seams over the full history`,
+followed by the same grandfathering notice, now against `86b84c9` and still `36`:
 
 - **Advancing `since` no longer erases the census.** It printed `0 declared seams` and exited 0 in
-  September's measurement. Driven again today, moving `since` forward one commit and re-running:
+  September's measurement. Driven again, moving `since` forward one commit and re-running:
 
   ```
   since 86b84c9 → kernel guard ok: 10 files pinned, 478 commits judged since 86b84c9, 11 declared seams over the full history
@@ -65,10 +69,16 @@ the one this line used to give: it cannot catch a capability landed under `fix:`
 squash-merge that collapses a `feat` into another subject type, capability added OUTSIDE the pinned
 list, or a rename git cannot detect. The convention IS the signal.
 
-Read it from the guard and nowhere else. `git log --grep='^Kernel-seam:'` inflates (it matches prose
-ABOUT the trailer; guard 11, grep 12) and git's own trailer parser reads only the final paragraph.
-Three commands, three answers. `check-kernel.mjs`'s failure text used to recommend the grep and no
-longer does — that correction is paid.
+Read it from the guard and nowhere else, and know what the guard leaves out. Counted today:
+`node scripts/check-kernel.mjs` lists **11**, `git log --grep='^Kernel-seam:' --oneline | wc -l`
+says **13**, and git's own trailer parser reads only the final paragraph. Three commands, three
+answers. The two extra rows in the grep are of opposite kinds: `2a9eda8` is a `docs:` commit whose
+PROSE quotes the trailer and declares nothing, while **`fbbdac4` is a real declaration the guard
+does not count — the `phase1-taint` merge, naming three journal words**, and the guard judges
+`feat:` subjects only, so a seam declared on a `merge:` commit is in the history and outside the
+census. Neither number is wrong; the ledger a reviewer watches in the diff is the one that has to
+include both. `check-kernel.mjs`'s failure text used to recommend the grep and no longer does —
+that correction is paid.
 
 **The limit that fires most often is `fix:`, and the phase-2-4 merge is the worked example.** Five
 pinned files changed on it and the ledger recorded nothing, correctly by the rules: every commit
@@ -231,7 +241,7 @@ implementation forced on the design, and the residue it left, are dated at the t
 
 - **The journal is the only authoritative state.** Everything else is a projection you can rebuild
   by folding it. If a decision reads a value, the journal must be able to reconstruct that value —
-  including across a restart. This has been violated **eight** times and each violation silently
+  including across a restart. This has been violated **nine** times and each violation silently
   switched off a guard. Five are named in
   `packages/core/test/run/oversight-survives-restart.test.ts`; the sixth is
   `packages/core/test/run/escalation.test.ts` — search either file for `MEMBER`. Seven and eight
@@ -255,15 +265,32 @@ implementation forced on the design, and the residue it left, are dated at the t
   `test/run/rewind-applies-the-parents-bound.test.ts` is the pin, with the control that makes it
   mean something. **Ask of every new bound: which verbs reach the guard, and does it hold on all
   of them?**
+  **MEMBER NINE arrived with the `phase1-taint` merge (`02a5e84`), and it is the first whose state
+  IS journaled** — which is why "which verbs reach this guard" is the question and "is this value
+  journaled" is not. The state is the E12 `fanout_skipped_gate` escalation, raised by
+  `Engine.#fireEmptyJoin` when a fan-out of width zero passes over a `human_gate` on its branch;
+  the decision that reads it is the join's gate. `policy.escalated` is durable, so an ordinary
+  restart folds it — but `#escalate` appends in its OWN transaction, pushing onto
+  `ctx.escalationWrites` drained after `#runWave`, while the join's `task.ready` commits INSIDE the
+  wave. A crash in that window is what the restart empties: the join comes back scheduled and
+  undecided with no escalation anywhere, and the second process wrote where the first would have
+  gated. `#escalateSkippedGate` is now called from `#restoreEvidence` off `fanout.planned`
+  (durable, carries the width, appended after the planner's own `task.committed`), and
+  `PolicyEngine.escalate` is idempotent so a run whose append survived appends nothing.
+  `test/run/empty-fanout-oversight.test.ts`'s "THE SKIPPED GATE IS RE-DERIVED WHEN THE ESCALATION
+  APPEND WAS LOST" is the pin, with the clean-width control beside it; `d3d9670` is the fix.
   **The enumeration is split, and a pointer to an enumeration is only as good as that
   enumeration's discipline about growing** — the sixth member landed in a file the citation did not
-  name, and the cited one still said five. Seven and eight are named in
+  name, and the cited one still said five. Seven, eight and nine are named in
   `oversight-survives-restart.test.ts`'s header, where a reader of the other six will find them.
-  **The four 2026-09-08 wave-2 merges did not add a ninth, and that was checked rather than
-  assumed.** `git diff 8d43127..ce9e7b4 -- packages/core/src/journal/events.ts` prints NOTHING: no
-  new event kind and no new durable payload field across all four, which is why property 3's
-  attestation rides on the `operator.command{kind, args}` vocabulary that already existed. The
-  nearest candidate is recorded and is deliberately NOT a member — `wave2-engine`'s residue 1:
+  **The four 2026-09-08 wave-2 merges added no member, and that was checked rather than assumed;
+  the ninth came later, on the taint merge.** `git diff 8d43127..ce9e7b4 --
+  packages/core/src/journal/events.ts` prints NOTHING: no new event kind and no new durable payload
+  field across all four, which is why property 3's attestation rides on the
+  `operator.command{kind, args}` vocabulary that already existed. `git diff ce9e7b4..HEAD` over the
+  same file is where the taint merge's three new words are. The
+  nearest candidate short of a member is recorded and is deliberately NOT one — `wave2-engine`'s
+  residue 1:
   `#resolveOnce`'s seen-key map and the broker's idempotency map are in memory, so a repeat
   redelivery of an identical decision answers 200 in the deciding process and 409 after a restart.
   Right shape, wrong outcome for this list — it fails CLOSED, nothing runs twice, and the journal
@@ -336,9 +363,15 @@ wave-1 lanes (`294e713`) and now ALL SIX wave-2 lanes**: `wave2-taint` (`9b45c7c
 finished — the decisions, including the three caps raised 3 → 4 and the one blocking finding merged
 knowingly as `TODO.md` §A0.21, are in `.agent/wave2-review-2026-09-08/plan.md` (this checkout only
 — `.agent/` is gitignored; `TODO.md` §A0.21 is the tracked half). `phase1-taint`
-is still unmerged, and the design its parking waited for now exists:
-`docs/design-taint-rc6-2026-09-05.md` measured that RC-6 is not a scope defect and recommends
-merging the branch with a `Kernel-seam:` trailer (handoff §5).
+**is MERGED too, at `02a5e84` on 2026-09-08**, on the recommendation of
+`docs/design-taint-rc6-2026-09-05.md` — which measured that RC-6 is not a scope defect and asked
+for the merge to carry a `Kernel-seam:` trailer. The design predicted three conflict hunks; `loom`
+had moved and there were **six**, in three files, resolved as `git log -1 fbbdac4` records. That
+trailer names the three journal words the branch added: `run.submitted.taintedInputs` — "the
+journal could not say which inputs a delegation handed over already untrusted";
+`task.committed.takeSuppliedByProducer` — "It could not say WHO chose a `take`"; and "the
+`fanout_skipped_gate` escalation rule, E12" — "it had no word for the oversight a fan-out of width
+zero passes over".
 
 ## Commands
 
