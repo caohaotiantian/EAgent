@@ -78,6 +78,28 @@ anyway and still prints the report — the bar is that nobody drives a stale bin
 told, not that nobody drives one. A copy with no sources beside it, which is every copy anyone
 installs, has nothing to be behind and says nothing.
 
+**`@loom/core` is `private: true`, and the two halves of what that means are not the same.**
+`npm publish` does not REFUSE — it exits 0 and quietly does nothing, which is the half worth
+knowing because a CI step that only checks the exit code would report a successful release:
+
+```
+$ cd packages/core && npm publish --dry-run
+… npm notice total files: 262
+npm warn publish Skipping workspace @loom/core, marked as private          exit 0
+```
+
+A tarball, meanwhile, installs and works. `bin` and the `./cli` subpath are there for exactly this,
+so `loom --help` runs in a fresh directory with no build:
+
+```
+$ npm pack packages/core                 → loom-core-0.0.0.tgz   1.8 MB, 262 files, exit 0
+$ npm install ../loom-core-0.0.0.tgz     → added 1 package in 314ms
+$ ./node_modules/.bin/loom --help        → loom — graph-native multi-agent orchestration   exit 0
+```
+
+The `private` flag is the maintainer's decision not to take the name yet, not a statement that the
+package does not work.
+
 That refusal ships *inside* the binary, which means a binary built before it existed cannot tell
 you it is missing — that is how the `bin/loom` in this repo once answered `--help` with exit 0
 while eight days and 48 source files behind. The check that lives outside the artifact is
@@ -293,6 +315,21 @@ apply the operator's own guards; the module is handed the same frozen
 | where refs resolve from | `--extension-module` — `resolver.register(r)`, a `ResourceResolver {resolve, document?, subgraph?}` — the REQUIRED member and only it, since demanding `document` refused a resolver implementing exactly the published interface. SUBSTITUTES rather than layers: a module supplying one owns ref resolution — `resolve`, `document`, `subgraph` — for the whole deployment, **`resources/` included**. The workspace scan still runs and still registers every `resources/function` and `resources/hook` body, but nothing can reach them: `rule015Resources` asks the RESOLVER, so a graph naming a workspace ref no longer compiles unless the module's resolver serves it. Driven: the same graph is `"status": "succeeded"` with no module and `GRAPH015_RESOURCE_NOT_FOUND` with a module resolver that answers `undefined`. Supplying one means taking on every ref the deployment's graphs name that `rule015Resources` checks — which is every kind but the two in `NAME_ONLY_KINDS` (`agent_profile`, `oversight`). Those two need no resolver at all and nothing reads their content, so a resolver that serves neither still COMPILES AND RUNS them: driven, an `agent` node on `agent_profile/writer@stable` beside a served `prompt/write@stable` is exit 0 and `"status": "succeeded"`, and a `human_gate` on `oversight/release@stable` under a resolver answering `undefined` for EVERY ref is exit 0 and `"status": "awaiting_gate"`. The ordinary half is the prompt beside them: unserved, `prompt/write@stable` refuses AT COMPILE — `✗ g.json: GRAPH015_RESOURCE_NOT_FOUND: resource "prompt/write@stable" does not resolve` then `E_GRAPH_INVALID: graph has 1 error(s): GRAPH015_RESOURCE_NOT_FOUND`, exit 1 | a second claim refuses: `registers a resolver, and <first module> already registered one` |
 | where the journal is | `--extension-module` — `store.register(s)`, any `StateStore`. This is the sharpest row on the list: a module supplying a `MemoryStateStore` makes a deployment whose runs do not survive the process, and the substitution is announced on whichever verb you used. `loom serve` says it in the boot banner, on stdout: `ext:    <path> → no adapters, store SUBSTITUTED (this deployment's journal is the module's)`. EVERY OTHER VERB, `loom run` included, says it on stderr instead — `! JOURNAL SUBSTITUTED by --extension-module <paths> — this deployment's journal is the module's, not <data-dir>. If it does not persist, nothing written by this command survives the process: no loom trace, no loom gates, no replay, and no restart can fold what this run recorded.` (three lines as printed) — and `serve` prints only the banner, never both | driven, both verbs on one module: `loom run` is exit 0, `"status": "succeeded"`, the `! JOURNAL SUBSTITUTED` lines on stderr; `loom serve` boots to the `store SUBSTITUTED` banner and writes no `JOURNAL SUBSTITUTED` line. On both, no `.loom/journal.db` is created, because none is opened — the `.loom` directory is made and stays empty. A member the object lacks refuses AT THE CALL, naming it — `store.register was given an object with no head(), listRuns() — a StateStore {append, read, head, listRuns, close}`, which is all five and not the three it first asked for: a partial store used to boot and die mid-run with `TypeError: this[#store].head is not a function` |
 | where externalised payloads go | `--extension-module` — `payloads.register(p)`, any `PayloadStore` | same single-slot rule, same refusal |
+
+**An exam is a graph, and that is why property 3 needed no fork.** `loom exam attest <exam.json>`
+takes an ordinary `apiVersion: loom.dev/v1` / `kind: GraphSpec` file — the same shape as anything in
+`graphs/` — so it is the first row above and not a row of its own. Driven on 2026-09-08 by an agent
+that had never seen the implementation, from design §6 alone: `loom compile exams/pick-exam.json` →
+`ok  deadline grade (default): timeoutMs=600000`; `loom exam attest exams/pick-exam.json --cohort
+<last> --as haotian` → exit 0, the attestation row echoing the spec back with the same
+`apiVersion` / `kind` / `channels` / `nodes` keys. What IS refused is a shape, not a format — an
+exam over the baseline's inputs alone:
+
+```
+E_CONFIG_INVALID: blind-exam.json cannot be attested for workflow "pick-bench" (graph sha256:57e8e86d…):
+the exam reads no baseline OUTPUT (baseline outputs ["picked","verdict"]) — an exam over inputs alone
+sees the question and never the run's answer, so it measures nothing about the run it grades   exit 1
+```
 
 **Fork required.** Each of these is a CLOSED SET, and the COMPILER names its members when you miss —
 all three are compiler refusals now, which is the shape the list converged on rather than a
