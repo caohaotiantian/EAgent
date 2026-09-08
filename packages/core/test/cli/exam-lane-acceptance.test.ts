@@ -744,6 +744,50 @@ test("AN ATTESTED SPEC THAT IS NOT AN EXAM IS REFUSED ON THE READ, NOT RUN — t
  * --against-cohort` went from `✗ L1 Δ 0.0000 0W/0L/30T exit 1` to `✓ L1 Δ +0.4000 20W/0L/10T
  * "promote": true exit 0` — the audit's reproduction 2, promoting on a relayed grader.
  */
+/**
+ * THE FIFTH RULE ON THE READ DOOR, and it was owed. The plan's own Decision says "a guard that
+ * runs only on the write is a guard a future writer walks past"; the first cut tested the fifth
+ * rule at `attestExam` and on the pure predicate, and nowhere on the side that DECIDES. A row
+ * attested before this rule existed carries a spec this binary will not vouch for, and the three
+ * scoring verbs must stop rather than fall back to the candidate's own in-graph S1 — which is
+ * the whole reason the exam exists.
+ */
+test("AN ATTESTED ROW WHOSE EXAM DECLARES AN UNREAD INPUT STOPS ALL THREE SCORING VERBS", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const real = (await journal(w.dir, w.last)).findLast((e) => isEvent(e, "operator.command"))!;
+      const args = { ...(real.payload as { args: Record<string, unknown> }).args } as Record<string, unknown>;
+      const spec = JSON.parse(JSON.stringify(args["spec"])) as GraphSpec;
+      // The row an operator wrote BEFORE the fifth rule: still [subject, items, picked], but the
+      // grading node reads only `items`. It compiles, its hash and manifest are its own true ones
+      // — everything a row's writer controls is in order — so `examShape` on the read path is the
+      // only thing between it and thirty exam runs that grade nothing.
+      const blindSpec: GraphSpec = { ...spec, nodes: spec.nodes.map((n) => ({ ...n, reads: ["items"] })) };
+      const blind = compileOrThrow({ spec: blindSpec, resolver: ws.resolver, tools: (ws.engine.tools as ToolRegistry).manifests(), tenantCapabilities: ws.granted });
+      args["spec"] = blindSpec;
+      args["examGraphHash"] = blind.graphHash;
+      args["resolutionManifest"] = blind.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest }));
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args }, actor: { kind: "human", subject: "someone", via: "console" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    const scored = await cli(["score", w.last, "--workspace", w.dir]);
+    refusedWith(scored, /is not an exam as this binary reads it.*"picked".*read by no node/s);
+    assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was graded on the authority of that row");
+    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /"picked".*read by no node/s);
+    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "y.json"), "--workspace", w.dir]), /"picked".*read by no node/s);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("A RELAY EXAM IN THE ROW IS REFUSED ON THE READ — an exam that grades the grader is not an exam of this graph", async () => {
   const w = await workspace();
   try {

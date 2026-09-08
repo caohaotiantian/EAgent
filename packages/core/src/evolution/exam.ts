@@ -119,33 +119,51 @@ export interface ExamOutcome {
  *    `spec.channels` alone (`GRAPH007_UNKNOWN_OVER`), never against the source node's, and the
  *    executor resolves it out of the whole scope (`engine.ts`, `const items = scope[e.over ?? ""]`).
  *    So an exam that fans out over `picked` genuinely consumes it while no node declares it.
- * 4. The free variables of every expression the executor evaluates — a `router` case's `when`, an
- *    edge's `when`/`until` — taken from the compiler's own `referencedChannels(parseExpr(src))`
- *    rather than re-derived. THIS ROUTE IS WHY `reads` IS NOT A SUPERSET, and the argument that
- *    said it was dropped a word: `rule004Expressions` constrains free variables to the owning
- *    node's `reads ∪ WRITES` — `∪ writes` deliberately, because an edge condition is evaluated on
- *    POST-COMMIT state, so `until: verdict.pass` leaving the node that just wrote `verdict` must
- *    be legal. An edge's owner can therefore satisfy GRAPH004 by DECLARING the channel among its
- *    writes, and `when: "picked.ok"` then names a channel in no node's `reads` and no `over`. A
- *    router cannot: it writes nothing, so its cases' variables are forced into its own `reads`,
- *    where route 1 already sees them — the gap is the EDGE condition alone, and the test file
- *    carries that control beside the case.
+ * 4. The free variables of the expressions the executor EVALUATES — a `router` case's `when`, a
+ *    non-router `conditional` edge's `when`, a `loop` edge's `until` — taken from the compiler's
+ *    own `referencedChannels(parseExpr(src))` rather than re-derived. THIS ROUTE IS WHY `reads` IS
+ *    NOT A SUPERSET, and the argument that said it was dropped a word: `rule004Expressions`
+ *    constrains free variables to the owning node's `reads ∪ WRITES` — `∪ writes` deliberately,
+ *    because an edge condition runs on POST-COMMIT state, so `until: verdict.pass` leaving the
+ *    node that just wrote `verdict` must be legal. An edge's owner can therefore satisfy GRAPH004
+ *    by DECLARING the channel among its writes, and `when: "picked.ok"` then names a channel in no
+ *    node's `reads` and no `over`.
  *
- * THE ROUTE COUNT WENT TWO → FOUR OVER TWO REVIEW ROUNDS, each time because a claim of
- * completeness was written before the enumeration was driven, and each time the symptom was
- * identical: a genuine exam refused with the sentence "read by no node", false about its own
- * graph. `test/graph/expression-reads.test.ts` pins the three expression sites and fails if the
- * engine grows a fourth; there is no such pin for `over`, and a fifth route would arrive silently.
+ *    THE PLACEMENT FILTER IS PART OF THE ROUTE, not a detail of it, and leaving it out was the
+ *    one defect in this file that pointed the ADMITTING way. `#edgesToTake` reads `when` in
+ *    `case "conditional":` alone and skips it when the source is a router; `until` only in
+ *    `#loopMayContinue`, off `case "loop":`. A `seq` edge is always taken and its `when` never
+ *    read — so collecting off every edge let `when: "picked.ok"` on a `seq` edge buy an exam
+ *    whose grader never sees `picked`, restoring the exact blindness this rule exists to refuse.
+ *
+ * THE ROUTE COUNT WENT TWO → FOUR OVER THREE REVIEW ROUNDS, every time because a claim of
+ * completeness was written before the enumeration was driven. Twice the symptom was a genuine
+ * exam refused with the sentence "read by no node", false about its own graph; the third time it
+ * was the opposite and worse. `test/graph/expression-reads.test.ts` pins the three expression
+ * sites — but by SCANNING ENGINE SOURCE for the `evaluate(this.#expr(ctx, …))` idiom, so it fails
+ * on a fourth site written that way and not on one written any other way. There is no pin at all
+ * for `over`. A fifth route would arrive silently, and the honest statement of this enumeration is
+ * that it was checked by hand against every `scopeFor` call site on 2026-09-08, not that anything
+ * keeps it true.
  *
  * WHAT IT DOES NOT CLOSE, and there are TWO residues, not the one this docstring first named:
  * - A node may declare `reads: ["picked"]` and its body ignore the value. A fact about the body,
  *   and nothing static can see it.
- * - SOME node may name `picked` without the value ever reaching the verdict — the rule asks
- *   whether the channel is read, not whether the reading REACHES the grade. Three shapes, so the
- *   set is named rather than gestured at: a body that reads it and discards it; a `join` node,
- *   which has a `reads` list and no body at all; and a node reachable only down an `error` edge,
- *   which never runs on the success path and is not terminal (`error` edges are in `dagEdges`, so
- *   the one-terminal rule does not catch it).
+ * - The rule asks whether the channel is NAMED on a route the executor can take, never whether the
+ *   value reaches the grade, and the gap between those two is wider than any list. Five shapes
+ *   found so far, named so the claim is checkable and not because five is the number: a body that
+ *   reads it and discards it; a `join` node, which has a `reads` list and no body at all; a node
+ *   reachable only down an `error` edge, which never runs on the success path and is not terminal
+ *   (`error` edges are in `dagEdges`, so the one-terminal rule does not catch it); a condition
+ *   that short-circuits past it (`when: "true || has(picked)"` — `referencedChannels` walks the
+ *   whole AST, `evaluate` returns on the left operand); and a fanout with `maxWidth: 0`, whose
+ *   `over` is named and whose branches never materialise. The last two arrive with routes 3 and 4
+ *   and are the price of counting them at all.
+ *   SO SAY THE GENERAL THING RATHER THAN THE LIST: this rule refuses MECHANICAL blindness — an
+ *   exam with no route to the channel — and it does not and cannot refuse an author who wants to
+ *   be blind. Closing the reachability half is a dataflow analysis from each declared input to
+ *   the terminal node; closing the rest is impossible, and the exam's quality stays the
+ *   operator's, exactly as the quality of a human gate's decision is.
  *   That one IS mechanical: dataflow reachability from each declared input to the terminal node
  *   would close it. It is not built here because it is a second analysis rather than a term in
  *   this one, and because the rule as it stands already refuses the shape that was actually
@@ -189,17 +207,27 @@ export function examShape(graph: RunGraph): string[] {
   }
   // THE FIFTH RULE. `subject` is exempt because the rule four lines up refuses a node that reads
   // it; requiring it to be read would make every exam unattestable.
+  const idx = new Map(spec.nodes.map((n) => [n.id, n]));
   const seen = new Set([
     // Routes 1 and 2.
     ...spec.nodes.flatMap((n) => [...observedChannels(n)]),
     // Route 3: a fanout edge consumes its `over` out of the whole scope; no node's `reads` names it.
     ...spec.edges.flatMap((e) => (e.kind === "fanout" && e.over !== undefined ? [e.over] : [])),
-    // Route 4: the executor's three expression sites. `parseExpr` cannot throw on a COMPILED graph
-    // — every one of these parsed at compile time — and the catch is the fail-closed backstop
-    // rather than the design: an expression this cannot read contributes nothing, so the rule
-    // refuses rather than admits.
+    // Route 4: the expression sites the executor ACTUALLY EVALUATES, and the placement filter is
+    // the whole of it. `#edgesToTake` reads `when` in `case "conditional":` alone and skips even
+    // that when the source is a router (the router already returned its `take`); `until` is read
+    // only inside `#loopMayContinue`, reached only from `case "loop":`. `seq`, `fanout`, `join`,
+    // `error` and `compensation` edges never read either field. Collecting off EVERY edge let one
+    // inert field buy the whole rule — a `seq` edge is always taken, so `when: "picked.ok"` on
+    // one admitted an exam whose grader never sees `picked`. `parseExpr` cannot throw on a
+    // COMPILED graph (every one of these passed `checkExpr` at compile time) and the catch is the
+    // fail-closed backstop rather than the design: an expression this cannot read contributes
+    // nothing, so the rule refuses rather than admits.
     ...[
-      ...spec.edges.flatMap((e) => [e.when, e.until]),
+      ...spec.edges.flatMap((e) => [
+        e.kind === "conditional" && idx.get(e.from)?.type !== "router" ? e.when : undefined,
+        e.kind === "loop" ? e.until : undefined,
+      ]),
       ...spec.nodes.flatMap((n) => (n.router?.cases ?? []).map((c) => c.when)),
     ].flatMap((src) => {
       if (src === undefined) return [];
@@ -216,10 +244,11 @@ export function examShape(graph: RunGraph): string[] {
   if (unread.length > 0) {
     problems.push(
       `exam input(s) ${unread.map((c) => `"${c}"`).join(", ")} are declared as inputs and read by no node — a node body's ` +
-        `state view is built from its \`reads\`, so a channel named by no node's \`reads\`, no \`\${…}\` in its tool args and ` +
-        `no fanout edge's \`over\` is one no body can see, and an exam that declares the run's answer and never reads it ` +
-        `grades exactly as blind as one that never declared it. Add it to the \`reads\` of the node that grades it, or stop ` +
-        `declaring it`,
+        `state view is built from its \`reads\`, so a channel reached by none of the four routes — a node's \`reads\`, a ` +
+        `\`\${…}\` in its tool args, a fanout edge's \`over\`, or an expression the executor evaluates (a router case's ` +
+        `\`when\`, a non-router conditional edge's \`when\`, a loop edge's \`until\`) — is one no body can see, and an exam ` +
+        `that declares the run's answer and never reads it grades exactly as blind as one that never declared it. Add it ` +
+        `to the \`reads\` of the node that grades it, or stop declaring it`,
     );
   }
   if (graph.terminalNodes.length !== 1) {
