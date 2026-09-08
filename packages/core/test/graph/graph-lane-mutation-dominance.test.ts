@@ -406,6 +406,42 @@ test("A LOOP BACK TO THE ENTRY NODE DOES NOT ERASE THE SEED, and the graft is st
   );
 });
 
+/**
+ * THE SAME ERASED SEED WITH NO MUTATED LOOP EDGE AT ALL, and this is the likelier real graph:
+ * "retry from the start until done" is an ordinary authored shape, so the back-edge is in the
+ * BASE spec and the model proposes only the plain graft. Nothing about the mutation looks
+ * unusual; the base graph alone was enough to turn the check off.
+ */
+test("AN AUTHORED BACK-EDGE INTO THE ENTRY DOES NOT EXCUSE THE GRAFT EITHER", () => {
+  const spec = gatedSpec();
+  const looped = {
+    ...spec,
+    edges: [
+      ...spec.edges,
+      { id: e("a2"), from: n("pay"), to: n("plan"), kind: "loop", until: "has(out)", maxIterations: 2 },
+    ],
+  } as unknown as GraphSpec;
+  const r = attempt(compiled(looped), mutation());
+  assert.equal(r.ok, false, "the base graph's own loop must not turn the check off");
+  assert.ok(
+    r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "pay"),
+    r.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.message}`).join(" | "),
+  );
+});
+
+test("…AND ITS CONTROL: on that same looped base, a mutation that does not bypass is accepted", () => {
+  const spec = gatedSpec();
+  const looped = {
+    ...spec,
+    edges: [
+      ...spec.edges,
+      { id: e("a2"), from: n("pay"), to: n("plan"), kind: "loop", until: "has(out)", maxIterations: 2 },
+    ],
+  } as unknown as GraphSpec;
+  const r = attempt(compiled(looped), mutation({ addEdges: [{ id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" }] }));
+  assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
+});
+
 test("…AND THE CONTROL: the loop back to the entry ON ITS OWN is still accepted", () => {
   // Without the grafting edge `hop -> pay` the same back-edge takes nothing away, so this is
   // what keeps the test above from passing for the wrong reason (a rule that refuses every

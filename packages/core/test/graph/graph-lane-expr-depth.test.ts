@@ -105,6 +105,14 @@ test("THE ORDINARY HALF: real expressions still compile, typecheck and report th
   // absurd for a hand-written edge condition and is still accepted; 256 is where it stops.
   assert.equal(checkExpr(chain(128), CHANNELS).ok, true);
   assert.equal(checkExpr(chain(255), CHANNELS).ok, true);
+  // ON the limit, which 255 and 257 leave open — and the answer is NOT what the docstring
+  // implied. A flat chain of N terms is an AST of DEPTH N, so `chain(256)` is depth 256 and
+  // `tooDeep` refuses at `d > MAX_EXPR_DEPTH`… except the root `when` wrapper adds one, so the
+  // last chain that compiles is 255. Measured, not reasoned: 256 is already refused, and by the
+  // depth rule rather than by something else.
+  const atLimit = checkExpr(chain(256), CHANNELS);
+  assert.equal(atLimit.ok, false, "255 terms is the last chain that compiles");
+  assert.match(atLimit.ok ? "" : atLimit.errors[0]!, /nests deeper than 256/);
   const over = checkExpr(chain(257), CHANNELS);
   assert.equal(over.ok, false);
   assert.match(over.ok ? "" : over.errors[0]!, /nests deeper than 256/);
