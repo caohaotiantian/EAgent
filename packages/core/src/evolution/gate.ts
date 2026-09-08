@@ -612,13 +612,6 @@ export interface PromotionInput {
   readonly postureDiffNonNegative: boolean;
   /** Two replays of the candidate produced identical state hashes. */
   readonly deterministic: boolean;
-  /**
-   * Whether the baseline's workflow has an operator-attested exam (`evolution/exam.ts`), measured
-   * by the caller from the journal and passed in, the way `postureDiffNonNegative` is. ABSENT IS
-   * FALSE: with no exam the in-graph evaluator is the only ground truth this workflow has, and
-   * `12-grader-unchanged` applies. A caller that does not answer has not loosened anything.
-   */
-  readonly examAttested?: boolean;
   readonly criteria?: PromotionCriteria;
 }
 
@@ -647,9 +640,8 @@ export interface PromotionVerdict {
  * `2-non-inferior`'s ratio, plus the two suite-provenance rules that replaced
  * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`), plus
  * `11-budget-exercised`, which refuses a ceiling this corpus never reached, plus
- * `12-grader-unchanged`, which refuses a change to the evaluator NODES on a workflow whose only
- * ground truth is that grader (and nothing else — what fed them is the candidate's, which is why
- * an exam exists), plus `13-replay-verified`, which refuses a case whose replay had to invent what the
+ * `12-grader-unchanged`, which refuses a change to the evaluator NODES (and nothing else — what
+ * fed them is the candidate's, which is why an exam exists), plus `13-replay-verified`, which refuses a case whose replay had to invent what the
  * recording could not say. The ids carry the numbering; the push order does not.
  *
  * THREE OF THE EIGHT ARE WEAKER THAN D10.d ONCE READ AS ENGLISH, and the table in
@@ -925,28 +917,34 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
   // score`, so the same latitude here would be the hole one step over, and `compileMutation` adds
   // no evaluator. If it ever does, that is the moment to revisit this line.
   //
-  // WHERE AN EXAM IS ATTESTED THE CHECK IS SKIPPED AND SAYS SO. Once an operator has attested an
-  // exam for this workflow (`evolution/exam.ts`), nothing that decides reads the in-graph grader —
-  // `loom score` and the live gate take S1 from the exam — so refusing a change to it protects
-  // nothing and costs the honest strengthening `aabdc63` recorded as a 6-of-6 false negative.
-  // Where no exam exists the in-graph grader IS the only ground truth this workflow has, and it
-  // may not change without a human act; the refusal names that act.
-  const attested = input.examAttested === true;
+  // AND IT APPLIES WHETHER OR NOT AN EXAM IS ATTESTED, WHICH IS A CORRECTION. This check first
+  // shipped with a skip: a caller that answered `examAttested: true` passed it with "the exam
+  // grades; the in-graph evaluator decides nothing" (`docs/design-property3-2026-09-05.md` §B′).
+  // THE PREMISE IS FALSE AND `run/engine.ts` IS WHERE. `#checkConfidence` reads every evaluator's
+  // write on every run and raises E1 `low_confidence` — a POSTURE ESCALATION — when the verdict
+  // is below the node's threshold, so a grader swapped for one returning `{pass:true,
+  // confidence:1}` silences an escalation that used to fire, on every future run of the published
+  // graph. That is an automated path lowering oversight, which is the one direction this project
+  // does not allow. Driven before the correction: `promote --baseline graphs/pick.json --suite
+  // s.json` with `check → check-rigged` on an ATTESTED workflow printed `✓ 12` skipped,
+  // `"promote": true`, exit 0 — the audit's reproduction 2 promoting again.
+  //
+  // The honest strengthening B′ protected keeps the door this refusal already names: attest the
+  // stronger grader and judge live (`--against-cohort`), where both sides are graded by the exam
+  // and no evaluator set is compared at all. So the check takes no answer from its caller.
   const evalStated = shaped(input.baseline.evaluators) && shaped(input.candidate.evaluators);
-  const graderDiff = attested || !evalStated ? [] : movedEvaluators(input.baseline.evaluators, input.candidate.evaluators);
+  const graderDiff = evalStated ? movedEvaluators(input.baseline.evaluators, input.candidate.evaluators) : [];
   checks.push({
     id: "12-grader-unchanged",
-    pass: attested || (evalStated && graderDiff.length === 0),
-    detail: attested
-      ? "skipped: this workflow has an operator-attested exam, so the in-graph evaluator decides nothing and may change freely"
-      : !evalStated
-        ? "a report did not say which evaluators its graph declares, so the graders could not be compared — a guard that cannot decide fails closed"
-        : graderDiff.length === 0
-          ? `the evaluator set is unchanged (${String(Object.keys(input.baseline.evaluators).length)} evaluator node(s))`
-          : `${String(graderDiff.length)} grader change(s): ${graderDiff.join("; ")}. A replayed suite grades work channels and ` +
-            `never the grader, so a grader change is a change this exam cannot see and this workflow has no other ground ` +
-            `truth. Strengthening a grader is an operator's act, not a candidate's: attest the stronger grader as this ` +
-            `workflow's exam (loom exam attest) and judge candidates live`,
+    pass: evalStated && graderDiff.length === 0,
+    detail: !evalStated
+      ? "a report did not say which evaluators its graph declares, so the graders could not be compared — a guard that cannot decide fails closed"
+      : graderDiff.length === 0
+        ? `the evaluator set is unchanged (${String(Object.keys(input.baseline.evaluators).length)} evaluator node(s))`
+        : `${String(graderDiff.length)} grader change(s): ${graderDiff.join("; ")}. A replayed suite grades work channels and ` +
+          `never the grader, and an evaluator's verdict decides a posture escalation at run time even where an attested exam ` +
+          `decides the score. Strengthening a grader is an operator's act, not a candidate's: attest the stronger grader as this ` +
+          `workflow's exam (loom exam attest) and judge candidates live`,
   });
 
   // ── what the replay had to invent ───────────────────────────────────────────

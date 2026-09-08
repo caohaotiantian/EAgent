@@ -6852,11 +6852,13 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const candReport = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
         const candAgain = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
 
-        // WHETHER THIS WORKFLOW HAS AN ATTESTED EXAM decides whether `12-grader-unchanged` applies,
-        // and the workflow is read off the cases' OWN `run.submitted.workflow` — never off the
-        // `--baseline` file's name, which the caller typed: a copy of an unattested graph renamed to
-        // an attested workflow would otherwise skip the check. Cases from more than one workflow, or
-        // from none with a journal, are "not attested", which is the direction the check applies in.
+        // WHETHER THIS WORKFLOW HAS AN ATTESTED EXAM, for the certificate and nothing else. It used
+        // to decide whether `12-grader-unchanged` applied; it no longer does — an evaluator's
+        // verdict escalates a posture at run time whatever grades the score, so the check takes no
+        // answer from a caller (`gate.ts`). What is left is provenance a reader of the row wants:
+        // whether this workflow's S1 is exam-backed at all. The workflow is read off the cases' OWN
+        // `run.submitted.workflow`, never off the `--baseline` file's name, which the caller typed.
+        // Cases from more than one workflow, or from none with a journal, report false.
         const { index } = graphsByHash(ws);
         const caseWorkflows = new Set<string>();
         for (const c of suite.cases) {
@@ -6874,7 +6876,6 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           promptGrowth: promptGrowthOf(baseline, candidate),
           postureDiffNonNegative: posturesHoldOf(ws, baseline, candidate),
           deterministic: sameOutcome(candReport, candAgain),
-          examAttested,
         });
 
         for (const c of [...verdict.checks].sort((a, b) => (a.id < b.id ? -1 : 1))) {

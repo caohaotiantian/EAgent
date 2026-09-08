@@ -268,9 +268,10 @@ test("STEP 2 · before any attestation, the live door and the freeze REFUSE and 
 test("STEP 3 · a legacy suite refuses the grader swap with ✗ 12-grader-unchanged, and the honest candidate passes 12", async () => {
   const w = await workspace();
   try {
-    // Freeze refuses without an attestation and check 12 is skipped with one, so the only suite
-    // this check can ever reach is one written by hand or by an older binary. Its shape is
-    // `freezeSuite`'s: golden (odd-length) runs pin `picked`, the rest pin nothing.
+    // Freeze refuses without an attestation, so a suite this early is one written by hand or by
+    // an older binary. Check 12 reaches a frozen one too — see STEP 11, where the same swap is
+    // refused on a suite this binary froze under an attestation. Its shape is `freezeSuite`'s:
+    // golden (odd-length) runs pin `picked`, the rest pin nothing.
     const cases = [];
     for (const [i, id] of w.ids.slice(0, 12).entries()) {
       const done = (await journal(w.dir, id)).find((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
@@ -468,6 +469,25 @@ test("STEP 11 · a rigged grader published by hand marks nothing golden the exam
       const n = Number(picked[0]!.split("-")[1]);
       assert.equal(picked.length, 2 + (n % 3), `case ${c.id} pins a complete pick — an exam-certified output`);
     }
+
+    // AND THE GRADER SWAP IS REFUSED ON THIS SUITE TOO, THOUGH THE WORKFLOW IS ATTESTED. Check 12
+    // used to pass here with "skipped: this workflow has an operator-attested exam", and the same
+    // command printed `"promote": true`, exit 0 — the audit's reproduction 2, through the replayed
+    // door, on a suite this binary froze. The skip's premise was that nothing which decides reads
+    // the in-graph grader once an exam exists; `run/engine.ts`'s `#checkConfidence` does, on every
+    // run, and raises a posture escalation the rigged grader silences. This is the pin on that.
+    const swap = await cli([
+      "promote", join(w.dir, "candidates", "rigged.json"),
+      "--baseline", join(w.dir, "graphs", "pick.json"),
+      "--suite", join(w.dir, "rigged-suite.json"),
+      "--workspace", w.dir,
+    ]);
+    assert.equal(swap.code, 1, `${swap.out}\n${swap.err}`);
+    assert.match(swap.out, /✗ 12-grader-unchanged.*node:check function\/check@stable → function\/check-rigged@stable/);
+    const sd = jsonOf<{ promote: boolean; examAttested: boolean; checks: { id: string; pass: boolean }[] }>(swap.out);
+    assert.equal(sd.promote, false);
+    assert.equal(sd.examAttested, true, "the workflow IS attested — that is the premise this test needs");
+    assert.deepEqual(sd.checks.filter((c) => !c.pass).map((c) => c.id), ["12-grader-unchanged"], "and 12 is the only thing standing in its way");
 
     // The rename buys a new workflow, not a way past the exam.
     cpSync(join(w.dir, "candidates", "renamed.json"), join(w.dir, "graphs", "renamed.json"));

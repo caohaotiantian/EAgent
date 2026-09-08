@@ -2,8 +2,9 @@
  * The two checks the replayed gate gained, and the one type it stopped lying about.
  *
  * `12-grader-unchanged` refuses audit reproduction 2 — a candidate whose only change is swapping
- * its evaluator's body — on a workflow with no attested exam, and is SKIPPED with its reason once
- * one exists (the exam grades; the in-graph evaluator decides nothing). `13-replay-verified`
+ * its evaluator's body — and refuses it whether or not the workflow has an attested exam, because
+ * an evaluator's verdict decides a posture escalation at RUN time even where it decides no score
+ * (see the test that names `#checkConfidence`). `13-replay-verified`
  * refuses a case whose replay served a tool result whose recording carries no `argsDigest` to a
  * different graph, and REPORTS (without refusing) the seeds it derived for nodes the recording
  * never ran. `CaseResult.replay` is optional and absent on a failed
@@ -96,18 +97,47 @@ test("THE CONTROL: an unchanged evaluator set passes, and the honest function-bo
   assert.equal(v.promote, true);
 });
 
-test("WHERE AN EXAM IS ATTESTED THE CHECK IS SKIPPED AND SAYS SO — strengthening the grader is no longer refused", () => {
-  const v = gateCandidate(input(report({ evaluators: { "node:check": RIGGED } }), { examAttested: true }));
+/**
+ * THE SKIP THAT WAS THERE AND IS NOT — and why, measured rather than argued.
+ *
+ * `12-grader-unchanged` used to pass with "skipped: this workflow has an operator-attested exam"
+ * whenever the caller answered `examAttested: true`, on the design's premise (`docs/design-
+ * property3-2026-09-05.md` §B′) that "once an exam exists the in-graph grader is not read by
+ * anything that decides". THAT PREMISE IS FALSE AND THE ENGINE IS WHERE. `#checkConfidence`
+ * (`run/engine.ts:5910`) reads every evaluator's write on every run and raises E1
+ * `low_confidence` — a posture escalation — when the verdict is below the node's threshold. A
+ * grader swapped for one that returns `{pass:true, confidence:1}` unconditionally therefore
+ * silences an escalation that used to fire, on every future run of the published graph, and
+ * nothing else in the gate can see it. Driven through the shipped binary before this test
+ * existed: `loom promote candidates/rigged.json --baseline graphs/pick.json --suite s.json` on
+ * an ATTESTED workflow printed `✓ 12-grader-unchanged  skipped: …`, `"promote": true`, exit 0 —
+ * the audit's reproduction 2, promoting again.
+ *
+ * "Oversight only tightens — a human may lower a posture; no automated path may" is the rule
+ * that settles it, so the check no longer takes an answer from its caller at all. The honest
+ * strengthening B′ was protecting still has a door, and it is the one this check's own refusal
+ * text already names: attest the stronger grader and judge live (`--against-cohort`), where
+ * both sides are graded by the exam and no evaluator set is compared.
+ */
+test("AN ATTESTED EXAM DOES NOT EXCUSE A GRADER SWAP — the check takes no answer from its caller", () => {
+  const v = gateCandidate(input(report({ evaluators: { "node:check": RIGGED } })));
   const c = check(v, "12-grader-unchanged");
-  assert.equal(c.pass, true);
-  assert.match(c.detail, /skipped: this workflow has an operator-attested exam/);
+  assert.equal(c.pass, false, "the audit's reproduction 2 is refused whether or not an exam exists");
+  assert.doesNotMatch(c.detail, /skipped/, "there is no arm that reports this check as skipped");
+  assert.match(c.detail, /function\/check@stable → function\/check-rigged@stable/);
 });
 
-test("`examAttested` absent means NOT attested — omission does not loosen", () => {
-  const v = gateCandidate(input(report({ evaluators: { "node:check": RIGGED } })));
-  assert.equal(check(v, "12-grader-unchanged").pass, false);
-  const explicit = gateCandidate(input(report({ evaluators: { "node:check": RIGGED } }), { examAttested: false }));
-  assert.equal(check(explicit, "12-grader-unchanged").pass, false);
+test("no member of PromotionInput can turn 12 off — an unknown extra key changes nothing", () => {
+  const rigged = report({ evaluators: { "node:check": RIGGED } });
+  const plain = gateCandidate(input(rigged));
+  const withExtra = gateCandidate({ ...input(rigged), examAttested: true } as Parameters<typeof gateCandidate>[0]);
+  assert.equal(check(plain, "12-grader-unchanged").pass, false);
+  assert.equal(check(withExtra, "12-grader-unchanged").pass, false, "the field the skip read is gone, so setting it loosens nothing");
+  assert.deepEqual(
+    withExtra.checks.map((x) => `${x.id}:${String(x.pass)}`),
+    plain.checks.map((x) => `${x.id}:${String(x.pass)}`),
+    "every check answers identically",
+  );
 });
 
 test("a report that does not state its evaluators cannot be compared, and fails closed", () => {
