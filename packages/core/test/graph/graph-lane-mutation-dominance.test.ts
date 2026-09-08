@@ -393,7 +393,9 @@ test("THE PACKED DOMINATOR ROWS ARE RIGHT ACROSS EVERY 32-NODE BOUNDARY, gate na
   };
   let checked = 0;
   for (const N of [2, 3, 30, 31, 32, 33, 34, 63, 64, 65, 96, 97, 128, 129]) {
-    for (const G of [1, Math.floor(N / 2), N - 2]) {
+    // DEDUPED: at N=3 all three positions are the same node, and counting it three times would
+    // overstate the sweep. N=2 has no interior position at all and contributes none.
+    for (const G of [...new Set([1, Math.floor(N / 2), N - 2])]) {
       if (G < 1 || G > N - 2) continue;
       const r = attempt(compiled(chainWithGate(N, G)), mutation({ ...chainGraft(N), proposedByNode: n("c0") }));
       assert.equal(r.ok, false, `N=${String(N)} G=${String(G)}`);
@@ -404,7 +406,7 @@ test("THE PACKED DOMINATOR ROWS ARE RIGHT ACROSS EVERY 32-NODE BOUNDARY, gate na
       checked++;
     }
   }
-  assert.equal(checked, 39, "the boundary sweep must actually have run every shape");
+  assert.equal(checked, 37, "the boundary sweep must actually have run every DISTINCT shape");
 });
 
 test("UNDER THE CEILING the rule still answers, on a graph two orders of magnitude past any authored one", () => {

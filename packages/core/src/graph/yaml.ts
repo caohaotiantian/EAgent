@@ -370,6 +370,12 @@ function blockScalar(
   // and `parseYaml` reads this to decide whether a recorded `---` was content. A block that
   // refuses one of its lines has still claimed the ones above it, so a `---` among them does
   // not get re-diagnosed as a second document on the way out.
+  //
+  // INCLUDING THE OFFENDING LINE, because `claim[1] = r + 1` runs before the throw below and
+  // this comment used to describe `= r`. The wider span is the safe direction and is kept
+  // deliberately: claiming one line too many can only SUPPRESS a second-document diagnostic for
+  // a line the parser already refused for its own reason, where claiming one too few would let
+  // a `---` the author wrote inside a block resurface as the wrong error.
   const claim: [number, number] = [from, from];
   doc.blocks.push(claim);
 
