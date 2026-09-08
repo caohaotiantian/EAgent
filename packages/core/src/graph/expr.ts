@@ -160,9 +160,18 @@ function syntax(src: string, at: number, message: string): Error {
  *
  * WHAT 256 MEANS FOR A FLAT CHAIN, said plainly because "nests deeper than 256" reads more
  * permissive than it is: the operators here are left-associative, so `a && b && c` is a
- * left-leaning spine and its DEPTH is its term count. 255 `&&` terms compile; 257 do not. That
- * is a behaviour change on the graph-compile path — such an expression compiled at 294e713 —
- * and it is a deliberate one, because the same shape at 10,000 terms crashed the compiler.
+ * left-leaning spine and its DEPTH is its term count. Measured at the boundary rather than
+ * reasoned to it — **255 `&&` terms compile and 256 do not**, because the chain sits under one
+ * more node than its own spine. That is a behaviour change on the graph-compile path — such an
+ * expression compiled at 294e713 — and it is a deliberate one, because the same shape at 10,000
+ * terms crashed the compiler.
+ *
+ * AND IT IS REPLAY-VISIBLE, which is not the same as harmless. `#rehydrateGraph` calls
+ * `compile`, and a non-`ok` result there raises `E_REPLAY_DIVERGENCE`, so a journal whose graph
+ * carries an expression over the limit can no longer be attached or replayed. Nothing in this
+ * tree writes one — the deepest authored expression anywhere is 5 — and refusing is the
+ * direction a guard is allowed to move, but a run recorded elsewhere would stop folding. The
+ * same sentence is owed by `GRAPH003_RESERVED_CHANNEL` and is written there.
  */
 const MAX_EXPR_DEPTH = 256;
 

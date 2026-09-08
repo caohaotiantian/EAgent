@@ -958,6 +958,22 @@ function isSafeId(id: unknown): boolean {
  * CHANNELS ONLY. Node and edge ids key objects too, and `plans["toString"]` has the same
  * shape — but they are not the reported defect, `plans` is built by the compiler rather than
  * from author-supplied keys, and widening a refusal is not something to do on a guess.
+ *
+ * THE SET IS READ OFF THE RUNNING V8, AND THAT HAS A PRICE worth naming: the compiler's answer
+ * stops being a pure function of its input. A future Node that adds an `Object.prototype` member
+ * widens this refusal with no commit here, so the same spec could compile on one runtime and not
+ * another. The trade is deliberate — the hazard IS "the name is on `Object.prototype`", and a
+ * hand-kept list is a second definition of that free to drift — and it is bounded two ways: the
+ * runtime hazard widens with the same member, so the refusal tracks the thing it exists for, and
+ * `test/graph/graph-lane-reserved-channel-names.test.ts` pins the twelve names of Node 24, so a
+ * runtime that changes the set turns that test red before it surprises anyone.
+ *
+ * AND IT IS REPLAY-VISIBLE. `#rehydrateGraph` calls `compile`, and a non-`ok` result there
+ * raises `E_REPLAY_DIVERGENCE`, so a journal whose graph declares a `toString` channel can no
+ * longer be attached or replayed. No graph in this tree does; the runtime half (lane T's
+ * `state/channels.ts` fix) means such a run was already broken where it mattered; and refusing
+ * is the direction a guard may move. Said out loud because "the graph stopped compiling" and
+ * "the run stopped folding" are different costs and only the first is obvious.
  */
 const PROTOTYPE_NAMES: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
 
