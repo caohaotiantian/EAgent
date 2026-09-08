@@ -2510,49 +2510,6 @@ export class Engine {
    * asserts that itself. A grandparent's mirror of the PARENT's mirror is answered the same way
    * when the parent next advances — recursion by journal, not by call stack.
    */
-  /**
-   * `#forwardToParentMirrors`, with the parent's problems kept out of this run's answer.
-   *
-   * THE FORWARD IS A COURTESY TO ANOTHER RUN, performed in the middle of THIS one's drive loop.
-   * Every verb that reaches it — `advance`, `resolveGate`, `rewind` — is a question about this
-   * run, and the forward reads the PARENT's journal and writes the PARENT's log. So a broken
-   * parent used to be the answer to a question about a healthy child: measured with the parent's
-   * store failing, `resolveGate(child, childGate)` threw `sqlite: disk I/O error` AFTER the
-   * human's decision had already landed durably — a caller with every reason to believe its
-   * decision had not taken, and to send it again.
-   *
-   * REFUSING TO FORWARD IS ALWAYS ALLOWED; REFUSING TO ANSWER IS NOT. That is invariant 4 read the
-   * way round it is usually read — a guard that cannot decide fails closed — and closed here means
-   * "the mirror stays open", which is the state a human can see and act on. Nothing is lost by
-   * refusing: `#forwardToParentMirrors` adds a gate to `mirrorsChecked` only AFTER it is genuinely
-   * answered, so a failed pass leaves every gate unmarked and the next one retries. The retired
-   * path keeps no memo at all, so it retries on any later touch.
-   *
-   * AND IT IS SAID OUT LOUD, on the channel this file already chose for the structurally identical
-   * case: an `onComplete` hook that throws is a `LOOM_HOOK_FAILED` warning for exactly this
-   * reason — "a silently swallowed extension failure is indistinguishable from an extension that
-   * did nothing". A forward that could not happen is not nothing either; the parent may still be
-   * waiting on a mirror. Not a journal row: the failure is the PARENT's and this run's log is the
-   * wrong place for it, the vocabulary has no member for it, and a row on the parent is the very
-   * write that just failed.
-   *
-   * IT SWALLOWS EVERYTHING, deliberately, including a programmer error from a future edit inside
-   * the forward. The alternative is a taxonomy of which cross-run failures may fail this run's
-   * verb, and every entry in it is a way for another run's fault to become this one's. The
-   * warning is what keeps a swallowed bug visible.
-   */
-  async #forwardToParentMirrorsQuietly(runId: RunId, p: RunProjection, checked?: Set<GateId>): Promise<void> {
-    try {
-      await this.#forwardToParentMirrors(runId, p, checked);
-    } catch (e) {
-      const why = e instanceof Error ? e.message : String(e);
-      process.emitWarning(
-        `could not forward run ${runId}'s gate decision to its parent's mirror: ${why}; the parent may still be waiting, and the next pass will try again`,
-        { code: "LOOM_MIRROR_FORWARD_FAILED", detail: JSON.stringify({ runId, error: why }) },
-      );
-    }
-  }
-
   async #forwardToParentMirrors(runId: RunId, p: RunProjection, checked?: Set<GateId>): Promise<void> {
     // Child ids are derived — `${parentRunId}~${taskId}` — and `SAFE_ID` admits no `~`, so the
     // last one is the boundary between the parent's id and this run's task id.
@@ -2685,6 +2642,52 @@ export class Engine {
       }
     }
     return wrote;
+  }
+
+  /**
+   * `#forwardToParentMirrors`, with the parent's problems kept out of this run's answer.
+   *
+   * THE FORWARD IS A COURTESY TO ANOTHER RUN, performed in the middle of THIS one's drive loop.
+   * Every verb that reaches it — `advance`, `resolveGate`, `rewind` — is a question about this
+   * run, and the forward reads the PARENT's journal and writes the PARENT's log. So a broken
+   * parent used to be the answer to a question about a healthy child: measured with the parent's
+   * store failing, `resolveGate(child, childGate)` threw `sqlite: disk I/O error` AFTER the
+   * human's decision had already landed durably — a caller with every reason to believe its
+   * decision had not taken, and to send it again.
+   *
+   * REFUSING TO FORWARD IS ALWAYS ALLOWED; REFUSING TO ANSWER IS NOT. That is invariant 4 read the
+   * way round it is usually read — a guard that cannot decide fails closed — and closed here means
+   * "the mirror stays open", which is the state a human can see and act on. Nothing is lost by
+   * refusing: `#forwardToParentMirrors` adds a gate to `mirrorsChecked` only AFTER that gate is
+   * genuinely answered, so whatever it did not reach is retried by the next pass. It marks as it
+   * goes, gate by gate — a throw on the third of five leaves the first two marked, which is right,
+   * because those two WERE answered — so the claim is "nothing unanswered is recorded as
+   * answered", not "a failed pass marks nothing". The retired path keeps no memo at all, so it
+   * retries every decided gate on any later touch.
+   *
+   * AND IT IS SAID OUT LOUD, on the channel this file already chose for the structurally identical
+   * case: an `onComplete` hook that throws is a `LOOM_HOOK_FAILED` warning for exactly this
+   * reason — "a silently swallowed extension failure is indistinguishable from an extension that
+   * did nothing". A forward that could not happen is not nothing either; the parent may still be
+   * waiting on a mirror. Not a journal row: the failure is the PARENT's and this run's log is the
+   * wrong place for it, the vocabulary has no member for it, and a row on the parent is the very
+   * write that just failed.
+   *
+   * IT SWALLOWS EVERYTHING, deliberately, including a programmer error from a future edit inside
+   * the forward. The alternative is a taxonomy of which cross-run failures may fail this run's
+   * verb, and every entry in it is a way for another run's fault to become this one's. The
+   * warning is what keeps a swallowed bug visible.
+   */
+  async #forwardToParentMirrorsQuietly(runId: RunId, p: RunProjection, checked?: Set<GateId>): Promise<void> {
+    try {
+      await this.#forwardToParentMirrors(runId, p, checked);
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      process.emitWarning(
+        `could not forward run ${runId}'s gate decision to its parent's mirror: ${why}; the parent may still be waiting, and the next pass will try again`,
+        { code: "LOOM_MIRROR_FORWARD_FAILED", detail: JSON.stringify({ runId, error: why }) },
+      );
+    }
   }
 
   /**
