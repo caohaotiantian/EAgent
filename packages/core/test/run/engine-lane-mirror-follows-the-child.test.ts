@@ -23,8 +23,8 @@ import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
-import type { EdgeId, GateId, NodeId, RunId } from "../../src/ids.ts";
-import type { Actor } from "../../src/journal/events.ts";
+import type { EdgeId, GateId, NodeId, RunId, Seq } from "../../src/ids.ts";
+import type { Actor, JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { HumanGateBroker } from "../../src/run/gates.ts";
@@ -389,4 +389,43 @@ test("A MIRROR THAT LANDS ON AN ALREADY-DECIDED CHILD GATE IS ANSWERED BY THE SA
   assert.equal(mirror?.decidedBy, "system");
   assert.equal((await r.engine.projection(childRunId))!.status, "succeeded");
   assert.deepEqual(r.charges, [20], "charged once");
+});
+
+test("CANCELLING A PARENT RELEASES THE CHILD'S CONTEXT TOO — every depth, not just the run cancel was called on", async () => {
+  // `cancel` retired the run it was CALLED on, through `#settled`. `#cancelTree` walked down to
+  // every delegated child, journaled the cancel and never released one — so an operator stopping
+  // a parent left the child's graph, branch index, taint sets and expression cache attached for
+  // the life of the process. That is the leak item 1 exists to close, at the depth where a
+  // delegation actually puts the memory.
+  //
+  // THE OBSERVABLE IS WHERE `projection` READS FROM. With a context it folds INCREMENTALLY from
+  // the cursor the context holds; with none it re-reads the child's whole journal from seq 1
+  // (`Engine.projection`). So a read of the CHILD's log FROM 1 is the engine saying it holds
+  // nothing for that run. `attach` is not the lens here: no shipped verb re-attaches a CANCELLED
+  // run — `advance` answers a terminal run from the fold, `planRewind` refuses a cancelled one —
+  // which is why this reads the other end.
+  let childReads = 0;
+  class CountingStore extends MemoryStateStore {
+    override read(runId: RunId, from: Seq): AsyncIterable<JournalEvent> {
+      if (String(runId).includes("~") && Number(from) <= 1) childReads++;
+      return super.read(runId, from);
+    }
+  }
+  const r = rig(new CountingStore({ now: () => NOW }));
+  const { runId, childRunId } = await parked(r);
+  assert.equal((await r.engine.projection(childRunId))!.status, "awaiting_gate");
+
+  const held = childReads;
+  await r.engine.projection(childRunId);
+  assert.equal(childReads, held, "while the child is attached, its projection is not a full re-fold");
+
+  assert.equal((await r.engine.cancel(runId, "stop", lead)).status, "cancelled");
+  assert.equal((await r.engine.projection(childRunId))!.status, "cancelled", "the cascade reached the child");
+
+  const afterCancel = childReads;
+  await r.engine.projection(childRunId);
+  assert.ok(
+    childReads > afterCancel,
+    "after the cancel the child's projection is a full re-fold from seq 1, which is what a released context means",
+  );
 });

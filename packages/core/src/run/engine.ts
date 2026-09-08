@@ -3238,6 +3238,14 @@ export class Engine {
         },
       ]),
     );
+    // AND THE CONTEXT GOES WITH IT, at every depth. `cancel` retires the run it was CALLED on
+    // (through `#settled`), which left every delegated child of a cancelled tree attached — the
+    // graph, the branch index, the taint sets and the expression cache, held for the life of the
+    // process on runs an operator has just stopped. That is half of "a cancelled run is
+    // released", and the deeper half: a parent cancelled at depth 1 can hold a dozen children.
+    // The run is terminal at this line — `run.cancelled` is appended above — so this is the same
+    // release `#settled` performs, taken at the depth that has the context.
+    this.#retire(runId);
   }
 
   /**
