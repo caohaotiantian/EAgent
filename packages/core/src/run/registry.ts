@@ -542,8 +542,13 @@ export interface ModelAdapter {
    * back to that same probe, which is exactly what it did before. It is optional because
    * `ModelAdapter` is on the pinned public surface and every external implementation of it
    * predates this member; making it required would break them to close a hole they may not
-   * have. An adapter that CAN answer should — see `RoutingAdapter.hasPrice` in `cli.ts`,
-   * which is the answer the shipped binary reads.
+   * have. An adapter that CAN answer should. `RoutingAdapter` in `cli.ts` implements it, and
+   * this line used to add "which is the answer the shipped binary reads" — false, and that
+   * method's own docstring now says so: `pricedFor` is only ever handed the adapters
+   * `readModels` constructs or the extension adapters argv pre-registered, never the
+   * `RoutingAdapter` built afterwards. The answer the binary reads here is an EXTENSION
+   * adapter's, when one implements this; for the two HTTP adapters it reads the operator's own
+   * tables and then the probe. One claim in two files, disagreeing with itself.
    *
    * `true` means "I have a rate for this model", including a rate of zero. It is not a claim
    * that the rate is right.

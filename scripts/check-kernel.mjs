@@ -47,7 +47,10 @@
  *     with no leading-whitespace tolerance, and did not accept `feature`, so five ordinary
  *     spellings of the same claim were not classified as capability at all. All 35 feat
  *     commits in `86b84c9..HEAD` match under both the old rule and the new one, with an empty
- *     symmetric difference — measured, not assumed.
+ *     symmetric difference — measured today, not assumed:
+ *     `git log --format='%s' 86b84c9..HEAD | /usr/bin/grep -acE '^feat(\([^)]*\))?!?:'` → 35.
+ *     (This file carried the same measurement as 34 in the other paragraph. One measurement
+ *     stated as two numbers is a measurement nobody made twice.)
  *   - AN EVIL MERGE. `--no-merges` is gone. It was there on the belief that "`git show
  *     --name-only` reports nothing for them", which is false: for a merge, `git show` prints
  *     the COMBINED diff, i.e. exactly the changes the resolution introduced and no others. So
@@ -104,12 +107,17 @@
  * trailer as readily as the trailer), and git's own `%(trailers:key=Kernel-seam)` a third number
  * again, because it parses only the final paragraph of a body. Three commands, three answers.
  *
- * SEVEN RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
- * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, the subject spelling and
- * the one-character trailer, each described above with its measurement.
+ * EIGHT RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
+ * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, HISTORY SIMPLIFICATION over
+ * both of those reads, the subject spelling and the one-character trailer, each described above
+ * with its measurement.
  *
- * THE LAST TWO ARE THE ONES WORTH REMEMBERING, AND EACH WAS FOUND ON THE COMMIT THAT CLAIMED
- * TO HAVE CLOSED THE ONE BEFORE. Five were closed and five were tested, each ALONE, and
+ * THE LAST THREE ARE THE ONES WORTH REMEMBERING, AND EACH WAS FOUND ON THE COMMIT THAT CLAIMED
+ * TO HAVE CLOSED THE ONE BEFORE. Three review rounds, three resets, each hiding inside the
+ * previous round's fix. That is what "a correction that lands half-done is worse than the
+ * defect" measures out to when the thing being corrected is a NUMBER: every round shrank the
+ * hole and none of them closed the class, because each fix reached for the next git command
+ * without asking what that command's DEFAULTS do. Five were closed and five were tested, each ALONE, and
  * composing two of them reset the ledger anyway. Then the commit that closed the composition
  * read the pin's own history through a hard-coded literal with no `--follow`, which is the
  * rename hole one door further out — so the file that had just written "cannot be reset by
@@ -279,7 +287,11 @@ const US = "\x1f";
  * reading git can do better — that one belongs to the reviewer with the rest of them.
  */
 function historicalNames(path) {
-  const r = git("log", "--follow", "--name-only", "--format=", "HEAD", "--", path);
+  // `--full-history` BESIDE `--follow`, because a pathspec makes git SIMPLIFY by default: a
+  // commit whose change to this path did not survive into the first-parent line is dropped, so
+  // a rename made on a side branch and resolved away is invisible. git accepts the two together
+  // (measured), and the whole point of this set is that it is not simplified.
+  const r = git("log", "--follow", "--full-history", "--name-only", "--format=", "HEAD", "--", path);
   if (!r.ok) refuse(`could not follow \`${path}\` through history: ${r.err}`);
   const names = new Set([path]);
   for (const line of r.out.split("\n")) {
@@ -345,7 +357,21 @@ function everPinnedPaths() {
   // pin is followed by the same mechanism its pinned files are, from `PIN`'s own current path.
   const pinRel = relative(root, PIN);
   const pinNames = [...historicalNames(pinRel)];
-  const log = git("log", "--format=%H", "HEAD", "--", ...pinNames);
+  // `--full-history`, AND THAT WAS THE EIGHTH RESET — in the commit that closed the seventh.
+  // `commitsIn("HEAD")` takes NO pathspec, so it really is the whole history; this read takes
+  // one, and a pathspec turns on git's default history simplification. So a merge whose
+  // resolution discarded a side branch's edit to the pin dropped that version of the pin, and
+  // with it every path only that version named. Driven on a fixture with `-s ours` (an ordinary
+  // conflict resolved in favour of the first parent is the same shape):
+  //
+  //     git log                HEAD -- scripts/kernel.json  → 2 commits, the side pin invisible
+  //     git log --full-history HEAD -- scripts/kernel.json  → 4, the side pin recovered
+  //
+  // …and the guard printed `0 declared seams`, exit 0, no departed-path notice, where the
+  // identical commits on a LINEAR history printed 1 seam and the notice. The docstring above
+  // said "the census reads the pin's whole history for the same reason it reads the whole
+  // commit history" while the two reads were differently scoped. Now they are not.
+  const log = git("log", "--full-history", "--format=%H", "HEAD", "--", ...pinNames);
   // AND IT REFUSES RATHER THAN DEGRADING. `return out` here answered "the pin has only ever
   // named what it names today", which IS the de-pin reset — the census failing open into the
   // exact hole it exists to close. Every other git failure in this file refuses; so does this.
@@ -402,7 +428,7 @@ function commitsIn(range) {
  *
  * CASE-INSENSITIVE, LEADING SPACE TOLERATED, AND `feature` ACCEPTED. The strict form
  * (`/^feat(\([^)]*\))?!?:/`) read five ordinary spellings of the same claim as some other
- * type entirely. Widening it reclassifies nothing in this repo's history — all 34 feat commits
+ * type entirely. Widening it reclassifies nothing in this repo's history — all 35 feat commits
  * in `86b84c9..HEAD` match under both — so the only commits it can newly judge are ones nobody
  * has written yet.
  */

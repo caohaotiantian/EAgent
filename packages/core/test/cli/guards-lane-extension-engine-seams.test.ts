@@ -492,3 +492,56 @@ test("A SUBSTITUTED RESOLVER OWNS `resources/` TOO — the workspace body stops 
   assert.notEqual(withMod.code, 0, withMod.out + withMod.err);
   assert.match(withMod.out + withMod.err, /GRAPH015_RESOURCE_NOT_FOUND/, withMod.out + withMod.err);
 });
+
+/**
+ * A SUBSTITUTED JOURNAL SAYS SO ON `run`, NOT ONLY ON `serve`.
+ *
+ * `store.register` replaces the JOURNAL — the only authoritative state there is — and the whole
+ * argument for allowing an argv-supplied module to do that was that the boot banner names it, so
+ * the substitution is never silent. The banner lives in `announce()`, whose only caller is the
+ * `serve` path. Driven at 85973f5 through `main` with a module registering a `MemoryStateStore`:
+ *
+ *     exit 0, "status": "succeeded", no `.loom/journal.db`, and NOTHING on either stream about
+ *     a substitution — followed by the run's own advice, `inspect it with: loom trace <id>`,
+ *     which then answered `has no run.compiled event in this workspace`.
+ *
+ * README's sharpest no-fork row and the plan's Decision 6 both rest on that banner, and on the
+ * verb an operator actually uses it did not exist.
+ */
+test("A MODULE THAT SUBSTITUTES THE JOURNAL IS ANNOUNCED UNDER `run`, not just under `serve`", async () => {
+  const d = dir();
+  const g = graph(d, "stamp", FUNCTION_GRAPH);
+  const m = mod(
+    d,
+    "mem.mjs",
+    `import { MemoryStateStore } from ${JSON.stringify(new URL("../../src/journal/memory.ts", import.meta.url).href)};
+     export default ({ store, functions }) => {
+       store.register(new MemoryStateStore());
+       functions.register("function/stamp@stable", () => ({ writes: { note: "ran" } }));
+     };\n`,
+  );
+  const r = await cli(["run", g, "--workspace", d, "--extension-module", m]);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /"status": "succeeded"/, r.out);
+  // The substitution really happened — no journal on disk — which is what makes the line owed.
+  assert.equal(existsSync(join(d, ".loom", "journal.db")), false, "the module's store should have replaced the journal");
+  assert.match(r.err, /JOURNAL SUBSTITUTED by --extension-module/, r.err);
+  // …and it says the consequence, not just the fact: an operator who reads only this line has
+  // to learn that `loom trace` — which the very next line of output recommends — cannot work.
+  assert.match(r.err, /no loom trace, no loom gates, no replay/, r.err);
+});
+
+/** THE ORDINARY HALF: a module that substitutes nothing prints no such line. */
+test("…and a module that does not substitute the journal says nothing about one", async () => {
+  const d = dir();
+  const g = graph(d, "stamp", FUNCTION_GRAPH);
+  const m = mod(
+    d,
+    "plain.mjs",
+    `export default ({ functions }) => { functions.register("function/stamp@stable", () => ({ writes: { note: "ran" } })); };\n`,
+  );
+  const r = await cli(["run", g, "--workspace", d, "--extension-module", m]);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.doesNotMatch(r.err, /JOURNAL SUBSTITUTED/, r.err);
+  assert.equal(existsSync(join(d, ".loom", "journal.db")), true, "…and the real journal is on disk");
+});

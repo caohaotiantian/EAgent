@@ -459,3 +459,61 @@ test("A PRE-`since` SEAM UNDER THE TRAILER FLOOR IS COUNTED AS A NOTICE, not del
   // …and it does not simply vanish, which is what it did before.
   assert.match(after.output, /1 commit\(s\) declared a Kernel-seam trailer shorter than the 40-character floor/);
 });
+
+/**
+ * THE EIGHTH RESET: HISTORY SIMPLIFICATION, found in the commit that closed the seventh.
+ *
+ * `commitsIn("HEAD")` takes no pathspec, so it really is the whole history. The pin's own
+ * history read takes one — and a pathspec turns on git's DEFAULT SIMPLIFICATION, which drops
+ * any commit whose change to that path did not survive into the first-parent line. So a merge
+ * whose resolution discarded a side branch's edit to `kernel.json` dropped that version of the
+ * pin, and with it every path only that version named. The docstring claimed the two reads
+ * were scoped alike while they were not. `--full-history` is the difference, on this read and
+ * on `historicalNames`' `--follow` beside it.
+ *
+ *     git log                HEAD -- scripts/kernel.json  → the side-branch pin invisible
+ *     git log --full-history HEAD -- scripts/kernel.json  → recovered
+ *
+ * `-s ours` is the cheapest way to write "a merge that kept the first parent's version"; an
+ * ordinary conflict resolved the same way is the same shape and the same loss.
+ */
+test("A MERGE THAT DISCARDS A SIDE BRANCH'S PIN EDIT does not erase what that pin named", () => {
+  const f = repo();
+  f.git("checkout", "-q", "-b", "side");
+  // On the side branch the pin ALSO names src/other.ts, and a seam is declared against it.
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.write(
+    "scripts/kernel.json",
+    JSON.stringify({ since: f.base, files: [{ path: KERNEL, why: "the executor" }, { path: "src/other.ts", why: "the other" }] }, null, 2),
+  );
+  f.commit("chore: pin other.ts too", "");
+  f.commit("feat(run): a posture", SEAM, { "src/other.ts": "export const other = 2;\n" });
+  f.git("checkout", "-q", "main");
+  // The merge keeps MAIN's pin, so `src/other.ts` is not pinned at HEAD and never was on the
+  // first-parent line — which is exactly what simplification hides.
+  f.git("merge", "-q", "-s", "ours", "--no-ff", "-m", "chore: merge side, keeping main's pin", "side");
+
+  const after = f.run();
+  assert.equal(after.status, 0, after.output);
+  // At 85973f5 this printed `0 declared seams over the full history`, exit 0, with no notice.
+  assert.equal(seams(after.output), 1, `simplification erased the seam:\n${after.output}`);
+  assert.match(after.output, /path\(s\) were pinned as kernel earlier in this history and are not now/);
+  assert.match(after.output, /src\/other\.ts/);
+});
+
+/** THE LINEAR CONTROL, so the loss above is attributable to the merge and not to the fixture. */
+test("…and the identical commits on a linear history always counted it — the control", () => {
+  const f = repo();
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.write(
+    "scripts/kernel.json",
+    JSON.stringify({ since: f.base, files: [{ path: KERNEL, why: "the executor" }, { path: "src/other.ts", why: "the other" }] }, null, 2),
+  );
+  f.commit("chore: pin other.ts too", "");
+  f.commit("feat(run): a posture", SEAM, { "src/other.ts": "export const other = 2;\n" });
+  f.pin(KERNEL);
+  f.commit("refactor(kernel): other.ts is not kernel after all", "");
+  const after = f.run();
+  assert.equal(after.status, 0, after.output);
+  assert.equal(seams(after.output), 1, after.output);
+});

@@ -192,7 +192,17 @@ test("…and without that row it still refuses, naming BOTH doors", () => {
   assert.deepEqual([...cfg.unpriced], ["local → freelocal/llama-local"]);
   assert.throws(
     () => cfg.adapter.estimateOf(REQ("local")),
-    (e: unknown) => isLoomError(e) && /this ROUTE row/.test(e.message) && /ModelAdapter\.hasPrice/.test(e.message),
+    // BOTH REMEDIES, AND EACH ONE THE BINARY ACTUALLY ACCEPTS. The message used to offer
+    // `{"input": <usd per 1M>, "output": <usd per 1M>}` on the ROUTE row, which the reader
+    // refuses — a refusal naming a remedy the binary rejects, left standing by the commit that
+    // made route rows zero-only. This asserts the free-endpoint door quotes a ZERO row, and
+    // that the paying door names somewhere that bills.
+    (e: unknown) =>
+      isLoomError(e) &&
+      /this route row: "prices": \{"llama-local": \{"input": 0, "output": 0\}\}/.test(e.message) &&
+      /ADAPTER row's "prices"/.test(e.message) &&
+      /ModelAdapter\.hasPrice/.test(e.message) &&
+      !/<usd per 1M>/.test(e.message),
   );
 });
 
@@ -326,12 +336,23 @@ test("THE ORDINARY HALF: the zero row this refusal is shaped around still boots 
  *
  * `pricedFor` read `if (own !== undefined) return own`, so BOTH booleans short-circuited. An
  * extension adapter that honestly answers "I cannot price this model" therefore beat an
- * explicit `{"input": 0, "output": 0}` the operator had written on the route row — and the
- * refusal that followed instructed them to write exactly that row. Measured at 72510cd:
+ * explicit `{"input": 0, "output": 0}` the operator had written on the route row. Run at
+ * 72510cd in a `git archive` extraction, `hasPrice: () => false` with that row present, and
+ * PASTED rather than paraphrased this time:
  *
- *     unpriced = [ 'local → freelocal/llama-local' ]
- *     estimateOf THREW: … which no price table prices … As the operator: add
- *       "prices": {"llama-local": {"input": 0, "output": 0}} to this ROUTE row …
+ *     unpriced: ["local → freelocal/llama-local"]
+ *     THREW: route "local" in …/m.json points at freelocal/llama-local, which no price table
+ *       prices — so every call on it would be journaled as costing 0 and no budget could bound
+ *       it. TWO WAYS TO SAY WHAT IT COSTS. As the operator: add "prices": {"llama-local":
+ *       {"input": <usd per 1M>, "output": <usd per 1M>}} to this ROUTE row, or to the adapter's
+ *       row when it has one …
+ *
+ * THIS DOCSTRING FIRST QUOTED THAT REFUSAL WITH `{"input": 0, "output": 0}` IN IT, which the
+ * binary has never printed, and the difference is not cosmetic: it is the whole of the next
+ * defect. The message offers `<usd per 1M>` on the ROUTE row and the reader refuses exactly
+ * that, so the refusal named a remedy the binary rejects — and paraphrasing the paste into
+ * agreement with the argument is what hid it for a round. "Reproduce by running, not by
+ * reading" is about the EVIDENCE as much as the conclusion.
  *
  * — a refusal whose only remedy was a third party editing their module. The two sources answer
  * different questions: the adapter says what its own table holds, the operator says what the

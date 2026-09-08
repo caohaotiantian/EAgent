@@ -3376,11 +3376,13 @@ class RoutingAdapter implements ModelAdapter {
       CODES.E_CONFIG_INVALID,
       `route "${key}" in ${this.#file} points at ${to === undefined ? "an unrouted model" : `${to.adapter}/${to.model}`}, ` +
         `which no price table prices — so every call on it would be journaled as costing 0 and no budget could bound it. ` +
-        `TWO WAYS TO SAY WHAT IT COSTS. As the operator: add "prices": {"${to?.model ?? key}": {"input": <usd per 1M>, ` +
-        `"output": <usd per 1M>}} to this ROUTE row, or to the adapter's row when it has one — an --extension-module ` +
-        `adapter has no adapter row, which is why the route row takes it too. As the adapter's author: implement the ` +
-        `optional ModelAdapter.hasPrice(model), which is the only answer that cannot be wrong. A genuinely free ` +
-        `endpoint says so with {"input": 0, "output": 0}: a rate, not a missing row.`,
+        `TWO WAYS TO SAY WHAT IT COSTS, AND THE ROUTE ROW IS ONLY ONE OF THEM. If the endpoint is genuinely FREE, ` +
+        `say so on this route row: "prices": {"${to?.model ?? key}": {"input": 0, "output": 0}} — a rate, not a missing ` +
+        `row, and the one thing a route row may declare, because it is read only to decide whether the route is priced ` +
+        `and never reaches the adapter that bills. If it COSTS something, the rate has to go somewhere that bills: the ` +
+        `ADAPTER row's "prices" when the adapter has a row, or — for an --extension-module adapter, which has none — ` +
+        `its author implementing the optional ModelAdapter.hasPrice(model) and pricing it in that adapter's own ` +
+        `priceOf, which is the only answer that cannot be wrong.`,
     );
   }
 
@@ -4620,9 +4622,12 @@ export function modelWarnings(models: ModelConfig | undefined, command: string):
         `  A journaled 0 is what made policy.budget.costUsd and --budget bound nothing and /health report a spend\n` +
         `  that did not happen. A FALLBACK tier listed here is NOT refused — FallbackAdapter prices it, this file never\n` +
         `  sees it, and a fall-through onto it bills at whatever that tier answers. For those, this line is the guard.\n` +
-        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that route or adapter row\n` +
-        `  in ${models.file}; an --extension-module adapter has no adapter row, so use the ROUTE row. Its author's own\n` +
-        `  door is the optional ModelAdapter.hasPrice(model). A free endpoint says {"input": 0, "output": 0} — a rate.\n`,
+        `  fix, if the endpoint is FREE: add "prices": {"<model>": {"input": 0, "output": 0}} to that ROUTE row in\n` +
+        `  ${models.file} — a rate, not a missing row, and the only thing a route row may declare (it decides whether\n` +
+        `  the route is priced and never reaches the adapter that bills, so a non-zero rate there is refused).\n` +
+        `  fix, if it COSTS something: put the rate where it bills — the ADAPTER row's "prices" when the adapter has a\n` +
+        `  row, or, for an --extension-module adapter (which has none), its author's own priceOf behind the optional\n` +
+        `  ModelAdapter.hasPrice(model).\n`
     );
   }
   // THE CEILING NOBODY CHOSE. A live GLM-5.2 turn ended `finishReason "max_tokens"` with
@@ -4653,6 +4658,37 @@ export function modelWarnings(models: ModelConfig | undefined, command: string):
     );
   }
   return out;
+}
+
+/**
+ * A DEPLOYMENT WHOSE JOURNAL IS A MODULE'S SAYS SO ON EVERY VERB, not only on `serve`.
+ *
+ * `store.register` substitutes the JOURNAL, which is the only authoritative state there is, and
+ * the whole argument for allowing it was that the boot banner names it so the substitution is
+ * never silent. That banner lives inside `announce()`, whose only caller is the `serve` path —
+ * so under `loom run` a module supplying a `MemoryStateStore` was completely silent, and the run
+ * then printed `inspect it with: loom trace <id>`, which cannot work:
+ *
+ *     $ loom run … --extension-module mem.mjs
+ *       exit 0, "status": "succeeded", journal.db exists: false, nothing about SUBSTITUTED
+ *     $ loom trace <id>
+ *       LoomError: run … has no run.compiled event in this workspace
+ *
+ * Found by review; the mitigation README's sharpest row rests on did not exist on the verb an
+ * operator actually uses. On stderr, like every other honest line, and skipped for `serve`
+ * because `announce()` already says it there — printing it twice teaches an operator to stop
+ * reading stderr, which is the failure mode this whole class of line has.
+ */
+function warnAboutSubstitutedJournal(ws: Workspace, command: string): void {
+  if (command === "serve" || ws.extensions?.store === undefined) return;
+  process.stderr.write(
+    `! JOURNAL SUBSTITUTED by --extension-module ${ws.extensions.files.join(", ")} — this deployment's journal is the
+` +
+      `  module's, not ${ws.dataDir}. If it does not persist, nothing written by this command survives the process:
+` +
+      `  no loom trace, no loom gates, no replay, and no restart can fold what this run recorded.
+`,
+  );
 }
 
 /** `modelWarnings`, on stderr — never stdout: `loom run` prints a JSON document there and a caller pipes it. */
@@ -6420,6 +6456,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
     // module guards against to differ from the one the built-ins guard against.
     const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths, jailFor(args));
     ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
+    warnAboutSubstitutedJournal(ws, args.command);
   } catch (e) {
     closeMcp();
     throw e;
@@ -8825,7 +8862,9 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       `${String(ws.models.unpriced.length)} route(s) in ${ws.models.file} have no price (${ws.models.unpriced.join(", ")}), ` +
         `so every candidate call on them is journaled as costing $0 and 3-cost would report a 0.00× ratio it never ` +
         `measured — against recordings that cost real money. ` +
-        `fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter.`,
+        `fix: put the rate where it bills — the adapter row's "prices", or the adapter author's own priceOf behind ` +
+        `the optional ModelAdapter.hasPrice(model). A genuinely free endpoint says {"input": 0, "output": 0} on the ` +
+        `ROUTE row, which is the only rate a route row may declare.`,
     );
   }
 
