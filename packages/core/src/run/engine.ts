@@ -984,6 +984,8 @@ interface RunContext {
   graph: RunGraph;
   /** The graph this context was ATTACHED with — what `#reattach` hands back after a retire. */
   readonly attached: RunGraph;
+  /** Decided gates of this CHILD run already checked against the parent's mirrors. See `#forwardToParentMirrors`. */
+  readonly mirrorsChecked: Set<GateId>;
   index: GraphIndex;
   /** Nodes added by mutations so far, against `expansion.maxNodes`. */
   addedNodes: number;
@@ -2320,6 +2322,10 @@ export class Engine {
       // question the journal would answer the other way. `#rewindSerially` clears the flag for
       // that reason and this loop is where it is picked up.
       await this.#seedPolicy(ctx, runId, p);
+      // A DECISION ON THIS RUN'S GATE REACHES THE PARENT WAITING ON IT, whichever door decided
+      // it — see `#forwardToParentMirrors`. Before the terminal check below: the decision that
+      // finished this child is the one its parent is most often waiting on.
+      await this.#forwardToParentMirrors(ctx, p);
       // RETIRED ON EVERY TERMINAL EXIT, not only on the call AFTER the one that finished. A
       // comment here used to say the finishing call could not retire because `openGates` and
       // `rewind` read `#runs` — that was true once and had stopped being true: both answer a
@@ -2432,6 +2438,76 @@ export class Engine {
       // `advance` is who should hear about it.
       const escalations = ctx.escalationWrites.splice(0);
       if (escalations.length > 0) await Promise.all(escalations);
+    }
+  }
+
+  /**
+   * Answer the parent's MIRROR of every gate this child run has decided, from the journal.
+   *
+   * A subgraph node raises a mirror of the child gate it is waiting on, and a human who answers
+   * the MIRROR has that answer forwarded into the child (`#forwardGateDecision`). The other
+   * direction had nothing: a human who answered the CHILD's own gate — in its own console, where
+   * `GET /gates` lists it beside the mirror — left the parent parked on a mirror nobody would
+   * ever decide. Measured at 294e713: child gate approved, child `awaiting_gate` on its next
+   * question, parent `awaiting_gate` with the mirror `open`, forever.
+   *
+   * JOURNAL-DRIVEN, NOT DOOR-DRIVEN. `resolveGate` is one of four writers of `gate.decided` —
+   * `resolveGateBatch`, the sweeper's pre-authorised `defaultAction` and the broker's dedupe are
+   * the others — and every one of them leaves the child `running` with a `ready` task, which is
+   * what brings it back through `#advanceSerially`. So the question is asked of the FOLD, here,
+   * on every pass: which of this run's decided gates does the parent still mirror open? The
+   * per-context set only remembers which decided gates have already been checked, so the parent
+   * is not re-folded on every iteration; a restart empties it and the fold answers again.
+   *
+   * ALWAYS `approve`, whatever the child decided. The mirror's question is "may the delegation
+   * proceed?", and the child has answered its own question in its own graph: a rejection there
+   * fails one child task and takes the child's error edges, and the parent then reads the
+   * child's terminal status. Forwarding `reject` instead would make the parent cancel a child
+   * that is handling the human's refusal (`#forwardGateDecision` → `#endChildRun`). `edit` and
+   * `redirect` are not carried by a mirror at all; `approve` is what "the child is proceeding
+   * under the human's substitution" means at the parent.
+   *
+   * `executor:subgraph` IS THE ACTOR, on the same argument as the other direction: the mirror
+   * inherited this gate's approvers and exclusions (`mirrorAuthorizationOf`), so the human who
+   * decided the child gate was checked against the very list the mirror carries. Idempotent from
+   * the fold — a decided mirror is not `open` — and a conflict with a concurrent decision is the
+   * broker's to refuse, so those are swallowed; anything else propagates.
+   *
+   * APPENDS ONLY, and drives nothing. `gate.decided` carries `run.resumed`, so the parent folds
+   * to `running` with its subgraph task `ready`, which `runClockTick` counts as due and the
+   * dispatcher drives under its own concurrency ceiling. Advancing the parent from inside the
+   * child's request would be the bare `void engine.advance` `cli.ts` bounded. Nothing here runs
+   * graph code, so nothing here needs the parent's graph bound; the parent's next `advance`
+   * asserts that itself. A grandparent's mirror of the PARENT's mirror is answered the same way
+   * when the parent next advances — recursion by journal, not by call stack.
+   */
+  async #forwardToParentMirrors(ctx: RunContext, p: RunProjection): Promise<void> {
+    // Child ids are derived — `${parentRunId}~${taskId}` — and `SAFE_ID` admits no `~`, so the
+    // last one is the boundary between the parent's id and this run's task id.
+    const id = String(ctx.runId);
+    const at = id.lastIndexOf("~");
+    if (at < 0) return;
+    const decided = Object.values(p.gates).filter((g) => g.state === "decided" && !ctx.mirrorsChecked.has(g.gateId));
+    if (decided.length === 0) return;
+    const parentRunId = id.slice(0, at) as RunId;
+    const parent = await this.projection(parentRunId);
+    if (parent === undefined) return;
+    for (const gate of decided) ctx.mirrorsChecked.add(gate.gateId);
+    if (isTerminal(parent.status)) return;
+    const log = this.#runs.get(parentRunId)?.log ?? this.#logFor(parentRunId);
+    for (const gate of decided) {
+      const mirror = Object.values(parent.gates).find((g) => g.state === "open" && g.mirrorOf === gate.gateId);
+      if (mirror === undefined) continue;
+      try {
+        await this.#gates.resolve(log, {
+          gateId: mirror.gateId,
+          decision: { kind: "approve" },
+          actor: SYSTEM_ACTOR("executor:subgraph"),
+          idempotencyKey: `child:${gate.gateId}`,
+        });
+      } catch (e) {
+        if (!isLoomError(e) || (e.code !== CODES.E_GATE_ALREADY_RESOLVED && e.code !== CODES.E_SEQ_CONFLICT)) throw e;
+      }
     }
   }
 
@@ -4384,6 +4460,7 @@ export class Engine {
       runId,
       graph,
       attached: graph,
+      mirrorsChecked: new Set(),
       grantBound,
       index: indexGraph(graph.spec),
       log: new RunLog(runId, {
