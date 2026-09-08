@@ -663,6 +663,11 @@ interface RollbackWalkStep {
  * `{}` exactly. What it cannot reconstruct is an absent key, a `null`, or a non-object, and
  * those three are the ones that now come back `undefined` for `#compensateOne` to refuse.
  */
+function detailsOf(result: unknown): Record<string, unknown> | undefined {
+  const details = (result as { readonly details?: unknown } | undefined)?.details;
+  return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
+}
+
 /**
  * What was thrown, as a string, when the point of the string is that the thrower cannot be trusted.
  *
@@ -672,22 +677,25 @@ interface RollbackWalkStep {
  * a guard whose failure path can fail is not a guard, and the thrower is a third-party
  * `StateStore`, an extension point that owes nobody an `Error`.
  *
- * Names the shape rather than inventing a message: an operator reading `a non-Error value
- * (object)` knows to look at whoever rejected, which is more than a swallowed `TypeError` tells
- * them.
+ * THE `instanceof Error` BRANCH IS NOT SAFE EITHER, and closing only the other one was this
+ * function's own first version. `class Nasty extends Error { get message() { throw … } }` passes
+ * `instanceof` and throws on the read; an `Error` whose `message` is a null-prototype object
+ * passes `instanceof`, survives the read, and throws in the caller's template literal with the
+ * very message the first version was written to stop — `Cannot convert object to primitive value`.
+ * So the WHOLE body is guarded and the result is coerced here rather than at the call site, and
+ * the three shapes are pinned in `engine-child-journal-does-not-fail-the-parent.test.ts`.
+ *
+ * Names the shape rather than inventing a message: an operator reading `a thrown object`
+ * knows to look at whoever rejected, which is more than a swallowed `TypeError` tells them.
  */
 function describeThrown(e: unknown): string {
-  if (e instanceof Error) return e.message;
   try {
-    return String(e);
+    const raw: unknown = e instanceof Error ? e.message : e;
+    // `String()` on a null-prototype object throws, and `typeof raw` cannot.
+    return typeof raw === "string" ? raw : String(raw);
   } catch {
-    return `a non-Error value (${typeof e}) whose own string conversion threw`;
+    return `a thrown ${typeof e} that could not be described (its own string conversion threw)`;
   }
-}
-
-function detailsOf(result: unknown): Record<string, unknown> | undefined {
-  const details = (result as { readonly details?: unknown } | undefined)?.details;
-  return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
 }
 
 /**
@@ -2794,7 +2802,10 @@ export class Engine {
         // opposite remediations — that one says the PARENT's store failed, reached from a healthy
         // child; this one says the CHILD's store failed, reached from a healthy parent — and an
         // operator filtering stderr by code is asking exactly which journal is broken. Both run
-        // ids are in the message for the same reason.
+        // ids are in the message for the same reason. With the SHIPPED store both runs share one
+        // SQLite file, so in practice a broken child journal means a broken everything and the
+        // parent's own next append says so too; the two codes separate them for a partitioned
+        // `StateStore`, which the extension point permits and this test's double stands in for.
         //
         // ONCE PER OPEN MIRROR PER PASS. The rate that was MEASURED is one warning per
         // `advance` of a parent whose only remaining work is the mirror — that parent is not
@@ -2886,7 +2897,10 @@ export class Engine {
     try {
       await this.#forwardToParentMirrors(runId, p, checked);
     } catch (e) {
-      const why = e instanceof Error ? e.message : String(e);
+      // `describeThrown`, not the bare idiom: this catch swallows EVERYTHING by contract, and
+      // the idiom's own failure on an undescribable rejection was the one case where it did not.
+      // The pair is deliberately not left to agree by review.
+      const why = describeThrown(e);
       process.emitWarning(
         `could not forward run ${runId}'s gate decision to its parent's mirror: ${why}; the parent may still be waiting, and the next pass will try again`,
         { code: "LOOM_MIRROR_FORWARD_FAILED", detail: JSON.stringify({ runId, error: why }) },
