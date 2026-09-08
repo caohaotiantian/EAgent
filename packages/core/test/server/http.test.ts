@@ -2726,8 +2726,16 @@ test("A NAMED APPROVER SEES THE QUESTION ADDRESSED TO THEM, AND NOT THE ONE BESI
     const res = await fetch(`${base}/runs`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer alice-token" },
-      body: JSON.stringify({ workflow: "two", inputs: { paths: DOCS } }),
+      // `seed`, NOT `paths`. This graph is `twoGateSpec()`, whose `inputs` is `["seed"]` — the
+      // sibling test at the bottom of this file has always sent `{ seed: "s" }` to it. `paths`
+      // belongs to `skeletonSpec` and was undeclared here from the day this test was written; it
+      // only ever worked because nothing read the channel and the gates raise regardless. Since
+      // `POST /runs` began applying the graph's declared-input set (TODO.md §A0.17) the body is
+      // refused 400, which is the check working. Nothing about what this test asserts — which
+      // approver sees which gate — moves.
+      body: JSON.stringify({ workflow: "two", inputs: { seed: "s" } }),
     });
+    assert.equal(res.status, 202, "the fixture body must be accepted, or the assertions below test nothing");
     const { runId } = (await res.json()) as { runId: string };
     for (let i = 0; i < 50; i++) {
       const p = await h.engine.projection(runId as never);
