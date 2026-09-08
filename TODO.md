@@ -156,8 +156,8 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
 `6b3513b`, `3656d69`, `ec2ad88`). Four more rows closed and are struck in place with their
 merge sha, their argument moved to §Z: §A0.5 (its compile half, which was the remaining one),
 §A0.8, §A0.14 (its loud half, likewise) and §A0.20 — so the count of rows the waves recorded
-and did not fix is now §A0.12, §A0.13, §A0.16–A0.19 and the one row those merges ADDED, §A0.21,
-which `wave2-graph` reproduced and handed to whoever owns `run/engine.ts`. The struck rows stay
+and did not fix is now §A0.12, §A0.13 and §A0.16–A0.19. The one row those merges ADDED, §A0.21,
+closed separately at `ff8fdac` (the `a0-21-take-kind` merge) — see §Z. The struck rows stay
 here rather than being deleted, for the reason §Z's header gives.
 
 - ~~**A0.5 · A channel named `toString` still compiles clean.**~~ CLOSED at `3cfd363` (the
@@ -289,8 +289,9 @@ here rather than being deleted, for the reason §Z's header gives.
   `mirrorOf` and `decidedBy: "system"` are what tell that row from a human's approval. And the
   parent-side operator can no longer reject a delegation once any door has decided the child's
   gate — `cancel` is the remaining parent-side brake.
-- **A0.21 · A router's `take` selects a `compensation` edge and walks past a human gate.**
-  Recorded by the `wave2-graph` lane in its fourth review round and merged knowingly at
+- ~~**A0.21 · A router's `take` selects a `compensation` edge and walks past a human gate.**~~
+  CLOSED at `ff8fdac` (the `a0-21-take-kind` merge), which brought `c0a45e1` onto `loom`. The
+  record of what it was: Recorded by the `wave2-graph` lane in its fourth review round and merged knowingly at
   `3cfd363` rather than fixed, because the mechanism is not in the file that lane owns.
   `graph/mutate.ts`'s `traversable` drops `compensation` on the claim that "nothing ever
   traverses one; `#edgesToTake` answers `case 'compensation': break;`" — and that switch is
@@ -2255,6 +2256,20 @@ the child finished and self-answered in 2 ms; `GET /gates` listing both rows is 
 is stated on the row. **What these merges did NOT close, and recorded instead, is §A0.21** — a
 router's `take` selecting a `compensation` edge past a human gate, merged knowingly at `3cfd363`
 because the fix belongs in `run/engine.ts` and not in the compiler that guessed at it.
+
+**Closed 2026-09-08, `a0-21-take-kind` merged.** §A0.21 — `TAKEABLE_EDGE_KINDS = {seq,
+conditional, fanout, join, loop}`, the one predicate all four `take` doors now share
+(`#strayRoute`, `Engine.steer`, `#applyGateDecision`, `#edgesToTake`), so a router naming a
+`compensation` edge no longer walks control past a human gate (`8a157e6`..`c0a45e1`, merged at
+`ff8fdac`). `E_ROUTE_INVALID` joined `RUN_FATAL_CODES` because the first cut was ornamental on
+any node carrying a catch-all `error` edge — a refused route otherwise still routed, down the
+node's own error edge. Four review rounds, all blocking findings confirmed and fixed. Gate at
+`c0a45e1`: 3485 pass / 0 fail, kernel/surface/zero-dep unchanged. Residue, unfixed and disclosed
+on the row: `E_ROUTE_INVALID` being run-fatal is itself a new, unpinned cost — a graph that
+rescued an invented edge with an `error` edge no longer can; a journal recorded before this fix
+now replays as a loud divergence under `replayRun` (attach-and-advance of the same old journal
+still folds and keeps the old bypass, silently); the compiler stays silent — the refusal is
+per-task at run time, not a compile-time diagnostic.
 
 **Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
 paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
