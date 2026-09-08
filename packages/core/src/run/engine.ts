@@ -2735,14 +2735,58 @@ export class Engine {
    * "wait for the child" argument, by `executor:subgraph` on the same inheritance argument, and
    * the same two swallowed codes for the same reasons. A mirror whose child gate is open, absent,
    * or belongs to a run this engine cannot fold is left alone — refusing to answer is always
-   * allowed.
+   * allowed. That last clause was ASPIRATIONAL until the read below was wrapped: "cannot fold"
+   * meant a THROW out of the parent's own `advance`, which is the opposite of leaving it alone.
    */
   async #answerMirrorsTheChildAlreadyDecided(ctx: RunContext, p: RunProjection): Promise<boolean> {
     const mirrors = Object.values(p.gates).filter((g) => g.state === "open" && g.mirrorOf !== undefined);
     if (mirrors.length === 0) return false;
     let wrote = false;
     for (const mirror of mirrors) {
-      const childP = await this.projection(`${String(ctx.runId)}~${String(mirror.taskId)}` as RunId);
+      // THE CHILD'S JOURNAL IS ANOTHER RUN'S DISK, read in the middle of THIS run's drive loop —
+      // so it is wrapped for the reason `#forwardToParentMirrorsQuietly` wraps the other
+      // direction, with the roles swapped. Unwrapped, a child whose store could not be read was
+      // the answer to `advance` on the PARENT: measured at `3d05cff`, `PARENT ADVANCE OUTCOME:
+      // threw:sqlite: child disk I/O error`. Every verb that reaches this loop — `advance`,
+      // `resolveGate`, `rewind` — is a question about the parent, and another run's disk is not
+      // an answer to it.
+      //
+      // PER MIRROR, NOT AROUND THE METHOD, because the return value is load-bearing: `wrote` tells
+      // the drive loop that `p` is stale and the pass must restart. A wrapper around the whole
+      // method would have to answer `false` after a partial write, and the loop would then decide
+      // from a projection the journal no longer matches. Scoped here, one unreadable child can
+      // neither hide a sibling's answer nor falsify `wrote`.
+      //
+      // FAIL CLOSED IS `continue`: nothing approved and nothing marked, so the mirror stays
+      // `open` — the one state a human can see and act on — and the next pass reads again.
+      //
+      // ONLY THE READ. The `#gates.resolve` below writes THIS run's own log, and a run's verb
+      // SHOULD fail on its own store; swallowing that would be a run hiding its own journal from
+      // its own caller. The cross-run read is the courtesy, and the courtesy is what refuses.
+      const childRunId = `${String(ctx.runId)}~${String(mirror.taskId)}` as RunId;
+      let childP: RunProjection | undefined;
+      try {
+        childP = await this.projection(childRunId);
+      } catch (e) {
+        // A SIBLING CODE, NOT `LOOM_MIRROR_FORWARD_FAILED`. The two carry opposite facts and
+        // opposite remediations — that one says the PARENT's store failed, reached from a healthy
+        // child; this one says the CHILD's store failed, reached from a healthy parent — and an
+        // operator filtering stderr by code is asking exactly which journal is broken. Both run
+        // ids are in the message for the same reason.
+        //
+        // ONCE PER FAILED READ, and that is once per operator action here rather than the storm
+        // the forward side produces: a parent parked `awaiting_gate` is not `due`, so no run clock
+        // re-enters this loop and nothing re-attempts the read except a verb somebody called. No
+        // dedupe set, deliberately — it would be memory a restart empties whose only reader is
+        // "do we print", and suppressing the repeat of a store that is still broken is the wrong
+        // direction for a pass that has just refused to act.
+        const why = e instanceof Error ? e.message : String(e);
+        process.emitWarning(
+          `could not read child run ${String(childRunId)}'s journal to answer run ${String(ctx.runId)}'s mirror ${String(mirror.gateId)}: ${why}; the mirror stays open and the next pass will try again`,
+          { code: "LOOM_MIRROR_ANSWER_FAILED", detail: JSON.stringify({ runId: ctx.runId, childRunId, error: why }) },
+        );
+        continue;
+      }
       if (childP === undefined) continue;
       if (childP.gates[mirror.mirrorOf!]?.state !== "decided") continue;
       try {
