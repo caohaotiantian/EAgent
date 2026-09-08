@@ -2238,20 +2238,25 @@ export class HumanGateBroker {
    * already folded, and a journal that disagrees about its own history — a different store, a
    * truncated one, a rewritten one — drops the fold and starts from seq 1.
    *
-   * WHAT THAT CLOSES, AND WHAT IT DOES NOT, because a mark on ONE event cannot speak for a
-   * prefix. It closes every second journal that is SHORTER than the mark, or that holds a
-   * different event there — which is what "a different journal" means in every case reachable
-   * from `src/`. It does NOT close a second journal whose event at the marked seq is IDENTICAL
-   * (same seq, ts and type) while its earlier events differ: those earlier events are never
-   * re-read, so the fold's state for them stands. Reproduced deliberately, with a frozen clock
-   * and a hand-built second store — three filler events and a copied `run.suspended` at the
-   * marked seq — and the second journal came back carrying the first's gate. No content mark on
-   * a single event can close that, because the two events are byte-identical; only a running
-   * digest of the whole folded prefix could, and it would cost a hash per event on the decision
-   * path to defend a configuration nothing constructs: `Engine` builds its own broker,
-   * `replayRun` deletes `gates` from the options it forwards, and reaching the residual needs
-   * the same ULID run id minted into two stores on purpose. The cache can be cold or stale, and
-   * it can be somebody else's only for a journal built to impersonate this one.
+   * WHAT THAT CLOSES, AND WHAT IT DOES NOT — stated exactly, because a mark on ONE event
+   * cannot speak for a prefix and a THREE-FIELD mark cannot even speak for that event. It
+   * closes every second journal that is SHORTER than the mark, and every one whose event there
+   * differs in seq, ts or type. It does NOT close one that agrees on those three: the mark is
+   * PAYLOAD-BLIND, so `run.suspended{reason:"gate"}` and `run.suspended{reason:"operator"}` at
+   * the same seq and instant are the same mark, and the earlier events — which are never
+   * re-read — keep the first journal's meaning. Reproduced both ways: a second store whose
+   * marked event is a copy, and one whose marked event differs only in a payload field `apply`
+   * actually reads (`status` came back `awaiting_gate` where that journal alone folds to
+   * `interrupted`).
+   *
+   * Comparing payloads would close the second of those and not the first, at the price of a
+   * structural compare per call on the decision path — and nothing closes a genuinely identical
+   * prefix short of a running digest of the whole fold. Neither is paid here, because the
+   * configuration is one nothing constructs: `Engine` builds its own broker, `replayRun` deletes
+   * `gates` from the options it forwards, and reaching the residual at all needs the same ULID
+   * run id minted into two stores on purpose. `gates-lane-queue-second-fold.test.ts` pins both
+   * halves — the refusal, and this bound — so strengthening the mark moves a test rather than
+   * passing silently.
    *
    * The re-fold loop is `#catchUp`'s, including the bound: a `while (folder.stale)` whose
    * termination rests on `RunFolder` keeping its promise about learning each marker once is a

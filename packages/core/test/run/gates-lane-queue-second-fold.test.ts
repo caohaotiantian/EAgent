@@ -176,6 +176,53 @@ test("A FOLD IS NEVER SERVED TO A JOURNAL THAT IS NOT THE ONE IT DESCRIBES", asy
   assert.deepEqual(Object.keys(folded?.gates ?? {}), [], "and no gate borrowed from store one");
 });
 
+test("…AND THE BOUND ON THAT, WHICH IS THAT THE MARK IS PAYLOAD-BLIND", async () => {
+  // The mark is `(seq, ts, type)` and NOT the event. So two journals whose event at the marked
+  // seq agrees on those three are the same mark to this check, however far their payloads —
+  // and their earlier events, which are never re-read — diverge. That is the residual the
+  // refusal above does not reach, and it is pinned rather than left to be discovered: comparing
+  // payloads would close THIS case (at a structural compare per call on the decision path) and
+  // still not close a journal whose prefix is genuinely identical. If `describes` is ever
+  // strengthened, this test moves, which is the point of writing it down.
+  const now = (): number => NOW;
+  const runId = newRunId(NOW);
+  const one = new CountingStore(new MemoryStateStore({ now }));
+  const two = new CountingStore(new MemoryStateStore({ now }));
+  const broker = new HumanGateBroker({ now });
+  const logOne = new RunLog(runId, { store: one, now });
+  const logTwo = new RunLog(runId, { store: two, now });
+
+  const gateId = await broker.raise(logOne, {
+    runId,
+    taskId: "approve@root#0" as TaskId,
+    nodeId: "approve" as NodeId,
+    policyRef: "oversight/restart-pod@stable",
+    payload: { host: "web-1" },
+    approvers: ["u:alice"],
+    allowEdit: [],
+  });
+  await logOne.append([{ type: "run.suspended", payload: { reason: "gate" }, actor: alice }]);
+  const marked = (await broker.project(logOne))!;
+  assert.equal(marked.status, "awaiting_gate", "store one is parked on its gate");
+
+  // Store two: a DIFFERENT history of the same length, whose last event agrees with the mark on
+  // seq, ts and type — and differs in a payload field the fold actually reads.
+  const filler = { type: "run.started", payload: { posture: "out" }, actor: alice } as const;
+  for (let seq = 1; seq < marked.seq; seq++) await logTwo.append([filler as never]);
+  await logTwo.append([{ type: "run.suspended", payload: { reason: "operator" }, actor: alice }]);
+
+  const served = await broker.project(logTwo);
+  const cold = await new HumanGateBroker({ now }).project(logTwo);
+  assert.equal(cold?.status, "interrupted", "store two, folded on its own, is an operator pause");
+  assert.deepEqual(Object.keys(cold?.gates ?? {}), [], "…and has no gate of its own");
+
+  // THE DOCUMENTED BOUND, asserted so it cannot drift unnoticed: the marks matched, so the fold
+  // was reused, and the answer is store ONE's. This is the case `describes` does not reach.
+  assert.equal(served?.status, "awaiting_gate", "the payload-blind mark accepted a foreign journal");
+  assert.deepEqual(Object.keys(served?.gates ?? {}), [gateId], "…and served store one's gate");
+  assert.notDeepEqual(served, cold, "which is exactly where the cached fold and a cold one part");
+});
+
 test("A GATE RAISED AFTER A CACHED POLL IS IN THE NEXT ONE — the only thing this cache may never do", async () => {
   const b = bench();
   const first = await b.broker.raise(b.log, request(b));
