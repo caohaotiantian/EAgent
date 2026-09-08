@@ -241,13 +241,21 @@ test("THE REFUSAL IS NOT STICKY — a pass that could not read the child reads a
 });
 
 /**
- * Three shapes a hostile `StateStore` can reject with that a description idiom does not survive.
+ * Four shapes a hostile `StateStore` can reject with, one per operation a description performs.
  *
- * `Object.create(null)` breaks `String(e)`; an `Error` subclass whose `message` GETTER throws and
- * an `Error` whose `message` is a null-prototype object both pass `instanceof Error` and break
- * `e.message` — the second reproducing the first fix's own symptom, `Cannot convert object to
- * primitive value`, one branch over. All three are driven through `Engine.advance` rather than
- * through the helper, because the claim is about the verb.
+ * THE SET IS THE OPERATIONS, which is why it is four and not an open-ended list. Describing a
+ * thrown value does exactly three things, and each was defeated in turn by a separate review
+ * round: `String(e)` — broken by `Object.create(null)`; reading `e.message` — broken by a getter
+ * that throws, and again by a `message` that is itself a null-prototype object, which survives the
+ * read and dies in the caller's template literal with `Cannot convert object to primitive value`;
+ * and the `e instanceof Error` TEST ITSELF — broken by a `Proxy` whose `getPrototypeOf` trap
+ * throws, because `OrdinaryHasInstance` walks the prototype chain. The fourth is the one that
+ * matters most, because it was in the CATCH: the guard's own failure path could fail.
+ *
+ * `typeof` is the one operation that cannot throw on any of them, so it is all the catch uses.
+ *
+ * All four are driven through `Engine.advance` rather than through the helper, because the claim
+ * is about the verb.
  */
 const HOSTILE_THROWS: readonly { readonly what: string; readonly make: () => unknown }[] = [
   { what: "an object with no prototype", make: () => Object.create(null) },
@@ -270,9 +278,26 @@ const HOSTILE_THROWS: readonly { readonly what: string; readonly make: () => unk
       return bad;
     },
   },
+  {
+    // `instanceof` is not a safe operation on an untrusted value: `OrdinaryHasInstance` walks
+    // `[[GetPrototypeOf]]`, and a `Proxy` traps it. This shape defeated the version of
+    // `describeThrown` whose CATCH did the `instanceof` — the guard's own failure path failing,
+    // which is the one outcome the guard exists to prevent. Measured at `2df0b5f`:
+    // `PARENT ADVANCE OUTCOME (hostile proxy): threw:hostile trap`.
+    what: "a Proxy whose getPrototypeOf trap throws",
+    make: () =>
+      new Proxy(
+        {},
+        {
+          getPrototypeOf(): never {
+            throw new Error("hostile trap");
+          },
+        },
+      ),
+  },
 ];
 
-test("A CHILD STORE THAT REJECTS WITH SOMETHING UNDESCRIBABLE IS STILL SWALLOWED — the guard's own failure path cannot throw", async () => {
+test("A CHILD STORE THAT REJECTS WITH SOMETHING UNDESCRIBABLE IS STILL SWALLOWED — every one of the four shapes, including the one that defeated the catch", async () => {
   // `StateStore` is an extension point (README's twelve rows), so nothing forces a third-party
   // store to reject with an `Error`. `String(e)` on an object with a null prototype throws inside
   // the catch, and the exception escapes `advance` — the guard producing the outcome the guard
@@ -298,24 +323,35 @@ test("A CHILD STORE THAT REJECTS WITH SOMETHING UNDESCRIBABLE IS STILL SWALLOWED
       const { runId, mirror } = await parked(r);
 
       breakChild = true;
-      const p = await r.engine.advance(runId);
+      // THE OUTCOME IS CAPTURED, NOT AWAITED BARE, so the defect ASSERTS rather than escaping as a
+      // thrown error. At `2df0b5f` the fourth shape gives `threw: hostile trap` here — the guard's
+      // own catch doing the `instanceof` that the proxy traps.
+      let outcome: string;
+      let p: RunProjection | undefined;
+      try {
+        p = await r.engine.advance(runId);
+        outcome = `returned ${p.status}`;
+      } catch (e) {
+        outcome = `threw: ${e instanceof Error ? e.message : "a value that is not an Error"}`;
+      }
       breakChild = false;
-      assert.equal(p.status, "awaiting_gate", `the parent still answers its own question: ${shape.what}`);
-      assert.equal(p.gates[mirror.gateId]?.state, "open", `and the mirror is still fail-closed: ${shape.what}`);
+      assert.equal(outcome, "returned awaiting_gate", `the parent still answers its own question: ${shape.what}`);
+      assert.equal(p!.gates[mirror.gateId]?.state, "open", `and the mirror is still fail-closed: ${shape.what}`);
 
       await new Promise((res) => setImmediate(res));
       const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_ANSWER_FAILED" && w.message.includes(String(runId)));
       assert.equal(mine.length, 1, `it is still said out loud (${shape.what}): ${JSON.stringify(warnings)}`);
       assert.ok(
-        /whose message could not be read/.test(mine[0]!.message),
+        /threw while describing/.test(mine[0]!.message),
         `and the warning says what it could not describe rather than dying trying (${shape.what}): ${mine[0]!.message}`,
       );
-      // AND IT DOES NOT INVENT A CAUSE. Only the first shape's string conversion actually threw;
-      // the other two threw on `message`. The description names the shape it saw and stops there,
-      // and it keeps the fact an operator can act on — that two of the three WERE `Error`s.
+      // AND IT DOES NOT INVENT A CAUSE. The four shapes fail at three different operations, so the
+      // description names the only thing it is sure of — that describing threw — rather than
+      // guessing which operation did it. An earlier version said "its own string conversion
+      // threw", which is false for shapes 2 and 4: two of the four, not three.
       assert.ok(
-        mine[0]!.message.includes(shape.what.startsWith("an Error") ? "a thrown Error" : "a thrown object"),
-        `and it says which shape it saw (${shape.what}): ${mine[0]!.message}`,
+        mine[0]!.message.includes("undescribable object"),
+        `and it says what it saw, using the one operation that cannot throw (${shape.what}): ${mine[0]!.message}`,
       );
     }
   } finally {
@@ -421,7 +457,7 @@ test("THE SHARED HELPER IS LOAD-BEARING ON THE FORWARD SIDE TOO — the one line
     const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_FORWARD_FAILED" && w.message.includes(String(childRunId)));
     assert.ok(mine.length >= 1, `the refusal is still announced: ${JSON.stringify(warnings)}`);
     assert.ok(
-      /whose message could not be read/.test(mine[0]!.message),
+      /<undescribable object: threw while describing>/.test(mine[0]!.message),
       `and it names what it could not describe rather than dying trying: ${mine[0]!.message}`,
     );
     void runId;
