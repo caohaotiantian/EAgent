@@ -865,8 +865,18 @@ function openConsole(base: string, token: string, answer: () => string): Page {
   const elements = new Map<string, Record<string, unknown>>();
   const element = (): Record<string, unknown> => {
     const children: Record<string, unknown>[] = [];
-    return {
-      innerHTML: "",
+    // `innerHTML` is a real setter here, not a plain field, because every render function on
+    // the page (`drawControls`, `drawGates`, …) starts with `el.innerHTML = ""` and then
+    // re-appends via `appendChild` — exactly what a browser's `innerHTML = ""` does by
+    // removing every child node first. Without this, a SECOND render of the same cached
+    // element (this mock reuses one object per id — see `getElementById` below) appends onto
+    // whatever the first render already left in `children`, instead of replacing it. That is
+    // what produced `pause,advance,cancel,pause,advance,cancel`: `command()`'s own coalescing
+    // timer (`invalidate()`, 60 ms) can fire a stray extra `draw()` between two `command()`
+    // calls under load, and the mock's un-cleared `children` array accumulated it. See
+    // `.agent/flake/plan.md` for the full trace.
+    let html = "";
+    const el: Record<string, unknown> = {
       textContent: "",
       title: "",
       className: "",
@@ -877,6 +887,12 @@ function openConsole(base: string, token: string, answer: () => string): Page {
       children,
       appendChild: (c: Record<string, unknown>) => void children.push(c),
     };
+    Object.defineProperty(el, "innerHTML", {
+      get: () => html,
+      set: (v: string) => { html = String(v); children.length = 0; },
+      enumerable: true,
+    });
+    return el;
   };
   const store = new Map<string, string>([["loom.token", token]]);
   const ctx = vm.createContext({
@@ -945,6 +961,53 @@ test("THE CONSOLE'S OWN command() STOPS A RUN — the page's script, not a reque
 
     assert.deepEqual(page.alerts, [], "the page must have reported no failure to the operator");
     assert.deepEqual(page.errors, [], "…and nothing must have thrown out of a repaint");
+  } finally {
+    await r.close();
+  }
+});
+
+/**
+ * A0.18 · TODO.md — pinned deterministically, not by looping the suite.
+ *
+ * "THE CONSOLE'S OWN command() STOPS A RUN" once collected
+ * `'pause,advance,cancel,pause,advance,cancel'` instead of `'pause,advance,cancel'`, one failure
+ * in six full-suite runs and none in isolation — a flake, not a deterministic defect on its own.
+ * `.agent/flake/plan.md` traces the cause: `command()`'s coalescing timer (`invalidate()`, a
+ * real 60 ms `setTimeout` in this harness) can fire a stray extra `draw()` between two
+ * `command()` calls under load, and the harness's DOM mock never cleared an element's
+ * `children` on `innerHTML = ""` the way a real browser does — so a second, benign render
+ * ACCUMULATED into the collection instead of replacing it.
+ *
+ * This test forces that second render on demand, with no timing dependency at all, so the
+ * defect is red at base by ASSERTION rather than by repetition: two direct `drawControls()`
+ * calls on one selection must still collect exactly one set of controls, because that is what
+ * a real DOM shows after any number of renders of the same state.
+ */
+test("THE CONTROLS COLLECT FROM ONE RENDER EVEN WHEN drawControls() RUNS TWICE — A0.18, forced deterministically", async () => {
+  const r = await rig({ identity: people() });
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const page = openConsole(r.base, "alice-token", () => "");
+    const select = `selected = ${JSON.stringify(String(runId))};`;
+    await page.run(`(() => { ${select} current.status = "running"; current.paused = false; })()`);
+
+    const collected = await page.run(
+      `(() => { drawControls(); drawControls(); return $("controls").children.map((b) => b.textContent).join(","); })()`,
+    );
+    assert.equal(
+      collected,
+      "pause,advance,cancel",
+      "a second render of the same state must REPLACE the controls, not append to them",
+    );
+
+    // `openConsole` fires the page's own boot sequence (`/health`, `whoami()`, `loadRuns()`,
+    // `loadGraphs()`) the instant its script runs — the same as a browser loading the page —
+    // and this test does none of the extra round trips the command-driving test above does
+    // to let them land first. Waiting for `whoami()`'s write bounds that, so `r.close()` does
+    // not race an in-flight `fetch` and turn into an unhandled rejection after the test ends.
+    for (let i = 0; i < 200 && (await page.run(`$("who").textContent`)) === ""; i++) {
+      await new Promise((x) => setTimeout(x, 5));
+    }
   } finally {
     await r.close();
   }
