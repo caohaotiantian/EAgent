@@ -1231,12 +1231,17 @@ const TEMPLATE_JSON = /\s*\|\s*json$/;
  * parent cannot enumerate lives — "the child declares no `human_gate` today" is a claim about a
  * spec the parent froze, not about the run that would have happened.
  *
- * ## TWO CALLERS, ONE QUESTION, AND THEY HELD TWO ANSWERS
+ * ## IT WAS WRITTEN FOR TWO CALLERS AND HAS ONE, WHICH IS A MERGE RESOLUTION AND NOT A REGRET
  *
- * `Engine.#fireEmptyJoin` asks it of a branch a zero-width fan passed over; `graph/mutate.ts`
- * asks it of a dominator a proposed mutation would remove. Both are "was the only thing that
- * could have stopped this taken out of the run", and the second answered `human_gate` alone
- * while the first had already been widened. Each half was measured before it was merged:
+ * `Engine.#fireEmptyJoin` asks it of a branch a zero-width fan passed over — and `#runSubgraph`
+ * and `applyTaint` reach it through the same engine. `graph/mutate.ts` was the second caller on
+ * `phase1-taint`, asking it of a dominator a proposed mutation would remove; the 2026-09-08 merge
+ * kept `loom`'s mutation rule instead, which preserves EVERY dominator and therefore asks no such
+ * question (`/usr/bin/grep -a -rn carriesOversight packages/core/src/` finds `spec.ts` and
+ * `run/engine.ts` and nothing else). The MUTATION row below is kept because it is the measurement
+ * that decided the predicate, not because `mutate.ts` still produces it: on the merged tree that
+ * graft is refused by dominance alone, under the code `MUT003_NOT_DOMINATED`. Both halves were
+ * measured before they were merged:
  *
  *   - THE FAN. One graph driven twice, a `subgraph` in the fan body holding the only gate and a
  *     `reversible_write` tool under the join:
@@ -1247,8 +1252,8 @@ const TEMPLATE_JSON = /\s*\|\s*json$/;
  *         base -> lookup -> rejoin below the delegation  -> ok      (before)
  *         the same mutation                              -> MUT003  (now)
  *
- * The cost is one escalation on an attacker-chosen empty fan whose branch delegates, and one
- * refused expansion past a delegation. Both are gates or refusals a person can answer, and both
+ * The cost is one escalation on an attacker-chosen empty fan whose branch delegates, and — on the
+ * tree this predicate came from — one refused expansion past a delegation. Both are gates or refusals a person can answer, and both
  * are the direction that fails closed.
  */
 export function carriesOversight(node: NodeSpec | undefined): boolean {

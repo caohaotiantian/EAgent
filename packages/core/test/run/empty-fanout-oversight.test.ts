@@ -223,6 +223,13 @@ function engineOver(store: MemoryStateStore, page: Options["page"], res?: Resour
   functions.register("function/two@stable", () => ({ writes: { items: ["one", "two"] } }));
   // The delegated graph's own body, which runs in the CHILD run behind the child's own gate.
   functions.register("function/leaf@stable", () => ({ writes: { out: ["p"] } }));
+  // THE FAN-BINDING SHAPE'S list producer: ONE element, and the element IS whatever the node
+  // read — so the fan's `as` binding, and nothing else, carries the fetched bytes into the
+  // delegation below it.
+  functions.register("function/wrap@stable", (view) => {
+    const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
+    return { writes: { pitems: [text] } };
+  });
   // The TRIPLE-nested shape's list producer. Only the OUTERMOST list empties on the word, so the
   // two inner fans are populated in both halves and the bound is being asked about depth rather
   // than about width.
@@ -1148,4 +1155,103 @@ test("THE FAN BODY'S BOUND HOLDS THREE FANS DEEP — past two inner joins, and s
   assert.equal(two.status, "awaiting_gate", `precondition: the authored gate stops a populated fan: ${two.status}`);
   assert.equal(two.escalated, "", "…on its own, with nothing escalated");
   assert.equal(two.wrote, 0, "and nothing written while it is open");
+});
+
+/**
+ * `fetch -> wrap -{fanout over pitems as pitem}-> delegate{seed: "pitem"} -{join}-> j -> write`,
+ * the delegation reading the fan's BINDING rather than a channel.
+ */
+function bindingSpec(clean: boolean): GraphSpec {
+  const src = clean ? "request" : "untrusted";
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: `parent-binding-${clean ? "clean" : "dirty"}`, project: "test", version: 1 },
+    policy: {
+      posture: "out",
+      budget: { costUsd: 1 },
+      capabilities: ["net:fetch", "notes:write"],
+      expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 4, maxLoopIterations: 1 },
+    },
+    channels: {
+      request: { type: "string", reduce: "replace" },
+      untrusted: { type: "string", reduce: "replace" },
+      pitems: { type: "array", reduce: "replace" },
+      pitem: { type: "string", reduce: "replace" },
+      parts: { type: "array", reduce: "append_ordered" },
+      receipt: { type: "object", reduce: "replace" },
+    },
+    inputs: ["request"],
+    outputs: ["receipt"],
+    nodes: [
+      { id: "fetch", type: "tool", reads: ["request"], writes: ["untrusted"], tool: { name: "net.fetch", version: "1.0", args: {} } },
+      { id: "wrap", type: "function", reads: [src], writes: ["pitems"], function: { ref: "function/wrap@stable", effects: [] } },
+      {
+        id: "delegate",
+        type: "subgraph",
+        reads: ["pitem"],
+        writes: ["parts"],
+        subgraph: { ref: FAN_LEAF_REF, inputs: { seed: "pitem" }, outputs: { parts: "out" }, budgetShare: 0.4 },
+      },
+      { id: "j", type: "join", reads: ["parts"], writes: ["parts"], join: { branches: ["delegate"], mode: "all", onBranchError: "skip" } },
+      { id: "write", type: "tool", reads: ["request"], writes: ["receipt"], tool: { name: "notes.write", version: "1.0", args: {} }, unhandled: true },
+    ],
+    edges: [
+      { id: "e0", from: "fetch", to: "wrap", kind: "seq" },
+      { id: "fan", from: "wrap", to: "delegate", kind: "fanout", over: "pitems", as: "pitem", maxWidth: 4 },
+      { id: "jj", from: "delegate", to: "j", kind: "join", branches: ["delegate"] },
+      { id: "toWrite", from: "j", to: "write", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+async function driveBinding(clean: boolean): Promise<{ status: string; gates: number; wrote: number }> {
+  const store = new MemoryStateStore({ now: NOW });
+  const graph = compileOrThrow({
+    spec: bindingSpec(clean),
+    resolver: fanChildResolver(),
+    tools: MANIFESTS,
+    tenantCapabilities: ["net:fetch", "notes:write"],
+  });
+  const { engine, wrote } = engineOver(store, "NONE", fanChildResolver());
+  const runId = (await engine.submit({ graph, inputs: { request: "NONE flagged today" } })) as RunId;
+  const p = await engine.advance(runId);
+  return { status: p.status, gates: Object.keys(p.gates).length, wrote: wrote() };
+}
+
+/**
+ * AND THE SEED HAS TO ASK THE PER-BRANCH READER, WHICH IS A ONE-HOP BYPASS OF THE ROW ABOVE.
+ *
+ * `#runSubgraph` computed the seed with `ctx.tainted.has(parentCh)` — the run-global set. A fan's
+ * `as` binding is not in it: `applyFanoutTaint` records the fanout EDGE in `ctx.taintedFans`,
+ * because a binding is not a channel any node writes and putting its NAME in the global set made
+ * every fan sharing that name one taint fact (`RunContext.taintedFans` carries that measurement).
+ * `taintedOn` is the only reader that consults both, and every other consumer was moved to it.
+ *
+ * `graph/validate.ts` requires `as` to be a declared channel and requires `sub.inputs`' parent
+ * side to be a declared channel, so `inputs: { seed: "pitem" }` inside a fan body compiles — and
+ * `scopeFor` merges the branch binding, so the child gets the fetched bytes. Same bytes, same two
+ * graphs, one word of `sub.inputs` different:
+ *
+ *     inputs { seed: "untrusted" }  -> awaiting_gate, gates=1, wrote=0   (the row above)
+ *     inputs { seed: "pitem" }      -> succeeded,     gates=0, wrote=1   (before)
+ *     inputs { seed: "pitem" }      -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * `docs/design-taint-rc6-2026-09-05.md` §4 named this as "also to reproduce" and `facts-owed.md`
+ * carried it as a read-only finding. Two reviewers reproduced it independently on the merged
+ * tree; this is the pin.
+ */
+test("A DELEGATION SEEDED FROM A FAN BINDING CARRIES THE TAINT TOO — the seed asks `taintedOn`", async () => {
+  const dirty = await driveBinding(false);
+  assert.equal(dirty.wrote, 0, "the child was seeded clean off a fan binding and deleted its own gate");
+  assert.equal(dirty.status, "awaiting_gate", `expected the delegation inside the fan to gate, got ${dirty.status}`);
+  assert.equal(dirty.gates, 1, "and exactly one gate");
+
+  // THE HALF THAT MUST NOT MOVE. The identical graph with `wrap` reading the run's own input:
+  // the same one-element list, the same empty child fan, the same delegation — and nothing
+  // untrusted anywhere, so the child's gate is skipped for the reason the graph asked for.
+  const clean = await driveBinding(true);
+  assert.equal(clean.status, "succeeded", `a clean binding must not gate: ${clean.status}`);
+  assert.equal(clean.gates, 0, "no gate on a fan nobody untrusted touched");
+  assert.equal(clean.wrote, 1, "and the write runs");
 });

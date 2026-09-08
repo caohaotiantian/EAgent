@@ -114,6 +114,16 @@ function engineOver(store: MemoryStateStore, page: string): { engine: Engine; ch
     if (text.includes("PAY")) throw new Error("the content made me fail");
     return { writes: { note: "fine" } };
   });
+  // THE RETRIED ATTEMPT. It asks for a retry the first time and then succeeds writing only ONE
+  // of its two declared channels, so `memo` is declared-but-never-written by a node that read
+  // the page — the exact input the failed-writes arm acts on, arriving on the one path that
+  // journals no `task.committed` at all.
+  let attempts = 0;
+  functions.register("function/retryonce@stable", () => {
+    attempts += 1;
+    if (attempts === 1) return { retry: { reason: "once" } };
+    return { writes: { amount: "10.00" } };
+  });
   const engine = new Engine({
     store,
     bus: new InProcessEventBus({ store }),
@@ -346,4 +356,96 @@ test("AND IT SURVIVES A RESTART — the fold rebuilds a failure another process 
   assert.equal(second.charged(), 0, "a restart refunded the failure: the second process charged where the first would have gated");
   assert.equal(after.status, "awaiting_gate", `expected the charge to gate in the second process, got ${after.status}`);
   assert.equal(first.charged(), 0, "and nothing charged in the first process either");
+});
+
+/** `fetch → decide{retries once, writes only `amount`} → hold(human_gate) → charge{reads memo}`. */
+function retrySpec(): GraphSpec {
+  return envelope(
+    "taint-retry",
+    { amount: { type: "string", reduce: "replace" }, memo: { type: "string", reduce: "replace" } },
+    [
+      FETCH,
+      {
+        id: "decide",
+        type: "function",
+        reads: ["untrusted"],
+        writes: ["amount", "memo"],
+        retry: { maxAttempts: 2, backoff: "fixed", initialMs: 0 },
+        function: { ref: "function/retryonce@stable", effects: [] },
+      },
+      { id: "hold", type: "human_gate", reads: ["request"], humanGate: { ref: "oversight/hold@stable" } },
+      { ...CHARGE, reads: ["request", "memo"] },
+    ],
+    [
+      { id: "e0", from: "fetch", to: "decide", kind: "seq" },
+      { id: "e1", from: "decide", to: "hold", kind: "seq" },
+      { id: "e2", from: "hold", to: "charge", kind: "seq" },
+    ],
+  );
+}
+
+test("A RETRIED ATTEMPT MARKS NOTHING THE FOLD CANNOT REBUILD — live and fold, one answer", async () => {
+  // THE NINTH SHAPE OF THE CLASS, and it was introduced by the failed-writes arm before a
+  // reviewer drove it. `#recordEvidence` runs ABOVE `#commit`'s retry early-return, so an arm
+  // that lived there applied to an attempt that journals `task.retry_scheduled` and NO
+  // `task.committed` — the live process tainted `memo` (declared, never written, by a node that
+  // read the page), the fold saw nothing to fold, and the second process charged where the first
+  // gated:
+  //
+  //     the arm in `#recordEvidence`   same process awaiting_gate/2/0 | restart succeeded/1/1
+  //     the arm in `#commit` (now)     same process succeeded/1/1  | restart succeeded/1/1
+  //
+  // A restart holding LESS taint than the process it replaces is the loosening direction, which
+  // is the one direction this file may not go. So the assertion is not a value, it is an
+  // EQUALITY: whatever the answer is, one process and two processes must reach the same one.
+  const store = new MemoryStateStore({ now: NOW });
+  const first = engineOver(store, INJECTED);
+  const graph = compileOrThrow({ spec: retrySpec(), resolver: resolver(), tools: MANIFESTS, tenantCapabilities: CAPS });
+  const runId = await first.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await first.engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", {
+    kind: "human",
+    id: "u:alice",
+  });
+  let held = await first.engine.advance(runId);
+  // The retry re-schedules the task, so the first `advance` returns with the run still `running`.
+  for (let i = 0; i < 5 && held.status === "running"; i++) held = await first.engine.advance(runId);
+  const holdGate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+  assert.ok(holdGate !== undefined, `precondition: the run stops on the authored gate: ${held.status}`);
+
+  // ONE PROCESS: the same engine answers its own gate and carries on.
+  await first.engine.resolveGate(runId, {
+    gateId: holdGate.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+  const one = await first.engine.advance(runId);
+  const inProcess = `${one.status}/${String(Object.keys(one.gates).length)}/${String(first.charged())}`;
+
+  // TWO PROCESSES: the same run again, with a second Engine answering the gate off the journal
+  // alone. `#restoreEvidence` is the whole of what it knows.
+  const store2 = new MemoryStateStore({ now: NOW });
+  const a = engineOver(store2, INJECTED);
+  const runId2 = await a.engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await a.engine.deescalate(runId2, `run:${runId2}`, "on", "reviewed the graph, watching it run", {
+    kind: "human",
+    id: "u:alice",
+  });
+  let held2 = await a.engine.advance(runId2);
+  for (let i = 0; i < 5 && held2.status === "running"; i++) held2 = await a.engine.advance(runId2);
+  const gate2 = Object.values(held2.gates).find((g) => g.nodeId === "hold");
+  assert.ok(gate2 !== undefined, "precondition: the second run stops on the same gate");
+  const b = engineOver(store2, INJECTED);
+  await b.engine.attach(runId2, graph);
+  await b.engine.resolveGate(runId2, {
+    gateId: gate2.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+  const two = await b.engine.advance(runId2);
+  const acrossRestart = `${two.status}/${String(Object.keys(two.gates).length)}/${String(a.charged() + b.charged())}`;
+
+  assert.equal(inProcess, "succeeded/1/1", `the ordinary answer moved: ${inProcess}`);
+  assert.equal(acrossRestart, inProcess, `a restart reached a different answer: ${inProcess} in one process, ${acrossRestart} across two`);
 });

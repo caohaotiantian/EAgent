@@ -1163,7 +1163,15 @@ interface RunContext {
    *
    * `taintedOn` is the only reader, and it answers by walking the asking task's own branch
    * coordinate — which carries the edge id of every fan it is inside — so the answer is about
-   * THIS branch rather than about a name.
+   * THIS branch's EDGES rather than about a name.
+   *
+   * ABOUT ITS EDGES, WHICH IS NOT THE SAME AS ABOUT ITS BRANCH, and the difference is worth
+   * stating because the paragraph above argues against a coarser key. This set is run-global and
+   * monotone like `ctx.tainted`, so the SAME fanout edge taken twice — a fan inside a loop, or an
+   * inner fan re-planned once per outer branch — is one taint fact: a dirty first pass marks a
+   * clean second one. That is the tightening direction, and a per-instance key would have to be
+   * the branch coordinate, which DESIGN D4 already tried and reverted for the taint set as a
+   * whole. It is a known over-approximation and not a claim of precision.
    */
   readonly taintedFans: Set<EdgeId>;
   /**
@@ -1247,8 +1255,20 @@ interface RunContext {
    * DERIVED, NOT DURABLE, and that is the whole reason it is a separate field rather than a
    * pre-fill of `ctx.tainted`. That set's docstring makes a promise this would break —
    * "monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
-   * running it live" — because a wave member that FAILS writes nothing, so no fold ever produces
-   * its channels. This overlay is recomputed from the wave's composition, which is itself
+   * running it live" — because a wave member that has not COMMITTED has produced no
+   * `task.committed` for a fold to read, so nothing rebuilds its channels at this point in the
+   * wave. (`applySuppressedWrites` means a fold DOES eventually produce the declared writes of a
+   * commit that failed; what it does not produce is a mid-wave view, which is what this overlay
+   * is. The sentence used to say "a wave member that FAILS writes nothing" and that half is no
+   * longer true.)
+   *
+   * IT COVERS EXTERNAL NODES ONLY, and `applyTaint` now has five sources. `waveTaintFor` filters
+   * the wave with `isExternal`, so a sibling that is control-tainted, or that read a tainted
+   * channel, or whose declared writes a failure suppressed, does not appear in a same-wave
+   * reader's overlay. That is the same hole this field exists to close, for four sources it does
+   * not cover — bounded by the fact that the overlay is a TIGHTENING extra on top of
+   * `ctx.tainted`, so the uncovered cases decide exactly as they did before the overlay existed
+   * and are caught on the next wave. Named here rather than left to be rediscovered. This overlay is recomputed from the wave's composition, which is itself
    * derived, so a replay of the same wave reaches the same answer without anything being
    * journaled that a fold could not reproduce.
    */
@@ -1493,8 +1513,9 @@ export class Engine {
   /**
    * THE RULE ID AND ITS EVIDENCE TRAVEL SEPARATELY.
    *
-   * They used to be one string: `` `${id} ${JSON.stringify(detail)}` ``. Seven of these eight
-   * rules pass a detail, so seven of eight journaled a `rule` no consumer could match — and one
+   * They used to be one string: `` `${id} ${JSON.stringify(detail)}` ``. Most of these rules pass
+   * a detail — seven of the eight that existed when this was written, and E12
+   * `fanout_skipped_gate` since — so most journaled a `rule` no consumer could match, and one
    * consumer was already trying. `evolution/trajectory.ts` counted E6 with
    * `e.payload.rule === "violation"` against the value `violation {"capability":{…}}`.
    */
@@ -2083,7 +2104,12 @@ export class Engine {
       // point: what it holds at this line is what EARLIER commits put there, which is where a
       // mark on this node can only have come from. The live path reads it at the same point of
       // the same commit — `#recordEvidence` runs before `applyControlTaint` in `#commit`.
-      applyTaint(ctx, parsed.branch, node, written, ev.payload.status === "failed");
+      applyTaint(ctx, parsed.branch, node, written);
+      // The writes this commit did NOT make, when it failed. Folded here, immediately after the
+      // ordinary writes and before the fanout halves, which is the order `#commit` applies them
+      // in — the live half is below `#commit`'s retry early-return so that a RETRIED attempt,
+      // which writes no `task.committed` at all, applies neither.
+      if (ev.payload.status === "failed") applySuppressedWrites(ctx, parsed.branch, node);
       applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
       // The fan binding, folded after `applyTaint` and before the control-flow half exactly as
       // the live path folds it: the commit that TAKES a fanout edge is the commit that wrote the
@@ -7564,10 +7590,33 @@ export class Engine {
     // `ctx.tainted` starts empty, so bytes a parent tool fetched arrived looking like a value a
     // person typed and the child's guards could not see them. It is passed to `submit`, which
     // journals it on the child's `run.submitted` so the child's own fold rebuilds it.
+    //
+    // `taintedOn` AND NOT `ctx.tainted.has`, WHICH IS WHERE THIS LINE STARTED AND IS A ONE-HOP
+    // BYPASS OF THE WHOLE SEED. A fanout edge's `as` binding is a DECLARED CHANNEL
+    // (`graph/validate.ts` requires it) and `sub.inputs`' parent side is a declared channel too,
+    // so `subgraph: { inputs: { seed: "item" } }` inside a fan body compiles — and `scopeFor`
+    // merges the branch binding, so the child gets the fetched bytes. But a binding is not in
+    // `ctx.tainted`: `applyFanoutTaint` records the fanout EDGE in `ctx.taintedFans`, and
+    // `taintedOn` is the only reader that consults both. Every other consumer on this branch was
+    // moved to `taintedOn` for exactly that reason and this one was not. Measured, same bytes,
+    // same shapes, one word of `sub.inputs` different, with the child holding its own
+    // `human_gate` behind its own empty fan:
+    //
+    //     inputs { seed: "untrusted" }  -> awaiting_gate, gates=1, wrote=0
+    //     inputs { seed: "item" }       -> succeeded,     gates=0, wrote=1   (before)
+    //     inputs { seed: "item" }       -> awaiting_gate, gates=1, wrote=0   (now)
+    //
+    // AND THE NODE'S OWN MARK IS A SOURCE TOO, for the same reason it is one in `applyTaint`: a
+    // delegation an attacker's choice SELECTED hands its child inputs that are the attacker's
+    // whatever channel they came from, and the child's fold has no other way to learn it. This
+    // over-approximates — every mapped input is seeded, not just the ones from tainted channels
+    // — which is the fail-closed direction and is what `#irreversibilityOf` cannot do for a
+    // `subgraph` node from the outside (design §4's latent fourth item).
     const taintedInputs: string[] = [];
+    const delegationChosen = ctx.controlTainted.has(w.node.id);
     for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
       inputs[childCh] = scope[parentCh];
-      if (ctx.tainted.has(parentCh)) taintedInputs.push(childCh);
+      if (delegationChosen || taintedOn(ctx, w.task.branch, parentCh)) taintedInputs.push(childCh);
     }
 
     // The slice is carved from what the PARENT still has, not from its original limit:
@@ -8852,6 +8901,11 @@ export class Engine {
     // restart switches off silently — five of those, then a sixth. This is the first piece of
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
+    // THE WRITES A FAILURE SUPPRESSED, and this is below the retry early-return on purpose: a
+    // retried attempt journals `task.retry_scheduled` and no `task.committed`, so applying it
+    // there would be a mark the fold can never rebuild. Same position relative to the fanout
+    // halves as `#restoreEvidence` uses.
+    if (outcome.status === "failed") applySuppressedWrites(ctx, w.task.branch, w.node);
     applyFanoutTaint(ctx, w.task.branch, take);
     applyFanoutWidthTaint(ctx, w.task.branch, w.node, take);
     applyControlTaint(ctx, w.task.branch, w.node, take, takeSuppliedByProducer, outcome.status === "failed");
@@ -9249,7 +9303,7 @@ export class Engine {
     // execution an attacker's choice selected writes the attacker's bytes. Running before
     // `applyControlTaint` is what makes the map hold exactly the marks EARLIER commits left,
     // which is the same thing the fold sees at the same point.
-    applyTaint(ctx, w.task.branch, w.node, outcome.writes, outcome.status === "failed");
+    applyTaint(ctx, w.task.branch, w.node, outcome.writes);
     applySecretFlow(ctx.carriesSecret, w.node, outcome.writes, ctx.graph.spec.channels);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
@@ -10612,6 +10666,16 @@ function taintedOn(ctx: RunContext, branch: BranchCoordinate, channel: string): 
   if (ctx.tainted.has(channel)) return true;
   for (const seg of branch.segments) {
     if (!ctx.taintedFans.has(seg.edgeId as EdgeId)) continue;
+    // AN EDGE ID THIS INDEX DOES NOT HOLD FALLS THROUGH AS "not tainted", which is the passing
+    // value and therefore owes an argument. It cannot happen and here is why, rather than a
+    // shrug: `seg.edgeId` was written by `childBranch` from an edge of THIS graph's index, the
+    // index is rebuilt from the compiled graph on every attach (`#rehydrateGraph` folds every
+    // `graph.mutated` before the fold that reads this), and `compileMutation` is
+    // additive-only — no verb removes an edge from a compiled graph. So an id in a segment is an
+    // id in `edgeById`, and the miss is unreachable rather than merely unlikely. The refusing
+    // value would be worse than useless here anyway: it would report every channel tainted on
+    // any branch whose edge went missing, which is a constant gate rather than a fail-closed
+    // answer.
     const edge = ctx.index.edgeById.get(seg.edgeId as EdgeId);
     if (edge !== undefined && (edge.as ?? "item") === channel) return true;
   }
@@ -10803,7 +10867,6 @@ function applyTaint(
   branch: BranchCoordinate,
   node: NodeSpec,
   writes: Readonly<Record<string, unknown>>,
-  failed: boolean,
 ): void {
   // `subgraph` counts as external, and deliberately over-approximates. A child runs under a
   // DIFFERENT `RunId` and therefore a different `RunContext` with its own taint set, so nothing
@@ -10823,44 +10886,72 @@ function applyTaint(
   // delegated did not. `#runSubgraph` computes which child inputs come from tainted parent
   // channels and `submit` journals them on the CHILD's `run.submitted`, which is the only event
   // the child's own fold can reach — so unlike the upward direction, this one does survive.
-  if (
-    !isExternal(node) &&
-    !ctx.controlTainted.has(node.id) &&
-    !observedChannels(node).some((c) => taintedOn(ctx, branch, c))
-  ) {
-    return;
-  }
+  if (!carriesTaint(ctx, branch, node)) return;
   for (const channel of Object.keys(writes)) ctx.tainted.add(channel);
-  // A COMMIT THAT FAILED WROTE NOTHING, AND WRITING NOTHING IS A VALUE. `writes` is empty for a
-  // failed outcome, so the loop above taints nothing and the channel this node was authored to
-  // write stays clean — which is exactly the value a reader downstream sees. `has(parts)` on an
-  // unwritten channel is `false`, and if the page is what made the write not happen then `false`
-  // is the attacker's byte. Measured on a clean fan (the list built from the run's own input, so
-  // the WIDTH is nobody's choice) whose body reads the page and throws iff it says PAY, with
-  // `onBranchError: "skip"` letting the join complete on zero contributions and the join's arms
-  // branching on `!has(parts)`:
-  //
-  //     the body reads the page, page says PAY  -> succeeded,     gates=0, charged=1  (before)
-  //     the body reads the page, page says PAY  -> awaiting_gate, gates=1, charged=0  (now)
-  //     the body reads the run's own input      -> succeeded,     gates=0, charged=1  (both)
-  //
-  // This is RC-1's R2 row — "suppressing every write is how you get an attacker-chosen value
-  // that is clean" — arriving by failure instead of by width. `applyFanoutWidthTaint` closed the
-  // width form; nothing closed this one, on any tree measured (`docs/design-taint-rc6-2026-09-05.md`
-  // §4, live at `a638e7d`, at the branch head and on `loom` alike).
-  //
-  // THE DECLARED SET, WHICH IS THE ONLY ONE THERE IS. `node.writes` is the graph's own statement
-  // of what this node writes; the fold reads it off the compiled graph and `task.committed.status`
-  // says the commit failed, so `#restoreEvidence` reproduces this exactly with no new journal
-  // field. It over-approximates in one direction only: a channel that is never written by anyone
-  // is marked untrusted, and a monotone set never takes that back. That is the same fail-safe
-  // shape the rest of this function has, and it costs a gate only where a hard-to-undo node
-  // reads such a channel.
-  //
-  // IT RUNS UNDER THE SAME GUARD as the ordinary write, deliberately: a node that read nothing
-  // tainted and sits in no tainted region fails for reasons of its own, and marking its declared
-  // writes would taint a channel on every ordinary retry in every graph.
-  if (failed) for (const channel of node.writes ?? []) ctx.tainted.add(channel);
+}
+
+/**
+ * Is this node's OUTPUT the attacker's — by origination, by selection, or by what it read?
+ *
+ * The three arms `applyTaint` opened with, hoisted because `applySuppressedWrites` asks the same
+ * question of the same node at the same commit and a second copy of a predicate is how the two
+ * halves of `#fireEmptyJoin` and `applyFanoutWidthTaint` drifted apart for a round.
+ */
+function carriesTaint(ctx: RunContext, branch: BranchCoordinate, node: NodeSpec): boolean {
+  return (
+    isExternal(node) ||
+    ctx.controlTainted.has(node.id) ||
+    observedChannels(node).some((c) => taintedOn(ctx, branch, c))
+  );
+}
+
+/**
+ * A COMMIT THAT FAILED WROTE NOTHING, AND WRITING NOTHING IS A VALUE.
+ *
+ * `applyTaint` above taints what a node WROTE, and a failed outcome's `writes` is empty — so the
+ * channel the node was authored to write stays clean, which is exactly the value a reader
+ * downstream sees. `has(parts)` on an unwritten channel is `false`, and if the page is what made
+ * the write not happen then `false` is the attacker's byte. Measured on a clean fan (the list
+ * built from the run's own input, so the WIDTH is nobody's choice) whose body reads the page and
+ * throws iff it says PAY, with `onBranchError: "skip"` letting the join complete on zero
+ * contributions and the join's arms branching on `!has(parts)`:
+ *
+ *     the body reads the page, page says PAY  -> succeeded,     gates=0, charged=1  (before)
+ *     the body reads the page, page says PAY  -> awaiting_gate, gates=1, charged=0  (now)
+ *     the body reads the run's own input      -> succeeded,     gates=0, charged=1  (both)
+ *
+ * This is RC-1's R2 row — "suppressing every write is how you get an attacker-chosen value that
+ * is clean" — arriving by failure instead of by width. `applyFanoutWidthTaint` closed the width
+ * form; nothing closed this one, on any tree measured
+ * (`docs/design-taint-rc6-2026-09-05.md` §4, live at `a638e7d`, at the branch head and on `loom`).
+ *
+ * IT IS A SEPARATE FUNCTION BECAUSE IT IS CALLED FROM A DIFFERENT PLACE, and that is the whole
+ * reason for the split. Folded into `applyTaint` it ran from `#recordEvidence`, which is ABOVE
+ * `#commit`'s retry early-return — so a node that read the page, failed once and was RETRIED
+ * tainted its declared writes in the live process, while the fold saw only
+ * `task.retry_scheduled` (no `task.committed` exists for a retried attempt) and rebuilt the set
+ * SHORT. A restart with less taint than the process it replaces is the loosening direction, and
+ * it is the ninth shape of the failure class `test/run/oversight-survives-restart.test.ts`
+ * enumerates. Reproduced by a reviewer end to end — `succeeded, charged 1` across a restart where
+ * the same run in one process gated. It is called from `#commit` now, below the retry return and
+ * in the same position relative to `applyFanoutTaint` that the fold uses, so live and fold apply
+ * the identical five folds in the identical order. `test/run/taint-failed-commits.test.ts` pins
+ * the retried-attempt row in both processes.
+ *
+ * THE DECLARED SET, WHICH IS THE ONLY ONE THERE IS. `node.writes` is the graph's own statement of
+ * what this node writes; the fold reads it off the compiled graph and `task.committed.status`
+ * says the commit failed, so `#restoreEvidence` reproduces this with no new journal field. It
+ * over-approximates in one direction only: a channel nobody ever writes is marked untrusted, and
+ * a monotone set never takes that back. Same fail-safe shape as the rest of this axis, and it
+ * costs a gate only where a hard-to-undo node reads such a channel.
+ *
+ * UNDER THE SAME GUARD as the ordinary write, deliberately: a node that read nothing tainted and
+ * sits in no tainted region fails for reasons of its own, and marking its declared writes would
+ * taint a channel on every ordinary failure in every graph.
+ */
+function applySuppressedWrites(ctx: RunContext, branch: BranchCoordinate, node: NodeSpec): void {
+  if (!carriesTaint(ctx, branch, node)) return;
+  for (const channel of node.writes ?? []) ctx.tainted.add(channel);
 }
 
 /**
@@ -11528,12 +11619,20 @@ function controlRegion(
   // THE EDGES THAT FIRED FROM OUTSIDE THE SPACE, WHICH IS NOT THE SAME AS "were not picked".
   // An unconditional sibling outside the space fired because `#edgesToTake` always takes it, so
   // everything forward of it runs whatever this decision came out and it belongs on the
-  // subtraction side. An `error` edge outside the space is the opposite: `#strayRoute` lets a
-  // producer name one in its own `take`, so it fired BECAUSE the producer picked it, and
-  // subtracting it takes the arm the producer chose straight out of the region. `choiceOf` drops
-  // every `error` edge from the space, so the kind is what separates the two — and when a
-  // producer supplied the take there is nothing else outside the space, because `choiceOf`'s
-  // space is then every outbound edge but the `error` and `compensation` ones.
+  // subtraction side.
+  //
+  // THE `error` ARM OF THIS FILTER IS BELT-AND-BRACES ON THE MERGED TREE, and it used to be the
+  // fix for a measured loosening: `#strayRoute` let a producer name one of its own `error` edges,
+  // `choiceOf` dropped every error edge from the space, and the arm the producer PICKED therefore
+  // landed on the subtraction side and took the irreversible action out of its own region. Two
+  // things closed that door since, from both sides. `loom`'s `TAKEABLE_EDGE_KINDS` (§A0.21,
+  // `ff8fdac`) refuses a producer take naming an `error` edge outright, `E_ROUTE_INVALID` and
+  // run-fatal — so no successful commit can reach this line with one. And `choiceOf`'s failed arm
+  // puts every error edge INSIDE the space, so a failed commit's error edges never reach
+  // `alsoRan` either. The filter stays because it is the safe answer for an edge kind that is not
+  // an alternative, and because both of those are other files' rules; but nothing in the tree can
+  // exercise it, and `control-flow-taint.test.ts`'s `A PRODUCER'S OWN error ARM IS A CHOICE` says
+  // in place that its fixture can no longer be built.
   const inSpace = new Set(space.map((e) => e.id));
   const alsoRan: EdgeId[] = [];
   for (const id of take) {
