@@ -72,6 +72,31 @@ test(
   },
 );
 
+/**
+ * THIS FIX NARROWS THE EXPLOIT, IT DOES NOT CLOSE IT — flagged by a fresh reviewer (round 1), who
+ * found the adversary's TRUE optimum is not the sum-floor value 2500 pinned above: it is claiming
+ * `cacheCredit` close to `estimated`, which `dearestRateFloor` cannot distinguish from a genuine
+ * full cache hit (both report the same two numbers). Driven by sweeping `cache_read_input_tokens`
+ * against the same 20,000-token estimate — see `USAGE_TOLERANCE`'s docstring in `usage.ts` for the
+ * full table this reproduces one row of.
+ */
+test(
+  "...but claiming a (fake) FULL cache hit beats claiming the sum floor — " +
+    "cache_read_input_tokens:19993 costs $0.005998, a ~10.0x discount the per-rate floor cannot see",
+  async () => {
+    const d = await anthropic(anth(`{"input_tokens":0,"cache_read_input_tokens":19993}`, `{"output_tokens":0}`));
+    assert.equal(dearestRateFloor(20000, 19993), 0, "the remainder (7 tokens) is too small to round up");
+    assert.equal(d.usage.inputTokens, 0);
+    assert.equal(
+      d.usage.costUsd,
+      0.005998,
+      `this is the adversary's minimum over the whole 0..20000 range this lane swept, not $0.00075 — ` +
+        `it is NOT further reducible by this fix, and it is honest ~10x (the raw cacheRead/input rate ` +
+        `ratio for claude-sonnet-5), not the ~80x the sum-floor defeat achieved`,
+    );
+  },
+);
+
 test("...and the same shortfall put in cache_creation_input_tokens is charged the same way", async () => {
   const d = await anthropic(anth(`{"input_tokens":0,"cache_creation_input_tokens":2500}`, `{"output_tokens":0}`));
   assert.equal(d.usage.cacheWriteTokens, 2500);
@@ -139,3 +164,40 @@ test("ORDINARY 4: no cache reported at all is untouched — dearestRateFloor deg
   const d = await anthropic(anth(`{"input_tokens":1}`, `{"output_tokens":0}`));
   assert.equal(d.usage.inputTokens, 2500, "the pre-existing sum floor (toleratedFloor(20000)-1+1) is unaffected");
 });
+
+/**
+ * ORDINARY 5 IS NOT UNCHANGED — flagged by a fresh reviewer (round 1) as a real, quantified
+ * over-charge on a genuine partial cache hit, and pinned here rather than left silent. A GENUINE
+ * partial cache hit whose real uncached remainder is small is over-charged, because subtracting
+ * the wire's `cacheCredit` from this adapter's own ESTIMATE amplifies the estimator's ordinary
+ * error onto whatever is left. See `dearestRateFloor`'s docstring in `usage.ts` for the general
+ * statement; this pins the exact number on a 100,000-character prompt (`estimated = 25000`).
+ */
+test(
+  "ORDINARY 5 (NOT unchanged, and pinned as such): a genuine small uncached remainder beside a " +
+    "large honest cache hit is over-charged by dearestRateFloor(25000,20000)-500 = 125 tokens",
+  async () => {
+    const req: ModelRequest = { model: "claude-sonnet-5", system: "", messages: [{ role: "user", content: "x".repeat(100_000) }], tools: [] };
+    const d = await done(
+      new AnthropicAdapter({
+        apiKey: "k",
+        fetch: sseFetch(anth(`{"input_tokens":500,"cache_read_input_tokens":20000}`, `{"output_tokens":0}`)),
+        prices: PRICES,
+      }).stream(req, ac()),
+    );
+    // The pre-existing sum floor alone would leave this untouched: 20500 >= toleratedFloor(25000)
+    // = 3125. `dearestRateFloor(25000, 20000) = floor(5000/8) = 625` forces it up regardless.
+    assert.equal(dearestRateFloor(25000, 20000), 625);
+    assert.equal(
+      d.usage.inputTokens,
+      625,
+      `an honest input_tokens:500 next to a genuine 20,000-token cache hit is raised to 625, not left at 500`,
+    );
+    assert.equal(d.usage.cacheReadTokens, 20_000, "the wire's honest cache number is untouched");
+    // (625*$3 + 20000*$0.30)/1e6 = $0.007875 against $0.007500 honest — a 5% over-charge on the
+    // whole turn, the price of not having the cacheable-prefix bound `USAGE_TOLERANCE`'s docstring
+    // names. It shrinks as the honest remainder grows and vanishes once inputTokens itself already
+    // clears dearestRateFloor — see ORDINARY 3, where 17,500 already does.
+    assert.equal(d.usage.costUsd, 0.007875, `expected the documented over-charge, got ${d.usage.costUsd}`);
+  },
+);

@@ -315,9 +315,13 @@ export class AnthropicAdapter implements ModelAdapter {
     // the reported SUM against the floor, so a wire meeting the sum entirely out of the cheap
     // dimensions paid nothing extra — `cache_read_input_tokens` declared at exactly the floor,
     // `input_tokens: 0`, was believed whole. `dearestRateFloor` is the second, PER-RATE check:
-    // whatever part of the estimate the wire's own cache claim does not cover is charged at the
-    // input rate on top of whatever the sum floor already added. See its docstring in `usage.ts`
-    // for the measured before/after and why it rounds down rather than up. `TODO.md` §A0.13.
+    // `inputTokens` is raised to it if the sum floor above left it lower — a MAX of the two
+    // floors, not a further addition on top of whichever one already fired. This closes the
+    // "under-report down to the loose sum floor AND mislabel it as cache" compound, NOT the raw
+    // cache-vs-input rate ratio a wire gets by claiming a (possibly fake) full cache hit instead
+    // — see `dearestRateFloor`'s and `USAGE_TOLERANCE`'s docstrings in `usage.ts` for the measured
+    // before/after, the residual that remains, and why this rounds down rather than up.
+    // `TODO.md` §A0.13 needs updating to match — narrowed, not closed.
     for (const acc of partial.values()) producedChars += acc.id.length + acc.name.length + acc.json.length;
     // `producedTokens` reads the PARSED calls and `producedChars` the RAW argument text. The raw
     // count is the larger whenever a call was cut off, and nothing on the wire guarantees the
