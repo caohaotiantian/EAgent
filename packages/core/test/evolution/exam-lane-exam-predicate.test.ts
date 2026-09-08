@@ -150,6 +150,38 @@ test("an exam that reads no baseline INPUT is the two-sided fixture moved outsid
   assert.ok(p.some((x) => /reads no baseline INPUT/.test(x)), p.join("\n"));
 });
 
+/**
+ * THE MIRROR OF THE RULE ABOVE, and it was missing for three review rounds.
+ *
+ * `attestationProblems` refused an exam that reads no baseline INPUT — the two-sided fixture, the
+ * candidate writing both question and answer — and said nothing about one that reads no baseline
+ * OUTPUT. An exam over `[subject, items]` alone sees the QUESTION and never the run's answer, so
+ * whatever body it carries it is measuring nothing about the run it grades; an always-pass one
+ * attests exit 0 and grades every recording `pass`. That is CLAUDE.md's first defect lens exactly
+ * — a guard answering its undecidable case with the passing value — sitting on the guard property
+ * 3 rests on.
+ *
+ * THE OUTPUT HAS TO BE ONE THE RECORDING DID NOT SUPPLY. A channel that is both an input and an
+ * output of the work graph does not count, because `examInputsFor` resolves that collision in
+ * favour of the RECORDED input — the exam would be handed the question under the answer's name.
+ * So the test is the same `outputReads` set the grading-the-grader rule already computes.
+ */
+test("AN EXAM THAT READS NO BASELINE OUTPUT IS REFUSED — it sees the question and never the answer", () => {
+  const p = attestationProblems(examSpec({ inputs: ["subject", "items"] }), baselineSpec());
+  assert.ok(p.some((x) => /reads no baseline OUTPUT/.test(x)), p.join("\n"));
+  // The control: the shipped shape reads `items` AND `picked` and still attests cleanly.
+  assert.deepEqual(attestationProblems(examSpec(), baselineSpec()), []);
+});
+
+test("A CHANNEL THAT IS BOTH AN INPUT AND AN OUTPUT IS NOT AN ANSWER — the recording wins the collision, so it does not satisfy the rule", () => {
+  const b = baselineSpec();
+  const both: GraphSpec = { ...b, outputs: [...b.outputs, "items"] };
+  const p = attestationProblems(examSpec({ inputs: ["subject", "items"] }), both);
+  assert.ok(p.some((x) => /reads no baseline OUTPUT/.test(x)), p.join("\n"));
+  // …and the same exam reading a real output alongside it is fine.
+  assert.deepEqual(attestationProblems(examSpec({ inputs: ["subject", "items", "picked"] }), both), []);
+});
+
 test("GRADING THE GRADER IS REFUSED: every baseline output the exam reads is evaluator-written", () => {
   // `review-bench` as shipped: six declared outputs, all written by evaluator nodes. Here the
   // same shape in miniature — the baseline declares only `verdict`, and the exam reads it.

@@ -139,14 +139,26 @@ export function examShape(graph: RunGraph): string[] {
 /**
  * Why this exam may not be attested against this baseline. Empty means it may.
  *
- * Three rules from the design and one from the journal. Every exam input other than `subject`
- * must be a declared `input` or `output` of the baseline graph, or the exam grades every baseline
+ * Four rules about the exam and one from the journal. Every exam input other than `subject` must
+ * be a declared `input` or `output` of the baseline graph, or the exam grades every baseline
  * recording `fail` for a channel those recordings never produced. It must read at least one
  * baseline INPUT: an exam over outputs alone is the two-sided fixture — the candidate writing both
  * `expected` and `answer` — with the fixture moved outside the graph. It must not read ONLY
  * outputs a baseline `evaluator` node writes, because that is grading the grader; `review-bench`
  * as shipped declares six evaluator-written outputs and nothing else, and this rule is what
- * refuses it. And the exam's `metadata.name` must differ from the workflow's: exam runs are
+ * refuses it.
+ *
+ * AND IT MUST READ AT LEAST ONE BASELINE OUTPUT, which is the mirror of the INPUT rule and was
+ * missing for three review rounds while its twin stood two lines away. An exam over `[subject,
+ * items]` sees the question and never the run's answer, so whatever body it carries it measures
+ * nothing about the run it grades: an always-pass one attested exit 0 and graded all thirty
+ * recordings `pass`, after which `L5-candidate-earned-it` certified the work-deleting candidate as
+ * having "scored above 0 on 30 of 30". A guard answering its undecidable case with the passing
+ * value is CLAUDE.md's first defect lens, and this was it on the guard property 3 rests on.
+ *
+ * ALL FOUR ARE ABOUT OWNERSHIP AND SHAPE, NOT QUALITY. They refuse the mechanical forms of a
+ * useless exam; they cannot refuse a body that reads the right channels and grades them badly.
+ * That stays the operator's, exactly as the quality of a human gate decision is. And the exam's `metadata.name` must differ from the workflow's: exam runs are
  * journaled under the exam's name, and the newest recording of the WORKFLOW is what
  * `corpusThrough` is read from.
  */
@@ -172,7 +184,16 @@ export function attestationProblems(exam: GraphSpec, baseline: GraphSpec): strin
         `trusts the work graph for both the question and the answer`,
     );
   }
+  // THE ANSWER SIDE, AND `outputReads` IS WHAT COUNTS AS ONE. A channel the baseline declares as
+  // both an input and an output does NOT count: `examInputsFor` resolves that collision in favour
+  // of the RECORDED input, so the exam would be handed the question under the answer's name.
   const outputReads = reads.filter((c) => outputs.has(c) && !inputs.has(c));
+  if (outputReads.length === 0) {
+    problems.push(
+      `the exam reads no baseline OUTPUT (baseline outputs ${JSON.stringify(baseline.outputs)}) — an exam over inputs alone ` +
+        `sees the question and never the run's answer, so it measures nothing about the run it grades`,
+    );
+  }
   if (outputReads.length > 0 && outputReads.every((c) => evaluatorWrites.has(c))) {
     problems.push(
       `every baseline output the exam reads (${outputReads.map((c) => `"${c}"`).join(", ")}) is written by a baseline evaluator node ` +

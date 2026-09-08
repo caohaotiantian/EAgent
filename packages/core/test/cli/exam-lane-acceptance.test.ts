@@ -163,6 +163,11 @@ function seed(dir: string): void {
   w("exams/pick-exam.json", exam("pick-exam", ["subject", "items", "picked"]));
   w("exams/bad-exam.json", exam("pick-exam-bad", ["subject", "verdict"]));
   w("exams/undeclared-exam.json", exam("pick-exam-undeclared", ["subject", "items", "chosen"]));
+  // Reads the QUESTION and never the answer: `items` is `pick-bench`'s input, and this exam sees
+  // no output at all. Its body is the ordinary `exam-pick`, but the shape is what makes it blind —
+  // `picked` is not in scope, so `view.get("picked")` is `[]` and the grade is whatever the body
+  // says about nothing. See the STEP 4 case that refuses it.
+  w("exams/blind-exam.json", exam("pick-exam-blind", ["subject", "items"]));
   w(
     "exams/agent-exam.json",
     exam("pick-exam-agent", ["subject", "items", "picked"], {
@@ -305,7 +310,7 @@ test("STEP 3 · a legacy suite refuses the grader swap with ✗ 12-grader-unchan
 
 // ── 4 · attest, and the five refusals ────────────────────────────────────────
 
-test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the newest recording; five shapes are refused by name", async () => {
+test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the newest recording; six shapes are refused by name", async () => {
   const w = await workspace();
   try {
     const a = await attest(w.dir, w.last);
@@ -329,7 +334,16 @@ test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the
     refusedWith(await attest(w.dir, w.last, "exams/bad-exam.json"), /is not an exam: an exam does not read "verdict"/);
     refusedWith(await attest(w.dir, w.last, "exams/undeclared-exam.json"), /"chosen" are declared by the baseline graph neither/);
     refusedWith(await attest(w.dir, w.last, "exams/agent-exam.json"), /is not an exam: .*"judge" is a agent/);
+    // AND THE BLIND EXAM — the mirror of the "reads no baseline INPUT" rule, missing until the
+    // fourth review round. It reads `items` and no output, so it sees the question and never the
+    // run's answer: at 945e54e it attested exit 0 and graded every recording `pass`.
+    refusedWith(await attest(w.dir, w.last, "exams/blind-exam.json"), /reads no baseline OUTPUT/);
     assert.equal((await journal(w.dir, w.last)).filter((e) => isEvent(e, "operator.command")).length, 1, "the refusals wrote nothing");
+    // THE CONTROL, and it is the one that makes the refusal mean something: the shipped honest
+    // exam still attests, on the same workspace, immediately after six refusals.
+    const again = await attest(w.dir, w.last);
+    assert.equal(again.code, 0, `${again.out}\n${again.err}`);
+    assert.match(again.err, /the same exam re-attested: same ruler, newer questions/);
   } finally {
     w.dispose();
   }
