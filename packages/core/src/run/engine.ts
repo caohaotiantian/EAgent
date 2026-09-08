@@ -536,14 +536,22 @@ const COMPENSATION_MAX_DEPTH = 16;
  *   would mean a fold refusing an event a previous build legitimately wrote, which is the one
  *   thing "the journal is the only authoritative state" does not allow.
  *
- *   `replayRun` — the same journal DIVERGES, loudly, because that verb re-executes into a fresh
- *   store rather than folding (`run/replay.ts`'s "Re-execute a recorded run into a throwaway
- *   journal and compare"). Measured on a journal recorded at `ce9e7b4` and replayed at HEAD:
- *   `match: false`, `task.committed hop@root#0 expected succeeded actual failed`,
- *   `run.completed expected succeeded actual failed:E_ROUTE_INVALID`. That is the honest answer
- *   — the recorded run really did take a route this build refuses — and it is a real cost:
- *   `runEvalSuite` and the promote ladder read those reports, so a suite pinned on such a run
- *   now reports divergence rather than a pass.
+ *   `replayRun` — a pre-fix recording DIVERGES, loudly, because that verb re-executes into a
+ *   fresh store rather than folding (`run/replay.ts`'s "Re-execute a recorded run into a
+ *   throwaway journal and compare"). THREE RECORDINGS, THREE ANSWERS, and the first version of
+ *   this paragraph quoted all three as if they were one — the mistake this whole comment is
+ *   about, made inside it. Measured, each recorded at `ce9e7b4` and replayed at HEAD:
+ *     · the run above, still `awaiting_gate` — `replayRun` does not report, it THROWS
+ *       `E_REPLAY_DIVERGENCE`, "replay raised a gate on node \"gate\" … that the recorded run
+ *       never decided", because the refusal now ends the run before the gate is reached.
+ *     · that same run after the human REJECTED — `match: false`, `task.committed hop@root#0
+ *       expected succeeded actual failed`, and the terminal frame is `run.failed expected
+ *       failed:E_HUMAN_APPROVAL_REQUIRED actual failed:E_ROUTE_INVALID`.
+ *     · a sibling run of the SAME GRAPH that the human APPROVED, so the recording succeeded —
+ *       `run.completed expected succeeded actual failed:E_ROUTE_INVALID`.
+ *   All three are the honest answer: the recorded run really did take a route this build
+ *   refuses. And it is a real cost — `runEvalSuite` and the promote ladder read those reports,
+ *   so a suite pinned on such a run now reports divergence rather than a pass.
  *
  * The bound is on runs submitted from here on, and `graph/mutate.ts` discloses the same limit
  * for the mutation rule beside it.
@@ -553,13 +561,16 @@ const TAKEABLE_EDGE_KINDS: ReadonlySet<EdgeKind> = new Set<EdgeKind>(["seq", "co
 /**
  * The edges in a `take` that name a kind control may not flow along — the refusal's evidence.
  *
- * ONE PREDICATE, THREE DOORS. Four producers write a `take` and they do not all pass the same
- * check: a router or `function` body and an operator `steer` reach `#strayRoute` through
- * `#dispatch`, while a `human_gate` redirect is answered in `#applyGateDecision` and never goes
- * near it. "A check applied per-caller is a check the next producer forgets" is written two
- * screens up about the stray-edge rule, which had exactly that history. `#edgesToTake` then
- * filters on the same predicate as the last word, for a `take` that reached the journal from a
- * build that did not have this.
+ * ONE PREDICATE, FOUR DOORS, because four producers write a `take` and they do not all pass the
+ * same check. `#strayRoute` covers a router or `function` body, and an operator `steer` too —
+ * the override is folded in by `#dispatch` before that check. `#applyGateDecision` covers a
+ * `human_gate` redirect, which is answered in `#executeTask` and never goes near `#strayRoute`.
+ * `Engine.steer` refuses at its own door as well, so the operator is told before anything is
+ * journaled. And `#edgesToTake` filters on the same predicate as the last word. "A check
+ * applied per-caller is a check the next producer forgets" is written two screens up about the
+ * stray-edge rule, which had exactly that history — and the door COUNT is the thing to
+ * re-derive from the call sites rather than trust: this line said three until a reviewer
+ * counted four.
  *
  * AN EDGE ID THIS GRAPH DOES NOT HAVE IS NOT THIS FUNCTION'S REFUSAL: the stray-edge check
  * beside it names those, and answering the same fact with two codes only tells a caller which
@@ -580,7 +591,7 @@ function untakeableEdges(
   return bad;
 }
 
-/** The one sentence all three doors refuse with, so they cannot drift on what they mean. */
+/** The one sentence all four doors refuse with, so they cannot drift on what they mean. */
 function untakeableMessage(nodeId: NodeId, bad: readonly EdgeSpec[]): string {
   return (
     `node "${nodeId}" selected ${bad.map((e) => `"${e.id}" (kind "${e.kind}")`).join(", ")} — ` +
@@ -3595,10 +3606,13 @@ export class Engine {
    * `graph:mutate`, a capability a tenant either holds or does not, and reaching it from the
    * operator surface would be oversight routing around itself.
    *
-   * SIX REFUSALS. The four numbered below are in the order of what each would break; the other
-   * two are stated at their own check rather than here, and the CHECK order is not this list's
-   * order — a `human_gate` node, whose route the DECISION decides, is refused before 3 and 4,
-   * and an edge of a kind control does not flow along is refused after them.
+   * SEVEN REFUSALS, and the count moved twice while this docstring was being corrected — it is
+   * the number a reader should re-derive from the code rather than trust. The four numbered
+   * below are in the order of what each would break; the other three are stated at their own
+   * check. THE CHECK ORDER IS NOT THIS LIST'S ORDER: a run that has already ended
+   * (`E_ILLEGAL_TRANSITION`, from `#requireLive`) and a `human_gate` node, whose route the
+   * DECISION decides, are both refused before 3 and 4, and an edge of a kind control does not
+   * flow along is refused after them.
    *
    *   1. A NON-HUMAN CALLER — `E_HUMAN_APPROVAL_REQUIRED`, and there is deliberately no
    *      `SYSTEM_ACTOR` default the way `cancel` has one. Confinement to the declared set is
@@ -3607,7 +3621,9 @@ export class Engine {
    *      the oversight this run would otherwise have had. A HUMAN MAY DO THAT — "a human may
    *      lower a posture" — and no automated path may, which is why the actor is the first
    *      thing checked rather than a parameter with a convenient default.
-   *   2. A RUN THIS PROCESS HOLDS NO GRAPH FOR — `E_RUN_NOT_FOUND`, via `#require`. This is
+   *   2. A RUN THIS PROCESS HOLDS NO GRAPH FOR — `E_RUN_NOT_FOUND`, from `#require`. A run with
+   *      no JOURNAL at all raises the same code one step earlier, from `#requireLive`; this
+   *      clause is the narrower case, a journal that exists with no graph attached. This is
    *      where `steer` parts company with `cancel` and `pause`, which work detached on purpose
    *      because they are a projection and two appends. The declared edge set lives in the
    *      COMPILED graph; with no graph there is nothing to confine the operator to, and a
@@ -3679,11 +3695,12 @@ export class Engine {
         { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
       );
     }
-    // THE SIXTH REFUSAL, checked last. AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`, and this is the
-    //    fifth refusal rather than a fourth clause because it is a different fact: the edge
-    //    leaves this node and the executor still has no route along it. `#strayRoute` would
-    //    refuse it at the moment it would be taken; refusing here is what tells the operator
-    //    at the door, which is the reason 3 is checked twice as well.
+    // AN EDGE OF A KIND CONTROL DOES NOT FLOW ALONG — `E_ROUTE_INVALID`. The LAST of the seven
+    // refusals in the docstring's list to be checked, and its own refusal rather than a clause
+    // on the one above, because it is a different fact: the edge leaves this node and the
+    // executor still has no route along it. `#strayRoute` would refuse it at the moment it
+    // would be taken; refusing here is what tells the operator at the door, which is the reason
+    // the ownership check is made twice as well.
     const untakeable = untakeableEdges(ctx.index.edgeById, route.take);
     if (untakeable.length > 0) {
       throw err.policy(CODES.E_ROUTE_INVALID, untakeableMessage(route.nodeId, untakeable), {
