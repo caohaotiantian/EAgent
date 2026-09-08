@@ -430,6 +430,52 @@ test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.c
   assert.match(String(details?.error), /inconsistent at seq 4/, "and so does its message");
 });
 
+test("B · A HOSTILE REJECTION does not defeat the guard that catches it — `instanceof` is trappable", async () => {
+  // THE PREVIOUS LANE'S HARD-WON SHAPE, APPLIED TO THIS LANE'S NEW CODE. `describeThrown` took
+  // four review rounds to become total, and the last of them was exactly this: `e instanceof
+  // Error` walks `[[GetPrototypeOf]]`, which a `Proxy` traps, so a guard's own failure path could
+  // fail. Round 2 of THIS lane re-opened the same hole one question over — `isLoomError(e)`, asked
+  // to recover the original code and to spot a cancellation, is also an `instanceof`, and it was
+  // bare. `loomCodeOf` puts both trappable operations inside a `try` whose catch does nothing.
+  //
+  // A `StateStore` is an extension point, so nothing forces it to reject with an `Error` at all.
+  class Hostile extends BreakableChildStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (isChild(runId) && this.failEveryChildRead) {
+        throw new Proxy({}, {
+          getPrototypeOf() {
+            throw new Error("hostile trap");
+          },
+        });
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const r = gateRig(new Hostile({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.failEveryChildRead = true;
+  const outcome = await outcomeOf(async () => r.engine.advance(runId));
+
+  // THE OBSERVABLE IS THE CLASS, NOT A THROW, and that is the whole reason this test needed a
+  // second draft. A bare `isLoomError` throwing inside the catch does NOT escape `advance` — it
+  // escapes into `#runWave`'s catch one frame out, which turns it into `failed / E_INTERNAL`,
+  // exactly the permanent verdict this lane exists to remove. So "the verb answered" is true at
+  // both commits and proves nothing; what separates them is WHICH answer.
+  //
+  //   at 1b37ef2 (bare `isLoomError`)   failed:E_INTERNAL         — the guard defeated
+  //   here       (`loomCodeOf`)         running                   — deferred, and it will retry
+  assert.notEqual(outcome, "failed:E_INTERNAL", `a hostile rejection must not defeat the guard that catches it: ${outcome}`);
+  assert.ok(!outcome.startsWith("threw"), `and it must not escape the verb either: ${outcome}`);
+});
+
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {
   const r = gateRig(new BreakableChildStore({ now: () => clock }));
   const { runId } = await parked(r);

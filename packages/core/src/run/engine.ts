@@ -755,6 +755,36 @@ function describeThrown(e: unknown): string {
 }
 
 /**
+ * The `code` of a thrown value, when it is safe to ask and the value is one of ours.
+ *
+ * `isLoomError` IS `e instanceof LoomError`, AND `instanceof` IS A TRAPPABLE OPERATION — the very
+ * hole `describeThrown` spent four rounds closing, re-opened the moment a guard's failure path
+ * asked "was this one of ours?" about an untrusted value. `OrdinaryHasInstance` walks
+ * `[[GetPrototypeOf]]`, which a `Proxy` traps; reading `.code` afterwards is a property read on a
+ * caller's object, which a getter traps. Both are inside the `try` and the catch does nothing
+ * trappable, which is what makes this total on the same argument `describeThrown` makes.
+ *
+ * IT ANSWERS `undefined` FOR TWO DIFFERENT FACTS — "not one of ours" and "could not tell" — and
+ * that conflation is deliberate rather than overlooked. Both callers want the same thing from
+ * both: `childUnavailable` omits `details.cause`, and the cancellation guard declines to treat an
+ * undescribable value as a cancellation. Neither is a loosening: an undescribable throw is
+ * converted to the same retryable refusal any other foreign failure gets, which is bounded, and
+ * at base it killed the run outright.
+ *
+ * AND `isLoomError` DOES NOT MEAN "ONE OF OURS" — `errors.ts` says so itself, because an
+ * `instanceof` proves a prototype and not provenance. So the string this returns is still a value
+ * a third party may have chosen, which is why it goes out through `describeThrown` rather than
+ * raw.
+ */
+function loomCodeOf(e: unknown): string | undefined {
+  try {
+    return isLoomError(e) ? describeThrown(e.code) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * A cross-run touch that could not happen, as a RETRYABLE failure of the task that tried it.
  *
  * THE OTHER HALF OF `describeThrown`'S RULE, for the sites where swallowing is not available.
@@ -851,9 +881,10 @@ function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomErro
   // THE ORIGINAL CODE TRAVELS IN `details.cause`. Re-classing an alarm as `unavailable` is what
   // makes the delegation retryable, and it also throws away WHICH failure it was — a reviewer
   // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent as a
-  // plain `E_SUBGRAPH_FAILED` with its code nowhere. `isLoomError` is a shape test on an untrusted
-  // value, so it is asked once and its answer is a string or nothing.
-  const cause = isLoomError(e) ? describeThrown(e.code) : undefined;
+  // plain `E_SUBGRAPH_FAILED` with its code nowhere. Through `loomCodeOf`, never a bare
+  // `isLoomError` — that is an `instanceof`, and asking it about an untrusted value is the
+  // trappable operation this file already paid four rounds for.
+  const cause = loomCodeOf(e);
   process.emitWarning(`${what} for child run ${child}: ${why}; the delegation is deferred and the next pass will try again`, {
     code: "LOOM_CHILD_UNREACHABLE",
     detail: JSON.stringify({ childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) }),
@@ -8372,7 +8403,11 @@ export class Engine {
         // ARGUED FROM THE CALL GRAPH, NOT DRIVEN — no fixture here races an abort against a
         // forward, so this is a guard placed by the same reasoning that shaped the non-goal, and
         // it is named as such rather than presented as a measured path.
-        if (isLoomError(e) && e.code === CODES.E_CANCELLED) throw e;
+        //
+        // THROUGH `loomCodeOf`, for the same reason: a bare `isLoomError(e)` here would be an
+        // `instanceof` on the value a hostile store threw, in the failure path of the guard that
+        // exists to survive it.
+        if (loomCodeOf(e) === CODES.E_CANCELLED) throw e;
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
