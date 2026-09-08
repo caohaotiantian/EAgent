@@ -179,8 +179,12 @@ const MAX_EXPR_DEPTH = 256;
  * The depth of a finished AST, measured with an explicit stack.
  *
  * Iterative on purpose: a recursive measure of "is this too deep to recurse over" is the bug
- * it exists to prevent. It stops as soon as the limit is passed, so the cost is bounded by the
- * limit rather than by the expression.
+ * it exists to prevent.
+ *
+ * ITS COST IS THE AST'S SIZE, not the limit, and this used to claim the opposite. Depth is not
+ * width: `f(a1, …, a100000)` is depth 3, so the walk stops at no limit and visits every node.
+ * O(size) is the right cost for a check that must see the whole tree to answer, and the source
+ * length the parser already consumed bounds it — but "bounded by the limit" was false.
  */
 function tooDeep(e: Expr): boolean {
   const stack: { readonly n: Expr; readonly d: number }[] = [{ n: e, d: 1 }];
@@ -560,7 +564,11 @@ export function checkExpr(
     if (typeErrors.length > 0) return { ok: false, errors: typeErrors.map((e) => e.message) };
     return { ok: true, expr, refs: referencedChannels(expr) };
   } catch (e) {
-    return { ok: false, errors: [(e as Error).message] };
+    // NOT `(e as Error).message`, which is what this said. The widened try now covers
+    // `inferType` and `referencedChannels`, so a non-`Error` throw from either reaches here
+    // where it used to escape — and the cast turned it into `errors: [undefined]`, a diagnostic
+    // with no message, which is worse than the crash it replaced.
+    return { ok: false, errors: [e instanceof Error ? e.message : `expression check failed: ${String(e)}`] };
   }
 }
 
