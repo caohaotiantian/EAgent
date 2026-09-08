@@ -271,6 +271,121 @@ test("EVERY EDGE KIND THE EXECUTOR CAN TAKE, which is not `dagEdges`", () => {
   assert.ok(comp.diagnostics.some((d) => d.code === "GRAPH012_NO_COMPENSATES"));
 });
 
+/**
+ * THE THIRD SHAPE, and it is a NODE TYPE rather than an edge kind: a `join` node.
+ *
+ * Two facts meet. `#maybeFireJoin` fires a `mode:"all"` join only when its branches arrive, so
+ * a gate standing in front of ONE branch is a must-execute ancestor of the join — but
+ * `dominators` intersects over predecessors, and an intersection over the branches cannot
+ * contain it. So `dom_before(j)` never held the gate, and nothing could be LOST. And
+ * `#edgesToTake` dispatches on the EDGE's kind, not on the target node's type, so a `seq` edge
+ * into a join node takes the generic `task.ready` arm and makes the join ready with ZERO
+ * branches arrived — the barrier is not weakened, it is skipped.
+ *
+ * Reproduced end to end at `a678b86`: `ok = true` with no diagnostic, and the human rejected
+ * while `note.append` ran.
+ */
+function joinSpec(): GraphSpec {
+  const base = gatedSpec();
+  const plan = base.nodes[0]!;
+  const gate = base.nodes[1]!;
+  const pay = base.nodes[2]!;
+  return {
+    ...base,
+    channels: { ...base.channels, a: { type: "object", reduce: "replace" }, b: { type: "object", reduce: "replace" } },
+    nodes: [
+      plan,
+      gate,
+      // `function` nodes, so `ran` distinguishes them from the tool the gate guards.
+      { id: n("A"), type: "function", reads: ["plan"], writes: ["a"], function: { ref: "function/detail@stable" } },
+      { id: n("B"), type: "function", reads: ["plan"], writes: ["b"], function: { ref: "function/detail@stable" } },
+      { id: n("j"), type: "join", reads: [], writes: [], join: { branches: [n("A"), n("B")], mode: "all", onBranchError: "fail" } },
+      pay,
+    ],
+    edges: [
+      { id: e("a0"), from: n("plan"), to: n("gate"), kind: "seq" },
+      { id: e("a1"), from: n("gate"), to: n("A"), kind: "seq" },
+      { id: e("a2"), from: n("plan"), to: n("B"), kind: "seq" },
+      { id: e("a3"), from: n("A"), to: n("j"), kind: "join" },
+      { id: e("a4"), from: n("B"), to: n("j"), kind: "join" },
+      { id: e("a5"), from: n("j"), to: n("pay"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("A GRAFT INTO A `join` NODE IS REFUSED, because an edge that is not a `join` edge skips the barrier", () => {
+  const r = attempt(
+    compiled(joinSpec()),
+    mutation({
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("j"), kind: "seq" },
+      ],
+    }),
+  );
+  assert.equal(r.ok, false, "a seq edge into a join node makes it ready with zero branches arrived");
+  assert.ok(
+    r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "j"),
+    r.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.message}`).join(" | "),
+  );
+});
+
+test("…AND THE CONTROL: on the same join graph, a mutation that does not touch the join is accepted", () => {
+  const r = attempt(
+    compiled(joinSpec()),
+    mutation({ addEdges: [{ id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" }] }),
+  );
+  assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
+});
+
+/**
+ * THE CEILING, and its ordinary half either side of the boundary.
+ *
+ * Everything the rule does is quadratic in the BASE graph's node count, it runs inside
+ * `#commit`, and it is reached only because a MODEL proposed an `added -> existing` edge. Before
+ * the bitset rewrite the Set-of-Sets fixpoint took 1.5 GB at 4,000 nodes and killed the process
+ * at 8,000 while the SAME call without the graft edge finished in two seconds — one model-chosen
+ * edge was the difference between a working engine and a dead one. Both halves are here: under
+ * the ceiling the real answer is still computed, over it the rule refuses instead of running.
+ */
+function chainSpec(N: number): GraphSpec {
+  const nodes: unknown[] = [];
+  const edges: unknown[] = [];
+  for (let i = 0; i < N; i++) {
+    nodes.push({ id: n(`c${String(i)}`), type: "function", reads: i === 0 ? ["goal"] : [], writes: [], function: { ref: "function/detail@stable" } });
+    if (i > 0) edges.push({ id: e(`ce${String(i)}`), from: n(`c${String(i - 1)}`), to: n(`c${String(i)}`), kind: "seq" });
+  }
+  const base = gatedSpec();
+  return { ...base, channels: { goal: base.channels["goal"] }, inputs: ["goal"], outputs: [], nodes, edges } as unknown as GraphSpec;
+}
+
+/** `c0 -> hop -> c<N-1>`: a second path to the last node, which the whole chain dominated. */
+const chainGraft = (N: number): Partial<GraphMutation> => ({
+  addNodes: [{ ...HOP, reads: [] } as unknown as NodeSpec],
+  addEdges: [
+    { id: e("m0"), from: n("c0"), to: n("hop"), kind: "seq" },
+    { id: e("m1"), from: n("hop"), to: n(`c${String(N - 1)}`), kind: "seq" },
+  ],
+});
+
+test("UNDER THE CEILING the rule still answers, on a graph two orders of magnitude past any authored one", () => {
+  const N = 4000;
+  const r = attempt(compiled(chainSpec(N)), mutation({ ...chainGraft(N), proposedByNode: n("c0") }));
+  assert.equal(r.ok, false);
+  assert.ok(
+    r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === `c${String(N - 1)}`),
+    r.diagnostics.filter((d) => d.severity === "error").map((d) => d.code).join(", "),
+  );
+});
+
+test("OVER THE CEILING it refuses rather than running, and says which bound it hit", () => {
+  const N = 4200;
+  const r = attempt(compiled(chainSpec(N)), mutation({ ...chainGraft(N), proposedByNode: n("c0") }));
+  assert.equal(r.ok, false);
+  const hit = r.diagnostics.find((d) => d.code === "MUT003_NOT_DOMINATED" && /past the 4096/.test(d.message));
+  assert.ok(hit, r.diagnostics.filter((d) => d.severity === "error").map((d) => d.message).join(" | "));
+});
+
 // ── end to end, through the engine ───────────────────────────────────────────
 
 interface Rig {
@@ -490,6 +605,42 @@ test("…AND THE SAME THING WITH A BACK-EDGE INTO THE ENTRY, which turned the wh
   }
   assert.notEqual(p.status, "succeeded");
   assert.deepEqual(r.ran, [], "no node with an empty predecessor list is not the same as no entry");
+});
+
+/** The join bypass end to end — the shape `dominators` could not see, because it never held the gate. */
+const JOIN_GRAFTER: MockScript = () => ({
+  text: JSON.stringify({
+    plan: { ok: true },
+    mutation: {
+      addNodes: [{ ...HOP, reads: [] }],
+      addEdges: [
+        { id: "m0", from: "plan", to: "hop", kind: "seq" },
+        { id: "m1", from: "hop", to: "j", kind: "seq" },
+      ],
+    },
+  }),
+  finishReason: "stop",
+});
+
+test("…AND THE SAME THING THROUGH A `join` NODE, where a seq edge fires the barrier with nothing arrived", async () => {
+  const r = rig(JOIN_GRAFTER);
+  const runId = await r.engine.submit({ graph: compiled(joinSpec()), inputs: { goal: "go" } });
+  let p = await r.engine.advance(runId);
+  if (p.status === "awaiting_gate") {
+    const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+    p = await r.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "reject", reason: "no" },
+      actor: { kind: "human", subject: "u:a", via: "console" },
+      idempotencyKey: "k",
+    });
+  }
+  assert.notEqual(p.status, "succeeded");
+  assert.deepEqual(
+    r.ran.filter((x) => x === "note.append"),
+    [],
+    "the tool the gate stands in front of must not have run",
+  );
 });
 
 test("THE ORDINARY HALF END TO END: the same graph, no mutation, approve and the tool runs", async () => {

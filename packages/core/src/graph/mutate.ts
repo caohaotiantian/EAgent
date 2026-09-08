@@ -224,11 +224,85 @@ export function compileMutation(input: MutateInput): MutationResult {
       nodes: [...spec.nodes, ...mutation.addNodes],
       edges: [...spec.edges, ...mutation.addEdges],
     };
+    const named = grafts.map((e) => `"${e.id}"`).join(", ");
+    const byId = new Map(spec.nodes.map((v) => [v.id, v]));
+
+    // A `join` TARGET IS REFUSED OUTRIGHT, and here the shape-ban is the correct rule rather
+    // than the lazy one. Two facts meet on it. `#edgesToTake` dispatches on the EDGE's kind and
+    // not on the target node's type, so a `seq` edge into a join node takes the generic
+    // `task.ready` arm and makes the join ready with ZERO branches arrived — the barrier is not
+    // weakened, it is skipped. And `dominators` cannot see that it was: an `all` join fires only
+    // when every branch arrives, so a gate in front of ONE branch is a must-execute ancestor of
+    // the join, but an INTERSECTION over the branches can never contain it. `dom_before(j)`
+    // never held the gate, so nothing could be lost. Measured on `plan -> gate -> A`,
+    // `plan -> B`, `A|B -[join]-> j -> pay`, mutation `{plan->hop, hop->j seq}`: `ok = true`
+    // with no diagnostic, and end to end the human rejected while `note.append` ran.
+    //
+    // WHY NOT MAKE `dominators` HONEST INSTEAD, which is the obvious repair — take the UNION of
+    // the branch dominators for an `all` join rather than their intersection. Because the union
+    // is not sound: `#fireEmptyJoin` fires a join whose fan-out produced NO branches, so a gate
+    // inside a branch that never materialised did not execute, and a rule resting on the union
+    // would call it a dominator anyway. It is unsound for `quorum` and `firstSuccess` for the
+    // plainer reason that a named branch need not arrive at all. An under-approximated `before`
+    // is safe here — it can only fail to refuse — and every node DOWNSTREAM of the join still
+    // carries `j` itself in its set, so a graft that routes around the join loses `j` and is
+    // caught by the loop below. The join node itself was the one hole, and it closes by
+    // refusing rather than by guessing.
+    for (const g of grafts) {
+      if (byId.get(g.to)?.type !== "join") continue;
+      diagnostics.push({
+        severity: "error",
+        code: "MUT003_NOT_DOMINATED",
+        message:
+          `edge "${g.id}" enters the join node "${g.to}"; an edge that is not a join edge makes a join ready ` +
+          `with none of its branches arrived, so the barrier — and every gate standing in front of a branch — ` +
+          `is skipped`,
+        at: { nodeId: g.to },
+        fix: `re-enter downstream of "${g.to}", or drop the edge`,
+      });
+    }
+
+    // THE SIZE CEILING, and it is a refusal rather than a slow path. This runs inside `#commit`
+    // on the live run, and it is reached only because a MODEL proposed an `added -> existing`
+    // edge. Everything below is quadratic in the BASE graph's node count — the fixpoint in
+    // bitset words, `indexGraph`'s own `ancestors` map in Set entries — and a quadratic a model
+    // can reach on the commit path is an availability hole whatever its constant, so past a
+    // bound the question is answered "refuse" rather than answered slowly. Measured on a chain
+    // of N nodes with one graft edge, whole `compileMutation` call, against the same call with
+    // the graft edge removed (which skips all of this):
+    //
+    //     N        with the graft          without it
+    //     1000      46 ms /   49 MB
+    //     2000     168 ms /  211 MB
+    //     4000     675 ms /  467 MB
+    //     8000    3093 ms / 1837 MB      1059 ms / 1033 MB
+    //
+    // The Set-of-Sets form this replaced was 115 ms / 122 MB at 1,000 and died of heap
+    // exhaustion at 8,000, so the bound is the second of two fixes and not a substitute for the
+    // first. 4,096 sits three orders of magnitude above any authored graph in this tree (the
+    // largest is 7 nodes; `scale.test.ts` compiles 500) and below where the cost stops being
+    // ordinary. It is a flat constant on purpose: the cost is driven by the BASE graph's size,
+    // which `expansion.maxNodes` — a budget for ADDED nodes — says nothing about.
+    if (grafted.nodes.length > MAX_DOMINATOR_NODES) {
+      diagnostics.push({
+        severity: "error",
+        code: "MUT003_NOT_DOMINATED",
+        message:
+          `edge ${named} would need a dominator check over ${grafted.nodes.length} nodes, past the ` +
+          `${MAX_DOMINATOR_NODES} this rule answers for; a mutation may not feed an existing node in a graph ` +
+          `this large`,
+        at: { edgeId: grafts[0]!.id },
+      });
+    } else {
+    // AFTER the ceiling, not before it: `indexGraph` builds an `ancestors` Map of Sets that is
+    // itself O(V^2), so calling it on an unbounded graph would put back the memory the bitset
+    // and the ceiling just took out. Measured on the 8,000-node chain, this order is what turns
+    // 1,838 MB into 1,033 MB — the whole remainder being `compile`'s own index, which every
+    // mutation pays anyway.
     const baseIdx = indexGraph(spec);
     const graftedIdx = indexGraph(grafted);
     const before = dominators(spec.nodes, traversable(spec), baseIdx.topoOrder, baseIdx.entryNodes);
     const after = dominators(grafted.nodes, traversable(grafted), graftedIdx.topoOrder, graftedIdx.entryNodes);
-    const named = grafts.map((e) => `"${e.id}"`).join(", ");
     // NO ENTRY, NO ANSWER. Dominance is defined relative to where the run starts, so a grafted
     // graph with no entry node makes the question undecidable rather than false — and an
     // undecidable guard refuses. `compile` would also refuse it GRAPH001_NO_ENTRY, but this rule
@@ -244,7 +318,7 @@ export function compileMutation(input: MutateInput): MutationResult {
       });
     }
     for (const v of spec.nodes) {
-      const lost = [...(before.get(v.id) ?? [])].filter((id) => !(after.get(v.id)?.has(id) ?? false));
+      const lost = before.lostBy(v.id, after);
       if (lost.length === 0) continue;
       const which = lost.map((id) => `"${id}"`).join(", ");
       diagnostics.push({
@@ -256,6 +330,7 @@ export function compileMutation(input: MutateInput): MutationResult {
         at: { nodeId: v.id },
         fix: `re-enter downstream of ${which}, or drop the edge into "${v.id}"`,
       });
+    }
     }
   }
 
@@ -346,6 +421,19 @@ export function compileMutation(input: MutateInput): MutationResult {
 }
 
 /**
+ * The largest graph the dominator rule answers for; past it the rule refuses. See the ceiling's
+ * own comment in `compileMutation` for the measurements and for why it is flat.
+ */
+const MAX_DOMINATOR_NODES = 4096;
+
+/** Dominator sets, held as one bit per (node, dominator) — see `dominators`. */
+interface DomSets {
+  /** The ids this node lost between the two computations; empty when its region is intact. */
+  lostBy: (id: NodeId, after: DomSets) => readonly NodeId[];
+  has: (id: NodeId, dominator: NodeId) => boolean;
+}
+
+/**
  * Which nodes every path to each node must pass through.
  *
  * The textbook iterative fixpoint, and it is here rather than in `validate.ts` because one
@@ -390,49 +478,112 @@ export function compileMutation(input: MutateInput): MutationResult {
  * look only at what a node LOST. Not at what it gained: a node with no inbound edge starts at
  * `{itself}`, so acquiring a predecessor GROWS its set — "adding an edge can only remove
  * dominators" is false for exactly that node, and this used to say so.
+ *
+ * ONE BIT PER (NODE, DOMINATOR) rather than a `Set` per node, and that is an availability fix
+ * rather than a tidy-up. The Set-of-Sets form allocated V sets of size V and a fresh
+ * intersection per predecessor per sweep, on the LIVE commit path, reached because a model
+ * proposed one `added -> existing` edge. Measured on a chain of N nodes with one graft edge:
+ *
+ *     N        Set-of-Sets              bitset
+ *     1000     115 ms / 122 MB
+ *     2000     456 ms / 428 MB
+ *     4000    2111 ms / 1503 MB
+ *     8000    heap out of memory        (and see the node ceiling at the caller)
+ *
+ * The same graph WITHOUT the graft edge finished in 2 s, so that one edge was the difference
+ * between a working engine and a dead process. The bitset is V*ceil(V/32) words — 8 MB at
+ * 8,000 — and the caller refuses past a node ceiling on top of it, because a bounded quadratic
+ * is still a quadratic on a path a model can reach.
+ *
+ * The result is deliberately NOT a Map of Sets: materialising V sets of V ids to hand back
+ * would put the memory straight back. `lostBy` walks one row against the other computation.
  */
 function dominators(
   nodes: readonly NodeSpec[],
   edges: readonly EdgeSpec[],
   topoOrder: readonly NodeId[],
   entryNodes: readonly NodeId[],
-): ReadonlyMap<NodeId, ReadonlySet<NodeId>> {
+): DomSets {
   const ids = nodes.map((n) => n.id);
-  const preds = new Map<NodeId, NodeId[]>();
-  for (const id of ids) preds.set(id, []);
-  for (const e of edges) preds.get(e.to)?.push(e.from);
+  const at = new Map<NodeId, number>();
+  ids.forEach((id, i) => at.set(id, i));
+  const words = Math.max(1, Math.ceil(ids.length / 32));
 
-  const entries = new Set<NodeId>(entryNodes.filter((id) => preds.has(id)));
+  const preds: number[][] = ids.map(() => []);
+  for (const e of edges) {
+    const to = at.get(e.to);
+    const from = at.get(e.from);
+    // An edge from or to an id no node declares; `compile` reports it as its own diagnostic.
+    if (to !== undefined && from !== undefined) preds[to]!.push(from);
+  }
+
+  const entries = new Set<number>();
+  for (const id of entryNodes) {
+    const i = at.get(id);
+    if (i !== undefined) entries.add(i);
+  }
   // A node with no predecessor at all is an entry too even where `entryNodes` disagrees — it is
   // unreachable, and seeding it `{itself}` keeps it out of every other node's intersection.
-  for (const id of ids) if (preds.get(id)!.length === 0) entries.add(id);
+  for (let i = 0; i < ids.length; i++) if (preds[i]!.length === 0) entries.add(i);
 
-  const dom = new Map<NodeId, Set<NodeId>>();
-  for (const id of ids) dom.set(id, entries.has(id) ? new Set([id]) : new Set(ids));
+  const rows: Uint32Array[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    const row = new Uint32Array(words);
+    if (entries.has(i)) row[i >>> 5]! |= 1 << (i & 31);
+    else {
+      row.fill(0xff_ff_ff_ff);
+      // The tail past `ids.length` must stay clear or every row "differs" forever.
+      const spare = words * 32 - ids.length;
+      if (spare > 0) row[words - 1] = 0xff_ff_ff_ff >>> spare;
+    }
+    rows.push(row);
+  }
 
   const seen = new Set<NodeId>(topoOrder);
-  const order = [...topoOrder.filter((id) => preds.has(id)), ...ids.filter((id) => !seen.has(id))];
+  const order = [
+    ...topoOrder.map((id) => at.get(id)).filter((i): i is number => i !== undefined),
+    ...ids.map((id, i) => (seen.has(id) ? -1 : i)).filter((i) => i >= 0),
+  ];
 
+  const next = new Uint32Array(words);
   for (let changed = true; changed; ) {
     changed = false;
-    for (const id of order) {
-      if (entries.has(id)) continue;
-      const p = preds.get(id)!;
-      let next: Set<NodeId> | undefined;
-      for (const q of p) {
-        const dq = dom.get(q);
-        if (dq === undefined) continue; // an edge from an id no node declares; `compile` reports it
-        next = next === undefined ? new Set(dq) : new Set([...next].filter((x) => dq.has(x)));
+    for (const i of order) {
+      if (entries.has(i)) continue;
+      const p = preds[i]!;
+      next.set(rows[p[0]!]!);
+      for (let k = 1; k < p.length; k++) {
+        const dq = rows[p[k]!]!;
+        for (let w = 0; w < words; w++) next[w]! &= dq[w]!;
       }
-      if (next === undefined) continue;
-      next.add(id);
-      const cur = dom.get(id)!;
-      if (next.size === cur.size && [...next].every((x) => cur.has(x))) continue;
-      dom.set(id, next);
+      next[i >>> 5]! |= 1 << (i & 31);
+      const cur = rows[i]!;
+      let same = true;
+      for (let w = 0; w < words; w++) if (next[w] !== cur[w]) { same = false; break; }
+      if (same) continue;
+      cur.set(next);
       changed = true;
     }
   }
-  return dom;
+  return {
+    lostBy(id, after) {
+      const i = at.get(id);
+      if (i === undefined) return [];
+      const row = rows[i]!;
+      const lost: NodeId[] = [];
+      for (let j = 0; j < ids.length; j++) {
+        if ((row[j >>> 5]! & (1 << (j & 31))) === 0) continue;
+        if (!after.has(id, ids[j]!)) lost.push(ids[j]!);
+      }
+      return lost;
+    },
+    has(id, dominator) {
+      const i = at.get(id);
+      const j = at.get(dominator);
+      if (i === undefined || j === undefined) return false;
+      return (rows[i]![j >>> 5]! & (1 << (j & 31))) !== 0;
+    },
+  };
 }
 
 /** Nodes reachable from a node, for a caller checking a proposer's region. */
