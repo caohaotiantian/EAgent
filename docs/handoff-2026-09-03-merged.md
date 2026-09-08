@@ -1,5 +1,9 @@
 # Handoff — 2026-09-03, after the merge
 
+**Superseded by `handoff-2026-09-08.md`** (two waves later: §1's numbers, §5's list and the
+worktree inventory are all stale there, and §5's kernel claim below was false — corrected in
+place). Read this one for §3, the run-clock story, which still holds.
+
 Supersedes `handoff-2026-09-03.md`, which was written before any of this landed and whose §4
 ranked list is now closed. Read that one only for the history of how the lanes were built.
 
@@ -107,7 +111,9 @@ Twelve confirmed findings across two rounds. What produced them:
 - **Two compile-time diagnostics belong in `graph/validate.ts`** and were left there deliberately:
   nothing checks `contextProjection`'s `take`, `overflow` or `maxTokens` at compile, so a graph
   with `take: "abc"` or `overflow: "TRUNCATE_TAIL"` compiles clean and refuses at run time. The
-  runtime half is done; the diagnostic is the right shape and that file is pinned kernel.
+  runtime half is done; the diagnostic is the right shape. (This sentence used to end "and that
+  file is pinned kernel" — false: `graph/validate.ts` is an explicit `notKernel` entry in
+  `scripts/kernel.json`, and the diagnostics landed there at `086fe75` without a seam.)
 
 ---
 
