@@ -1255,3 +1255,89 @@ test("A DELEGATION SEEDED FROM A FAN BINDING CARRIES THE TAINT TOO — the seed 
   assert.equal(clean.gates, 0, "no gate on a fan nobody untrusted touched");
   assert.equal(clean.wrote, 1, "and the write runs");
 });
+
+/**
+ * A store whose `policy.escalated` append FAILS, which is the crash this rule's evidence has to
+ * survive.
+ *
+ * `#escalate` does not append inline: `onEscalate` pushes onto `ctx.escalationWrites` and the
+ * advance loop drains it AFTER `#runWave`, while the join's `task.ready` is committed inside the
+ * wave. So there is a window in which the schedule is durable and the escalation is not, and a
+ * failed append is the cheapest faithful way into it — the drain rejects, `advance` throws, and
+ * what is left on disk is precisely what a `kill -9` in that window leaves: the join ready, the
+ * branch's gate passed over, no `policy.escalated`, and no `gate.raised` because the join has not
+ * been decided yet.
+ */
+function escalationAppendFails(inner: MemoryStateStore): MemoryStateStore {
+  const wrapper = {
+    append: (input: { events?: readonly { type: string }[] }) => {
+      if ((input.events ?? []).some((e) => e.type === "policy.escalated")) {
+        return Promise.reject(new Error("the escalation append was lost"));
+      }
+      return (inner as unknown as { append: (i: unknown) => unknown }).append(input) as Promise<never>;
+    },
+    head: (runId: RunId) => inner.head(runId),
+    listRuns: (limit?: number, filter?: unknown) =>
+      (inner as unknown as { listRuns: (l?: number, f?: unknown) => unknown }).listRuns(limit, filter),
+    close: () => inner.close(),
+    read: (runId: RunId, fromSeq: number, toSeq?: number) =>
+      (inner as unknown as { read: (r: RunId, f: number, t?: number) => AsyncIterable<unknown> }).read(runId, fromSeq, toSeq),
+  };
+  return wrapper as unknown as MemoryStateStore;
+}
+
+/**
+ * E12 IS RE-DERIVED AT ATTACH, AND IT WAS THE ONLY `#escalate` SITE THAT WAS NOT.
+ *
+ * The row above pins the ordinary restart, where the `policy.escalated` append landed and
+ * `PolicyEngine.restore` folds it — which is why that row passes with or without this fold. This
+ * one pins the append not landing. Before `#escalateSkippedGate` was reachable from
+ * `#restoreEvidence`, the second process rebuilt `ctx.tainted` and `ctx.controlTainted` from the
+ * journal, found the join already scheduled and undecided, and had nothing anywhere that said a
+ * gate had been passed over:
+ *
+ *     append kept, second process   -> awaiting_gate, gates=1, wrote=0   (both)
+ *     append LOST, second process   -> succeeded,     gates=0, wrote=1   (before)
+ *     append LOST, second process   -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * The evidence is `fanout.planned`: durable, carries the width, and appended in the same batch as
+ * and AFTER the planning task's own `task.committed`, so the fold re-derives the predicate
+ * against the taint state the live path saw. `PolicyEngine.escalate` is idempotent, so the run
+ * whose append survived re-derives the same escalation and appends nothing.
+ */
+test("THE SKIPPED GATE IS RE-DERIVED WHEN THE ESCALATION APPEND WAS LOST", async () => {
+  const store = new MemoryStateStore({ now: NOW });
+  const graph = graphFor({ page: "NONE", gateOnBranch: true });
+  const first = engineOver(escalationAppendFails(store), "NONE");
+  const runId = await first.engine.submit({ graph, inputs: { request: "please" } });
+  await assert.rejects(
+    () => first.engine.advance(runId as RunId),
+    /the escalation append was lost/,
+    "precondition: the escalation append is what fails, and it takes `advance` with it",
+  );
+  assert.equal(first.wrote(), 0, "precondition: nothing written in the process that died");
+
+  // The journal now holds the join's `task.ready` and no `policy.escalated`. A second process,
+  // over the real store, with none of the first one's memory.
+  const second = engineOver(store, "NONE");
+  await second.engine.attach(runId as RunId, graph);
+  const after = await second.engine.advance(runId as RunId);
+  assert.equal(second.wrote(), 0, "a lost escalation append let the downstream through");
+  assert.equal(after.status, "awaiting_gate", `the fold did not re-derive the skipped gate: ${after.status}`);
+  assert.equal(Object.keys(after.gates).length, 1, "and exactly one gate, re-raised once");
+
+  // AND THE HALF THAT MUST NOT MOVE: the same journal shape for a fan whose width came from the
+  // run's own input. There is nothing to re-derive, so nothing is — the fold must not invent a
+  // gate for an empty fan that is simply an empty day.
+  const cleanStore = new MemoryStateStore({ now: NOW });
+  const cleanGraph = graphFor({ page: "NONE", gateOnBranch: true, listFrom: "input" });
+  const c1 = engineOver(cleanStore, "NONE");
+  const cleanRun = await c1.engine.submit({ graph: cleanGraph, inputs: { request: "NONE flagged today" } });
+  const cleanHeld = await c1.engine.advance(cleanRun as RunId);
+  assert.equal(cleanHeld.status, "succeeded", `precondition: a clean empty fan runs: ${cleanHeld.status}`);
+  const c2 = engineOver(cleanStore, "NONE");
+  await c2.engine.attach(cleanRun as RunId, cleanGraph);
+  const cleanAfter = await c2.engine.advance(cleanRun as RunId);
+  assert.equal(cleanAfter.status, "succeeded", `the fold invented a gate on a clean width: ${cleanAfter.status}`);
+  assert.equal(Object.keys(cleanAfter.gates).length, 0, "and raised none");
+});

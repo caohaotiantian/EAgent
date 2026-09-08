@@ -2077,6 +2077,18 @@ export class Engine {
         ctx.streaks.record(parseTaskId(ev.taskId).nodeId, false);
         continue;
       }
+      // E12'S EVIDENCE, AND IT IS THE ONLY ARM HERE THAT IS NOT `task.committed`. `fanout.planned`
+      // is durable and carries the width; it is appended in the same batch as, and AFTER, the
+      // planning task's own `task.committed`, so by this line `ctx.tainted` and
+      // `ctx.controlTainted` hold exactly what they held when `#fireEmptyJoin` ran live. The
+      // planner's branch is the one in the event's own `taskId` — `fanout.planned.nodeId` is
+      // `e.to`, the fan body's head, NOT the planner. See `#escalateSkippedGate`.
+      if (isEvent(ev, "fanout.planned")) {
+        if (ev.payload.width !== 0) continue;
+        const fanEdge = ctx.index.edgeById.get(ev.payload.edgeId as EdgeId);
+        if (fanEdge !== undefined) this.#escalateSkippedGate(ctx, fanEdge, parseTaskId(ev.taskId).branch);
+        continue;
+      }
       if (!isEvent(ev, "task.committed")) continue;
       const parsed = parseTaskId(ev.taskId);
       const nodeId = parsed.nodeId;
@@ -2508,6 +2520,14 @@ export class Engine {
     // breached, so it says nothing about a run sitting at two. Only the sets and the
     // counter do, which is exactly what invariant 2 means by "rebuildable by folding".
     await this.#restoreEvidence(ctx);
+
+    // AN ESCALATION THE FOLD RE-RAISED HAS TO REACH DISK HERE, not on the next wave. The advance
+    // loop drains `escalationWrites` after `#runWave`, and a run that attaches with nothing
+    // runnable — parked on a gate, or finished — returns before that line, so a re-raise would
+    // live only in this process's `PolicyEngine`. That is the failure this fold exists to close,
+    // one layer out.
+    const raised = ctx.escalationWrites.splice(0);
+    if (raised.length > 0) await Promise.all(raised);
   }
 
   /**
@@ -9821,22 +9841,12 @@ export class Engine {
    */
   #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
     const events: NewEvent[] = [];
-    // WHOSE WIDTH IT WAS is the predicate, and it is `fanoutWidthEvidence` — the SAME function
-    // `applyFanoutWidthTaint` calls, because this line used to be a second copy of it that had
-    // drifted narrower. See that function for the two sources and the graph that measured the
-    // one this was missing.
-    const source = ctx.index.byId.get(fanout.from);
-    const attackerWidth =
-      source !== undefined && fanoutWidthEvidence(ctx, parent, source, fanout) !== undefined;
-    const skipped = attackerWidth ? [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id))) : [];
+    this.#escalateSkippedGate(ctx, fanout, parent);
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
       const id = makeTaskId(e.to, parent, 0);
       if (events.some((x) => x.taskId === id)) continue;
-      if (skipped.length > 0) {
-        this.#escalate(ctx, "fanout_skipped_gate", e.to, { edgeId: fanout.id, skipped });
-      }
       events.push({
         type: "task.ready",
         payload: { nodeId: e.to, branchPath: encodeBranch(parent), edgesIn: [e.id] },
@@ -9845,6 +9855,51 @@ export class Engine {
       });
     }
     return events;
+  }
+
+  /**
+   * E12 — a fan-out of width zero passed over oversight the graph declared on its branch.
+   *
+   * SPLIT OUT OF `#fireEmptyJoin` SO THE FOLD CAN CALL IT, which is the whole reason it is a
+   * method of its own. Raised live at the planning commit and re-derived at attach from
+   * `fanout.planned`, exactly as `applyTaint`, `applyFanoutTaint`, `applyFanoutWidthTaint` and
+   * `applyControlTaint` are — this was the one `#escalate` site in the file whose evidence no
+   * fold rebuilt, and it landed on `loom` with this branch.
+   *
+   * WHY THAT MATTERED, and it is not the ordinary restart. `policy.escalated` is durable and
+   * `PolicyEngine.restore` folds it, so an escalation whose append LANDED survives a restart
+   * already (`empty-fanout-oversight.test.ts`'s "THE SKIPPED GATE SURVIVES A RESTART" pins that).
+   * But `#escalate` appends in its OWN transaction — `onEscalate` pushes onto
+   * `ctx.escalationWrites` and the advance loop drains it after `#runWave` — while the join's
+   * `task.ready` is committed inside the wave. A crash in that window leaves the join scheduled,
+   * the branch's gate passed over, and nothing anywhere able to say so. Every other rule in the
+   * table re-derives its evidence at attach and re-raises; this one could not.
+   *
+   * RE-RAISING IS SAFE BECAUSE IT IS IDEMPOTENT. `PolicyEngine.escalate` returns without calling
+   * `onEscalate` when the posture it would set is the one already held, and `ctx.policy.restore`
+   * runs BEFORE `#restoreEvidence`, so a run whose append survived folds the row, re-derives the
+   * same escalation, and appends nothing. The append happens only when the original was lost —
+   * which is the definition of re-derivable.
+   *
+   * WHOSE WIDTH IT WAS is `fanoutWidthEvidence` — the SAME function `applyFanoutWidthTaint`
+   * calls, because this predicate used to be a second copy of it that had drifted narrower. See
+   * that function for the two sources and the graph that measured the one this was missing. The
+   * UNSKIPPABLE set is `carriesOversight`: `human_gate`, and `subgraph` because its own body may
+   * hold one the parent cannot see.
+   */
+  #escalateSkippedGate(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): void {
+    const source = ctx.index.byId.get(fanout.from);
+    if (source === undefined || fanoutWidthEvidence(ctx, parent, source, fanout) === undefined) return;
+    const skipped = [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id)));
+    if (skipped.length === 0) return;
+    const seen = new Set<NodeId>();
+    for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
+      if (e.kind !== "join") continue;
+      if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
+      if (seen.has(e.to)) continue;
+      seen.add(e.to);
+      this.#escalate(ctx, "fanout_skipped_gate", e.to, { edgeId: fanout.id, skipped });
+    }
   }
 
   /** One branch Task of a fan-out, at a determined coordinate. */
