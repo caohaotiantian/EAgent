@@ -682,6 +682,52 @@ function detailsOf(result: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * What was thrown, as a string, when the point of the string is that the thrower cannot be trusted.
+ *
+ * `e instanceof Error ? e.message : String(e)` is the idiom everywhere a failure is described
+ * rather than rethrown, and it has a hole: `String(Object.create(null))` throws. That is harmless
+ * where the catch rethrows anyway, and it is the whole defect where the catch exists to SWALLOW —
+ * a guard whose failure path can fail is not a guard, and the thrower is a third-party
+ * `StateStore`, an extension point that owes nobody an `Error`.
+ *
+ * IT IS TOTAL, AND THAT TOOK FOUR ROUNDS BECAUSE DESCRIBING A VALUE IS THREE OPERATIONS, EACH OF
+ * WHICH A HOSTILE VALUE CAN TRAP. `String(e)` throws on `Object.create(null)`. Reading `e.message`
+ * throws on a getter that throws, and a `message` that is a null-prototype object survives the
+ * read and then throws in the CALLER's template literal — `Cannot convert object to primitive
+ * value`, the very symptom the first attempt was written to stop. And `e instanceof Error` throws
+ * on a `Proxy` whose `getPrototypeOf` trap throws, because `OrdinaryHasInstance` walks the
+ * prototype chain — which defeated the version that did the `instanceof` INSIDE ITS OWN CATCH.
+ *
+ * SO THE CATCH USES `typeof` AND NOTHING ELSE. `typeof` is the one operation that invokes no trap,
+ * calls no getter and performs no coercion, on any value including a revoked `Proxy`; every other
+ * operation is inside the `try`. That is what makes the "cannot throw" claim checkable rather than
+ * hopeful, and the four shapes are pinned in
+ * `engine-child-journal-does-not-fail-the-parent.test.ts` — one per operation, plus the caller's
+ * coercion, which is why the result is coerced HERE rather than at the call site.
+ *
+ * IT NAMES THE FAILURE, NOT A CAUSE. The four shapes fail at three different operations, so the
+ * fallback says only that describing threw. An earlier version said "its own string conversion
+ * threw", and measured against THIS code that is false for two of the four — shape 2 dies reading
+ * `message` and shape 4 dies testing `instanceof`, neither of which is a conversion. (It reads
+ * worse still against the version that wrote it, where a third shape's conversion happened in the
+ * caller; the count depends on which code you hold it against, which is the tell that the sentence
+ * was never checkable.)
+ */
+function describeThrown(e: unknown): string {
+  try {
+    // Every trappable operation is in here: the `instanceof` test, the `message` read, and the
+    // coercion. `typeof raw` cannot throw, so the string branch is a free early exit.
+    const raw: unknown = e instanceof Error ? e.message : e;
+    return typeof raw === "string" ? raw : String(raw);
+  } catch {
+    // ONLY `typeof`, which is why this line is total. Anything richer — re-testing `instanceof`,
+    // reading a property, coercing — is another operation the same hostile value can trap, and
+    // this catch has nowhere left to fall.
+    return `<undescribable ${typeof e}: threw while describing>`;
+  }
+}
+
+/**
  * The `compensation.recorded` row for one decided step. ONE WRITER, AND NOW ONE CALLER.
  *
  * It was two: `#compensate` wrote the dispatched rows and `#compensateChild` wrote the rows for a
@@ -2891,14 +2937,77 @@ export class Engine {
    * "wait for the child" argument, by `executor:subgraph` on the same inheritance argument, and
    * the same two swallowed codes for the same reasons. A mirror whose child gate is open, absent,
    * or belongs to a run this engine cannot fold is left alone — refusing to answer is always
-   * allowed.
+   * allowed. That last clause was ASPIRATIONAL until the read below was wrapped: "cannot fold"
+   * meant a THROW out of the parent's own `advance`, which is the opposite of leaving it alone.
    */
   async #answerMirrorsTheChildAlreadyDecided(ctx: RunContext, p: RunProjection): Promise<boolean> {
     const mirrors = Object.values(p.gates).filter((g) => g.state === "open" && g.mirrorOf !== undefined);
     if (mirrors.length === 0) return false;
     let wrote = false;
     for (const mirror of mirrors) {
-      const childP = await this.projection(`${String(ctx.runId)}~${String(mirror.taskId)}` as RunId);
+      // THE CHILD'S JOURNAL IS ANOTHER RUN'S DISK, read in the middle of THIS run's drive loop —
+      // so it is wrapped for the reason `#forwardToParentMirrorsQuietly` wraps the other
+      // direction, with the roles swapped. Unwrapped, a child whose store could not be read was
+      // the answer to `advance` on the PARENT: measured at `3d05cff`, `PARENT ADVANCE OUTCOME:
+      // threw:sqlite: child disk I/O error`. Every verb that reaches this loop — `advance`,
+      // `resolveGate`, `rewind` — is a question about the parent, and another run's disk is not
+      // an answer to it.
+      //
+      // PER MIRROR, NOT AROUND THE METHOD, because the return value is load-bearing: `wrote` tells
+      // the drive loop that `p` is stale and the pass must restart. A wrapper around the whole
+      // method would have to answer `false` after a partial write, and the loop would then decide
+      // from a projection the journal no longer matches. Scoped here, one unreadable child can
+      // neither hide a sibling's answer nor falsify `wrote`.
+      //
+      // FAIL CLOSED IS `continue`: nothing approved and nothing marked, so the mirror stays
+      // `open` — the one state a human can see and act on — and the next pass reads again.
+      //
+      // ONLY THE READ. The `#gates.resolve` below writes THIS run's own log, and a run's verb
+      // SHOULD fail on its own store; swallowing that would be a run hiding its own journal from
+      // its own caller. The cross-run read is the courtesy, and the courtesy is what refuses.
+      const childRunId = `${String(ctx.runId)}~${String(mirror.taskId)}` as RunId;
+      let childP: RunProjection | undefined;
+      try {
+        childP = await this.projection(childRunId);
+      } catch (e) {
+        // A SIBLING CODE, NOT `LOOM_MIRROR_FORWARD_FAILED`. The two carry opposite facts and
+        // opposite remediations — that one says the PARENT's store failed, reached from a healthy
+        // child; this one says the CHILD's store failed, reached from a healthy parent — and an
+        // operator filtering stderr by code is asking exactly which journal is broken. Both run
+        // ids are in the message for the same reason. With the SHIPPED store both runs share one
+        // SQLite file, so in practice a broken child journal means a broken everything and the
+        // parent's own next append says so too; the two codes separate them for a partitioned
+        // `StateStore`, which the extension point permits and this test's double stands in for.
+        //
+        // ONCE PER OPEN MIRROR PER PASS. The rate that was MEASURED is one warning per
+        // `advance` of a parent whose only remaining work is the mirror — one open mirror, one
+        // pass, one warning. It is NOT the general rate, and TWO mechanisms raise it, not one: the
+        // drive loop re-enters this method after every write WITHIN a single `advance`, so a
+        // parent with other work warns once per lap of `for(;;)`; and such a parent is also `due`
+        // (a `ready` or `leased` task), so the run clock advances it again unprompted. Together
+        // that is the storm `#forwardToParentMirrorsQuietly` already produces. No
+        // dedupe set even so, deliberately — it would be memory a restart hands back empty whose
+        // only reader is "do we print", and suppressing the repeat of a store that is still broken
+        // is the wrong direction for a pass that has just refused to act.
+        //
+        // AND IT IS NOT ONLY ANOTHER RUN'S DISK. `projection` also raises `E_TRACE_INCONSISTENT`
+        // and whatever `foldRun` throws on a malformed journal — invariant-2 alarms, reduced here
+        // to a warning because they arrived through a DIFFERENT run's verb, where they are not
+        // decidable; the child's own verb still raises them. A throw on the re-read that FOLLOWS
+        // `ctx.folder.restart()` — the read is the line after it, never inside it — also leaves
+        // the child's live folder reset to seq 0, which the next `#project` re-folds from 1.
+        //
+        // THE STRINGIFY CANNOT THROW. `StateStore` is an extension point, so nothing forces a
+        // third-party store to reject with an `Error`, and `String(Object.create(null))` throws —
+        // out of the catch, out of `advance`, which is the one outcome this block exists to
+        // prevent. A guard whose failure path can fail is not a guard.
+        const why = describeThrown(e);
+        process.emitWarning(
+          `could not read child run ${String(childRunId)}'s journal to answer run ${String(ctx.runId)}'s mirror ${String(mirror.gateId)}: ${why}; the mirror stays open and the next pass will try again`,
+          { code: "LOOM_MIRROR_ANSWER_FAILED", detail: JSON.stringify({ runId: ctx.runId, childRunId, error: why }) },
+        );
+        continue;
+      }
       if (childP === undefined) continue;
       if (childP.gates[mirror.mirrorOf!]?.state !== "decided") continue;
       try {
@@ -2962,7 +3071,10 @@ export class Engine {
     try {
       await this.#forwardToParentMirrors(runId, p, checked);
     } catch (e) {
-      const why = e instanceof Error ? e.message : String(e);
+      // `describeThrown`, not the bare idiom: this catch swallows EVERYTHING by contract, and
+      // the idiom's own failure on an undescribable rejection was the one case where it did not.
+      // The pair is deliberately not left to agree by review.
+      const why = describeThrown(e);
       process.emitWarning(
         `could not forward run ${runId}'s gate decision to its parent's mirror: ${why}; the parent may still be waiting, and the next pass will try again`,
         { code: "LOOM_MIRROR_FORWARD_FAILED", detail: JSON.stringify({ runId, error: why }) },
