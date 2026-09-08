@@ -45,6 +45,8 @@ import type { EdgeId, NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { Actor, JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
+import { HumanGateBroker } from "../../src/run/gates.ts";
+import { RunLog } from "../../src/run/log.ts";
 import type { GateRecord, RunProjection } from "../../src/run/projection.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
@@ -151,11 +153,12 @@ async function parked(r: ReturnType<typeof rig>) {
   return { runId, childRunId, mirror };
 }
 
-test("A BROKEN CHILD JOURNAL NEVER FAILS THE PARENT'S `advance` — the mirror-answer read refuses, it does not propagate", async () => {
-  // THE TITLE NAMES ONE VERB AND ONE READ, and it used to name every verb. `advance` itself is
-  // still exposed one step later, through `#planRollbackChild`, and `resolveGate` on a mirror
-  // through `#runSubgraph` — see this file's header for the set of four and the measurement.
-  // This lane was authorised for the mirror-answer read only.
+test("THE MIRROR-ANSWER READ REFUSES A BROKEN CHILD JOURNAL INSTEAD OF PROPAGATING IT — the parent's `advance` survives THIS read", async () => {
+  // THE TITLE NAMES ONE READ, and it took three review rounds to stop it naming a verb. "A broken
+  // child journal never fails the parent's `advance`" is FALSE at this commit — `advance` still
+  // dies one step later at `#planRollbackChild`, and the file header pastes that stack. The title
+  // is the one string CI prints, so a universal in it is a false claim shipped by default. This
+  // lane was authorised for the mirror-answer read; the title now says exactly that.
   let breakChild = false;
   class BrokenChildReads extends MemoryStateStore {
     override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
@@ -304,10 +307,124 @@ test("A CHILD STORE THAT REJECTS WITH SOMETHING UNDESCRIBABLE IS STILL SWALLOWED
       const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_ANSWER_FAILED" && w.message.includes(String(runId)));
       assert.equal(mine.length, 1, `it is still said out loud (${shape.what}): ${JSON.stringify(warnings)}`);
       assert.ok(
-        /could not be described/.test(mine[0]!.message),
+        /whose message could not be read/.test(mine[0]!.message),
         `and the warning says what it could not describe rather than dying trying (${shape.what}): ${mine[0]!.message}`,
       );
+      // AND IT DOES NOT INVENT A CAUSE. Only the first shape's string conversion actually threw;
+      // the other two threw on `message`. The description names the shape it saw and stops there,
+      // and it keeps the fact an operator can act on — that two of the three WERE `Error`s.
+      assert.ok(
+        mine[0]!.message.includes(shape.what.startsWith("an Error") ? "a thrown Error" : "a thrown object"),
+        `and it says which shape it saw (${shape.what}): ${mine[0]!.message}`,
+      );
     }
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
+
+test("AND THE MIRROR IS ANSWERED BY THE READ THIS DIFF WRAPS ONCE THE CHILD'S STORE COMES BACK — the recovery, through the right half", async () => {
+  // THE FIRST TEST'S RECOVERY ASSERTION GOES THROUGH THE OTHER DIRECTION. It calls
+  // `resolveGate(child, …)`, so `#forwardToParentMirrors` — the CHILD-side forward — is what
+  // decides the mirror, and the read this diff wraps is never what recovers. That is a real gap:
+  // the plan's Accept says "the very next pass answers the mirror", and "the very next pass" means
+  // the PARENT's.
+  //
+  // SO THE CHILD'S GATE IS DECIDED STRAIGHT ON ITS OWN JOURNAL, through the broker and a bare
+  // `RunLog`, with no engine verb on the child at all — the sweeper's `defaultAction`, the batch
+  // door and the broker's dedupe all reach the journal this way. Nothing forwards. The only thing
+  // that can answer the parent's mirror is `#answerMirrorsTheChildAlreadyDecided`, on the parent's
+  // own next `advance`, through the wrapped read.
+  let breakChild = false;
+  class BrokenChildReads extends MemoryStateStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (breakChild && String(runId).includes("~")) throw new Error("sqlite: child disk I/O error");
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const store = new BrokenChildReads({ now: () => NOW });
+  const r = rig(store);
+  const { runId, childRunId, mirror } = await parked(r);
+  const childGate = open((await r.engine.projection(childRunId))!)!;
+
+  // Decided on the child's journal, by no engine verb.
+  await new HumanGateBroker({ now: () => NOW }).resolve(new RunLog(childRunId, { store, now: () => NOW }), {
+    gateId: childGate.gateId,
+    decision: { kind: "approve" },
+    actor: lead,
+    idempotencyKey: "direct",
+  });
+
+  // While the child's store is down, the parent's pass refuses and leaves the mirror open.
+  breakChild = true;
+  assert.equal((await r.engine.advance(runId)).status, "awaiting_gate");
+  assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open", "refused, not answered");
+
+  // The store comes back and the parent's very next pass answers it — through the wrapped read,
+  // which is the half this diff is about.
+  breakChild = false;
+  const healed = await r.engine.advance(runId);
+  const answered = (await r.engine.projection(runId))!.gates[mirror.gateId];
+  assert.equal(answered?.state, "decided", `the parent's own next pass answered it: ${JSON.stringify(healed.status)}`);
+  assert.equal(answered?.decision, "approve");
+  assert.equal(answered?.decidedBy, "system");
+});
+
+test("THE SHARED HELPER IS LOAD-BEARING ON THE FORWARD SIDE TOO — the one line this lane changed in round 4's wrapper", async () => {
+  // `#forwardToParentMirrorsQuietly` swallows EVERYTHING by contract, and its description idiom
+  // was the one thing in it that could throw. This lane adopted `describeThrown` there — the only
+  // edit it made to round 4's code, and the "sharing a helper" its brief permits — and until this
+  // test that one line was the only part of the diff nothing drove.
+  //
+  // THE PARENT'S STORE IS WHAT BREAKS HERE, and the verb is the CHILD's: the mirror image of every
+  // other test in this file.
+  let breakParent = false;
+  class HostileParentReads extends MemoryStateStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (breakParent && !String(runId).includes("~")) {
+        const bad = new Error("x");
+        // Passes `instanceof Error`, and every implicit conversion of `.message` throws.
+        Object.defineProperty(bad, "message", { value: Object.create(null) });
+        throw bad;
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const warnings: { code?: string; message: string }[] = [];
+  const onWarning = (w: Error & { code?: string }): void => {
+    warnings.push({ ...(w.code === undefined ? {} : { code: w.code }), message: w.message });
+  };
+  process.on("warning", onWarning);
+  try {
+    const r = rig(new HostileParentReads({ now: () => NOW }));
+    const { runId, childRunId } = await parked(r);
+    const childGate = open((await r.engine.projection(childRunId))!)!;
+
+    breakParent = true;
+    // The child's own verb, about the child's own gate, with the parent's store rejecting
+    // undescribably. Before the helper was shared, `String(e.message)` here threw out of
+    // `resolveGate` — the exact outcome round 4's wrapper exists to prevent.
+    const childP = await r.engine.resolveGate(childRunId, {
+      gateId: childGate.gateId,
+      decision: { kind: "approve" },
+      actor: lead,
+      idempotencyKey: "c1",
+    });
+    assert.equal(childP.status, "awaiting_gate", "the child answered its own question");
+    assert.equal(
+      (await r.engine.projection(childRunId))!.gates[childGate.gateId]?.state,
+      "decided",
+      "and its decision is durable, which is why propagating the parent's fault would mislead",
+    );
+
+    await new Promise((res) => setImmediate(res));
+    const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_FORWARD_FAILED" && w.message.includes(String(childRunId)));
+    assert.ok(mine.length >= 1, `the refusal is still announced: ${JSON.stringify(warnings)}`);
+    assert.ok(
+      /whose message could not be read/.test(mine[0]!.message),
+      `and it names what it could not describe rather than dying trying: ${mine[0]!.message}`,
+    );
+    void runId;
   } finally {
     process.off("warning", onWarning);
   }

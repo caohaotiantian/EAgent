@@ -694,7 +694,11 @@ function describeThrown(e: unknown): string {
     // `String()` on a null-prototype object throws, and `typeof raw` cannot.
     return typeof raw === "string" ? raw : String(raw);
   } catch {
-    return `a thrown ${typeof e} that could not be described (its own string conversion threw)`;
+    // NAMES WHAT IS KNOWN AND NOTHING ELSE. An earlier version said "its own string conversion
+    // threw", which is false for the shape where the `message` GETTER threw and nothing was ever
+    // converted; and `typeof e` alone loses the one fact an operator can act on, that the store
+    // DID reject with an `Error`. `instanceof` cannot throw, so this line cannot either.
+    return `a thrown ${e instanceof Error ? "Error" : typeof e} whose message could not be read`;
   }
 }
 
@@ -2808,10 +2812,12 @@ export class Engine {
         // `StateStore`, which the extension point permits and this test's double stands in for.
         //
         // ONCE PER OPEN MIRROR PER PASS. The rate that was MEASURED is one warning per
-        // `advance` of a parent whose only remaining work is the mirror — that parent is not
-        // `due`, so no run clock re-enters this loop. It is NOT the general rate: a parent with
-        // any other `ready` or `leased` task IS due, and then the clock re-enters every lap and
-        // this warns every lap, the storm `#forwardToParentMirrorsQuietly` already produces. No
+        // `advance` of a parent whose only remaining work is the mirror — one open mirror, one
+        // pass, one warning. It is NOT the general rate, and TWO mechanisms raise it, not one: the
+        // drive loop re-enters this method after every write WITHIN a single `advance`, so a
+        // parent with other work warns once per lap of `for(;;)`; and such a parent is also `due`
+        // (a `ready` or `leased` task), so the run clock advances it again unprompted. Together
+        // that is the storm `#forwardToParentMirrorsQuietly` already produces. No
         // dedupe set even so, deliberately — it would be memory a restart hands back empty whose
         // only reader is "do we print", and suppressing the repeat of a store that is still broken
         // is the wrong direction for a pass that has just refused to act.
@@ -2819,9 +2825,9 @@ export class Engine {
         // AND IT IS NOT ONLY ANOTHER RUN'S DISK. `projection` also raises `E_TRACE_INCONSISTENT`
         // and whatever `foldRun` throws on a malformed journal — invariant-2 alarms, reduced here
         // to a warning because they arrived through a DIFFERENT run's verb, where they are not
-        // decidable; the child's own verb still raises them. A throw inside `ctx.folder.restart()`
-        // also leaves the child's live folder reset to seq 0, which the next `#project` re-folds
-        // from 1.
+        // decidable; the child's own verb still raises them. A throw on the re-read that FOLLOWS
+        // `ctx.folder.restart()` — the read is the line after it, never inside it — also leaves
+        // the child's live folder reset to seq 0, which the next `#project` re-folds from 1.
         //
         // THE STRINGIFY CANNOT THROW. `StateStore` is an extension point, so nothing forces a
         // third-party store to reject with an `Error`, and `String(Object.create(null))` throws —
