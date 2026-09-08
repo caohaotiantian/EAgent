@@ -127,6 +127,14 @@ export interface ValidationContext {
    * graph's answer.
    */
   readonly subgraphMemo?: Map<string, readonly Diagnostic[]>;
+  /**
+   * Deep tool-reachability answers already computed on this walk — see
+   * `reachableToolNamesThrough`, whose key discipline and lifetime this shares with
+   * `subgraphMemo`, and for the same reason: the key names neither the resolver nor the
+   * tenant, so a memo carried across two unrelated compiles would answer one graph's question
+   * with another graph's answer.
+   */
+  readonly toolReachMemo?: Map<string, readonly string[]>;
 }
 
 /**
@@ -169,10 +177,51 @@ export function reachableToolNamesThrough(
   node: NodeSpec,
   childSpec: (ref: ResourceRef) => GraphSpec | undefined,
   maxDepth: number,
+  memo?: Map<string, readonly string[]>,
 ): readonly string[] {
   const out = [...reachableToolNames(node)];
   const root = node.subgraph?.ref;
   if (root === undefined) return out;
+  for (const name of namesUnder(root, childSpec, maxDepth, memo)) if (!out.includes(name)) out.push(name);
+  return out;
+}
+
+/**
+ * The walk itself, keyed so a caller can pay for it once.
+ *
+ * ONCE PER DISTINCT (maxDepth, ref), NOT ONCE PER NODE. `rule017Capabilities` calls the
+ * function above for every node in every graph on the walk, and `rule016Subgraphs`'s own memo
+ * bounds how many graphs that is but not how many times each subtree is re-walked underneath.
+ * It was the whole residue that memo left: on `test/graph/perf-lane-subgraph-walk.test.ts`'s
+ * 12-level two-way chain, `subgraph()` resolutions go 336 -> 102 with the diagnostics
+ * byte-identical (12,286 at depth 12, 196,606 at depth 16).
+ *
+ * `maxDepth` IS IN THE KEY because a child spec may declare its own `policy.expansion`, so two
+ * callers on one walk can ask about the same ref under different budgets. `childSpec` is not,
+ * which is why the memo may not outlive one `validateGraph` walk — see
+ * `ValidationContext.toolReachMemo`.
+ *
+ * THE MEMO IS ON THE WHOLE SUBTREE ANSWER AND NOT ON EACH (ref, remaining) STEP, and the
+ * step-wise version would be cheaper again. It is not taken because this walk is not
+ * compositional: `reachedAt` is global to one walk, so what a subtree contributes depends on
+ * what the walk has already reached. Two consequences decided it. The ORDER of the returned
+ * names would change, and callers turn that order into the order their diagnostics appear in.
+ * And a `policy.expansion.maxDepth` that is not a number — which nothing yet refuses, so
+ * `maxDepth: "abc"` reaches here as written — makes a `remaining` countdown non-terminating
+ * where `reachedAt` still stops the walk. A cheaper walk that can hang on a malformed graph is
+ * not the trade.
+ */
+function namesUnder(
+  root: ResourceRef,
+  childSpec: (ref: ResourceRef) => GraphSpec | undefined,
+  maxDepth: number,
+  memo?: Map<string, readonly string[]>,
+): readonly string[] {
+  const key = `${String(maxDepth)}\u0000${root}`;
+  const cached = memo?.get(key);
+  if (cached !== undefined) return cached;
+
+  const out: string[] = [];
 
   // THE DEPTH EACH REF WAS REACHED AT, not merely whether it was seen — the same guard
   // `compile.ts`'s `resolveSubgraphs` uses, and for the same measured reason. A bare visited-`Set`
@@ -207,6 +256,7 @@ export function reachableToolNamesThrough(
     reachedAt.set(root, 1);
     walk(first, 1);
   }
+  memo?.set(key, out);
   return out;
 }
 
@@ -562,10 +612,15 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   checkToolNames(spec, ctx.tools, d);
   rule011And012ErrorPaths(spec, idx, ctx.tools, d);
   rule013Reducers(spec, d);
-  rule014And019Oversight(spec, idx, ctx, expansion, d);
+  // ONE MEMO FOR THE WHOLE WALK, and it has to be created HERE rather than inside the rule
+  // that reads it: `rule016Subgraphs` runs first and carries `ctx` into every child, so a map
+  // made in `rule017Capabilities` would be a fresh one per level and share nothing across them.
+  const walkCtx: ValidationContext =
+    ctx.toolReachMemo === undefined ? { ...ctx, toolReachMemo: new Map<string, readonly string[]>() } : ctx;
+  rule014And019Oversight(spec, idx, walkCtx, expansion, d);
   rule015Resources(spec, ctx.resolver, d);
-  rule016Subgraphs(spec, ctx, expansion, d);
-  rule017Capabilities(spec, ctx, expansion, d);
+  rule016Subgraphs(spec, walkCtx, expansion, d);
+  rule017Capabilities(spec, walkCtx, expansion, d);
 
   return d;
 }
@@ -883,6 +938,51 @@ function isSafeId(id: unknown): boolean {
 }
 
 /**
+ * The names a CHANNEL may not take, because `Object.prototype` already carries them.
+ *
+ * `SAFE_ID` keeps `__proto__` out and stops there, so `toString`, `constructor`,
+ * `hasOwnProperty`, `valueOf`, `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString` and
+ * the four `__define`/`__lookup` accessors all compiled clean — and then the RUN died on
+ * `E_INTERNAL channel "toString": expected array, got function`, because a channel name keys
+ * `ChannelState`, the reducer table and the projection, and a raw read off any of them answers
+ * with the prototype's member for a channel nobody declared. `state/channels.ts` closed the
+ * runtime half by asking `hasOwnProperty` at every such site; this is the other half, which is
+ * that the compiler should have refused the graph before a run existed.
+ *
+ * READ OFF `Object.prototype`, NOT WRITTEN DOWN. The hazard is exactly "this name is on
+ * `Object.prototype`", so a hand-kept list would be a second definition of that set, free to
+ * drift from the one the engine actually collides with. Twelve names on Node 24; `__proto__`
+ * is among them and is already unreachable through `SAFE_ID`, which costs nothing and leaves
+ * the set complete on its face if `SAFE_ID` ever widens.
+ *
+ * CHANNELS ONLY. Node and edge ids key objects too, and `plans["toString"]` has the same
+ * shape — but they are not the reported defect, `plans` is built by the compiler rather than
+ * from author-supplied keys, and widening a refusal is not something to do on a guess.
+ *
+ * THE SET IS READ OFF THE RUNNING V8, AND THAT HAS A PRICE worth naming: the compiler's answer
+ * stops being a pure function of its input. A future Node that adds an `Object.prototype` member
+ * widens this refusal with no commit here, so the same spec could compile on one runtime and not
+ * another. The trade is deliberate — the hazard IS "the name is on `Object.prototype`", and a
+ * hand-kept list is a second definition of that free to drift — and it is bounded two ways: the
+ * runtime hazard widens with the same member, so the refusal tracks the thing it exists for, and
+ * `test/graph/graph-lane-reserved-channel-names.test.ts` pins the twelve names of Node 24, so a
+ * runtime that changes the set turns that test red before it surprises anyone.
+ *
+ * AND IT IS REPLAY-VISIBLE. `#rehydrateGraph` calls `compile`, and a non-`ok` result there
+ * raises `E_REPLAY_DIVERGENCE`, so a journal whose graph declares a `toString` channel can no
+ * longer be attached or replayed. No graph in this tree does; the runtime half (lane T's
+ * `state/channels.ts` fix) means such a run was already broken where it mattered; and refusing
+ * is the direction a guard may move. Said out loud because "the graph stopped compiling" and
+ * "the run stopped folding" are different costs and only the first is obvious.
+ */
+const PROTOTYPE_NAMES: ReadonlySet<string> = new Set(Object.getOwnPropertyNames(Object.prototype));
+
+const RESERVED_LIST = [...PROTOTYPE_NAMES]
+  .sort()
+  .map((r) => `\`${r}\``)
+  .join(", ");
+
+/**
  * The largest delay a Node timer holds. A FOURTH local copy, matching `cli.ts`, `providers/http.ts`
  * and `server/http.ts` — the tree copies a bare constant rather than exporting it, because an
  * export from a barrelled module lands on the pinned public surface (`store.ts`'s `storeDenyLists`
@@ -1163,7 +1263,22 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   for (const e of spec.edges) if (!isSafeId(e.id)) badId("edge id", e.id, typeof e.id === "string" ? { edgeId: e.id } : undefined);
   // A channel name is an object key in `ChannelState`, and `initialState` assigns it with
   // `out[name] = …` — which for `__proto__` writes the prototype and declares nothing.
-  for (const name of Object.keys(spec.channels ?? {})) if (!isSafeId(name)) badId("channel name", name, { channel: name });
+  for (const name of Object.keys(spec.channels ?? {})) {
+    if (!isSafeId(name)) {
+      badId("channel name", name, { channel: name });
+      continue;
+    }
+    if (PROTOTYPE_NAMES.has(name)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_RESERVED_CHANNEL",
+        message: `channel "${name}" is a name \`Object.prototype\` already carries, so no object keyed by channel name can hold it`,
+        at: { channel: name },
+        fix: `rename the channel; the reserved names are ${RESERVED_LIST}`,
+      });
+      fatal = true;
+    }
+  }
 
   const seenNodes = new Set<string>();
   for (const n of spec.nodes) {
@@ -2442,10 +2557,12 @@ function rule014And019Oversight(
             "out",
             // An unknown name contributes nothing, exactly as before — see the matching
             // comment in `compile.ts`.
-            ...reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth).flatMap((name) => {
-              const m = ctx.tools[name];
-              return m === undefined ? [] : [CLASS_DEFAULT_POSTURE[m.irreversibility]];
-            }),
+            ...reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth, ctx.toolReachMemo).flatMap(
+              (name) => {
+                const m = ctx.tools[name];
+                return m === undefined ? [] : [CLASS_DEFAULT_POSTURE[m.irreversibility]];
+              },
+            ),
           );
 
     // THE SAME HELPER THE COMPILER USES. These were two copies a word apart — `n.reads` here,
@@ -3368,7 +3485,7 @@ function rule017Capabilities(spec: GraphSpec, ctx: ValidationContext, expansion:
     // identical tenant check on its own nodes and a second copy here would only duplicate the
     // diagnostic. The graph ceiling is the half that is genuinely per-level.
     const direct = reachableToolNames(n);
-    for (const name of reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth)) {
+    for (const name of reachableToolNamesThrough(n, (ref) => ctx.resolver.subgraph?.(ref), expansion.maxDepth, ctx.toolReachMemo)) {
       // SAY WHICH ONE, because the two have different fixes: a name this node writes down can be
       // dropped from the node, a name that arrived through the child cannot.
       const where = direct.includes(name) ? `node "${n.id}"` : `subgraph "${n.subgraph?.ref}" under node "${n.id}"`;

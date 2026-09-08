@@ -52,6 +52,26 @@ interface Line {
 }
 
 /**
+ * The raw source, and the raw line ranges block scalars claimed as content.
+ *
+ * `src` was already threaded through every structural function so `blockScalar` could read the
+ * lines rather than the ones `parseYaml` prepared; `blocks` rides along for the reverse trip.
+ * `parseYaml`'s document scan runs before block structure is known, so it cannot decide on its
+ * own whether a `---` is a second document or a line of somebody's prompt — it records the
+ * question and `blockScalar`, the ONE place that decides where a block ends, answers it. A
+ * second, lexical pass that found block spans for itself would be a second definition of that
+ * boundary, free to disagree with the first, which is the silent mis-read this module refuses
+ * anchors to avoid.
+ */
+interface Doc {
+  readonly src: readonly string[];
+  /** `[from, to)` in raw 0-based line indices. */
+  readonly blocks: [number, number][];
+}
+
+const SECOND_DOCUMENT = "a second document (---); this subset reads one document per file";
+
+/**
  * Parse a YAML document into a plain JSON-shaped value.
  *
  * Throws `E_GRAPH_INVALID` with a line number on anything outside the subset. An author
@@ -71,6 +91,10 @@ export function parseYaml(source: string, opts: ParseYamlOptions = {}): unknown 
   // `\r`-terminated file as ONE line, so `a: 1\rb: 2` parsed as the single key `a` with the
   // value `"1\rb: 2"` — the silent mis-read this module refuses anchors to avoid.
   const src = source.replace(/^\ufeff/, "").split(/\r\n|\n|\r/);
+  const doc: Doc = { src, blocks: [] };
+  // Raw indices of every `---` that WOULD be a second document. Whether it is one depends on
+  // block structure, which nothing knows yet.
+  const strayDocs: number[] = [];
   src.forEach((raw, i) => {
     const no = i + 1;
     if (/^\t/.test(raw) || /^ *\t/.test(raw)) {
@@ -80,11 +104,13 @@ export function parseYaml(source: string, opts: ParseYamlOptions = {}): unknown 
     if (stripped.trim() === "") return;
     if (/^---\s*$/.test(stripped.trim())) {
       // A leading `---` OPENS the document; one that arrives after content has been read
-      // starts a second, which this subset does not do.
+      // starts a second, which this subset does not do — UNLESS it is a line of a block
+      // scalar, where `---` is content and not syntax. Recorded rather than refused here, and
+      // decided below once `blockScalar` has said which raw lines it took. Either way the line
+      // is dropped from `lines`, exactly as `...` is: the block scalar reads `src`, so the raw
+      // read puts it back.
       docs++;
-      if (docs > 1 || lines.length > 0) {
-        throw fail(where, no, "a second document (---); this subset reads one document per file");
-      }
+      if (docs > 1 || lines.length > 0) strayDocs.push(i);
       return;
     }
     if (/^\.\.\.\s*$/.test(stripped.trim())) return;
@@ -100,8 +126,30 @@ export function parseYaml(source: string, opts: ParseYamlOptions = {}): unknown 
     lines.push({ indent: stripped.length - stripped.trimStart().length, text: stripped.trimEnd(), no });
   });
 
-  if (lines.length === 0) return null;
-  const [value, next] = parseBlock(lines, 0, lines[0]!.indent, where, src);
+  // A stray `---` with no structure at all around it cannot be inside anything.
+  if (lines.length === 0) {
+    if (strayDocs.length > 0) throw fail(where, strayDocs[0]! + 1, SECOND_DOCUMENT);
+    return null;
+  }
+
+  // THE PARSE ERROR IS THE ONE THAT LOSES. A document with a genuine second `---` parses as
+  // its two halves concatenated, so whatever it then fails on is a consequence rather than the
+  // fault; the recorded `---` is the fault, and keeps the line number and the message it always
+  // had. It costs one thing, said out loud: a document broken in two ways where the OTHER
+  // fault comes first now reports that other fault, because the pre-scan's refusals still fire
+  // in line order and this one no longer does.
+  const stray = (): number | undefined => strayDocs.find((i) => !doc.blocks.some(([a, b]) => i >= a && i < b));
+  let value: unknown;
+  let next: number;
+  try {
+    [value, next] = parseBlock(lines, 0, lines[0]!.indent, where, doc);
+  } catch (e) {
+    const inside = stray();
+    if (inside !== undefined) throw fail(where, inside + 1, SECOND_DOCUMENT);
+    throw e;
+  }
+  const outside = stray();
+  if (outside !== undefined) throw fail(where, outside + 1, SECOND_DOCUMENT);
   if (next < lines.length) throw fail(where, lines[next]!.no, "content after the document ended; check the indentation");
   return value;
 }
@@ -119,15 +167,15 @@ export function parseYamlSpec(source: string, opts: ParseYamlOptions = {}): Reco
 // Block structure
 // ---------------------------------------------------------------------------
 
-function parseBlock(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [unknown, number] {
+function parseBlock(lines: readonly Line[], start: number, indent: number, where: string, doc: Doc): [unknown, number] {
   const first = lines[start];
   if (first === undefined) return [null, start];
   return first.text.trimStart().startsWith("- ") || first.text.trim() === "-"
-    ? parseSequence(lines, start, indent, where, src)
-    : parseMapping(lines, start, indent, where, src);
+    ? parseSequence(lines, start, indent, where, doc)
+    : parseMapping(lines, start, indent, where, doc);
 }
 
-function parseSequence(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [unknown[], number] {
+function parseSequence(lines: readonly Line[], start: number, indent: number, where: string, doc: Doc): [unknown[], number] {
   const out: unknown[] = [];
   let i = start;
 
@@ -147,7 +195,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
         i++;
         continue;
       }
-      const [value, next] = parseBlock(lines, i + 1, child.indent, where, src);
+      const [value, next] = parseBlock(lines, i + 1, child.indent, where, doc);
       out.push(value);
       i = next;
       continue;
@@ -162,7 +210,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
         synthetic.push(lines[j]!);
         j++;
       }
-      const [value, consumed] = parseMapping(synthetic, 0, inner, where, src);
+      const [value, consumed] = parseMapping(synthetic, 0, inner, where, doc);
       if (consumed < synthetic.length) throw fail(where, synthetic[consumed]!.no, "unexpected content in a sequence item");
       out.push(value);
       i = j;
@@ -175,7 +223,7 @@ function parseSequence(lines: readonly Line[], start: number, indent: number, wh
   return [out, i];
 }
 
-function parseMapping(lines: readonly Line[], start: number, indent: number, where: string, src: readonly string[]): [Record<string, unknown>, number] {
+function parseMapping(lines: readonly Line[], start: number, indent: number, where: string, doc: Doc): [Record<string, unknown>, number] {
   const out: Record<string, unknown> = {};
   let i = start;
 
@@ -205,14 +253,14 @@ function parseMapping(lines: readonly Line[], start: number, indent: number, whe
         i++;
         continue;
       }
-      const [value, next] = parseBlock(lines, i + 1, child.indent, where, src);
+      const [value, next] = parseBlock(lines, i + 1, child.indent, where, doc);
       put(out, key, value);
       i = next;
       continue;
     }
 
     if (rest === "|" || rest === ">" || rest === "|-" || rest === ">-") {
-      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"), src, where, line.no);
+      const [text, next] = blockScalar(lines, i + 1, indent, rest.startsWith(">"), rest.endsWith("-"), doc, where, line.no);
       put(out, key, text);
       i = next;
       continue;
@@ -275,10 +323,18 @@ function put(out: Record<string, unknown>, key: string, value: unknown): void {
  * correct one and the old value was never what the author wrote; the migration is real all the
  * same and belongs in a release note rather than only here.
  *
- * ONE MEMBER OF THE FAMILY IS STILL OPEN, and it is open at every sha: a `---` line INSIDE a block
- * scalar is content, and `parseYaml`'s document scan throws "a second document (---)" before this
- * function ever runs. `...` is fine, because that scan only DROPS it and the raw read puts it
- * back. Closing `---` means moving the document scan behind block structure too.
+ * AND `---` IS CONTENT IN HERE TOO, which was the last member of the family this function can
+ * reach. One shape outside it survives, and naming it is cheaper than implying it does not
+ * exist: a block scalar opened by a BARE sequence item (`- |`) is not part of this subset at
+ * all, so `---` under one is still reported as a second document rather than as unsupported
+ * syntax. Nothing legitimate is lost — `- |` does not parse either way — but the message is
+ * the wrong one for that input. The
+ * document scan runs before block structure is known, so it could not tell a second document
+ * from a line of somebody's prompt; it now RECORDS the question and this function answers it,
+ * by reporting the raw lines it took into `doc.blocks`. That keeps one definition of where a
+ * block ends — a scan that worked the spans out for itself would be a second one, free to
+ * disagree. `...` needed none of this: the scan only DROPS it and the raw read puts it back,
+ * which is now what happens to `---` as well.
  */
 function blockScalar(
   lines: readonly Line[],
@@ -286,10 +342,11 @@ function blockScalar(
   indent: number,
   folded: boolean,
   chomp: boolean,
-  src: readonly string[],
+  doc: Doc,
   where: string,
   headerNo: number,
 ): [string, number] {
+  const src = doc.src;
   // THE BLOCK'S INDENT COMES FROM THE FIRST NON-BLANK RAW LINE, not from `lines[start]`. `lines`
   // has already dropped blank and comment-only lines, so a block whose FIRST line is a comment had
   // that line silently deleted — `script: |` beginning `# what this does` lost it — and, worse,
@@ -309,16 +366,31 @@ function blockScalar(
   }
   if (blockIndent === undefined) return ["", start];
 
+  // Claimed AS THE WALK ADVANCES, not after it: the walk can throw on a badly indented line,
+  // and `parseYaml` reads this to decide whether a recorded `---` was content. A block that
+  // refuses one of its lines has still claimed the ones above it, so a `---` among them does
+  // not get re-diagnosed as a second document on the way out.
+  //
+  // INCLUDING THE OFFENDING LINE, because `claim[1] = r + 1` runs before the throw below and
+  // this comment used to describe `= r`. The wider span is the safe direction and is kept
+  // deliberately: claiming one line too many can only SUPPRESS a second-document diagnostic for
+  // a line the parser already refused for its own reason, where claiming one too few would let
+  // a `---` the author wrote inside a block resurface as the wrong error.
+  const claim: [number, number] = [from, from];
+  doc.blocks.push(claim);
+
   const collected: string[] = [];
   let r = from;
   for (; r < src.length; r++) {
     const raw = src[r]!;
     if (raw.trim() === "") {
+      claim[1] = r + 1;
       collected.push("");
       continue;
     }
     const ind = raw.length - raw.trimStart().length;
     if (ind <= indent) break;
+    claim[1] = r + 1;
     if (ind < blockIndent) {
       throw fail(
         where,
