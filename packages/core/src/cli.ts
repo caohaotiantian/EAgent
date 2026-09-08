@@ -1434,7 +1434,27 @@ export function openWorkspace(
   // file refuses everywhere else. An unshaped ref simply is not seeded — its body is still
   // registered, and a graph naming it still fails GRAPH015_RESOURCE_NOT_FOUND, which is honest.
   const published = readResources(root);
-  const SEEDABLE = /^(function|hook)\/([^/@]+)@[^/@]+$/;
+  // `@stable` AND NOTHING ELSE, because that is the only version a seed can produce and the
+  // only one the two loaders below ever ask for. `ResourceStore.#seed` creates one version and
+  // points `@stable` at it; `registerFunctions`/`registerHooks` compute `${kind}/${name}@stable`
+  // — so a ref registered as `function/stamp@v1` was seeded under a name whose only selector is
+  // `@stable`, and `moduleOnly`, which held the RAW ref, did not contain the `@stable` spelling
+  // the loaders then looked up. The loader was handed the pin, tried to compile the ref STRING
+  // as a function body, and printed a compile failure for a body that is registered and fine:
+  //
+  //     $ loom run … --extension-module fn.mjs      # fn.mjs registers "function/stamp@v1"
+  //     ! skipping function/stamp@stable in …/resources/function: function resource
+  //       "function/stamp@stable" did not evaluate: Unexpected token '/' …
+  //
+  // …which is the exact outcome `moduleOnly` exists to prevent, and the follow-on refusal then
+  // tells the operator the file IS there and did not compile. The identical fixture spelled
+  // `@stable` prints nothing.
+  //
+  // A REF AT ANOTHER VERSION IS SIMPLY NOT SEEDED, which is the rule an unshaped ref already
+  // gets one line down and for the same reason: its body stays registered, and a graph naming
+  // it fails GRAPH015_RESOURCE_NOT_FOUND exactly as it would with no module at all. That is
+  // honest, where a pin at a version nothing can select is a pin nothing reads.
+  const SEEDABLE = /^(function|hook)\/([^/@]+)@stable$/;
   const moduleRefs = [...(extensions?.functionRefs ?? []), ...(extensions?.hookRefs ?? [])]
     .map((ref) => ({ ref, m: SEEDABLE.exec(ref) }))
     .filter((r): r is { ref: string; m: RegExpExecArray } => r.m !== null)

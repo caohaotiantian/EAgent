@@ -16,7 +16,9 @@
  *       Cannot read properties of undefined (reading 'register')
  *
  * — `functions` was not a key on the object at all. At HEAD the same command prints
- * `"note": "stamped at epoch 0 by undefined"`, status `succeeded`.
+ * `"note": "stamped at epoch 0"`, status `succeeded`. (This line said "stamped at epoch 0 by
+ * undefined" — a leftover from an earlier fixture that no longer matches what the module below
+ * writes or what the assertion reads.)
  *
  * AND THE TWO PRIVILEGED BUILT-INS. `builtinTools(jail)` registers AFTER the extension modules
  * and `ToolRegistry.register` shadows, so an extension tool named `fs.read` was registered, held
@@ -391,4 +393,66 @@ test("…and one module registering two stores refuses on its own", async () => 
     () => loadExtensionModules([m]),
     (e: unknown) => isLoomError(e) && /registers a store, and it already registered one/.test(e.message),
   );
+});
+
+/**
+ * A REF AT A VERSION THAT IS NOT `@stable` SEEDS NOTHING, and the tell was a compile failure
+ * printed for a body that is registered and fine.
+ *
+ * `moduleOnly` held the RAW ref; `registerFunctions` and `registerHooks` compute
+ * `${kind}/${name}@stable`, because `ResourceStore.#seed` creates ONE version and points
+ * `@stable` at it. So a module registering `function/stamp@v1` was seeded, was NOT in the set
+ * the loaders skip by, and the loader was handed the pin — whose content is the ref STRING —
+ * and tried to compile it as a function body. Measured at ce14397:
+ *
+ *     ! skipping function/stamp@stable in …/resources/function: function resource
+ *       "function/stamp@stable" did not evaluate: Unexpected token '/' — a code resource file
+ *       is a BARE FUNCTION EXPRESSION and nothing else …
+ *
+ * …the exact outcome `moduleOnly` exists to prevent, followed by a refusal telling the operator
+ * the file IS there and did not compile. The identical fixture at `@stable` printed nothing.
+ */
+test("A MODULE REF THAT IS NOT `@stable` SEEDS NOTHING, and prints no compile failure for it", async () => {
+  const d = dir();
+  const g = graph(d, "v1", {
+    ...FUNCTION_GRAPH,
+    nodes: [{ id: "root", type: "function", function: { ref: "function/stamp@v1" }, writes: ["note"] }],
+  });
+  const m = mod(d, "v1.mjs", `export default ({ functions }) => { functions.register("function/stamp@v1", () => ({ writes: { note: "x" } })); };\n`);
+  const r = await cli(["compile", g, "--workspace", d, "--extension-module", m]);
+  // NOT SEEDED, so the graph fails the way it would with no module at all — the honest answer,
+  // and the same rule an unshaped ref gets above.
+  assert.notEqual(r.code, 0, r.out + r.err);
+  assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND|GRAPH0/, r.out + r.err);
+  // …and the thing that must NOT happen: a compile failure announced against a body that is
+  // registered and fine. This is the assertion that was red at ce14397.
+  assert.doesNotMatch(r.err, /! skipping function\/stamp@stable/, r.err);
+  assert.doesNotMatch(r.err, /did not evaluate/, r.err);
+});
+
+/** The same one namespace over, because `hooks.register` had no test at all. */
+test("…and the same is true of a `hook` ref, which had no test of its own", async () => {
+  const d = dir();
+  const g = graph(d, "hookv1", {
+    ...FUNCTION_GRAPH,
+    hooks: { preNode: [{ ref: "hook/audit@v1" }] },
+  });
+  const m = mod(d, "hookv1.mjs", `export default ({ hooks }) => { hooks.register("hook/audit@v1", (input) => input); };\n`);
+  const r = await cli(["compile", g, "--workspace", d, "--extension-module", m]);
+  assert.doesNotMatch(r.err, /! skipping hook\/audit@stable/, r.err);
+  assert.doesNotMatch(r.err, /did not evaluate/, r.err);
+});
+
+/** THE ORDINARY HALF: the `@stable` ref this seeding is FOR still seeds, compiles and runs. */
+test("…and a `@stable` module ref still seeds, so the seam it exists for is untouched", async () => {
+  const d = dir();
+  const g = graph(d, "stable", FUNCTION_GRAPH);
+  const m = mod(
+    d,
+    "stable.mjs",
+    `export default ({ functions }) => { functions.register("function/stamp@stable", () => ({ writes: { note: "seeded" } })); };\n`,
+  );
+  const r = await cli(["run", g, "--workspace", d, "--extension-module", m]);
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.match(r.out, /"note": "seeded"/, r.out);
 });
