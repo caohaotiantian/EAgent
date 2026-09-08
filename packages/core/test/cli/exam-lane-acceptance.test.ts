@@ -553,6 +553,19 @@ test("A RECORDING WITH NO run.completed IN THE COHORT DOES NOT REFUSE THE HONEST
     assert.equal(s.code, 0, `${s.err}\n${String(s.thrown)}`);
     assert.equal(jsonOf<{ score: number; components: { completed: boolean } }>(s.out).components.completed, false);
     assert.match(s.err, /is "incomplete", not succeeded/);
+    // …and it is told the one thing it can do: this run CAN still finish, so re-scoring is advice.
+    assert.match(s.err, /Re-score it once it is terminal/);
+
+    // THE OTHER HALF, WHICH THE SAME SENTENCE USED TO GET WRONG. A cancelled run IS terminal, so
+    // "re-score it once it is terminal" was advice nobody could take; `failed` and `cancelled` are
+    // ends, `incomplete` and `awaiting_gate` are not.
+    const c = await cli(["cancel", pending, "--as", "haotian", "--workspace", w.dir]);
+    assert.equal(c.code, 0, `${c.out}\n${c.err}\n${String(c.thrown)}`);
+    const after = await cli(["score", pending, "--workspace", w.dir]);
+    assert.equal(after.code, 0, `${after.err}\n${String(after.thrown)}`);
+    assert.match(after.err, /is "cancelled", not succeeded/);
+    assert.match(after.err, /this run's final reading; a later one would say the same/);
+    assert.doesNotMatch(after.err, /Re-score it once it is terminal/);
   } finally {
     w.dispose();
   }
@@ -681,6 +694,59 @@ test("AN ATTESTED SPEC THAT IS NOT AN EXAM IS REFUSED ON THE READ, NOT RUN — t
     assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was run on the authority of that row");
     refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /is not an exam as this binary reads it/);
     refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "x.json"), "--workspace", w.dir]), /is not an exam as this binary reads it/);
+  } finally {
+    w.dispose();
+  }
+});
+
+/**
+ * THE OTHER HALF OF THE SAME READ, and it was missed when the first half was made. `examShape`
+ * asks whether a row's spec is an exam; `attestationProblems` asks whether it is an exam OF THIS
+ * GRAPH, and only it can see the relay: an exam that reads no baseline INPUT and only channels a
+ * baseline EVALUATOR wrote is a pass-through of the graph's own verdict, which is the candidate's
+ * to write. `attestExam` refuses to write such a row; nothing re-read it.
+ *
+ * Driven by the round-three reviewer before this pin existed, with the relay row's own true hash,
+ * manifest and a human actor so every other check passed: `promote candidates/rigged.json
+ * --against-cohort` went from `✗ L1 Δ 0.0000 0W/0L/30T exit 1` to `✓ L1 Δ +0.4000 20W/0L/10T
+ * "promote": true exit 0` — the audit's reproduction 2, promoting on a relayed grader.
+ */
+test("A RELAY EXAM IN THE ROW IS REFUSED ON THE READ — an exam that grades the grader is not an exam of this graph", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const real = (await journal(w.dir, w.last)).findLast((e) => isEvent(e, "operator.command"))!;
+      const args = { ...(real.payload as { args: Record<string, unknown> }).args } as Record<string, unknown>;
+      const honest = args["spec"] as GraphSpec;
+      // Reads ONLY `verdict` — a channel `pick.json`'s own evaluator writes — and relays it.
+      // `examShape` is satisfied: subject declared, one output `verdict`, one terminal assertion.
+      const relay: GraphSpec = {
+        ...honest,
+        channels: { ...honest.channels, relayed: { type: "object", reduce: "replace" } },
+        inputs: ["subject", "picked"],
+        nodes: [{ id: "grade" as NodeId, type: "evaluator", reads: ["picked"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-pick@stable", threshold: 0 } }],
+        edges: [],
+      };
+      const compiled = compileOrThrow({ spec: relay, resolver: ws.resolver, tools: (ws.engine.tools as ToolRegistry).manifests(), tenantCapabilities: ws.granted });
+      args["spec"] = relay;
+      args["examGraphHash"] = compiled.graphHash;
+      args["resolutionManifest"] = compiled.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest }));
+      args["reads"] = [...relay.inputs];
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args }, actor: { kind: "human", subject: "someone", via: "console" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    const scored = await cli(["score", w.last, "--workspace", w.dir]);
+    refusedWith(scored, /could not be attested against that workflow's baseline graph.*reads no baseline INPUT/s);
+    assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was run on the authority of that row");
+    refusedWith(await live(w.dir, "candidates/rigged.json", w.last), /could not be attested against that workflow's baseline graph/);
+    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "relay.json"), "--workspace", w.dir]), /could not be attested against that workflow's baseline graph/);
   } finally {
     w.dispose();
   }
