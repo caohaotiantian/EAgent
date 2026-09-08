@@ -77,7 +77,10 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
     probe: () => {
       // The mechanism exists and is wired: a registry is constructed and handed to the Engine.
       assert.match(SRC("cli.ts"), /new HookRegistry\(\)/, "the CLI must construct a hook registry");
-      assert.match(SRC("cli.ts"), /registerHooks\(documents, hooks, root\)/, "and populate it from the workspace");
+      // `moduleOnly` is the fourth argument: refs whose only body came from an
+      // `--extension-module`, which the loader must skip because their resolver pin holds the
+      // ref string rather than a body. The workspace half of the call is what this row claims.
+      assert.match(SRC("cli.ts"), /registerHooks\(documents, hooks, root\b/, "and populate it from the workspace");
       assert.match(SRC("run/engine.ts"), /hooks\b/, "and the engine must take it");
       // End-to-end evidence: test/resources/hook-loader.test.ts.
     },

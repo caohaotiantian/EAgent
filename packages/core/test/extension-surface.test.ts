@@ -189,3 +189,62 @@ test("…and every async shape is still refused, in both loaders", () => {
     }
   }
 });
+
+/**
+ * THE TWO COUNTS THE SECTION OPENS WITH, CHECKED AGAINST THE TABLE AND THE BULLETS.
+ *
+ * The test above pins the three fork-required sets, member for member, and nothing pinned the
+ * NUMBERS the section leads with — so "Twelve things need no fork. Three do" could drift from
+ * its own table in either direction, silently, which is the failure mode this whole section is
+ * an argument against. It has drifted once already: the twelve was an UNDERCOUNT, because five
+ * `EngineOptions` members were reachable from a library embedder and not from argv and had no
+ * rows at all.
+ *
+ * Counted off the DOCUMENT rather than restated here: the "no fork" number is the body rows of
+ * the table (every line between the header separator and the blank line that ends it), and the
+ * "fork required" number is the bullets under that heading. A count written a second time in
+ * this file would be the same rot one file over.
+ */
+test("README's extensibility section counts its own rows", () => {
+  const section = README.slice(README.indexOf("## Extending it, and where that stops"));
+  const head = section.indexOf("| what | how | measured |");
+  assert.ok(head > 0, "the no-fork table is gone — this gate now checks nothing");
+  const rows = section
+    .slice(head)
+    .split("\n")
+    .slice(2) // the header row and its `|---|` separator
+    .filter((l) => l.startsWith("|")).length;
+
+  const forkHead = section.indexOf("**Fork required.**");
+  assert.ok(forkHead > 0);
+  const bullets = section
+    .slice(forkHead)
+    .split("\n\n")[1]!
+    .split("\n")
+    .filter((l) => l.startsWith("- **")).length;
+
+  const said = /\*\*([A-Z][a-z]+) things need no fork\. ([A-Z][a-z]+) do\*\*/.exec(section);
+  assert.ok(said, "the section no longer states its two counts in the sentence this gate reads");
+  const WORDS: Readonly<Record<string, number>> = {
+    Three: 3,
+    Four: 4,
+    Five: 5,
+    Six: 6,
+    Seven: 7,
+    Eight: 8,
+    Nine: 9,
+    Ten: 10,
+    Eleven: 11,
+    Twelve: 12,
+    Thirteen: 13,
+    Fourteen: 14,
+    Fifteen: 15,
+    Sixteen: 16,
+    Seventeen: 17,
+    Eighteen: 18,
+    Nineteen: 19,
+    Twenty: 20,
+  };
+  assert.equal(WORDS[said[1]!], rows, `the section says ${said[1]!} no-fork rows and the table has ${String(rows)}`);
+  assert.equal(WORDS[said[2]!], bullets, `the section says ${said[2]!} fork-required rows and there are ${String(bullets)} bullets`);
+});

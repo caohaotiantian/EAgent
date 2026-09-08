@@ -142,11 +142,11 @@ export class McpClient {
    * A dropped tool is a fact about a third party, and a drop nobody can see is the same silence
    * the unvalidated forward had. `start` records rather than throws; see the comment there.
    *
-   * NOTHING IN `cli.ts` OR `server/` READS THIS YET, so the fact is available to a library
-   * embedder and not to the operator the paragraph above invokes: under `loom serve` a legitimate
-   * server whose description runs past `MAX_DESCRIPTION_CHARS` simply stops offering that tool,
-   * with no line anywhere. The missing half is one stderr line per entry in the CLI's MCP
-   * registration loop, which is not this module's to add.
+   * READ BY `mcpRejectionWarnings` in `cli.ts`, which writes one stderr line per entry right
+   * after `startMcp` returns. Until it did, the fact was available to a library embedder and not
+   * to the operator this paragraph invokes: under `loom serve` a legitimate server whose
+   * description runs past `MAX_DESCRIPTION_CHARS` simply stopped offering that tool with no line
+   * anywhere, and it was diagnosed as "the model did not call the tool".
    */
   get rejectedTools(): readonly { readonly name: string; readonly reason: string }[] {
     return this.#rejectedTools;
