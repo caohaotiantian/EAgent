@@ -284,7 +284,7 @@ test("A DROPPED MCP TOOL STILL CLAIMS ITS NAME — a server must not be able to 
   assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
   assert.match(said, /E_CONFIG_INVALID/, said);
   assert.match(said, /mcp__a__b__x/, said);
-  assert.match(said, /offered by mcp server "a" and dropped/, said);
+  assert.match(said, /already claimed by mcp server "a", which offered it and this binary dropped it/, said);
 });
 
 test("THE `mcp__` PREFIX BELONGS TO THE MCP REGISTRAR — an extension may not spell one, with or without a server", async () => {
@@ -304,4 +304,40 @@ test("THE `mcp__` PREFIX BELONGS TO THE MCP REGISTRAR — an extension may not s
   assert.match(said, /mcp__docs__search/, said);
   assert.ok(said.includes(m), `the message must name the module path ${m}:\n${said}`);
   assert.match(said, /reserved for the --mcp-file registrar/, said);
+});
+
+test("ONE SERVER OFFERING ONE NAME TWICE STILL BOOTS — a third party's list must not abort the deployment", async () => {
+  const d = dir();
+  // `McpClient.start` keeps the FIRST of a duplicated name and puts the rest on `rejectedTools`,
+  // deliberately, so one bad entry does not cost the operator the rest of the server. Folding
+  // `rejectedTools` into the collision check made that policy self-defeating: the same server's
+  // own duplicate looked like a second claimant, and a server could abort the boot of every
+  // OTHER server by repeating a name. A name a server claims twice is claimed by ONE registrar,
+  // and which entry wins is `McpClient`'s decision and not this guard's.
+  const one = mcpServer(d, "one.mjs", ["search", "search"]);
+  const p = join(d, "mcp.json");
+  writeFileSync(
+    p,
+    JSON.stringify({ servers: [{ name: "docs", command: process.execPath, args: [one], envAllow: ["PATH", "HOME"] }] }),
+  );
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--mcp-file", p]);
+  const said = r.out + r.err;
+  assert.match(said, /MCP TOOL DROPPED — docs: "search"/, said);
+  assert.equal(r.code, 0, `refused a boot base accepted:\n${said}`);
+  assert.match(said, /\bok\b/, said);
+});
+
+test("THE SAME, WITH A MALFORMED TWIN — one valid `x` and one oversized `x` from one server boots", async () => {
+  const d = dir();
+  const one = mcpServer(d, "one.mjs", ["x"], ["x"]);
+  const p = join(d, "mcp.json");
+  writeFileSync(
+    p,
+    JSON.stringify({ servers: [{ name: "docs", command: process.execPath, args: [one], envAllow: ["PATH", "HOME"] }] }),
+  );
+  const g = graph(d, "clean", CLEAN);
+  const r = await cli(["compile", g, "--workspace", d, "--mcp-file", p]);
+  const said = r.out + r.err;
+  assert.equal(r.code, 0, `refused a boot base accepted:\n${said}`);
 });

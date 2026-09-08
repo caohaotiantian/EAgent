@@ -1619,35 +1619,58 @@ export function openWorkspace(
   // 9000-character description beside an extension tool named `mcp__docs__search` — one
   // `! MCP TOOL DROPPED` line, then `"status": "succeeded"` with the EXTENSION's answer under the
   // server's id. The operator configured the collision either way, so either way it refuses.
-  const claimed = new Map<string, string>();
+  //
+  // AND A CLAIM CARRIES WHO MADE IT, not just a sentence about them. The first cut stored a
+  // LABEL and asked whether it started with `mcp server "<name>"` — and every MCP label was
+  // written as `offered by mcp server "…"`, so that test was false for every value the map could
+  // hold. Two things followed and both shipped green: the same-server exemption below was dead
+  // code, so ONE server offering one name twice — which `McpClient` handles by keeping the first
+  // and recording the rest, precisely so a bad entry does not cost the operator the server —
+  // aborted the whole boot, a REGRESSION against 3d05cff and a deployment a third party's list
+  // could take down; and the message read "already claimed by offered by mcp server". A
+  // structured claimant is what makes the exemption checkable rather than spelled.
+  const claimed = new Map<string, { readonly label: string; readonly server?: string }>();
   for (const t of tools.list()) {
     const owner = extensions?.toolOwners.get(t.name);
-    claimed.set(t.name, owner === undefined ? "a built-in of this binary" : `--extension-module ${owner}`);
+    // `shipped` RATHER THAN "not an extension", because "everything else is a built-in" is true
+    // only while these are the only two registrars that have run — and this whole block exists
+    // because a third one was added and nobody updated the reasoning that assumed two.
+    const label =
+      owner !== undefined
+        ? `--extension-module ${owner}`
+        : shipped.has(t.name)
+          ? "a built-in of this binary"
+          : "a tool already in this workspace's registry";
+    claimed.set(t.name, { label });
   }
   for (const { client } of mcp) {
     const offered = [
-      ...client.tools.map((spec) => ({ tool: spec.name, how: `mcp server "${client.name}"` })),
-      ...client.rejectedTools.map((r) => ({ tool: r.name, how: `mcp server "${client.name}" and dropped` })),
+      ...client.tools.map((spec) => ({ tool: spec.name, label: `mcp server "${client.name}"` })),
+      ...client.rejectedTools.map((r) => ({
+        tool: r.name,
+        label: `mcp server "${client.name}", which offered it and this binary dropped it`,
+      })),
     ];
-    for (const { tool, how } of offered) {
+    for (const { tool, label } of offered) {
       const name = mcpToolName(client.name, tool);
       const by = claimed.get(name);
       // A NAME THIS SAME SERVER ALREADY CLAIMED IS NOT A COLLISION BETWEEN TWO REGISTRARS.
-      // `McpClient` keeps the FIRST of a duplicated name and drops the rest, so one server can
-      // reach here having offered one id twice; that is `mcpTools`' refusal to make, in its own
-      // vocabulary, and this guard is about who owns the slot rather than about one server's list.
-      if (by !== undefined && !by.startsWith(`mcp server "${client.name}"`)) {
+      // `McpClient` keeps the FIRST of a duplicated name and puts the rest on `rejectedTools`, so
+      // one server reaches here having claimed one id twice — as a plain duplicate, or as a valid
+      // entry beside a malformed twin. Which of its own entries wins is `McpClient`'s decision and
+      // this guard is about who owns the slot, so it says nothing.
+      if (by !== undefined && by.server !== client.name) {
         throw err.validation(
           CODES.E_CONFIG_INVALID,
           `mcp server "${client.name}" offers the tool "${tool}", which this binary registers as "${name}" — ` +
-            `and that name is already claimed by ${by}. MCP tools are registered AFTER the extension modules ` +
+            `and that name is already claimed by ${by.label}. MCP tools are registered AFTER the extension modules ` +
             `and the built-ins, and ToolRegistry.register shadows on collision, so the existing definition would ` +
             `keep its capability in the grant list and its entry in the compiler's manifest and would never be ` +
             `dispatched. Rename one of them — an MCP tool's id is mcp__<server>__<tool>, so renaming the server ` +
             `in the --mcp-file works too.`,
         );
       }
-      if (by === undefined) claimed.set(name, `offered by ${how}`);
+      if (by === undefined) claimed.set(name, { label, server: client.name });
     }
   }
 
@@ -1663,6 +1686,15 @@ export function openWorkspace(
   //
   // AFTER the collision loop, so the operator who configured BOTH gets the message that names
   // both claimants rather than this more general one.
+  //
+  // AT BOOT, AND ONLY AT BOOT — which is what this reserves and all it reserves. `ToolRegistry`
+  // permits registration after `seal()` unless the embedder asked otherwise
+  // (`registerAfterSeal: "deny"`, opt-in, see its docstring), and `extensions.toolNames` is a
+  // snapshot `loadExtensionModules` took when the factory returned. So a module that registers
+  // from a timer rather than from its factory body is invisible here and still shadows at
+  // dispatch — measured under `loom serve`, a `setTimeout` registering `mcp__docs__search`
+  // answered a node compiled against the MCP tool's manifest. That is `ToolRegistry`'s own
+  // documented hazard and it is NOT closed here; do not read this loop as more than a boot check.
   for (const name of extensions?.toolNames ?? []) {
     if (!name.startsWith("mcp__")) continue;
     throw err.validation(
