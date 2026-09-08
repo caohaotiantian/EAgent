@@ -224,9 +224,25 @@ export function compileMutation(input: MutateInput): MutationResult {
       nodes: [...spec.nodes, ...mutation.addNodes],
       edges: [...spec.edges, ...mutation.addEdges],
     };
-    const before = dominators(spec.nodes, traversable(spec), indexGraph(spec).topoOrder);
-    const after = dominators(grafted.nodes, traversable(grafted), indexGraph(grafted).topoOrder);
+    const baseIdx = indexGraph(spec);
+    const graftedIdx = indexGraph(grafted);
+    const before = dominators(spec.nodes, traversable(spec), baseIdx.topoOrder, baseIdx.entryNodes);
+    const after = dominators(grafted.nodes, traversable(grafted), graftedIdx.topoOrder, graftedIdx.entryNodes);
     const named = grafts.map((e) => `"${e.id}"`).join(", ");
+    // NO ENTRY, NO ANSWER. Dominance is defined relative to where the run starts, so a grafted
+    // graph with no entry node makes the question undecidable rather than false — and an
+    // undecidable guard refuses. `compile` would also refuse it GRAPH001_NO_ENTRY, but this rule
+    // may not depend on another rule running first to avoid answering "accepted".
+    if (graftedIdx.entryNodes.length === 0) {
+      diagnostics.push({
+        severity: "error",
+        code: "MUT003_NOT_DOMINATED",
+        message:
+          `edge ${named} leaves the graph with no entry node, so what dominates ` +
+          `"${grafts[0]!.to}" cannot be decided; a mutation may not make that question unanswerable`,
+        at: { edgeId: grafts[0]!.id },
+      });
+    }
     for (const v of spec.nodes) {
       const lost = [...(before.get(v.id) ?? [])].filter((id) => !(after.get(v.id)?.has(id) ?? false));
       if (lost.length === 0) continue;
@@ -336,10 +352,23 @@ export function compileMutation(input: MutateInput): MutationResult {
  * caller needs it: nothing else in the compiler asks a dominance question, and a second export
  * on a pinned surface for a single use is a cost with no buyer.
  *
- * A node with no inbound edge is an entry and dominates only itself. Everything else starts at
- * "every node dominates me" and shrinks, which is what makes the fixpoint converge from the
- * safe side — a node the walk never reaches keeps the full set rather than the empty one, so an
- * unreachable region cannot report a LOST dominator it never had.
+ * SEEDED FROM THE GRAPH'S ENTRY SET, and it used to seed "every node whose predecessor list is
+ * empty" instead. Those are the same set only while the edges are acyclic, and this walk stopped
+ * being acyclic the moment `loop` edges joined it. A mutation that adds a back-edge into the
+ * entry node leaves NO node with an empty predecessor list, every set then stays at "everything
+ * dominates me" for want of a seed, and nothing can report a LOST dominator — so the graft the
+ * caller exists to refuse was accepted. Measured on the gated fixture, `{plan->hop, hop->pay,
+ * hop->plan loop}`: `ok = true`, and end to end the human rejected and the tool ran
+ * (`ran = ["hop", "note.append"]`). An entry is not recomputed from its predecessors, which is
+ * what makes a back-edge into it harmless instead of fatal.
+ *
+ * `entryNodes` is `indexGraph`'s — "no inbound edge of any kind EXCEPT a loop back-edge", which
+ * is the set the executor actually starts from, so this asks the same question the run answers.
+ *
+ * Everything that is not an entry starts at "every node dominates me" and shrinks, which is what
+ * makes the fixpoint converge from the safe side — a node the walk never reaches keeps the full
+ * set rather than the empty one, so an unreachable region cannot report a LOST dominator it
+ * never had.
  *
  * IN TOPOLOGICAL ORDER, and that is a cost fix rather than a preference. Sweeping in
  * declaration order needs one pass per level when a graph is declared backwards, and this runs
@@ -366,14 +395,20 @@ function dominators(
   nodes: readonly NodeSpec[],
   edges: readonly EdgeSpec[],
   topoOrder: readonly NodeId[],
+  entryNodes: readonly NodeId[],
 ): ReadonlyMap<NodeId, ReadonlySet<NodeId>> {
   const ids = nodes.map((n) => n.id);
   const preds = new Map<NodeId, NodeId[]>();
   for (const id of ids) preds.set(id, []);
   for (const e of edges) preds.get(e.to)?.push(e.from);
 
+  const entries = new Set<NodeId>(entryNodes.filter((id) => preds.has(id)));
+  // A node with no predecessor at all is an entry too even where `entryNodes` disagrees — it is
+  // unreachable, and seeding it `{itself}` keeps it out of every other node's intersection.
+  for (const id of ids) if (preds.get(id)!.length === 0) entries.add(id);
+
   const dom = new Map<NodeId, Set<NodeId>>();
-  for (const id of ids) dom.set(id, preds.get(id)!.length === 0 ? new Set([id]) : new Set(ids));
+  for (const id of ids) dom.set(id, entries.has(id) ? new Set([id]) : new Set(ids));
 
   const seen = new Set<NodeId>(topoOrder);
   const order = [...topoOrder.filter((id) => preds.has(id)), ...ids.filter((id) => !seen.has(id))];
@@ -381,8 +416,8 @@ function dominators(
   for (let changed = true; changed; ) {
     changed = false;
     for (const id of order) {
+      if (entries.has(id)) continue;
       const p = preds.get(id)!;
-      if (p.length === 0) continue;
       let next: Set<NodeId> | undefined;
       for (const q of p) {
         const dq = dom.get(q);

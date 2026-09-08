@@ -378,6 +378,84 @@ test("…AND THE SAME THING THROUGH A `loop` EDGE, which is how the first versio
   assert.deepEqual(r.ran, [], "a loop edge is a path the executor takes, so it is a path this rule must see");
 });
 
+/**
+ * The same bypass a THIRD way: the graft, plus a `loop` edge back to the ENTRY node.
+ *
+ * `dominators` seeded `{itself}` for a node with no predecessor. Add a back-edge into the entry
+ * and NO node has an empty predecessor list, so every set stays at "everything dominates me" and
+ * nothing can report a LOST dominator — the guard answers its undecidable case with the passing
+ * value. The seed is the graph's entry set now, and an entry is not recomputed from its
+ * predecessors, which is what makes a back-edge into it harmless rather than fatal.
+ */
+test("A LOOP BACK TO THE ENTRY NODE DOES NOT ERASE THE SEED, and the graft is still refused", () => {
+  const r = attempt(
+    compiled(),
+    mutation({
+      addNodes: [{ ...HOP, reads: ["plan", "out"] } as unknown as NodeSpec],
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "seq" },
+        { id: e("m2"), from: n("hop"), to: n("plan"), kind: "loop", until: "has(plan)", maxIterations: 2 } as unknown as EdgeSpec,
+      ],
+    }),
+  );
+  assert.equal(r.ok, false, "a back-edge into the entry must not turn the check off");
+  assert.ok(
+    r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "pay"),
+    r.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.message}`).join(" | "),
+  );
+});
+
+test("…AND THE CONTROL: the loop back to the entry ON ITS OWN is still accepted", () => {
+  // Without the grafting edge `hop -> pay` the same back-edge takes nothing away, so this is
+  // what keeps the test above from passing for the wrong reason (a rule that refuses every
+  // mutation carrying a loop edge would pass it).
+  const r = attempt(
+    compiled(),
+    mutation({
+      addNodes: [{ ...HOP, reads: ["plan", "out"] } as unknown as NodeSpec],
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m2"), from: n("hop"), to: n("plan"), kind: "loop", until: "has(plan)", maxIterations: 2 } as unknown as EdgeSpec,
+      ],
+    }),
+  );
+  assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
+});
+
+/** The graft plus a back-edge into the entry — the shape that erased the dominator seed. */
+const ENTRY_LOOP_GRAFTER: MockScript = () => ({
+  text: JSON.stringify({
+    plan: { ok: true },
+    mutation: {
+      addNodes: [{ ...HOP, reads: ["plan", "out"] }],
+      addEdges: [
+        { id: "m0", from: "plan", to: "hop", kind: "seq" },
+        { id: "m1", from: "hop", to: "pay", kind: "seq" },
+        { id: "m2", from: "hop", to: "plan", kind: "loop", until: "has(plan)", maxIterations: 2 },
+      ],
+    },
+  }),
+  finishReason: "stop",
+});
+
+test("…AND THE SAME THING WITH A BACK-EDGE INTO THE ENTRY, which turned the whole check off", async () => {
+  const r = rig(ENTRY_LOOP_GRAFTER);
+  const runId = await r.engine.submit({ graph: compiled(), inputs: { goal: "go" } });
+  let p = await r.engine.advance(runId);
+  if (p.status === "awaiting_gate") {
+    const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+    p = await r.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "reject", reason: "no" },
+      actor: { kind: "human", subject: "u:a", via: "console" },
+      idempotencyKey: "k",
+    });
+  }
+  assert.notEqual(p.status, "succeeded");
+  assert.deepEqual(r.ran, [], "no node with an empty predecessor list is not the same as no entry");
+});
+
 test("THE ORDINARY HALF END TO END: the same graph, no mutation, approve and the tool runs", async () => {
   const r = rig(HONEST);
   const runId = await r.engine.submit({ graph: compiled(), inputs: { goal: "go" } });
