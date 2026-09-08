@@ -58,9 +58,11 @@
  *     read #1  `#runSubgraph`          (B)
  *     read #2  `#forwardGateDecision`  (C)
  *     reads #3..#6  the child's OWN advance, driven by `#runSubgraph`'s `advance(childRunId)` —
- *                   NOT wrapped, deliberately: that call's throw can be the PARENT's own
- *                   cancellation travelling out of a nested drive, and turning a cancel into a
- *                   retry is loosening. This lane's recorded residue.
+ *                   NOT wrapped, and the reason is SCOPE: it is not one of the five sites this
+ *                   lane was authorised for, and wrapping a whole nested drive is a much wider
+ *                   behaviour change. This paragraph said "because it would swallow a cancel" for
+ *                   three rounds; that argument is measured and dead — see the cancel-race test.
+ *                   This lane's recorded residue, on the honest reason.
  *     read #7  `#answerMirrorsTheChildAlreadyDecided` — already wrapped; warns and continues.
  *
  *   The pass that carries a REJECTION to a child whose gate was answered at another door:
@@ -654,6 +656,62 @@ test("D · A STORE THAT REJECTS WITH AN `AbortError` IS NOT THIS RUN BEING CANCE
   const p = (await r.engine.projection(runId))!;
   assert.notEqual(p.status, "cancelled", "the parent was never cancelled");
   assert.deepEqual(r.charges, [], "and nothing was charged on the refused pass");
+});
+
+test("D · A CANCEL RACING THE FORWARD ends the run, and no re-class can change that", async () => {
+  // THE TEST THAT DELETED A GUARD. Three rounds argued that converting a foreign failure into a
+  // retryable refusal could "swallow a cancel", and two of them shipped a guard against it. This
+  // drives the race the argument was about — `cancel` aborts OUTSIDE the per-run drive lock, so
+  // the signal really can flip inside this catch — and the answer is that the re-class cannot
+  // matter: `cancel` decides the run's status by journaling `run.cancelled`, so a task deferred
+  // during a cancelled run defers into a run that is already over.
+  //
+  // Measured: with the guard replaced by `if (false) throw e`, this test and the other thirteen
+  // stay green. That is why there is no guard at that site now, and why the honest reason for
+  // leaving `#runSubgraph`'s own `advance(childRunId)` unwrapped is SCOPE rather than cancels.
+  //
+  // It is kept as the ORDINARY HALF of that interaction: an operator's stop, landing mid-forward,
+  // still ends the run and still charges nothing.
+  let engineRef: Engine | undefined;
+  let parentRef: RunId | undefined;
+  class CancelRacingStore extends BreakableChildStore {
+    override async append(input: AppendInput): Promise<AppendResult> {
+      if (isChild(input.runId) && this.failAppendAt !== undefined) {
+        this.appends++;
+        if (this.failAppendAt === this.appends) {
+          this.failAppendAt = undefined;
+          await engineRef!.cancel(parentRef!, "the operator stopped it mid-forward");
+          throw new Error("sqlite: child disk I/O error");
+        }
+      }
+      return super.append(input);
+    }
+  }
+  const r = gateRig(new CancelRacingStore({ now: () => clock }));
+  const { runId } = await parked(r);
+  engineRef = r.engine;
+  parentRef = runId;
+  const mirror = openGate((await r.engine.projection(runId))!)!;
+
+  r.store.appends = 0;
+  r.store.failAppendAt = 1;
+
+  const outcome = await outcomeOf(async () =>
+    r.engine.resolveGate(runId, {
+      gateId: mirror.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: LEAD, via: "console" },
+      idempotencyKey: "mirror",
+    }),
+  );
+  assert.equal(r.store.failAppendAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE RUN ENDS. Whatever the failure was re-classed as, a cancelled run does not go back round
+  // the deferral budget — the status came from `run.cancelled`, not from the task outcome.
+  assert.notEqual(outcome, "running", `a cancelled run does not keep deferring: ${outcome}`);
+  const p = (await r.engine.projection(runId))!;
+  assert.equal(p.status, "cancelled", `the operator's cancel is what decided this run: ${p.status}`);
+  assert.deepEqual(r.charges, [], "and nothing was charged");
 });
 
 test("E · `#endChildRun` cannot overturn the human's REJECTION — it warns, and the refusal stands", async () => {

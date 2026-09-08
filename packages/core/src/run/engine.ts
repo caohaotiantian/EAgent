@@ -8149,7 +8149,7 @@ export class Engine {
       // ONE HUMAN DECISION, not two. If the parent's gate was answered, that answer was
       // about the child's question — forward it rather than asking again in the child's
       // own console.
-      const forwarded = await this.#forwardGateDecision(ctx, p, w, childRunId);
+      const forwarded = await this.#forwardGateDecision(p, w, childRunId);
       if (forwarded !== undefined) {
         // A REJECTION IS THE PARENT'S OUTCOME TOO, and it is the same outcome the
         // short-circuit in `#executeTask` used to produce before a mirror's decision had
@@ -8345,7 +8345,7 @@ export class Engine {
    * refusal like anything that is not `approve`, and the parent then fails on the child's
    * own status rather than applying writes the child never saw.
    */
-  async #forwardGateDecision(ctx: RunContext, p: RunProjection, w: Wave, childRunId: RunId): Promise<GateRecord | undefined> {
+  async #forwardGateDecision(p: RunProjection, w: Wave, childRunId: RunId): Promise<GateRecord | undefined> {
     const settled = lastDecidedGate(p, w.task.taskId);
     if (settled?.mirrorOf === undefined) return undefined;
 
@@ -8396,50 +8396,28 @@ export class Engine {
           idempotencyKey: `parent:${w.task.taskId}`,
         });
       } catch (e) {
-        // A CANCELLATION IS NOT A HICCUP, and this guard exists because the try below it is wider
-        // than "the write". `#resolveGateAsSystem` ends in `advance(childRunId)`, so this catch
-        // sees the CHILD'S WHOLE NESTED DRIVE — which is exactly the shape this lane's non-goals
-        // refuse to convert for `#runSubgraph`'s own `advance(childRunId)`: turning a cancel into
-        // a retry is loosening, and the argument does not stop applying because the drive is one
-        // frame deeper. A reviewer found the inconsistency; the fix is to keep the argument rather
-        // than to widen the conversion. Cancellation travels out unchanged, so an aborted child
-        // fails the parent's delegation as a cancellation and not as "come back later".
+        // THE CANCELLATION GUARD THAT USED TO STAND HERE IS GONE, and its removal is the most
+        // useful thing this line has to say. Three versions of it shipped: `isLoomError(e) &&
+        // e.code === E_CANCELLED`, then `toLoomError(e).code === E_CANCELLED`, then
+        // `ctx.abort.signal.aborted`. The second was a defect — `toLoomError` maps any `Error`
+        // named `"AbortError"` to `E_CANCELLED`, which is what any deadline-backed `StateStore`
+        // rejects with, so a third party's error NAME decided a parent run's fate:
         //
-        // THE VERDICT COMES FROM THIS RUN'S OWN SIGNAL, NOT FROM THE THROWN VALUE — and getting
-        // that backwards is the mistake this line has now made twice, in opposite directions.
-        // Round 3 widened the test to `toLoomError(e).code === E_CANCELLED`, which decides "was
-        // this run cancelled" from the value's NAME: `toLoomError` maps any `Error` whose `name`
-        // is `"AbortError"` to `E_CANCELLED`, and that is the shape ANY fetch- or deadline-backed
-        // `StateStore` rejects with. Measured by a reviewer on test D's fixture, with the child's
-        // append throwing `Object.assign(new Error("sqlite: internal deadline, request aborted"),
-        // {name: "AbortError"})`:
+        //   c54b0c2 base → failed:E_CANCELLED   1b37ef2 → running
+        //   fdeeb1a      → running              7f908a4 → failed:E_CANCELLED
         //
-        //   c54b0c2 base → failed:E_CANCELLED     1b37ef2 → running
-        //   fdeeb1a      → running                7f908a4 → failed:E_CANCELLED
+        // The third version was correct and INERT, which is why none of them is here now. With
+        // `if (false) throw e` substituted for it, all fourteen tests in
+        // `engine-cross-run-child-touches.test.ts` — including one written specifically to drive a
+        // `cancel` racing this forward — stay green. The reason is structural: `cancel` decides a
+        // run's status by journaling `run.cancelled`, so a task outcome re-classed as "come back
+        // later" during a cancelled run changes nothing. Nothing runs, because the run is over.
         //
-        // — a third party's error name deciding a parent run's fate, which is the class this lane
-        // exists to close, re-opened by the commit meant to harden it.
-        //
-        // `ctx.abort.signal.aborted` IS THE ONLY THING THAT KNOWS. It is this engine's own
-        // `AbortController` for this run, reading a boolean off an object nothing outside the
-        // process can substitute, so no store can forge it and no `Proxy` can trap it. If this run
-        // is being cancelled, refuse to re-class anything as "come back later"; otherwise every
-        // foreign failure is converted alike, whatever it calls itself. That also removes the
-        // question `isCancellation` existed to answer, so the helper is gone.
-        //
-        // IT IS STILL A GUARD AGAINST A SHAPE NOBODY HAS DRIVEN — no path was found that raises
-        // out of a drive on abort, because both abort checks in this file RETURN an outcome. It is
-        // kept because the argument behind it is the one that keeps `#runSubgraph`'s own
-        // `advance(childRunId)` unwrapped, and it is now cheap enough to be worth the coherence:
-        // one boolean read, no taxonomy, nothing an extension can influence.
-        //
-        // AND THE OLD VERSION OF THAT SENTENCE WAS FALSE, which is why this one is narrower.
-        // Round 3 wrote "nothing in the tree produces the input that would" reach the guard's true
-        // arm — but its input was an error NAME, and a reviewer built the producing shape out of
-        // in-tree parts in one line. The claim that survives is about the ABORT PATH, not about
-        // what a store can throw: nothing in this file throws on abort. A store can produce any
-        // value it likes, and after this change none of them is a verdict about this run.
-        if (ctx.abort.signal.aborted) throw e;
+        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN, and the honest reason
+        // `#runSubgraph`'s own `advance(childRunId)` is left unwrapped is SCOPE — it is not one of
+        // the five sites this lane was authorised for, and wrapping it is a much wider behaviour
+        // change — not "it would swallow a cancel". That argument was overstated three times; a
+        // fourth rewrite of it would be worth less than deleting it.
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
