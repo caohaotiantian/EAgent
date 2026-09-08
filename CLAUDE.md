@@ -39,14 +39,31 @@ runs the test: a `feat` commit touching one of them fails the gate unless it car
 it is what a kernel is for. That trailer is the escape hatch and also the ledger: the guard's own
 output lists every seam declared in `since..HEAD`, with its reason.
 
-**That ledger IS resettable, three ways, and this line used to claim it was not.** Measured
-2026-09-02 by running the guard against synthetic commits: advancing `since` one commit prints
-`0 declared seams` and exits 0; a `refactor:` rename of a pinned file (with the pin updated in the
-same commit) drops that file's seams AND erases an outstanding unfixed violation against it,
-because the matcher compares historical commits to the CURRENT path; and `Feat:`/`FEAT:`/`feature:`
-are not classified as features at all. A one-character trailer value satisfies "a sentence of
-design argument". Treat the count as a number a reviewer must watch in the diff, not as one the
-tool defends.
+**That ledger WAS resettable three ways — measured 2026-09-02 — and `wave2-guards` (`3656d69`)
+closed all three.** Re-measured on `loom` at HEAD today rather than carried:
+
+- **Advancing `since` no longer erases the census.** It printed `0 declared seams` and exited 0 in
+  September's measurement. Driven again today, moving `since` forward one commit and re-running:
+
+  ```
+  since 86b84c9 → kernel guard ok: 10 files pinned, 478 commits judged since 86b84c9, 11 declared seams over the full history
+  since b79e2d0 → kernel guard ok: 10 files pinned, 477 commits judged since b79e2d0, 11 declared seams over the full history
+                  notice: 36 feat commit(s) touched the kernel before `since` (b79e2d0) and declared
+                  no seam. Grandfathered, not paid — advancing `since` grows this number.
+  ```
+- **`Feat:`/`FEAT:`/`feature:` are classified as features.** The classifier is
+  `const FEAT = /^[ \t]*feat(?:ure)?(\([^)]*\))?!?:/i`; run against seven subjects, all of
+  `feat(run):`, `Feat:`, `FEAT:`, `feature:`, `feat!:` are true and `fix(run):` / `refactor:` are
+  false.
+- **A `refactor:` rename no longer drops a file's seams**, because the path set is the union of
+  every name `git log --follow --full-history` gives each pinned file, and the PIN's own history is
+  followed the same way. Read from `check-kernel.mjs`, not driven here — the other two are.
+- **A one-character trailer is now a violation**, under `MIN_SEAM_CHARS`.
+
+**Watch the number in the diff anyway**, for the reason the guard's own header gives rather than
+the one this line used to give: it cannot catch a capability landed under `fix:` or `refactor:`, a
+squash-merge that collapses a `feat` into another subject type, capability added OUTSIDE the pinned
+list, or a rename git cannot detect. The convention IS the signal.
 
 Read it from the guard and nowhere else. `git log --grep='^Kernel-seam:'` inflates (it matches prose
 ABOUT the trailer; guard 11, grep 12) and git's own trailer parser reads only the final paragraph.
