@@ -406,10 +406,11 @@ const MAX_INTERVENTION_LAPS = 8;
  *      `E_BUDGET_EXHAUSTED` shares that class and is a verdict about this run — it is fatal,
  *      caught by `RUN_FATAL_CODES`, and the code test here is the second lock on that door.
  *
- *   `E_SUBGRAPH_FAILED` · **only its retryable arm**, and the two arms are what make this safe
- *      to key on the code alone. `#runSubgraph` raises this code twice: `err.unavailable` for a
- *      child that HAS NOT FINISHED ("not finished is not failed", as that site's own comment
- *      says) and `err.internal` for a child that ended failed. `internal` is not in `RETRYABLE`,
+ *   `E_SUBGRAPH_FAILED` · **only its retryable arm**, and the arms are what make this safe
+ *      to key on the code alone. `#runSubgraph` raises this code THREE times, not twice as this
+ *      line said for two rounds — `err.unavailable` for a child that HAS NOT FINISHED ("not
+ *      finished is not failed", as that site's own comment says), and `err.internal` twice, for a
+ *      child that ended failed and for one "awaiting a gate it does not have". `internal` is not in `RETRYABLE`,
  *      so the `!error.retryable` refusal above has already returned by the time this set is
  *      consulted. **A third, retryable arm added at that site would silently join this set** — if
  *      one is ever added, split the code rather than widening this comment.
@@ -417,14 +418,20 @@ const MAX_INTERVENTION_LAPS = 8;
  *      THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
  *      for the three cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
  *      forward's read of the child, and the forward's WRITE to the child's gate — so "only the
- *      poll can reach it" is no longer true and five raises share the code. They MEET this set's
- *      criterion: a child journal this node could not read is not this node's failure, and
- *      uncharged re-entry inside `DEFERRAL_BUDGET_MS` is what a transient foreign store wants.
- *      What the instruction above was defending is the word SILENTLY, and that is what this
- *      paragraph pays; the split it asks for needs a new `CODES` member and the argument for
- *      taking it anyway is at `childUnavailable`. The one thing membership costs, stated: an
- *      `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
- *      child's disk is broken".
+ *      poll can reach it" is no longer true and SIX raises share the code, of which four are
+ *      retryable. They MEET this set's criterion for the case they were written for: a child
+ *      journal this node could not read is not this node's failure, and uncharged re-entry inside
+ *      `DEFERRAL_BUDGET_MS` is what a transient foreign store wants. What the instruction above
+ *      was defending is the word SILENTLY, and that is what this paragraph pays; the split it asks
+ *      for needs a new `CODES` member and the argument for taking it anyway is at
+ *      `childUnavailable`. What membership costs, stated as a set rather than a headline:
+ *      an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
+ *      child's disk is broken"; and a DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT`
+ *      out of `projection`, which is a real invariant-2 alarm and not a disk — is deferred as if
+ *      it were transient. Measured: 19 uncharged re-entries and 20 stderr lines for a failure that
+ *      is identical every pass. It is bounded and it is not a loosening (neither code is in
+ *      `RUN_FATAL_CODES`, so nothing about routing changes), and the alarm's own code now travels
+ *      in `details.cause` so the parent's row still says WHICH failure it was.
  *
  * Why the poll belongs here at all: measured. With only the rate limit deferring, a 429 in a
  * CHILD asking for two minutes killed the PARENT, because `DEFAULT_SUBGRAPH_RETRY` spends its
@@ -841,12 +848,18 @@ function describeThrown(e: unknown): string {
 function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomError {
   const why = describeThrown(e);
   const child = describeThrown(childRunId);
+  // THE ORIGINAL CODE TRAVELS IN `details.cause`. Re-classing an alarm as `unavailable` is what
+  // makes the delegation retryable, and it also throws away WHICH failure it was — a reviewer
+  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent as a
+  // plain `E_SUBGRAPH_FAILED` with its code nowhere. `isLoomError` is a shape test on an untrusted
+  // value, so it is asked once and its answer is a string or nothing.
+  const cause = isLoomError(e) ? describeThrown(e.code) : undefined;
   process.emitWarning(`${what} for child run ${child}: ${why}; the delegation is deferred and the next pass will try again`, {
     code: "LOOM_CHILD_UNREACHABLE",
-    detail: JSON.stringify({ childRunId: child, error: why }),
+    detail: JSON.stringify({ childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) }),
   });
   return err.unavailable(CODES.E_SUBGRAPH_FAILED, `${what} for child run ${child}`, {
-    details: { childRunId, error: why },
+    details: { childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) },
   });
 }
 
@@ -2071,6 +2084,16 @@ export class Engine {
    * row is written for anything here — so nothing unattempted is recorded as attempted, and the
    * next `rewind` re-plans the child from its journal. That is strictly more undo than the throw
    * it replaces, which abandoned the rest of the walk as well.
+   *
+   * AND IT COSTS THE THIRD STATE, which is the rule `#planRollbackChildSteps` itself lives on —
+   * that method's own docstring says an undispatchable step is "carried forward `undispatchable`
+   * RATHER THAN DROPPED", so `#dispatchRollback` journals `not_attempted` and "nobody even tried"
+   * survives in the CHILD's log. A swallow here writes no such row: the child's subtree is dropped
+   * and the only evidence is a `process.emitWarning` a restart does not have. That is the weaker
+   * position and it is stated rather than left for a reader to notice. It is taken because the
+   * three-state design needs the child's journal to write the row IN, and the child's journal is
+   * precisely what could not be reached; carrying a step forward with no step to carry needs a
+   * journal word for "a subtree nobody could enumerate", which is vocabulary, not a fix.
    *
    * "PLANNING WRITES NOTHING" IS ABOUT THE JOURNAL, and two in-memory writes do survive the
    * swallow: `#planRollback` adds descendants to the shared `seen` set before it can throw, and
@@ -8035,7 +8058,7 @@ export class Engine {
     try {
       existing = await this.projection(childRunId);
     } catch (e) {
-      throw childUnavailable(childRunId, `subgraph "${sub.ref}" could not read the journal`, e);
+      throw childUnavailable(childRunId, `subgraph "${describeThrown(sub.ref)}" could not read the journal`, e);
     }
     if (existing === undefined) {
       // THE REFERENCE IS JOURNALED FIRST, and the order matters more than it looks.
@@ -8325,7 +8348,7 @@ export class Engine {
     try {
       childP = await this.projection(childRunId);
     } catch (e) {
-      throw childUnavailable(childRunId, `the parent's decision on task ${String(w.task.taskId)} could not be forwarded — reading the journal failed`, e);
+      throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — reading the journal failed`, e);
     }
     const target = childP === undefined ? undefined : gateOf(childP, settled.mirrorOf);
     if (target?.state === "open") {
@@ -8337,7 +8360,20 @@ export class Engine {
           idempotencyKey: `parent:${w.task.taskId}`,
         });
       } catch (e) {
-        throw childUnavailable(childRunId, `the parent's decision on task ${String(w.task.taskId)} could not be forwarded — answering gate ${String(target.gateId)} failed`, e);
+        // A CANCELLATION IS NOT A HICCUP, and this guard exists because the try below it is wider
+        // than "the write". `#resolveGateAsSystem` ends in `advance(childRunId)`, so this catch
+        // sees the CHILD'S WHOLE NESTED DRIVE — which is exactly the shape this lane's non-goals
+        // refuse to convert for `#runSubgraph`'s own `advance(childRunId)`: turning a cancel into
+        // a retry is loosening, and the argument does not stop applying because the drive is one
+        // frame deeper. A reviewer found the inconsistency; the fix is to keep the argument rather
+        // than to widen the conversion. Cancellation travels out unchanged, so an aborted child
+        // fails the parent's delegation as a cancellation and not as "come back later".
+        //
+        // ARGUED FROM THE CALL GRAPH, NOT DRIVEN — no fixture here races an abort against a
+        // forward, so this is a guard placed by the same reasoning that shaped the non-goal, and
+        // it is named as such rather than presented as a measured path.
+        if (isLoomError(e) && e.code === CODES.E_CANCELLED) throw e;
+        throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
     return settled.decision === "reject" ? settled : undefined;

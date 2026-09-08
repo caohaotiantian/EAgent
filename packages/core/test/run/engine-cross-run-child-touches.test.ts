@@ -3,8 +3,11 @@
  *
  * `engine-child-journal-does-not-fail-the-parent.test.ts` pins ONE cross-run child touch,
  * `#answerMirrorsTheChildAlreadyDecided`. Its residue named five more of the same shape, and this
- * file pins those five — one test each, plus one control for A. Named rather than claimed total,
- * and these are the members:
+ * file pins those five. At least one test each, and the rest are the costs and the controls that
+ * two review rounds asked to be paid rather than asserted — the guard's own printer on a hostile
+ * payload, the method-vs-read decision, the bounded warning rate, a deterministic alarm's code
+ * surviving the re-class, and the rewind door. Named rather than claimed total, and these are the
+ * members:
  *
  *   A  `#planRollbackChild`     READ   the child's projection, and the recursive plan's own
  *                                      journal read one frame down
@@ -65,6 +68,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
@@ -372,6 +376,58 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
   assert.ok(mine.length >= 1, `the refusals are said out loud: ${JSON.stringify(seen.map((w) => w.code))}`);
   assert.ok(mine.length <= 40, `and stderr is not a firehose: ${mine.length} warnings over ${passes} passes`);
   assert.match(mine[0]!.message, /the delegation is deferred and the next pass will try again/);
+});
+
+test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.cause`", async () => {
+  // THE COST OF RE-CLASSING, PAID RATHER THAN HIDDEN. Making the delegation retryable means
+  // answering `E_SUBGRAPH_FAILED` whatever the child's store raised — and `projection` does not
+  // only raise disk errors. It raises `E_TRACE_INCONSISTENT`, a real invariant-2 alarm, which is
+  // DETERMINISTIC: deferring it re-reads the same broken journal every pass. A reviewer measured
+  // that arriving at the parent with its code nowhere at all, so the code now travels in
+  // `details.cause` and the parent's row still says WHICH failure it was.
+  //
+  // The deferral itself is left alone. It is bounded (the test above), it is not a loosening —
+  // neither code is in `RUN_FATAL_CODES`, so nothing about routing changes — and refusing to
+  // defer would need this function to decide which foreign failures are permanent, which is the
+  // taxonomy every wrap in this file exists to avoid.
+  class Inconsistent extends BreakableChildStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      // A REAL `LoomError`, built the way `#project` builds this one, not a look-alike. The engine
+      // asks `isLoomError`, which proves provenance rather than shape, so a hand-assembled object
+      // with the right keys is correctly NOT trusted to name a code — the first version of this
+      // fixture used one and the assertion caught it.
+      if (isChild(runId) && this.failEveryChildRead) {
+        throw err.internal(CODES.E_TRACE_INCONSISTENT, "journal for this run is inconsistent at seq 4");
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const r = gateRig(new Inconsistent({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.failEveryChildRead = true;
+  let outcome = "";
+  let p: RunProjection | undefined;
+  for (let i = 0; i < 60; i++) {
+    outcome = await outcomeOf(async () => {
+      p = await r.engine.advance(runId);
+      return p;
+    });
+    if (!outcome.startsWith("running") && !outcome.startsWith("awaiting_gate")) break;
+    clock += 60_000;
+  }
+
+  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the parent's own verb still answers: ${outcome}`);
+  const details = p!.error?.details as { cause?: unknown; error?: unknown } | undefined;
+  assert.equal(details?.cause, "E_TRACE_INCONSISTENT", `the alarm's own code survives the re-class: ${JSON.stringify(details)}`);
+  assert.match(String(details?.error), /inconsistent at seq 4/, "and so does its message");
 });
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {
