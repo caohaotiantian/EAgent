@@ -64,7 +64,8 @@ function workspace(): { dir: string; dispose: () => void } {
   // than tidy: `loom score` reads `<workspace>/graphs/` as the set of graphs a human approved,
   // so a candidate parked there would be marked promoted before it was ever gated. It is
   // published, named by no example graph, and reachable only through `loom promote`.
-  for (const sub of ["graphs", "resources", "candidates"]) {
+  // `exams/` likewise: an exam is attested, never published, and lives in neither of the others.
+  for (const sub of ["graphs", "resources", "candidates", "exams"]) {
     cpSync(join(EXAMPLES, sub), join(dir, sub), { recursive: true });
   }
   return { dir, dispose: () => rmSync(dir, { recursive: true, force: true }) };
@@ -363,15 +364,17 @@ test("ctx.effects in a SANDBOXED body refuses, exactly as summarise.js says it d
 test("every published resource is reachable from an example graph", () => {
   const ws = workspace();
   try {
-    // BOTH DIRECTORIES. A resource named only by a candidate is still reachable — that is what
-    // a candidate IS — and scanning `graphs/` alone would have forced `bench-collate-v2.js` to
-    // be published as a graph to stay green, which is the one place it must not be.
-    const specs = [
-      ...graphNames(ws.dir).map((g) => readFileSync(graphFile(ws.dir, g), "utf8")),
-      ...readdirSync(join(ws.dir, "candidates"))
-        .filter((f) => [".json", ".yaml", ".yml"].includes(extname(f)))
-        .map((f) => readFileSync(join(ws.dir, "candidates", f), "utf8")),
-    ].join("\n");
+    // ALL THREE DIRECTORIES. A resource named only by a candidate is still reachable — that is
+    // what a candidate IS — and scanning `graphs/` alone would have forced `bench-collate-v2.js`
+    // to be published as a graph to stay green, which is the one place it must not be. An exam
+    // (`exams/`) is a graph the operator attests rather than publishes, for the same reason.
+    const specDir = (dir: string): string[] =>
+      existsSync(join(ws.dir, dir))
+        ? readdirSync(join(ws.dir, dir))
+            .filter((f) => [".json", ".yaml", ".yml"].includes(extname(f)))
+            .map((f) => readFileSync(join(ws.dir, dir, f), "utf8"))
+        : [];
+    const specs = [...graphNames(ws.dir).map((g) => readFileSync(graphFile(ws.dir, g), "utf8")), ...specDir("candidates"), ...specDir("exams")].join("\n");
     const kinds = readdirSync(join(ws.dir, "resources"), { withFileTypes: true }).filter((d) => d.isDirectory());
     let seen = 0;
     for (const kind of kinds) {
@@ -413,9 +416,12 @@ test("review-bench scores k/6, not one bit — a review that got five of six rig
     assert.equal(s["status"], "succeeded");
 
     const outputs = s["outputs"] as Record<string, { pass: boolean; detail: string }>;
-    assert.deepEqual(Object.keys(outputs).sort(), ["verdict0", "verdict1", "verdict2", "verdict3", "verdict4", "verdict5"]);
+    // `reviews` is the raw model text, declared as an output so an operator's exam can grade it
+    // (`examples/exams/review-bench-exam.json`); the six verdicts are the graph's own grading.
+    assert.deepEqual(Object.keys(outputs).sort(), ["reviews", "verdict0", "verdict1", "verdict2", "verdict3", "verdict4", "verdict5"]);
+    const verdicts = Object.keys(outputs).filter((k) => k.startsWith("verdict")).sort();
     assert.deepEqual(
-      Object.keys(outputs).sort().map((k) => outputs[k]!.detail),
+      verdicts.map((k) => outputs[k]!.detail),
       [
         "fail-open-fold: MISSED",
         "default-stop: MISSED",

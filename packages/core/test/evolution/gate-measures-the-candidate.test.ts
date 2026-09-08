@@ -198,7 +198,7 @@ test("CONTROL · the baseline over its own graph still passes — a refusal on t
 
   const report = await runEvalSuite({ store: h.store, suite: suiteOver(ids), graph, engine: engineOf(h) });
   assert.equal(report.passRate, 1, JSON.stringify(report.cases.map((c) => c.reasons)));
-  assert.deepEqual(report.cases[0]!.replay.reboundEffects, [], "the same graph asks the same questions");
+  assert.deepEqual(report.cases[0]!.replay!.reboundEffects, [], "the same graph asks the same questions");
 });
 
 test("CONTROL · a candidate that changes a deterministic FUNCTION body still promotes", async () => {
@@ -236,8 +236,8 @@ test("CONTROL · a candidate that changes a deterministic FUNCTION body still pr
 
   // Neither side is refused: the request is identical in both, because the change is below
   // the model entirely.
-  assert.deepEqual(candidate.cases[0]!.replay.reboundEffects, [], "a body change asks the model nothing new");
-  assert.deepEqual(candidate.cases[0]!.replay.unverifiedModelEffects, []);
+  assert.deepEqual(candidate.cases[0]!.replay!.reboundEffects, [], "a body change asks the model nothing new");
+  assert.deepEqual(candidate.cases[0]!.replay!.unverifiedModelEffects, []);
   assert.equal(baseline.passRate, 1);
   assert.equal(candidate.passRate, 1);
   assert.equal(decide(baseline, candidate).promote, true, "a measurable candidate still gets through");
@@ -292,7 +292,7 @@ test("A RECORDING WITH NO requestDigest CANNOT CERTIFY A DIFFERENT GRAPH — the
   const reason = candidate.cases[0]!.reasons.find((r) => r.includes("no requestDigest"));
   assert.ok(reason, `got ${JSON.stringify(candidate.cases[0]!.reasons)}`);
   assert.match(reason, /re-record the corpus, or judge this candidate live/, "the refusal has to say what to do next");
-  assert.ok(candidate.cases[0]!.replay.unverifiedModelEffects.length > 0);
+  assert.ok(candidate.cases[0]!.replay!.unverifiedModelEffects.length > 0);
 });
 
 test("CONTROL · the SAME graph over a digest-less recording still passes", async () => {
@@ -305,8 +305,8 @@ test("CONTROL · the SAME graph over a digest-less recording still passes", asyn
 
   const report = await runEvalSuite({ store: old, suite: suiteOver([runId]), graph, engine: engineOf(h) });
   assert.equal(report.passRate, 1, JSON.stringify(report.cases.map((c) => c.reasons)));
-  assert.equal(report.cases[0]!.replay.graph.match, true, "the premise: it is the recorded graph");
-  assert.ok(report.cases[0]!.replay.unverifiedModelEffects.length > 0, "…and the digests really are missing");
+  assert.equal(report.cases[0]!.replay!.graph.match, true, "the premise: it is the recorded graph");
+  assert.ok(report.cases[0]!.replay!.unverifiedModelEffects.length > 0, "…and the digests really are missing");
 });
 
 /**
@@ -350,12 +350,12 @@ test("A CANDIDATE THAT SIMPLY DOES LESS IS REFUSED — the turns it skipped are 
   // IS rebound — fewer turns produce different summaries, so it writes a different body than the
   // recording did — which is a second true reason and not the one this test is about.)
   assert.deepEqual(
-    candidate.cases[0]!.replay.reboundEffects.filter((r) => r.field === "model"),
+    candidate.cases[0]!.replay!.reboundEffects.filter((r) => r.field === "model"),
     [],
     "the turns it took asked what the recording asked",
   );
   assert.ok(
-    candidate.cases[0]!.replay.unservedEffects.length > 0,
+    candidate.cases[0]!.replay!.unservedEffects.length > 0,
     "the premise on the other side: the recording holds turns this replay never asked for",
   );
   assert.ok(

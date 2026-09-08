@@ -83,7 +83,7 @@ import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spa
 import { OtlpHttpExporter } from "./telemetry/otlp.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
-import { digest, shapeOf } from "./canonical.ts";
+import { digest, sameContent, shapeOf } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
 import {
   cohortKeyOf,
@@ -96,6 +96,17 @@ import {
 } from "./evolution/score.ts";
 import { gateCandidate, runEvalSuite, type EvalCase, type EvalReport, type EvalSuite } from "./evolution/gate.ts";
 import { gateCandidateLive, MIN_PAIRED_RUNS, pairedCostRatio, type LivePair, type Unmeasured } from "./evolution/live.ts";
+import {
+  attestationOf,
+  attestationProblems,
+  EXAM_ATTEST_KIND,
+  EXAM_SUBJECT_INPUT,
+  examInputsFor,
+  examShape,
+  verdictOf,
+  type ExamAttestation,
+  type ExamOutcome,
+} from "./evolution/exam.ts";
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -205,11 +216,27 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              is not one of them. Refuses a cohort under 30, a
                                              selection that is all golden (the baseline passes
                                              such an exam by construction) and an --out that
-                                             already exists — a re-frozen exam is not frozen
+                                             already exists — a re-frozen exam is not frozen.
+                                             REFUSES a workflow with no attested exam (below)
+  loom exam attest <exam.json|yaml>          attest a GRADER THE CANDIDATE CANNOT WRITE: a
+               --cohort <runId> --as ID      small graph of deterministic bodies that reads a
+                                             workflow's recorded inputs and terminal outputs
+                                             and writes one verdict. From then on loom score,
+                                             suite freeze and promote --against-cohort take S1
+                                             from it, run by this binary over inputs the
+                                             candidate did not author; the in-graph evaluator
+                                             decides nothing. The workflow is DERIVED from
+                                             --cohort (any run in it), never typed; --as is
+                                             required and names the person attesting. The row
+                                             carries the exam spec, so the file is a cache and
+                                             the journal is the authority. Re-attest the same
+                                             exam to admit recordings made since; a different
+                                             exam is a different ruler and every earlier score
+                                             is excluded from it
   loom promote <candidate.json|yaml>         judge a candidate graph against a baseline over a
                --baseline <graph.json|yaml>  frozen suite of RECORDED runs, replayed offline.
                --suite <suite.json>          No model is called and no tool runs. Prints the
-               [--proposed-by ID]            eleven promotion checks and journals the decision
+               [--proposed-by ID]            fifteen promotion checks and journals the decision
                                              as operator.command on the first case's run.
                                              Exit 0 promotes, 1 refuses. The suite must have
                                              been frozen BEFORE the candidate was proposed —
@@ -228,7 +255,10 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              many of the cohort's recordings are used (default:
                                              all of them; floor ${String(MIN_PAIRED_RUNS)}), oldest first.
                                              8-determinism CANNOT run here and is reported as
-                                             DID NOT RUN, never as passed
+                                             DID NOT RUN, never as passed. REFUSES a workflow
+                                             with no attested exam (loom exam attest): both
+                                             sides of every pair are graded by that exam, never
+                                             by either graph's own evaluator
 
   --help            print this and exit — also "loom help", and valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
@@ -676,6 +706,7 @@ const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   score: ["bucket", "graph"],
   cohort: [],
   suite: ["as", "bucket", "cases", "cohort", "out"],
+  exam: ["as", "cohort"],
   promote: ["against-cohort", "as", "baseline", "bucket", "budget", "proposed-by", "runs", "suite"],
 };
 
@@ -7286,8 +7317,13 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         )) {
           process.stderr.write(note);
         }
-        const cohort = measureCohort(key, [t, ...peers.members]);
-        const scored = scoreTrajectory(t, cohort);
+        // THE EXAM, WHEN THIS WORKFLOW HAS ONE. S1 comes from the operator-attested grader rather
+        // than from this graph's own evaluator, and the ruler's digest carries the exam's hash, so
+        // every row scored before the attestation is a row under another ruler. Without one, the
+        // fold below is byte-for-byte what it was. See `examFor`.
+        const exam = await examFor(ws, t.cohort.workflow, promotedGraphHashes, [t, ...peers.members], index.get(t.cohort.graphHash)?.spec);
+        const cohort = measureCohort(key, [t, ...peers.members], exam === undefined ? {} : { exam });
+        const scored = scoreTrajectory(t, cohort, examOptsFor(exam, t.runId));
         const verdict = isGolden(t, scored, cohort);
         const ceiling = promotionCeiling(scored.signals);
         // A RUN THAT HAS NOT FINISHED SCORES 0 BY THE FLOOR, and that 0 is about the run's
@@ -7295,10 +7331,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // exactly this — but the person at the terminal is reading a number, so say it here
         // too. Not a refusal: a verdict on an unfinished run is a real thing to record, and
         // re-scoring after it finishes appends the later reading.
+        //
+        // AND "RE-SCORE IT LATER" IS ADVICE ONLY FOR A RUN THAT CAN STILL FINISH. This sentence
+        // was one sentence with the status word substituted, so a CANCELLED run — which is
+        // terminal — was told to re-score once it is terminal: advice nobody can take. `failed`
+        // and `cancelled` are ends; `incomplete` and `awaiting_gate` are not.
         if (!scored.components.completed) {
+          const ended = t.outcome.runStatus === "cancelled" || t.outcome.runStatus === "failed";
           process.stderr.write(
             `! run ${runId} is "${t.outcome.runStatus}", not succeeded — its outcome is 0 because it has not finished, ` +
-              `which is a different fact from having finished badly. Re-score it once it is terminal.\n`,
+              `which is a different fact from having finished badly. ` +
+              `${ended ? "That is this run's final reading; a later one would say the same." : "Re-score it once it is terminal."}\n`,
           );
         }
         // A SATURATED COHORT IS NOT A BAD SCORE, IT IS AN ABSENT RANKING, and the person at the
@@ -7430,6 +7473,16 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         return await freezeSuite(ws, args);
       }
 
+      // THE GRADER THE CANDIDATE CANNOT WRITE. See `attestExam` and `evolution/exam.ts`.
+      case "exam": {
+        const sub = requirePositional(args, 0, `a subcommand — "attest" is the only one`);
+        if (sub !== "attest") {
+          process.stderr.write(`unknown subcommand "exam ${sub}" — the only one is "attest"\n\n${USAGE}`);
+          return 2;
+        }
+        return await attestExam(ws, args);
+      }
+
       // THE DOOR ON THE PROMOTION GATE, and it is the whole reason the gate exists.
       //
       // `gateCandidate`, `runEvalSuite` and `requirePromotable` had ZERO callers outside
@@ -7515,6 +7568,22 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const candReport = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
         const candAgain = await runEvalSuite({ store: ws.store, suite, graph: candidate, engine });
 
+        // WHETHER THIS WORKFLOW HAS AN ATTESTED EXAM, for the certificate and nothing else. It used
+        // to decide whether `12-grader-unchanged` applied; it no longer does — an evaluator's
+        // verdict escalates a posture at run time whatever grades the score, so the check takes no
+        // answer from a caller (`gate.ts`). What is left is provenance a reader of the row wants:
+        // whether this workflow's S1 is exam-backed at all. The workflow is read off the cases' OWN
+        // `run.submitted.workflow`, never off the `--baseline` file's name, which the caller typed.
+        // Cases from more than one workflow, or from none with a journal, report false.
+        const { index } = graphsByHash(ws);
+        const caseWorkflows = new Set<string>();
+        for (const c of suite.cases) {
+          const sub = (await journalOf(ws, c.runId)).find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+          if (sub !== undefined) caseWorkflows.add(sub.payload.workflow);
+        }
+        const examAttested =
+          caseWorkflows.size === 1 && (await scanForExam(ws, [...caseWorkflows][0]!, new Set(index.keys()))).attestation !== undefined;
+
         const verdict = gateCandidate({
           baseline: baseReport,
           candidate: candReport,
@@ -7535,7 +7604,6 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // THE POPULATION THE DECISION WAS MADE OVER, so "promoted over them" is a fact on the
         // page rather than a claim in a commit message. Folded with each case run's own authored
         // graph, the same way `loom score` folds — see `cohortPeers`.
-        const { index } = graphsByHash(ws);
         const keys = new Map<string, number>();
         for (const c of suite.cases) {
           const events = await journalOf(ws, c.runId);
@@ -7556,6 +7624,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           baseline: { passRate: baseReport.passRate, passed: baseReport.passed, total: baseReport.total, costUsd: baseReport.totalCostUsd },
           candidate: { passRate: candReport.passRate, passed: candReport.passed, total: candReport.total, costUsd: candReport.totalCostUsd },
           caseRunIds: suite.cases.map((c) => c.runId),
+          examAttested,
           // A suite whose cases come from more than one cohort is not wrong, but it is a
           // different claim, and a report that hid it would let "promoted over one cohort of
           // thirty" be said about six unrelated runs.
@@ -8223,22 +8292,551 @@ async function cohortPeers(
   const members: Trajectory[] = [];
   for (const s of summaries) {
     if (s.runId === self) continue;
-    const events = await journalOf(ws, s.runId);
-    if (events.length === 0) continue;
-    // The peer's OWN authored graph, by the hash the peer's own `run.submitted` names — never
-    // the judged run's. A cohort can hold runs of more than one graph (the key's graphHash slot
-    // is the run's own), so reusing one spec for all of them would read another graph's node
-    // types onto this run's steps.
-    const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
-    const graph = submitted === undefined ? undefined : graphs.get(submitted.payload.graphHash);
-    const t = foldTrajectory(events, {
-      promotedGraphHashes,
-      ...(graph === undefined ? {} : { graph }),
-      ...(bucketInput === undefined ? {} : { bucketInput }),
-    });
-    if (cohortKeyOf(t) === key) members.push(t);
+    const t = await foldPeer(ws, s.runId, promotedGraphHashes, graphs, bucketInput);
+    if (t !== undefined && cohortKeyOf(t) === key) members.push(t);
   }
   return { members, truncated: summaries.length >= COHORT_SCAN_LIMIT };
+}
+
+/**
+ * One peer, folded under the SAME rule as the run being judged — and with its OWN authored graph,
+ * by the hash its own `run.submitted` names, never the judged run's. A cohort can hold runs of
+ * more than one graph (the key's graphHash slot is the run's own), so reusing one spec for all of
+ * them would read another graph's node types onto this run's steps. `undefined` for an empty
+ * journal.
+ */
+async function foldPeer(
+  ws: Workspace,
+  runId: RunId,
+  promotedGraphHashes: ReadonlySet<string>,
+  graphs: ReadonlyMap<string, RunGraph>,
+  bucketInput?: InputBucket,
+): Promise<Trajectory | undefined> {
+  const events = await journalOf(ws, runId);
+  if (events.length === 0) return undefined;
+  const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+  const graph = submitted === undefined ? undefined : graphs.get(submitted.payload.graphHash);
+  return foldTrajectory(events, {
+    promotedGraphHashes,
+    ...(graph === undefined ? {} : { graph }),
+    ...(bucketInput === undefined ? {} : { bucketInput }),
+  });
+}
+
+// ── evolution: the operator's exam ──────────────────────────────────────────
+
+/**
+ * `loom exam attest <exam.json> --cohort <runId> --as <subject>` — THE ONE VERB THAT IS OPERATOR-ONLY.
+ *
+ * WHY IT EXISTS. `loom score`, `suite freeze` and `promote --against-cohort` all took S1 — the only
+ * signal a model cannot argue with — from the graph's own `evaluator` nodes, and a candidate owns
+ * its graph. Driven through this binary: a candidate with no work node and an evaluator writing
+ * `{pass:true}` promoted at paired mean Δ +0.4000 over 30 pairs; a candidate whose only change was
+ * its evaluator's body cleared all thirteen replayed checks. Three pins on what the grader SAW were
+ * each defeated by a graph shape with no vocabulary for it (`aabdc63`). The exam is a grader the
+ * candidate does not author: a small graph an operator attests here, which the runtime then runs
+ * over two things the candidate does not write — a baseline run's RECORDED inputs and the graded
+ * run's TERMINAL outputs. `evolution/exam.ts` says what makes a graph an exam.
+ *
+ * WHAT THIS VERB DECIDES, AND WHAT IT REFUSES. The workflow is DERIVED from `--cohort` (its
+ * `run.submitted.workflow`), never typed: two sources for one fact need a rule for their
+ * disagreement, and `promoteAgainstCohort` refuses `--baseline` on the same argument. The exam is
+ * compiled from the file (`loadGraph` with `introducing`, so its bodies must be published) and
+ * refused unless it IS an exam; refused unless every input it reads is a declared input or output
+ * of the cohort's baseline graph, reads at least one baseline input, and does not read ONLY
+ * evaluator-written outputs (grading the grader — `review-bench` as shipped). `--as` is REQUIRED
+ * and may not be the synthetic `cli`: a person is deciding what counts as ground truth, and the
+ * row names them.
+ *
+ * WHAT IT WRITES. One `operator.command{kind:"evolution.exam-attest"}` row on the `--cohort` run
+ * with a human actor — the same borrow `suite freeze` and both `promote` verbs make, because the
+ * store is keyed by runId and the subject of this fact is a workflow. THE SPEC RIDES IN THE ROW: the
+ * file is a cache and the journal is the authority, so the exam is reconstructible with the file
+ * gone. `corpusThrough` is the newest recording of the workflow at this instant, and the gates read
+ * recordings at or before it and no later: the exam's QUESTIONS are the recordings, and a recording
+ * made after the operator looked is not a question until the operator looks again. Re-attesting the
+ * same exam admits them and moves no ruler; a different exam is a different ruler, and every score
+ * journaled under the old one is excluded by digest (`score.ts`).
+ *
+ * THE TRUST ASSUMPTION, stated: this holds under one operator. A loop that can run this verb owns
+ * its own exam; `proc.exec` inside a run reaches it only behind a human gate.
+ */
+async function attestExam(ws: Workspace, args: Args): Promise<number> {
+  const file = requirePositional(args, 1, "an exam graph file");
+  const attester = attesterFlag(args);
+  const anchorId = examCohortFlag(args);
+
+  const exam = loadGraph(ws, file, true);
+  const shape = examShape(exam);
+  if (shape.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
+        `inputs, exactly one output "verdict", and runs deterministic bodies ending in an evaluator{kind:"assertion"} ` +
+        `that writes it.`,
+    );
+  }
+
+  const anchorEvents = await journalOf(ws, anchorId);
+  if (anchorEvents.length === 0) {
+    process.stderr.write(`no journal for run ${anchorId} in this workspace (${ws.root}), so it names no workflow\n`);
+    return 1;
+  }
+  const { index } = graphsByHash(ws);
+  const promotedGraphHashes = new Set(index.keys());
+  const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+  const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
+  const anchorT = foldTrajectory(anchorEvents, { promotedGraphHashes, ...(anchorGraph === undefined ? {} : { graph: anchorGraph }) });
+  const workflow = anchorT.cohort.workflow;
+  const baseline = index.get(anchorT.cohort.graphHash);
+  if (baseline === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} has that ` +
+        `hash (${String(index.size)} searched). --cohort names a RECORDING — a run of a graph published in graphs/ — because ` +
+        `the exam's inputs are checked against that graph's declared inputs and outputs. A candidate run or an exam run is ` +
+        `not one; name a recording, or restore the graph's bytes to graphs/.`,
+    );
+  }
+  const problems = attestationProblems(exam.spec, baseline.spec);
+  if (problems.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${basename(file)} cannot be attested for workflow "${workflow}" (graph ${baseline.graphHash}): ${problems.join("; ")}`,
+    );
+  }
+
+  const scan = await scanForExam(ws, workflow, promotedGraphHashes);
+  const row: ExamAttestation = {
+    workflow,
+    examGraphHash: exam.graphHash,
+    spec: exam.spec,
+    resolutionManifest: exam.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest })),
+    reads: [...exam.spec.inputs],
+    attestedAt: Date.now(),
+    corpusThrough: scan.newestRecording ?? anchorId,
+  };
+  await ws.store.append({
+    runId: anchorId,
+    expectedSeq: await ws.store.head(anchorId),
+    events: [
+      {
+        type: "operator.command",
+        payload: { kind: EXAM_ATTEST_KIND, args: { ...row } },
+        actor: { kind: "human", subject: attester, via: "console" },
+      },
+    ],
+  });
+  process.stdout.write(`${JSON.stringify({ runId: anchorId, ...row }, null, 2)}\n`);
+  process.stderr.write(
+    `attested ${exam.graphHash} as the exam for workflow "${workflow}" over recordings through ${row.corpusThrough}` +
+      `${scan.attestation === undefined ? "" : scan.attestation.examGraphHash === exam.graphHash ? " (the same exam re-attested: same ruler, newer questions)" : ` (replacing ${scan.attestation.examGraphHash}: a NEW ruler — every score journaled under the old one is now excluded)`}. ` +
+      `Every recording is graded again on the next scoring verb.\n`,
+  );
+  return 0;
+}
+
+/** `--as` on `exam attest`: REQUIRED, a person, never the synthetic default. */
+function attesterFlag(args: Args): string {
+  const v = args.flags["as"];
+  if (v === undefined || v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `exam attest --as needs a subject${v === undefined ? " and none was given" : v === "" ? ": the one given was empty" : ": the flag was given with no value at all"}. ` +
+        `Attesting decides what counts as ground truth for a workflow, and the row has to name the person who decided.`,
+    );
+  }
+  if (v === "cli" || v === SUITE_GENERATOR || isSyntheticSubject(v)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--as "${v}" names nobody: ${v === "cli" ? "it is the label this binary writes when no person is named" : v === SUITE_GENERATOR ? "it is the identity loom suite freeze signs exams with, and the one that may never attest one" : "a parenthesised subject is a marker the control plane writes when it could not identify a caller"}. ` +
+        `Name the person attesting.`,
+    );
+  }
+  if (v.length > MAX_SUBJECT) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--as is ${String(v.length)} characters; the limit is ${String(MAX_SUBJECT)}.`);
+  }
+  return v;
+}
+
+/** `--cohort <runId>` on `exam attest` — any run in the cohort names the workflow and its baseline. */
+function examCohortFlag(args: Args): RunId {
+  const v = args.flags["cohort"];
+  if (v === undefined || v === true || v === "") {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `exam attest --cohort needs a runId: ${v === undefined ? "none was given" : v === "" ? "the one given was empty" : "the flag was given with no value at all"}. ` +
+        `It names any run of the workflow the exam grades — the workflow and its baseline graph are derived from it, never typed.`,
+    );
+  }
+  return v as RunId;
+}
+
+/** The refusal every gate prints for a workflow nobody has attested an exam for. */
+function noExamRefusal(workflow: string, anchorId: RunId, verb: string): LoomError {
+  return err.validation(
+    CODES.E_CONFIG_INVALID,
+    `no measurement the candidate cannot write exists for workflow "${workflow}": without an attested exam the only ground ` +
+      `truth is the graph's own evaluator, which a candidate authors. Refusing to ${verb} it. Attest one with ` +
+      `loom exam attest <exam.json> --cohort ${anchorId} --as <you>, or judge by hand.`,
+  );
+}
+
+/** For the refusal text: why a recording has no usable grade. */
+function describeGrade(g: ExamOutcome | undefined): string {
+  if (g === undefined) return "no grade";
+  if (!g.gradable && (g.missing ?? []).includes("run.completed")) return "the run never reached run.completed, so it has no terminal outputs to grade";
+  if (!g.gradable) return `ungradable — the exam reads ${(g.missing ?? []).map((c) => `"${c}"`).join(", ")} and this run's recording and outputs carry no such channel`;
+  return `exam run ${g.examRunId ?? "(none)"} reached no verdict`;
+}
+
+/** `{ exam }` for `scoreTrajectory`, or `{}` when the workflow has none. Never `{ exam: undefined }`. */
+function examOptsFor(exam: ExamFold | undefined, runId: string): { exam?: ExamOutcome } {
+  if (exam === undefined) return {};
+  const g = exam.grades.get(runId);
+  if (g === undefined) {
+    // `examFor` grades every member it is handed, so this is a caller scoring a run it did not
+    // hand over. Failing closed here rather than scoring without the exam: that would fold a
+    // candidate-written S1 under the exam's ruler.
+    throw err.internal(CODES.E_INTERNAL, `run ${runId} was not graded by exam ${exam.graphHash} before being scored under it`);
+  }
+  return { exam: g };
+}
+
+/** What the scoring verbs fold with when the workflow has an attested exam. */
+interface ExamFold {
+  readonly attestation: ExamAttestation;
+  readonly graph: RunGraph;
+  readonly graphHash: string;
+  readonly grades: Map<string, ExamOutcome>;
+  readonly recordings: ExamScan["recordings"];
+}
+
+/**
+ * The exam for a workflow, with every member handed in GRADED — or `undefined` when no attestation
+ * exists, in which case the caller folds exactly as it did before exams existed.
+ *
+ * Grades found in the journal (verified, see `scanForExam`) are reused; the rest are made now, one
+ * function-only run each. The caller decides what an absent exam means for it: `loom score` reports
+ * in-graph S1 as today, `suite freeze` and `promote --against-cohort` refuse.
+ */
+async function examFor(
+  ws: Workspace,
+  workflow: string,
+  published: ReadonlySet<string>,
+  members: readonly Trajectory[],
+  /**
+   * This workflow's baseline graph, when the caller resolved one — the bytes `attestationProblems`
+   * is re-run against on the read path. `undefined` skips that half; see `attestedGraph`.
+   */
+  baseline?: GraphSpec,
+  /**
+   * For the verbs that DECIDE: grade only the members at or before the attestation's
+   * `corpusThrough` — a recording after it is not a question, and grading it would be one exam
+   * run per recording an author added. `loom score` reports and passes nothing.
+   */
+  deciding?: { readonly corpusOnly: true },
+): Promise<ExamFold | undefined> {
+  const scan = await scanForExam(ws, workflow, published);
+  if (scan.attestation === undefined) return undefined;
+  const graph = attestedGraph(ws, scan.attestation, baseline);
+  const through = scan.attestation.corpusThrough;
+  for (const m of members) {
+    if (deciding !== undefined && m.runId > through) continue;
+    if (scan.grades.has(m.runId)) continue;
+    // A run that never reached `run.completed` has no terminal outputs to grade and is not a
+    // member of anything — `measureCohort` drops it — so no exam run is spent on it. It still
+    // carries a grade, an ungradable one, so `loom score` on it answers with the floor's 0 and
+    // the "not succeeded" note, as it did before exams existed.
+    scan.grades.set(
+      m.runId,
+      m.outcome.runStatus === "succeeded"
+        ? await gradeWithExam(ws, scan.attestation, graph, m.runId)
+        : { graphHash: scan.attestation.examGraphHash, gradable: false, missing: ["run.completed"] },
+    );
+  }
+  return { attestation: scan.attestation, graph, graphHash: scan.attestation.examGraphHash, grades: scan.grades, recordings: scan.recordings };
+}
+
+/**
+ * THE CORPUS A DECIDING VERB JUDGES OVER, assembled from the cursor scan rather than from
+ * `cohortPeers`' newest-500 window: every recording of the cohort's graph at or before the
+ * attestation's `corpusThrough`, folded under the same rule as the anchor and kept if it lands on
+ * the anchor's key. Exam runs double a workspace's listing, so a cohort of 250 recordings crossed
+ * that window on its first `loom score`; a question set a listing bound chose is not the one the
+ * operator attested over, and this is the set they did. Bounded by the attestation, not by the
+ * workspace.
+ */
+async function examCorpus(
+  ws: Workspace,
+  exam: ExamFold,
+  anchorT: Trajectory,
+  key: string,
+  promotedGraphHashes: ReadonlySet<string>,
+  graphs: ReadonlyMap<string, RunGraph>,
+  bucketInput?: InputBucket,
+): Promise<Trajectory[]> {
+  const members: Trajectory[] = [];
+  for (const r of exam.recordings) {
+    if (r.graphHash !== anchorT.authoredGraphHash || r.runId > exam.attestation.corpusThrough) continue;
+    const t = r.runId === anchorT.runId ? anchorT : await foldPeer(ws, r.runId, promotedGraphHashes, graphs, bucketInput);
+    if (t !== undefined && cohortKeyOf(t) === key) members.push(t);
+  }
+  return members;
+}
+
+/**
+ * The attested exam, compiled fresh — and refused if its body moved underneath the attestation.
+ *
+ * `graphHash` pins the spec, and the spec names its bodies by REF; the attestation row carries the
+ * `resolutionManifest` the operator saw, so a `resources/function/exam-*.js` edited since resolves
+ * to a different digest and is not the exam anybody attested. Refused rather than graded with: a
+ * grader whose body nobody attested is a grader somebody else wrote.
+ */
+function attestedGraph(ws: Workspace, att: ExamAttestation, baseline?: GraphSpec): RunGraph {
+  const result = compile({
+    spec: att.spec,
+    resolver: ws.resolver,
+    tools: (ws.engine.tools as ToolRegistry).manifests(),
+    tenantCapabilities: ws.granted,
+  });
+  if (!result.ok) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the attested exam ${att.examGraphHash} for workflow "${att.workflow}" no longer compiles in this workspace ` +
+        `(${result.diagnostics.map((d) => `${d.code}: ${d.message}`).join("; ")}) — a body it names is gone. Re-attest.`,
+    );
+  }
+  const g = result.graph;
+  if (g.graphHash !== att.examGraphHash || !sameManifest(g.resolutionManifest, att.resolutionManifest)) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the exam attested for workflow "${att.workflow}" (${att.examGraphHash}) resolves differently in this workspace: ` +
+        `${g.graphHash !== att.examGraphHash ? `hash ${g.graphHash}` : "a function body it names has changed since the attestation"}. ` +
+        `A grader whose body nobody attested grades nothing. Re-attest it: loom exam attest <exam.json> --cohort <runId> --as <you>`,
+    );
+  }
+  // AND IT IS STILL AN EXAM, ASKED HERE AND NOT ONLY AT THE VERB. `attestExam` runs `examShape`
+  // on the file before it writes the row; this is the side that DECIDES — the spec comes out of a
+  // journal row, `attestationOf` checks the row's SHAPE and not its meaning, and everything below
+  // compiles this graph and RUNS it. A row whose spec carried an `agent` or `tool` node would
+  // otherwise be compiled and driven by every scoring verb: a provider call, real money, and a
+  // non-deterministic grade, on the authority of a row nobody re-read. Same argument as the
+  // human-actor re-check in `scanForExam`, and the same one commit; a guard that runs only on the
+  // write is a guard a future writer walks past.
+  const shape = examShape(g);
+  if (shape.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the exam attested for workflow "${att.workflow}" (${att.examGraphHash}) is not an exam as this binary reads it: ` +
+        `${shape.join("; ")}. A row is data an earlier process wrote, and this one is the ruler; refusing rather than ` +
+        `running it. Attest an exam this binary accepts: loom exam attest <exam.json> --cohort <runId> --as <you>`,
+    );
+  }
+  // AND IT STILL ATTESTS AGAINST THIS WORKFLOW'S BASELINE — the other half of the same read, and
+  // it was missed the first time this argument was made. `examShape` asks whether the spec is an
+  // exam; `attestationProblems` asks whether it is an exam OF THIS GRAPH, and only it can see
+  // "grading the grader" — an exam that reads no baseline INPUT and only channels a baseline
+  // evaluator wrote is a RELAY of the graph's own verdict, which is the candidate's to write.
+  // Driven before this line existed: a row carrying such a spec, with its own true hash, manifest
+  // and a human actor, promoted the audit's rigged candidate at Δ +0.4000, 20W/0L/10T, exit 0.
+  //
+  // The baseline is the PUBLISHED graph looked up by hash — bytes a row's writer does not choose
+  // — and it is passed in rather than derived here because the callers already hold it. When a
+  // caller has none (a `loom score` whose graph is not in graphs/) the check is skipped and
+  // `examShape`'s half still runs: `graphs/` is the operator's own directory, and somebody who can
+  // rewrite it can publish a rigged grader without an exam at all.
+  if (baseline !== undefined) {
+    const problems = attestationProblems(g.spec, baseline);
+    if (problems.length > 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `the exam attested for workflow "${att.workflow}" (${att.examGraphHash}) could not be attested against that ` +
+          `workflow's baseline graph as this binary reads them: ${problems.join("; ")}. A row is data an earlier process ` +
+          `wrote, and this one is the ruler; refusing rather than grading with it. Attest an exam this binary accepts: ` +
+          `loom exam attest <exam.json> --cohort <runId> --as <you>`,
+      );
+    }
+  }
+  return g;
+}
+
+function sameManifest(a: readonly { ref: string; digest: string }[], b: readonly { ref: string; digest: string }[]): boolean {
+  const norm = (m: readonly { ref: string; digest: string }[]): { ref: string; digest: string }[] =>
+    [...m].map(({ ref, digest: d }) => ({ ref, digest: d })).sort((x, y) => (x.ref < y.ref ? -1 : x.ref > y.ref ? 1 : 0));
+  return sameContent(norm(a), norm(b));
+}
+
+/**
+ * The inputs an exam is given for one graded run, rebuilt from that run's own journal: recorded
+ * inputs (externalised handles fetched back into values) and terminal outputs, keyed by the exam's
+ * declared inputs, plus `subject`. `undefined` when the run is not terminal.
+ */
+async function subjectInputsFor(
+  ws: Workspace,
+  att: ExamAttestation,
+  subjectRunId: RunId,
+): Promise<ReturnType<typeof examInputsFor> | undefined> {
+  const events = await journalOf(ws, subjectRunId);
+  const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+  // THE LAST `run.completed`, NOT THE FIRST. A rewound run finishes twice, and every other reader
+  // of this journal — `foldTrajectory`, `lastScore` — takes the later state. Grading the earlier
+  // one would let the grade and the score disagree about the same run, which is the fold saying
+  // two things at once.
+  const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+  if (submitted === undefined || completed === undefined) return undefined;
+  const recorded: Record<string, unknown> = { ...submitted.payload.inputs };
+  for (const [channel, ref] of Object.entries(submitted.payload.external ?? {})) {
+    recorded[channel] = await ws.payloads.get(subjectRunId, ref);
+  }
+  return examInputsFor(att.spec, subjectRunId, recorded, completed.payload.outputs);
+}
+
+/**
+ * GRADE ONE RUN: run the attested exam over the run's recorded inputs and terminal outputs.
+ *
+ * Fails closed in the direction that refuses the CANDIDATE, which is not the same direction on
+ * both sides of a pair (the caller applies the asymmetry): an exam input present in neither the
+ * recording nor the outputs is UNGRADABLE and the exam is not run — a grader handed a missing answer
+ * must not guess; a run with no `run.completed` is not gradable either; an exam run that does not
+ * reach a `{pass: boolean}` verdict is a grade with no verdict. The exam run's journal is the
+ * durable record — a run the candidate did not author, keyed by its own id, whose `inputs.subject`
+ * names the graded run. It is submitted with no principal: who ran the scoring verb is not
+ * provenance, and nothing reads it as such.
+ */
+async function gradeWithExam(ws: Workspace, att: ExamAttestation, examGraph: RunGraph, subjectRunId: RunId): Promise<ExamOutcome> {
+  const built = await subjectInputsFor(ws, att, subjectRunId);
+  if (built === undefined) return { graphHash: att.examGraphHash, gradable: false, missing: ["run.completed"] };
+  if (!built.ok) return { graphHash: att.examGraphHash, gradable: false, missing: built.missing };
+  const { runId } = await startAndDrive(ws, { graph: examGraph, inputs: built.inputs });
+  process.stderr.write(`graded ${subjectRunId} by exam run ${runId} (exam ${att.examGraphHash})\n`);
+  const events = await journalOf(ws, runId);
+  const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+  const verdict = completed === undefined ? undefined : verdictOf(completed.payload.outputs);
+  return { graphHash: att.examGraphHash, gradable: true, examRunId: runId, ...(verdict === undefined ? {} : { verdict }) };
+}
+
+/** What `scanForExam` finds: the newest attestation for a workflow, and every verified grade under it. */
+interface ExamScan {
+  readonly attestation?: ExamAttestation;
+  /** Subject runId → its grade, for grades whose exam run this scan could VERIFY. */
+  readonly grades: Map<string, ExamOutcome>;
+  /** The newest run of the workflow whose graph is published — a recording, not a candidate run. */
+  readonly newestRecording?: RunId;
+  /** Every run of the workflow whose graph is published, with its authored hash — the recordings. */
+  readonly recordings: readonly { readonly runId: RunId; readonly graphHash: string }[];
+}
+
+/**
+ * Find the workflow's attestation and every grade already made under it — BY TRAVERSING THE WHOLE
+ * LISTING, never the 500-newest window.
+ *
+ * `cohortPeers` reads `listRuns(COHORT_SCAN_LIMIT)`, and a fact that lives on one anchor run would
+ * scroll out of that window as the workspace grows — exam runs make it grow faster — after which a
+ * scoring verb would silently fall back to in-graph S1, a loosening driven by run count. So this
+ * walks `listRuns` by its cursor (`RunFilter.after`), reading the FIRST event of every run
+ * (`run.submitted` is seq 1) and the whole journal of every run of the WORKFLOW, where an
+ * attestation row can sit; runs of other workflows and exam runs of other exams are read at their
+ * first event only. There is no truncated case to fall back from. The `recordings` it returns are
+ * what `suite freeze` and `promote --against-cohort` assemble their corpus from, so under an exam
+ * those verbs never depend on the window either.
+ *
+ * THE NEWEST ATTESTATION WINS, ordered by `(ts, runId, seq)` so two rows with one clock reading are
+ * still ordered — and a newest row this binary cannot read REFUSES rather than falling back to an
+ * older row or to the in-graph grader: a row nobody can read is not evidence for either.
+ *
+ * A GRADE IS VERIFIED BEFORE IT IS BELIEVED. An exam run is a run anyone who can run `loom run` can
+ * make, so a completed run under the attested hash is a grade of R only if: its
+ * `run.compiled.resolutionManifest` is the ATTESTED one (the graph hash pins the REF, not the body —
+ * a run made after editing `exam-pick.js` carries the same hash and a different digest, and is
+ * somebody else's grader); and its inputs, externalised handles fetched, are byte-for-byte what
+ * §4.2 builds from R's own journal. A row that fails either is not a grade; an exam run with no
+ * `run.completed` is not one yet, and R is graded again.
+ */
+async function scanForExam(ws: Workspace, workflow: string, published: ReadonlySet<string>): Promise<ExamScan> {
+  const heads: { runId: RunId; workflow: string; graphHash: string }[] = [];
+  const seen = new Set<RunId>();
+  let cursor: RunId | undefined;
+  for (;;) {
+    const page = cursor === undefined ? await ws.store.listRuns(COHORT_SCAN_LIMIT) : await ws.store.listRuns(COHORT_SCAN_LIMIT, { after: cursor });
+    if (page.length === 0) break;
+    for (const s of page) {
+      for await (const e of ws.store.read(s.runId, 1 as Seq, 1 as Seq)) {
+        if (isEvent(e, "run.submitted")) heads.push({ runId: s.runId, workflow: e.payload.workflow, graphHash: e.payload.graphHash });
+        break;
+      }
+    }
+    cursor = page[page.length - 1]!.runId;
+    if (seen.has(cursor)) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `the StateStore in use returned run "${cursor}" twice as a page boundary while paging listRuns(${String(COHORT_SCAN_LIMIT)}, { after }), ` +
+          `so its cursor does not advance. Refusing rather than reading a truncated view of the journal.`,
+      );
+    }
+    seen.add(cursor);
+    if (page.length < COHORT_SCAN_LIMIT) break;
+  }
+
+  const rows: { ts: number; runId: RunId; seq: number; args: Readonly<Record<string, unknown>> }[] = [];
+  let newestRecording: RunId | undefined;
+  const recordings: { runId: RunId; graphHash: string }[] = [];
+  for (const h of heads) {
+    if (h.workflow !== workflow) continue;
+    if (published.has(h.graphHash)) {
+      recordings.push({ runId: h.runId, graphHash: h.graphHash });
+      if (newestRecording === undefined || h.runId > newestRecording) newestRecording = h.runId;
+    }
+    // EVERY run of the workflow, published or not. An attestation is appended to a run whose
+    // graph was published at the time; deleting that file later must not make the row — and
+    // with it the ruler — disappear, so the read does not depend on graphs/ as it is today.
+    for (const e of await journalOf(ws, h.runId)) {
+      // A HUMAN ACTOR, RE-CHECKED ON THE READ. `attestExam` writes `{kind:"human"}` by
+      // construction and `attesterFlag` refuses the synthetic subjects, but this is the side that
+      // DECIDES what the ruler is, and a guard that only runs on the write is a guard a future
+      // writer can walk past. No other writer of this kind exists today (grep over `src/`); this
+      // is the direction "oversight only tightens" argues the check belongs on.
+      if (isEvent(e, "operator.command") && e.payload.kind === EXAM_ATTEST_KIND && e.actor.kind === "human") {
+        rows.push({ ts: e.ts, runId: h.runId, seq: e.seq, args: e.payload.args });
+      }
+    }
+  }
+  rows.sort((a, b) => b.ts - a.ts || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0) || b.seq - a.seq);
+  const newest = rows[0];
+  const grades = new Map<string, ExamOutcome>();
+  if (newest === undefined) return { grades, recordings, ...(newestRecording === undefined ? {} : { newestRecording }) };
+  const attestation = attestationOf(newest.args);
+  if (attestation === undefined || attestation.workflow !== workflow) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the newest evolution.exam-attest row for workflow "${workflow}" (run ${newest.runId} seq ${String(newest.seq)}) is not one this ` +
+        `binary can read, and an older row would be a different ruler. Re-attest: loom exam attest <exam.json> --cohort ${newest.runId} --as <you>`,
+    );
+  }
+
+  for (const h of heads) {
+    if (h.graphHash !== attestation.examGraphHash) continue;
+    const events = await journalOf(ws, h.runId);
+    const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
+    const compiled = events.find((e): e is Extract<JournalEvent, { type: "run.compiled" }> => isEvent(e, "run.compiled"));
+    const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+    if (submitted === undefined || compiled === undefined || completed === undefined) continue;
+    if (!sameManifest(compiled.payload.resolutionManifest, attestation.resolutionManifest)) continue;
+    const subject = submitted.payload.inputs[EXAM_SUBJECT_INPUT];
+    if (typeof subject !== "string") continue;
+    const rebuilt = await subjectInputsFor(ws, attestation, subject as RunId);
+    if (rebuilt === undefined || !rebuilt.ok) continue;
+    const given: Record<string, unknown> = { ...submitted.payload.inputs };
+    for (const [channel, ref] of Object.entries(submitted.payload.external ?? {})) given[channel] = await ws.payloads.get(h.runId, ref);
+    if (!sameContent(given, rebuilt.inputs)) continue;
+    const verdict = verdictOf(completed.payload.outputs);
+    // Two verified grades of one run under one exam cannot disagree — the exam is deterministic
+    // — so the first found is kept and the rest are the same fact again.
+    if (!grades.has(subject)) {
+      grades.set(subject, { graphHash: attestation.examGraphHash, gradable: true, examRunId: h.runId, ...(verdict === undefined ? {} : { verdict }) });
+    }
+  }
+  return { attestation, grades, recordings, ...(newestRecording === undefined ? {} : { newestRecording }) };
 }
 
 // ── evolution: freezing an exam OUT OF a cohort ─────────────────────────────
@@ -8407,20 +9005,39 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     ...(bucketInput === undefined ? {} : { bucketInput }),
   });
   const key = cohortKeyOf(anchorT);
-  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
-  if (peers.truncated) {
-    process.stderr.write(
-      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
-    );
+  // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
+  // `golden` rests on this graph's own evaluator — which is what let a rigged grader write its
+  // wrong outputs into the next exam as ground truth. The exam also FREEZES THE QUESTIONS:
+  // recordings after `corpusThrough` are not cases until a human re-attests, and the corpus is
+  // assembled from the attestation's own scan rather than from a listing window (`examCorpus`).
+  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], index.get(anchorT.cohort.graphHash)?.spec, { corpusOnly: true });
+  if (exam === undefined) throw noExamRefusal(anchorT.cohort.workflow, anchorId, "freeze a suite from");
+  const inCorpus = await examCorpus(ws, exam, anchorT, key, promotedGraphHashes, index, bucketInput);
+  const afterCorpus = exam.recordings.filter((r) => r.graphHash === anchorT.authoredGraphHash && r.runId > exam.attestation.corpusThrough).length;
+  for (const t of inCorpus) {
+    if (t.outcome.runStatus === "succeeded" && !exam.grades.has(t.runId)) exam.grades.set(t.runId, await gradeWithExam(ws, exam.attestation, exam.graph, t.runId));
   }
-  const cohort = measureCohort(key, [anchorT, ...peers.members]);
+  const peers = { truncated: false };
+  const cohort = measureCohort(key, inCorpus, { exam });
   if (cohort.n < MIN_COHORT_SIZE) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a frozen suite needs at least ` +
         `${String(MIN_COHORT_SIZE)} — the same floor isGolden condition 4 clears, because a suite cut from a cohort ` +
-        `too small to have goldens has no regression floor to freeze. "Comparable" counts runs that SUCCEEDED and ` +
-        `did work. Record more runs of this workflow first.`,
+        `too small to have goldens has no regression floor to freeze. "Comparable" counts runs that SUCCEEDED, ` +
+        `did work, and were GRADED by the attested exam, recorded at or before the attestation's corpusThrough ` +
+        `(${exam.attestation.corpusThrough}; ${String(afterCorpus)} recording(s) came later and are not questions ` +
+        `until someone re-attests). Record more runs of this workflow first, then re-attest.`,
+    );
+  }
+  // THE ANCHOR'S OWN ROW MUST BE UNDER THIS RULER. `weightsDigest` carries the exam's hash, so a
+  // row scored before the attestation — or under another exam — cannot select cases for this one.
+  if (anchorScore.weightsDigest !== cohort.weightsDigest) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `run ${anchorId}'s last journaled score was computed under a different ruler (${anchorScore.weightsDigest}) than the ` +
+        `one this workflow's attested exam ${exam.attestation.examGraphHash} defines (${cohort.weightsDigest}) — the score ` +
+        `predates the attestation, or was made under another exam. Judge it again first: loom score ${anchorId}`,
     );
   }
 
@@ -8465,7 +9082,7 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   const otherKeysSeen = new Set<string>();
   let excludedForWeights = 0;
   let undelivered = 0;
-  for (const t of [anchorT, ...peers.members]) {
+  for (const t of inCorpus) {
     const runId = t.runId as RunId;
     const events = runId === anchorId ? anchorEvents : await journalOf(ws, runId);
     const sc = runId === anchorId ? anchorScore : lastScore(events);
@@ -8522,7 +9139,8 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" yields ${String(eligible.length)} case(s) and a frozen suite needs at least ` +
         `${String(MIN_SUITE_CASES)}: ${String(unjudged)} run(s) carry no journaled verdict, ${String(excludedForWeights)} ` +
-        `were scored under different weights, ${String(undelivered)} finished without delivering work, ` +
+        `were scored under a different ruler (other weights, or before this exam was attested — re-run loom score on them), ` +
+        `${String(undelivered)} finished without delivering work, ` +
         `${String(unresolvedGate)} ended on an unresolved gate and so cannot carry the safety invariant, ` +
         `${String(otherKey)} were judged under a DIFFERENT cohort key. Cases come from evolution.scored rows and ` +
         `nothing else, so the fix is to judge the cohort: loom score <runId>.` +
@@ -8588,6 +9206,9 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     cohortKey: key,
     cohortN: cohort.n,
     weightsDigest: anchorScore.weightsDigest,
+    examGraphHash: exam.attestation.examGraphHash,
+    corpusThrough: exam.attestation.corpusThrough,
+    afterCorpus,
     suite: suite.name,
     suiteVersion: suite.version,
     frozenAt,
@@ -8887,6 +9508,19 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     ...(bucketInput === undefined ? {} : { bucketInput }),
   });
   const key = cohortKeyOf(anchorT);
+  // THE CANDIDATE HAS TO BE A CANDIDATE FOR THIS WORKFLOW, and it says so itself. The exam is
+  // selected by the COHORT's workflow, never the candidate's, so a candidate that renamed itself
+  // would be graded by nothing it can influence — but its runs would be journaled under a name no
+  // attestation covers, and a later `loom score` would fall back to its own evaluator for them.
+  // Refused before anything runs.
+  if (candidate.spec.metadata.name !== anchorT.cohort.workflow) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the candidate is named "${candidate.spec.metadata.name}" and the cohort is workflow "${anchorT.cohort.workflow}". A ` +
+        `candidate for a workflow carries that workflow's name; a renamed graph is a new workflow with no recordings, ` +
+        `no exam and no cohort, not a candidate for this one.`,
+    );
+  }
   // RESOLVED BEFORE THE COHORT IS MEASURED, not after. This block used to sit below the
   // `n < MIN_COHORT_SIZE` refusal, and now that `measureCohort` drops a member it could not
   // measure, an unpublished baseline makes every member specless and the FIRST thing the
@@ -8902,12 +9536,21 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
         `matches, which is the point — those runs were produced by the old bytes.`,
     );
   }
-  const peers = await cohortPeers(ws, anchorId, key, promotedGraphHashes, index, bucketInput);
-  if (peers.truncated) {
-    process.stderr.write(
-      `! the cohort scan stopped at ${String(COHORT_SCAN_LIMIT)} runs, so this cohort may be smaller than the workspace's\n`,
-    );
+  // NO MEASUREMENT THE CANDIDATE CANNOT WRITE, NO LIVE PROMOTION. Both sides of every pair below
+  // are graded by the operator's exam; without one the only S1 is the candidate's own evaluator,
+  // and a candidate that deletes its work and writes {pass:true} promotes at Δ +0.4000 — measured.
+  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], baseline.spec, { corpusOnly: true });
+  if (exam === undefined) throw noExamRefusal(anchorT.cohort.workflow, anchorId, "judge a candidate live against");
+  // THE QUESTIONS ARE FROZEN WITH THE EXAM, and assembled from its own scan (`examCorpus`): a
+  // recording made after the operator attested is not a question until the operator looks again,
+  // so an author who records thirty runs on inputs the candidate was built for has added nothing
+  // this gate will read.
+  const inCorpus = await examCorpus(ws, exam, anchorT, key, promotedGraphHashes, index, bucketInput);
+  const afterCorpus = exam.recordings.filter((r) => r.graphHash === anchorT.authoredGraphHash && r.runId > exam.attestation.corpusThrough).length;
+  for (const t of inCorpus) {
+    if (t.outcome.runStatus === "succeeded" && !exam.grades.has(t.runId)) exam.grades.set(t.runId, await gradeWithExam(ws, exam.attestation, exam.graph, t.runId));
   }
+  const peers = { members: inCorpus.filter((t) => t.runId !== anchorId) };
   // Said here for the reason `loom score` says it: `measureCohort` drops a member it could not
   // measure, and a cohort that shrank has to say why or the `n < MIN_COHORT_SIZE` refusal below
   // blames the operator's corpus for the operator's graphs/ directory. WHICH why is the point —
@@ -8922,12 +9565,19 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   )) {
     process.stderr.write(note);
   }
-  const cohort = measureCohort(key, [anchorT, ...peers.members]);
+  if (afterCorpus > 0) {
+    process.stderr.write(
+      `! ${String(afterCorpus)} recording(s) of this workflow are newer than the attestation's corpusThrough ` +
+        `(${exam.attestation.corpusThrough}) and are not questions; re-attest the exam to admit them\n`,
+    );
+  }
+  const cohort = measureCohort(key, inCorpus, { exam });
   if (cohort.n < MIN_COHORT_SIZE) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `cohort "${key}" has n = ${String(cohort.n)} comparable runs and a promotion needs at least ` +
-        `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED, did work, and could be MEASURED — a ` +
+        `${String(MIN_COHORT_SIZE)}. "Comparable" counts runs that SUCCEEDED, did work, could be MEASURED, were GRADED ` +
+        `by the attested exam and were recorded at or before its corpusThrough (${String(afterCorpus)} came later) — a ` +
         // THE SET, AND ALL OF IT. This used to end at "folded without its graph", which was the
         // whole of `specResolved` until `verdictsResolved` joined it; the enumeration did not
         // move, so the one exclusion an operator cannot fix by publishing a graph was the one it
@@ -8959,8 +9609,33 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   // score as free improvement, and the candidate is measured with its graph in hand because
   // this command compiled it. Refusing to pair against an unmeasured baseline is the same
   // "a guard that cannot decide fails closed" the cost and posture checks above already apply.
-  const eligible = [anchorT, ...peers.members]
-    .map((t) => ({ t, scored: scoreTrajectory(t, cohort) }))
+  //
+  // AND A BASELINE THE EXAM COULD NOT GRADE REFUSES THE PROMOTION BEFORE ANY RUN STARTS. A pair
+  // against a baseline scored 0 for want of a grade would hand the candidate that whole score as
+  // improvement it did not earn; a pair silently dropped would let a candidate be judged on the
+  // questions that happened to be readable. Refusing spends nothing. The attest-time checks make
+  // this unreachable for recordings of the graph the exam was attested against; it stays reachable
+  // when the exam was attested on another cohort of the same workflow.
+  const ungraded = inCorpus.filter((t) => {
+    if (t.outcome.runStatus !== "succeeded" || !t.specResolved) return false;
+    const g = exam.grades.get(t.runId);
+    return g === undefined || !g.gradable || g.verdict === undefined;
+  });
+  if (ungraded.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${String(ungraded.length)} recording(s) of cohort "${key}" could not be graded by exam ${exam.attestation.examGraphHash} ` +
+        `(${ungraded.slice(0, 5).map((t) => `${t.runId}: ${describeGrade(exam.grades.get(t.runId))}`).join("; ")}${ungraded.length > 5 ? "; …" : ""}). ` +
+        `Pairing a candidate against a run the exam cannot read would hand it that run's whole score, so this promotion ` +
+        `is refused before any candidate run starts. Attest an exam that reads what these recordings produced ` +
+        `(loom exam attest <exam> --cohort ${anchorId} --as <you>).`,
+    );
+  }
+  const eligible = inCorpus
+    // Only a run that finished and was measured has a grade to score under; a pending, failed or
+    // cancelled recording is not a member of anything and is not scored at all.
+    .filter((t) => t.outcome.runStatus === "succeeded" && t.specResolved)
+    .map((t) => ({ t, scored: scoreTrajectory(t, cohort, examOptsFor(exam, t.runId)) }))
     .filter((x) => x.scored.components.delivered && x.scored.components.specResolved)
     // OLDEST FIRST. A RunId is a ULID, so ascending order is chronological, and taking the head
     // of it means `--runs 6` uses the six recordings least able to have been made for this
@@ -8975,6 +9650,8 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   );
 
   const pairs: LivePair[] = [];
+  /** The exam runs behind each pair, so the certificate says which grade judged which side. */
+  const examRuns: { baselineRunId: RunId; baselineExamRunId?: string; candidateExamRunId?: string }[] = [];
   const unmeasured: Unmeasured[] = [];
   const gatingRegressions: string[] = [];
   const budgetUsd = budgetFlag(args);
@@ -9030,7 +9707,11 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       continue;
     }
 
-    const candScored = scoreTrajectory(candT, cohort);
+    // THE CANDIDATE SIDE IS GRADED BY THE SAME EXAM, over its own terminal outputs. A candidate
+    // that dropped or renamed the channel the exam reads is ungradable — score 0, not delivered —
+    // and one whose outputs crash the exam has not passed it. Neither hides in `unmeasured`.
+    const candGrade = await gradeWithExam(ws, exam.attestation, exam.graph, runId);
+    const candScored = scoreTrajectory(candT, cohort, { exam: candGrade });
     pairs.push({
       baselineRunId: t.runId,
       candidateRunId: runId,
@@ -9038,6 +9719,12 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       candidateScore: candScored.score,
       baselineCostUsd: t.usage.costUsd,
       candidateCostUsd: candT.usage.costUsd,
+    });
+    const baselineExamRunId = exam.grades.get(t.runId)?.examRunId;
+    examRuns.push({
+      baselineRunId: t.runId,
+      ...(baselineExamRunId === undefined ? {} : { baselineExamRunId }),
+      ...(candGrade.examRunId === undefined ? {} : { candidateExamRunId: candGrade.examRunId }),
     });
 
     // OVERSIGHT ONLY TIGHTENS, per input. Both halves of `ungatedActions`, asked of two real
@@ -9094,10 +9781,26 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     },
     baselineGraphHash: baseline.graphHash,
     candidateGraphHash: candidate.graphHash,
+    // WHICH EXAM JUDGED IT, OVER WHICH QUESTIONS. The grader neither graph owns, and the newest
+    // recording that counted as a question; `pairs[].baselineExamRunId` / `candidateExamRunId`
+    // name the exam run behind each side's S1.
+    examGraphHash: exam.attestation.examGraphHash,
+    corpusThrough: exam.attestation.corpusThrough,
+    afterCorpus,
     eligible: eligible.length,
     selected: selected.length,
     paired: verdict.paired,
-    pairs: pairs.map((p) => ({ ...p, diff: Math.round((p.candidateScore - p.baselineScore) * 1e6) / 1e6 })),
+    pairs: pairs.map((p) => {
+      const e = examRuns.find((x) => x.baselineRunId === p.baselineRunId);
+      // ABSENT when no exam run was made for that side — the exam could not read its outputs —
+      // rather than a sentinel a certificate reader would have to know about.
+      return {
+        ...p,
+        diff: Math.round((p.candidateScore - p.baselineScore) * 1e6) / 1e6,
+        ...(e?.baselineExamRunId === undefined ? {} : { baselineExamRunId: e.baselineExamRunId }),
+        ...(e?.candidateExamRunId === undefined ? {} : { candidateExamRunId: e.candidateExamRunId }),
+      };
+    }),
     unmeasured,
     medianCostRatio,
     // WHICH CHECKS COULD NOT RUN. Without this the row says "promote: true" over a set of

@@ -185,7 +185,7 @@ test("THE EVAL GATE STILL JUDGES A CANDIDATE THAT ADDS A FUNCTION NODE — its s
   });
 
   assert.equal(report.passed, 1, JSON.stringify(report.cases[0]?.reasons));
-  assert.equal(report.cases[0]?.replay.replayed.status, "succeeded");
-  assert.deepEqual(report.cases[0]?.replay.derivedSeeds, ["extra@root#0:random:0"], "the new node's seed was derived, and the report says so");
-  assert.equal(report.cases[0]?.replay.hermetic, false);
+  assert.equal(report.cases[0]?.replay?.replayed.status, "succeeded");
+  assert.deepEqual(report.cases[0]?.replay?.derivedSeeds, ["extra@root#0:random:0"], "the new node's seed was derived, and the report says so");
+  assert.equal(report.cases[0]?.replay?.hermetic, false);
 });

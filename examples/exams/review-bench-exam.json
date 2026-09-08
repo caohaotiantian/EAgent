@@ -1,0 +1,59 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "review-bench-exam",
+    "project": "loom",
+    "version": 1,
+    "description": "THE OPERATOR'S EXAM for review-bench: re-parses the raw reviews against the planted cases and writes one verdict. It reads `reviews` (the model's text) and never `verdicts` or `verdictN` — those are the work graph's own summary of itself, and a candidate may rewrite them. Attest with: loom exam attest exams/review-bench-exam.json --cohort <a review-bench run> --as <you> The evaluator's threshold is 0 on purpose: an assertion evaluator whose verdict scores below its threshold escalates the run's posture (E1 low_confidence), and an exam run that FAILS a candidate is the ordinary case, not a low-confidence one."
+  },
+  "policy": {
+    "posture": "out",
+    "capabilities": []
+  },
+  "channels": {
+    "subject": {
+      "type": "string",
+      "reduce": "replace"
+    },
+    "cases": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "reviews": {
+      "type": "array",
+      "reduce": "replace"
+    },
+    "verdict": {
+      "type": "object",
+      "reduce": "replace"
+    }
+  },
+  "inputs": [
+    "subject",
+    "cases",
+    "reviews"
+  ],
+  "outputs": [
+    "verdict"
+  ],
+  "nodes": [
+    {
+      "id": "grade",
+      "type": "evaluator",
+      "reads": [
+        "cases",
+        "reviews"
+      ],
+      "writes": [
+        "verdict"
+      ],
+      "evaluator": {
+        "kind": "assertion",
+        "ref": "function/bench-exam@stable",
+        "threshold": 0
+      }
+    }
+  ],
+  "edges": []
+}

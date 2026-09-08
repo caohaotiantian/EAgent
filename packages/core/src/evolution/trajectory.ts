@@ -760,14 +760,16 @@ function allVerdictsResolved(steps: readonly RawStep[], nodeTypes: ReadonlyMap<N
  * of the walking skeleton over one to five documents (`test/evolution/cohort-bucket.test.ts`)
  * now form ONE cohort of 5, with costs $0.000075 → $0.000375 around a p50 of $0.000225 — a 5x
  * spread inside one cohort. Five runs whose OUTCOME is identical (1.000 each) score
- * `0.833 0.767 0.700 0.700 0.700` instead of `0.700` five times: the cost term now reflects
- * input size as well as quality, and that is the noise this trade buys.
+ * `0.733 0.667 0.600 0.600 0.600` instead of `0.600` five times: the cost term now reflects
+ * input size as well as quality, and that is the noise this trade buys. (A gateless cohort pays
+ * no human-effort credit — `score.ts`'s zero-median rule — so there is no 0.1 in any of these;
+ * `cohort-bucket.test.ts` pins them.)
  *
  * AND WHAT THE OLD DEFAULT COST, which is larger. `costNormalized` is
  * `clamp01(cost / cohort.p50Cost)` and the term is `weights.cost * (1 - costNormalized)`, so in
  * a cohort of ONE a run is compared against itself: `costNormalized` is exactly 1 — measured
  * `[1, 1, 1, 1, 1]` for those same five runs scored alone — and the cost term contributes
- * exactly 0, so all five scored `0.700`. Not because the ruler was precise: because 20% of the
+ * exactly 0, so all five scored `0.600`. Not because the ruler was precise: because 20% of the
  * metric was structurally dead. `latencyNormalized` is the same construction over `p50Wall`
  * and goes the same way on any run whose wall time is non-zero. A noisier ruler that exists
  * beats an exact one no two runs ever stand on, and `bucketInput` is the seam for a deployment

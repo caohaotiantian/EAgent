@@ -707,7 +707,7 @@ test("THE EVAL GATE STILL REPLAYS A CANDIDATE GRAPH — the check did not make `
   });
 
   assert.equal(report.passed, 1, JSON.stringify(report.cases[0]?.reasons));
-  assert.equal(report.cases[0]?.replay.graph.match, false, "…and the gate can see that the graph changed");
+  assert.equal(report.cases[0]?.replay?.graph.match, false, "…and the gate can see that the graph changed");
 });
 
 // ── the CALL a recorded result answered ──────────────────────────────────────

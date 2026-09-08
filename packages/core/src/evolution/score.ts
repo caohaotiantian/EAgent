@@ -163,6 +163,37 @@
  * The escape is a signal that VARIES, and it is a real one rather than an argument:
  * `evaluator{kind:"assertion"}` scores `k/n`, so a cohort of runs of `review-bench` spreads over
  * the ladder and the rank measures correctness again.
+ *
+ * ## …AND S1 IS THE CANDIDATE'S OWN UNLESS AN EXAM SAYS OTHERWISE
+ *
+ * Everything above takes S1 from the graph's `evaluator{kind:"assertion"}` nodes, and the graph
+ * is the artifact being optimised — so whoever authors a candidate authors its S1, and with it
+ * `outcome`, the ceiling and `isGolden` condition 1. Driven through the shipped verbs
+ * (`docs/audit-2026-09-02.md`): a candidate with no work node and an evaluator writing
+ * `{pass:true}` promoted at paired mean Δ +0.4000 over 30 pairs. Every structural pin on what the
+ * in-graph grader saw was defeated (`git show aabdc63`), because the candidate owns every channel
+ * a graph produces.
+ *
+ * `evolution/exam.ts` is the answer, and this file's part of it is small: `scoreTrajectory` and
+ * `measureCohort` take an optional `exam` — the verdict an OPERATOR-ATTESTED exam graph wrote
+ * about this run, over recorded inputs and terminal outputs the candidate did not get to
+ * rearrange. With one present, S1 is that verdict and `t.outcome.assertions` is NOT read: an
+ * assertion the optimiser wrote is the graph's opinion of itself, one rung above S5, and `didWork`
+ * stops counting it as work for the same reason. NEITHER IS S4, for the same reason again — a
+ * rubric is a model the graph chose grading a prompt the graph wrote, and because `outcomeOf`
+ * averages over the signals PRESENT, adding one raises the outcome of a run the exam failed
+ * (measured: 0 → 0.2308) rather than diluting it. S2 and S3 stay: a human's gate decision and a
+ * downstream fact are not the candidate's to write. `delivered` additionally needs the run to have
+ * been GRADABLE — a run whose outputs the exam could not read delivered nothing and earns no
+ * efficiency credit either, so the work-deleting candidate scores exactly 0 rather than the cost
+ * and latency credit it would keep in a priced cohort.
+ *
+ * THE EXAM IS PART OF THE RULER. `weightsDigest` becomes `digest({weights, examGraphHash})` under
+ * an exam (`rulerDigest`), and every reader already refuses or excludes on a digest mismatch —
+ * this function throws `E_COHORT_INVALIDATED`, `freezeSuite` counts `excludedForWeights`, `loom
+ * cohort` reports it. So a row scored before the attestation, or under another exam, is a row
+ * under a different ruler and code that already exists says so; no new field and no kernel touch.
+ * Without `exam`, every byte here is what it was, which is what keeps every old journal folding.
  */
 
 import { digest, type Digest } from "../canonical.ts";
@@ -170,6 +201,7 @@ import { CODES, err } from "../errors.ts";
 // The number condition 6 has to quote. Imported rather than restated, so the size named in the
 // refusal and the size the engine decided by cannot drift apart.
 import { EXTERNALISE_ABOVE_BYTES } from "../journal/payloads.ts";
+import type { ExamOutcome } from "./exam.ts";
 import type { Trajectory } from "./trajectory.ts";
 
 // ---------------------------------------------------------------------------
@@ -313,11 +345,30 @@ const DECISION_VALUE: Readonly<Record<string, number>> = {
   reject: 0,
 };
 
-export function readSignals(t: Trajectory, downstream?: DownstreamOutcome): SignalReading[] {
+export function readSignals(t: Trajectory, downstream?: DownstreamOutcome, exam?: ExamOutcome): SignalReading[] {
   const out: SignalReading[] = [];
   const o = t.outcome;
 
-  if (o.assertions.length > 0) {
+  if (exam !== undefined) {
+    // THE EXAM'S VERDICT IS S1, AND THE GRAPH'S OWN ASSERTIONS ARE NOT READ — see the header.
+    // Ungradable: no S1 at all (and `delivered` is false below, so the score is 0 whatever else
+    // is present). Gradable but ungraded — the exam run did not reach a verdict — is a 0, not an
+    // absence: a candidate whose outputs crash the exam has not passed it, and a candidate could
+    // otherwise crash a weak exam on every input and hide in "unmeasured". The baseline side of a
+    // pair is the caller's to exclude, and `promoteAgainstCohort` does.
+    if (exam.gradable) {
+      const v = exam.verdict;
+      out.push({
+        id: "S1",
+        value: v === undefined ? 0 : clamp01(v.score ?? (v.pass ? 1 : 0)),
+        weight: SIGNAL_WEIGHTS.S1,
+        evidence:
+          v === undefined
+            ? `exam run ${exam.examRunId ?? "(not started)"} under graph ${exam.graphHash} reached no verdict`
+            : `exam ${exam.examRunId ?? "(unrecorded)"} graph ${exam.graphHash}: ${v.pass ? "pass" : "fail"}${v.score === undefined ? "" : ` score ${v.score.toFixed(3)}`}`,
+      });
+    }
+  } else if (o.assertions.length > 0) {
     const passed = o.assertions.filter((a) => a.pass).length;
     out.push({
       id: "S1",
@@ -347,7 +398,19 @@ export function readSignals(t: Trajectory, downstream?: DownstreamOutcome): Sign
       evidence: accepted ? "no rework, no reopened incident" : "reworked or reopened",
     });
   }
-  if (o.rubrics.length > 0) {
+  // S4 IS THE CANDIDATE'S TOO, AND UNDER AN EXAM IT IS NOT READ EITHER — the same clause the
+  // assertion branch above and `didWork` below already make, arrived at one rung later. A rubric
+  // is a model the graph chose grading a prompt the graph wrote; it is candidate-owned in exactly
+  // the way an in-graph assertion is. `outcomeOf` divides by the weights PRESENT, so pushing a
+  // 0.3-weight 1.0 beside a 1.0-weight 0 does not dilute the exam's verdict, it raises it:
+  // measured, `outcome` 0 → 0.2308 for a candidate the operator's exam failed on every input,
+  // which is +0.1385 of score on every pair and enough for `L1-paired-improvement` and
+  // `L5-candidate-earned-it`. That is CLAUDE.md §3's shape — the candidate owning both sides of a
+  // channel its own graph produces — surviving inside the average after S1 was taken away from it.
+  // Without an exam nothing changes: S4 is then one rung of the only ladder there is, capped at
+  // `canary` by `promotionCeiling` and excluded from `GROUND_TRUTH_SIGNALS`, which is the older
+  // and weaker protection this replaces where an exam exists.
+  if (exam === undefined && o.rubrics.length > 0) {
     const avg = o.rubrics.reduce((a, r) => a + r.score, 0) / o.rubrics.length;
     out.push({ id: "S4", value: clamp01(avg), weight: SIGNAL_WEIGHTS.S4, evidence: `${o.rubrics.length} rubric verdict(s)` });
   }
@@ -439,37 +502,55 @@ export function outcomeOf(signals: readonly SignalReading[]): number {
  * its answer per run. Adding a public name is a reviewed act (`scripts/surface.json`), and
  * this one buys a caller nothing it cannot read off a `ScoredTrajectory`.
  */
-function didWork(t: Trajectory): boolean {
+function didWork(t: Trajectory, exam?: ExamOutcome): boolean {
   return (
     t.usage.modelCalls > 0 ||
     t.usage.toolCalls > 0 ||
     t.usage.subgraphRuns > 0 ||
     t.steps.some((s) => s.status === "succeeded" && s.channelsWritten.length > 0) ||
-    t.outcome.assertions.length > 0 ||
-    t.outcome.humanDecisions.length > 0 ||
-    t.outcome.rubrics.length > 0
+    // UNDER AN EXAM AN IN-GRAPH VERDICT IS NOT WORK — an assertion OR a rubric. Both are the
+    // graph's opinion of itself, and the exam exists because that opinion is the candidate's to
+    // write. The rubric half was missed when the assertion half was written, and the asymmetry is
+    // nearly inert (a rubric costs a model call, and `modelCalls > 0` is the first clause here) —
+    // it is fixed because a predicate that treats two candidate-authored verdicts differently is
+    // one whose next reader has to work out which. `humanDecisions` stays: a person deciding is
+    // work whoever wrote the graph.
+    (exam === undefined && (t.outcome.assertions.length > 0 || t.outcome.rubrics.length > 0)) ||
+    t.outcome.humanDecisions.length > 0
   );
+}
+
+/**
+ * THE RULER, AS ONE DIGEST. `digest(weights)` without an exam — byte-identical to every row ever
+ * journaled — and `digest({weights, examGraphHash})` with one, so a score under exam E1, a score
+ * under E2 and a score under no exam are three rulers every existing reader already tells apart.
+ * `evolution.scored.weights` still carries the four numbers; the digest covers more than they do,
+ * and the row's `signals[].evidence` names the exam so a reader can see why.
+ */
+function rulerDigest(weights: ScoreWeights, examGraphHash: string | undefined): Digest {
+  return examGraphHash === undefined ? digest(weights) : digest({ weights, examGraphHash });
 }
 
 export function scoreTrajectory(
   t: Trajectory,
   cohort: CohortStats,
-  opts: { downstream?: DownstreamOutcome; weights?: ScoreWeights } = {},
+  opts: { downstream?: DownstreamOutcome; weights?: ScoreWeights; exam?: ExamOutcome } = {},
 ): ScoredTrajectory {
   const weights = opts.weights ?? DEFAULT_WEIGHTS;
-  const wd = digest(weights);
+  const wd = rulerDigest(weights, opts.exam?.graphHash);
   if (wd !== cohort.weightsDigest) {
     // A weight change invalidates the cohort. Refusing here rather than warning is the
     // point: the failure mode is a system that quietly reports an improvement it
-    // measured with a different ruler.
+    // measured with a different ruler. An exam is part of the ruler, so a run graded by one
+    // scored against a cohort measured without it — or under another — is refused here too.
     throw err.validation(
       CODES.E_COHORT_INVALIDATED,
-      `cohort "${cohort.key}" was measured under different score weights; re-measure it before comparing`,
-      { details: { cohortWeights: cohort.weightsDigest, theseWeights: wd } },
+      `cohort "${cohort.key}" was measured under a different ruler (score weights, or a different exam); re-measure it before comparing`,
+      { details: { cohortWeights: cohort.weightsDigest, theseWeights: wd, examGraphHash: opts.exam?.graphHash ?? null } },
     );
   }
 
-  const signals = readSignals(t, opts.downstream);
+  const signals = readSignals(t, opts.downstream, opts.exam);
   // THE FLOOR (see the header). The signals are still read and still reported as evidence —
   // a run can pass an assertion and then die, and the record should say so — but the run's
   // outcome is the outcome of the RUN, and a run that did not finish has none.
@@ -505,7 +586,12 @@ export function scoreTrajectory(
   // is not that work. Measured on this tree before the gate existed: a no-op success banked the
   // whole cost + latency credit and scored 0.400. That is the same reward-for-failing the floor
   // was added to close, wearing terminal success as a disguise.
-  const delivered = completed && didWork(t);
+  // AND UNDER AN EXAM, DELIVERED MEANS GRADABLE. A run whose outputs the exam could not read
+  // — the work channel absent, renamed, never declared — delivered nothing the ruler can see,
+  // so it earns no efficiency credit either. Measured on the audit's fixture: the work-deleting
+  // candidate scored 0.600 against a $0 cohort and would keep 0.300 of cost and latency credit
+  // in a priced one; with this line it scores exactly 0.
+  const delivered = completed && didWork(t, opts.exam) && (opts.exam === undefined || opts.exam.gradable);
 
   const earned =
     weights.outcome * outcome +
@@ -701,15 +787,33 @@ export function isGolden(
  *
  * `n` therefore counts comparable runs rather than journal rows, and `MIN_COHORT_SIZE` means
  * 30 of those.
+ *
+ * UNDER AN EXAM, A MEMBER IS A RUN THE EXAM GRADED — the same clause a fourth time. `exam.grades`
+ * is what the caller could read back or produce for each run; a run with no grade, one the exam
+ * could not read (`gradable: false`), or one whose exam run reached no verdict is `unmeasured`,
+ * and a member nobody measured sets a percentile nobody took. It is dropped from the population
+ * rather than scored 0 for the reason the third clause gives: an exam that crashes on some inputs
+ * must not lower `p90Score` for everyone else. The digest this stamps is the exam's ruler, so a
+ * `scoreTrajectory` call without the same exam refuses it.
  */
 export function measureCohort(
   key: string,
   all: readonly Trajectory[],
-  opts: { weights?: ScoreWeights; downstream?: ReadonlyMap<string, DownstreamOutcome> } = {},
+  opts: {
+    weights?: ScoreWeights;
+    downstream?: ReadonlyMap<string, DownstreamOutcome>;
+    exam?: { readonly graphHash: string; readonly grades: ReadonlyMap<string, ExamOutcome> };
+  } = {},
 ): CohortStats {
   const weights = opts.weights ?? DEFAULT_WEIGHTS;
-  const weightsDigest = digest(weights);
-  const members = all.filter((m) => m.specResolved && m.outcome.runStatus === "succeeded" && didWork(m));
+  const weightsDigest = rulerDigest(weights, opts.exam?.graphHash);
+  const gradeOf = (m: Trajectory): ExamOutcome | undefined => opts.exam?.grades.get(m.runId);
+  const graded = (m: Trajectory): boolean => {
+    if (opts.exam === undefined) return true;
+    const g = gradeOf(m);
+    return g !== undefined && g.graphHash === opts.exam.graphHash && g.gradable && g.verdict !== undefined;
+  };
+  const members = all.filter((m) => m.specResolved && m.outcome.runStatus === "succeeded" && didWork(m, gradeOf(m)) && graded(m));
   const p50 = (xs: readonly number[]): number => {
     if (xs.length === 0) return 0;
     const sorted = [...xs].sort((a, b) => a - b);
@@ -729,7 +833,8 @@ export function measureCohort(
 
   const scored = members.map((m) => {
     const d = opts.downstream?.get(m.runId);
-    return scoreTrajectory(m, base, { weights, ...(d === undefined ? {} : { downstream: d }) });
+    const g = gradeOf(m);
+    return scoreTrajectory(m, base, { weights, ...(d === undefined ? {} : { downstream: d }), ...(g === undefined ? {} : { exam: g }) });
   });
   const scores = scored.map((s) => s.score).sort((a, b) => a - b);
   const outcomes = scored.map((s) => s.outcome);

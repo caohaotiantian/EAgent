@@ -171,7 +171,7 @@ test("A CANDIDATE THAT CHANGES THE OUTPUT STILL PASSES ITS DECLARED EXPECTATIONS
     engine: engineOf(h),
   });
 
-  assert.equal(report.cases[0]!.replay.match, false, "the candidate really did diverge…");
+  assert.equal(report.cases[0]!.replay!.match, false, "the candidate really did diverge…");
   assert.equal(report.passed, 1, `…and still meets its contract: ${JSON.stringify(report.cases[0]!.reasons)}`);
 });
 
@@ -214,7 +214,7 @@ test("A CANDIDATE THAT DELETED THE HUMAN GATE FAILS THE MUST-PASS SAFETY CASE", 
   });
 
   assert.deepEqual(
-    Object.values(report.cases[0]!.replay.replayed.gates).map((g) => g.state),
+    Object.values(report.cases[0]!.replay!.replayed.gates).map((g) => g.state),
     [],
     "the candidate raised no gate whatsoever",
   );
@@ -311,6 +311,7 @@ function report(over: Partial<EvalReport> = {}): EvalReport {
     // answer for two reports that share a (non-existent) graph, and keeps every criterion in
     // this file about the criterion it names.
     budgets: {},
+    evaluators: {},
     ...over,
   };
 }
@@ -374,7 +375,7 @@ test("a malformed suite certifies nothing, so it blocks promotion too", () => {
 
 test("every criterion reports a readable detail, pass or fail", () => {
   const v = gateCandidate({ ...baseInput, candidate: report() });
-  assert.equal(v.checks.length, 13);
+  assert.equal(v.checks.length, 15);
   for (const c of v.checks) assert.ok(c.detail.length > 0, c.id);
 });
 
@@ -487,7 +488,7 @@ test("a candidate that passed NOTHING is refused, however badly the baseline did
   const nothing = (o: Partial<EvalReport> = {}): EvalReport =>
     ({ suite: "s", suiteVersion: 1, suiteFrozenAt: 1_000, cases: [], passed: 0, total: 3, passRate: 0,
        mustPassFailures: [], totalCostUsd: 0.001, p95WallMs: 10, suiteValid: true, suiteIssues: [],
-       budgets: {}, ...o }) as EvalReport;
+       budgets: {}, evaluators: {}, ...o }) as EvalReport;
 
   const tie = gateCandidate({ ...baseInput, baseline: nothing(), candidate: nothing() });
   assert.equal(tie.promote, false, "0 of 3 is not a promotion, even against a baseline that also managed 0");
@@ -529,7 +530,7 @@ test("a channel expectation is compared by CANONICAL form, not by the order its 
     graph: compileSkeleton(),
     engine: engineOf(h),
   });
-  const produced = report.cases[0]!.replay.replayed.channels["merged"] as Record<string, unknown>;
+  const produced = report.cases[0]!.replay!.replayed.channels["merged"] as Record<string, unknown>;
   assert.ok(produced !== undefined && Object.keys(produced).length > 1, "need a multi-key object to reorder");
 
   // Same entries, reversed insertion order — the only difference.
