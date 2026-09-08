@@ -1469,16 +1469,33 @@ export function openWorkspace(
   // no journal records. A module that supplies a resolver owns REF RESOLUTION for this
   // deployment; the boot banner names it so that is never silent.
   //
-  // "INCLUDING `resources/`" IS WHAT THIS SAID AND IT IS NOT TRUE, so it is gone rather than
-  // half-true. What a substituted resolver replaces is `resolve`/`document`/`subgraph` — the
-  // three questions the compiler and the engine ask about a ref. It does NOT replace the
-  // workspace scan: `documents` is built from `readResources(root)` above regardless, and
-  // `registerFunctions`/`registerHooks` below still compile and register every body in
-  // `resources/function` and `resources/hook` into the registries. So a deployment with a
-  // module resolver still runs the operator's own function and hook bodies, which is very
-  // probably what an operator wants and is certainly what the code does. Wiring it the other
-  // way would delete the workspace seam for anyone who supplies a resolver, which is a
-  // behaviour change no Decision covers; the claim is corrected instead of the code.
+  // THIS SENTENCE HAS BEEN WRONG TWICE, IN OPPOSITE DIRECTIONS, so here is only what was
+  // driven. It first read "owns ref resolution for the deployment, `resources/` included",
+  // which a reviewer read as "the workspace scan is skipped" — it is not. The correction then
+  // said the operator's own bodies "keep working beside a module's resolver", which is false in
+  // the way that matters. Both measured, on one workspace holding `resources/function/stamp.js`
+  // and one module registering `{resolve: () => undefined}`:
+  //
+  //     $ loom run stamp.json --workspace $D                        # no module
+  //       "status": "succeeded",  "note": "from the workspace file"
+  //     $ loom run stamp.json --workspace $D --extension-module res.mjs
+  //       ✗ GRAPH015_RESOURCE_NOT_FOUND: resource "function/stamp@stable" does not resolve
+  //
+  // WHAT IS TRUE: the workspace scan is NOT skipped — `documents` is built from
+  // `readResources(root)` regardless, and `registerFunctions`/`registerHooks` below do compile
+  // and register every `resources/function` and `resources/hook` BODY into the registries. And
+  // those bodies are unreachable anyway, because `rule015Resources` asks the RESOLVER, which is
+  // now the module's: a graph naming a workspace ref does not COMPILE, so the registered body
+  // is never looked up. The same is true of every `prompt/*` document.
+  //
+  // SO THE OPERATIVE SENTENCE IS THE FIRST ONE AFTER ALL: a module that substitutes the
+  // resolver takes on serving every ref this deployment's graphs name, `resources/` included.
+  // What was wrong was never that claim; it was the reader it invites — the scan still runs and
+  // the registries still fill, and a module author who assumes otherwise gets a registry full
+  // of bodies nothing can reach. Layering instead would mean inventing a resolution order —
+  // workspace first? module first? per method? — that nobody wrote down and no journal records,
+  // which is why `EngineOptions.resolver` takes one object; the boot banner names the module so
+  // the substitution is never silent.
   const resolver: ResourceResolver = extensions?.resolver ?? {
     // Without a published document, refs resolve to a digest of their own name. That is
     // enough for the compiler's pinning to be structurally correct locally.
@@ -3245,6 +3262,13 @@ export function readModels(
  *     reader. It does not reach the adapter, so a non-zero rate here would lift this refusal
  *     while the adapter went on billing 0.
  *
+ * AND A `false` FROM SOURCE 1 IS NOT FINAL, which reading `own !== undefined` made it. It falls
+ * through to source 2 and is decisive only if the operator wrote no row — otherwise an adapter
+ * saying "I cannot price this" overrode an operator who had already said what it costs, and the
+ * refusal named a remedy only a third party could apply. It stays decisive over the PROBE,
+ * which is the fail-closed direction: the adapter is the only source that knows the probe
+ * cannot tell a free endpoint from a missing row.
+ *
  * SOURCE 1 IS UNREACHABLE FOR EVERY ADAPTER THIS FILE CONSTRUCTS, today, and saying so is the
  * point: `MockModelAdapter` implements `hasPrice` and is never routed through here, and
  * `RoutingAdapter` implements it and is never passed to this function. So the branch exists for
@@ -3264,8 +3288,18 @@ function pricedFor(
   model: string,
 ): boolean {
   if (adapter === undefined) return false;
+  // A `true` FROM THE ADAPTER SETTLES IT; A `false` DOES NOT, and reading both as final made the
+  // operator's documented escape hatch inert. An extension adapter that honestly answers "I
+  // cannot price this model" beat an explicit `{"input": 0, "output": 0}` the operator had
+  // written on the route row, and the refusal that followed told them to write it. Driven: with
+  // `hasPrice: () => false` and that row present, `unpriced` still listed the route and
+  // `estimateOf` still threw — a refusal whose only remedy was a third party editing their
+  // module. The two sources answer different questions: the adapter says what its own table
+  // holds, the operator says what the endpoint charges, and an operator who has written a rate
+  // down has answered the one this guard is asking. So `false` falls THROUGH to the tables and
+  // is decisive only when nobody wrote one.
   const own = adapter.hasPrice?.(model);
-  if (own !== undefined) return own;
+  if (own === true) return true;
   // EVERY TABLE THE OPERATOR WROTE, NOT THE FIRST ONE THAT EXISTS. This was
   // `declaredPrices.get(a) ?? routePrices.get(k)`, and `??` falls through only when the adapter
   // row has NO `prices` AT ALL — so an adapter row pricing model A masked a ROUTE row declaring
@@ -3274,6 +3308,10 @@ function pricedFor(
   // the more specific statement, so it comes first.
   const tables = rows.filter((r) => r !== undefined);
   if (tables.length > 0 && resolvePrice(tables, model) !== undefined) return true;
+  // NOW the adapter's `false` is decisive, and it is decisive in the fail-closed direction: it
+  // is the only source that knows the probe below cannot tell a free endpoint from a missing
+  // row, so believing it over the probe refuses where the probe would have passed.
+  if (own === false) return false;
   return adapter.priceOf(model, { inputTokens: 1e6, outputTokens: 1e6 }) !== 0;
 }
 
@@ -3373,7 +3411,16 @@ class RoutingAdapter implements ModelAdapter {
     return to.adapter.estimateOf({ ...req, model: to.model });
   }
 
-  /** The route's primary tier, asked of the adapter behind it. See `pricedFor`. */
+  /**
+   * The route's primary tier, asked of the adapter behind it. See `pricedFor`.
+   *
+   * NO CALLER IN `src/`, and that is worth saying rather than leaving to be discovered.
+   * `pricedFor` is only ever handed the adapters `readModels` constructs or the extension
+   * adapters `preRegistered` supplies — never the `RoutingAdapter` it goes on to build — so
+   * this method exists for a library embedder holding the routed adapter and for the tests
+   * that pin its answer. It is implemented because `ModelAdapter` declares it and an adapter
+   * that can answer should; it is not on the path the binary walks.
+   */
   hasPrice(model: string): boolean {
     return !this.#unpriced.has(model) && this.#routes.has(model);
   }

@@ -456,3 +456,39 @@ test("…and a `@stable` module ref still seeds, so the seam it exists for is un
   assert.equal(r.code, 0, r.out + r.err);
   assert.match(r.out, /"note": "seeded"/, r.out);
 });
+
+/**
+ * WHAT A SUBSTITUTED RESOLVER ACTUALLY DOES TO `resources/`, pinned because the comment and
+ * README row describing it have now been wrong twice, in opposite directions.
+ *
+ * First they said the module "owns ref resolution for the deployment, `resources/` included",
+ * read as "the workspace scan is skipped" — it is not. The correction said the operator's own
+ * bodies "keep working beside a module's resolver" — false in the way that matters. The measured
+ * fact is neither: the scan runs, the bodies are registered, and a graph naming one does NOT
+ * COMPILE, because `rule015Resources` asks the resolver and the resolver is now the module's.
+ * A module supplying a resolver takes on serving every ref the deployment's graphs name.
+ *
+ * The control is the whole test: the SAME workspace and the SAME graph, once without the module.
+ *
+ * GREEN AT 294e713 AND AT EVERY COMMIT SINCE, and saying so is the point: this pins a FACT the
+ * prose kept getting wrong, not a behaviour this branch changed. A reader asking "what ran?"
+ * should get "nothing new — that is why it is here".
+ */
+test("A SUBSTITUTED RESOLVER OWNS `resources/` TOO — the workspace body stops resolving", async () => {
+  const d = dir();
+  mkdirSync(join(d, "resources", "function"), { recursive: true });
+  writeFileSync(join(d, "resources", "function", "stamp.js"), `(view, ctx) => ({ writes: { note: "from the workspace file" } })\n`);
+  const g = graph(d, "stamp", FUNCTION_GRAPH);
+
+  // THE CONTROL FIRST, so "it does not resolve" cannot be a fact about the fixture.
+  const without = await cli(["run", g, "--workspace", d]);
+  assert.equal(without.code, 0, without.out + without.err);
+  assert.match(without.out, /"note": "from the workspace file"/, without.out);
+
+  // A resolver that resolves NOTHING. It is a legal `ResourceResolver` — `resolve` is the one
+  // required member — and it takes the whole deployment's ref resolution with it.
+  const m = mod(d, "res.mjs", `export default ({ resolver }) => { resolver.register({ resolve: () => undefined }); };\n`);
+  const withMod = await cli(["run", g, "--workspace", d, "--extension-module", m]);
+  assert.notEqual(withMod.code, 0, withMod.out + withMod.err);
+  assert.match(withMod.out + withMod.err, /GRAPH015_RESOURCE_NOT_FOUND/, withMod.out + withMod.err);
+});

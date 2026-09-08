@@ -320,3 +320,64 @@ test("THE ORDINARY HALF: the zero row this refusal is shaped around still boots 
   assert.deepEqual([...priced.unpriced], []);
   assert.ok(priced.adapter.priceOf("free", { inputTokens: 1e6, outputTokens: 1e6 }) > 0, "an ADAPTER row does reach the adapter");
 });
+
+/**
+ * AN ADAPTER'S `false` IS NOT FINAL, because it made the operator's own escape hatch inert.
+ *
+ * `pricedFor` read `if (own !== undefined) return own`, so BOTH booleans short-circuited. An
+ * extension adapter that honestly answers "I cannot price this model" therefore beat an
+ * explicit `{"input": 0, "output": 0}` the operator had written on the route row — and the
+ * refusal that followed instructed them to write exactly that row. Measured at 72510cd:
+ *
+ *     unpriced = [ 'local → freelocal/llama-local' ]
+ *     estimateOf THREW: … which no price table prices … As the operator: add
+ *       "prices": {"llama-local": {"input": 0, "output": 0}} to this ROUTE row …
+ *
+ * — a refusal whose only remedy was a third party editing their module. The two sources answer
+ * different questions: the adapter says what its own table holds, the operator says what the
+ * endpoint charges. `false` falls through to the tables now and is decisive only when nobody
+ * wrote one — and it stays decisive over the PROBE, which is the fail-closed direction.
+ */
+const FREE_EXT = {
+  provider: "freelocal",
+  stream: (): AsyncIterable<never> => ({ [Symbol.asyncIterator]: async function* () {} }) as AsyncIterable<never>,
+  priceOf: () => 0,
+  estimateOf: () => 0,
+  outputCeilingOf: () => 1024,
+};
+
+/** A `--models-file` with one route onto a PRE-REGISTERED extension adapter, as argv supplies it. */
+function readExt(hasPrice: (() => boolean) | undefined, routePrices: Record<string, { input: number; output: number }> | undefined) {
+  const d = mkdtempSync(join(tmpdir(), "loom-unpriced-extfalse-"));
+  made.push(d);
+  const p = join(d, "models.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      routes: { local: { adapter: "freelocal", model: "llama-local", ...(routePrices === undefined ? {} : { prices: routePrices }) } },
+    }),
+  );
+  const adapter = hasPrice === undefined ? FREE_EXT : { ...FREE_EXT, hasPrice };
+  return readModels(p, {}, undefined, new Map([["freelocal", adapter as never]]));
+}
+
+test("AN ADAPTER'S `hasPrice` false DOES NOT OVERRIDE AN OPERATOR'S OWN ZERO ROW", () => {
+  const cfg = readExt(() => false, { "llama-local": { input: 0, output: 0 } });
+  assert.deepEqual([...cfg.unpriced], [], "the operator wrote the rate down; the adapter only said its table lacks one");
+  assert.equal(cfg.adapter.estimateOf(REQ("local")), 0, "…and the route runs rather than refusing");
+});
+
+test("…but with NO row written, `hasPrice` false still refuses — it beats the probe, which is fail-closed", () => {
+  // The probe alone would answer "priced" only for a non-zero price, and this adapter prices 0,
+  // so the probe says unpriced too. The case that matters is that `false` is BELIEVED rather
+  // than being softened into "ask the probe": it is the only source that knows the probe cannot
+  // tell a free endpoint from a missing row.
+  const cfg = readExt(() => false, undefined);
+  assert.deepEqual([...cfg.unpriced], ["local → freelocal/llama-local"]);
+  assert.throws(() => cfg.adapter.estimateOf(REQ("local")), (e: unknown) => isLoomError(e) && /no price table prices/.test(e.message));
+});
+
+test("…and `hasPrice` true is still final, with or without a row — the control", () => {
+  assert.deepEqual([...readExt(() => true, undefined).unpriced], []);
+  assert.deepEqual([...readExt(() => true, { "llama-local": { input: 0, output: 0 } }).unpriced], []);
+});
