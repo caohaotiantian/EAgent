@@ -1,5 +1,5 @@
 /**
- * The automatic escalation decision table, E1–E10.
+ * The automatic escalation decision table.
  *
  * Two properties hold for the table as a whole, and they are asserted first because
  * every individual rule depends on them: every rule only TIGHTENS, and every rule names
@@ -58,10 +58,14 @@ test("EVERY RULE ONLY TIGHTENS — no rule can lower a posture", () => {
   }
 });
 
-test("the table covers E1 through E10, each exactly once", () => {
+test("every rule has its own D7.7 code, and E11 is still nobody's", () => {
+  // The members, not a count: a code shared by two rules is a journal entry an operator cannot
+  // look up. E11 is absent on purpose — D7.7 reserves it for provider fall-through, which
+  // `providers/fallback.ts` names in `onFallback` and which nothing in this table builds.
   const codes = Object.values(ESCALATION_RULES).map((r) => r.code).sort();
-  assert.deepEqual(codes, ["E1", "E10", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"]);
-  assert.equal(new Set(codes).size, 10);
+  assert.deepEqual(codes, ["E1", "E10", "E12", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"]);
+  assert.equal(new Set(codes).size, codes.length, "two rules share a code");
+  assert.ok(!codes.includes("E11"), "E11 belongs to provider fall-through and is not built here");
 });
 
 test("every rule states WHY, because an operator will ask", () => {

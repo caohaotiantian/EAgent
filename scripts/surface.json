@@ -373,6 +373,7 @@
   "builtinTools",
   "callbackRejection",
   "canonicalize",
+  "carriesOversight",
   "channelValue",
   "checkExpr",
   "childBranch",

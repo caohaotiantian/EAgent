@@ -60,7 +60,7 @@ import { EXTERNALISE_ABOVE_BYTES, payloadHandle, refFor, type PayloadRef, type P
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
-import { observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
+import { carriesOversight, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -285,6 +285,19 @@ export interface SubmitInput {
    * CLI authenticates nobody and inventing a subject is worse than recording none.
    */
   readonly submittedBy?: SubmittedBy;
+  /**
+   * Input channels that arrive ALREADY UNTRUSTED — the taint a delegation carries downward.
+   *
+   * Set by `#runSubgraph` and by nothing else, for the same reason `runId` is: a child run's
+   * `ctx.tainted` starts empty, and the parent channels its inputs were resolved from are the
+   * only thing that can say which of them a tool fetched. It is journaled on `run.submitted`
+   * so the child's OWN fold rebuilds it — see that event's field for why the parent's
+   * `subgraph.started` is not a place this can live.
+   *
+   * A caller may only ADD taint through it, never remove any, so an embedder that passes it is
+   * tightening. The default — absent — is what every existing caller already produces.
+   */
+  readonly taintedInputs?: readonly string[];
 }
 
 /**
@@ -1117,8 +1130,50 @@ interface RunContext {
   folder: RunFolder;
   /** E4's counter: consecutive failures per node, reset by any success. */
   readonly streaks: FailureStreaks;
-  /** Channels written by a tool, i.e. carrying untrusted output. E8's evidence. */
+  /**
+   * Channels carrying untrusted content. E8's evidence, run-global and monotone.
+   *
+   * FIVE WAYS IN, and "written by a tool" was the whole list once and is now one of them. A
+   * channel is in this set when it was written by an EXTERNAL node (`isExternal`); or by a node
+   * that READ a channel already in it; or by a node an earlier tainted choice SELECTED
+   * (`ctx.controlTainted`); or it is the DECLARED write of a commit that FAILED under any of
+   * those three, because suppressing a write is a value too; or it arrived already untrusted
+   * from a parent through `run.submitted.taintedInputs`. `applyTaint` is all five and is the
+   * only writer.
+   *
+   * NEVER CLEARED, and there is deliberately no declassification operator: a channel a trusted
+   * node later overwrites stays untrusted. That is the fail-safe direction and it is the accepted
+   * cost — `docs/design-taint-rc6-2026-09-05.md` §3 measures how far the set spreads on a
+   * cascading graph and why the spread is implicit flow rather than a defect.
+   */
   readonly tainted: Set<string>;
+  /**
+   * Fan-out EDGES whose list was untrusted — the per-branch half of E8's evidence.
+   *
+   * KEYED BY EDGE AND NOT BY CHANNEL NAME, and it was a channel name for a round. A fanout
+   * edge's `as` binding is not a channel any node writes: `#activate` puts a DIFFERENT VALUE
+   * into it per branch and per fanout edge. Putting the name into `tainted` therefore made
+   * every fan sharing a binding name ONE taint fact, and the run-global set is monotonic and
+   * never cleared, so an earlier dirty fan poisoned every later clean one. Two graphs one
+   * character apart, the second fan's list built entirely from the run's own input and its body
+   * reading only that fan's own item:
+   *
+   *     the first fan binds `as: "item"`  -> awaiting_gate, gates=1, charged=0
+   *     the first fan binds `as: "other"` -> succeeded,     gates=0, charged=2
+   *
+   * `taintedOn` is the only reader, and it answers by walking the asking task's own branch
+   * coordinate — which carries the edge id of every fan it is inside — so the answer is about
+   * THIS branch's EDGES rather than about a name.
+   *
+   * ABOUT ITS EDGES, WHICH IS NOT THE SAME AS ABOUT ITS BRANCH, and the difference is worth
+   * stating because the paragraph above argues against a coarser key. This set is run-global and
+   * monotone like `ctx.tainted`, so the SAME fanout edge taken twice — a fan inside a loop, or an
+   * inner fan re-planned once per outer branch — is one taint fact: a dirty first pass marks a
+   * clean second one. That is the tightening direction, and a per-instance key would have to be
+   * the branch coordinate, which DESIGN D4 already tried and reverted for the taint set as a
+   * whole. It is a known over-approximation and not a claim of precision.
+   */
+  readonly taintedFans: Set<EdgeId>;
   /**
    * Channels carrying secret-classified data they were NOT declared to hold.
    *
@@ -1200,8 +1255,20 @@ interface RunContext {
    * DERIVED, NOT DURABLE, and that is the whole reason it is a separate field rather than a
    * pre-fill of `ctx.tainted`. That set's docstring makes a promise this would break —
    * "monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
-   * running it live" — because a wave member that FAILS writes nothing, so no fold ever produces
-   * its channels. This overlay is recomputed from the wave's composition, which is itself
+   * running it live" — because a wave member that has not COMMITTED has produced no
+   * `task.committed` for a fold to read, so nothing rebuilds its channels at this point in the
+   * wave. (`applySuppressedWrites` means a fold DOES eventually produce the declared writes of a
+   * commit that failed; what it does not produce is a mid-wave view, which is what this overlay
+   * is. The sentence used to say "a wave member that FAILS writes nothing" and that half is no
+   * longer true.)
+   *
+   * IT COVERS EXTERNAL NODES ONLY, and `applyTaint` now has five sources. `waveTaintFor` filters
+   * the wave with `isExternal`, so a sibling that is control-tainted, or that read a tainted
+   * channel, or whose declared writes a failure suppressed, does not appear in a same-wave
+   * reader's overlay. That is the same hole this field exists to close, for four sources it does
+   * not cover — bounded by the fact that the overlay is a TIGHTENING extra on top of
+   * `ctx.tainted`, so the uncovered cases decide exactly as they did before the overlay existed
+   * and are caught on the next wave. Named here rather than left to be rediscovered. This overlay is recomputed from the wave's composition, which is itself
    * derived, so a replay of the same wave reaches the same answer without anything being
    * journaled that a fold could not reproduce.
    */
@@ -1446,8 +1513,9 @@ export class Engine {
   /**
    * THE RULE ID AND ITS EVIDENCE TRAVEL SEPARATELY.
    *
-   * They used to be one string: `` `${id} ${JSON.stringify(detail)}` ``. Seven of these eight
-   * rules pass a detail, so seven of eight journaled a `rule` no consumer could match — and one
+   * They used to be one string: `` `${id} ${JSON.stringify(detail)}` ``. Most of these rules pass
+   * a detail — seven of the eight that existed when this was written, and E12
+   * `fanout_skipped_gate` since — so most journaled a `rule` no consumer could match, and one
    * consumer was already trying. `evolution/trajectory.ts` counted E6 with
    * `e.payload.rule === "violation"` against the value `violation {"capability":{…}}`.
    */
@@ -1994,13 +2062,43 @@ export class Engine {
    */
   async #restoreEvidence(ctx: RunContext): Promise<void> {
     for await (const ev of this.#store.read(ctx.runId, 1 as Seq)) {
+      // THE SEED A DELEGATION CARRIED IN, and the one arm here that reads an event with no
+      // `taskId`. A child run's inputs are ordinary run inputs by the time they reach its own
+      // journal; `run.submitted.taintedInputs` is what says which of them a parent tool fetched,
+      // and `Engine.submit` folds the same list into `ctx.tainted` on the live path. Absent
+      // means nothing was tainted — see the event's own field for why that is exact and not the
+      // fail-open reading it looks like.
+      if (isEvent(ev, "run.submitted")) {
+        for (const channel of ev.payload.taintedInputs ?? []) ctx.tainted.add(channel);
+        continue;
+      }
       if (ev.taskId === undefined) continue;
       if (isEvent(ev, "task.retry_scheduled")) {
         ctx.streaks.record(parseTaskId(ev.taskId).nodeId, false);
         continue;
       }
+      // E12'S EVIDENCE, AND IT IS THE ONLY ARM HERE THAT IS NOT `task.committed`. `fanout.planned`
+      // is durable and carries the width; it is appended in the same batch as, and AFTER, the
+      // planning task's own `task.committed`, so by this line `ctx.tainted` and
+      // `ctx.controlTainted` hold exactly what they held when `#fireEmptyJoin` ran live. The
+      // planner's branch is the one in the event's own `taskId` — `fanout.planned.nodeId` is
+      // `e.to`, the fan body's head, NOT the planner. See `#escalateSkippedGate`.
+      if (isEvent(ev, "fanout.planned")) {
+        if (ev.payload.width !== 0) continue;
+        // AN EDGE THIS INDEX DOES NOT HOLD SKIPS THE RE-DERIVATION, which is the passing value and
+        // is the same door `taintedOn` documents: `#rehydrateGraph` runs on the ADVANCE path only,
+        // so a fold reached from `#rewindSerially` can meet a mutation-added fanout edge against
+        // the authored index. It is the same self-healing shape — the rewind clears
+        // `policySeeded`, so the next advance rehydrates and re-derives, and `PolicyEngine.escalate`
+        // is idempotent — and the compensation tools that rewind dispatches are the window. Named
+        // in both places rather than only where a reviewer happened to look.
+        const fanEdge = ctx.index.edgeById.get(ev.payload.edgeId as EdgeId);
+        if (fanEdge !== undefined) this.#escalateSkippedGate(ctx, fanEdge, parseTaskId(ev.taskId).branch);
+        continue;
+      }
       if (!isEvent(ev, "task.committed")) continue;
-      const nodeId = parseTaskId(ev.taskId).nodeId;
+      const parsed = parseTaskId(ev.taskId);
+      const nodeId = parsed.nodeId;
       ctx.streaks.record(nodeId, ev.payload.status !== "failed");
       const node = ctx.index.byId.get(nodeId);
       if (node === undefined) continue;
@@ -2021,8 +2119,26 @@ export class Engine {
       // bytes is exact rather than an approximation — the channel NAME is the whole input.
       const written =
         ev.payload.external === undefined ? ev.payload.writes : { ...ev.payload.writes, ...ev.payload.external };
-      applyTaint(ctx.tainted, node, written);
+      // `ctx.controlTainted` is read here and WRITTEN four lines down, and the order is the
+      // point: what it holds at this line is what EARLIER commits put there, which is where a
+      // mark on this node can only have come from. The live path reads it at the same point of
+      // the same commit — `#recordEvidence` runs before `applyControlTaint` in `#commit`.
+      applyTaint(ctx, parsed.branch, node, written);
+      // The writes this commit did NOT make, when it failed. Folded here, immediately after the
+      // ordinary writes and before the fanout halves, which is the order `#commit` applies them
+      // in — the live half is below `#commit`'s retry early-return so that a RETRIED attempt,
+      // which writes no `task.committed` at all, applies neither.
+      if (ev.payload.status === "failed") applySuppressedWrites(ctx, parsed.branch, node);
       applySecretFlow(ctx.carriesSecret, node, written, ctx.graph.spec.channels);
+      // The fan binding, folded after `applyTaint` and before the control-flow half exactly as
+      // the live path folds it: the commit that TAKES a fanout edge is the commit that wrote the
+      // list it fans over, so `over` is tainted by the line above and the binding is an ordinary
+      // tainted channel by the time anything else reads the set.
+      applyFanoutTaint(ctx, parsed.branch, ev.payload.take as readonly EdgeId[]);
+      // The fan's WIDTH, folded in the same position as the live path: after the binding, before
+      // the control-flow half. A restart that skipped this would mark fewer nodes than the
+      // original process, which is the loosening direction.
+      applyFanoutWidthTaint(ctx, parsed.branch, node, ev.payload.take as readonly EdgeId[]);
       // E8's control-flow half. `take` is a durable field of this event, and the choice space
       // and region are derived from the graph, so a branch decision rebuilds exactly — which is
       // the whole reason the fact is recorded at the DECIDING NODE rather than re-derived at
@@ -2030,7 +2146,18 @@ export class Engine {
       // matches the live path: `applyControlTaint` reads `ctx.tainted`, and a node that tainted
       // nothing itself cannot change its own answer. Every commit is offered, not just a
       // router's, because `choiceOf` names three more ways a `take` comes out narrowed.
-      applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, node, ev.payload.take as readonly EdgeId[]);
+      // `?? true` IS THE MIGRATION, and it is the only default that fails closed. A journal
+      // written before `takeSuppliedByProducer` existed cannot say who chose; absent-as-false
+      // would reproduce the defect that field closed on every old run and do it across a
+      // RESTART. See `choiceOf` for the argument and what absent-as-true costs.
+      applyControlTaint(
+        ctx,
+        parsed.branch,
+        node,
+        ev.payload.take as readonly EdgeId[],
+        ev.payload.takeSuppliedByProducer ?? true,
+        ev.payload.status === "failed",
+      );
     }
   }
 
@@ -2247,6 +2374,13 @@ export class Engine {
     // which seq 1 alone was 300,261 — the whole of the residual. It is now 4,556.
     const seeded = await this.#externalise(ctx, input.inputs);
 
+    // TAINT CROSSES INTO A CHILD RUN HERE, and this is the live half of a fact
+    // `#restoreEvidence` folds from the event appended two lines down. Both read the same list,
+    // so a child that a second process resumes starts from the set the first one started from.
+    // Seeded BEFORE anything can run, which is what makes it indistinguishable from a channel a
+    // tool inside the child wrote.
+    for (const channel of input.taintedInputs ?? []) ctx.tainted.add(channel);
+
     // Durable at ACK: run.submitted + the compiled graph + the manifest. NOT any
     // execution — a 202 means "this WILL run", never "this HAS run".
     await ctx.log.append([
@@ -2273,6 +2407,13 @@ export class Engine {
           // paragraph above `declaredUsd`.
           ...(Object.keys(recordedLimits).length === 0 ? {} : { limits: recordedLimits }),
           ...(ctx.grantBound === undefined ? {} : { capabilities: [...ctx.grantBound] }),
+          // WRITTEN ONLY WHEN NON-EMPTY, which is what makes absent exact rather than a guess:
+          // for a journal this binary wrote, absent and empty are the same statement. Every
+          // top-level submit produces absent, and that is correct — a run's own inputs are
+          // whatever its submitter handed it.
+          ...(input.taintedInputs === undefined || input.taintedInputs.length === 0
+            ? {}
+            : { taintedInputs: [...input.taintedInputs] }),
         },
         // The control plane IS what appended this row, so the envelope stays true and the
         // principal rides in the payload. See `SubmittedBy`.
@@ -2386,6 +2527,21 @@ export class Engine {
     // breached, so it says nothing about a run sitting at two. Only the sets and the
     // counter do, which is exactly what invariant 2 means by "rebuildable by folding".
     await this.#restoreEvidence(ctx);
+
+    // AN ESCALATION THE FOLD RE-RAISED HAS TO REACH DISK HERE, not on the next wave. The advance
+    // loop drains `escalationWrites` after `#runWave`, and a run that attaches with nothing
+    // runnable — parked on a gate, or finished — returns before that line, so a re-raise would
+    // live only in this process's `PolicyEngine`. That is the failure this fold exists to close,
+    // one layer out.
+    //
+    // A REJECTION HERE THROWS WITH `policySeeded` ALREADY TRUE (set at the top of this method), so
+    // no later call in THIS process re-folds. In-process safety holds — `PolicyEngine.escalate`
+    // applies the posture before `onEscalate` is called, so the guard is armed whether or not the
+    // row landed — and a fresh process re-derives from `fanout.planned`, which is the whole point
+    // of the fold above. It is a pre-existing shape that this line adds a new rejection source
+    // to, and it is stated rather than closed.
+    const raised = ctx.escalationWrites.splice(0);
+    if (raised.length > 0) await Promise.all(raised);
   }
 
   /**
@@ -4897,6 +5053,7 @@ export class Engine {
       folder: new RunFolder(),
       streaks: new FailureStreaks(),
       tainted: new Set(),
+      taintedFans: new Set(),
       carriesSecret: new Set(),
       controlTainted: new Map(),
       waveTaint: new Map(),
@@ -4916,44 +5073,88 @@ export class Engine {
    * A caller re-attaches the AUTHORED graph — it is what it has on disk. If this run
    * previously adopted mutations, the in-memory graph is behind the journal, and every
    * derived thing (plans, entry nodes, `maxInstances`) would be computed from the wrong
-   * spec. Replaying the recorded specs through the same compiler restores it, and a
-   * hash mismatch after replay is a genuine divergence rather than something to paper
+   * spec. Replaying the recorded mutations through the same DOOR they came in by restores it,
+   * and a hash mismatch after replay is a genuine divergence rather than something to paper
    * over.
+   *
+   * ONCE PER ATTACH, not once per turn: the early return below skips everything whenever the
+   * in-memory graph already matches the journal's target, so within a process this runs when a
+   * run is picked up behind its own history. That is the case that matters — a second process
+   * replaying another's mutations against a store that has since moved.
    */
   async #rehydrateGraph(ctx: RunContext): Promise<void> {
-    const nodes: NodeSpec[] = [];
-    const edges: EdgeSpec[] = [];
-    let target: string | undefined;
-    let consumed = 0;
+    const recorded: JournalEvent<"graph.mutated">["payload"][] = [];
     for await (const e of ctx.log.read(1)) {
-      if (!isEvent(e, "graph.mutated")) continue;
-      nodes.push(...e.payload.nodes);
-      edges.push(...e.payload.edges);
-      consumed += e.payload.nodes.length;
-      target = e.payload.newHash;
+      if (isEvent(e, "graph.mutated")) recorded.push(e.payload);
     }
+    const target = recorded.at(-1)?.newHash;
     if (target === undefined || target === ctx.graph.graphHash) return;
 
-    const result = compile({
-      spec: { ...ctx.graph.spec, nodes: [...ctx.graph.spec.nodes, ...nodes], edges: [...ctx.graph.spec.edges, ...edges] },
-      // What this run already froze, then the live store for anything the mutation ADDED.
-      //
-      // ONCE PER ATTACH, not once per turn: the early return above skips this whenever the
-      // in-memory graph already matches the journal's target, so within a process it recompiles
-      // when a run is picked up behind its own history. That is the case that matters — a
-      // second process replaying another's mutations against a store that has since moved.
-      resolver: frozenFirst(ctx.graph, this.#resolver),
-      tools: this.tools.manifests(),
-      tenantCapabilities: this.#policyOpts.granted,
-    });
-    if (!result.ok || result.graph.graphHash !== target) {
+    // REPLAYED ONE MUTATION AT A TIME, THROUGH `compileMutation` AND NOT `compile`, AND THAT IS
+    // THE FAIL-CLOSED READING OF A GUARD THAT ONLY EVER RAN AT PROPOSAL TIME.
+    //
+    // This method used to fold every recorded mutation into one merged spec and hand it to
+    // `compile`, which runs the 22 authored-graph rules and NOT the four `compileMutation` adds.
+    // §2b — a mutation may not take a node out of a `human_gate`'s dominated region — is one of
+    // the four, so a journal written by a binary that did not have it resumed on one that does
+    // with the graft intact and the human's rejection bypassed. Measured on one store: the
+    // authored `plan -> gate -> pay`, a `graph.mutated` holding `plan -> hop -> pay` appended
+    // straight into the log, a second Engine attaching the AUTHORED graph, and the human
+    // rejecting the gate:
+    //
+    //     fold-and-compile -> failed, wrote 1   (the tool ran, through the graft)
+    //     replay-and-revalidate -> attach refuses, wrote 0
+    //
+    // `mutate.ts`'s header says a model "cannot propose one that weakens oversight ... because
+    // those are compile errors", and that sentence was true only for the process that did the
+    // proposing. Making it true across a restart is what this loop is for.
+    //
+    // IT REFUSES THE ATTACH RATHER THAN DROPPING THE MUTATION. Dropping it would leave the run
+    // executing a graph its own journal does not describe, which is the one thing `#rehydrate`
+    // exists to prevent; refusing means the run cannot be picked up until a human looks, and
+    // refusing is always allowed.
+    //
+    // The journal carries every input the re-validation needs — `nodes`, `edges`, `proposedBy`,
+    // `proposedByNode` and the running node count — so this is a fold and not a guess.
+    let graph = ctx.graph;
+    let consumed = 0;
+    for (const m of recorded) {
+      const result = compileMutation({
+        base: graph,
+        mutation: {
+          addNodes: m.nodes,
+          addEdges: m.edges,
+          proposedBy: m.proposedBy,
+          proposedByNode: m.proposedByNode,
+        },
+        budget: { consumedNodes: consumed, expansion: graph.expansion },
+        // What this run already froze, then the live store for anything the mutation ADDED.
+        resolver: frozenFirst(ctx.graph, this.#resolver),
+        tools: this.tools.manifests(),
+        tenantCapabilities: this.#policyOpts.granted,
+        ...(this.#policyOpts.systemFloor === undefined ? {} : { systemPostureFloor: this.#policyOpts.systemFloor }),
+      });
+      if (!result.ok) {
+        throw err.policy(
+          CODES.E_OVERSIGHT_LOOSEN_FORBIDDEN,
+          `run ${ctx.runId} recorded a mutation this binary refuses: ${result.diagnostics
+            .filter((d) => d.severity === "error")
+            .map((d) => `${d.code}: ${d.message}`)
+            .join("; ")}`,
+          { details: { diagnostics: result.diagnostics.filter((d) => d.severity === "error") } },
+        );
+      }
+      graph = result.graph;
+      consumed += m.nodes.length;
+    }
+    if (graph.graphHash !== target) {
       throw err.internal(
         CODES.E_REPLAY_DIVERGENCE,
-        `run ${ctx.runId} recorded graph ${target} but replaying its mutations produced ${result.ok ? result.graph.graphHash : "a compile error"}`,
+        `run ${ctx.runId} recorded graph ${target} but replaying its mutations produced ${graph.graphHash}`,
       );
     }
-    ctx.graph = result.graph;
-    ctx.index = indexGraph(result.graph.spec);
+    ctx.graph = graph;
+    ctx.index = indexGraph(graph.spec);
     ctx.addedNodes = consumed;
   }
 
@@ -5256,10 +5457,16 @@ export class Engine {
       return this.#dispatch(ctx, p, w);
     }
 
-    // E8. A channel a tool wrote carries output from outside the system, and feeding that
-    // into a hard-to-undo action is the prompt-injection path. The bit was already being
-    // computed and passed; what was missing is the FIRING SITE every other rule in D7.7's
-    // table has. Raised before the decision it must bind, not at commit like E4/E5, because the
+    // E8. A channel carrying untrusted content, fed into a hard-to-undo action, is the
+    // prompt-injection path. The bit was already being computed and passed; what was missing is
+    // the FIRING SITE every other rule in D7.7's table has.
+    //
+    // "A CHANNEL A TOOL WROTE" WAS THIS SENTENCE FOR A LONG TIME AND NAMES ONE OF FIVE SOURCES.
+    // `RunContext.tainted` lists them: an external node's write, a write by a reader of such a
+    // channel, a write by a node a tainted choice SELECTED, the declared write of a commit that
+    // FAILED under any of those, and a seed a parent handed down on `run.submitted.taintedInputs`.
+    // Two of the five are control flow becoming data flow, and the count is the reason this
+    // comment no longer says "a tool". Raised before the decision it must bind, not at commit like E4/E5, because the
     // evidence is an upstream task's committed writes — durable, and re-folded into `ctx.tainted`
     // at attach, so a fresh process reaches the same answer.
     // `escalate` is idempotent on re-raise, so a node decided repeatedly journals one event.
@@ -7411,7 +7618,40 @@ export class Engine {
 
     const scope = scopeFor(p, ctx.graph.spec.channels, w.task.branch);
     const inputs: Record<string, unknown> = {};
-    for (const [childCh, parentCh] of Object.entries(sub.inputs)) inputs[childCh] = scope[parentCh];
+    // WHICH OF THE CHILD'S INPUTS ARRIVE UNTRUSTED, computed from the PARENT channel each one is
+    // resolved from. A set defined by node type is wrong at this boundary in both directions —
+    // `carriesOversight` is the upward half — and this is the downward one: the child's own
+    // `ctx.tainted` starts empty, so bytes a parent tool fetched arrived looking like a value a
+    // person typed and the child's guards could not see them. It is passed to `submit`, which
+    // journals it on the child's `run.submitted` so the child's own fold rebuilds it.
+    //
+    // `taintedOn` AND NOT `ctx.tainted.has`, WHICH IS WHERE THIS LINE STARTED AND IS A ONE-HOP
+    // BYPASS OF THE WHOLE SEED. A fanout edge's `as` binding is a DECLARED CHANNEL
+    // (`graph/validate.ts` requires it) and `sub.inputs`' parent side is a declared channel too,
+    // so `subgraph: { inputs: { seed: "item" } }` inside a fan body compiles — and `scopeFor`
+    // merges the branch binding, so the child gets the fetched bytes. But a binding is not in
+    // `ctx.tainted`: `applyFanoutTaint` records the fanout EDGE in `ctx.taintedFans`, and
+    // `taintedOn` is the only reader that consults both. Every other consumer on this branch was
+    // moved to `taintedOn` for exactly that reason and this one was not. Measured, same bytes,
+    // same shapes, one word of `sub.inputs` different, with the child holding its own
+    // `human_gate` behind its own empty fan:
+    //
+    //     inputs { seed: "untrusted" }  -> awaiting_gate, gates=1, wrote=0
+    //     inputs { seed: "item" }       -> succeeded,     gates=0, wrote=1   (before)
+    //     inputs { seed: "item" }       -> awaiting_gate, gates=1, wrote=0   (now)
+    //
+    // AND THE NODE'S OWN MARK IS A SOURCE TOO, for the same reason it is one in `applyTaint`: a
+    // delegation an attacker's choice SELECTED hands its child inputs that are the attacker's
+    // whatever channel they came from, and the child's fold has no other way to learn it. This
+    // over-approximates — every mapped input is seeded, not just the ones from tainted channels
+    // — which is the fail-closed direction and is what `#irreversibilityOf` cannot do for a
+    // `subgraph` node from the outside (design §4's latent fourth item).
+    const taintedInputs: string[] = [];
+    const delegationChosen = ctx.controlTainted.has(w.node.id);
+    for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
+      inputs[childCh] = scope[parentCh];
+      if (delegationChosen || taintedOn(ctx, w.task.branch, parentCh)) taintedInputs.push(childCh);
+    }
 
     // The slice is carved from what the PARENT still has, not from its original limit:
     // a subgraph reached late in an expensive run gets less, which is correct.
@@ -7479,6 +7719,7 @@ export class Engine {
         workflow: sub.ref,
         ...(slice === undefined ? {} : { budgetUsd: slice }),
         ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
+        ...(taintedInputs.length === 0 ? {} : { taintedInputs }),
       });
     } else {
       // THE PARENT'S CEILING TRAVELS on the resume path too — `#contextFor` returns an existing
@@ -8611,6 +8852,16 @@ export class Engine {
     if (outcome.mutation !== undefined) {
       const applied = this.#applyMutation(ctx, w, outcome.mutation);
       if (applied.error !== undefined) {
+        // A REFUSED MUTATION STILL COMMITS, so it still folds. This exit journals its own
+        // `task.committed{status:"failed"}` and returns, and `#restoreEvidence` cannot tell it
+        // from any other failed commit — so without this line the fold applied
+        // `applySuppressedWrites` for an event the live path had not, and a restart came back
+        // with MORE taint than the process that ran. Tightening rather than loosening, and
+        // bounded (`take` is `[]`, so three of the four are no-ops today), but "live and fold
+        // apply the identical folds in the identical order" is either true or it is a sentence
+        // nobody can rely on. Found by a reviewer asking which CODE PATHS reach the recorder,
+        // which is the same question that found the retry path one commit earlier.
+        this.#foldCommitEvidence(ctx, w, [], false, true);
         return void (await ctx.log.commit(
           p.seq,
           [
@@ -8622,7 +8873,14 @@ export class Engine {
             },
             {
               type: "task.committed",
-              payload: { status: "failed", writes: {}, take: [], usage: outcome.usage, attempt: w.task.attempt + 1 },
+              payload: {
+                status: "failed",
+                writes: {},
+                take: [],
+                takeSuppliedByProducer: false,
+                usage: outcome.usage,
+                attempt: w.task.attempt + 1,
+              },
               actor: SYSTEM_ACTOR("executor"),
               taskId: w.task.taskId,
             },
@@ -8667,6 +8925,12 @@ export class Engine {
     // the OUTER join is going to fold again.
     const routing = this.#withBranchWrites(ctx, p, w.task.branch);
     const take = outcome.status === "failed" ? this.#errorEdges(ctx, w, outcome.error?.code) : this.#edgesToTake(ctx, routing, w, outcome);
+    // WHO CHOSE, recorded rather than inferred. A `function`/`evaluator` body, a `human_gate`
+    // redirect and an operator `steer` all arrive as `outcome.take`, and `choiceOf` used to
+    // guess between them and edge-expression narrowing by looking at edge kinds — a guess that
+    // is wrong whenever the producer's take includes the node's unconditional edges. A FAILED
+    // commit's take is `#errorEdges`, which no producer wrote.
+    const takeSuppliedByProducer = outcome.status !== "failed" && outcome.take !== undefined;
 
     // E8'S CONTROL-FLOW HALF, FOLDED HERE AND NOT IN `#recordEvidence`, WHICH IS WHERE EVERY
     // OTHER PIECE OF THIS RUN'S ESCALATION EVIDENCE IS FOLDED. The reason is one line up:
@@ -8681,7 +8945,7 @@ export class Engine {
     // restart switches off silently — five of those, then a sixth. This is the first piece of
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
-    applyControlTaint(ctx.controlTainted, ctx.tainted, ctx.index, w.node, take);
+    this.#foldCommitEvidence(ctx, w, take, takeSuppliedByProducer, outcome.status === "failed");
 
     if (outcome.status === "failed") {
       events.push({
@@ -8719,6 +8983,9 @@ export class Engine {
         status: outcome.status === "failed" ? "failed" : "succeeded",
         writes: committed.values,
         take,
+        // WRITTEN ON EVERY COMMIT, true or false, so that ABSENT means one thing only: a journal
+        // older than the field. `#restoreEvidence` folds absent as `true`.
+        takeSuppliedByProducer,
         usage: outcome.usage,
         attempt: w.task.attempt + 1,
         ...(committed.external === undefined ? {} : { external: committed.external }),
@@ -9059,6 +9326,37 @@ export class Engine {
    * Called once per committed Task, which is the only point where the outcome, the tools
    * it used, and the channels it wrote are all known together.
    */
+  /**
+   * The four folds a COMMIT applies, in the order `#restoreEvidence` applies them.
+   *
+   * ONE CALLER PER `task.committed`, WHICH IS THE POINT. `engine.ts` journals that event from two
+   * places — the ordinary end of `#commit` and the exit that refuses a proposed mutation — and
+   * the fold cannot tell them apart. When these four lines lived inline at the first site only,
+   * the second wrote an event the fold folded and the live path did not. Adding a third exit
+   * later is now a call rather than four lines somebody has to remember.
+   *
+   * IT IS NOT REACHED FROM `#recordEvidence`, and that separation is load-bearing: that method
+   * runs ABOVE `#commit`'s retry early-return, where an attempt journals `task.retry_scheduled`
+   * and no `task.committed` at all. Anything applied there is a mark no fold can rebuild — see
+   * `applySuppressedWrites` for the measurement.
+   *
+   * The order is `applySuppressedWrites` → `applyFanoutTaint` → `applyFanoutWidthTaint` →
+   * `applyControlTaint`, after `applyTaint`, which `#recordEvidence` already ran. Each of the
+   * later three reads what the earlier ones wrote, so the order is the answer and not a style.
+   */
+  #foldCommitEvidence(
+    ctx: RunContext,
+    w: Wave,
+    take: readonly EdgeId[],
+    takeSuppliedByProducer: boolean,
+    failed: boolean,
+  ): void {
+    if (failed) applySuppressedWrites(ctx, w.task.branch, w.node);
+    applyFanoutTaint(ctx, w.task.branch, take);
+    applyFanoutWidthTaint(ctx, w.task.branch, w.node, take);
+    applyControlTaint(ctx, w.task.branch, w.node, take, takeSuppliedByProducer, failed);
+  }
+
   #recordEvidence(ctx: RunContext, w: Wave, outcome: NodeOutcome): void {
     // Also at commit: a run can drift over the line through settled spend across many
     // cheap tasks, without any single reservation reaching it.
@@ -9068,7 +9366,12 @@ export class Engine {
     // folded in `#commit` instead, because it keys on `take` and `take` is computed after this
     // method has already run. That makes this method no longer the only live site
     // `#restoreEvidence` has to mirror; both say so.
-    applyTaint(ctx.tainted, w.node, outcome.writes);
+    //
+    // `applyTaint` READS that map as well as being folded before it is written: a node whose own
+    // execution an attacker's choice selected writes the attacker's bytes. Running before
+    // `applyControlTaint` is what makes the map hold exactly the marks EARLIER commits left,
+    // which is the same thing the fold sees at the same point.
+    applyTaint(ctx, w.task.branch, w.node, outcome.writes);
     applySecretFlow(ctx.carriesSecret, w.node, outcome.writes, ctx.graph.spec.channels);
 
     // E4 — consecutive failures. Reset by any success, so flakiness spread over a day
@@ -9531,9 +9834,62 @@ export class Engine {
    * The join runs at the PARENT branch with no contributions, which is exactly what an
    * empty fold means: `findings` stays at its initial value and the verdict downstream
    * reads "no evidence" rather than the graph quietly stopping.
+   *
+   * AND IT SKIPS EVERY NODE ON THE BRANCH, WHICH IS HOW IT DELETED A HUMAN GATE. The width of a
+   * fan is a runtime value — usually one a tool fetched — so this is the one way a node that
+   * STATICALLY dominates an action does not run in front of it. Measured on one graph driven
+   * twice, the only difference being what the fetched page said, with a `reversible_write` tool
+   * below the join whose only oversight was the authored gate on the branch:
+   *
+   *     the page yields two items -> awaiting_gate, gates=1, wrote=0
+   *     the page yields none      -> succeeded,     gates=0, wrote=1
+   *
+   * So a skipped `human_gate` escalates the JOIN — the node that releases the downstream the
+   * gate stood in front of — to `in`, and somebody is asked once. Not a refusal: an empty fan is
+   * a legitimate shape and this method exists for it, so the run continues on approval.
+   *
+   * AND ONLY WHEN THE WIDTH WAS THE ATTACKER'S. The bound this docstring used to state was "an
+   * empty fan whose branch holds nothing unskippable fires its join exactly as before, which is
+   * the alert-with-no-pods case" — and the alert-with-no-pods workflow is precisely the one with
+   * a gate on its branch, so the sentence bounded the cost over a different population from the
+   * one paying it. Measured on the ordinary shape, "for each flagged item, ask a person" over a
+   * list the run's own INPUT produced, with `fetch` still running and `untrusted` still tainted:
+   *
+   *     the list is built from the input, nothing flagged -> awaiting_gate, gates=1  (before)
+   *     the list is built from the input, nothing flagged -> succeeded,     gates=0  (now)
+   *     the list is built from the fetched page, empty    -> awaiting_gate, gates=1  (both)
+   *
+   * The predicate is `fanoutWidthEvidence`, THE FUNCTION `applyFanoutWidthTaint` CALLS AND NOT A
+   * SECOND COPY OF IT — a width nothing untrusted produced was chosen by the run's own data, and
+   * skipping a branch on the strength of it is what the graph asked for.
+   * `test/run/empty-fanout-oversight.test.ts` pins all three rows.
+   *
+   * THIS LINE WAS A SECOND COPY AND IT HAD DRIFTED. It read `fanout.over !== undefined &&
+   * ctx.tainted.has(fanout.over)`, which is one of the two sources the other function reads;
+   * both docstrings asserted they computed the same predicate. What the copy missed is the node
+   * planning the fan being itself in an earlier tainted choice's region, which is how injected
+   * text steers a run between two CLEAN list-builders and gets an attacker-chosen width over a
+   * channel `ctx.tainted` never held. See `fanoutWidthEvidence` for the measurement.
+   *
+   * A NARROWING WAS PROPOSED HERE AND IS REFUSED, with numbers. "Escalate only when the fan's
+   * exit join reaches something `isHardToUndo`" was suggested on the argument that the ordinary
+   * alert-with-no-pods workflow escalates on an empty day. It does not: measured on
+   * `workflows/incident-triage.ts` driven with `pods: []`, the width DOES read as the attacker's
+   * — `signals` is tainted because `extract-signals` declares no `effects` — and the fan body is
+   * `{investigate, quarantine, correlate}`, which holds nothing unskippable, so this method
+   * escalates nothing and all 17 of that file's tests pass either way. What the narrowing costs
+   * is measured too: it reopens all three exploits this file pins, because every one of them
+   * protects a `reversible_write`, which is exactly the class for which an authored gate is the
+   * only oversight there is.
+   *
+   * THE UNSKIPPABLE SET IS NAMED RATHER THAN COUNTED, and it is `carriesOversight`: `human_gate`,
+   * and `subgraph` because its own body may hold one the parent cannot see. That function
+   * carries the measurement and the argument for treating a delegation as unskippable outright
+   * rather than walking into it.
    */
   #fireEmptyJoin(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): NewEvent[] {
     const events: NewEvent[] = [];
+    this.#escalateSkippedGate(ctx, fanout, parent);
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
       if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
@@ -9547,6 +9903,59 @@ export class Engine {
       });
     }
     return events;
+  }
+
+  /**
+   * E12 — a fan-out of width zero passed over oversight the graph declared on its branch.
+   *
+   * SPLIT OUT OF `#fireEmptyJoin` SO THE FOLD CAN CALL IT, which is the whole reason it is a
+   * method of its own. Raised live at the planning commit and re-derived at attach from
+   * `fanout.planned`, exactly as `applyTaint`, `applyFanoutTaint`, `applyFanoutWidthTaint` and
+   * `applyControlTaint` are — this was the one `#escalate` site in the file whose evidence no
+   * fold rebuilt, and it landed on `loom` with this branch.
+   *
+   * WHY THAT MATTERED, and it is not the ordinary restart. `policy.escalated` is durable and
+   * `PolicyEngine.restore` folds it, so an escalation whose append LANDED survives a restart
+   * already (`empty-fanout-oversight.test.ts`'s "THE SKIPPED GATE SURVIVES A RESTART" pins that).
+   * But `#escalate` appends in its OWN transaction — `onEscalate` pushes onto
+   * `ctx.escalationWrites` and the advance loop drains it after `#runWave` — while the join's
+   * `task.ready` is committed inside the wave. A crash in that window leaves the join scheduled,
+   * the branch's gate passed over, and nothing anywhere able to say so. Every other rule in the
+   * table re-derives its evidence at attach and re-raises; this one could not.
+   *
+   * RE-RAISING IS SAFE BECAUSE IT IS IDEMPOTENT. `PolicyEngine.escalate` returns without calling
+   * `onEscalate` when the posture it would set is the one already held, and `ctx.policy.restore`
+   * runs BEFORE `#restoreEvidence`, so a run whose append survived folds the row, re-derives the
+   * same escalation, and appends nothing. The append happens only when the original was lost —
+   * which is the definition of re-derivable.
+   *
+   * WHOSE WIDTH IT WAS is `fanoutWidthEvidence` — the SAME function `applyFanoutWidthTaint`
+   * calls, because this predicate used to be a second copy of it that had drifted narrower. See
+   * that function for the two sources and the graph that measured the one this was missing. The
+   * UNSKIPPABLE set is `carriesOversight`: `human_gate`, and `subgraph` because its own body may
+   * hold one the parent cannot see.
+   */
+  #escalateSkippedGate(ctx: RunContext, fanout: EdgeSpec, parent: BranchCoordinate): void {
+    const source = ctx.index.byId.get(fanout.from);
+    if (source === undefined || fanoutWidthEvidence(ctx, parent, source, fanout) === undefined) return;
+    const skipped = [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id)));
+    if (skipped.length === 0) return;
+    // THE EXIT JOIN IS THE ONE A `join` EDGE LEAVES `fanout.to` BY, which is what `#fireEmptyJoin`
+    // schedules and therefore what this must escalate — the two scan the same set on purpose.
+    // `GRAPH021` is looser: it requires only that a join node be DOWNSTREAM, so
+    // `plan --fanout--> head --seq--> work --join--> J` compiles and neither method finds
+    // anything. That fan strands rather than releasing anything (the join is never readied
+    // either), so there is nothing to escalate ABOUT today; naming it because the gap is
+    // inherited from `#fireEmptyJoin` rather than introduced here, and because the day
+    // `#fireEmptyJoin` learns to walk further this must walk with it.
+    const seen = new Set<NodeId>();
+    for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
+      if (e.kind !== "join") continue;
+      if (!(ctx.index.byId.get(e.to)?.join?.branches ?? []).includes(fanout.to)) continue;
+      if (seen.has(e.to)) continue;
+      seen.add(e.to);
+      this.#escalate(ctx, "fanout_skipped_gate", e.to, { edgeId: fanout.id, skipped });
+    }
   }
 
   /** One branch Task of a fan-out, at a determined coordinate. */
@@ -10339,13 +10748,60 @@ function stateAtPrefix(p: RunProjection, branch: BranchCoordinate): Record<strin
 /**
  * IS THIS CHANNEL UNTRUSTED FOR THIS TASK'S DECISION — the durable set plus this wave's overlay.
  *
- * Both readers go through here so the two halves cannot drift apart. `ctx.tainted` is what the
- * journal can rebuild; `ctx.waveTaint` is what a concurrent member of the same wave is about to
- * write and has not committed yet. See `RunContext.waveTaint` for why the second cannot simply
- * be folded into the first.
+ * Both readers go through here so the two halves cannot drift apart. `taintedOn` is what the
+ * journal can rebuild — the channel set plus this branch's own fan bindings; `ctx.waveTaint` is
+ * what a concurrent member of the same wave is about to write and has not committed yet. See
+ * `RunContext.waveTaint` for why the second cannot simply be folded into the first.
  */
 function taintedFor(ctx: RunContext, taskId: TaskId, channel: string): boolean {
-  return ctx.tainted.has(channel) || (ctx.waveTaint.get(taskId)?.has(channel) ?? false);
+  return taintedOn(ctx, parseTaskId(taskId).branch, channel) || (ctx.waveTaint.get(taskId)?.has(channel) ?? false);
+}
+
+/**
+ * IS THIS CHANNEL UNTRUSTED FOR A TASK ON THIS BRANCH — the DURABLE half, and the only reader
+ * of `ctx.taintedFans`.
+ *
+ * Two sources, and the second is per-branch rather than per-run. A CHANNEL is untrusted for
+ * everybody once something untrusted wrote it. A fan's `as` BINDING is untrusted only inside a
+ * branch of a fan whose own list was untrusted — it is not a channel any node writes, and
+ * `#activate` puts a different value in it per branch and per fanout edge. The branch coordinate
+ * carries the edge id of every fan the task is inside (`BranchSegment.edgeId`), so this walks it
+ * rather than asking a run-global set about a name. See `RunContext.taintedFans` for the two
+ * graphs one character apart that the name-keyed version got wrong.
+ *
+ * DELIBERATELY NOT `ctx.waveTaint`: everything folded from the journal reads this function, and
+ * the wave overlay is derived per wave and no fold reproduces it. `taintedFor` adds it for the
+ * one reader that is deciding a task rather than folding one.
+ */
+function taintedOn(ctx: RunContext, branch: BranchCoordinate, channel: string): boolean {
+  if (ctx.tainted.has(channel)) return true;
+  for (const seg of branch.segments) {
+    if (!ctx.taintedFans.has(seg.edgeId as EdgeId)) continue;
+    // AN EDGE ID THIS INDEX DOES NOT HOLD FALLS THROUGH AS "not tainted", which is the passing
+    // value and therefore owes an argument. It cannot happen and here is why, rather than a
+    // shrug: `seg.edgeId` was written by `childBranch` from an edge of THIS graph's index, the
+    // index is rebuilt from the compiled graph on the ADVANCE path (`#rehydrateGraph` folds every
+    // `graph.mutated` before the fold that reads this), and `compileMutation` is additive-only —
+    // no verb removes an edge from a compiled graph.
+    //
+    // ONE DOOR DOES NOT REHYDRATE, and a reviewer found it: `#rehydrateGraph` is called from
+    // `#advanceSerially` alone, while `#seedPolicy` — and therefore `#restoreEvidence`, and
+    // therefore this function — is also reached from `#rewindSerially`. So `attach(runId, the
+    // AUTHORED graph)` followed by a rewind with no advance in between folds a journal whose
+    // branch segments may carry a mutation-added fanout edge id against an index that does not
+    // hold it, and the miss fires. It self-heals — the rewind clears `policySeeded`, so the next
+    // advance rehydrates and re-folds, and these sets are monotone — but the compensation tools
+    // that rewind dispatches see the short set. That is the same "which verbs reach this guard"
+    // shape `#seedPolicy` exists for, one level in, and it is recorded here rather than fixed
+    // because the fix is a rehydrate on the rewind path and that is a change to the rewind verb.
+    // The refusing
+    // value would be worse than useless here anyway: it would report every channel tainted on
+    // any branch whose edge went missing, which is a constant gate rather than a fail-closed
+    // answer.
+    const edge = ctx.index.edgeById.get(seg.edgeId as EdgeId);
+    if (edge !== undefined && (edge.as ?? "item") === channel) return true;
+  }
+  return false;
 }
 
 /**
@@ -10488,33 +10944,265 @@ function applySecretFlow(
 /**
  * THE taint rule, and the only place it is written.
  *
- * Two ways a node's writes carry untrusted content, and the second was missing entirely:
- * the node fetched it (an external producer), or the node OBSERVED it and passed it on. With
- * only the first half, any node that is not a tool laundered taint away — a `function` node
+ * THREE ways a node's writes carry untrusted content, and each was missing in turn: the node
+ * FETCHED it (an external producer), the node OBSERVED it and passed it on, or the node RAN AT
+ * ALL only because an attacker's choice selected it.
+ *
+ * With only the first, any node that is not a tool laundered taint away — a `function` node
  * doing `clean = copy(notes)`, or an `agent` declaring `tools: []` and relaying its input, both
  * reproduced running an irreversible charge under a de-escalated ceiling with nothing raised.
  * Those are ordinary graph shapes: a normalizer, a summariser.
+ *
+ * WITH ONLY THE FIRST TWO, CONTROL FLOW NEVER BECAME DATA FLOW. `applyControlTaint` marks the
+ * nodes a tainted choice selected, and every consumer of that mark had to reach for the region
+ * itself — so each round added an evidence source to one call site to compensate for a
+ * propagation edge that did not exist. The sharpest shape needs no fan, no router special case
+ * and no width: the attacker picks WHICH of two CLEAN bodies writes the amount, and the charge
+ * reads it. One graph driven twice, same injected page, same human de-escalation to `on`:
+ *
+ *     the router reads the page        -> succeeded,     gates=0, charged=1   (before)
+ *     the router reads the page        -> awaiting_gate, gates=1, charged=0   (now)
+ *     the router reads the run's input -> succeeded,     gates=0, charged=1   (both)
+ *
+ * IT IS FOLD-SAFE BY POSITION, NOT BY ARGUMENT. `ctx.controlTainted` is populated by
+ * `applyControlTaint` at the DECIDING node's own commit, which is an EARLIER event than the
+ * commit of anything the decision selected — so `controlTainted.has(node.id)` is already
+ * answerable here. Both sites run the two in the same order on the same event: `#restoreEvidence`
+ * folds `applyTaint` then `applyControlTaint`, and `#commit` calls `#recordEvidence` (which is
+ * where this function runs) before the `applyControlTaint` line further down. A node marked by
+ * its own commit — the deciding node of a loop, which its own back-edge reaches — is marked
+ * before its NEXT commit at both sites, which is the same answer either way.
+ *
+ * THE RISK IS OVER-GATING AND THE ANSWER IS THE REGION, NOT THIS ARM. Marking the writes of
+ * everything in a tainted region is only as large as the region, so this arm was added AFTER
+ * `controlRegion` was made exact rather than before. Measured on the whole shape corpus in
+ * `test/run/control-flow-taint.test.ts` plus `examples/graphs`: no ordinary shape's column
+ * moved.
  *
  * Monotonic and never cleared, so folding it forward from seq 1 gives the same answer as
  * running it live — which is what makes the rebuild at attach honest rather than approximate.
  * The cost is over-gating: a tainted channel later overwritten by trusted data stays tainted.
  * That is the fail-safe direction, and there is deliberately no declassification operator.
  */
-function applyTaint(tainted: Set<string>, node: NodeSpec, writes: Readonly<Record<string, unknown>>): void {
+function applyTaint(
+  ctx: RunContext,
+  branch: BranchCoordinate,
+  node: NodeSpec,
+  writes: Readonly<Record<string, unknown>>,
+): void {
   // `subgraph` counts as external, and deliberately over-approximates. A child runs under a
   // DIFFERENT `RunId` and therefore a different `RunContext` with its own taint set, so nothing
   // the child learned reaches the parent — a child that fetched untrusted text and mapped it out
   // through `sub.outputs` handed the parent a channel that looked clean, and the parent charged
-  // on it. Carrying the child's set across the boundary would be more precise and would not
-  // SURVIVE: the fold at attach reads committed writes, and which of a child's channels were
-  // tainted is not among them. Treating the boundary itself as untrusted is the version that
-  // rebuilds. The cost is a pure-computation subgraph tainting its outputs.
+  // on it. Carrying the child's set UP would be more precise and would not SURVIVE: the fold at
+  // attach reads committed writes, and which of a child's channels were tainted is not among
+  // them. Treating the boundary itself as untrusted is the version that rebuilds. The cost is a
+  // pure-computation subgraph tainting its outputs.
   //
-  // The other direction needs no rule. Each run gets its own `PolicyEngine` (`#contextFor`), so
-  // a parent's ceiling never reaches the child, and the child re-decides every node at full
-  // strictness — an irreversible child node gates at `in` on its class whatever the parent did.
-  if (!isExternal(node) && !observedChannels(node).some((c) => tainted.has(c))) return;
-  for (const channel of Object.keys(writes)) tainted.add(channel);
+  // THAT ARGUMENT IS ABOUT THE UPWARD DIRECTION AND DOES NOT SETTLE THE DOWNWARD ONE, and it
+  // stood as if it did. This paragraph used to say "the other direction needs no rule", meaning
+  // the child re-decides every node at full strictness under its own `PolicyEngine` — which is
+  // true and is about POSTURE, not about taint. The child's `ctx.tainted` starts EMPTY, so
+  // parent-fetched bytes arrived through `sub.inputs` as an ordinary run input and the child's
+  // own guards could not see them: the same workflow flattened into the parent gated and
+  // delegated did not. `#runSubgraph` computes which child inputs come from tainted parent
+  // channels and `submit` journals them on the CHILD's `run.submitted`, which is the only event
+  // the child's own fold can reach — so unlike the upward direction, this one does survive.
+  if (!carriesTaint(ctx, branch, node)) return;
+  for (const channel of Object.keys(writes)) ctx.tainted.add(channel);
+}
+
+/**
+ * Is this node's OUTPUT the attacker's — by origination, by selection, or by what it read?
+ *
+ * The three arms `applyTaint` opened with, hoisted because `applySuppressedWrites` asks the same
+ * question of the same node at the same commit and a second copy of a predicate is how the two
+ * halves of `#fireEmptyJoin` and `applyFanoutWidthTaint` drifted apart for a round.
+ */
+function carriesTaint(ctx: RunContext, branch: BranchCoordinate, node: NodeSpec): boolean {
+  return (
+    isExternal(node) ||
+    ctx.controlTainted.has(node.id) ||
+    observedChannels(node).some((c) => taintedOn(ctx, branch, c))
+  );
+}
+
+/**
+ * A COMMIT THAT FAILED WROTE NOTHING, AND WRITING NOTHING IS A VALUE.
+ *
+ * `applyTaint` above taints what a node WROTE, and a failed outcome's `writes` is empty — so the
+ * channel the node was authored to write stays clean, which is exactly the value a reader
+ * downstream sees. `has(parts)` on an unwritten channel is `false`, and if the page is what made
+ * the write not happen then `false` is the attacker's byte. Measured on a clean fan (the list
+ * built from the run's own input, so the WIDTH is nobody's choice) whose body reads the page and
+ * throws iff it says PAY, with `onBranchError: "skip"` letting the join complete on zero
+ * contributions and the join's arms branching on `!has(parts)`:
+ *
+ *     the body reads the page, page says PAY  -> succeeded,     gates=0, charged=1  (before)
+ *     the body reads the page, page says PAY  -> awaiting_gate, gates=1, charged=0  (now)
+ *     the body reads the run's own input      -> succeeded,     gates=0, charged=1  (both)
+ *
+ * This is RC-1's R2 row — "suppressing every write is how you get an attacker-chosen value that
+ * is clean" — arriving by failure instead of by width. `applyFanoutWidthTaint` closed the width
+ * form; nothing closed this one, on any tree measured
+ * (`docs/design-taint-rc6-2026-09-05.md` §4, live at `a638e7d`, at the branch head and on `loom`).
+ *
+ * IT IS A SEPARATE FUNCTION BECAUSE IT IS CALLED FROM A DIFFERENT PLACE, and that is the whole
+ * reason for the split. Folded into `applyTaint` it ran from `#recordEvidence`, which is ABOVE
+ * `#commit`'s retry early-return — so a node that read the page, failed once and was RETRIED
+ * tainted its declared writes in the live process, while the fold saw only
+ * `task.retry_scheduled` (no `task.committed` exists for a retried attempt) and rebuilt the set
+ * SHORT. A restart with less taint than the process it replaces is the loosening direction, and
+ * it is the ninth shape of the failure class `test/run/oversight-survives-restart.test.ts`
+ * enumerates. Reproduced by a reviewer end to end — `succeeded, charged 1` across a restart where
+ * the same run in one process gated. It is called from `#commit` now, below the retry return and
+ * in the same position relative to `applyFanoutTaint` that the fold uses, so live and fold apply
+ * the identical five folds in the identical order. `test/run/taint-failed-commits.test.ts` pins
+ * the retried-attempt row in both processes.
+ *
+ * THE DECLARED SET, WHICH IS THE ONLY ONE THERE IS. `node.writes` is the graph's own statement of
+ * what this node writes; the fold reads it off the compiled graph and `task.committed.status`
+ * says the commit failed, so `#restoreEvidence` reproduces this with no new journal field. It
+ * over-approximates in one direction only: a channel nobody ever writes is marked untrusted, and
+ * a monotone set never takes that back. Same fail-safe shape as the rest of this axis, and it
+ * costs a gate only where a hard-to-undo node reads such a channel.
+ *
+ * UNDER THE SAME GUARD as the ordinary write, deliberately: a node that read nothing tainted and
+ * sits in no tainted region fails for reasons of its own, and marking its declared writes would
+ * taint a channel on every ordinary failure in every graph.
+ */
+function applySuppressedWrites(ctx: RunContext, branch: BranchCoordinate, node: NodeSpec): void {
+  if (!carriesTaint(ctx, branch, node)) return;
+  for (const channel of node.writes ?? []) ctx.tainted.add(channel);
+}
+
+/**
+ * A FAN'S PER-BRANCH BINDING CARRIES THE LIST'S TAINT, and nothing carried it before.
+ *
+ * `applyTaint` taints channels a node WROTE. A fanout edge's `as` binding is not written by any
+ * node: `#activate` puts `{ channel: e.as ?? "item", value: item }` straight into the branch's
+ * bindings, so the ordinary way a fan body sees its element — `reads: ["item"]` — read attacker
+ * bytes with `ctx.tainted` silent. Two graphs one word apart, same fetched page, same
+ * `pay.charge`, same human de-escalation to `on`:
+ *
+ *     the body reads `items` (the list channel)  -> awaiting_gate, gates=1, charged=0
+ *     the body reads `item`  (the same bytes)    -> succeeded,     gates=0, charged=2
+ *
+ * IT RECORDS THE EDGE, NOT THE BINDING'S NAME, and it recorded the name for a round. `as` is
+ * not a channel any node writes — `#activate` puts a DIFFERENT VALUE into it per branch and per
+ * fanout edge — so a name in the run-global, monotonic `ctx.tainted` made every fan sharing that
+ * name one taint fact. `RunContext.taintedFans` carries the two graphs one character apart that
+ * measured it, and `taintedOn` is the read that answers per branch.
+ *
+ * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
+ * is called from `#restoreEvidence` as well as `#commit`, in the same order relative to
+ * `applyTaint`: the commit that TAKES the fanout edge is the commit that wrote the list.
+ *
+ * This is the DATA half of the fanout question. The WIDTH half is `applyFanoutWidthTaint`, one
+ * function down: how many branches a tainted list opens is a count, but WHICH NODES that count
+ * selected is the fan's branch, and that is a node set.
+ */
+function applyFanoutTaint(ctx: RunContext, branch: BranchCoordinate, take: readonly EdgeId[]): void {
+  for (const id of take) {
+    const edge = ctx.index.edgeById.get(id);
+    if (edge === undefined || edge.kind !== "fanout") continue;
+    if (edge.over === undefined || !taintedOn(ctx, branch, edge.over)) continue;
+    ctx.taintedFans.add(edge.id);
+  }
+}
+
+/**
+ * HOW WIDE A FAN IS, IS A DECISION — and the one control decision that is a NUMBER.
+ *
+ * `applyFanoutTaint` one function up closes the DATA half: a body reading its own item reads the
+ * fetched page. The width is the other half, and it is what decides whether the branch runs at
+ * all. A fan body that reads nothing untrusted still ran because an attacker's list said so, N
+ * times because the list was N long, and zero times if it was empty. Measured on one graph driven
+ * twice, the charge on the fan branch reading only the run's own input, under a human ceiling of
+ * `on` typed before any untrusted byte existed:
+ *
+ *     the list is built from the fetched page -> succeeded, gates=0, charged=2
+ *     the list is built from the run's input  -> succeeded, gates=0, charged=2
+ *
+ * `controlRegion` has nothing to say about this: the fan edge is not conditional, it is not
+ * narrowing a `take`, and a count is not a node set. What IS a node set is which nodes the
+ * decision selected, and for a fan that is its BRANCH — `fanBody`, bounded at the fan's own
+ * compiled depth.
+ *
+ * BOUNDED, AND THAT IS THE WHOLE OF IT. Marking `reachable(the fanout edge)` walks to the end of
+ * the graph, which is the constant gate this axis exists to avoid; the node BELOW the exit join
+ * runs exactly once at every width including zero, so the width did not select it. Both halves
+ * are pinned: the fan body gates and the node under the join does not.
+ *
+ * THE EXIT JOIN ITSELF IS IN, and `fanBody` argues that at length. It runs once at every width
+ * too, so the width did not select its EXECUTION — but the width is exactly what its FOLD saw,
+ * and at width 0 the folded channel is never written at all, so a join branching on that channel
+ * branches on a value an attacker chose by suppressing every write to it.
+ *
+ * WHOSE WIDTH IT WAS is `fanoutWidthEvidence`, one function down, and it is a separate function
+ * because `Engine.#fireEmptyJoin` asks the same question and used to answer it with its own
+ * narrower copy. This docstring and that method's both claimed they computed one predicate while
+ * they computed two.
+ *
+ * Derived from the graph plus the committed `take`, so the fold reproduces it — which is why it
+ * is called from `#restoreEvidence` as well as `#commit`, in the same position at both.
+ */
+function applyFanoutWidthTaint(
+  ctx: RunContext,
+  branch: BranchCoordinate,
+  node: NodeSpec,
+  take: readonly EdgeId[],
+): void {
+  for (const id of take) {
+    const edge = ctx.index.edgeById.get(id);
+    if (edge === undefined || edge.kind !== "fanout") continue;
+    const evidence = fanoutWidthEvidence(ctx, branch, node, edge);
+    if (evidence === undefined) continue;
+    for (const b of fanBody(ctx.index, edge)) {
+      if (!ctx.controlTainted.has(b)) ctx.controlTainted.set(b, { decidedBy: node.id, channels: evidence });
+    }
+  }
+}
+
+/**
+ * WHOSE WIDTH THIS FAN WAS — the tainted channels that say so, or `undefined` for the run's own.
+ *
+ * ONE FUNCTION BECAUSE THERE ARE TWO READERS AND THEY DRIFTED. `applyFanoutWidthTaint` above
+ * marks the fan body when the width was an attacker's; `Engine.#fireEmptyJoin` escalates when a
+ * width of ZERO skipped something unskippable, and it is the same question — a fan emptied by
+ * the run's own data skipped the branch the graph asked it to skip. Both docstrings asserted
+ * they computed the same predicate and they did not: `#fireEmptyJoin` read
+ * `fanout.over !== undefined && ctx.tainted.has(fanout.over)` and stopped there, missing the
+ * FIRST of the two sources below. Measured on one graph, a `human_gate` on the fan branch and a
+ * `reversible_write` tool under the join, driven twice:
+ *
+ *     the page steers into the empty list-builder -> succeeded,     gates=0, wrote=1   (before)
+ *     the page steers into the empty list-builder -> awaiting_gate, gates=1, wrote=0   (now)
+ *     the INPUT steers into the same builder      -> succeeded,     gates=0, wrote=1   (both)
+ *
+ * THE TWO SOURCES, and the first is the one that was missing:
+ *
+ *   1. THE NODE PLANNING THE FAN IS ITSELF IN AN EARLIER TAINTED CHOICE'S REGION. The same third
+ *      source `choiceTainted` names: a node running only because an attacker's choice selected
+ *      it is a node whose own decisions are that attacker's too, so the fan it plans carries the
+ *      taint even when the LIST is clean. That is not a corner: `applyTaint` never turns control
+ *      taint into data taint, so injected text that steers a run between two clean list-builders
+ *      produces an attacker-chosen width over a channel `ctx.tainted` has never heard of.
+ *   2. THE LIST ITSELF IS TAINTED — `over` is a channel something untrusted wrote.
+ *
+ * Both are folded from the journal (`ctx.controlTainted` and `ctx.tainted` are rebuilt by
+ * `#restoreEvidence`), so a restart reaches the same answer as the live process.
+ */
+function fanoutWidthEvidence(
+  ctx: RunContext,
+  branch: BranchCoordinate,
+  node: NodeSpec,
+  edge: EdgeSpec,
+): readonly string[] | undefined {
+  const inherited = ctx.controlTainted.get(node.id);
+  if (inherited !== undefined) return inherited.channels;
+  if (edge.over !== undefined && taintedOn(ctx, branch, edge.over)) return [edge.over];
+  return undefined;
 }
 
 /** Why a node is control-tainted: whose choice selected it, and what that choice had read. */
@@ -10573,35 +11261,41 @@ interface ControlTaint {
  * `applySecretFlow` already refuses that shape for the confidentiality axis for the reason
  * that applies here too: an axis that marks everything carries no information, and a gate that
  * always fires is one somebody switches off. So the marked set is the CONTROL REGION and
- * nothing else — the nodes this choice actually selected, `reachable(the choice-space edges
- * TAKEN) \ reachable(the choice-space edges NOT taken)`. A node the choice reaches whichever
+ * nothing else — the nodes this choice actually selected, which `controlRegion` computes as the
+ * EXCLUSIVE reach of each taken edge. A node the choice reaches whichever
  * way it went would have run anyway; the choice did not select it, and it is not marked. That
  * is the arm between the deciding node and the point where its branches reconverge, and it is
  * EMPTY for a choice whose arms lead to the same place. It narrows again at the consumer: E8
  * clamps a hard-to-undo action and nothing else, so a region full of reads costs no gate at all.
  *
  * Widening the key from `router` to `choice` does NOT widen the marked set for an ordinary
- * node, and the reason is the subtraction rather than a special case: a node whose every
- * outbound edge fired has an empty alternatives side, and a node with no conditional, loop or
- * producer-narrowed edges has an empty choice space and returns before any of this runs.
+ * node, and it takes BOTH of the two reasons below to keep that true — the version that kept
+ * only the first gated a three-node linear graph:
+ *
+ *   1. A node with no conditional, loop or producer-supplied edges has an empty choice space and
+ *      returns before any of this runs.
+ *   2. A node whose every out-edge fired, and whose out-edges are UNCONDITIONAL, chose nothing —
+ *      the edges were always going to fire, so none of them seeds a region. `controlRegion`
+ *      is where that is decided; `couldHaveNotFired` beside it is the predicate.
  *
  * Monotonic and never cleared, exactly like `applyTaint`, so folding forward from seq 1
  * reaches the state the live process held. First writer wins, so a node selected by two
  * tainted choices names the first — one escalation, and the same answer under replay.
  */
 function applyControlTaint(
-  controlTainted: Map<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
-  index: GraphIndex,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   take: readonly EdgeId[],
+  producerSupplied: boolean,
+  failed: boolean,
 ): void {
-  const choice = choiceOf(index, node, take);
+  const choice = choiceOf(ctx.index, node, take, producerSupplied, failed);
   if (choice.space.length === 0) return;
-  const evidence = choiceTainted(controlTainted, tainted, node, choice);
+  const evidence = choiceTainted(ctx, branch, node, choice);
   if (evidence === undefined) return;
-  for (const id of controlRegion(index, choice.space, take)) {
-    if (!controlTainted.has(id)) controlTainted.set(id, { decidedBy: node.id, channels: evidence });
+  for (const id of controlRegion(ctx.index, choice.space, take)) {
+    if (!ctx.controlTainted.has(id)) ctx.controlTainted.set(id, { decidedBy: node.id, channels: evidence });
   }
 }
 
@@ -10610,9 +11304,23 @@ interface Choice {
   /** Every edge the decision could have taken, taken or not. Empty when it picked among nothing. */
   readonly space: readonly EdgeSpec[];
   /**
-   * True when the DECIDING NODE supplied the choice — a router, or a producer-narrowed `take`.
-   * It is what makes `observedChannels(node)` evidence in `choiceTainted`, and it is false for a
+   * True when the DECIDING NODE supplied the choice — a router, or a `take` a producer wrote. It
+   * is what makes `observedChannels(node)` evidence in `choiceTainted`, and it is false for a
    * take that only edge expressions narrowed, where the node's own reads decided nothing.
+   *
+   * IT IS NOT `narrowed`, and it was for one round. Having no unconditional out-edge widens the
+   * SPACE — not taking the arm means nothing runs, so the arm is a real choice — and says nothing
+   * about who picked. Tying the two together made a node that merely READ the fetched page supply
+   * its own reads as evidence for a decision an edge `when` made from the run's own input:
+   * "summarise the page, then branch on a clean flag", which `choiceTainted` names verbatim as
+   * the constant gate this axis exists to avoid. Measured, one `conditional` out-edge, no
+   * producer, the `when` reading only `request`:
+   *
+   *     `decide` reads the page -> awaiting_gate, gates=1, charged=0   (byTheNode = narrowed)
+   *     `decide` reads the page -> succeeded,     gates=0, charged=1   (byTheNode = producer)
+   *
+   * `only` and `loopuntil` stay marked through the split, because there the expression itself
+   * references the tainted channel and `choiceTainted` reads expressions on its own.
    */
   readonly byTheNode: boolean;
 }
@@ -10638,54 +11346,209 @@ interface Choice {
  *      `human_gate` redirect, or an operator `steer`. All three arrive as `outcome.take` and
  *      `#strayRoute` bounds them to the node's own outbound edges, which is what makes that
  *      set the space.
+ *   (There is no fifth. A failure code was one for a round; see the `#errorEdges` entry below
+ *   for the four measurements that took it out again.)
  *
  * ## THE SET IT DOES NOT COVER, AND WHY EACH IS OUT
  *
- *   - `#errorEdges`. A FAILURE selected that arm, not content, and no special case says so:
- *     an error edge is in no choice space, so a failed commit's `taken` side is empty whatever
- *     it read and `controlRegion` returns nothing. Driven on a `function` node that reads the
- *     injected page, throws, and hands its `error` edge an irreversible charge — succeeded,
- *     gates=0, charged=1, where leaving the taken side as the whole `take` instead measures
- *     awaiting_gate, gates=1, charged=0. That is also why the sentence about a failed commit in
- *     `controlRegion` is now true: the version this replaced claimed a failed router's `take` is
- *     `[]`, which it is NOT when the router has an outbound `error` edge — `#commit` computes
- *     `take = this.#errorEdges(...)` for a failed outcome.
- *   - A `fanout` edge's `over`. It decides the WIDTH of a fan, and every branch runs the SAME
- *     nodes, so the node set is identical either way and the region is empty by construction.
- *     An attacker choosing how many times a body runs is a real question and a different one;
- *     `maxWidth` is its bound.
+ *   - WHICH `error` ARM A FAILURE CODE PICKED, as a question separate from the failure itself.
+ *     That distinction is out and stays out; the FAILURE is in, and the failed arm at the top of
+ *     this function is where. The history is worth keeping because it is the same undecidable
+ *     case answered three ways.
+ *
+ *     ROUND ONE PUT THE CODE IN THE SPACE AND KEYED ON THE ARM COUNT. Four graphs, all driven
+ *     twice — the deciding node reading the fetched page, then the run's own input — with an
+ *     irreversible charge on one arm:
+ *
+ *       two coded arms, the body picks the code from what it read
+ *                                   dirty awaiting_gate 1 gate | clean succeeded 0
+ *       two coded arms, the body ALWAYS throws the same code
+ *                                   dirty awaiting_gate 1 gate | clean succeeded 0
+ *       two catch-all arms          dirty succeeded      0     | clean succeeded 0
+ *       ONE coded arm, no catch-all dirty succeeded      0     | clean succeeded 0
+ *
+ *     Rows one and two are the same journal: the same node type, the same two coded arms, the
+ *     same tainted read, one arm fired. What differs is a counterfactual INSIDE the body — would
+ *     it have produced a different code on different content — and the engine never sees a body.
+ *     Row four is the other end: with ONE `codes`-restricted arm the code decides whether the
+ *     recovery runs AT ALL, and the count let that through. Wrong in both directions.
+ *
+ *     ROUND TWO TOOK IT ALL BACK OUT, on the sentence "a failure selected the arm and content did
+ *     not". That is true of a failure content did not cause, and it left rows one and four open:
+ *     a `function` node that reads the injected page, throws, and hands its `error` edge an
+ *     irreversible charge measured succeeded, gates=0, charged=1 on every tree the design
+ *     examined (`docs/design-taint-rc6-2026-09-05.md` §4's `errthrow`, live at `a638e7d`, at
+ *     `phase1-taint`'s head and on `loom`). An undecidable case answered with the passing value.
+ *
+ *     ROUND THREE — the arm at the top of this function — stops trying to separate the two
+ *     populations and gates BOTH, but only when the failing commit read untrusted content or sat
+ *     in a tainted region. The four rows above all move to `dirty awaiting_gate 1 gate | clean
+ *     succeeded 0`, and row two is the price, named as such in the design's §10 and pinned in
+ *     `test/run/control-flow-taint.test.ts` as `WHAT THE FAILED-COMMIT ARM COSTS`. What is gated
+ *     is error handling BELOW A FETCH, not error handling; the clean column is the whole of that
+ *     claim and it is measured in both files.
+ *
+ *     A DURABLE "the failure was PRODUCER-SUPPLIED" BIT WOULD NOT HAVE HELPED, which is why it
+ *     was not built: `errthrow`'s body throws, so that bit is `false` there and the row stays
+ *     open. It says nothing about a parse that failed BECAUSE the page was malformed, which is
+ *     content choosing the arm through a throw.
+ *   - A `fanout` edge's WIDTH. A fan edge narrows no `take`, so it is in no choice space and this
+ *     function has nothing to say about it — but the width IS a decision, and it is answered two
+ *     functions up rather than left open. `applyFanoutTaint` records the fanout EDGE in
+ *     `ctx.taintedFans` so a fan body reading its own item reads untrusted bytes, and
+ *     `applyFanoutWidthTaint` marks the fan BODY, bounded at the join, when `over` is tainted.
+ *     The sentence here used to say the node set is identical whatever the width, which is false
+ *     at width 0 — the branch nodes do not run at all.
  *   - A `compensation` edge. The executor never traverses one — `#edgesToTake` argues that at
  *     length.
- *   - HOW MANY TIMES a loop body runs. `controlRegion` is a node SET and cannot express an
- *     iteration count, so a loop edge alone in a space marks nothing: taking it leaves the
- *     alternatives side empty, and not taking it leaves the taken side empty. Its `until`
- *     contributes evidence only when the space holds another edge as well.
- *   - Which of the four producers wrote a `take`. The journal records the `take` and not who
- *     chose it, so a human's redirect and a body's route are one case here. That OVER-marks a
- *     human decision, which is the fail-closed direction and costs a gate only when the node
- *     also READ untrusted content and its take was narrowed.
+ *   - HOW MANY TIMES a loop body runs, as a NUMBER. `controlRegion` is a node set and cannot
+ *     express an iteration count. What it can express is WHICH NODES the decision to go round
+ *     again selected, and that is now what it returns: a `loop` edge could have come out the
+ *     other way whatever else is in the space, so it seeds a region on its own — see
+ *     `couldHaveNotFired`. The node set it returns is the CYCLE BODY, and
+ *     that is a measured claim rather than a definition: the deciding node's forward `seq` edge
+ *     is outside the space and fired on the same commit, so everything past the loop comes off
+ *     the region through `controlRegion`'s second subtraction source. The first pass is the graph
+ *     an author wrote and nothing marks it, because the deciding node commits only after the body
+ *     has run once.
+ *   - WHICH of the four producers wrote a `take`. The journal records THAT one did — see below —
+ *     and not which, so a human's redirect and a body's route are one case here. That OVER-marks
+ *     a human decision, which is the fail-closed direction and costs a gate only when the node
+ *     also READ untrusted content.
  *
- * ## WHY `narrowed` IS COMPUTED THE WAY IT IS
+ * ## WHO CHOSE IS RECORDED, NOT INFERRED
  *
- * `#edgesToTake` takes an unconditional edge — anything that is not `conditional`, `loop`,
- * `error` or `compensation` — ALWAYS. So an unconditional edge missing from `take` is proof a
- * producer supplied it, and an unconditional edge present is proof one did not.
+ * `producerSupplied` is `task.committed.takeSuppliedByProducer` — a durable bit the commit that
+ * computed the `take` also wrote. It used to be inferred from edge kinds instead: `#edgesToTake`
+ * takes an unconditional edge ALWAYS, so an unconditional edge missing from `take` was read as
+ * proof a producer supplied it — and an unconditional edge PRESENT was read as proof none did.
+ * The second half is false. A producer take that includes the node's unconditional edges is
+ * indistinguishable from no producer take at all, so the ordinary body — always continue to my
+ * sink, AND pick an arm — switched the evidence off. Measured on one graph with one edge of
+ * difference, the charge reading only the clean channel in both:
  *
- * A node whose outbound edges are ALL conditional or loop admits no such proof either way, and
- * it falls to the fail-closed side: `byTheNode` true, so the node's own reads count as evidence
- * alongside the edge expressions. That arm is load-bearing rather than defensive. Measured on a
- * `function` node with two `conditional` out-edges whose `when` reads only the clean channel,
- * routing from the injected page with its body — the one shape where nothing in the graph says
- * who chose:
+ *     every out-edge `conditional`, body returns `take` -> awaiting_gate, gates=1, charged=0
+ *     the same body plus ONE `seq` edge it also takes   -> succeeded,     gates=0, charged=1
  *
- *     `byTheNode` from the space's edge kinds -> succeeded,     gates=0, charged=1
- *     `byTheNode` from `narrowed`             -> awaiting_gate, gates=1, charged=0
+ * All four producers the list above names arrive as `outcome.take` and none is distinguishable
+ * in the journal, so the recorded bit covers a `human_gate` redirect and an operator `steer` as
+ * well as a body.
  *
- * The cost is over-marking a node that READ untrusted content and branched on something clean,
- * when every one of its outbound edges is conditional. That is a pure branch node, the region
- * subtraction still bounds it to the arm, and the alternative is the row above.
+ * A NODE WHOSE OUT-EDGES ARE ALL CONDITIONAL OR LOOP gets the WIDE SPACE and not the node's own
+ * reads as evidence, and the two used to move together. The wide space is right: every one of
+ * those edges could have not fired, so all of them are what this commit picked among. The
+ * evidence is not — the take came from the edge expressions, `choiceTainted` reads those
+ * expressions itself, and if they read nothing tainted then nothing tainted narrowed the take.
+ * See `Choice.byTheNode` for the graph that measured it.
+ *
+ * A JOURNAL WRITTEN BEFORE THE BIT EXISTED reads `undefined`, and `#restoreEvidence` folds that
+ * as TRUE. An old journal cannot say who chose, and a guard that cannot decide fails closed.
+ * Reading absent as `false` would reproduce the row above on every old run and do it ACROSS A
+ * RESTART, which is the failure class this file already carries six of; reading it as the old
+ * inference would keep the hole for exactly the runs nobody can re-run. Absent-as-true
+ * over-marks an old journal, so a replayed old run can gate where the original process did not —
+ * the tightening direction, which is the one permitted.
+ *
+ * WHAT THAT COSTS, MEASURED RATHER THAN ARGUED. One journal, written by this binary and then
+ * AGED IN PLACE by deleting the one key, so the only difference between the two columns is the
+ * field itself — a cross-binary run over one sqlite file measures the same thing and adds every
+ * other difference between two trees to it. Three graphs, each stopped on an authored
+ * `human_gate` between the deciding commit and the charge, resumed by approving that gate:
+ *
+ *     graph                              bit present        bit absent
+ *     no branch at all                   1 gate, charged 1  1 gate, charged 1
+ *     one `seq` taken, one `conditional` 1 gate, charged 1  2 gates, charged 0
+ *       sibling untaken, its `when`
+ *       reading only the run's input
+ *     a producer chose on the page       2 gates, charged 0 2 gates, charged 0
+ *
+ * THE MIDDLE ROW IS WHAT THIS DEFAULT COSTS, and this table asserted the opposite of it for a
+ * round: it claimed the columns differ only for a graph that "branches on the fetched page". They
+ * do not. `couldHaveNotFired` — the thing that keeps the first row cheap — admits an
+ * unconditional taken edge as a seed as soon as SOMETHING in the space was left untaken, and one
+ * untaken sibling is something. So
+ * any pre-existing in-flight run whose deciding node read fetched content and left one
+ * conditional sibling untaken needs a second human to resume, however clean that sibling's `when`
+ * was.
+ *
+ * IT IS KEPT ANYWAY, and the alternative was measured before it was refused. Reading absent as
+ * "a producer chose only where the node has no unconditional out-edge" removes the middle row and
+ * REOPENS the third for old journals: `bodycondseqgated` has an unconditional edge, so that
+ * reading makes an old journal charge where the field's whole purpose is that it does not. That
+ * is a loosening, across a restart, for exactly the runs nobody can re-run — the failure class
+ * this codebase already carries six of. A one-time extra human on in-flight runs is the cheaper
+ * side of that trade, and it is bounded: it costs nothing for any run this binary started.
+ * `test/run/control-flow-taint.test.ts` pins all three rows in both columns.
  */
-function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): Choice {
+function choiceOf(
+  index: GraphIndex,
+  node: NodeSpec,
+  take: readonly EdgeId[],
+  producerSupplied: boolean,
+  failed: boolean,
+): Choice {
+  // A FAILED COMMIT PICKED AMONG ITS ERROR ARMS *AND* THE ARMS IT DID NOT REACH, and this branch
+  // is first because a failed router's `take` is `#errorEdges`, not one of its declared cases.
+  //
+  // The entries below say an `error` edge is in no choice space because "a failure selected the
+  // arm and content did not". That is true of a failure content did not cause, and there is no
+  // fold that separates the two — `#commit` records `E_INTERNAL` whether the body threw on the
+  // page or on a clock. So the door was shut, and the shape it left open is the whole of it: a
+  // body that reads the page and throws iff it says PAY, with a catch-all `error` edge onto an
+  // irreversible action and a `seq` edge past it. Content picks between "charge" and "carry on"
+  // and no guard sees a choice at all:
+  //
+  //     `decide` reads the page          -> succeeded,     gates=0, charged=1   (before)
+  //     `decide` reads the page          -> awaiting_gate, gates=1, charged=0   (now)
+  //     `decide` reads the run's input   -> succeeded,     gates=0, charged=1   (both)
+  //
+  // THE THIRD ROW IS THE WHOLE OF WHAT KEEPS THIS OFF ORDINARY GRAPHS, and it is not a property
+  // of this function: the space is only evidence when `choiceTainted` finds something tainted in
+  // it, and for a failed node that read nothing untrusted and sits in no tainted region there is
+  // nothing to find. What this does cost is named in the design and paid on purpose
+  // (`docs/design-taint-rc6-2026-09-05.md` §10): a node that READ untrusted content and then
+  // failed gates its error handling, whether the content caused the failure or not. The five
+  // rows of `A FAILURE CODE IS NOT A CHOICE` in `test/run/control-flow-taint.test.ts` are that
+  // price, measured in both columns — every dirty arm gates, every clean arm does not.
+  //
+  // `byTheNode` IS TRUE HERE. The node itself threw, and what it threw on is what it read, so
+  // its own `reads` are evidence in the sense `choiceTainted` means: the deciding node could
+  // have come out the other way on other content. That is the same claim a `router` makes and a
+  // producer-supplied `take` makes, arrived at through a failure.
+  //
+  // COMPENSATION EDGES STAY OUT, because nothing ever traverses one — `#edgesToTake` answers
+  // `case "compensation": break;` and rollback is journal-driven.
+  if (failed) {
+    const outbound = (index.outbound.get(node.id) ?? []).filter((e) => e.kind !== "compensation");
+    // A `human_gate`'s FAILURE IS A PERSON, AND THE ONE THING IT IS NOT IS THE PAGE. This is the
+    // exception to the paragraph above and the reason it is `byTheNode` rather than an early
+    // return. `#applyGateDecision` answers a REJECT with `{status:"failed",
+    // E_HUMAN_APPROVAL_REQUIRED}`, so a rejection arrives here as an ordinary failed commit — and
+    // a gate's `reads` are, very often, exactly the fetched channel the gate exists to SHOW the
+    // person deciding. Offering those reads as evidence made "show a person the page and let them
+    // say no" into the attacker's decision: the gate's error region control-tainted, and a SECOND
+    // human asked on the cleanup path.
+    //
+    //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (before)
+    //     the gate reads the page, human rejects  -> awaiting_gate, gates=2, charged=0  (the bug)
+    //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (now)
+    //
+    // AND IT IS NOT THE UNDECIDABLE CASE THE ARM ABOVE PAYS FOR. That price is owed because
+    // `#commit` records `E_INTERNAL` whether a body threw on the page or on a clock. This one is
+    // decidable twice over: the node is a `human_gate`, which computes nothing of its own, and
+    // the journal carries `gate.decided{decision:"reject"}`. The node type is the cheaper of the
+    // two and needs no second journal read, so it is what this uses — and it covers a gate's
+    // other failures for the same reason: a timeout is a clock, and `E_GATE_REQUIRED` is a
+    // deployment fact. None of them is content.
+    //
+    // THE WIDE SPACE STAYS, so the other two evidence sources still apply: an edge expression
+    // that reads a tainted channel, and — the one that matters — the gate ITSELF sitting in an
+    // earlier tainted choice's region, which makes whether it ran at all an attacker's decision.
+    // A gate an attacker's choice selected is still marked; a gate a person answered is not.
+    // `test/run/taint-failed-commits.test.ts`'s `A HUMAN SAYING NO IS NOT THE PAGE CHOOSING` is
+    // the pin, with the control that says the row is about the taint and not about the shape.
+    return { space: outbound, byTheNode: node.type !== "human_gate" };
+  }
   if (node.type === "router") {
     const ids = new Set<EdgeId>();
     for (const c of node.router?.cases ?? []) for (const id of c.take) ids.add(id as EdgeId);
@@ -10697,13 +11560,22 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): C
     }
     return { space, byTheNode: true };
   }
-  const outbound = (index.outbound.get(node.id) ?? []).filter((e) => e.kind !== "error" && e.kind !== "compensation");
+  const all = index.outbound.get(node.id) ?? [];
+  // EVERY `error` EDGE IS OUT OF THE SPACE *ON A SUCCESSFUL COMMIT*, which is what this line is
+  // now bounded to: the failed arm at the top of this function returned already. A successful
+  // commit did not take an error edge — and may no longer even name one, since a producer take
+  // is confined to `TAKEABLE_EDGE_KINDS` — so nothing here is a choice it made.
+  const outbound = all.filter((e) => e.kind !== "error" && e.kind !== "compensation");
   const unconditional = outbound.filter((e) => e.kind !== "conditional" && e.kind !== "loop");
-  const chosen = new Set<EdgeId>(take);
-  const narrowed = unconditional.length === 0 || unconditional.some((e) => !chosen.has(e.id));
-  return narrowed
-    ? { space: outbound, byTheNode: true }
-    : { space: outbound.filter((e) => e.kind === "conditional" || e.kind === "loop"), byTheNode: false };
+  // THE SPACE AND WHO CHOSE ARE TWO ANSWERS, and one predicate used to give both. A node with no
+  // unconditional out-edge picked among ALL of them — not taking the arm means nothing runs — so
+  // `narrowed` is right about the SPACE. It is not an answer to who picked: unless a producer
+  // supplied the take, the edge expressions did, and the node's own reads decided nothing.
+  const narrowed = producerSupplied || unconditional.length === 0;
+  return {
+    space: narrowed ? outbound : outbound.filter((e) => e.kind === "conditional" || e.kind === "loop"),
+    byTheNode: producerSupplied,
+  };
 }
 
 /**
@@ -10723,6 +11595,11 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): C
  * them would gate every "summarise the page, then branch on a clean flag" graph — the
  * constant-gate shape this axis exists to avoid.
  *
+ * THAT PARAGRAPH WAS FALSE FOR A ROUND while sitting here unchanged, which is the reason it now
+ * carries a pointer: `choiceOf` set `byTheNode` from `narrowed`, so a node with one `conditional`
+ * out-edge supplied its own reads as evidence for a decision the `when` made. `Choice.byTheNode`
+ * carries the measurement and the graph is pinned in `test/run/control-flow-taint.test.ts`.
+ *
  * `observedChannels` IS NOT ENOUGH ALONE, for the reason `#gatePayload` and `dataClassification`
  * both carry one word at a time: an expression is evaluated against `scopeFor` — every
  * channel, declared or not — so a condition can read a channel absent from `reads`.
@@ -10741,19 +11618,20 @@ function choiceOf(index: GraphIndex, node: NodeSpec, take: readonly EdgeId[]): C
  * exact failure this codebase has now had six of.
  */
 function choiceTainted(
-  controlTainted: ReadonlyMap<NodeId, ControlTaint>,
-  tainted: ReadonlySet<string>,
+  ctx: RunContext,
+  branch: BranchCoordinate,
   node: NodeSpec,
   choice: Choice,
 ): readonly string[] | undefined {
-  const inherited = controlTainted.get(node.id);
+  const inherited = ctx.controlTainted.get(node.id);
   if (inherited !== undefined) return inherited.channels;
   // Nothing untrusted exists in this run yet, so no expression can have read any. Checked
-  // first because it is also what stops the fail-closed arm below being a constant gate.
-  if (tainted.size === 0) return undefined;
+  // first because it is also what stops the fail-closed arm below being a constant gate. BOTH
+  // halves of the durable evidence, because a fan's binding is not in `tainted`.
+  if (ctx.tainted.size === 0 && ctx.taintedFans.size === 0) return undefined;
 
   const hit = new Set<string>();
-  if (choice.byTheNode) for (const c of observedChannels(node)) if (tainted.has(c)) hit.add(c);
+  if (choice.byTheNode) for (const c of observedChannels(node)) if (taintedOn(ctx, branch, c)) hit.add(c);
 
   const exprs: string[] = [];
   for (const c of node.router?.cases ?? []) exprs.push(c.when);
@@ -10773,7 +11651,7 @@ function choiceTainted(
       // is treated as untrusted.
       return [...hit];
     }
-    for (const r of refs) if (tainted.has(r)) hit.add(r);
+    for (const r of refs) if (taintedOn(ctx, branch, r)) hit.add(r);
   }
   return hit.size === 0 ? undefined : [...hit];
 }
@@ -10781,14 +11659,62 @@ function choiceTainted(
 /**
  * The nodes this choice SELECTED — not the ones it would have reached anyway.
  *
- * `reachable(the choice-space edges TAKEN) \ reachable(the choice-space edges NOT taken)`. Both
- * sides read the SAME space, which is what makes the subtraction a statement about the choice:
- * an edge outside the space was not something this commit picked, so it belongs on neither side.
- * That is also why a commit that took no edge from its own space selects nothing — the failed
- * node, whose `take` is its `error` edges, and the degenerate router whose only case names its
- * own fallback.
+ * EXCLUSIVE REACH, per taken edge:
  *
- * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS THE FIX
+ *     union over the taken edges e of:
+ *         reachable(e)  \  reachable((the rest of the space) + (what fired inevitably outside it))
+ *
+ * A node is in the region iff SOME taken edge reaches it and NOTHING ELSE the decision could have
+ * gone through, or did go through regardless, reaches it. That is exactly "this choice, and
+ * nothing else, put it there."
+ *
+ * ## IT REPLACED `reachable(taken) \ reachable(alternatives ∪ alsoRan)`, WHICH IS A WEAKER CLAIM
+ *
+ * The set-at-a-time form asks "is this node downstream of the arm and of nothing that did not
+ * fire". It cannot see that a node is reached by TWO edges of the same take, so a node the
+ * decision reached by an edge it would have taken anyway stayed in the region as long as some
+ * OTHER taken edge also reached it. Four rounds each answered one shape of that with one more
+ * condition on the early return, which by round 4 read
+ * `alternatives.length === 0 && !isRouter && !taken.some(conditional || loop)`. Each of the four
+ * measured below is that same defect one mechanism over, and none of them needs a special case
+ * here now. Every row is one graph driven twice — the deciding node reading the fetched page,
+ * then the run's own input — with an irreversible `pay.charge` reading only clean channels and a
+ * human ceiling of `on` typed before any untrusted byte existed:
+ *
+ *     shape                                            before            after
+ *     always continue, AND do X if the page says so    (closed round 4, still closed)
+ *     an ordinary poll-until-done retry loop           (closed round 4, still closed)
+ *     a router arm below a reconvergence               (closed round 4, still closed)
+ *     the same "continue AND branch" with a PRODUCER
+ *       take, so both edges are inside the space       gate 1, ch 0     ch 1, no gate
+ *     a router whose case takes every edge it declared gate 1, ch 0     ch 1, no gate
+ *     a producer take naming its own `error` edge      ch 1, no gate    gate 1, ch 0
+ *
+ * The last row is the one pointing the other way, and it is round 4's own loosening: `alsoRan`
+ * subtracted every edge that fired from outside the space, and `#strayRoute` lets a producer name
+ * an `error` edge in its own `take` while `choiceOf` drops error edges from the space. So a body
+ * that read the injected page and named one of its own error arms subtracted the irreversible
+ * action out of its own region. The kind test in the `alsoRan` loop below is what separates the
+ * two populations; see the comment there.
+ *
+ * ## WHAT IS SUBTRACTED, AND WHY EACH SOURCE IS ON THAT SIDE
+ *
+ *   - THE REST OF THE SPACE, taken or not. An untaken edge is the arm the decision did not go
+ *     down. A DIFFERENTLY-taken edge is an arm it also went down, so a node both reach is not
+ *     something this edge selected — and that is the half the set-at-a-time form could not
+ *     express at all.
+ *   - WHAT FIRED INEVITABLY FROM OUTSIDE THE SPACE. `choiceOf` drops a node's unconditional
+ *     out-edges from the space whenever no producer supplied the take, and those edges FIRED —
+ *     `#edgesToTake` always takes them — so everything forward of them runs whatever this
+ *     decision came out. This is not a corner: it is every graph in which a node continues AND
+ *     branches.
+ *
+ * A commit that took no edge from its own space selects nothing — the degenerate router whose
+ * only case names its own fallback. A FAILED commit is no longer an example of that: `choiceOf`'s
+ * failed arm puts its error edges in the space alongside the arms it never reached, so its taken
+ * side is the error edges it did take.
+ *
+ * ## THE ALTERNATIVES SIDE DOES NOT FOLLOW A `loop` EDGE, AND THAT IS STILL THE FIX
  *
  * This walk once followed every edge kind except `compensation` on both sides, and the sentence
  * here claimed that "on the alternatives side credits an arm with everything it could have led
@@ -10802,30 +11728,222 @@ function choiceTainted(
  *     not-taken arm loops back  -> succeeded,     gates=0, charged=1
  *
  * "Would have run anyway" has to mean "without passing through this same decision again". A
- * backward edge does pass through it again, so credit stops there: on the alternatives side a
+ * backward edge does pass through it again, so credit stops there: on the subtraction side a
  * `loop` edge contributes neither its target nor anything past it. The TAKEN side still walks
  * them, where over-approximating marks MORE.
  *
  * This subsumes refusing to re-expand the deciding node's own id, which was the other candidate
  * fix and is the weaker one: GRAPH006_UNMARKED_CYCLE makes every cycle in a compiled graph run
- * through a `loop` edge, so with loop edges dropped the alternatives walk is a DAG walk that
+ * through a `loop` edge, so with loop edges dropped the subtraction walk is a DAG walk that
  * cannot come back at all — including by a route that re-enters ABOVE the deciding node rather
  * than at it, which blocking one id does not stop.
  *
  * `error` edges are still walked on the taken side, and `compensation` is walked on neither: it
  * is a DECLARATION the compiler checks rather than a route the executor follows — `#edgesToTake`
  * argues that at length.
+ *
+ * ## WHAT IT COSTS, MEASURED
+ *
+ * Exclusive reach is one walk per seed plus one per subtractor, where the naive form was two
+ * walks flat. The subtraction side is re-formed for every seed, so the per-edge walks are
+ * memoised and unioned — forward reachability distributes over union, so that is exact rather
+ * than an approximation. Measured on `workflows/incident-triage.ts` — 11 nodes and 15 edges,
+ * larger than every graph in `examples/graphs`, whose biggest is 10 — driven through its own
+ * suite: 20 reachability walks and 58 node-visits before, 30 and 70 after.
  */
-function controlRegion(index: GraphIndex, space: readonly EdgeSpec[], take: readonly EdgeId[]): ReadonlySet<NodeId> {
+function controlRegion(
+  index: GraphIndex,
+  space: readonly EdgeSpec[],
+  take: readonly EdgeId[],
+): ReadonlySet<NodeId> {
   const chosen = new Set<EdgeId>(take);
-  const taken: EdgeId[] = [];
-  const alternatives: EdgeId[] = [];
-  for (const e of space) (chosen.has(e.id) ? taken : alternatives).push(e.id);
-  if (taken.length === 0 || alternatives.length === 0) return new Set<NodeId>();
+  const taken: EdgeSpec[] = [];
+  const alternatives: EdgeSpec[] = [];
+  for (const e of space) {
+    if (chosen.has(e.id)) taken.push(e);
+    else alternatives.push(e);
+  }
+  if (taken.length === 0) return new Set<NodeId>();
 
-  const selected = reachableFromEdges(index, taken, true);
-  for (const id of reachableFromEdges(index, alternatives, false)) selected.delete(id);
-  return selected;
+  // THE EDGES THAT FIRED FROM OUTSIDE THE SPACE, WHICH IS NOT THE SAME AS "were not picked".
+  // An unconditional sibling outside the space fired because `#edgesToTake` always takes it, so
+  // everything forward of it runs whatever this decision came out and it belongs on the
+  // subtraction side.
+  //
+  // THE `error` ARM OF THIS FILTER IS BELT-AND-BRACES ON THE MERGED TREE, and it used to be the
+  // fix for a measured loosening: `#strayRoute` let a producer name one of its own `error` edges,
+  // `choiceOf` dropped every error edge from the space, and the arm the producer PICKED therefore
+  // landed on the subtraction side and took the irreversible action out of its own region. Two
+  // things closed that door since, from both sides. `loom`'s `TAKEABLE_EDGE_KINDS` (§A0.21,
+  // `ff8fdac`) refuses a producer take naming an `error` edge outright, `E_ROUTE_INVALID` and
+  // run-fatal — so no successful commit can reach this line with one. And `choiceOf`'s failed arm
+  // puts every error edge INSIDE the space, so a failed commit's error edges never reach
+  // `alsoRan` either. The filter stays because it is the safe answer for an edge kind that is not
+  // an alternative, and because both of those are other files' rules; but nothing in the tree can
+  // exercise it, and `control-flow-taint.test.ts`'s `A PRODUCER'S OWN error ARM IS A CHOICE` says
+  // in place that its fixture can no longer be built.
+  const inSpace = new Set(space.map((e) => e.id));
+  const alsoRan: EdgeId[] = [];
+  for (const id of take) {
+    if (inSpace.has(id)) continue;
+    const e = index.edgeById.get(id);
+    if (e === undefined || e.kind === "error" || e.kind === "compensation") continue;
+    alsoRan.push(id);
+  }
+
+  // One walk per edge, memoised, because the subtraction side is re-formed for every seed and
+  // forward reachability distributes over union: `reachable(A ∪ B) === reachable(A) ∪
+  // reachable(B)`. So the cost is |space| + |alsoRan| walks whatever the seed count is.
+  const cache = new Map<EdgeId, ReadonlySet<NodeId>>();
+  const anyway = (id: EdgeId): ReadonlySet<NodeId> => {
+    let r = cache.get(id);
+    if (r === undefined) {
+      r = reachableFromEdges(index, [id], false);
+      cache.set(id, r);
+    }
+    return r;
+  };
+
+  const region = new Set<NodeId>();
+  for (const e of taken) {
+    if (!couldHaveNotFired(e, alternatives.length)) continue;
+    const otherwise = new Set<NodeId>();
+    for (const o of space) if (o.id !== e.id) for (const n of anyway(o.id)) otherwise.add(n);
+    for (const id of alsoRan) for (const n of anyway(id)) otherwise.add(n);
+    for (const n of reachableFromEdges(index, [e.id], true)) if (!otherwise.has(n)) region.add(n);
+  }
+  return region;
+}
+
+/**
+ * Could this taken edge have not fired? Only such an edge is a seed of the region.
+ *
+ * Two ways, and both have to be here or one of two measured shapes breaks:
+ *
+ *   - ITS OWN EXPRESSION COULD HAVE COME OUT THE OTHER WAY — `conditional` and `loop`. Not
+ *     taking the arm is a real alternative even when it reaches nothing, which is what makes a
+ *     lone conditional out-edge (`only`) and a lone `loop` edge (`loopuntil`) real choices.
+ *   - THE DECISION DEMONSTRABLY EXCLUDED SOMETHING — some edge of the space was left untaken.
+ *     An unconditional edge cannot fail to fire on its own, so the only thing that can have
+ *     omitted it is the producer that wrote the `take`, and a producer that named every edge in
+ *     its space omitted nothing. `fetch -> summarise -> charge` with a body naming its one `seq`
+ *     edge is byte-identical in the journal to a body that named nothing at all, and marking it
+ *     control-tainted gates a graph with no branch in it.
+ *
+ * The second clause is what replaced the `isRouter` exemption. A router that takes every edge it
+ * declared left nothing untaken, so under this predicate it seeds nothing — which is the answer
+ * the exemption was there to avoid giving for the wrong reason.
+ */
+function couldHaveNotFired(edge: EdgeSpec, untaken: number): boolean {
+  // AN `error` EDGE FIRES ONLY IF THE COMMIT FAILED, so not taking it is always a real
+  // alternative — the same argument the first clause makes for `conditional` and `loop`. It is
+  // reachable only from `choiceOf`'s failed arm (every other path drops error edges from the
+  // space, and a producer may no longer name one — `TAKEABLE_EDGE_KINDS`), so this clause says
+  // nothing about a successful commit. Without it, a node whose ONLY outbound edge is one
+  // catch-all `error` edge leaves `untaken === 0` and seeds nothing, and content choosing
+  // between "the recovery runs" and "the run dies" is the shape `errone` measured.
+  return edge.kind === "conditional" || edge.kind === "loop" || edge.kind === "error" || untaken > 0;
+}
+
+/**
+ * The nodes that run ON one branch of a fan-out: `e.to`, everything forward of it at or below
+ * the fan's own depth, and the join that collapses the branch back.
+ *
+ * The bound is what makes this usable at all. `reachableFromEdges` has no stop at the join, so a
+ * fan body walked with it is "everything downstream of the fan" — the constant-gate shape two
+ * other axes in this file refuse in writing.
+ *
+ * ## THE BOUND IS THE COMPILED FAN-OUT DEPTH, AND IT WAS TWICE WRONG BEFORE
+ *
+ * This walk used to stop at the first `join` EDGE or the first node of type `join`, and exclude
+ * it. Both halves of that were wrong, and each cost a measured exploit.
+ *
+ * EXCLUDING THE EXIT JOIN LAUNDERS THE FOLDED CHANNEL. At width 0 nobody writes the channel the
+ * join folds, so `applyTaint` never taints it, and the join's own `conditional` arms then pick
+ * among branches on a value the attacker chose by suppressing every write to it. One graph,
+ * `plan` reading the fetched page, the join's arms leading to an irreversible `pay.charge`:
+ *
+ *     the page says TWO  -> awaiting_gate, gates=1, charged=0
+ *     the page says NONE -> succeeded,     gates=0, charged=1   (before)
+ *     the page says NONE -> awaiting_gate, gates=1, charged=0   (now)
+ *
+ * The join runs once at every width, so the width did not select the join's EXECUTION — but the
+ * width is exactly what its fold saw, so the width did select its DECISION. That is why the exit
+ * join is IN and the node past it is OUT.
+ *
+ * STOPPING AT THE *FIRST* JOIN NODE IS NOT THE FAN'S OWN EXIT. In a nested fan-out the OUTER
+ * branch continues past the INNER join, so everything the outer fan selected past that point was
+ * outside the walk. Both consumers paid: a `human_gate` authored between the two joins was
+ * invisible to `#fireEmptyJoin`'s scan — round 1's exploit reproduced verbatim one nesting level
+ * down — and an irreversible node there ran unmarked at the attacker's count.
+ *
+ *     nested, `plan` reads the page   -> succeeded,     gates=0, charged=2   (before)
+ *     nested, `plan` reads the page   -> awaiting_gate, gates=2, charged=0   (now)
+ *     nested, `plan` reads the input  -> succeeded,     gates=0, charged=2   (both)
+ *
+ * `index.fanoutDepth` is the number of enclosing fan-out coordinate segments a Task of a node
+ * carries (`graph/validate.ts`, built from `computeFanoutStacks`). Every node on this fan's
+ * branch is at the depth of `fanout.to`, or deeper inside a nested fan; the exit join is the
+ * first node SHALLOWER than that. So the walk admits every node it reaches and stops DESCENDING
+ * at the first one below `bodyDepth` — which puts the exit join in and everything past it out,
+ * at any nesting level, without asking what kind an edge or a node is.
+ *
+ * AN UNDEFINED DEPTH IS DESCENDED THROUGH, AND THE ARGUMENT HERE USED TO RUN THE OTHER WAY.
+ * `GRAPH008_JOIN_DEPTH` refuses an ambiguous depth for joins and their named arms and tolerates
+ * it elsewhere, so absent means "this node is reachable at two different fan-out depths" — and
+ * this paragraph read that as "which is not a claim that it is on this branch" and stopped. It
+ * is not a claim that it is NOT, either, and the two are not symmetric: an unknown depth means
+ * the node MIGHT be on the branch, and answering "it is not" is the failure this file already
+ * carries a list of. ONE extra inbound edge — a `conditional` whose `when` never matches, or an
+ * edge a mutation adds — truncated the walk and made everything below it invisible to BOTH
+ * consumers at once. Measured on one graph driven twice, a `human_gate` two hops down the branch
+ * and a `reversible_write` tool under the join:
+ *
+ *     the page yields none -> succeeded,     gates=0, wrote=1   (before)
+ *     the page yields none -> awaiting_gate, gates=1, wrote=0   (now)
+ *
+ * So the ONLY thing that stops the walk is a KNOWN depth shallower than a KNOWN body depth. When
+ * the body's own depth is ambiguous nothing stops it at all and the body is the whole downstream,
+ * which is the over-approximating direction and the one this function's `loop` paragraph already
+ * picks.
+ *
+ * A NODE SHALLOWER THAN THE BODY IS ADMITTED ONLY THROUGH A `join` EDGE. This walk used to
+ * `seen.add(e.to)` BEFORE testing the depth, so any edge out of the body admitted its target
+ * whatever depth it was at — and a retry `loop` back-edge out of a fan body points at a node
+ * ABOVE the fan. When that node is the run's already-approved `human_gate`, an empty fan
+ * escalated on a gate that had run and asked a second human:
+ *
+ *     an empty fan under an approved gate, retry edge out of the body -> gates=2   (before)
+ *     the same graph                                                  -> gates=1   (now)
+ *
+ * Only a `join` edge pops a fan-out level (`computeFanoutStacks`), so the edge kind separates the
+ * exit join from everything else exactly, with no second notion of depth to keep in step.
+ *
+ * Everything else is followed, `loop` edges included: a cycle inside a fan body is a branch that
+ * retries, and over-approximating the body is the direction that marks MORE.
+ */
+function fanBody(index: GraphIndex, fanout: EdgeSpec): Set<NodeId> {
+  const bodyDepth = index.fanoutDepth.get(fanout.to);
+  const seen = new Set<NodeId>([fanout.to]);
+  const queue: NodeId[] = [fanout.to];
+  for (let i = 0; i < queue.length; i++) {
+    for (const e of index.outbound.get(queue[i]!) ?? []) {
+      if (e.kind === "compensation" || seen.has(e.to)) continue;
+      const depth = index.fanoutDepth.get(e.to);
+      // THE BOUND, AND IT IS THE ONLY THING THAT STOPS THE WALK. A node the compiler puts
+      // SHALLOWER than the body is one of two things and they need opposite answers: the fan's
+      // own EXIT JOIN, which is in and where the walk ends, or a node ABOVE the fan that a
+      // `loop` back-edge re-enters, which this width did not select at all. Only a `join` edge
+      // pops a fan-out level (`computeFanoutStacks`), so the edge kind separates them exactly.
+      if (bodyDepth !== undefined && depth !== undefined && depth < bodyDepth) {
+        if (e.kind === "join") seen.add(e.to);
+        continue;
+      }
+      seen.add(e.to);
+      queue.push(e.to);
+    }
+  }
+  return seen;
 }
 
 /**

@@ -11,7 +11,7 @@
  * journal already had. Invariant 2 in its sharpest form: state that is durable in
  * principle and only in memory in practice is state the journal is not authoritative for.
  *
- * THE CLASS HAS EIGHT MEMBERS AND ONLY FIVE ARE IN THIS FILE, so the enumeration lives here in
+ * THE CLASS HAS NINE MEMBERS AND ONLY FIVE ARE IN THIS FILE, so the enumeration lives here in
  * full rather than in a count a reader has to trust. Five are below; the last two of those are
  * at the bottom. Taint was the fourth and E4's failure streak the fifth — both live on
  * `RunContext`, both are written by `Engine.#recordEvidence`, and only one of them was being
@@ -38,6 +38,30 @@
  * `#seedPolicy` is what both verbs call; `test/run/rewind-applies-the-parents-bound.test.ts`
  * pins it. The question that finds the next one is "which verbs reach this guard", not "is this
  * value journaled".
+ *
+ * MEMBER NINE arrived with `phase1-taint` and is the first one whose state IS journaled — which
+ * is why the question above is the right one and "is this value journaled" is not. E12
+ * `fanout_skipped_gate` is raised by `Engine.#fireEmptyJoin` when a fan-out of width zero passes
+ * over a `human_gate` on its branch, and `policy.escalated` is durable, so an ordinary restart
+ * folds it (`test/run/empty-fanout-oversight.test.ts`'s "THE SKIPPED GATE SURVIVES A RESTART").
+ * But `#escalate` appends in its OWN transaction — `onEscalate` pushes onto
+ * `ctx.escalationWrites`, drained after `#runWave` — while the join's `task.ready` is committed
+ * INSIDE the wave. A crash in that window leaves the join scheduled and undecided with no
+ * escalation anywhere, and it was the one `#escalate` site in `engine.ts` whose evidence no fold
+ * re-derived: the second process wrote where the first would have gated. `#escalateSkippedGate`
+ * is now called from `#restoreEvidence` off `fanout.planned` (durable, carries the width,
+ * appended after the planner's own `task.committed`), and `PolicyEngine.escalate` is idempotent
+ * so a run whose append survived appends nothing. `empty-fanout-oversight.test.ts`'s "THE SKIPPED
+ * GATE IS RE-DERIVED WHEN THE ESCALATION APPEND WAS LOST" is the pin, with the clean-width
+ * control that makes it mean something.
+ *
+ * AND ONE THE LENS CAUGHT BEFORE IT SHIPPED, unnumbered because it never reached anyone: a taint
+ * arm placed in `#recordEvidence` applied to a RETRIED attempt, which journals
+ * `task.retry_scheduled` and no `task.committed` — so the live process held taint the fold could
+ * not rebuild. `test/run/taint-failed-commits.test.ts`'s "A RETRIED ATTEMPT MARKS NOTHING THE
+ * FOLD CANNOT REBUILD" pins it as an EQUALITY between one process and two. The generalisation is
+ * the same one member seven taught, one noun over: ask which CODE PATHS reach the recorder, not
+ * only which verbs reach the guard.
  */
 
 import assert from "node:assert/strict";
