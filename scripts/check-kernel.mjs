@@ -67,7 +67,12 @@
  *
  * ── The census cannot be reset by `since`, by editing `files`, or by both ───────
  *
- * NOR BY THE TWO IN SEQUENCE, which is the correction this paragraph itself needed.
+ * NOR BY RENAMING THE PIN, and nor by the two knobs in sequence — two corrections this
+ * paragraph has needed, one per review round. `everPinnedPaths` named `scripts/kernel.json` in
+ * two hard-coded literals and asked for no `--follow`, so `git mv`ing the pin (with the path
+ * updated in the same commit) erased the pin's own history and every path only an earlier
+ * version named: measured on a clone of HEAD, 11 seams to 10 and the departed-path notice gone.
+ * It is followed from `PIN` by the same mechanism its pinned files are.
  * `everPinnedPaths` read the pin's own history over `since..HEAD`, so de-pinning a file and
  * THEN advancing `since` past the de-pin took the ledger to 0 with exit 0 and neither notice
  * printed. Each knob was closed alone and tested alone, which is exactly why neither test saw
@@ -99,12 +104,19 @@
  * trailer as readily as the trailer), and git's own `%(trailers:key=Kernel-seam)` a third number
  * again, because it parses only the final paragraph of a body. Three commands, three answers.
  *
- * SIX RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
- * SEQUENCE, the rename, the subject spelling and the one-character trailer, each described
- * above with its measurement. The sixth is the one worth remembering: five were closed and
- * five were tested, each alone, and composing two of them reset the ledger anyway. Ask of a
- * closed reset what it does NEXT TO the other closed ones. What is left is the reset no tool
- * can close, and it is the next paragraph.
+ * SEVEN RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
+ * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, the subject spelling and
+ * the one-character trailer, each described above with its measurement.
+ *
+ * THE LAST TWO ARE THE ONES WORTH REMEMBERING, AND EACH WAS FOUND ON THE COMMIT THAT CLAIMED
+ * TO HAVE CLOSED THE ONE BEFORE. Five were closed and five were tested, each ALONE, and
+ * composing two of them reset the ledger anyway. Then the commit that closed the composition
+ * read the pin's own history through a hard-coded literal with no `--follow`, which is the
+ * rename hole one door further out — so the file that had just written "cannot be reset by
+ * editing `files`" could still be reset by moving the file that holds `files`. Ask of a closed
+ * reset what it does NEXT TO the other closed ones, and ask of every path this file names
+ * whether the path itself can move. What is left is the reset no tool can close, and it is the
+ * next paragraph.
  *
  * THE LIMIT THAT FIRES MOST OFTEN IS `fix:`, which may touch the kernel freely — so a capability
  * landing under it is asked for no seam at all. It happened on the phase-2-4 merge: five pinned
@@ -135,7 +147,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = fileURLToPath(new URL("../", import.meta.url));
@@ -317,11 +329,39 @@ function everPinnedPaths() {
   // what is JUDGED and must bound nothing about what is COUNTED — including which paths were
   // ever counted. The census reads the pin's whole history for the same reason it reads the
   // whole commit history.
-  const log = git("log", "--format=%H", "HEAD", "--", "scripts/kernel.json");
-  if (!log.ok) return out;
+  // AND UNDER EVERY NAME THE PIN ITSELF HAS EVER HAD, which the first version of this did not
+  // do — it named `scripts/kernel.json` in two hard-coded literals and asked for no `--follow`.
+  // That was the rename hole a THIRD door over: `historicalNames` follows a pinned FILE that
+  // moved, `everPinnedPaths` follows a pinned PATH that was dropped, and nothing followed THE
+  // PIN. Driven on a clone of HEAD, two `refactor:` commits and exit 0 throughout:
+  //
+  //     1. refactor(kernel): engine.ts is not kernel after all       → 11 seams, notice printed
+  //     2. git mv scripts/kernel.json scripts/pins/kernel.json,
+  //        with PIN and these literals updated in the same commit    → 10 seams, notice GONE,
+  //                                                                    grandfathered 36 → 22
+  //
+  // …on the very commit whose subject was "the kernel census had a sixth reset". A correction
+  // that lands half-done is worse than the defect, and this file has now paid that twice. The
+  // pin is followed by the same mechanism its pinned files are, from `PIN`'s own current path.
+  const pinRel = relative(root, PIN);
+  const pinNames = [...historicalNames(pinRel)];
+  const log = git("log", "--format=%H", "HEAD", "--", ...pinNames);
+  // AND IT REFUSES RATHER THAN DEGRADING. `return out` here answered "the pin has only ever
+  // named what it names today", which IS the de-pin reset — the census failing open into the
+  // exact hole it exists to close. Every other git failure in this file refuses; so does this.
+  if (!log.ok) refuse(`could not read the pin's own history: ${log.err}`);
   for (const sha of log.out.split("\n").map((l) => l.trim()).filter(Boolean)) {
-    const blob = git("show", `${sha}:scripts/kernel.json`);
-    if (!blob.ok) continue;
+    // THE PIN'S NAME AS OF THAT COMMIT, not today's: after a rename, `${sha}:${today}` does not
+    // exist for any commit before it. Each candidate is tried and the first that reads wins.
+    let blob;
+    for (const name of pinNames) {
+      const r = git("show", `${sha}:${name}`);
+      if (r.ok) {
+        blob = r;
+        break;
+      }
+    }
+    if (blob === undefined) continue;
     try {
       for (const e of JSON.parse(blob.out).files ?? []) {
         if (typeof e?.path === "string" && e.path.length > 0) out.add(e.path);
@@ -433,6 +473,18 @@ const all = judge(commitsIn("HEAD"), everWatched);
  * asks, with no arithmetic between two differently-scoped runs.
  */
 const grandfathered = judge(commitsIn(since.out), everWatched).violations.length;
+/**
+ * SEAMS THAT WERE DECLARED AND ARE TOO THIN TO COUNT, said out loud rather than dropped.
+ *
+ * A `Kernel-seam:` trailer under `MIN_SEAM_CHARS` becomes a VIOLATION, and a violation outside
+ * the judged range is never printed and never counted — so introducing the floor silently
+ * DELETED any pre-`since` seam that failed it, from a ledger whose whole job is not to lose
+ * numbers. None exists in this repo (the eleven run 71 characters and up), which is exactly why
+ * it would have gone unnoticed: the floor's own arrival is a census-shrinking event nobody
+ * would have seen. Counted separately because the count means something different — these
+ * commits DID declare, and what is missing is the argument.
+ */
+const thin = all.violations.filter((v) => v.thin !== undefined).length;
 
 // ── the working tree: a notice, never a failure ──────────────────────────────────
 
@@ -499,6 +551,13 @@ if (departed.length > 0) {
       "Their declared seams are still counted; an UNPAID violation against one no longer fails the build:",
   );
   for (const f of departed) console.log(`        ${f}`);
+}
+if (thin > 0) {
+  console.log(
+    `  notice: ${String(thin)} commit(s) declared a Kernel-seam trailer shorter than the ` +
+      `${String(MIN_SEAM_CHARS)}-character floor, so they are counted as undeclared rather than as seams. ` +
+      "The floor arriving must not quietly shrink the ledger.",
+  );
 }
 if (grandfathered > 0) {
   console.log(
