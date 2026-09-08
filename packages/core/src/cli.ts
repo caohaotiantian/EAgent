@@ -7821,10 +7821,17 @@ async function examFor(
   const through = scan.attestation.corpusThrough;
   for (const m of members) {
     if (deciding !== undefined && m.runId > through) continue;
+    if (scan.grades.has(m.runId)) continue;
     // A run that never reached `run.completed` has no terminal outputs to grade and is not a
-    // member of anything — `measureCohort` drops it — so no exam run is spent on it.
-    if (m.outcome.runStatus !== "succeeded") continue;
-    if (!scan.grades.has(m.runId)) scan.grades.set(m.runId, await gradeWithExam(ws, scan.attestation, graph, m.runId));
+    // member of anything — `measureCohort` drops it — so no exam run is spent on it. It still
+    // carries a grade, an ungradable one, so `loom score` on it answers with the floor's 0 and
+    // the "not succeeded" note, as it did before exams existed.
+    scan.grades.set(
+      m.runId,
+      m.outcome.runStatus === "succeeded"
+        ? await gradeWithExam(ws, scan.attestation, graph, m.runId)
+        : { graphHash: scan.attestation.examGraphHash, gradable: false, missing: ["run.completed"] },
+    );
   }
   return { attestation: scan.attestation, graph, graphHash: scan.attestation.examGraphHash, grades: scan.grades, recordings: scan.recordings };
 }

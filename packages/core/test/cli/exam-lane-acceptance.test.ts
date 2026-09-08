@@ -528,6 +528,11 @@ test("A RECORDING WITH NO run.completed IN THE COHORT DOES NOT REFUSE THE HONEST
     assert.equal(d.paired.n, 30, "the pending run is not a pair; the thirty recordings are");
     assert.equal(d.paired.mean, 0.4);
     assert.equal(d.pairs.some((p) => p.baselineRunId === pending), false);
+    // And scoring the pending run itself answers as it always did: the floor's 0, no exam run.
+    const s = await cli(["score", pending, "--workspace", w.dir]);
+    assert.equal(s.code, 0, `${s.err}\n${String(s.thrown)}`);
+    assert.equal(jsonOf<{ score: number; components: { completed: boolean } }>(s.out).components.completed, false);
+    assert.match(s.err, /is "incomplete", not succeeded/);
   } finally {
     w.dispose();
   }
