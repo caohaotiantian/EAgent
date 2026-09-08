@@ -140,6 +140,36 @@ test("no member of PromotionInput can turn 12 off — an unknown extra key chang
   );
 });
 
+/**
+ * THE BAR IS PART OF THE GRADER, and this is the edge the first fix landed one over from.
+ * `673c3b3` removed the `examAttested` skip because `#checkConfidence` (`run/engine.ts`) raises
+ * the E1 `low_confidence` posture escalation when a verdict falls below the evaluator's
+ * THRESHOLD — and then compared `{kind, ref, digest, reads}`, which does not include the
+ * threshold. A candidate whose only change is `threshold: 0.5 → 0` silences the identical
+ * escalation with the ref and the body untouched, and `6-oversight-diff` does not see it either
+ * (`posturesHoldOf` recompiles for node postures only). The plan had rejected this as
+ * "deliberate, stated" — a rejection that predates the fix which made the threshold the check's
+ * own reason for existing.
+ */
+test("LOWERING AN EVALUATOR'S THRESHOLD IS A GRADER CHANGE — the escalation it silences is the one check 12 protects", () => {
+  const strict = { ...CHECK, threshold: 0.5 };
+  const lax = { ...CHECK, threshold: 0 };
+  const v = gateCandidate({ ...input(report({ evaluators: { "node:check": lax } })), baseline: report({ evaluators: { "node:check": strict } }) });
+  const c = check(v, "12-grader-unchanged");
+  assert.equal(c.pass, false, "same kind, same ref, same body, same reads — and a different bar");
+  assert.match(c.detail, /node:check threshold 0\.5 → 0/);
+  assert.equal(v.promote, false);
+});
+
+test("DROPPING the threshold field is a change too, and absent compares as its own value", () => {
+  const withBar = gateCandidate({ ...input(report({ evaluators: { "node:check": CHECK } })), baseline: report({ evaluators: { "node:check": { ...CHECK, threshold: 0.5 } } }) });
+  assert.equal(check(withBar, "12-grader-unchanged").pass, false);
+  assert.match(check(withBar, "12-grader-unchanged").detail, /threshold 0\.5 → \(none\)/);
+  // CONTROL: two evaluators that agree on the bar, however it is spelled, are unchanged.
+  const same = gateCandidate({ ...input(report({ evaluators: { "node:check": { ...CHECK, threshold: 0.5 } } })), baseline: report({ evaluators: { "node:check": { ...CHECK, threshold: 0.5 } } }) });
+  assert.equal(check(same, "12-grader-unchanged").pass, true);
+});
+
 test("a report that does not state its evaluators cannot be compared, and fails closed", () => {
   const { evaluators: _absent, ...withoutEvaluators } = report();
   const v = gateCandidate(input(withoutEvaluators as unknown as EvalReport));

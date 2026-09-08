@@ -29,7 +29,7 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ToolRegistry } from "../../src/run/registry.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import type { EvalSuite } from "../../src/evolution/gate.ts";
-import type { RunId } from "../../src/ids.ts";
+import type { NodeId, RunId } from "../../src/ids.ts";
 import { isEvent, type EventPayloads, type JournalEvent } from "../../src/journal/events.ts";
 
 // ── the fixture, as §6 states it ─────────────────────────────────────────────
@@ -631,6 +631,56 @@ test("AN ATTESTATION ROW WITH A MACHINE ACTOR IS NOT ONE — the newest human ro
     assert.match(jsonOf<{ signals: { evidence: string }[] }>(s.out).signals[0]!.evidence, /^exam /, "the human row is still the ruler");
     const promoted = await live(w.dir, "candidates/fixed.json", w.last);
     assert.equal(promoted.code, 0, `${promoted.out}\n${promoted.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+/**
+ * THE ROW'S SPEC IS RE-READ AS AN EXAM WHERE THE RULER IS READ, for the reason the actor test
+ * above gives and in the same commit's spirit. `attestExam` runs `examShape` on the FILE before it
+ * writes the row; `attestationOf` then checks the row's shape and not its meaning, and
+ * `attestedGraph` compiles the row's spec and `gradeWithExam` RUNS it. A row carrying a spec with
+ * an `agent` or `tool` node — trivially written with its own true `examGraphHash` — would
+ * otherwise be compiled and driven by every scoring verb: a provider call, real money, and a
+ * non-deterministic grade, on the authority of a row nobody re-read.
+ */
+test("AN ATTESTED SPEC THAT IS NOT AN EXAM IS REFUSED ON THE READ, NOT RUN — the row is data, not a licence", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      const real = (await journal(w.dir, w.last)).findLast((e) => isEvent(e, "operator.command"))!;
+      const args = { ...(real.payload as { args: Record<string, unknown> }).args } as Record<string, unknown>;
+      const spec = JSON.parse(JSON.stringify(args["spec"])) as GraphSpec;
+      // A shape a COMPILE accepts and `examShape` does not: a second, disconnected terminal node,
+      // so the verdict a reader takes off `run.completed.outputs` is not the graph's last word. The row then states this spec's OWN true hash and manifest — which is what a
+      // writer of a row would do — so the hash and manifest checks above are satisfied and the
+      // only thing left standing between the row and a run is `examShape` on the read path.
+      const extra = { id: "aside" as NodeId, type: "function" as const, reads: ["items"], writes: ["noise"], function: { ref: "function/exam-pick@stable" } };
+      const doctoredSpec: GraphSpec = {
+        ...spec,
+        channels: { ...spec.channels, noise: { type: "object", reduce: "replace" } },
+        nodes: [...spec.nodes, extra],
+      };
+      const doctored = compileOrThrow({ spec: doctoredSpec, resolver: ws.resolver, tools: (ws.engine.tools as ToolRegistry).manifests(), tenantCapabilities: ws.granted });
+      args["spec"] = doctoredSpec;
+      args["examGraphHash"] = doctored.graphHash;
+      args["resolutionManifest"] = doctored.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest }));
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args }, actor: { kind: "human", subject: "someone", via: "console" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    const scored = await cli(["score", w.last, "--workspace", w.dir]);
+    refusedWith(scored, /is not an exam as this binary reads it.*exactly one terminal node/s);
+    assert.doesNotMatch(scored.err, /graded .* by exam run/, "nothing was run on the authority of that row");
+    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /is not an exam as this binary reads it/);
+    refusedWith(await cli(["suite", "freeze", "--cohort", w.last, "--out", join(w.dir, "x.json"), "--workspace", w.dir]), /is not an exam as this binary reads it/);
   } finally {
     w.dispose();
   }

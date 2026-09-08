@@ -157,9 +157,25 @@ export interface EvalReport {
    * Keys are `"node:<id>"`; `digest` is the `resolutionManifest` entry for `evaluator.ref`, and is
    * absent when the compile did not resolve the ref (a compile refuses that, so absence is only
    * reachable from a hand-built report — and the check fails closed on it).
+   *
+   * `threshold` IS ONE OF THE FIELDS, and it was added after the first review round rather than
+   * with the others: `#checkConfidence` (`run/engine.ts`) raises the E1 `low_confidence` posture
+   * escalation when a verdict falls below it, so `threshold: 0.5 → 0` silences exactly the
+   * oversight `12-grader-unchanged` exists to protect, with the ref and the body untouched. A
+   * projection that named the grader but not the bar it grades against refused a body swap and
+   * permitted the identical effect one field over.
    */
   readonly evaluators: Readonly<
-    Record<string, { readonly kind: "assertion" | "rubric"; readonly ref: string; readonly digest?: string; readonly reads: readonly string[] }>
+    Record<
+      string,
+      {
+        readonly kind: "assertion" | "rubric";
+        readonly ref: string;
+        readonly digest?: string;
+        readonly reads: readonly string[];
+        readonly threshold?: number;
+      }
+    >
   >;
 }
 
@@ -215,7 +231,7 @@ export async function runEvalSuite(opts: EvalOptions): Promise<EvalReport> {
 
 /** `EvalReport.evaluators` for one graph — see that field for the key shape. */
 function evaluatorsOf(graph: RunGraph): EvalReport["evaluators"] {
-  const out: Record<string, { kind: "assertion" | "rubric"; ref: string; digest?: string; reads: readonly string[] }> = {};
+  const out: Record<string, { kind: "assertion" | "rubric"; ref: string; digest?: string; reads: readonly string[]; threshold?: number }> = {};
   for (const node of graph.spec.nodes) {
     if (node.type !== "evaluator" || node.evaluator === undefined) continue;
     const resolved = graph.resolutionManifest.find((r) => r.ref === node.evaluator?.ref);
@@ -224,6 +240,7 @@ function evaluatorsOf(graph: RunGraph): EvalReport["evaluators"] {
       ref: node.evaluator.ref,
       ...(resolved === undefined ? {} : { digest: resolved.digest }),
       reads: [...(node.reads ?? [])].sort(),
+      ...(node.evaluator.threshold === undefined ? {} : { threshold: node.evaluator.threshold }),
     };
   }
   return out;
@@ -1019,6 +1036,13 @@ function movedEvaluators(baseline: EvalReport["evaluators"], candidate: EvalRepo
     const br = [...b.reads].sort().join(",");
     const cr = [...c.reads].sort().join(",");
     if (br !== cr) out.push(`${scope} reads [${br}] → [${cr}]`);
+    // THE BAR, NOT ONLY THE GRADER. A threshold is what `#checkConfidence` compares a verdict
+    // against to raise E1 `low_confidence`, so lowering it silences an escalation as surely as
+    // swapping the body for one that always passes. Absent is its own value and compares as such:
+    // a candidate that DROPS the field is a candidate that changed the bar.
+    if (b.threshold !== c.threshold) {
+      out.push(`${scope} threshold ${b.threshold === undefined ? "(none)" : String(b.threshold)} → ${c.threshold === undefined ? "(none)" : String(c.threshold)}`);
+    }
   }
   return out;
 }

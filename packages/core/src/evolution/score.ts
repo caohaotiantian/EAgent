@@ -508,11 +508,15 @@ function didWork(t: Trajectory, exam?: ExamOutcome): boolean {
     t.usage.toolCalls > 0 ||
     t.usage.subgraphRuns > 0 ||
     t.steps.some((s) => s.status === "succeeded" && s.channelsWritten.length > 0) ||
-    // UNDER AN EXAM AN IN-GRAPH VERDICT IS NOT WORK. It is the graph's opinion of itself, and
-    // the exam exists because that opinion is the candidate's to write. See the header.
-    (exam === undefined && t.outcome.assertions.length > 0) ||
-    t.outcome.humanDecisions.length > 0 ||
-    t.outcome.rubrics.length > 0
+    // UNDER AN EXAM AN IN-GRAPH VERDICT IS NOT WORK — an assertion OR a rubric. Both are the
+    // graph's opinion of itself, and the exam exists because that opinion is the candidate's to
+    // write. The rubric half was missed when the assertion half was written, and the asymmetry is
+    // nearly inert (a rubric costs a model call, and `modelCalls > 0` is the first clause here) —
+    // it is fixed because a predicate that treats two candidate-authored verdicts differently is
+    // one whose next reader has to work out which. `humanDecisions` stays: a person deciding is
+    // work whoever wrote the graph.
+    (exam === undefined && (t.outcome.assertions.length > 0 || t.outcome.rubrics.length > 0)) ||
+    t.outcome.humanDecisions.length > 0
   );
 }
 

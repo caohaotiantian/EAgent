@@ -7895,6 +7895,23 @@ function attestedGraph(ws: Workspace, att: ExamAttestation): RunGraph {
         `A grader whose body nobody attested grades nothing. Re-attest it: loom exam attest <exam.json> --cohort <runId> --as <you>`,
     );
   }
+  // AND IT IS STILL AN EXAM, ASKED HERE AND NOT ONLY AT THE VERB. `attestExam` runs `examShape`
+  // on the file before it writes the row; this is the side that DECIDES — the spec comes out of a
+  // journal row, `attestationOf` checks the row's SHAPE and not its meaning, and everything below
+  // compiles this graph and RUNS it. A row whose spec carried an `agent` or `tool` node would
+  // otherwise be compiled and driven by every scoring verb: a provider call, real money, and a
+  // non-deterministic grade, on the authority of a row nobody re-read. Same argument as the
+  // human-actor re-check in `scanForExam`, and the same one commit; a guard that runs only on the
+  // write is a guard a future writer walks past.
+  const shape = examShape(g);
+  if (shape.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `the exam attested for workflow "${att.workflow}" (${att.examGraphHash}) is not an exam as this binary reads it: ` +
+        `${shape.join("; ")}. A row is data an earlier process wrote, and this one is the ruler; refusing rather than ` +
+        `running it. Attest an exam this binary accepts: loom exam attest <exam.json> --cohort <runId> --as <you>`,
+    );
+  }
   return g;
 }
 
