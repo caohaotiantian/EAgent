@@ -368,6 +368,45 @@ const chainGraft = (N: number): Partial<GraphMutation> => ({
   ],
 });
 
+/**
+ * THE BITSET ACROSS ITS WORD BOUNDARIES, which is the failure mode a fixture cannot show.
+ *
+ * One bit per (node, dominator) packed 32 to a word means a wrong shift or a wrong tail mask
+ * silently answers "nothing was lost" — the passing value, for graphs of exactly the wrong size.
+ * So the same graft is driven over every node count either side of 32, 64, 96 and 128, with the
+ * gate at three positions in each, and each case must not merely refuse but NAME the gate.
+ */
+test("THE PACKED DOMINATOR ROWS ARE RIGHT ACROSS EVERY 32-NODE BOUNDARY, gate named each time", () => {
+  const chainWithGate = (N: number, G: number): GraphSpec => {
+    const nodes: unknown[] = [];
+    const edges: unknown[] = [];
+    for (let i = 0; i < N; i++) {
+      nodes.push(
+        i === G
+          ? { id: n(`c${String(i)}`), type: "human_gate", reads: [], writes: [], humanGate: { ref: "oversight/sre-prod-change@stable" } }
+          : { id: n(`c${String(i)}`), type: "function", reads: i === 0 ? ["goal"] : [], writes: [], function: { ref: "function/detail@stable" } },
+      );
+      if (i > 0) edges.push({ id: e(`ce${String(i)}`), from: n(`c${String(i - 1)}`), to: n(`c${String(i)}`), kind: "seq" });
+    }
+    const base = gatedSpec();
+    return { ...base, channels: { goal: base.channels["goal"] }, inputs: ["goal"], outputs: [], nodes, edges } as unknown as GraphSpec;
+  };
+  let checked = 0;
+  for (const N of [2, 3, 30, 31, 32, 33, 34, 63, 64, 65, 96, 97, 128, 129]) {
+    for (const G of [1, Math.floor(N / 2), N - 2]) {
+      if (G < 1 || G > N - 2) continue;
+      const r = attempt(compiled(chainWithGate(N, G)), mutation({ ...chainGraft(N), proposedByNode: n("c0") }));
+      assert.equal(r.ok, false, `N=${String(N)} G=${String(G)}`);
+      assert.ok(
+        r.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.message.includes(`"c${String(G)}"`)),
+        `N=${String(N)} G=${String(G)}: ${r.diagnostics.filter((d) => d.severity === "error").map((d) => d.message).join(" | ")}`,
+      );
+      checked++;
+    }
+  }
+  assert.equal(checked, 39, "the boundary sweep must actually have run every shape");
+});
+
 test("UNDER THE CEILING the rule still answers, on a graph two orders of magnitude past any authored one", () => {
   const N = 4000;
   const r = attempt(compiled(chainSpec(N)), mutation({ ...chainGraft(N), proposedByNode: n("c0") }));
