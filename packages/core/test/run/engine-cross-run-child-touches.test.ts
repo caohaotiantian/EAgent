@@ -54,7 +54,7 @@
  *     read #3  `#endChildRun`          (E)
  *
  * THE STORE FAILS ONCE, not forever, at B/C/D/E: the claim under test is that a TRANSIENT failure
- * of another run's disk costs this run a retry rather than its life, and a store that stayed
+ * of another run's disk costs this run a re-entry rather than its life, and a store that stayed
  * broken would fail the run either way and prove nothing about the class.
  *
  * THE STORE FAILS DURING ITERATION, not at the call, because that is how a store actually breaks:
@@ -102,10 +102,17 @@ async function warningsWhile(body: () => Promise<void>): Promise<{ code?: string
 
 // ── Fixture 1: a parent parked on a MIRROR of its child's human gate ──────────────────────────
 //
-// Shared with `engine-child-journal-does-not-fail-the-parent.test.ts`, with one addition: the
-// `delegate` node carries a `retry` policy. That is what makes B, C and D's fix OBSERVABLE rather
-// than merely differently-coded — a retryable class only means anything where the graph declared
-// a retry, and the honest claim is "the delegation costs a retry", not "the class changed".
+// Shared with `engine-child-journal-does-not-fail-the-parent.test.ts`.
+//
+// WHAT ACTUALLY RE-ENTERS THE NODE IS THE DEFERRAL, NOT THE `retry` POLICY, and an earlier version
+// of this comment said the opposite. `E_SUBGRAPH_FAILED` is in `DEFERRABLE_CODES`, and
+// `#retryDecision` takes the deferral arm BEFORE it consults `NodeSpec.retry` at all, so the
+// refusal these three sites now raise is re-entered UNCHARGED on a 1 s curve inside a 900 s
+// budget. Measured by this round's reviewer, who deleted the fixture's retry policy
+// (`maxAttempts: 1`) and got 7/7 anyway, with `deferrals 1 / deferredMs 1000` on the task record.
+// `compile.ts` floors a `subgraph` node with `DEFAULT_SUBGRAPH_RETRY` besides, so "a node with no
+// retry policy" is not a state this fixture could reach. The policy below is kept only so the
+// fixture says out loud what it relies on; it is NOT what makes the tests pass.
 
 const GATE_TOOLS: Record<string, ToolManifestLite> = {
   "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: false },
@@ -149,7 +156,7 @@ const gateParent: GraphSpec = {
       reads: ["total"],
       writes: ["result"],
       subgraph: { ref: "graph/double@stable", inputs: { amount: "total" }, outputs: { result: "receipt" }, budgetShare: 0.5 },
-      // Fixed, zero-length, no jitter: the retry is a fact about the graph, not about a clock.
+      // Declared, not load-bearing — see the fixture comment above: the deferral arm re-enters this
       retry: { maxAttempts: 3, backoff: "fixed", initialMs: 0, jitter: false },
     },
   ],
@@ -286,7 +293,7 @@ async function outcomeOf(body: () => Promise<RunProjection>): Promise<string> {
   }
 }
 
-test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child store that hiccups costs the delegation a RETRY, not the run", async () => {
+test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child store that hiccups costs the delegation a DEFERRAL, not the run", async () => {
   const r = gateRig(new BreakableChildStore({ now: () => clock }));
   const { runId, childRunId } = await parked(r);
 
@@ -309,7 +316,7 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
   // disk. The retry the graph declared was unreachable, because `internal` is not a retryable
   // class.
   assert.notEqual(p.status, "failed", `the parent must survive a transient child read: ${p.status}/${p.error?.code ?? ""} ${p.error?.message ?? ""}`);
-  assert.equal(p.status, "succeeded", "and the delegation completes on the retry");
+  assert.equal(p.status, "succeeded", "and the delegation completes when the store comes back");
   assert.deepEqual(r.charges, [20], "the child's charge ran exactly once — a retry is not a second child run");
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
 
@@ -341,7 +348,7 @@ test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own si
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
 
   const p = await settle(r.engine, runId);
-  assert.equal(p.status, "succeeded", `the forward is retried and the delegation completes: ${p.error?.message ?? ""}`);
+  assert.equal(p.status, "succeeded", `the forward is re-entered and the delegation completes: ${p.error?.message ?? ""}`);
   assert.deepEqual(r.charges, [20], "and the human's single approval produced a single charge");
 });
 
@@ -509,12 +516,36 @@ const compParent: GraphSpec = {
   ],
 } as unknown as GraphSpec;
 
-/** Reads of the CHILD's journal fail from the moment `armed` is set, and stay failing. */
+/**
+ * Reads of the CHILD's journal fail from the moment `armed` is set, and stay failing.
+ *
+ * `skipChildReads` delays that by N child reads. It exists for one test: the wrap at A goes
+ * around the METHOD rather than around its first read, and the only input that can tell the two
+ * apart is a store that survives the projection read and dies on the recursive plan's journal
+ * read one frame down.
+ *
+ * `hostileRef` is the SECOND way this store can be hostile, and it is the one that defeated the
+ * first version of the guard: instead of rejecting, it answers the PARENT's read normally but
+ * rewrites the `ref` inside `subgraph.started` to a value that cannot be coerced to a string. A
+ * `StateStore` is an extension point, so nothing forces the payload it hands back to hold the
+ * bytes that were written — and the guard's failure path prints that payload.
+ */
 class ChildJournalGone extends MemoryStateStore {
   armed = false;
+  hostileRef = false;
+  skipChildReads = 0;
   override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
-    if (this.armed && isChild(runId)) throw new Error("sqlite: child disk I/O error");
-    yield* super.read(runId, fromSeq, toSeq);
+    if (this.armed && isChild(runId)) {
+      if (this.skipChildReads > 0) this.skipChildReads--;
+      else throw new Error("sqlite: child disk I/O error");
+    }
+    for await (const ev of super.read(runId, fromSeq, toSeq)) {
+      if (this.hostileRef && ev.type === "subgraph.started") {
+        yield { ...ev, payload: { ...ev.payload, ref: Object.create(null) as string } } as JournalEvent;
+        continue;
+      }
+      yield ev;
+    }
   }
 }
 
@@ -632,18 +663,89 @@ test("A · THE ORDINARY HALF — with the child's journal readable, the whole tr
   assert.deepEqual(new Set(r.world.undone), new Set([1, 7]), `the child's row too: ${JSON.stringify(r.world.undone)}`);
 });
 
+test("A · AROUND THE METHOD, NOT AROUND THE READ — the SECOND throwing read is the input that tells them apart", async () => {
+  // THE DIFF'S MAIN DECISION, PINNED RATHER THAN ARGUED. `#planRollbackChild` wraps the whole
+  // body because the body has TWO reads that can throw: `projection(child.runId)`, and the
+  // recursive `#planRollback`'s own `log.read` over the child's journal one frame down. A
+  // reviewer built the narrow alternative — wrap only the projection read — and it passed every
+  // other test in this file, because those fixtures break the store before the FIRST read. The
+  // shape below is the only one that separates them, and it was measured on both:
+  //
+  //   SHIPPED (method-wide)  failed:E_TOOL_SOURCE_UNAVAILABLE   rows [7]     undone [1]
+  //   NARROW  (read only)    threw: sqlite: child disk I/O error rows [1,7]  undone []
+  //
+  // An untested decision is a decision the next refactor deletes for free; this is the test that
+  // costs it something.
+  const r = compRig();
+  const runId = await r.engine.submit({ graph: r.graph, inputs: { seed: "x" } });
+  r.store.skipChildReads = 1;
+
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    for (let i = 0; i < 20; i++) {
+      outcome = await outcomeOf(async () => r.engine.advance(runId));
+      if (outcome.startsWith("succeeded") || outcome.startsWith("failed") || outcome.startsWith("threw")) break;
+    }
+  });
+
+  assert.equal(r.store.skipChildReads, 0, "the fixture really did let the first child read through");
+  assert.equal(outcome, "failed:E_TOOL_SOURCE_UNAVAILABLE", `the verb answers when the SECOND read is the one that dies: ${outcome}`);
+  assert.deepEqual(r.world.undone, [1], `and the parent's own undo still ran: ${JSON.stringify(r.world)}`);
+  assert.ok(
+    seen.some((w) => w.code === "LOOM_ROLLBACK_CHILD_UNREADABLE"),
+    `the refusal is said out loud from the deeper read too: ${JSON.stringify(seen)}`,
+  );
+});
+
+test("A · THE GUARD'S OWN FAILURE PATH PRINTS STORE-SUPPLIED VALUES, and they are described rather than coerced", async () => {
+  // FOUND BY REVIEW, ON THE FIRST VERSION OF THIS LANE'S OWN WRAP. The catch ran `describeThrown`
+  // on the rejection and then coerced `child.runId` and `child.ref` raw — two values read out of
+  // `subgraph.started.payload`, i.e. out of the same third-party store the guard exists to
+  // survive. A store answering `ref: Object.create(null)` therefore killed the guard through the
+  // template literal instead of through the `catch`, and `advance(parent)` threw
+  // `Cannot convert object to primitive value` with the parent's own undo never dispatched —
+  // byte for byte the outcome the wrap was written to remove.
+  //
+  // THE SHAPE IS CHOSEN BY OPERATION, not by example: `Object.create(null)` is the one value that
+  // defeats BOTH doors at once — the template literal's implicit `ToString` and `JSON.stringify`'s
+  // treatment of the `detail` — which is why one shape suffices for two lines.
+  const r = compRig();
+  const runId = await r.engine.submit({ graph: r.graph, inputs: { seed: "x" } });
+  r.store.hostileRef = true;
+
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    for (let i = 0; i < 20; i++) {
+      outcome = await outcomeOf(async () => r.engine.advance(runId));
+      if (outcome.startsWith("succeeded") || outcome.startsWith("failed") || outcome.startsWith("threw")) break;
+    }
+  });
+
+  assert.equal(outcome, "failed:E_TOOL_SOURCE_UNAVAILABLE", `the verb still ANSWERS on a hostile payload: ${outcome}`);
+  assert.deepEqual(r.world.undone, [1], `and the parent's own undo still ran: ${JSON.stringify(r.world)}`);
+
+  // The warning is still emitted, and it says the id and the ref could not be described rather
+  // than inventing a value for them.
+  const mine = seen.filter((w) => w.code === "LOOM_ROLLBACK_CHILD_UNREADABLE");
+  assert.ok(mine.length >= 1, `the refusal is still said out loud: ${JSON.stringify(seen)}`);
+  assert.match(mine[0]!.message, /undescribable object/, `the unprintable ref is named, not coerced: ${mine[0]!.message}`);
+});
+
 test("A · WHICH VERBS REACH IT — the rewind door refuses EARLIER, at a SIXTH cross-run read, and this diff did not open it", async () => {
   // WHICH VERBS REACH THE GUARD, ASKED RATHER THAN ASSUMED — and the answer was not the one the
   // wrap's own docstring first claimed. `#planRollbackChild` sits under two doors: `#failRun` →
   // `#compensate` (the test above, through `advance`) and `#rewindWalk`, which `rewind` and
   // `planRewind` share. Driven here, the second door does NOT reach it while the child is
   // unreadable, because `#rewindRefusals` runs first and `#uncompensatedIrreversible` — which
-  // follows `subgraph.started` into the CHILD's journal at engine.ts:1663 — throws before the
-  // walk is ever planned:
+  // follows `subgraph.started` into the CHILD's journal — throws before the walk is ever planned:
   //
-  //   at ChildJournalGone.read -> #uncompensatedIrreversible (engine.ts:1634)
-  //      -> #uncompensatedIrreversible (engine.ts:1663) -> #rewindRefusals (4659)
-  //      -> Engine.planRewind (4251)
+  //   at ChildJournalGone.read -> #uncompensatedIrreversible (recursing into itself)
+  //      -> #rewindRefusals -> Engine.planRewind
+  //
+  // METHOD NAMES, NOT LINE NUMBERS. This paragraph carried four line citations and a reviewer
+  // found all four stale by eight lines, shifted by the very commit that wrote them — the third
+  // time this file's neighbourhood has shipped that. A line number in a comment is a claim with a
+  // shelf life of one commit; a method name has survived every commit in this lane.
   //
   // THAT IS A SIXTH SITE OF THE SAME SHAPE AND IT IS DELIBERATELY LEFT ALONE. It is a REFUSAL
   // guard — it decides whether a rewind may proceed past an irreversible effect a child
