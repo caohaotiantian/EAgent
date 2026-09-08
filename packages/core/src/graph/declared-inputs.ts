@@ -61,8 +61,8 @@ const MAX_NAMED = 8;
  * was measured missing — this function against `{"a".repeat(900_000): 1}`, with and without the
  * clip:
  *
- *     WITHOUT clip: one 900,000-char key → message 900486 chars
- *     WITH    clip: one 900,000-char key → message    607 chars
+ *     WITHOUT clip: one 900,000-char key → message 900560 chars
+ *     WITH    clip: one 900,000-char key → message    681 chars
  *
  * `server/http.ts`'s own `truncate` states the rule that was being broken one file over — "a
  * caller-supplied string on its way into a message. Bounded, because a header is not" — and 120
@@ -117,6 +117,23 @@ function undeclaredInputs(spec: GraphSpec, inputs: Readonly<Record<string, unkno
  * rule is that warning, enforced at the door instead of printed and scrolled past, and the
  * refusal points at the place the author was already told.
  *
+ * AND IT SAYS THE DIAGNOSTIC IS A WARNING, because a behaviour check reading the message as an
+ * operator caught the version that did not. `loom compile` on a graph whose node reads an
+ * undeclared channel prints
+ * `! g005-probe.json: GRAPH005_UNPRODUCED_READ: node "plan" reads "notes", …` and then `ok`,
+ * **exit 0** — so "which is what GRAPH005_UNPRODUCED_READ already says at compile time", printed
+ * beside a hard 400, told the operator the compiler had stopped them when it had not.
+ *
+ * THE FAILURE-AND-SPEND CLAUSE IS SCOPED, for the same reason and by the same reader. It used to
+ * assert, of every refused key, that the run "fails four layers below the mistake, after it has
+ * been submitted and … after it has spent". That is true of the TYPO — `{"documnet":…}` really did
+ * reach `E_INTERNAL: E_CHANNEL_UNDECLARED` — and FALSE of the EXTRA key, which at `c54b0c2`
+ * answered 202 and SUCCEEDED at $0. One sentence covering both cannot assert either
+ * unconditionally, so the half that holds for every refused key — the value does nothing — is
+ * unconditional, and the half that holds only when the caller meant a channel the graph needs is
+ * introduced by "where". An operator who checks a refusal's claim and finds it false stops reading
+ * refusals, which is a worse outcome than saying less.
+ *
  * `clip` GUARDS ONLY THE LENGTH, and on a key whose 120th and 121st UTF-16 units are a surrogate
  * PAIR the slice leaves a lone high surrogate. That is deliberate rather than unnoticed: the
  * bound still holds at 121 units, `JSON.stringify` escapes a lone surrogate to `\udXXX` so the
@@ -142,9 +159,10 @@ export function undeclaredInputsMessage(
     `${subject} names ${undeclared.length === 1 ? "a channel" : "channels"} this graph does not declare as an input: ` +
     `${shown.map((k) => `"${clip(k)}"${near(k)}`).join(", ")}${rest === 0 ? "" : ` and ${rest} more`}. ` +
     `It declares ${declared.length === 0 ? "no inputs at all" : declared.map((d) => `"${d}"`).join(", ")}. ` +
-    `Nothing was submitted. Correct the spelling, or — if a node is meant to read the channel — add it to ` +
-    `the graph's inputs:, which is what GRAPH005_UNPRODUCED_READ already says at compile time. Seeding a ` +
-    `channel the graph does not declare leaves it in the journal unread, and the run fails four layers ` +
-    `below the mistake, after it has been submitted and, against a real provider, after it has spent.`
+    `Nothing was submitted. A channel the graph does not declare is seeded and then read by nothing, so ` +
+    `the value would have done nothing; and where the name you meant was one the graph needs, the run ` +
+    `fails four layers below the mistake — against a real provider, after it has spent. Correct the ` +
+    `spelling, or — if a node is meant to read this channel — add it to the graph's "inputs" list, which ` +
+    `is what GRAPH005_UNPRODUCED_READ warns about at compile time without refusing.`
   );
 }

@@ -177,7 +177,7 @@ test("the message is bounded in BOTH dimensions — key count and key length", a
     assert.ok(message.length < 1000, `the refusal must not grow with the key COUNT: ${message.length} chars`);
 
     // LENGTH, which capping the count does NOT give. Measured on the function with and without
-    // the clip, one 900,000-character key: 900486 chars → 607 chars. `http.ts`'s own `truncate` —
+    // the clip, one 900,000-character key: 900560 chars → 681 chars. `http.ts`'s own `truncate` —
     // "a caller-supplied string on its way into a message. Bounded, because a header is not" —
     // is the rule that was being broken, one file over.
     const huge = await post(r, { workflow: "skeleton-summarize", inputs: { [`x`.repeat(50_000)]: 1 } });
@@ -216,9 +216,16 @@ test("A GRAPH THAT COMPILES AND READS THE CHANNEL IS REFUSED TOO — the break's
     assert.equal(res.status, 400);
     const message = errorOf(res.body).message ?? "";
     assert.match(message, /"hint"/);
-    assert.match(message, /add it to the graph's inputs:/i, `the refusal must name the fix, not a false diagnosis: ${message}`);
-    assert.match(message, /GRAPH005_UNPRODUCED_READ/, "and say where the caller has already been told it");
+    assert.match(message, /add it to the graph's "inputs" list/, `the refusal must name the fix, not a false diagnosis: ${message}`);
+    // AND SAY THE DIAGNOSTIC IS A WARNING. `loom compile` on such a graph prints the line and then
+    // `ok`, exit 0 — a message that reads "which is what GRAPH005 already says at compile time"
+    // beside a hard 400 tells the operator the compiler stopped them when it did not.
+    assert.match(message, /GRAPH005_UNPRODUCED_READ warns about at compile time without refusing/, message);
     assert.match(message, /Nothing was submitted/, "and not claim a run was made — a 400 makes none");
+    // AND NOT ASSERT A FAILURE THAT DID NOT HAPPEN. The extra-key body succeeded at `c54b0c2` at
+    // $0, so "the run fails … after it has spent" cannot be unconditional; it is introduced by
+    // "where", scoped to the caller who meant a channel the graph needs.
+    assert.match(message, /where the name you meant was one the graph needs, the run\s+fails/, message);
     assert.equal(await runCount(r), 0);
   } finally {
     await r.close();
@@ -253,10 +260,11 @@ test("a refusal does not poison an idempotency slot — the same key, corrected,
 
 /** The tail both doors share, written once so the two assertions below cannot drift apart. */
 const TAIL =
-  `Nothing was submitted. Correct the spelling, or — if a node is meant to read the channel — add it to ` +
-  `the graph's inputs:, which is what GRAPH005_UNPRODUCED_READ already says at compile time. Seeding a ` +
-  `channel the graph does not declare leaves it in the journal unread, and the run fails four layers ` +
-  `below the mistake, after it has been submitted and, against a real provider, after it has spent.`;
+  `Nothing was submitted. A channel the graph does not declare is seeded and then read by nothing, so ` +
+  `the value would have done nothing; and where the name you meant was one the graph needs, the run ` +
+  `fails four layers below the mistake — against a real provider, after it has spent. Correct the ` +
+  `spelling, or — if a node is meant to read this channel — add it to the graph's "inputs" list, which ` +
+  `is what GRAPH005_UNPRODUCED_READ warns about at compile time without refusing.`;
 
 test("ONE RULE, TWO DOORS: the CLI and the wire render the same sentence under different nouns", () => {
   // `cli.ts`'s `assertDeclaredInputs` is now three lines over this function, so the pin on what an
