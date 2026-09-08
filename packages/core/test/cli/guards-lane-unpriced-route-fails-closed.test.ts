@@ -213,3 +213,110 @@ test("AN ADAPTER THAT ANSWERS `hasPrice` IS BELIEVED, which is the module author
   assert.deepEqual([...cfg.unpriced], [], "the only answer that cannot be wrong is the adapter's own");
   assert.equal(cfg.adapter.estimateOf(REQ("local")), 0);
 });
+
+/**
+ * A helper that writes BOTH tables, because the two defects below are about their interaction.
+ * `adapterPrices` goes on the adapter row, `routeFree` on the `free` route row.
+ */
+function twoTables(
+  adapterPrices: Record<string, { input: number; output: number }> | undefined,
+  routePrices: Record<string, { input: number; output: number }> | undefined,
+): string {
+  const d = mkdtempSync(join(tmpdir(), "loom-unpriced-two-"));
+  made.push(d);
+  const p = join(d, "models.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      adapters: [
+        {
+          provider: "openai",
+          name: "local",
+          baseUrl: "http://127.0.0.1:9/v1",
+          apiKeyEnv: null,
+          ...(adapterPrices === undefined ? {} : { prices: adapterPrices }),
+        },
+      ],
+      routes: {
+        priced: { adapter: "local", model: "gpt-5" },
+        free: { adapter: "local", model: "nobody-prices-me", ...(routePrices === undefined ? {} : { prices: routePrices }) },
+      },
+    }),
+  );
+  return p;
+}
+
+/**
+ * AN ADAPTER ROW THAT PRICES SOMETHING ELSE MUST NOT MASK THE ROUTE ROW.
+ *
+ * `pricedFor` was handed `declaredPrices.get(adapter) ?? routePrices.get(key)`, and `??` falls
+ * through only when the adapter row has NO `prices` AT ALL. So an adapter row pricing model A
+ * hid a route row declaring model B free, the route landed in `unpriced`, and the refusal told
+ * the operator to add prices "to this ROUTE row" — the row they had already written. Measured
+ * at ce14397: `cfg.unpriced === ["free → local/nobody-prices-me"]`.
+ *
+ * `resolvePrice` has always taken a LIST of tables in precedence order; passing it one was the
+ * whole defect. Route first, because it is the more specific statement.
+ */
+test("AN ADAPTER `prices` ROW FOR ANOTHER MODEL DOES NOT MASK THE ROUTE'S OWN ROW", () => {
+  const cfg = readModels(twoTables({ "some-other-model": { input: 1, output: 2 } }, { "nobody-prices-me": { input: 0, output: 0 } }), {});
+  assert.deepEqual([...cfg.unpriced], [], "the route row says free and nothing may hide it");
+  assert.equal(cfg.adapter.hasPrice?.("free"), true);
+  assert.doesNotMatch(modelWarnings(cfg, "run").join(""), /NO PRICE FOR/);
+  // The control that makes it mean something: with the SAME adapter row and no route row, the
+  // route is still unpriced — so the assertion above is about the route row and not about the
+  // adapter row having become total.
+  const without = readModels(twoTables({ "some-other-model": { input: 1, output: 2 } }, undefined), {});
+  assert.deepEqual([...without.unpriced], ["free → local/nobody-prices-me"]);
+});
+
+/**
+ * A NON-ZERO ROUTE PRICE IS A ONE-LINE OFF SWITCH FOR THE GUARD IT ESCAPES, so it is refused.
+ *
+ * The route row is read by `pricedFor` and by nothing else: `RoutingAdapter.priceOf` delegates
+ * to the adapter behind the route, and the cost a turn is billed comes off THAT adapter's own
+ * `done` frame. Measured at ce14397 with `"prices": {"nobody-prices-me": {"input": 5, "output":
+ * 15}}` on the route row:
+ *
+ *     cfg.unpriced                                              → []          (guard cleared)
+ *     cfg.adapter.priceOf("free", {1e6, 1e6})                   → 0           (still free)
+ *     cfg.adapter.estimateOf(REQ("free"))                       → 0           (still free)
+ *
+ * — the banner gone, the refusal gone, and every call still journaled as costing 0, which is
+ * the exact hole this whole change exists to close. Zero is the one rate the row can state
+ * truthfully; a real rate belongs on the adapter row or in the adapter's own `priceOf` behind
+ * `hasPrice`, and the refusal names both.
+ */
+test("A NON-ZERO ROUTE PRICE IS REFUSED, because it would silence the guard and bill nothing", () => {
+  assert.throws(
+    () => readModels(twoTables(undefined, { "nobody-prices-me": { input: 5, output: 15 } }), {}),
+    (e: unknown) =>
+      isLoomError(e) &&
+      e.code === "E_CONFIG_INVALID" &&
+      /a ROUTE price row may only declare a FREE endpoint/.test(e.message) &&
+      /A REAL RATE HAS TWO DOORS/.test(e.message),
+  );
+});
+
+test("…including a row that is free in one direction only", () => {
+  for (const row of [
+    { input: 0, output: 15 },
+    { input: 5, output: 0 },
+  ]) {
+    assert.throws(
+      () => readModels(twoTables(undefined, { "nobody-prices-me": row }), {}),
+      (e: unknown) => isLoomError(e) && /may only declare a FREE endpoint/.test(e.message),
+    );
+  }
+});
+
+test("THE ORDINARY HALF: the zero row this refusal is shaped around still boots and still clears the guard", () => {
+  const cfg = readModels(twoTables(undefined, { "nobody-prices-me": { input: 0, output: 0 } }), {});
+  assert.deepEqual([...cfg.unpriced], []);
+  assert.equal(cfg.adapter.priceOf("free", { inputTokens: 1e6, outputTokens: 1e6 }), 0);
+  // …and the adapter row's non-zero prices are untouched by any of this: only the ROUTE row is
+  // restricted, because only the ROUTE row fails to reach the thing that bills.
+  const priced = readModels(twoTables({ "nobody-prices-me": { input: 5, output: 15 } }, undefined), {});
+  assert.deepEqual([...priced.unpriced], []);
+  assert.ok(priced.adapter.priceOf("free", { inputTokens: 1e6, outputTokens: 1e6 }) > 0, "an ADAPTER row does reach the adapter");
+});

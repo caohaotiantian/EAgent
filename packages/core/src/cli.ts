@@ -2684,6 +2684,16 @@ const ADAPTER_FIELDS: readonly string[] = ["provider", "name", "baseUrl", "apiKe
  * routed model has. It is read by `pricedFor` and by nothing else — it does not reach the
  * adapter, which keeps its own table private and is the thing actually billing. A module author
  * has the other door and it is the better one: implement `hasPrice`.
+ *
+ * WHICH IS WHY IT MAY ONLY SAY ZERO, and the first version of this row did not enforce that.
+ * "Read by `pricedFor` and by nothing else" and "a place to put PRICES" cannot both be true: a
+ * non-zero rate here cleared `unpriced`, cleared the `! NO PRICE FOR n ROUTES` banner and
+ * lifted `RoutingAdapter`'s refusal while every call went on being journaled at `costUsd: 0` —
+ * a one-line off switch for the guard this row exists to make escapable, reachable by an
+ * operator who believes they have just priced the route. The reader refuses a non-zero rate and
+ * names the two doors that do reach the thing that bills. Zero is the one rate this row can
+ * state truthfully, and stating it is the row's whole job: it makes an explicit free endpoint
+ * distinguishable from a missing table, which `priceOf` alone cannot do.
  */
 const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback", "prices"];
 const TIER_FIELDS: readonly string[] = ["adapter", "model", "when"];
@@ -3029,8 +3039,41 @@ export function readModels(
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
     }
     const model = nonEmpty(row["model"], `${where} "model"`, refuse);
-    // See `ROUTE_FIELDS`: the only place an operator can price an extension adapter's model.
-    if (row["prices"] !== undefined) routePrices.set(key, priceTable(row["prices"], `${where} "prices"`, refuse));
+    // See `ROUTE_FIELDS`: the only place an operator can DECLARE AN EXTENSION ADAPTER'S MODEL
+    // FREE — and only free, which is the half the first version of this row got wrong.
+    //
+    // A ROUTE `prices` ROW MAY ONLY SAY ZERO. The row is read by `pricedFor` and by nothing
+    // else: `RoutingAdapter.priceOf` delegates to the adapter behind the route, and the cost a
+    // turn is actually billed comes off that adapter's own `done` frame. So a NON-ZERO row
+    // cleared `unpriced`, cleared the `! NO PRICE FOR n ROUTES` banner and lifted the refusal
+    // while every call still journaled `costUsd: 0` — this lane's own hole, reopened one layer
+    // out by the escape hatch written to close it, and reachable by an operator who believes
+    // they have just priced the route. A guard whose off switch is one line of the file it
+    // guards is the shape CLAUDE.md names: the undecidable case answered with the passing
+    // value.
+    //
+    // Zero is the one rate this row can state truthfully, because zero is what the adapter
+    // will bill anyway — the row's whole job is to say that the zero is a RATE and not a
+    // missing table, which is the distinction `priceOf` alone cannot make. A real rate has two
+    // doors and neither is here: the adapter row's `prices` (for an `anthropic`/`openai` wire),
+    // and `ModelAdapter.hasPrice` plus the adapter's own `priceOf` (for any other), which is
+    // the only answer that both refuses correctly AND bills correctly.
+    if (row["prices"] !== undefined) {
+      const table = priceTable(row["prices"], `${where} "prices"`, refuse);
+      for (const [model_, p] of Object.entries(table)) {
+        if (p.input !== 0 || p.output !== 0) {
+          refuse(
+            `${where} "prices"."${model_}" declares {"input": ${String(p.input)}, "output": ${String(p.output)}}, and a ROUTE ` +
+              `price row may only declare a FREE endpoint: {"input": 0, "output": 0}. It is read when deciding whether ` +
+              `the route is priced at all and it never reaches the adapter, which is what bills — so a non-zero rate ` +
+              `here would clear the unpriced refusal while every call still journaled costUsd 0. A REAL RATE HAS TWO ` +
+              `DOORS: put it on the ADAPTER row's "prices" when the adapter has a row, or, for an --extension-module ` +
+              `adapter, have its author implement ModelAdapter.hasPrice(model) and price it in the adapter's own priceOf.`,
+          );
+        }
+      }
+      routePrices.set(key, table);
+    }
 
     // DECLARATIVE FALLBACK CHAINS, which the README promised and nothing constructed.
     // `FallbackAdapter` has been written and tested since the provider layer landed;
@@ -3114,7 +3157,7 @@ export function readModels(
   const unpriced = [...routes.entries()].flatMap(([key, r]) => {
     const reach = chainTiers.get(key) ?? [{ adapter: r.adapter, model: r.model }];
     return reach
-      .filter((t) => !pricedFor(adapters.get(t.adapter), declaredPrices.get(t.adapter) ?? routePrices.get(key), t.model))
+      .filter((t) => !pricedFor(adapters.get(t.adapter), [routePrices.get(key), declaredPrices.get(t.adapter)], t.model))
       .map((t) => `${key} → ${t.adapter}/${t.model}`);
   });
   // The PRIMARY tier only, keyed by route, because that is the pair `RoutingAdapter` resolves
@@ -3122,7 +3165,7 @@ export function readModels(
   // never sees — they stay a boot warning, which is the honest half this file can reach.
   const unpricedRoutes = new Set(
     [...routes.entries()]
-      .filter(([key, r]) => !pricedFor(adapters.get(r.adapter), declaredPrices.get(r.adapter) ?? routePrices.get(key), r.model))
+      .filter(([key, r]) => !pricedFor(adapters.get(r.adapter), [routePrices.get(key), declaredPrices.get(r.adapter)], r.model))
       .map(([key]) => key),
   );
   return {
@@ -3153,13 +3196,23 @@ export function readModels(
  *     on the interface (`run/registry.ts` says why), so today `MockModelAdapter` and
  *     `RoutingAdapter` answer and the two HTTP adapters do not — closing that costs one line
  *     each in `providers/{anthropic,openai}.ts`, which is a file this change does not own.
- *  2. The operator's OWN `prices` table — the ADAPTER row's when there is one, else the ROUTE
- *     row's — resolved by the same `resolvePrice` the adapters use, so an exact row wins over a
- *     dated-base row exactly as it does inside them and a row for `m-pro` covers
+ *  2. The operator's OWN `prices` tables — BOTH of them, route row first and adapter row
+ *     second — resolved by the same `resolvePrice` the adapters use, so an exact row wins over
+ *     a dated-base row exactly as it does inside them and a row for `m-pro` covers
  *     `m-pro-20260101`. This is the explicit-zero escape hatch, and the ROUTE half of it is not
  *     an ergonomic nicety: an `--extension-module` adapter HAS no adapter row (`provider`
  *     accepts only `anthropic` and `openai`, and a row whose `name` collides with a registered
  *     extension adapter is refused), so without it the refusal named a fix nobody could apply.
+ *
+ *     BOTH, AND NOT `adapterRow ?? routeRow`, which is what this said and did. `??` falls
+ *     through only when the adapter row has NO `prices` at all, so an adapter row that priced
+ *     model A masked a route row declaring model B free — and the refusal that followed told
+ *     the operator to write the row they had already written. `resolvePrice` takes a LIST in
+ *     precedence order and always did; passing it one table was the defect.
+ *
+ *     AND THE ROUTE ROW MAY ONLY SAY ZERO — enforced where it is read, at `ROUTE_FIELDS`'
+ *     reader. It does not reach the adapter, so a non-zero rate here would lift this refusal
+ *     while the adapter went on billing 0.
  *
  * SOURCE 1 IS UNREACHABLE FOR EVERY ADAPTER THIS FILE CONSTRUCTS, today, and saying so is the
  * point: `MockModelAdapter` implements `hasPrice` and is never routed through here, and
@@ -3176,13 +3229,20 @@ export function readModels(
  */
 function pricedFor(
   adapter: ModelAdapter | undefined,
-  rows: Readonly<Record<string, { input: number; output: number }>> | undefined,
+  rows: readonly (Readonly<Record<string, { input: number; output: number }>> | undefined)[],
   model: string,
 ): boolean {
   if (adapter === undefined) return false;
   const own = adapter.hasPrice?.(model);
   if (own !== undefined) return own;
-  if (rows !== undefined && resolvePrice([rows], model) !== undefined) return true;
+  // EVERY TABLE THE OPERATOR WROTE, NOT THE FIRST ONE THAT EXISTS. This was
+  // `declaredPrices.get(a) ?? routePrices.get(k)`, and `??` falls through only when the adapter
+  // row has NO `prices` AT ALL — so an adapter row pricing model A masked a ROUTE row declaring
+  // model B free, and the refusal that followed named the route row as the fix. `resolvePrice`
+  // already takes a LIST in precedence order, which is the shape this wanted: the route row is
+  // the more specific statement, so it comes first.
+  const tables = rows.filter((r) => r !== undefined);
+  if (tables.length > 0 && resolvePrice(tables, model) !== undefined) return true;
   return adapter.priceOf(model, { inputTokens: 1e6, outputTokens: 1e6 }) !== 0;
 }
 
