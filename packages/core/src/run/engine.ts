@@ -2598,9 +2598,10 @@ export class Engine {
    *
    * BOTH HALVES ARE STILL NEEDED, AND THE REASON IS NOT THE ONE THIS PARAGRAPH FIRST GAVE. It
    * said the child "cannot come back for it" because `#advanceSerially` answers a retired terminal
-   * run from the fold and returns before the drive loop — true when it was written, and made
-   * false by the very next commit, which calls the forward on that early-return path so any later
-   * touch of a retired child retries. What survives is the other half of the argument: nothing
+   * run from the fold and returns before the drive loop — true when it was written at `81ac84e`,
+   * and made false four commits later at `9a0568c`, which calls the forward on that early-return
+   * path so any later touch of a retired child retries. (Not "the next commit", as this line first
+   * said: `ac5c7f9`, `bb38620` and `60dfd5e` fall between them and all three touch this file.) What survives is the other half of the argument: nothing
    * DRIVES a retired child or a parked parent. A parent `awaiting_gate` is not `due`, so no run
    * clock advances it, and a terminal child is advanced only if something polls it. So the child
    * side closes the case where the child is still moving, this side closes the case where the

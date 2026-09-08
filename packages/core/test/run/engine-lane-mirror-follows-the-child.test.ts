@@ -512,14 +512,16 @@ test("A MIRROR THE BROKER ANSWERS `{resolved:false}` DOES NOT RESTART THE DRIVE 
   // it answered is no longer open" — assumed a write that never happened. Reachable through a
   // rewind, which suppresses the `gate.decided` while the broker keeps the idempotency entry.
   //
-  // THE DOUBLE IS BOUNDED AND ALWAYS TERMINATES, deliberately. A liar that answers
-  // `{resolved:false}` forever is what the defect turns into an unbounded loop, and a test that
-  // HANGS at base is not a test that fails at base — worse, this loop is pure microtasks, so it
-  // starves timers and `--test-timeout` cannot rescue the suite. So the assertion is the
-  // BOUNDED one that distinguishes the two behaviours safely: with the flag read correctly, the
-  // pass is not restarted and the broker is asked about this mirror a small, bounded number of
-  // times. The unbounded half is measured out of tree, in a killable child process, and recorded
-  // in the lane report.
+  // THE DOUBLE IS A BOUNDED LIAR, AND THE BOUND IS WHAT MAKES THIS A FAILURE RATHER THAN A HANG.
+  // A liar that answers `{resolved:false}` for ever is what the defect turns into an unbounded
+  // loop, and a test that HANGS at base is not a test that fails at base — worse, this loop is
+  // pure microtasks, so it starves timers and `--test-timeout` cannot rescue the suite from it.
+  // So the double counts its own lies and THROWS past a bound the correct build never approaches:
+  // the defective build gets a named error instead of wedging the runner, and the correct one
+  // never sees it. Measured at HEAD: 2 calls.
+  //
+  // The trailing assertions are the ordinary half — the pass ended, and nothing was written.
+  const LIE_BUDGET = 50;
   let falseAnswers = 0;
   class LyingBroker extends HumanGateBroker {
     override async resolve(
@@ -530,6 +532,12 @@ test("A MIRROR THE BROKER ANSWERS `{resolved:false}` DOES NOT RESTART THE DRIVE 
       if (input.actor.kind === "system" && String(input.actor.component) === "executor:subgraph" && input.gateId.startsWith("gate_")) {
         void log;
         falseAnswers++;
+        // THE TRIPWIRE. With the flag read from `.resolved` the drive pass is not restarted and
+        // this is reached about twice; with it set from "resolve did not throw" the pass restarts
+        // for ever. Throwing here is what turns that into a test failure the runner can report.
+        if (falseAnswers > LIE_BUDGET) {
+          throw new Error(`the drive pass restarted on a {resolved:false} answer: ${String(falseAnswers)} calls`);
+        }
         return { resolved: false };
       }
       return super.resolve(log, input);
@@ -545,7 +553,7 @@ test("A MIRROR THE BROKER ANSWERS `{resolved:false}` DOES NOT RESTART THE DRIVE 
   assert.equal(p.status, "awaiting_gate", "the pass ended rather than restarting on a write that did not happen");
   assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open", "nothing was written, which is the premise");
   assert.ok(falseAnswers >= 1, "the double was actually consulted");
-  assert.ok(falseAnswers < 50, `the pass is not restarted on a `+"`{resolved:false}`"+`: ${String(falseAnswers)} calls`);
+  assert.ok(falseAnswers <= LIE_BUDGET, `the pass is not restarted on a `+"`{resolved:false}`"+`: ${String(falseAnswers)} calls`);
 });
 
 test("POLLING A FINISHED CHILD STILL ANSWERS WHEN THE PARENT'S LOG IS BROKEN — the forward may refuse, the answer may not", async () => {
