@@ -762,8 +762,8 @@ function allVerdictsResolved(steps: readonly RawStep[], nodeTypes: ReadonlyMap<N
  * spread inside one cohort. Five runs whose OUTCOME is identical (1.000 each) score
  * `0.733 0.667 0.600 0.600 0.600` instead of `0.600` five times: the cost term now reflects
  * input size as well as quality, and that is the noise this trade buys. (A gateless cohort pays
- * no human-effort credit — `score.ts`'s zero-median rule — which is why these read 0.1 below
- * the numbers this paragraph carried before that rule; `cohort-bucket.test.ts` pins them.)
+ * no human-effort credit — `score.ts`'s zero-median rule — so there is no 0.1 in any of these;
+ * `cohort-bucket.test.ts` pins them.)
  *
  * AND WHAT THE OLD DEFAULT COST, which is larger. `costNormalized` is
  * `clamp01(cost / cohort.p50Cost)` and the term is `weights.cost * (1 - costNormalized)`, so in

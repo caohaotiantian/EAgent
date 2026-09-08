@@ -18,7 +18,9 @@ import type { ReplayReport } from "../../src/run/replay.ts";
 import type { RunId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
-import { compileSkeleton } from "../run/skeleton.ts";
+import { compileSkeleton, resolver } from "../run/skeleton.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
+import type { EdgeId, NodeId } from "../../src/ids.ts";
 
 const CHECK = { kind: "assertion" as const, ref: "function/check@stable", digest: "sha256:check", reads: ["items", "picked"] };
 const RIGGED = { kind: "assertion" as const, ref: "function/check-rigged@stable", digest: "sha256:rigged", reads: ["items", "picked"] };
@@ -179,7 +181,24 @@ test("every check reports, and there are fifteen of them", () => {
 
 test("A FAILED REPLAY LEAVES `replay` ABSENT — the type no longer promises a report that is not there", async () => {
   const store = new MemoryStateStore();
-  const graph = compileSkeleton();
+  // A graph WITH an evaluator, so the projection has something to resolve; the skeleton has none.
+  const graph = compileOrThrow({
+    spec: {
+      ...compileSkeleton().spec,
+      policy: { posture: "out", capabilities: [] },
+      channels: { items: { type: "array", reduce: "replace" }, picked: { type: "array", reduce: "replace" }, verdict: { type: "object", reduce: "replace" } },
+      inputs: ["items"],
+      outputs: ["verdict"],
+      nodes: [
+        { id: "pick" as NodeId, type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+        { id: "verify" as NodeId, type: "evaluator", reads: ["items", "picked"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/check@stable", threshold: 0.5 } },
+      ],
+      edges: [{ id: "e" as EdgeId, from: "pick" as NodeId, to: "verify" as NodeId, kind: "seq" }],
+    },
+    resolver: resolver(),
+    tools: {},
+    tenantCapabilities: [],
+  });
   const suite = {
     name: "s",
     version: 1,
@@ -199,5 +218,9 @@ test("A FAILED REPLAY LEAVES `replay` ABSENT — the type no longer promises a r
   assert.equal(r.cases[0]!.pass, false);
   assert.match(r.cases[0]!.reasons[0] ?? "", /^replay failed: /);
   assert.equal("replay" in r.cases[0]!, false, "absent, not `undefined` under a lie of a type");
-  assert.ok(r.evaluators["node:verify"] !== undefined || Object.keys(r.evaluators).length >= 0, "the projection is present on every report");
+  // The projection is filled from a REAL compile: every evaluator the skeleton declares carries
+  // the digest its ref resolved to.
+  assert.deepEqual(Object.keys(r.evaluators), ["node:verify"]);
+  assert.match(r.evaluators["node:verify"]!.digest ?? "", /^sha256:/, "the ref resolved and its digest rode onto the report");
+  assert.deepEqual(r.evaluators["node:verify"]!.reads, ["items", "picked"]);
 });

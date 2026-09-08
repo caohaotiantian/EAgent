@@ -24,6 +24,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
+import { compileOrThrow } from "../../src/graph/compile.ts";
+import type { GraphSpec } from "../../src/graph/spec.ts";
+import type { ToolRegistry } from "../../src/run/registry.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import type { EvalSuite } from "../../src/evolution/gate.ts";
 import type { RunId } from "../../src/ids.ts";
@@ -134,7 +137,7 @@ interface LiveDecision {
   readonly corpusThrough?: string;
   readonly afterCorpus?: number;
   readonly paired: { n: number; mean: number; lower95: number; wilcoxonLower95: number; wins: number; losses: number; ties: number };
-  readonly pairs: { baselineRunId: string; candidateRunId: string; baselineScore: number; candidateScore: number; baselineExamRunId: string; candidateExamRunId: string }[];
+  readonly pairs: { baselineRunId: string; candidateRunId: string; baselineScore: number; candidateScore: number; baselineExamRunId?: string; candidateExamRunId?: string }[];
   readonly checks: { id: string; ran: boolean; pass: boolean; detail: string }[];
 }
 
@@ -288,9 +291,8 @@ test("STEP 3 · a legacy suite refuses the grader swap with ✗ 12-grader-unchan
 
     // The control: the honest fix passes 12 (the evaluator set is unchanged) and TIES on the floor
     // — a suite frozen by an honest grader pins only the runs it got right, which the fix
-    // reproduces, so the replayed door promotes at Δ 0.0pp and measures no improvement. (The
-    // design's §6 expected ✗ 1-must-pass here; that is the shape of a suite POISONED by a rigged
-    // grader, which is step 11's subject, not an honest legacy suite's.)
+    // reproduces, so the replayed door promotes at Δ 0.0pp and measures no improvement. A suite
+    // that pins WRONG outputs is one a rigged grader froze, which is step 11's subject.
     const fixed = await promote("candidates/fixed.json");
     assert.equal(fixed.code, 0, `${fixed.out}\n${fixed.err}`);
     assert.match(fixed.out, /✓ 12-grader-unchanged/);
@@ -317,12 +319,13 @@ test("STEP 4 · attest exits 0 and journals a human row with corpusThrough = the
     assert.deepEqual(rows[0]!.actor, { kind: "human", subject: "haotian", via: "console" });
     assert.equal((rows[0]!.payload.args as { spec: { kind: string } }).spec.kind, "GraphSpec", "the spec rides in the row");
 
-    // `loom audit` checks the journal's rules and does not list operator.command rows, so the
-    // row is read back through the store above rather than off that verb's output.
-
     refusedWith(await cli(["exam", "attest", join(w.dir, "exams/pick-exam.json"), "--cohort", w.last, "--workspace", w.dir]), /--as needs a subject/);
     refusedWith(await attest(w.dir, w.last, "exams/pick-exam.json", "cli"), /names nobody/);
-    refusedWith(await attest(w.dir, w.last, "exams/bad-exam.json"), /grading the grader/);
+    // bad-exam reads [subject, verdict]: the only evaluator-written output of pick-bench IS the
+    // exam's own output name, so the shape rule fires before the grading-the-grader rule does.
+    // (`exam-lane-exam-predicate.test.ts` drives the latter on a baseline whose evaluator writes
+    // another name, the review-bench shape.)
+    refusedWith(await attest(w.dir, w.last, "exams/bad-exam.json"), /is not an exam: an exam does not read "verdict"/);
     refusedWith(await attest(w.dir, w.last, "exams/undeclared-exam.json"), /"chosen" are declared by the baseline graph neither/);
     refusedWith(await attest(w.dir, w.last, "exams/agent-exam.json"), /is not an exam: .*"judge" is a agent/);
     assert.equal((await journal(w.dir, w.last)).filter((e) => isEvent(e, "operator.command")).length, 1, "the refusals wrote nothing");
@@ -340,8 +343,7 @@ test("STEPS 5–9 · pre-exam rows are another ruler; noop and rigged REFUSE, re
 
     // STEP 5. `loom cohort` keys on the queried run's own last row, so immediately after the
     // attestation nothing is excluded yet; one re-score under the exam ruler makes the other 29
-    // rows the stale ones. (The design's "30 / members 0" cannot be produced by a verb that
-    // always counts the run it was asked about.)
+    // rows the stale ones.
     assert.deepEqual((await cohortOf(w.dir, w.last)).excludedForWeights, 0);
     const first = await cli(["score", w.last, "--workspace", w.dir]);
     assert.equal(first.code, 0, first.err);
@@ -367,7 +369,7 @@ test("STEPS 5–9 · pre-exam rows are another ruler; noop and rigged REFUSE, re
     assert.deepEqual([dn.paired.wins, dn.paired.losses, dn.paired.ties], [0, 10, 20]);
     assert.equal(check(dn, "L1-paired-improvement").pass, false);
     assert.equal(check(dn, "L5-candidate-earned-it").pass, false);
-    assert.ok(dn.pairs.every((p) => p.candidateScore === 0 && p.candidateExamRunId === ""), "`picked` is absent from every candidate output: ungradable, and the exam was not run");
+    assert.ok(dn.pairs.every((p) => p.candidateScore === 0 && p.candidateExamRunId === undefined), "`picked` is absent from every candidate output: ungradable, and no exam run was made");
 
     // STEP 7 · audit repro 2 through the live door.
     const rigged = await live(w.dir, "candidates/rigged.json", w.last);
@@ -401,7 +403,7 @@ test("STEPS 5–9 · pre-exam rows are another ruler; noop and rigged REFUSE, re
     assert.match(df.examGraphHash ?? "", /^sha256:/);
     assert.equal(df.corpusThrough, w.last);
     assert.equal(df.pairs.length, 30);
-    assert.equal(df.pairs.filter((p) => p.baselineExamRunId !== "" && p.candidateExamRunId !== "").length, 30, "60 exam run ids: one grade per side per pair");
+    assert.equal(df.pairs.filter((p) => p.baselineExamRunId !== undefined && p.candidateExamRunId !== undefined).length, 30, "60 exam run ids: one grade per side per pair");
     const cert = (await journal(w.dir, df.pairs[0]!.baselineRunId))
       .filter((e): e is Extract<JournalEvent, { type: "operator.command" }> => isEvent(e, "operator.command") && e.payload.kind === "evolution.promote")
       .map((e) => e.payload.args as { examGraphHash?: string; promote: boolean });
@@ -497,6 +499,72 @@ test("STEP 12 · with the exam file deleted the row still grades — same verdic
     rmSync(join(w.dir, "graphs"), { recursive: true, force: true });
     const r = await live(w.dir, "candidates/fixed.json", w.last);
     assert.ok(isLoomError(r.thrown) && r.thrown.code === CODES.E_RUN_NOT_FOUND, String(r.thrown));
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── a recording that never finished is not a question, and refuses nothing ───
+
+test("A RECORDING WITH NO run.completed IN THE COHORT DOES NOT REFUSE THE HONEST CANDIDATE — it was never a member", async () => {
+  const w = await workspace();
+  try {
+    // Submitted and never advanced: same graph, same input shape, no terminal event.
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    let pending: RunId;
+    try {
+      const spec = JSON.parse(readFileSync(join(w.dir, "graphs", "pick.json"), "utf8")) as GraphSpec;
+      const g = compileOrThrow({ spec, resolver: ws.resolver, tools: (ws.engine.tools as ToolRegistry).manifests(), tenantCapabilities: ws.granted });
+      pending = await ws.engine.submit({ graph: g, inputs: { items: ["p", "q", "r"] } });
+    } finally {
+      ws.close();
+    }
+    // Attested AFTER the pending run, so corpusThrough covers it.
+    const a = await attest(w.dir, pending);
+    assert.equal(a.code, 0, `${a.out}\n${a.err}\n${String(a.thrown)}`);
+    const fixed = await live(w.dir, "candidates/fixed.json", w.last);
+    assert.equal(fixed.code, 0, `${fixed.out}\n${fixed.err}`);
+    const d = jsonOf<LiveDecision>(fixed.out);
+    assert.equal(d.paired.n, 30, "the pending run is not a pair; the thirty recordings are");
+    assert.equal(d.paired.mean, 0.4);
+    assert.equal(d.pairs.some((p) => p.baselineRunId === pending), false);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE ATTESTATION SURVIVES ITS ANCHOR'S GRAPH BEING UNPUBLISHED — a file does not decide the ruler", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    // A second published graph of the same workflow, so the workflow still has recordings to score.
+    cpSync(join(w.dir, "candidates", "rigged.json"), join(w.dir, "graphs", "rigged.json"));
+    const r = await record(w.dir, "graphs/rigged.json", { items: items(2) });
+    unlinkSync(join(w.dir, "graphs", "pick.json"));
+    const s = await cli(["score", r, "--workspace", w.dir]);
+    assert.equal(s.code, 0, s.err);
+    assert.match(jsonOf<{ signals: { evidence: string }[] }>(s.out).signals[0]!.evidence, /^exam /, "S1 is still the exam's, not check-rigged's");
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A NEWEST ATTESTATION ROW THIS BINARY CANNOT READ REFUSES — no fallback to an older row or to in-graph S1", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args: { workflow: "pick-bench" } }, actor: { kind: "human", subject: "someone", via: "console" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    refusedWith(await cli(["score", w.last, "--workspace", w.dir]), /newest evolution\.exam-attest row .* is not one this binary can read/);
+    refusedWith(await live(w.dir, "candidates/fixed.json", w.last), /is not one this binary can read/);
   } finally {
     w.dispose();
   }

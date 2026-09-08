@@ -104,7 +104,13 @@ export function examShape(graph: RunGraph): string[] {
   if (spec.outputs.length !== 1 || spec.outputs[0] !== EXAM_VERDICT_OUTPUT) {
     problems.push(`an exam declares exactly one output, "${EXAM_VERDICT_OUTPUT}" (found ${JSON.stringify(spec.outputs)})`);
   }
+  if (spec.inputs.includes(EXAM_VERDICT_OUTPUT)) {
+    problems.push(`an exam does not read "${EXAM_VERDICT_OUTPUT}" — it is the exam's own output, and an input by that name collides with it`);
+  }
   for (const node of spec.nodes) {
+    if ((node.function?.effects ?? []).length > 0) {
+      problems.push(`node "${String(node.id)}" declares effects ${JSON.stringify(node.function?.effects)} — a body that reaches a tool is not deterministic, and an exam's grade must replay`);
+    }
     if (node.type === "agent" || node.type === "tool" || node.type === "subgraph" || node.type === "human_gate") {
       problems.push(`node "${String(node.id)}" is a ${node.type} — an exam runs deterministic bodies only, so its grade replays and calls no provider`);
     }

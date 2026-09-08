@@ -283,7 +283,9 @@ function sameOutcome(a: Awaited<ReturnType<typeof runEvalSuite>>, b: Awaited<Ret
     a.cases.length === b.cases.length &&
     a.cases.every((x, i) => {
       const y = b.cases[i];
-      return y !== undefined && x.id === y.id && JSON.stringify(x.replay?.replayed.channels) === JSON.stringify(y.replay?.replayed.channels);
+      // Two failed replays carry no report and agree on nothing; `undefined === undefined` is not
+      // determinism, it is two absences.
+      return y !== undefined && x.id === y.id && x.replay !== undefined && y.replay !== undefined && JSON.stringify(x.replay.replayed.channels) === JSON.stringify(y.replay.replayed.channels);
     })
   );
 }

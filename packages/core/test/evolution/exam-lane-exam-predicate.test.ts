@@ -155,9 +155,24 @@ test("GRADING THE GRADER IS REFUSED: every baseline output the exam reads is eva
   // same shape in miniature — the baseline declares only `verdict`, and the exam reads it.
   const p = attestationProblems(examSpec({ inputs: ["subject", "items", "verdict"] }), baselineSpec(["verdict"]));
   assert.ok(p.some((x) => /grading the grader/.test(x)), p.join("\n"));
-  // …and the control: the same exam over a baseline that ALSO declares the work channel is not
-  // refused on this rule, because the exam reads `picked` too.
-  assert.deepEqual(attestationProblems(examSpec({ inputs: ["subject", "items", "picked", "verdict"] }), baselineSpec()), []);
+});
+
+test("an exam does not read `verdict` — it is its own output — and a body with declared effects is not deterministic", () => {
+  const spec = examSpec();
+  const p = examShape(compileOf(examSpec({ inputs: ["subject", "items", "picked", "verdict"] })));
+  assert.ok(p.some((x) => /does not read "verdict"/.test(x)), p.join("\n"));
+  const grade = spec.nodes[0]!;
+  const withEffects = compileOf({
+    ...spec,
+    channels: { ...spec.channels, fetched: { type: "object", reduce: "replace" } },
+    nodes: [
+      { id: "look" as NodeId, type: "function", reads: ["items"], writes: ["fetched"], function: { ref: "function/look@stable", effects: ["net.fetch"] } },
+      { ...grade, reads: [...(grade.reads ?? []), "fetched"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "look" as NodeId, to: "grade" as NodeId, kind: "seq" }],
+  });
+  const q = examShape(withEffects);
+  assert.ok(q.some((x) => /"look" declares effects \["net.fetch"\]/.test(x)), q.join("\n"));
 });
 
 test("a baseline that declares a channel named `subject` is refused — the link from grade to run must not be a graph's to write", () => {

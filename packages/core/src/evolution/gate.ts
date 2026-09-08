@@ -102,10 +102,8 @@ export interface CaseResult {
   readonly wallMs: number;
   /**
    * ABSENT when the replay itself failed — `E_REPLAY_DIVERGENCE`, a missing seed, a graph the
-   * recording cannot serve. The type used to say `ReplayReport` and the failure arm stored
-   * `undefined as unknown as ReplayReport`, so every consumer that read `case.replay.graph` on
-   * a failed case threw a `TypeError` the type had promised could not happen. `reasons` carries
-   * the failure; a reader that wants the report checks for it.
+   * recording cannot serve — so a consumer reading `case.replay.graph` on a failed case meets
+   * `undefined` and the type, not a `TypeError`. `reasons` carries the failure.
    */
   readonly replay?: ReplayReport;
 }
@@ -649,8 +647,9 @@ export interface PromotionVerdict {
  * `2-non-inferior`'s ratio, plus the two suite-provenance rules that replaced
  * "human-authored" in M9 (`9-suite-predates-candidate`, `10-separate-lineage`), plus
  * `11-budget-exercised`, which refuses a ceiling this corpus never reached, plus
- * `12-grader-unchanged`, which refuses a grader change on a workflow whose only ground truth is
- * that grader, plus `13-replay-verified`, which refuses a case whose replay had to invent what the
+ * `12-grader-unchanged`, which refuses a change to the evaluator NODES on a workflow whose only
+ * ground truth is that grader (and nothing else — what fed them is the candidate's, which is why
+ * an exam exists), plus `13-replay-verified`, which refuses a case whose replay had to invent what the
  * recording could not say. The ids carry the numbering; the push order does not.
  *
  * THREE OF THE EIGHT ARE WEAKER THAN D10.d ONCE READ AS ENGLISH, and the table in
@@ -952,8 +951,8 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
 
   // ── what the replay had to invent ───────────────────────────────────────────
   //
-  // `runCase` reads three of `ReplayReport`'s refusals into case reasons (`unexercised`). Two more
-  // arrived with the report and had no reader here. `unverifiedToolEffects` names recorded tool
+  // `runCase` reads three of `ReplayReport`'s refusals into case reasons (`unexercised`); this
+  // check reads two more. `unverifiedToolEffects` names recorded tool
   // calls with no `argsDigest` — journals before 2026-08-27 — so a replay against a DIFFERENT graph
   // cannot say whether the candidate called the tool with the recording's arguments or was handed
   // its result for another call; that is refused, with the same-graph exemption `unexercised`
@@ -990,7 +989,7 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
     pass: unverified.length === 0,
     detail:
       unverified.length === 0
-        ? `every recorded effect the replay served can be shown to belong to the call that asked for it.${derivedNote}`
+        ? `no recorded effect was served to a changed graph without its argument digest to bind it.${derivedNote}`
         : `${String(unverified.length)} case(s) measured something the recording could not vouch for — ${unverified.slice(0, 5).join("; ")}. ` +
           `Re-record the corpus, or judge this candidate live.${derivedNote}`,
   });
