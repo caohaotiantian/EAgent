@@ -55,9 +55,12 @@
  *   - A `loop` EDGE ON THE ARM NOT TAKEN, in both places the alternatives walk meets one: as a
  *     node it walks to, and as its own seed. A backward edge credited the other arm with the
  *     whole graph, so the subtraction emptied the region.
- *   - A FAILURE IS NOT A CHOICE, which is the guard pointing the other way: widening from
- *     "router" to "any node" put every node's `error` arm within reach of being marked, and
- *     this is the test that keeps it out.
+ *   - A FAILURE *IS* A CHOICE WHEN THE PAGE CAUSED IT, and this row has been answered three ways;
+ *     `choiceOf`'s docstring is the ledger. It is the axis pointing BOTH ways at once: widening
+ *     from "router" to "any node" put every node's `error` arm within reach of being marked, and
+ *     shutting the door on all of them left a live injection path on every node that reads a
+ *     fetched page and has an error arm. What separates the two is not the failure, which no fold
+ *     can classify, but what the failing node had READ — the clean half of every row below.
  *
  * ## AND FIVE MORE, EACH DRIVEN THROUGH THE ENGINE WITH A CHARGE COUNTER FIRST
  *
@@ -90,11 +93,12 @@
  *   - A FAN'S WIDTH, which is the one control decision that is a NUMBER. Which nodes it selected
  *     is its BRANCH, bounded at the fan's own compiled depth — with the node below the exit join
  *     left alone, because that one runs once at every width including zero.
- *   - WHICH ERROR ARM FIRED. This one was CLOSED AND THEN REOPENED: see the four-row test at the
- *     bottom of this file. The predicate was the arm count, and the count is wrong in both
- *     directions — it gated ordinary error handling on every failure and let a single coded arm
- *     through — while no predicate over the journal separates a code content produced from one
- *     it did not. The rows are pinned as a ledger of what this axis does not cover.
+ *   - WHICH ERROR ARM FIRED, as a question separate from WHETHER THE COMMIT FAILED. The first is
+ *     still not covered and cannot be: no predicate over the journal separates a code content
+ *     produced from one it did not, and the arm-count rule that tried was wrong in both
+ *     directions. The second is covered now, by `choiceOf`'s failed arm, and the five-row test
+ *     near the bottom of this file is the price rather than the ledger of a hole: ordinary error
+ *     handling gates when it sits below a fetch, and does not otherwise.
  *
  * ## AND FOUR MORE, WHICH ARE THIS AXIS OVER-REACHING RATHER THAN UNDER-REACHING
  *
@@ -1131,22 +1135,35 @@ test("A `loop` EDGE ON THE ARM NOT TAKEN DOES NOT EMPTY THE REGION", async () =>
   assert.equal(seeded.status, "awaiting_gate", `expected the region to survive a back-edge SEED, got ${seeded.status}`);
 });
 
-test("A FAILURE IS NOT A CHOICE — a failed node's `error` arm was selected by the failure", async () => {
-  // The same node as the `conditional` test, reading the same injected page, with one thing
-  // added: it throws. `#commit` then computes `take = this.#errorEdges(...)`, so the arm that
-  // runs is one no condition picked. Marking it would say "untrusted content chose this" about
-  // a choice the FAILURE made, and it would do it for every node in every graph that has an
-  // error edge and reads anything a tool fetched — the constant-gate shape, arrived at from the
-  // other side. An error edge is in no choice space, so the taken side comes out empty.
+test("A FAILURE THE PAGE CAUSED IS A CHOICE — and a failure with nothing untrusted in it is not", async () => {
+  // THIS ROW USED TO SAY THE OPPOSITE, and the reversal is `docs/design-taint-rc6-2026-09-05.md`
+  // §10 being carried out rather than a drift. The sentence it rested on — "a failure selected
+  // the arm and content did not" — is true of a failure content did not cause, and the engine
+  // cannot tell the two apart: `#commit` records `E_INTERNAL` whichever it was. So the question
+  // is which way to answer an undecidable case, and the old answer was the passing one. Held
+  // open, it is an injection path on every node in the tree that reads fetched bytes and has an
+  // error arm onto something hard to undo (`errthrow`, design §4, live at `a638e7d`, at the
+  // branch head and on `loom` alike — `test/run/taint-failed-commits.test.ts` is the pin).
   //
-  // This is the arm for `taken = take INTERSECT space`. With the taken side left as the whole
-  // `take`, the error edge seeds the region and this graph measures awaiting_gate, gates=1,
-  // charged=0 — and every other test in this file stays green, which is why it needs its own.
+  // The same node as the `conditional` test, reading the same injected page, with one thing
+  // added: it throws. `#commit` computes `take = this.#errorEdges(...)`, and `choiceOf`'s failed
+  // arm now puts BOTH the error edge and the two conditional arms it never reached in the space,
+  // so the error edge is a taken edge that could have not fired and `charge` is its exclusive
+  // reach.
   const r = await drive({ branchOn: "untrusted", shape: "failing" });
 
-  assert.equal(r.status, "succeeded", `a failure is not a branch decision: ${r.status}`);
-  assert.equal(r.gates, 0, "gating the error handler of every node that read a page is over-gating");
-  assert.equal(r.charged, 1, "and the error arm runs, which is what an error arm is for");
+  assert.equal(r.status, "awaiting_gate", `a failure downstream of the page is a branch decision: ${r.status}`);
+  assert.equal(r.gates, 1, "one failure, one choice, one gate");
+  assert.equal(r.charged, 0, "and the irreversible arm does not run unwatched");
+
+  // AND THE HALF THAT KEEPS IT OFF ORDINARY GRAPHS, which is the whole reason this is not the
+  // constant gate the old sentence feared: the identical graph with the deciding node reading
+  // the run's own input still fails, still takes its error arm, and still charges, with no gate.
+  // What is gated is error handling BELOW a fetch, not error handling.
+  const clean = await drive({ branchOn: "request", shape: "failing" });
+  assert.equal(clean.status, "succeeded", `ordinary error handling stopped: ${clean.status}`);
+  assert.equal(clean.gates, 0, "gating the error handler of a node that read nothing untrusted is over-gating");
+  assert.equal(clean.charged, 1, "and the error arm runs, which is what an error arm is for");
 });
 
 test("IT SURVIVES A RESTART — the fold rebuilds a branch decision another process made", async () => {
@@ -1670,46 +1687,60 @@ test("WHAT ABSENT-AS-TRUE COSTS: an untaken sibling is enough, and the table now
   assert.deepEqual(await run("bodycondseqgated", drop), { gates: 2, charged: 0 }, "row 3, bit absent");
 });
 
-test("A FAILURE CODE IS NOT A CHOICE — four rows, and the last one is a hole this leaves open", async () => {
-  // A ROUND SHIPPED THE OPPOSITE RULE and it was reverted, not narrowed. `#errorEdges` filters on
+test("WHAT THE FAILED-COMMIT ARM COSTS — five rows, and the price is the whole dirty column", async () => {
+  // THE LEDGER OF WHAT THIS AXIS DOES AND DOES NOT SEPARATE, re-measured after `choiceOf` gained
+  // its failed arm. It used to be the ledger of a hole: `#errorEdges` filters on
   // `e.codes.includes(code)`, so with two coded arms the CODE says which one runs — and a node
-  // that read the fetched page can fail with a code derived from it. The rule keyed on "more than
-  // one error edge, at least one taken", and the count is wrong in both directions.
+  // that read the fetched page can fail with a code derived from it. A rule keyed on "more than
+  // one error edge, at least one taken" was shipped for that and reverted, because the count is
+  // wrong in both directions and no predicate over the journal separates a code content produced
+  // from one it did not.
   //
-  // These four rows are the measurement that decided it. Every one drives the same deciding node
-  // twice — reading the fetched page, then reading the run's own input — with an irreversible
-  // charge on one arm and a human ceiling of `on` typed before any untrusted byte existed.
+  // The failed arm does not separate them either. It stops trying: a commit that FAILED having
+  // read untrusted content, or from inside a tainted region, picked among its error arms and the
+  // arms it never reached, whatever made it fail. Rows 1 and 2 below are the two populations the
+  // count could not tell apart, and they now get the SAME answer — row 1 because that is the
+  // exploit, row 2 because that is the price of not being able to tell.
+  //
+  // Every one of these drives the same deciding node twice — reading the fetched page, then
+  // reading the run's own input — with an irreversible charge on one arm and a human ceiling of
+  // `on` typed before any untrusted byte existed. The CLEAN column is what says this is a
+  // narrowing on the fetch and not a gate on failure.
   const row = async (shape: Shape): Promise<{ dirty: string; clean: string }> => {
     const d = await drive({ branchOn: "untrusted", shape });
     const c = await drive({ branchOn: "request", shape });
     return { dirty: `${d.status}/${String(d.gates)}/${String(d.charged)}`, clean: `${c.status}/${String(c.gates)}/${String(c.charged)}` };
   };
 
-  // ROW 1 — the exploit the reverted rule closed. The body returns `{retry}`
-  // (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and throws (`E_INTERNAL`) otherwise, so
-  // injected text picks which arm fires and one of them is the charge. THIS IS OPEN.
-  assert.deepEqual(await row("errcodes"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+  // ROW 1 — the exploit the reverted rule closed and this one closes again. The body returns
+  // `{retry}` (`E_FUNCTION_UNAVAILABLE`) when what it read says PAY and throws (`E_INTERNAL`)
+  // otherwise, so injected text picks which arm fires and one of them is the charge. THIS WAS
+  // OPEN and the row said so.
+  assert.deepEqual(await row("errcodes"), { dirty: "awaiting_gate/1/0", clean: "succeeded/0/1" });
 
-  // ROW 2 — WHY IT IS OPEN. The same node type, the same two coded arms, the same tainted read,
-  // one arm fired — and a body that ALWAYS throws the same code whatever it read. Ordinary error
-  // handling: "on parse failure do A, on timeout do B", above a recovery that undoes something.
-  // Rows 1 and 2 write the SAME journal; what differs is a counterfactual inside a body the
-  // engine never sees. The reverted rule gated both.
-  assert.deepEqual(await row("errordinary"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+  // ROW 2 — THE PRICE, and it is the same journal as row 1. The same node type, the same two
+  // coded arms, the same tainted read, one arm fired — and a body that ALWAYS throws the same
+  // code whatever it read. Ordinary error handling: "on parse failure do A, on timeout do B",
+  // above a recovery that undoes something. It gates when it sits below a fetch. There is no
+  // fold that distinguishes it from row 1, so this is the cost of closing row 1 at all.
+  assert.deepEqual(await row("errordinary"), { dirty: "awaiting_gate/1/0", clean: "succeeded/0/1" });
 
-  // ROW 3 — two catch-alls. Neither declares `codes`, so both fire and nothing was discriminated.
-  assert.deepEqual(await row("errcatchall"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+  // ROW 3 — two catch-alls. Neither declares `codes`, so both fire; the CODE discriminated
+  // nothing, but the failure still did — it decided between these two arms and the seq arm the
+  // node would have taken had it succeeded.
+  assert.deepEqual(await row("errcatchall"), { dirty: "awaiting_gate/1/0", clean: "succeeded/0/1" });
 
-  // ROW 4 — the other end of the count, and the reason "at least one arm declares `codes`" is not
-  // the fix either. ONE `codes`-restricted arm and no catch-all: the code decides whether the
-  // recovery runs AT ALL — a code it does not name leaves no error edge to take and the run
-  // fails — so content chooses between "the charge runs" and "the run dies". The count let this
-  // through; the discrimination predicate would catch it, and would still gate row 2.
-  assert.deepEqual(await row("errone"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+  // ROW 4 — the other end of the count the reverted rule got wrong. ONE `codes`-restricted arm
+  // and no catch-all: the code decides whether the recovery runs AT ALL — a code it does not
+  // name leaves no error edge to take and the run fails — so content chooses between "the charge
+  // runs" and "the run dies". `couldHaveNotFired` admits an `error` edge as a seed on its own
+  // kind, which is what closes this one even where nothing else in the space was left untaken.
+  assert.deepEqual(await row("errone"), { dirty: "awaiting_gate/1/0", clean: "succeeded/0/1" });
 
-  // AND THE ROW THAT WAS NEVER IN DOUBT: one catch-all error edge. A failure selected the arm,
-  // nothing filtered, and there was nothing to choose among.
-  assert.deepEqual(await row("failing"), { dirty: "succeeded/0/1", clean: "succeeded/0/1" });
+  // ROW 5 — one catch-all error edge, the shape that was never in doubt. It is in doubt now for
+  // the same reason as row 2: the failure chose between the error arm and the two conditional
+  // arms the node never got to evaluate, and the page is what made it fail.
+  assert.deepEqual(await row("failing"), { dirty: "awaiting_gate/1/0", clean: "succeeded/0/1" });
 });
 
 test("ALWAYS CONTINUE, AND ADDITIONALLY DO X IF THE PAGE SAYS SO — the sibling that fired is not an alternative", async () => {
