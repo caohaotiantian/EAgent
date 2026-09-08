@@ -155,8 +155,9 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
 **Re-measured 2026-09-08, after the four reviewed wave-2 branches merged** (`3cfd363`,
 `6b3513b`, `3656d69`, `ec2ad88`). Four more rows closed and are struck in place with their
 merge sha, their argument moved to §Z: §A0.5 (its compile half, which was the remaining one),
-§A0.8, §A0.14 (its loud half, likewise) and §A0.20 — so the count of rows the waves recorded
-and did not fix is now §A0.12, §A0.13 and §A0.16–A0.19. The one row those merges ADDED, §A0.21,
+§A0.8, §A0.14 (its loud half, likewise) and §A0.20 — and §A0.16 followed at `02a5e84` (the
+`taint` merge), so the count of rows the waves recorded and did not fix is now §A0.12, §A0.13
+and §A0.17–A0.19. The one row those merges ADDED, §A0.21,
 closed separately at `ff8fdac` (the `a0-21-take-kind` merge) — see §Z. The struck rows stay
 here rather than being deleted, for the reason §Z's header gives.
 
@@ -226,7 +227,9 @@ here rather than being deleted, for the reason §Z's header gives.
   route refusing at the model call — the guard fails closed at the call rather than pricing a
   route at $0, and `test/cli/guards-lane-unpriced-route-fails-closed.test.ts` is the pin.
 
-- **A0.16 · Three injection paths are live on `loom`, on no register row.**
+- ~~**A0.16 · Three injection paths are live on `loom`, on no register row.**~~ CLOSED at
+  `02a5e84` (the `taint` merge), which brought `phase1-taint` and five fix commits onto `loom`;
+  the argument and the residue are in §Z. The record of what it was:
   `docs/design-taint-rc6-2026-09-05.md` §4 names them with the graph shape and the three-arm
   measurement (dirty / page-safe / clean) for each: **`errfan`** — a clean fan whose body reads
   the page and THROWS iff it says PAY, join `onBranchError:"skip"`, join arms on `!has(parts)`:
@@ -238,9 +241,11 @@ here rather than being deleted, for the reason §Z's header gives.
   succeeded gates=0 charged=1`). Identical at `a638e7d` and `294e713`. The probes were
   `probes/rc6/{errfan,mutedge5,errthrow}.test.ts` in the taint lane's scratchpad, importing the
   `wt-phase1` worktree — `prunable` in `git worktree list` because its `.git` link file is
-  missing, though the directory is still there. Closes
-  when each is a test under `packages/core/test/run/` that refuses, with the fail-closed rule
-  design §6 item 2b states per path, on the merged `phase1-taint`.
+  missing, though the directory is still there. Closed by
+  `test/run/taint-failed-commits.test.ts` and `test/run/control-flow-taint.test.ts` on the merged
+  `phase1-taint`: `errfan` and `errthrow` move their dirty arm to `awaiting_gate gates=1
+  charged=0` with both clean arms byte-identical, and `mutedge5` was already refused on `loom` by
+  the dominator rule, byte-identical on all three arms.
 - **A0.17 · `POST /runs` accepts the input the CLI refuses.** Since `8c734ce`, `loom run --input
   '{"documnet":…}'` refuses `E_CONFIG_INVALID` naming the key and the declared set, with zero
   `run.submitted` rows. The plane does not: lane P measured `POST /runs {"workflow":
@@ -2270,6 +2275,50 @@ rescued an invented edge with an `error` edge no longer can; a journal recorded 
 now replays as a loud divergence under `replayRun` (attach-and-advance of the same old journal
 still folds and keeps the old bypass, silently); the compiler stays silent — the refusal is
 per-task at run time, not a compile-time diagnostic.
+
+**Closed 2026-09-08, three more reviewed branches merged.** §A0.16 the three injection paths —
+control-flow taint, brought on with `phase1-taint` and five fix commits closing five confirmed
+blocking findings over three review rounds (`fbbdac4`..`ca1a43c`, merged at `02a5e84`; gate 3539
+pass / 0 fail). `errfan` and `errthrow` move their dirty arm from `succeeded gates=0 charged=1`
+to `awaiting_gate gates=1 charged=0`, both clean arms byte-identical; `mutedge5` was already
+refused on `loom` by the dominator rule and is byte-identical on all three arms, measured not
+assumed. The merge commit `fbbdac4` carries a `Kernel-seam` trailer naming three vocabulary
+items — `run.submitted.taintedInputs`, `task.committed.takeSuppliedByProducer`, and the
+`fanout_skipped_gate` escalation rule E12 — and the guard does not judge merge commits, so it is
+recorded in `git log` and not in the ledger's count of 11. **Residue, disclosed and not fixed:**
+`CLAUDE.md`'s journal-authority bullet reads eight where the enumeration it cites now reads nine
+(E12 re-derived at attach is the ninth member, pinned by
+`test/run/empty-fanout-oversight.test.ts`); RC-2's five exclusive-reach rows, the legibility
+`Cause` map and the prefix-rebuild sweep stay open from design §6; `loom`'s dominator rule
+refuses the canonical expansion, pinned INVERTED in `test/graph/mutation-dominator.test.ts` so a
+later narrowing is deliberate; `#rehydrateGraph` throws `E_OVERSIGHT_LOOSEN_FORBIDDEN` forever on
+a run whose recorded mutation this binary refuses, and validates with `tenantCapabilities` where
+the proposal-time call does not; `taintedOn` is short on the REWIND verb, self-healing on the
+next advance; E12's `detail.skipped` is unbounded when `fanoutDepth` is ambiguous and E12 misses
+a fan whose exit join is one `seq` hop from the fan head; `loom replay` of a recording made
+before this change diverges on any run with a failure below a fetch; and the attach-time fold's
+cost is unbounded in journal length × graph size and unmeasured. The lane's report §Residue
+after three rounds is the full list, including a tenth line of pre-existing mutation-replay
+items that the shipped binary cannot reach today because mutation is not reachable from it.
+
+**Also closed 2026-09-08, from the same day's lane reports rather than from an §A0 row** — both
+were residue named by earlier lanes and neither had a row here. `engine-child-journal` (merged
+at `0de48c4`): `#answerMirrorsTheChildAlreadyDecided` read the CHILD's journal unwrapped inside
+the PARENT's drive loop, so a child whose store failed became the answer to `advance` on the
+parent — the engine lane's round-4 residue item 1, the mirror image of the one that round closed.
+The read is wrapped PER MIRROR (`wrote` is load-bearing, so a whole-method wrapper would report
+`false` after a partial write), emitting `LOOM_MIRROR_ANSWER_FAILED` exactly once per advance and
+leaving the mirror open; the parent's own `#gates.resolve` stays unwrapped on purpose. Its own
+residue is the four unwrapped cross-run child reads of the same shape — `#planRollbackChild`,
+`#runSubgraph`, `#forwardGateDecision`, `#endChildRun` — plus the cross-run WRITE
+`#resolveGateAsSystem`, which are the next lane. `mcp-registrar` (merged at `010510e`): of the
+three registrars `openWorkspace` fills into one `ToolRegistry`, only the extension-vs-built-in
+pair refused a name collision, so an extension module spelling `mcp__docs__search` beside an
+`--mcp-file` server `docs` offering `search` compiled `ok` at `3d05cff`; it now refuses
+`E_CONFIG_INVALID` naming both claimants before any MCP tool registers, and MCP × MCP is covered
+too. Residue: the prefix message hardcodes `--extension-module`, wrong on the two embedder paths;
+the reservation refuses read-only verbs; and the reservation is a BOOT check that a post-`seal()`
+registration still walks around, which is `ToolRegistry`'s own documented hazard.
 
 **Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
 paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
