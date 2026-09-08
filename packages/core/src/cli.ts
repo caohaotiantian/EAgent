@@ -1466,8 +1466,19 @@ export function openWorkspace(
   // SUBSTITUTED, NOT LAYERED, when a module supplies one. `EngineOptions.resolver` takes one
   // object and the compile path reads `Workspace.resolver`, so layering would mean inventing a
   // resolution order — workspace first? module first? per method? — that nobody wrote down and
-  // no journal records. A module that supplies a resolver is saying it owns ref resolution for
-  // this deployment, including `resources/`; the boot banner names it so that is never silent.
+  // no journal records. A module that supplies a resolver owns REF RESOLUTION for this
+  // deployment; the boot banner names it so that is never silent.
+  //
+  // "INCLUDING `resources/`" IS WHAT THIS SAID AND IT IS NOT TRUE, so it is gone rather than
+  // half-true. What a substituted resolver replaces is `resolve`/`document`/`subgraph` — the
+  // three questions the compiler and the engine ask about a ref. It does NOT replace the
+  // workspace scan: `documents` is built from `readResources(root)` above regardless, and
+  // `registerFunctions`/`registerHooks` below still compile and register every body in
+  // `resources/function` and `resources/hook` into the registries. So a deployment with a
+  // module resolver still runs the operator's own function and hook bodies, which is very
+  // probably what an operator wants and is certainly what the code does. Wiring it the other
+  // way would delete the workspace seam for anyone who supplies a resolver, which is a
+  // behaviour change no Decision covers; the claim is corrected instead of the code.
   const resolver: ResourceResolver = extensions?.resolver ?? {
     // Without a published document, refs resolve to a digest of their own name. That is
     // enough for the compiler's pinning to be structurally correct locally.
