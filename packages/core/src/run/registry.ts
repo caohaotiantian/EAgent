@@ -526,6 +526,34 @@ export interface ModelAdapter {
   readonly provider: string;
   stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }): number;
+  /**
+   * Whether this adapter can price `model` AT ALL — which `priceOf` cannot answer.
+   *
+   * `priceOf` returns a number, and its answer for a model it has no row for is `0`. Zero is
+   * also the honest price of a genuinely free endpoint, so the two are indistinguishable at
+   * the one call site that has to tell them apart: a budget compares against a number, so a
+   * run on an UNPRICED model spends without limit while journaling `costUsd: 0`, and
+   * `policy.budget.costUsd` stops bounding anything. The CLI's only probe for this was
+   * `priceOf(m, {inputTokens: 1e6, outputTokens: 1e6}) === 0`, which cannot see the
+   * difference either — so an operator with a deliberate `{"input": 0, "output": 0}` row had
+   * no way to say so.
+   *
+   * OPTIONAL, and the absence is not a loophole: a caller that gets `undefined` here falls
+   * back to that same probe, which is exactly what it did before. It is optional because
+   * `ModelAdapter` is on the pinned public surface and every external implementation of it
+   * predates this member; making it required would break them to close a hole they may not
+   * have. An adapter that CAN answer should. `RoutingAdapter` in `cli.ts` implements it, and
+   * this line used to add "which is the answer the shipped binary reads" — false, and that
+   * method's own docstring now says so: `pricedFor` is only ever handed the adapters
+   * `readModels` constructs or the extension adapters argv pre-registered, never the
+   * `RoutingAdapter` built afterwards. The answer the binary reads here is an EXTENSION
+   * adapter's, when one implements this; for the two HTTP adapters it reads the operator's own
+   * tables and then the probe. One claim in two files, disagreeing with itself.
+   *
+   * `true` means "I have a rate for this model", including a rate of zero. It is not a claim
+   * that the rate is right.
+   */
+  hasPrice?(model: string): boolean;
   /** Worst-case cost of a request, for the budget reservation (D6.5). */
   estimateOf(req: ModelRequest): number;
   /**
@@ -731,6 +759,18 @@ export class MockModelAdapter implements ModelAdapter {
 
   priceOf(_model: string, usage: { inputTokens: number; outputTokens: number }): number {
     return round6(((usage.inputTokens + usage.outputTokens) / 1_000_000) * this.#pricePerMTok);
+  }
+
+  /**
+   * ALWAYS, for every model id, and that is the whole point of the mock.
+   *
+   * It fabricates a cost from one rate per million tokens with no table to miss, so there is
+   * no model it cannot price. Answering `false` when `pricePerMTok` happens to be 0 would be
+   * wrong in the direction that matters: a caller that fails closed on "unpriced" would refuse
+   * the offline default, which is the configuration `loom run` uses on a fresh machine.
+   */
+  hasPrice(_model: string): boolean {
+    return true;
   }
 
   outputCeilingOf(req: ModelRequest): number {

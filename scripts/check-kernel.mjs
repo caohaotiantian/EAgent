@@ -35,30 +35,96 @@
  *
  *   - a capability landed under `fix:`, `refactor:` or `chore:`. The convention IS the signal;
  *     a mislabelled commit defeats it and no tree-reading check would have caught it either.
- *   - a squash-merge that collapses a `feat` into a subject of some other type. Merge commits
- *     are skipped outright (`--no-merges`): `git show --name-only` reports nothing for them.
+ *   - a squash-merge that collapses a `feat` into a subject of some other type.
  *   - capability added OUTSIDE the list that makes the kernel harder to change later.
  *   - uncommitted work. A dirty kernel file has no commit message yet, so it is reported as a
  *     NOTICE and never as a failure — otherwise nobody could edit the kernel and run the gate.
  *
+ * FOUR THINGS IT USED NOT TO CATCH AND NOW DOES, each measured against this repo before and
+ * after, and each refusing NOTHING that exists in the history today:
+ *
+ *   - `Feat:`, `FEAT:` and `feature:`. `/^feat(\([^)]*\))?!?:/` was case-sensitive, anchored
+ *     with no leading-whitespace tolerance, and did not accept `feature`, so five ordinary
+ *     spellings of the same claim were not classified as capability at all. All 35 feat
+ *     commits in `86b84c9..HEAD` match under both the old rule and the new one, with an empty
+ *     symmetric difference — measured today, not assumed:
+ *     `git log --format='%s' 86b84c9..HEAD | /usr/bin/grep -acE '^feat(\([^)]*\))?!?:'` → 35.
+ *     (This file carried the same measurement as 34 in the other paragraph. One measurement
+ *     stated as two numbers is a measurement nobody made twice.)
+ *   - AN EVIL MERGE. `--no-merges` is gone. It was there on the belief that "`git show
+ *     --name-only` reports nothing for them", which is false: for a merge, `git show` prints
+ *     the COMBINED diff, i.e. exactly the changes the resolution introduced and no others. So
+ *     an ordinary merge still reports nothing and a `feat:`-subjected merge that writes a
+ *     pinned file in its own resolution is now judged. Reproduced at 294e713: the guard
+ *     printed ok over a merge adding `NEW_POSTURE` to `run/policy.ts`.
+ *   - A RENAME. `paths.includes(f.trim())` compared a HISTORICAL commit's file list to the
+ *     CURRENT pin path, so a `refactor:` rename with the pin updated in the same commit
+ *     dropped that file's seams from the ledger AND erased an outstanding unfixed violation
+ *     against it. The path set is now the union of every name `git log --follow` says each
+ *     pinned file has had, so the history is matched under the names it was written with.
+ *   - A ONE-CHARACTER TRAILER. `Kernel-seam: x` satisfied "a sentence of design argument".
+ *     `MIN_SEAM_CHARS` is a floor, not a standard — see it.
+ *   - DROPPING A PATH FROM `files`. See `everPinnedPaths`: the census now covers every path the
+ *     pin has ever named, and a departed path is printed. The build still stops failing for it,
+ *     because that is what remedy 3 means.
+ *
+ * ── The census cannot be reset by `since`, by editing `files`, or by both ───────
+ *
+ * NOR BY RENAMING THE PIN, and nor by the two knobs in sequence — two corrections this
+ * paragraph has needed, one per review round. `everPinnedPaths` named `scripts/kernel.json` in
+ * two hard-coded literals and asked for no `--follow`, so `git mv`ing the pin (with the path
+ * updated in the same commit) erased the pin's own history and every path only an earlier
+ * version named: measured on a clone of HEAD, 11 seams to 10 and the departed-path notice gone.
+ * It is followed from `PIN` by the same mechanism its pinned files are.
+ * `everPinnedPaths` read the pin's own history over `since..HEAD`, so de-pinning a file and
+ * THEN advancing `since` past the de-pin took the ledger to 0 with exit 0 and neither notice
+ * printed. Each knob was closed alone and tested alone, which is exactly why neither test saw
+ * the composition; it is closed by reading the pin's history over all of HEAD.
+ *
+ * It could be all three ways, and that was this file's most-repeated false claim. Two knobs bound
+ * what is JUDGED, which is right — grandfathering and de-pinning are both legitimate, argued
+ * acts, and remedy 3 in the failure text below offers the second one. What neither may do is
+ * erase the number a reader watches, and both did: advancing `since` one commit printed
+ * `0 declared seams` and exit 0, and dropping a path from `files` under a `refactor:` subject
+ * took an outstanding unpaid violation to exit 0 and, on this repo, would take the ledger from
+ * 11 to 1 by removing `run/engine.ts` alone.
+ *
+ * VIOLATIONS are judged in `since..HEAD` against the CURRENT pin. The CENSUS is taken over the
+ * FULL history and over every path the pin has EVER named (`everPinnedPaths`), so it moves for
+ * no reason but a real one. Two notices carry what the split gives up: how many feat commits
+ * touched the kernel before `since` with no seam, and which paths have left the pin — the debt
+ * that was grandfathered in each case, which each knob would otherwise silently grow.
+ *
  * ── The escape hatch, and why it is not a rubber stamp ───────────────────────────
  *
  * `Kernel-seam:` in the commit body. It costs a sentence of design argument, and this script's
- * own output above is the debt census: it prints every seam declared in `since..HEAD` with the
- * reason its file is pinned.
+ * own output above is the debt census: it prints every seam declared over the WHOLE history —
+ * `since` bounds what is judged and nothing about what is counted — with the reason its file is
+ * pinned.
  *
  * READ IT FROM HERE AND NOWHERE ELSE, and this paragraph used to say the opposite. Measured on
  * one range: this guard 11, `git log --grep='^Kernel-seam:'` 12 (it matches prose ABOUT the
  * trailer as readily as the trailer), and git's own `%(trailers:key=Kernel-seam)` a third number
  * again, because it parses only the final paragraph of a body. Three commands, three answers.
  *
- * AND IT IS NOT A NUMBER NOBODY CAN RESET — this paragraph claimed that too. Advancing `since`
- * by one commit prints `0 declared seams` and exits 0; a `refactor:` rename of a pinned file
- * with the pin updated in the same commit drops that file's seams AND erases an outstanding
- * violation against it, because the matcher compares historical commits to the CURRENT path;
- * `Feat:`, `FEAT:` and `feature:` are not classified as features at all; and a one-character
- * trailer value satisfies "a sentence of design argument". The count is a number a REVIEWER
- * watches in the diff, not one this tool defends.
+ * EIGHT RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
+ * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, HISTORY SIMPLIFICATION over
+ * both of those reads, the subject spelling and the one-character trailer, each described above
+ * with its measurement.
+ *
+ * THE LAST THREE ARE THE ONES WORTH REMEMBERING, AND EACH WAS FOUND ON THE COMMIT THAT CLAIMED
+ * TO HAVE CLOSED THE ONE BEFORE. Three review rounds, three resets, each hiding inside the
+ * previous round's fix. That is what "a correction that lands half-done is worse than the
+ * defect" measures out to when the thing being corrected is a NUMBER: every round shrank the
+ * hole and none of them closed the class, because each fix reached for the next git command
+ * without asking what that command's DEFAULTS do. Five were closed and five were tested, each ALONE, and
+ * composing two of them reset the ledger anyway. Then the commit that closed the composition
+ * read the pin's own history through a hard-coded literal with no `--follow`, which is the
+ * rename hole one door further out — so the file that had just written "cannot be reset by
+ * editing `files`" could still be reset by moving the file that holds `files`. Ask of a closed
+ * reset what it does NEXT TO the other closed ones, and ask of every path this file names
+ * whether the path itself can move. What is left is the reset no tool can close, and it is the
+ * next paragraph.
  *
  * THE LIMIT THAT FIRES MOST OFTEN IS `fix:`, which may touch the kernel freely — so a capability
  * landing under it is asked for no seam at all. It happened on the phase-2-4 merge: five pinned
@@ -89,7 +155,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = fileURLToPath(new URL("../", import.meta.url));
@@ -114,8 +180,13 @@ function git(...args) {
  * ate that space on the first line only, and the notice printed `ackages/core/...`.
  */
 function gitRaw(...args) {
-  const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
-  return { ok: r.status === 0, out: r.stdout ?? "", err: (r.stderr ?? "").trim() };
+  // `maxBuffer` EXPLICITLY, because the default is 1 MB and the full-history census reads every
+  // commit message in the repository — 1,297,843 bytes at 294e713, i.e. already past it. The
+  // failure is `ENOBUFS` with an EMPTY stderr and a null status, so the guard refused with a
+  // blank reason: fail-closed, but unreadable. `r.error` is reported for the same reason.
+  const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  const err = (r.stderr ?? "").trim() || (r.error ? String(r.error.message ?? r.error) : "");
+  return { ok: r.status === 0, out: r.stdout ?? "", err };
 }
 
 // ── the pin ──────────────────────────────────────────────────────────────────────
@@ -166,7 +237,7 @@ if (typeof pin.since !== "string" || pin.since.trim().length === 0) {
 
 /**
  * An OBJECT NAME, never a ref. Reproduced while writing this guard: with `"since": "HEAD"` the
- * range `HEAD..HEAD` is empty, so the guard printed `kernel guard ok: … 0 commits since fb813ec`
+ * range `HEAD..HEAD` is empty, so the guard printed `kernel guard ok: … 0 commits judged since fb813ec`
  * over a `feat` commit that had just rewritten a pinned file. Any moving ref — `HEAD`, `@`, a
  * branch, a tag someone re-points — is the same vacuum, and it is the cheapest way to switch
  * this guard off without deleting it.
@@ -200,40 +271,246 @@ if (!since.ok) {
 
 const RS = "\x1e";
 const US = "\x1f";
-const log = git(
-  "log",
-  "--no-merges",
-  "--format=%H%x1f%s%x1f%b%x1e",
-  `${since.out}..HEAD`,
-);
-if (!log.ok) refuse(`could not read \`${pin.since}..HEAD\`: ${log.err}`);
 
-const commits = log.out
-  .split(RS)
-  .map((c) => c.trim())
-  .filter(Boolean)
-  .map((c) => {
-    const [sha, subject, body = ""] = c.split(US);
-    return { sha, subject, body };
-  });
-
-/** The repo's convention is Conventional Commits; only `feat` claims to add capability. */
-const FEAT = /^feat(\([^)]*\))?!?:/;
-const SEAM = /^Kernel-seam:[ \t]*(\S.*)$/m;
-
-const violations = [];
-const declared = [];
-
-for (const c of commits) {
-  if (!FEAT.test(c.subject)) continue;
-  const shown = git("show", "--name-only", "--format=", c.sha);
-  if (!shown.ok) refuse(`could not read the file list of ${c.sha}: ${shown.err}`);
-  const touched = shown.out.split("\n").filter((f) => paths.includes(f.trim()));
-  if (touched.length === 0) continue;
-  const seam = SEAM.exec(c.body);
-  if (seam) declared.push({ ...c, touched, seam: seam[1].trim() });
-  else violations.push({ ...c, touched });
+/**
+ * EVERY NAME EACH PINNED FILE HAS EVER HAD, not the name it has today.
+ *
+ * The matcher compares a historical commit's file list to this set, and comparing it to the
+ * CURRENT path was the laundering hole: `git mv run/policy.ts run/authz.ts` with `kernel.json`
+ * updated in the same `refactor:` commit made every earlier commit against `run/policy.ts`
+ * invisible — dropping declared seams from the ledger and, worse, erasing an outstanding
+ * unfixed violation. Reproduced at 294e713 both ways.
+ *
+ * `--follow` is per-path by construction (git refuses it on more than one pathspec), which is
+ * why this is a loop rather than one call. It is cheap: ten calls, 0.14 s over 681 commits.
+ * A rename git cannot detect (a delete and an unrelated add) still escapes, and no tool
+ * reading git can do better — that one belongs to the reviewer with the rest of them.
+ */
+function historicalNames(path) {
+  // `--full-history` BESIDE `--follow`, because a pathspec makes git SIMPLIFY by default: a
+  // commit whose change to this path did not survive into the first-parent line is dropped, so
+  // a rename made on a side branch and resolved away is invisible. git accepts the two together
+  // (measured), and the whole point of this set is that it is not simplified.
+  const r = git("log", "--follow", "--full-history", "--name-only", "--format=", "HEAD", "--", path);
+  if (!r.ok) refuse(`could not follow \`${path}\` through history: ${r.err}`);
+  const names = new Set([path]);
+  for (const line of r.out.split("\n")) {
+    const f = line.trim();
+    if (f.length > 0) names.add(f);
+  }
+  return names;
 }
+
+const watched = new Set();
+for (const p of paths) for (const name of historicalNames(p)) watched.add(name);
+
+/**
+ * EVERY PATH THE PIN HAS EVER NAMED, recovered from `kernel.json`'s own history.
+ *
+ * The fifth reset, and it is the rename hole one door over. `historicalNames` follows a file
+ * that MOVED; nothing followed a file that was simply DROPPED from `files`. Reproduced on a
+ * fixture: a `refactor(kernel): src/other.ts is not kernel after all` commit took an
+ * outstanding unpaid violation to `exit=0`, and a second commit re-pinning onto a new file took
+ * the ledger from 1 declared seam to 0. On this repo, dropping `run/engine.ts` would take the
+ * published count from 11 to 1.
+ *
+ * THE SPLIT IS THE SAME ONE `since` GETS, and for the same reason. De-pinning is a legitimate,
+ * argued act — the guard's own failure text offers it as remedy 3 — so VIOLATIONS are judged
+ * against the CURRENT pin and a file argued out of the kernel stops failing the build. What it
+ * must not do is erase the number a reader watches, so the CENSUS is taken over every path the
+ * pin has ever held. A seam declared against a file is a fact about the kernel's history and
+ * does not stop being one when the file leaves the list.
+ *
+ * WHAT IS LEFT, named rather than claimed closed: an UNPAID violation against a de-pinned file
+ * stops failing the build, by construction, because that is what remedy 3 means. The report
+ * says so when the two path sets differ, so the reviewer this file keeps deferring to is
+ * looking at the number rather than guessing at it.
+ */
+function everPinnedPaths() {
+  const out = new Set(paths);
+  // ALL OF HEAD, NOT `since..HEAD`, AND THAT WAS THE SIXTH RESET — the two knobs composed.
+  // Scoping this read to the judged range meant a de-pin that happened BEFORE `since` was
+  // invisible to the census the de-pin rule exists to protect, so the two documented-legitimate
+  // acts, taken in order, erased the number a reader watches with NEITHER notice printed:
+  //
+  //     1. `refactor(kernel): src/engine.ts is not kernel after all`  → ledger 1, notice printed
+  //     2. `chore(kernel): grandfather everything up to the de-pin`   → ledger 0, exit 0, silent
+  //
+  // Measured on a fixture and reproduced independently by two readers. Each knob alone was
+  // closed and each was tested alone, which is exactly why neither test saw it. `since` bounds
+  // what is JUDGED and must bound nothing about what is COUNTED — including which paths were
+  // ever counted. The census reads the pin's whole history for the same reason it reads the
+  // whole commit history.
+  // AND UNDER EVERY NAME THE PIN ITSELF HAS EVER HAD, which the first version of this did not
+  // do — it named `scripts/kernel.json` in two hard-coded literals and asked for no `--follow`.
+  // That was the rename hole a THIRD door over: `historicalNames` follows a pinned FILE that
+  // moved, `everPinnedPaths` follows a pinned PATH that was dropped, and nothing followed THE
+  // PIN. Driven on a clone of HEAD, two `refactor:` commits and exit 0 throughout:
+  //
+  //     1. refactor(kernel): engine.ts is not kernel after all       → 11 seams, notice printed
+  //     2. git mv scripts/kernel.json scripts/pins/kernel.json,
+  //        with PIN and these literals updated in the same commit    → 10 seams, notice GONE,
+  //                                                                    grandfathered 36 → 22
+  //
+  // …on the very commit whose subject was "the kernel census had a sixth reset". A correction
+  // that lands half-done is worse than the defect, and this file has now paid that twice. The
+  // pin is followed by the same mechanism its pinned files are, from `PIN`'s own current path.
+  const pinRel = relative(root, PIN);
+  const pinNames = [...historicalNames(pinRel)];
+  // `--full-history`, AND THAT WAS THE EIGHTH RESET — in the commit that closed the seventh.
+  // `commitsIn("HEAD")` takes NO pathspec, so it really is the whole history; this read takes
+  // one, and a pathspec turns on git's default history simplification. So a merge whose
+  // resolution discarded a side branch's edit to the pin dropped that version of the pin, and
+  // with it every path only that version named. Driven on a fixture with `-s ours` (an ordinary
+  // conflict resolved in favour of the first parent is the same shape):
+  //
+  //     git log                HEAD -- scripts/kernel.json  → 2 commits, the side pin invisible
+  //     git log --full-history HEAD -- scripts/kernel.json  → 4, the side pin recovered
+  //
+  // …and the guard printed `0 declared seams`, exit 0, no departed-path notice, where the
+  // identical commits on a LINEAR history printed 1 seam and the notice. The docstring above
+  // said "the census reads the pin's whole history for the same reason it reads the whole
+  // commit history" while the two reads were differently scoped. Now they are not.
+  const log = git("log", "--full-history", "--format=%H", "HEAD", "--", ...pinNames);
+  // AND IT REFUSES RATHER THAN DEGRADING. `return out` here answered "the pin has only ever
+  // named what it names today", which IS the de-pin reset — the census failing open into the
+  // exact hole it exists to close. Every other git failure in this file refuses; so does this.
+  if (!log.ok) refuse(`could not read the pin's own history: ${log.err}`);
+  for (const sha of log.out.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    // THE PIN'S NAME AS OF THAT COMMIT, not today's: after a rename, `${sha}:${today}` does not
+    // exist for any commit before it. Each candidate is tried and the first that reads wins.
+    let blob;
+    for (const name of pinNames) {
+      const r = git("show", `${sha}:${name}`);
+      if (r.ok) {
+        blob = r;
+        break;
+      }
+    }
+    if (blob === undefined) continue;
+    try {
+      for (const e of JSON.parse(blob.out).files ?? []) {
+        if (typeof e?.path === "string" && e.path.length > 0) out.add(e.path);
+      }
+    } catch {
+      // A malformed pin in HISTORY is not this run's problem — the CURRENT one is validated
+      // above, and refusing here would make an old bad commit unfixable forever.
+    }
+  }
+  return out;
+}
+
+const everWatched = new Set();
+for (const p of everPinnedPaths()) for (const name of historicalNames(p)) everWatched.add(name);
+
+/**
+ * MERGES ARE READ, NOT SKIPPED. `--no-merges` was here on a false premise this file stated
+ * outright — "`git show --name-only` reports nothing for them". `git show` on a merge prints
+ * the COMBINED diff: empty for an ordinary merge, and exactly the resolution's own changes for
+ * an evil one. So including merges costs no false positives and closes the hole where a
+ * `feat:`-subjected merge rewrites a pinned file inside its conflict resolution.
+ */
+function commitsIn(range) {
+  const log = git("log", "--format=%H%x1f%s%x1f%b%x1e", range);
+  if (!log.ok) refuse(`could not read \`${range}\`: ${log.err}`);
+  return log.out
+    .split(RS)
+    .map((c) => c.trim())
+    .filter(Boolean)
+    .map((c) => {
+      const [sha, subject, body = ""] = c.split(US);
+      return { sha, subject, body };
+    });
+}
+
+/**
+ * The repo's convention is Conventional Commits; only `feat` claims to add capability.
+ *
+ * CASE-INSENSITIVE, LEADING SPACE TOLERATED, AND `feature` ACCEPTED. The strict form
+ * (`/^feat(\([^)]*\))?!?:/`) read five ordinary spellings of the same claim as some other
+ * type entirely. Widening it reclassifies nothing in this repo's history — all 35 feat commits
+ * in `86b84c9..HEAD` match under both — so the only commits it can newly judge are ones nobody
+ * has written yet.
+ */
+const FEAT = /^[ \t]*feat(?:ure)?(\([^)]*\))?!?:/i;
+const SEAM = /^Kernel-seam:[ \t]*(\S.*)$/m;
+/**
+ * A FLOOR, NOT A STANDARD. The docstring's "it costs a sentence of design argument" was
+ * satisfied by `Kernel-seam: x`, and a guard whose stated price is one character is a guard
+ * whose ledger a reader cannot read. 40 characters and a space is roughly the shortest thing
+ * that can be a sentence; the eleven seams declared in this repo run 71 characters and up, so
+ * this refuses none of them. Whether a seam argument is GOOD is a reviewer's judgement and
+ * always will be — this only stops the trailer from being free.
+ */
+const MIN_SEAM_CHARS = 40;
+
+/** Which pinned files (under any name they have had) a commit touched. */
+function kernelFilesTouched(sha, set) {
+  const shown = git("show", "--name-only", "--format=", sha);
+  if (!shown.ok) refuse(`could not read the file list of ${sha}: ${shown.err}`);
+  return shown.out.split("\n").filter((f) => set.has(f.trim()));
+}
+
+function judge(commits, set = watched) {
+  const violations = [];
+  const declared = [];
+  for (const c of commits) {
+    if (!FEAT.test(c.subject)) continue;
+    const touched = kernelFilesTouched(c.sha, set);
+    if (touched.length === 0) continue;
+    const seam = SEAM.exec(c.body);
+    const value = seam ? seam[1].trim() : "";
+    if (seam && (value.length < MIN_SEAM_CHARS || !/\s/.test(value))) {
+      violations.push({ ...c, touched, thin: value });
+    } else if (seam) {
+      declared.push({ ...c, touched, seam: value });
+    } else {
+      violations.push({ ...c, touched });
+    }
+  }
+  return { violations, declared };
+}
+
+const commits = commitsIn(`${since.out}..HEAD`);
+const { violations, declared } = judge(commits);
+
+/**
+ * THE CENSUS IS TAKEN OVER ALL OF HEAD, so `since` cannot zero it.
+ *
+ * `since` grandfathers what is JUDGED — that is what it is for, and advancing it after a real
+ * review is a legitimate act. What it must not do is erase the number a reader watches, and it
+ * did: one line of `kernel.json` took the ledger from 11 to 0 with every test still green.
+ * Counting over the whole history costs one more pass and makes the reset visible instead.
+ */
+const all = judge(commitsIn("HEAD"), everWatched);
+/**
+ * Feat commits that touched the kernel BEFORE `since` and declared nothing: the grandfathered
+ * debt, judged over exactly the commits `since` excludes.
+ *
+ * IT USED TO BE `all.violations.length - violations.length`, WHICH IS TWO SUBTRACTIONS AT ONCE.
+ * `all` is judged over `everWatched` and `violations` over `watched`, so a violation INSIDE
+ * `since..HEAD` against a DE-PINNED path fell into the difference and was reported as "touched
+ * the kernel before `since`" — untrue of that commit, and it files de-pin debt under the
+ * `since` heading when the de-pin notice below is what should carry it. Measured: a `feat`
+ * commit two commits AFTER `since`, de-pinned, printed `1 feat commit(s) touched the kernel
+ * before `since``.
+ *
+ * Judging `since` itself — the commits reachable FROM it — answers the question the notice
+ * asks, with no arithmetic between two differently-scoped runs.
+ */
+const grandfathered = judge(commitsIn(since.out), everWatched).violations.length;
+/**
+ * SEAMS THAT WERE DECLARED AND ARE TOO THIN TO COUNT, said out loud rather than dropped.
+ *
+ * A `Kernel-seam:` trailer under `MIN_SEAM_CHARS` becomes a VIOLATION, and a violation outside
+ * the judged range is never printed and never counted — so introducing the floor silently
+ * DELETED any pre-`since` seam that failed it, from a ledger whose whole job is not to lose
+ * numbers. None exists in this repo (the eleven run 71 characters and up), which is exactly why
+ * it would have gone unnoticed: the floor's own arrival is a census-shrinking event nobody
+ * would have seen. Counted separately because the count means something different — these
+ * commits DID declare, and what is missing is the argument.
+ */
+const thin = all.violations.filter((v) => v.thin !== undefined).length;
 
 // ── the working tree: a notice, never a failure ──────────────────────────────────
 
@@ -253,6 +530,12 @@ if (violations.length > 0) {
   for (const v of violations) {
     console.error(`  ${v.sha.slice(0, 7)}  ${v.subject}`);
     for (const f of v.touched) console.error(`            ${f}`);
+    if (v.thin !== undefined) {
+      console.error(
+        `            its Kernel-seam trailer is ${String(v.thin.length)} character(s), ` +
+          `"${v.thin}" — the floor is ${String(MIN_SEAM_CHARS)} and a space`,
+      );
+    }
   }
   console.error("");
   console.error("CLAUDE.md property 1: if a feature must change the kernel, the kernel is missing");
@@ -275,12 +558,38 @@ if (violations.length > 0) {
 
 console.log(
   `kernel guard ok: ${paths.length} files pinned, ` +
-    `${commits.length} commits since ${since.out.slice(0, 7)}, ` +
-    `${declared.length} declared seam${declared.length === 1 ? "" : "s"}`,
+    `${commits.length} commits judged since ${since.out.slice(0, 7)}, ` +
+    `${all.declared.length} declared seam${all.declared.length === 1 ? "" : "s"} over the full history` +
+    (declared.length === all.declared.length ? "" : ` (${declared.length} of them judged, the rest before \`since\`)`),
 );
-for (const d of declared) {
+// THE FULL-HISTORY LEDGER, not the judged range's. `since` decides what is enforced and must
+// not decide what is visible — see the census note above.
+for (const d of all.declared) {
   console.log(`  seam  ${d.sha.slice(0, 7)}  ${d.subject}`);
   console.log(`        ${d.seam}`);
+}
+// THE PATHS THAT HAVE LEFT THE PIN, said out loud. De-pinning is remedy 3 and is allowed; what
+// is not allowed is for it to be invisible. Their seams stay in the census above.
+const departed = [...everWatched].filter((f) => !watched.has(f)).sort();
+if (departed.length > 0) {
+  console.log(
+    `  notice: ${String(departed.length)} path(s) were pinned as kernel earlier in this history and are not now. ` +
+      "Their declared seams are still counted; an UNPAID violation against one no longer fails the build:",
+  );
+  for (const f of departed) console.log(`        ${f}`);
+}
+if (thin > 0) {
+  console.log(
+    `  notice: ${String(thin)} commit(s) declared a Kernel-seam trailer shorter than the ` +
+      `${String(MIN_SEAM_CHARS)}-character floor, so they are counted as undeclared rather than as seams. ` +
+      "The floor arriving must not quietly shrink the ledger.",
+  );
+}
+if (grandfathered > 0) {
+  console.log(
+    `  notice: ${String(grandfathered)} feat commit(s) touched the kernel before \`since\` (${since.out.slice(0, 7)}) ` +
+      "and declared no seam. Grandfathered, not paid — advancing `since` grows this number.",
+  );
 }
 if (dirtyFiles.length > 0) {
   console.log(

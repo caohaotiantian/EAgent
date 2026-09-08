@@ -27,8 +27,8 @@ import type { GraphSpec, RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
-import type { RunSummary } from "./journal/store.ts";
-import { builtinTools, fsRestore } from "./builtin/tools.ts";
+import type { RunSummary, StateStore } from "./journal/store.ts";
+import { builtinTools, fsRestore, type BuiltinOptions } from "./builtin/tools.ts";
 import { Engine } from "./run/engine.ts";
 import type { BudgetLimits } from "./run/policy.ts";
 import {
@@ -52,6 +52,7 @@ import {
 import { AnthropicAdapter } from "./providers/anthropic.ts";
 import { OpenAIAdapter } from "./providers/openai.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS, type HttpOptions } from "./providers/http.ts";
+import { resolvePrice } from "./providers/usage.ts";
 import { replayRun } from "./run/replay.ts";
 import {
   BearerTokenIdentity,
@@ -1079,7 +1080,16 @@ function planeWorkerId(): string {
 interface Workspace {
   readonly root: string;
   readonly dataDir: string;
-  readonly store: SqliteStateStore;
+  /**
+   * `StateStore` and not `SqliteStateStore`, since `--extension-module` may substitute one.
+   *
+   * Every verb in this file already used only the interface — `append`, `head`, `read`,
+   * `listRuns`, `close` — so this narrows nothing that was being used and stops the field's
+   * type from claiming a backend the workspace need not have. `openWorkspace` still builds a
+   * SQLite one when nothing supplies another, which is what makes `loom run` work in an empty
+   * directory.
+   */
+  readonly store: StateStore;
   readonly engine: Engine;
   readonly bus: InProcessEventBus;
   /**
@@ -1146,6 +1156,68 @@ interface Workspace {
  * journal, registers the built-in tools against a jail, and returns a working engine.
  * No service, no migration step, no configuration file required.
  */
+/**
+ * The filesystem/network/exec boundary this deployment runs under, derived from argv alone.
+ *
+ * ONE DERIVATION, TWO CALLERS, and the second one is the whole reason it is a function.
+ * `openWorkspace` builds the built-ins from this; `main` needs the SAME object BEFORE
+ * `openWorkspace` runs, because `loadExtensionModules` hands it to the modules — and an
+ * extension tool given a jail assembled a second time is an extension tool guarding against a
+ * second boundary. It is pure over `args`, so calling it twice cannot produce two answers.
+ *
+ * THE JAIL ROOT CONTAINS THE JOURNAL, so containment alone is not the boundary. `root` is the
+ * workspace and `dataDir` defaults to `<root>/.loom`, so `journal.db` — the only authoritative
+ * durable state there is (invariant 2) — sits inside the directory a model may write to, with
+ * `fs:write` granted and `reversible_write` meaning no gate. Measured before the deny-list
+ * existed: a `tool` node with `fs.write {path: ".loom/journal.db"}` reported
+ * `status: "succeeded"` having truncated the database, and `fs.read` of the same path hands
+ * back everything ever journaled — including secrets that arrived as run inputs — past every
+ * redaction the event path applies.
+ *
+ * THE FIX IS THE DENY-LIST, NOT A DIFFERENT DEFAULT LOCATION, and the reason is `--data-dir`:
+ * an operator may put the journal anywhere, including deliberately inside the workspace, so a
+ * rule that depends on where the default happens to fall protects only the default. Deriving
+ * the denial from the data dir that was ACTUALLY chosen covers every spelling, and it keeps
+ * `.loom` beside the graphs it belongs to — one directory to copy, archive or delete, which is
+ * the whole ergonomic story of "boot from an empty directory".
+ *
+ * `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its files
+ * become the SYSTEM PROMPT of the next run, so a workspace that let a run write there let a run
+ * author its own instructions — durable prompt injection, reproduced end to end: a `tool` node
+ * writing `resources/prompt/p.md` succeeded, and the next boot served "PWNED: ignore all prior
+ * instructions." as that node's system message. The symlink refusal in `readResources` was the
+ * half of this that got noticed; it stops a run READING `/etc/passwd` through a planted link and
+ * does nothing about a run WRITING the operator's prompt.
+ *
+ * AND `graphs/` IS THE SAME RULE ONE STEP OVER. A run holds `fs:write` unconditionally, and
+ * `discoverGraphs` reads that directory to build the index a `serve` process answers gates from.
+ * Reproduced: a run writes `graphs/zz-planted.json` whose `metadata.name` collides with the
+ * operator's, the real graph is EVICTED from the index, a gate on a run using it cannot be
+ * answered, and `GateSweeper` needs no attachment and expires it into `run.failed`. A run could
+ * strip oversight from other runs. "What a run may not do is decide what the next run is told"
+ * and "…what the next run IS" are one sentence.
+ *
+ * FROZEN, because it is handed to code this binary did not write. Freezing changes nothing
+ * about the built-ins — `openWorkspace` calls this function again and reads nothing back off a
+ * module — and it means a module that tries to widen its own copy gets an error rather than a
+ * false belief. `--allow-exec` and `--exec-env` default to ABSENT, and absent means the tool is
+ * not registered at all: a run that never names a program cannot run one.
+ */
+export function jailFor(args: Args): BuiltinOptions {
+  const root = resolve(pathFlag(args, "workspace") ?? process.cwd());
+  const dataDir = resolve(pathFlag(args, "data-dir") ?? join(root, ".loom"));
+  const egressHosts = listFlag(args, "egress", "a hostname", TOOL_ENABLING);
+  const execPrograms = listFlag(args, "allow-exec", "a program name", TOOL_ENABLING);
+  const execEnvNames = listFlag(args, "exec-env", "an environment variable name", TOOL_ENABLING);
+  return Object.freeze({
+    root,
+    deny: Object.freeze([dataDir, join(root, "resources"), join(root, "graphs")]),
+    ...(egressHosts === undefined ? {} : { egressAllowlist: Object.freeze([...egressHosts]) }),
+    ...(execPrograms === undefined ? {} : { execAllowlist: Object.freeze([...execPrograms]) }),
+    ...(execEnvNames === undefined ? {} : { execEnvAllow: Object.freeze([...execEnvNames]) }),
+  });
+}
+
 /**
  * `fetchImpl` exists for the same reason `env` does, one step further along.
  *
@@ -1236,7 +1308,12 @@ export function openWorkspace(
   // here. The deny-list was right and the directory's absence made it advisory.
   mkdirSync(join(root, "resources"), { recursive: true });
 
-  const store = new SqliteStateStore({ path: join(dataDir, "journal.db") });
+  // SUBSTITUTABLE, AND THIS IS THE SHARPEST ONE ON THE LIST. `EngineOptions.store` has always
+  // taken any `StateStore` and this function always built a SQLite one, so an embedder chose
+  // the journal and argv could not. A module supplying one is choosing where — or whether —
+  // this deployment's only authoritative state is durable; the boot banner names it for that
+  // reason, and nothing else about the workspace changes.
+  const store = extensions?.store ?? new SqliteStateStore({ path: join(dataDir, "journal.db") });
   const bus = new InProcessEventBus({ store });
   // BESIDE `journal.db`, INSIDE THE DATA DIR, and both halves of that are the argument.
   //
@@ -1251,68 +1328,40 @@ export function openWorkspace(
   // journal sits in a directory a `fs.write` tool could otherwise reach; a payload store outside
   // it would have needed its own entry, and the entry somebody forgets is the one this codebase
   // has paid for twice.
-  const payloads = filePayloads(join(dataDir, "payloads"));
+  const payloads = extensions?.payloads ?? filePayloads(join(dataDir, "payloads"));
 
   // THE EXTENSION MODULES' REGISTRY, when there is one, rather than a second one beside it.
   // A tool registered into a registry this function does not use is a tool nothing can call,
   // and the grant list below is derived from THIS object — so an extension tool has to be in
-  // it before `capabilitiesOf` runs or the capability it needs is one nobody holds. The
-  // built-ins are registered on top, so a name collision leaves the BUILT-IN live: an
-  // extension cannot quietly replace `fs.write`.
+  // it before `capabilitiesOf` runs or the capability it needs is one nobody holds.
   const tools = extensions?.tools ?? new ToolRegistry();
-  // THE JAIL ROOT CONTAINS THE JOURNAL, so containment alone is not the boundary.
+  // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`.
+  const jail = jailFor(args);
+  const execPrograms = jail.execAllowlist;
+  // A COLLISION WITH A BUILT-IN REFUSES TO BOOT, and this line used to say the opposite was
+  // fine: "the built-ins are registered on top, so a name collision leaves the BUILT-IN live:
+  // an extension cannot quietly replace `fs.write`." The first clause was true and the
+  // conclusion was the wrong one. `ToolRegistry.register` SHADOWS, so an extension tool named
+  // `fs.read` was registered, held its capability, appeared in the grant list — and was never
+  // dispatched, because the built-in went on top of it. Nothing anywhere said so. That is the
+  // same two-things-claiming-one-slot shape an adapter name and a channel name already refuse
+  // to boot on, and tools were the one registry where it was resolved by load order instead.
   //
-  // `root` is the workspace and `dataDir` defaults to `<root>/.loom`, so `journal.db` —
-  // the only authoritative durable state there is (invariant 2) — sits inside the
-  // directory a model may write to, with `fs:write` granted below and
-  // `reversible_write` meaning no gate. Measured before this line existed: a `tool` node
-  // with `fs.write {path: ".loom/journal.db"}` reported `status: "succeeded"` having
-  // truncated the database, and `fs.read` of the same path hands back everything ever
-  // journaled — including secrets that arrived as run inputs — past every redaction the
-  // event path applies.
-  //
-  // THE FIX IS THE DENY-LIST, NOT A DIFFERENT DEFAULT LOCATION, and the reason is
-  // `--data-dir`: an operator may put the journal anywhere, including deliberately
-  // inside the workspace, so a rule that depends on where the default happens to fall
-  // protects only the default. Deriving the denial from the data dir that was ACTUALLY
-  // chosen covers every spelling, and it keeps `.loom` beside the graphs it belongs to —
-  // one directory to copy, archive or delete, which is the whole ergonomic story of
-  // "boot from an empty directory". Moving the journal out as well would buy no safety
-  // this line does not already give and would hide the run's own history from the person
-  // looking for it.
-  // READ BEFORE THE JAIL IS BUILT, so a malformed flag refuses before any tool is registered.
-  const egressHosts = listFlag(args, "egress", "a hostname", TOOL_ENABLING);
-  const execPrograms = listFlag(args, "allow-exec", "a program name", TOOL_ENABLING);
-  const execEnvNames = listFlag(args, "exec-env", "an environment variable name", TOOL_ENABLING);
-  const jail = {
-    root,
-    // `resources/` JOINS THE DATA DIR, and for a sharper reason than the journal has. Its
-    // files become the SYSTEM PROMPT of the next run, so a workspace that let a run write
-    // there let a run author its own instructions — durable prompt injection, reproduced end
-    // to end: a `tool` node writing `resources/prompt/p.md` succeeded, and the next boot
-    // served "PWNED: ignore all prior instructions." as that node's system message.
-    //
-    // The symlink refusal in `readResources` was the half of this that got noticed. It stops
-    // a run READING `/etc/passwd` through a planted link; it does nothing about a run WRITING
-    // the operator's prompt, which is the half that matters more. Both halves are the same
-    // rule — what a run may not do is decide what the next run is told.
-    //
-    // AND `graphs/` IS THE SAME RULE ONE STEP OVER, which this list did not cover. A run holds
-    // `fs:write` unconditionally (see the grant below), and `discoverGraphs` reads this directory
-    // to build the index a `serve` process answers gates from. Reproduced: a run writes
-    // `graphs/zz-planted.json` whose `metadata.name` collides with the operator's, and the real
-    // graph is EVICTED from the index — after which a gate on a run using it cannot be answered,
-    // while `GateSweeper` needs no attachment and expires it into `run.failed`. A run could strip
-    // oversight from other runs. "What a run may not do is decide what the next run is told" and
-    // "…what the next run IS" are one sentence.
-    deny: [dataDir, join(root, "resources"), join(root, "graphs")],
-    ...(egressHosts === undefined ? {} : { egressAllowlist: egressHosts }),
-    // Both default to absent, and absent means the tool is not registered at all. A run
-    // that never names a program cannot run one — see `procExec`, where the allowlist is
-    // the entire boundary rather than one check among several.
-    ...(execPrograms === undefined ? {} : { execAllowlist: execPrograms }),
-    ...(execEnvNames === undefined ? {} : { execEnvAllow: execEnvNames }),
-  };
+  // REFUSING RATHER THAN LETTING THE EXTENSION WIN, because the extension winning is the worse
+  // half: `fs.write` carries the deny-list that keeps a run out of its own journal, and an
+  // outsider's replacement would be a run's own writes deciding what the next run is told. The
+  // operator picks a different name; a guard that cannot decide fails closed.
+  const shipped = new Set([...builtinTools(jail).map((t) => t.name), fsRestore(jail).name]);
+  for (const name of extensions?.toolNames ?? []) {
+    if (!shipped.has(name)) continue;
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--extension-module ${extensions?.toolOwners.get(name) ?? "(unknown module)"} registers the tool name "${name}", ` +
+        `which is a built-in of this binary. The built-ins are registered after the modules and ToolRegistry shadows on ` +
+        `collision, so the extension's definition would be registered, would hold its capability, and would never be ` +
+        `dispatched. Rename it — the built-in names are: ${[...shipped].sort().join(", ")}.`,
+    );
+  }
   for (const t of builtinTools(jail)) tools.register(t);
   tools.register(fsRestore(jail));
 
@@ -1362,8 +1411,92 @@ export function openWorkspace(
   // LAYERED, not substituted: a ref with no file still pins exactly as it did, so a graph with
   // no `resources/` directory compiles unchanged and `humanGate.ref`/`function` refs — which
   // are pins by design and have no documents — are untouched.
-  const documents = new ResourceStore({ seed: readResources(root) });
-  const resolver: ResourceResolver = {
+  // THE WORKSPACE'S FILES, PLUS A PIN FOR EVERY REF AN EXTENSION MODULE SUPPLIED A BODY FOR.
+  //
+  // `rule015Resources` asks the resolver whether a `function`/`hook` ref resolves and refuses
+  // when it does not, because those two kinds are deliberately outside `NAME_ONLY_KINDS`: a ref
+  // with no body is a graph that compiles and cannot run. A module-registered body breaks that
+  // equivalence — the body exists, the file does not — so the ref is seeded here with its own
+  // NAME as content, which is exactly the "digest of its own name" pin the resolver's fallback
+  // documents below and is machine-independent (a module PATH would not be).
+  //
+  // A WORKSPACE FILE OF THE SAME NAME STILL WINS, because `#seed` points `@stable` at whichever
+  // landed last and the module's entries go FIRST. That is the same direction the registries
+  // take one paragraph down, for the same reason: between a body an operator can open and one a
+  // module supplied, the file is the one they can read.
+  //
+  // ONLY A WELL-FORMED `function/<name>@<ver>` OR `hook/<name>@<ver>` IS SEEDED, and the check
+  // is here rather than in the loader because a `FunctionRegistry` key is an arbitrary string —
+  // an embedder may use any, and `register` does not care. Splitting an unshaped one on `/`
+  // produces a `kind` of whatever precedes the first slash (`"stam"` for `"stamp"`, since
+  // `indexOf` answers -1 and `slice(0, -1)` drops the last character), which `ResourceStore`
+  // accepts and no `list({kind})` ever finds again: a pin nothing reads, which is the shape this
+  // file refuses everywhere else. An unshaped ref simply is not seeded — its body is still
+  // registered, and a graph naming it still fails GRAPH015_RESOURCE_NOT_FOUND, which is honest.
+  const published = readResources(root);
+  // `@stable` AND NOTHING ELSE, because that is the only version a seed can produce and the
+  // only one the two loaders below ever ask for. `ResourceStore.#seed` creates one version and
+  // points `@stable` at it; `registerFunctions`/`registerHooks` compute `${kind}/${name}@stable`
+  // — so a ref registered as `function/stamp@v1` was seeded under a name whose only selector is
+  // `@stable`, and `moduleOnly`, which held the RAW ref, did not contain the `@stable` spelling
+  // the loaders then looked up. The loader was handed the pin, tried to compile the ref STRING
+  // as a function body, and printed a compile failure for a body that is registered and fine:
+  //
+  //     $ loom run … --extension-module fn.mjs      # fn.mjs registers "function/stamp@v1"
+  //     ! skipping function/stamp@stable in …/resources/function: function resource
+  //       "function/stamp@stable" did not evaluate: Unexpected token '/' …
+  //
+  // …which is the exact outcome `moduleOnly` exists to prevent, and the follow-on refusal then
+  // tells the operator the file IS there and did not compile. The identical fixture spelled
+  // `@stable` prints nothing.
+  //
+  // A REF AT ANOTHER VERSION IS SIMPLY NOT SEEDED, which is the rule an unshaped ref already
+  // gets one line down and for the same reason: its body stays registered, and a graph naming
+  // it fails GRAPH015_RESOURCE_NOT_FOUND exactly as it would with no module at all. That is
+  // honest, where a pin at a version nothing can select is a pin nothing reads.
+  const SEEDABLE = /^(function|hook)\/([^/@]+)@stable$/;
+  const moduleRefs = [...(extensions?.functionRefs ?? []), ...(extensions?.hookRefs ?? [])]
+    .map((ref) => ({ ref, m: SEEDABLE.exec(ref) }))
+    .filter((r): r is { ref: string; m: RegExpExecArray } => r.m !== null)
+    .map((r) => ({ ref: r.ref, kind: r.m[1] as ResourceKind, name: r.m[2]! }))
+    .filter((r) => !published.some((p) => p.kind === r.kind && p.name === r.name));
+  const documents = new ResourceStore({ seed: [...moduleRefs.map((r) => ({ kind: r.kind, name: r.name, content: r.ref })), ...published] });
+  /** The refs whose only body is a module's, so the two loaders below do not try to compile a pin. */
+  const moduleOnly = new Set(moduleRefs.map((r) => r.ref));
+  // SUBSTITUTED, NOT LAYERED, when a module supplies one. `EngineOptions.resolver` takes one
+  // object and the compile path reads `Workspace.resolver`, so layering would mean inventing a
+  // resolution order — workspace first? module first? per method? — that nobody wrote down and
+  // no journal records. A module that supplies a resolver owns REF RESOLUTION for this
+  // deployment; the boot banner names it so that is never silent.
+  //
+  // THIS SENTENCE HAS BEEN WRONG TWICE, IN OPPOSITE DIRECTIONS, so here is only what was
+  // driven. It first read "owns ref resolution for the deployment, `resources/` included",
+  // which a reviewer read as "the workspace scan is skipped" — it is not. The correction then
+  // said the operator's own bodies "keep working beside a module's resolver", which is false in
+  // the way that matters. Both measured, on one workspace holding `resources/function/stamp.js`
+  // and one module registering `{resolve: () => undefined}`:
+  //
+  //     $ loom run stamp.json --workspace $D                        # no module
+  //       "status": "succeeded",  "note": "from the workspace file"
+  //     $ loom run stamp.json --workspace $D --extension-module res.mjs
+  //       ✗ GRAPH015_RESOURCE_NOT_FOUND: resource "function/stamp@stable" does not resolve
+  //
+  // WHAT IS TRUE: the workspace scan is NOT skipped — `documents` is built from
+  // `readResources(root)` regardless, and `registerFunctions`/`registerHooks` below do compile
+  // and register every `resources/function` and `resources/hook` BODY into the registries. And
+  // those bodies are unreachable anyway, because `rule015Resources` asks the RESOLVER, which is
+  // now the module's: a graph naming a workspace ref does not COMPILE, so the registered body
+  // is never looked up. The same is true of every `prompt/*` document.
+  //
+  // SO THE OPERATIVE SENTENCE IS THE FIRST ONE AFTER ALL: a module that substitutes the
+  // resolver takes on serving every ref this deployment's graphs name, `resources/` included.
+  // What was wrong was never that claim; it was the reader it invites — the scan still runs and
+  // the registries still fill, and a module author who assumes otherwise gets a registry full
+  // of bodies nothing can reach. Layering instead would mean inventing a resolution order —
+  // workspace first? module first? per method? — that nobody wrote down and no journal records,
+  // which is why `EngineOptions.resolver` takes one object; the boot banner names the module so
+  // the substitution is never silent.
+  const resolver: ResourceResolver = extensions?.resolver ?? {
     // Without a published document, refs resolve to a digest of their own name. That is
     // enough for the compiler's pinning to be structurally correct locally.
     resolve: (ref) => documents.resolve(ref),
@@ -1387,16 +1520,23 @@ export function openWorkspace(
   // keyed by ref and the engine looks up by ref: a lazy loader would need a second lookup path
   // into the same registry, which is the shape that lets two answers disagree. A body that does
   // not evaluate refuses HERE, at boot, where an operator is watching — not inside a run.
-  const functions = new FunctionRegistry();
-  registerFunctions(documents, functions, root);
+  //
+  // THE MODULE'S REGISTRY WHEN THERE IS ONE, with the workspace's own bodies registered ON TOP.
+  // That order is the opposite of `tools` and deliberately so: `ToolRegistry` collisions are
+  // refused above because a tool name is what a MODEL dispatches and a silent substitution
+  // there is unauditable, while a `function` ref is written in a graph the operator wrote, next
+  // to a file they can open. Between a body they can read and one a module supplied, the file
+  // wins — and `FunctionRegistry` shadows, so registering afterwards is what makes it win.
+  const functions = extensions?.functions ?? new FunctionRegistry();
+  registerFunctions(documents, functions, root, moduleOnly);
 
   // EVERY PUBLISHED HOOK BODY, COMPILED AND REGISTERED — and until this line the entire
   // extension surface was unreachable through the binary. `Engine.#hooks` is `undefined`
   // when no registry is passed, and no caller passed one, so `#hooksFor` returned `[]` at
   // all eight points: a graph declaring `hooks: {preTool: [...]}` compiled, validated,
   // pinned the ref, and ran with the hook never firing.
-  const hooks = new HookRegistry();
-  registerHooks(documents, hooks, root);
+  const hooks = extensions?.hooks ?? new HookRegistry();
+  registerHooks(documents, hooks, root, moduleOnly);
 
   // ONE DERIVATION, USED HERE AND BY THE COMPILER — see `capabilitiesOf`.
   // MCP TOOLS BEFORE THE GRANT IS DERIVED. Connecting the server IS the grant — that is W8's
@@ -1978,10 +2118,35 @@ function fallbackFeed(): FallbackFeed {
  * source, from a second module or from `--identity-file`, because a deployment has one answer
  * to "who is this caller" and a silent second one is oversight decided by load order.
  *
- * **SCOPED TO `{models, tools, channels, identity}` EXACTLY** — the four entries this
- * removes from README's fork list, and no more. This object is the place a fifth seam
- * EXTENDS when somebody builds one; a second flag is the move to refuse, because the trust
- * argument above is written once and a second door would have to re-earn it.
+ * **AND FOUR MORE THE FIVE `EngineOptions` SEAMS BRING**, the same shape again: two modules
+ * registering one TOOL NAME (`ToolRegistry` keys by name and SHADOWS on collision, so this was
+ * the one registry where two claims on a slot were silently resolved by load order), and a
+ * second `resolver`, `store` or `payloads` — each a slot that holds exactly one.
+ *
+ * **THE OBJECT IS `{models, tools, channels, identity, functions, hooks, resolver, store,
+ * payloads}`**, and the last five were debts rather than bounds. `EngineOptions` has taken all
+ * five since it existed, every one of their types is on `scripts/surface.json`, and
+ * `openWorkspace` constructed all five unconditionally — so a LIBRARY EMBEDDER reached them
+ * and argv reached none. README's fork list did not carry rows for them, which made its
+ * published count an UNDERCOUNT rather than a bound: the measured consequence was that a
+ * host-realm async `function` body using `Date` ran from an embedder and could not be supplied
+ * from the CLI at all. They come through the SAME door for the reason the last two did — the
+ * trust argument above is written once, and a second flag would have to re-earn it.
+ *
+ * The five split into two shapes and the split is not cosmetic. `functions` and `hooks` are
+ * REGISTRIES, handed over exactly as `models` and `tools` are, so a module's bodies and the
+ * workspace's published `resources/function/*.js` coexist — the workspace's are registered
+ * afterwards and win a collision, because a file an operator can see must beat a module they
+ * cannot. `resolver`, `store` and `payloads` are single VALUES that `EngineOptions` takes by
+ * substitution, so a module supplying one REPLACES what `openWorkspace` would have built, and
+ * two claims refuse rather than pick by load order.
+ *
+ * **SUPPLYING `store` REPLACES THE JOURNAL**, which is the sharpest thing on this list: the
+ * journal is the only authoritative state there is, and a module that supplies a
+ * `MemoryStateStore` produces a deployment whose runs do not survive the process. That is the
+ * embedder's own decision to make — `agent()` already makes it — and it is bounded by the same
+ * fact as everything else here: a human typed the path on argv. The boot banner names every
+ * substituted seam so it is never a silent one.
  */
 export interface ExtensionModules {
   /** Handed to `openWorkspace` in place of the registry it would have constructed. */
@@ -2006,6 +2171,44 @@ export interface ExtensionModules {
    */
   readonly identity: IdentitySource | undefined;
   /**
+   * The function and hook registries this process runs on, handed to the modules first.
+   *
+   * REGISTRIES AND NOT COLLECTORS, so a module's bodies live in the same object the engine
+   * looks up in — the argument `models` and `tools` already make. `openWorkspace` registers
+   * the workspace's own published `resources/{function,hook}/*.js` into these AFTERWARDS, so a
+   * ref an operator can see on disk wins over one a module supplied. That direction is
+   * deliberate and is the opposite of `tools`: a tool name is dispatched by the model and a
+   * built-in shadowing an extension is a silent substitution, while a function ref is written
+   * in a graph the operator wrote, and the file beside it is the thing they can read.
+   */
+  readonly functions: FunctionRegistry;
+  readonly hooks: HookRegistry;
+  /**
+   * The refs the modules registered into those two, so `openWorkspace` can make them RESOLVE.
+   *
+   * A body in the registry is not enough on its own: `rule015Resources` asks the RESOLVER, not
+   * the registry, and `function`/`hook` are deliberately not in `NAME_ONLY_KINDS` — an absent
+   * document there is "a graph that compiles and cannot run". Measured before this field
+   * existed, driving the shipped binary with a module registering `function/stamp@stable`:
+   * `GRAPH015_RESOURCE_NOT_FOUND: resource "function/stamp@stable" does not resolve`. So the
+   * refs are carried out and seeded, and the premise the rule is protecting — that a ref with
+   * no body cannot run — stays true, because a body IS registered for exactly these.
+   */
+  readonly functionRefs: readonly string[];
+  readonly hookRefs: readonly string[];
+  /**
+   * The three `EngineOptions` members a module may SUBSTITUTE, or `undefined` for each.
+   *
+   * Single-valued, so `openWorkspace` uses the module's where there is one and builds its own
+   * where there is not — and a SECOND claim on any of them refuses to boot, exactly as a
+   * second `identity` does. There is no merging: a resolver that layered over the workspace's
+   * would be a fourth resolution order nobody wrote down, and a `store` cannot be layered at
+   * all.
+   */
+  readonly resolver: ResourceResolver | undefined;
+  readonly store: StateStore | undefined;
+  readonly payloads: PayloadStore | undefined;
+  /**
    * Adapters by the `provider` name each registered under.
    *
    * A MAP and not a bare `ReadonlySet<string>`, and the difference is load-bearing:
@@ -2016,6 +2219,15 @@ export interface ExtensionModules {
   readonly adapters: ReadonlyMap<string, ModelAdapter>;
   /** Tool names the modules registered, for the boot banner. */
   readonly toolNames: readonly string[];
+  /**
+   * Which module registered each tool name, so a collision refusal can name the file.
+   *
+   * `builtinTools` registers on top of these and `ToolRegistry.register` SHADOWS, so an
+   * extension tool sharing a built-in's name used to be silently never dispatched — the same
+   * two-claims-one-slot shape an adapter or channel name already refused to boot on, and the
+   * one registry where it did not. `openWorkspace` reads this to say which module lost.
+   */
+  readonly toolOwners: ReadonlyMap<string, string>;
   /** Channel names the modules registered, for the boot banner. Order matches `channels`. */
   readonly channelNames: readonly string[];
   /** Resolved paths, in load order, for the boot banner. */
@@ -2072,6 +2284,32 @@ class ObservedToolRegistry extends ToolRegistry {
     // refused registration must not count as this module having done something.
     const d = super.register(tool);
     this.calls.push(tool.name);
+    return d;
+  }
+}
+
+/**
+ * The same distinction two registries over, and neither has an enumeration API either.
+ *
+ * "Did THIS module register anything" is a question about CALLS, and `register` is the only
+ * moment that is knowable — `FunctionRegistry.has(ref)` can answer "is a body resident" and
+ * cannot answer "did the module put it there", because `openWorkspace` registers the
+ * workspace's own published bodies into the same object afterwards.
+ */
+class ObservedFunctionRegistry extends FunctionRegistry {
+  readonly calls: string[] = [];
+  override register(ref: string, body: Parameters<FunctionRegistry["register"]>[1]): ReturnType<FunctionRegistry["register"]> {
+    const d = super.register(ref, body);
+    this.calls.push(ref);
+    return d;
+  }
+}
+
+class ObservedHookRegistry extends HookRegistry {
+  readonly calls: string[] = [];
+  override register(ref: string, body: Parameters<HookRegistry["register"]>[1]): ReturnType<HookRegistry["register"]> {
+    const d = super.register(ref, body);
+    this.calls.push(ref);
     return d;
   }
 }
@@ -2156,18 +2394,96 @@ class CollectedIdentity {
   }
 }
 
-export async function loadExtensionModules(paths: readonly string[]): Promise<ExtensionModules> {
+/**
+ * A slot that holds exactly one thing, collected the way `CollectedIdentity` collects.
+ *
+ * `resolver`, `store` and `payloads` are `EngineOptions` members taken BY SUBSTITUTION: there
+ * is one journal, one payload store and one resolution order per deployment. So the same rule
+ * `identity` has applies without argument — two claims refuse rather than let load order pick
+ * — and the same reason for keeping BOTH is why this is an array: a refusal that cannot name
+ * where the first one came from is a refusal nobody can act on.
+ *
+ * VALIDATED AT THE CALL, in the only frame that knows which module handed the value over.
+ * `what` names the members a caller must provide, because these three are structural types
+ * with no `name` field to quote back — a `store` missing `append` is a deployment that boots
+ * and fails at the first journal write, which is the far side of the boundary this exists to
+ * keep refusals on.
+ */
+class CollectedSlot<T> {
+  readonly claims: T[] = [];
+  readonly #slot: string;
+  readonly #members: readonly string[];
+  readonly #shape: string;
+  constructor(slot: string, members: readonly string[], shape: string) {
+    this.#slot = slot;
+    this.#members = members;
+    this.#shape = shape;
+  }
+  register(value: T): void {
+    const v = value as Record<string, unknown> | null;
+    if (typeof v !== "object" || v === null) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `${this.#slot}.register was given ${v === null ? "null" : typeof v}, not ${this.#shape}`);
+    }
+    const missing = this.#members.filter((m) => typeof v[m] !== "function");
+    if (missing.length > 0) {
+      throw err.validation(
+        CODES.E_CONFIG_INVALID,
+        `${this.#slot}.register was given an object with no ${missing.map((m) => `${m}()`).join(", ")} — ${this.#shape}. ` +
+          `It substitutes what openWorkspace would have built, so a member it lacks is not a fallback, it is a run that ` +
+          `fails at the first call.`,
+      );
+    }
+    this.claims.push(value);
+  }
+}
+
+/**
+ * @param jail The SAME `{root, deny, egressAllowlist, execAllowlist, execEnvAllow}` the
+ *   built-ins get, so an outsider's filesystem or network tool can apply the operator's own
+ *   guards. It was not handed over before, which made `builtinTools` a PRIVILEGED built-in in
+ *   the sense README's property-2 section refuses: an extension tool could not narrow itself
+ *   to the workspace, could not honour `--egress`, and could not learn that `.loom` and
+ *   `resources/` are denied — so the only fs tool that could be safe was one that ships in the
+ *   box. It is frozen, and it is read-only in the honest sense: nothing reads it back off the
+ *   module, so a module that mutates its own copy changes nothing about the built-ins.
+ */
+export async function loadExtensionModules(paths: readonly string[], jail?: BuiltinOptions): Promise<ExtensionModules> {
   const models = new ObservedModelRegistry();
   const tools = new ObservedToolRegistry();
   const channels = new CollectedChannels();
   const identity = new CollectedIdentity();
+  // The engine looks up by ref in THESE objects, so a module registering into them is a module
+  // whose bodies run — the argument `models` and `tools` already make one registry over.
+  const functions = new ObservedFunctionRegistry();
+  const hooks = new ObservedHookRegistry();
+  // THE REQUIRED MEMBERS AND ONLY THOSE, which both of the first two got wrong in opposite
+  // directions. `ResourceResolver` declares `document?` and `subgraph?` OPTIONAL, so demanding
+  // `document` refused a resolver that implements exactly the published interface — a false
+  // positive against this repo's own type. `StateStore` declares FIVE, and asking for three let
+  // a partial one boot and die inside a run with an untyped `TypeError: this[#store].head is
+  // not a function` — the far side of the boundary this check exists to keep refusals on, which
+  // is the very thing its docstring claims.
+  const resolver = new CollectedSlot<ResourceResolver>("resolver", ["resolve"], "a ResourceResolver {resolve, document?, subgraph?}");
+  const store = new CollectedSlot<StateStore>("store", ["append", "read", "head", "listRuns", "close"], "a StateStore {append, read, head, listRuns, close}");
+  const payloads = new CollectedSlot<PayloadStore>("payloads", ["put", "get"], "a PayloadStore {put, get}");
   const files: string[] = [];
   /** Which module registered each adapter name, so a collision refusal can name both. */
   const owner = new Map<string, string>();
   /** The same, one namespace over. Adapter names and channel names do not collide with each other. */
   const channelOwner = new Map<string, string>();
+  /**
+   * The same again for TOOLS, which had no such map and needed one most.
+   *
+   * `ToolRegistry.register` pushes onto a stack keyed by name and `get` returns the top, so two
+   * modules registering `house.ping` left the first permanently undispatchable with nothing
+   * anywhere saying so — the one registry where two claims on a slot were resolved by load
+   * order. `openWorkspace` reads this map back to name the module when a built-in collides.
+   */
+  const toolOwner = new Map<string, string>();
   /** Which module registered the one identity source, so the second one's refusal can name it. */
   let identityOwner: string | undefined;
+  /** The same, for each single-valued `EngineOptions` slot. */
+  const slotOwner = new Map<string, string>();
   for (const raw of paths) {
     const path = resolve(raw);
     const refuse: (why: string) => never = (why) => {
@@ -2180,6 +2496,16 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     const toolsBefore = tools.calls.length;
     const channelsBefore = channels.calls.length;
     const identityBefore = identity.sources.length;
+    const functionsBefore = functions.calls.length;
+    const hooksBefore = hooks.calls.length;
+    // ONE MARK PER SLOT, not just their sum: the sum answers "did this module claim any of the
+    // three", which is what the "registered nothing" check needs, and cannot answer "did THIS
+    // module claim THIS slot", which is what the collision check needs. Reading the sum for the
+    // second question is what made a module refuse for a slot it never touched.
+    const resolverBefore = resolver.claims.length;
+    const storeBefore = store.claims.length;
+    const payloadsBefore = payloads.claims.length;
+    const slotsBefore = resolverBefore + storeBefore + payloadsBefore;
     let mod: { default?: unknown };
     try {
       // `pathToFileURL`, not the bare path: a relative specifier would resolve against
@@ -2198,9 +2524,10 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     if (typeof factory !== "function") {
       refuse(
         `has no default export that is a function. An extension module is ` +
-          `\`export default ({models, tools, channels, identity}) => { … }\`, called with this process's ` +
-          `ModelRegistry and ToolRegistry, a channel collector and an identity collector, before any ` +
-          `configuration is read. Found ` +
+          `\`export default ({models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}) => { … }\`, ` +
+          `called with this process's ModelRegistry, ToolRegistry, FunctionRegistry and HookRegistry, three collectors ` +
+          `(channels, identity, and one per substitutable EngineOptions member), and the operator's own jail — before ` +
+          `any configuration is read. Found ` +
           `${factory === undefined ? "no default export" : `a default export of type ${typeof factory}`}.`,
       );
     }
@@ -2214,8 +2541,14 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
           tools: ToolRegistry;
           channels: CollectedChannels;
           identity: CollectedIdentity;
+          functions: FunctionRegistry;
+          hooks: HookRegistry;
+          resolver: CollectedSlot<ResourceResolver>;
+          store: CollectedSlot<StateStore>;
+          payloads: CollectedSlot<PayloadStore>;
+          jail: BuiltinOptions | undefined;
         }) => unknown
-      )({ models, tools, channels, identity });
+      )({ models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail });
     } catch (e) {
       refuse(`threw while registering: ${isLoomError(e) ? e.message : (e as Error).message}`);
     }
@@ -2227,12 +2560,19 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
       // check that still asked only those two would have refused the very deployment this
       // seam was built for.
       channels.calls.length === channelsBefore &&
-      identity.sources.length === identityBefore
+      identity.sources.length === identityBefore &&
+      // THE FIVE NEW SEAMS COUNT TOO, for the reason `channels` was added for: a module whose
+      // whole job is a function body registers no adapter, tool, channel or identity, so a
+      // check that still asked only the first four would refuse the deployment it exists for.
+      functions.calls.length === functionsBefore &&
+      hooks.calls.length === hooksBefore &&
+      resolver.claims.length + store.claims.length + payloads.claims.length === slotsBefore
     ) {
       refuse(
-        `registered nothing. Its default export must call \`models.register(adapter)\`, \`tools.register(tool)\`, ` +
-          `\`channels.register(channel)\` or \`identity.register(source)\`; a module that registers nothing is a ` +
-          `deployment the operator believes is extended and is not.`,
+        `registered nothing. Its default export must call one of \`models.register(adapter)\`, \`tools.register(tool)\`, ` +
+          `\`channels.register(channel)\`, \`identity.register(source)\`, \`functions.register(ref, body)\`, ` +
+          `\`hooks.register(ref, body)\`, \`resolver.register(r)\`, \`store.register(s)\` or \`payloads.register(p)\`; ` +
+          `a module that registers nothing is a deployment the operator believes is extended and is not.`,
       );
     }
     // TWO MODULES, ONE ADAPTER NAME — the same refusal `readModels` makes about a file row
@@ -2256,6 +2596,16 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
       }
       channelOwner.set(name, path);
     }
+    // AND FOR TOOLS, which is the collision this registry alone did not refuse. `register`
+    // pushes onto a stack keyed by name and `get` returns the TOP, so a second `house.ping`
+    // left the first permanently undispatchable and nothing said which module lost.
+    for (const name of tools.calls.slice(toolsBefore)) {
+      const first = toolOwner.get(name);
+      if (first !== undefined) {
+        refuse(`registers the tool name "${name}", which ${first} already registered. One of them would never be dispatched.`);
+      }
+      toolOwner.set(name, path);
+    }
     // AND THE ONE SLOT THAT HOLDS ONE. A second source is not a shadow, it is a second answer
     // to "who is this caller" — so whether a credential is accepted would be decided by argv
     // order, which is oversight loosening along a path nobody chose. Refusing is always allowed.
@@ -2267,6 +2617,38 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
         );
       }
       identityOwner = path;
+    }
+    // THE THREE SUBSTITUTABLE SLOTS, same rule and same reason. A second `store` is a second
+    // journal, and the journal is the only authoritative state there is: which one a run is
+    // written to must not be decided by the order two paths appeared on argv.
+    //
+    // PER-MODULE DELTA, LIKE THE FOUR LOOPS ABOVE IT, and this was the one that was not.
+    // `claims` is CUMULATIVE across modules, so `claims.length === 0` only skips a module when
+    // NOBODY has claimed the slot yet. After module A registered a store, module B — which
+    // registers only a tool — did not skip, found `slotOwner.get("store") === A`, and was
+    // refused with a message that is FALSE about B. Driven both ways:
+    //
+    //   loadExtensionModules([a.mjs, b.mjs])  → E_CONFIG_INVALID: … b.mjs: registers a store,
+    //                                            and … a.mjs already registered one
+    //   loadExtensionModules([b.mjs, a.mjs])  → boots
+    //
+    // …which is the load-order dependence the refusal exists to prevent, produced by the
+    // refusal itself. `slotsBefore` above is a SUM of the three, so it cannot attribute a claim
+    // to a slot either; each slot's own mark is taken here.
+    for (const [slot, collected, before] of [
+      ["resolver", resolver, resolverBefore],
+      ["store", store, storeBefore],
+      ["payloads", payloads, payloadsBefore],
+    ] as const) {
+      if (collected.claims.length === before) continue;
+      const first = slotOwner.get(slot);
+      if (collected.claims.length - before > 1 || first !== undefined) {
+        refuse(
+          `registers a ${slot}, and ${first ?? "it"} already registered one. That is an EngineOptions member this ` +
+            `deployment has exactly one of: a second would make which one a run uses depend on load order.`,
+        );
+      }
+      slotOwner.set(slot, path);
     }
     files.push(path);
   }
@@ -2294,6 +2676,17 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
     channels: [...channels.registered],
     channelNames: [...channels.calls],
     identity: identity.sources[0],
+    functions,
+    hooks,
+    functionRefs: [...functions.calls],
+    hookRefs: [...hooks.calls],
+    // `[0]` AND NOT A LAST-WINS PICK: the loop above has already refused a second claim, so
+    // there is at most one and reading the first is reading the only one. Writing `.at(-1)`
+    // here would be a second rule quietly disagreeing with the refusal.
+    resolver: resolver.claims[0],
+    store: store.claims[0],
+    payloads: payloads.claims[0],
+    toolOwners: new Map(toolOwner),
     files,
     // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
     // rather than a second rule invented here. `ModelRegistry.register` claims the default
@@ -2322,7 +2715,35 @@ export async function loadExtensionModules(paths: readonly string[]): Promise<Ex
  * `--extension-module`, which is a door that now exists.
  */
 const ADAPTER_FIELDS: readonly string[] = ["provider", "name", "baseUrl", "apiKeyEnv", "prices", "defaultMaxTokens"];
-const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback"];
+/**
+ * `prices` IS ON THE ROUTE ROW AS WELL AS THE ADAPTER ROW, and the reason is an
+ * `--extension-module` adapter.
+ *
+ * The unpriced refusal tells an operator to "add `prices` to that adapter's row", and for a
+ * third-wire adapter there IS no adapter row: `provider` accepts exactly `anthropic` and
+ * `openai`, and a row whose `name` collides with a registered extension adapter is refused so
+ * one of the two is never reachable. So the instruction was impossible to follow — and the
+ * refusal landed on exactly the population README's "a provider on ANY OTHER wire" row exists
+ * for, every extension adapter written before `ModelAdapter.hasPrice` existed. Measured: a
+ * 25-line free local adapter that ran at 294e713 could not be started at all, two spellings of
+ * the fix both refused.
+ *
+ * THE ROUTE IS WHERE THE OPERATOR CAN ALWAYS WRITE, because a route row is the one thing every
+ * routed model has. It is read by `pricedFor` and by nothing else — it does not reach the
+ * adapter, which keeps its own table private and is the thing actually billing. A module author
+ * has the other door and it is the better one: implement `hasPrice`.
+ *
+ * WHICH IS WHY IT MAY ONLY SAY ZERO, and the first version of this row did not enforce that.
+ * "Read by `pricedFor` and by nothing else" and "a place to put PRICES" cannot both be true: a
+ * non-zero rate here cleared `unpriced`, cleared the `! NO PRICE FOR n ROUTES` banner and
+ * lifted `RoutingAdapter`'s refusal while every call went on being journaled at `costUsd: 0` —
+ * a one-line off switch for the guard this row exists to make escapable, reachable by an
+ * operator who believes they have just priced the route. The reader refuses a non-zero rate and
+ * names the two doors that do reach the thing that bills. Zero is the one rate this row can
+ * state truthfully, and stating it is the row's whole job: it makes an explicit free endpoint
+ * distinguishable from a missing table, which `priceOf` alone cannot do.
+ */
+const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback", "prices"];
 const TIER_FIELDS: readonly string[] = ["adapter", "model", "when"];
 /**
  * `cacheRead`/`cacheWrite` are NOT here on purpose: both adapters' options carry them and
@@ -2500,6 +2921,10 @@ export function readModels(
   // naming an adapter this file did not declare would make that sentence false.
   const adapters = new Map<string, ModelAdapter>(preRegistered);
   const declared: string[] = [];
+  /** adapter name → the `prices` table its row declared, for `pricedFor`. */
+  const declaredPrices = new Map<string, Readonly<Record<string, { input: number; output: number }>>>();
+  /** route key → the `prices` table THAT row declared. See `ROUTE_FIELDS`. */
+  const routePrices = new Map<string, Readonly<Record<string, { input: number; output: number }>>>();
   const fallbacks = fallbackFeed();
   /** Adapter names whose row omitted `defaultMaxTokens`. See `ModelConfig.unsetCeilings`. */
   const unsetCeilings: string[] = [];
@@ -2629,6 +3054,11 @@ export function readModels(
     // fires on silence and never on a value, because a threshold applied to a ceiling the
     // operator picked is a banner line operators learn to skip.
     if (row["defaultMaxTokens"] === undefined) unsetCeilings.push(name);
+    // AND THE OPERATOR'S OWN TABLE, kept for the same reason and read by `pricedFor`. The
+    // adapter keeps its `prices` option private, so after this loop nothing can ask one
+    // whether a zero it returns is a rate the operator WROTE or a row it does not have — and
+    // those are the two answers the unpriced check has to tell apart.
+    if (common.prices !== undefined) declaredPrices.set(name, common.prices);
     try {
       adapters.set(name, provider === "anthropic" ? new AnthropicAdapter(common) : new OpenAIAdapter({ ...common, provider: name }));
     } catch (e) {
@@ -2657,6 +3087,41 @@ export function readModels(
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
     }
     const model = nonEmpty(row["model"], `${where} "model"`, refuse);
+    // See `ROUTE_FIELDS`: the only place an operator can DECLARE AN EXTENSION ADAPTER'S MODEL
+    // FREE — and only free, which is the half the first version of this row got wrong.
+    //
+    // A ROUTE `prices` ROW MAY ONLY SAY ZERO. The row is read by `pricedFor` and by nothing
+    // else: `RoutingAdapter.priceOf` delegates to the adapter behind the route, and the cost a
+    // turn is actually billed comes off that adapter's own `done` frame. So a NON-ZERO row
+    // cleared `unpriced`, cleared the `! NO PRICE FOR n ROUTES` banner and lifted the refusal
+    // while every call still journaled `costUsd: 0` — this lane's own hole, reopened one layer
+    // out by the escape hatch written to close it, and reachable by an operator who believes
+    // they have just priced the route. A guard whose off switch is one line of the file it
+    // guards is the shape CLAUDE.md names: the undecidable case answered with the passing
+    // value.
+    //
+    // Zero is the one rate this row can state truthfully, because zero is what the adapter
+    // will bill anyway — the row's whole job is to say that the zero is a RATE and not a
+    // missing table, which is the distinction `priceOf` alone cannot make. A real rate has two
+    // doors and neither is here: the adapter row's `prices` (for an `anthropic`/`openai` wire),
+    // and `ModelAdapter.hasPrice` plus the adapter's own `priceOf` (for any other), which is
+    // the only answer that both refuses correctly AND bills correctly.
+    if (row["prices"] !== undefined) {
+      const table = priceTable(row["prices"], `${where} "prices"`, refuse);
+      for (const [model_, p] of Object.entries(table)) {
+        if (p.input !== 0 || p.output !== 0) {
+          refuse(
+            `${where} "prices"."${model_}" declares {"input": ${String(p.input)}, "output": ${String(p.output)}}, and a ROUTE ` +
+              `price row may only declare a FREE endpoint: {"input": 0, "output": 0}. It is read when deciding whether ` +
+              `the route is priced at all and it never reaches the adapter, which is what bills — so a non-zero rate ` +
+              `here would clear the unpriced refusal while every call still journaled costUsd 0. A REAL RATE HAS TWO ` +
+              `DOORS: put it on the ADAPTER row's "prices" when the adapter has a row, or, for an --extension-module ` +
+              `adapter, have its author implement ModelAdapter.hasPrice(model) and price it in the adapter's own priceOf.`,
+          );
+        }
+      }
+      routePrices.set(key, table);
+    }
 
     // DECLARATIVE FALLBACK CHAINS, which the README promised and nothing constructed.
     // `FallbackAdapter` has been written and tested since the provider layer landed;
@@ -2728,29 +3193,126 @@ export function readModels(
     );
   }
 
+  // WHICH ROUTES COST NOTHING, computed here because this is where both halves are in hand,
+  // and computed BEFORE the router so the router can refuse on them — see `RoutingAdapter`.
+  // A model outside the adapter's price table prices at ZERO, and a budget compares against a
+  // number, so a run on an unpriced model spent without limit while reporting `costUsd: 0`.
+  // That matters more since a graph's declared `policy.budget.costUsd` became a real ceiling:
+  // the ceiling is unreachable if nothing ever approaches it.
+  //
+  // EVERY TIER, not just the one a route names. A chain whose fallback is unpriced spends
+  // without limit the moment it falls through, and the run reports `costUsd: 0` for it.
+  const unpriced = [...routes.entries()].flatMap(([key, r]) => {
+    const reach = chainTiers.get(key) ?? [{ adapter: r.adapter, model: r.model }];
+    return reach
+      .filter((t) => !pricedFor(adapters.get(t.adapter), [routePrices.get(key), declaredPrices.get(t.adapter)], t.model))
+      .map((t) => `${key} → ${t.adapter}/${t.model}`);
+  });
+  // The PRIMARY tier only, keyed by route, because that is the pair `RoutingAdapter` resolves
+  // and prices. A chain's later tiers are priced inside `FallbackAdapter`, which this class
+  // never sees — they stay a boot warning, which is the honest half this file can reach.
+  const unpricedRoutes = new Set(
+    [...routes.entries()]
+      .filter(([key, r]) => !pricedFor(adapters.get(r.adapter), [routePrices.get(key), declaredPrices.get(r.adapter)], r.model))
+      .map(([key]) => key),
+  );
   return {
-    adapter: new RoutingAdapter(adapters, routes, path),
+    adapter: new RoutingAdapter(adapters, routes, path, unpricedRoutes),
     adapters: declared,
     routes: [...routes.keys()],
-    // WHICH ROUTES COST NOTHING, computed here because this is where both halves are in hand.
-    // A model outside the adapter's price table prices at ZERO — `priceOf` returns 0 for an
-    // unknown id — and a budget compares against a number, so a run on an unpriced model spends
-    // without limit while reporting `costUsd: 0`. That matters more since a graph's declared
-    // `policy.budget.costUsd` became a real ceiling: the ceiling is unreachable if nothing ever
-    // approaches it. Probed with a million tokens each way, which is the unit the tables use.
-    // EVERY TIER, not just the one a route names. A chain whose fallback is unpriced spends
-    // without limit the moment it falls through, and the run reports `costUsd: 0` for it —
-    // which is the same hole this check exists to close, one tier down.
-    unpriced: [...routes.entries()].flatMap(([key, r]) => {
-      const reach = chainTiers.get(key) ?? [{ adapter: r.adapter, model: r.model }];
-      return reach
-        .filter((t) => adapters.get(t.adapter)?.priceOf(t.model, { inputTokens: 1e6, outputTokens: 1e6 }) === 0)
-        .map((t) => `${key} → ${t.adapter}/${t.model}`);
-    }),
+    unpriced,
     unsetCeilings,
     file: path,
     fallbacks,
   };
+}
+
+/**
+ * Can this adapter price this model at all — as opposed to "does it price it at zero".
+ *
+ * THE TWO ARE DIFFERENT AND THE PROBE COULD NOT TELL THEM APART. The only check this file had
+ * was `priceOf(m, {inputTokens: 1e6, outputTokens: 1e6}) === 0`, and `priceOf` answers 0 for a
+ * model it has no row for. So an unpriced model and a deliberately free one — a local endpoint
+ * with `"prices": {"local-7b": {"input": 0, "output": 0}}`, which `priceTable` accepts and
+ * documents as legal — produced the same answer, and an operator who had written that row down
+ * still got `! NO PRICE FOR 1 ROUTE` and, now, a refusal they could not clear.
+ *
+ * TWO SOURCES, IN THIS ORDER, and neither is the probe on its own:
+ *
+ *  1. `ModelAdapter.hasPrice`, when the adapter implements it. That is the adapter's own
+ *     answer about its own table and is the only source that cannot be wrong. It is OPTIONAL
+ *     on the interface (`run/registry.ts` says why), so today `MockModelAdapter` and
+ *     `RoutingAdapter` answer and the two HTTP adapters do not — closing that costs one line
+ *     each in `providers/{anthropic,openai}.ts`, which is a file this change does not own.
+ *  2. The operator's OWN `prices` tables — BOTH of them, route row first and adapter row
+ *     second — resolved by the same `resolvePrice` the adapters use, so an exact row wins over
+ *     a dated-base row exactly as it does inside them and a row for `m-pro` covers
+ *     `m-pro-20260101`. This is the explicit-zero escape hatch, and the ROUTE half of it is not
+ *     an ergonomic nicety: an `--extension-module` adapter HAS no adapter row (`provider`
+ *     accepts only `anthropic` and `openai`, and a row whose `name` collides with a registered
+ *     extension adapter is refused), so without it the refusal named a fix nobody could apply.
+ *
+ *     BOTH, AND NOT `adapterRow ?? routeRow`, which is what this said and did. `??` falls
+ *     through only when the adapter row has NO `prices` at all, so an adapter row that priced
+ *     model A masked a route row declaring model B free — and the refusal that followed told
+ *     the operator to write the row they had already written. `resolvePrice` takes a LIST in
+ *     precedence order and always did; passing it one table was the defect.
+ *
+ *     AND THE ROUTE ROW MAY ONLY SAY ZERO — enforced where it is read, at `ROUTE_FIELDS`'
+ *     reader. It does not reach the adapter, so a non-zero rate here would lift this refusal
+ *     while the adapter went on billing 0.
+ *
+ * AND A `false` FROM SOURCE 1 IS NOT FINAL, which reading `own !== undefined` made it. It falls
+ * through to source 2 and is decisive only if the operator wrote no row — otherwise an adapter
+ * saying "I cannot price this" overrode an operator who had already said what it costs, and the
+ * refusal named a remedy only a third party could apply. It stays decisive over the PROBE,
+ * which is the fail-closed direction: the adapter is the only source that knows the probe
+ * cannot tell a free endpoint from a missing row.
+ *
+ * SOURCE 1 IS UNREACHABLE FOR EVERY ADAPTER THIS FILE CONSTRUCTS, today, and saying so is the
+ * point: `MockModelAdapter` implements `hasPrice` and is never routed through here, and
+ * `RoutingAdapter` implements it and is never passed to this function. So the branch exists for
+ * extension adapters that opt in — which is exactly the population source 2's route row exists
+ * to rescue in the meantime.
+ *
+ * and only then the million-token probe, which is what every caller did before and is right
+ * for every adapter whose table this file cannot see.
+ *
+ * NO ADAPTER AT ALL ANSWERS `false`, not `true`. Every caller has already refused an unknown
+ * adapter name by the time it gets here, so this arm is unreachable today; if it ever becomes
+ * reachable, "I could not find the adapter" must not be the passing answer.
+ */
+function pricedFor(
+  adapter: ModelAdapter | undefined,
+  rows: readonly (Readonly<Record<string, { input: number; output: number }>> | undefined)[],
+  model: string,
+): boolean {
+  if (adapter === undefined) return false;
+  // A `true` FROM THE ADAPTER SETTLES IT; A `false` DOES NOT, and reading both as final made the
+  // operator's documented escape hatch inert. An extension adapter that honestly answers "I
+  // cannot price this model" beat an explicit `{"input": 0, "output": 0}` the operator had
+  // written on the route row, and the refusal that followed told them to write it. Driven: with
+  // `hasPrice: () => false` and that row present, `unpriced` still listed the route and
+  // `estimateOf` still threw — a refusal whose only remedy was a third party editing their
+  // module. The two sources answer different questions: the adapter says what its own table
+  // holds, the operator says what the endpoint charges, and an operator who has written a rate
+  // down has answered the one this guard is asking. So `false` falls THROUGH to the tables and
+  // is decisive only when nobody wrote one.
+  const own = adapter.hasPrice?.(model);
+  if (own === true) return true;
+  // EVERY TABLE THE OPERATOR WROTE, NOT THE FIRST ONE THAT EXISTS. This was
+  // `declaredPrices.get(a) ?? routePrices.get(k)`, and `??` falls through only when the adapter
+  // row has NO `prices` AT ALL — so an adapter row pricing model A masked a ROUTE row declaring
+  // model B free, and the refusal that followed named the route row as the fix. `resolvePrice`
+  // already takes a LIST in precedence order, which is the shape this wanted: the route row is
+  // the more specific statement, so it comes first.
+  const tables = rows.filter((r) => r !== undefined);
+  if (tables.length > 0 && resolvePrice(tables, model) !== undefined) return true;
+  // NOW the adapter's `false` is decisive, and it is decisive in the fail-closed direction: it
+  // is the only source that knows the probe below cannot tell a free endpoint from a missing
+  // row, so believing it over the probe refuses where the probe would have passed.
+  if (own === false) return false;
+  return adapter.priceOf(model, { inputTokens: 1e6, outputTokens: 1e6 }) !== 0;
 }
 
 /**
@@ -2776,11 +3338,52 @@ class RoutingAdapter implements ModelAdapter {
   readonly #adapters: ReadonlyMap<string, ModelAdapter>;
   readonly #routes: ReadonlyMap<string, Route>;
   readonly #file: string;
+  readonly #unpriced: ReadonlySet<string>;
 
-  constructor(adapters: ReadonlyMap<string, ModelAdapter>, routes: ReadonlyMap<string, Route>, file: string) {
+  constructor(adapters: ReadonlyMap<string, ModelAdapter>, routes: ReadonlyMap<string, Route>, file: string, unpriced: ReadonlySet<string>) {
     this.#adapters = adapters;
     this.#routes = routes;
     this.#file = file;
+    this.#unpriced = unpriced;
+  }
+
+  /**
+   * A ROUTE NOBODY CAN PRICE REFUSES, rather than costing zero.
+   *
+   * `priceOf` answers `0` for a model no table has a row for, and a budget compares against a
+   * number — so before this, a run on an unpriced route spent without limit while journaling
+   * `costUsd: 0`, `policy.budget.costUsd` bounded nothing, `--budget-usd` bounded nothing, and
+   * `/health` reported a spend that did not happen. The boot line said so and could do nothing
+   * about it, which is the shape of guard this repo keeps finding: an undecidable input
+   * answered with the passing value.
+   *
+   * REFUSING AT THE CALL AND NOT AT BOOT, which is a decision rather than an accident.
+   * `readModels` runs inside `openWorkspace`, which every verb opens — `gates`, `approve`,
+   * `trace`, `replay`, `audit` included. Refusing there would mean a pricing row nobody has
+   * written yet blocks a human from ANSWERING A GATE on a run already in flight, which is
+   * oversight lost to a configuration detail. Here it is the model call itself that refuses:
+   * `estimateOf` runs one line before `stream` in `#runAgent`, so the reservation refuses and
+   * nothing reaches the network — and every verb that does not call a model is untouched.
+   *
+   * THE ESCAPE IS A ROW, NOT A FLAG. `"prices": {"<model>": {"input": 0, "output": 0}}` is
+   * legal and `pricedFor` reads it, so a genuinely free endpoint is one line of the operator's
+   * own file away — a number they wrote down rather than a guard they turned off.
+   */
+  #priced(key: string): void {
+    if (!this.#unpriced.has(key)) return;
+    const to = this.#routes.get(key);
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `route "${key}" in ${this.#file} points at ${to === undefined ? "an unrouted model" : `${to.adapter}/${to.model}`}, ` +
+        `which no price table prices — so every call on it would be journaled as costing 0 and no budget could bound it. ` +
+        `TWO WAYS TO SAY WHAT IT COSTS, AND THE ROUTE ROW IS ONLY ONE OF THEM. If the endpoint is genuinely FREE, ` +
+        `say so on this route row: "prices": {"${to?.model ?? key}": {"input": 0, "output": 0}} — a rate, not a missing ` +
+        `row, and the one thing a route row may declare, because it is read only to decide whether the route is priced ` +
+        `and never reaches the adapter that bills. If it COSTS something, the rate has to go somewhere that bills: the ` +
+        `ADAPTER row's "prices" when the adapter has a row, or — for an --extension-module adapter, which has none — ` +
+        `its author implementing the optional ModelAdapter.hasPrice(model) and pricing it in that adapter's own ` +
+        `priceOf, which is the only answer that cannot be wrong.`,
+    );
   }
 
   #resolve(model: string): { readonly adapter: ModelAdapter; readonly model: string } {
@@ -2797,13 +3400,31 @@ class RoutingAdapter implements ModelAdapter {
   }
 
   stream(req: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
+    // BOTH DOORS, because `#runAgent` reserves through `estimateOf` and then streams; a
+    // refusal on only one of them is a bound that holds on one verb and not the other.
+    this.#priced(req.model);
     const to = this.#resolve(req.model);
     return to.adapter.stream({ ...req, model: to.model }, signal);
   }
 
   estimateOf(req: ModelRequest): number {
+    this.#priced(req.model);
     const to = this.#resolve(req.model);
     return to.adapter.estimateOf({ ...req, model: to.model });
+  }
+
+  /**
+   * The route's primary tier, asked of the adapter behind it. See `pricedFor`.
+   *
+   * NO CALLER IN `src/`, and that is worth saying rather than leaving to be discovered.
+   * `pricedFor` is only ever handed the adapters `readModels` constructs or the extension
+   * adapters `preRegistered` supplies — never the `RoutingAdapter` it goes on to build — so
+   * this method exists for a library embedder holding the routed adapter and for the tests
+   * that pin its answer. It is implemented because `ModelAdapter` declares it and an adapter
+   * that can answer should; it is not on the path the binary walks.
+   */
+  hasPrice(model: string): boolean {
+    return !this.#unpriced.has(model) && this.#routes.has(model);
   }
 
   /**
@@ -2818,6 +3439,7 @@ class RoutingAdapter implements ModelAdapter {
   }
 
   priceOf(model: string, usage: { inputTokens: number; outputTokens: number }): number {
+    this.#priced(model);
     const to = this.#resolve(model);
     return to.adapter.priceOf(to.model, usage);
   }
@@ -3350,6 +3972,28 @@ export function readMcpServers(file: string): readonly McpServerConfig[] {
 }
 
 /**
+ * One line per tool an MCP server offered and this binary refused, with the reason.
+ *
+ * A SEPARATE PURE FUNCTION for `modelWarnings`' reason: the decision is testable without a
+ * process, and the only thing `main` does with it is write it. It names the server, the tool
+ * and the refusal, because "this tool is not there" and "this tool was rejected for saying X"
+ * are different problems and only the second one has a fix the server's author can act on.
+ */
+export function mcpRejectionWarnings(mcp: readonly ConnectedMcpServer[]): readonly string[] {
+  const out: string[] = [];
+  for (const { client } of mcp) {
+    for (const { name, reason } of client.rejectedTools) {
+      out.push(
+        `! MCP TOOL DROPPED — ${client.name}: "${name}" was offered by the server and is NOT registered.\n` +
+          `  ${reason}\n` +
+          `  A graph naming it will not compile, and a model cannot call it. Fix it on the server, or drop the row.\n`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
  * What the boot output says about a `--mcp-file` row that lowered a gate.
  *
  * SEPARATE FROM THE WRITE, for the reason `execWarnings` is: the decision worth checking is WHICH
@@ -3619,11 +4263,15 @@ function requireFunctionBodies(ws: Workspace, spec: GraphSpec): void {
  * where the message reaches an operator's terminal — rather than at the moment a node executes,
  * halfway through a run that has already spent money.
  */
-function registerFunctions(store: ResourceStore | undefined, functions: FunctionRegistry, root: string): void {
+function registerFunctions(store: ResourceStore | undefined, functions: FunctionRegistry, root: string, moduleOnly: ReadonlySet<string> = new Set()): void {
   if (store === undefined) return;
   const loader = createFunctionLoader({ store });
   for (const version of store.list({ kind: "function" })) {
     const ref = `function/${version.name}@stable`;
+    // A REF WHOSE ONLY BODY IS AN EXTENSION MODULE'S. `openWorkspace` seeds a pin for it so
+    // `rule015Resources` can resolve it; the pin's content is the ref STRING, so handing it to
+    // the loader would print a compile failure for a body that is already registered and fine.
+    if (moduleOnly.has(ref)) continue;
     try {
       const body = loader.load(ref);
       if (body !== undefined) functions.register(ref, body);
@@ -3643,11 +4291,13 @@ function registerFunctions(store: ResourceStore | undefined, functions: Function
  * process from serving every other graph, and it is ANNOUNCED, because a silently absent
  * extension is the failure this whole change is about.
  */
-function registerHooks(store: ResourceStore | undefined, hooks: HookRegistry, root: string): void {
+function registerHooks(store: ResourceStore | undefined, hooks: HookRegistry, root: string, moduleOnly: ReadonlySet<string> = new Set()): void {
   if (store === undefined) return;
   const loader = createHookLoader({ store });
   for (const version of store.list({ kind: "hook" })) {
     const ref = `hook/${version.name}@stable`;
+    // See `registerFunctions`: a pin whose body lives in an extension module, not in a file.
+    if (moduleOnly.has(ref)) continue;
     try {
       const body = loader.load(ref);
       if (body !== undefined) hooks.register(ref, body);
@@ -3966,10 +4616,18 @@ export function modelWarnings(models: ModelConfig | undefined, command: string):
   if (models.unpriced.length > 0) {
     const n = models.unpriced.length;
     out.push(
-      `! NO PRICE FOR ${n} ROUTE${n === 1 ? "" : "S"} — every call on ${n === 1 ? "it" : "them"} is journaled as costing 0,\n` +
-        `  so a graph's policy.budget.costUsd and --budget cannot bind and /health reports a spend that did not happen:\n` +
+      `! NO PRICE FOR ${n} ROUTE${n === 1 ? "" : "S"} — a model call on ${n === 1 ? "it" : "them"} now REFUSES\n` +
+        `  (E_CONFIG_INVALID, at the budget reservation, before the network) rather than being journaled as costing 0:\n` +
         models.unpriced.map((r) => `    ${r}\n`).join("") +
-        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n`,
+        `  A journaled 0 is what made policy.budget.costUsd and --budget bound nothing and /health report a spend\n` +
+        `  that did not happen. A FALLBACK tier listed here is NOT refused — FallbackAdapter prices it, this file never\n` +
+        `  sees it, and a fall-through onto it bills at whatever that tier answers. For those, this line is the guard.\n` +
+        `  fix, if the endpoint is FREE: add "prices": {"<model>": {"input": 0, "output": 0}} to that ROUTE row in\n` +
+        `  ${models.file} — a rate, not a missing row, and the only thing a route row may declare (it decides whether\n` +
+        `  the route is priced and never reaches the adapter that bills, so a non-zero rate there is refused).\n` +
+        `  fix, if it COSTS something: put the rate where it bills — the ADAPTER row's "prices" when the adapter has a\n` +
+        `  row, or, for an --extension-module adapter (which has none), its author's own priceOf behind the optional\n` +
+        `  ModelAdapter.hasPrice(model).\n`
     );
   }
   // THE CEILING NOBODY CHOSE. A live GLM-5.2 turn ended `finishReason "max_tokens"` with
@@ -4000,6 +4658,37 @@ export function modelWarnings(models: ModelConfig | undefined, command: string):
     );
   }
   return out;
+}
+
+/**
+ * A DEPLOYMENT WHOSE JOURNAL IS A MODULE'S SAYS SO ON EVERY VERB, not only on `serve`.
+ *
+ * `store.register` substitutes the JOURNAL, which is the only authoritative state there is, and
+ * the whole argument for allowing it was that the boot banner names it so the substitution is
+ * never silent. That banner lives inside `announce()`, whose only caller is the `serve` path —
+ * so under `loom run` a module supplying a `MemoryStateStore` was completely silent, and the run
+ * then printed `inspect it with: loom trace <id>`, which cannot work:
+ *
+ *     $ loom run … --extension-module mem.mjs
+ *       exit 0, "status": "succeeded", journal.db exists: false, nothing about SUBSTITUTED
+ *     $ loom trace <id>
+ *       LoomError: run … has no run.compiled event in this workspace
+ *
+ * Found by review; the mitigation README's sharpest row rests on did not exist on the verb an
+ * operator actually uses. On stderr, like every other honest line, and skipped for `serve`
+ * because `announce()` already says it there — printing it twice teaches an operator to stop
+ * reading stderr, which is the failure mode this whole class of line has.
+ */
+function warnAboutSubstitutedJournal(ws: Workspace, command: string): void {
+  if (command === "serve" || ws.extensions?.store === undefined) return;
+  process.stderr.write(
+    `! JOURNAL SUBSTITUTED by --extension-module ${ws.extensions.files.join(", ")} — this deployment's journal is the
+` +
+      `  module's, not ${ws.dataDir}. If it does not persist, nothing written by this command survives the process:
+` +
+      `  no loom trace, no loom gates, no replay, and no restart can fold what this run recorded.
+`,
+  );
 }
 
 /** `modelWarnings`, on stderr — never stdout: `loom run` prints a JSON document there and a caller pipes it. */
@@ -5354,7 +6043,14 @@ function announce(
         // pins the whole line, and the two new seams are absent from most modules — a module that
         // registers neither prints exactly what it printed before.
         `${ext.channelNames.length === 0 ? "" : `, ${ext.channelNames.map((n) => `channel ${n}`).join(", ")}`}` +
-        `${ext.identity === undefined ? "" : `, identity ${ext.identity.name}`}\n`,
+        `${ext.identity === undefined ? "" : `, identity ${ext.identity.name}`}` +
+        // THE SUBSTITUTED SEAMS, NAMED, and `store` is why this is not optional. A module may
+        // now replace the JOURNAL — the only authoritative state there is — and a deployment
+        // whose runs do not survive the process must not look identical at boot to one whose
+        // do. Same rule as every other line here: read off the loaded object, never the flag.
+        `${ext.resolver === undefined ? "" : ", resolver SUBSTITUTED"}` +
+        `${ext.store === undefined ? "" : ", store SUBSTITUTED (this deployment's journal is the module's)"}` +
+        `${ext.payloads === undefined ? "" : ", payloads SUBSTITUTED"}\n`,
     );
   }
   process.stdout.write(`  who:    ${identity === undefined ? "(nobody — no identity source)" : identity.name}\n`);
@@ -5718,6 +6414,14 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // BEFORE THE CONNECT, so an operator sees what they declared even when a server fails to start.
   for (const line of mcpLoweringWarnings(mcpServers)) process.stderr.write(line);
   const mcp = mcpServers.length === 0 ? [] : await startMcp(mcpServers);
+  // A DROPPED TOOL IS A FACT ABOUT A THIRD PARTY AND WAS VISIBLE TO NOBODY. `McpClient` records
+  // every tool `tools/list` offered and it refused, with the reason, and its own docstring says
+  // "NOTHING IN `cli.ts` OR `server/` READS THIS YET" — so under `loom serve` a legitimate
+  // server whose description runs past MAX_DESCRIPTION_CHARS simply stopped offering that tool
+  // with no line anywhere, and the operator diagnosed it as "the model did not call the tool".
+  // Here rather than in the registration loop inside `openWorkspace`, because this is where the
+  // client is and `openWorkspace` writes to no stream.
+  for (const line of mcpRejectionWarnings(mcp)) process.stderr.write(line);
   // THE CHILDREN ARE CLOSED FROM TWO PLACES BECAUSE THERE ARE TWO WAYS OUT, and until this
   // existed there was one. `main`'s `finally` closes them when the workspace has been opened;
   // everything between `startMcp` and `openWorkspace` returning is a refusal path that used to
@@ -5746,8 +6450,13 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         "the operator believes is extended and is not.",
     );
     const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
-    const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths);
+    // THE SAME JAIL THE BUILT-INS GET, handed over so an outsider's fs or network tool can
+    // apply the operator's own guards. `jailFor` is pure over `args`, so this and
+    // `openWorkspace`'s call cannot disagree — which they would have to be for the boundary a
+    // module guards against to differ from the one the built-ins guard against.
+    const extensions = extensionPaths === undefined ? undefined : await loadExtensionModules(extensionPaths, jailFor(args));
     ws = openWorkspace(args, process.env, fetchImpl, mcp, extensions);
+    warnAboutSubstitutedJournal(ws, args.command);
   } catch (e) {
     closeMcp();
     throw e;
@@ -8153,7 +8862,9 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       `${String(ws.models.unpriced.length)} route(s) in ${ws.models.file} have no price (${ws.models.unpriced.join(", ")}), ` +
         `so every candidate call on them is journaled as costing $0 and 3-cost would report a 0.00× ratio it never ` +
         `measured — against recordings that cost real money. ` +
-        `fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter.`,
+        `fix: put the rate where it bills — the adapter row's "prices", or the adapter author's own priceOf behind ` +
+        `the optional ModelAdapter.hasPrice(model). A genuinely free endpoint says {"input": 0, "output": 0} on the ` +
+        `ROUTE row, which is the only rate a route row may declare.`,
     );
   }
 

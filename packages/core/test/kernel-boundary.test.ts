@@ -213,7 +213,10 @@ test("GREEN: history before `since` is grandfathered, not judged retroactively",
   f.pin({ since: f.git("rev-parse", "HEAD") });
   const r = f.run();
   assert.equal(r.status, 0, r.output);
-  assert.match(r.output, /0 commits since/);
+  // "commits JUDGED since", because the ok-line names two differently-scoped numbers and used
+  // to leave a reader to divide one by the other: the commit count is the judged range, the
+  // seam count is the whole history.
+  assert.match(r.output, /0 commits judged since/);
 });
 
 test("GREEN + NOTICE: an uncommitted kernel edit is reported and never fails", () => {
@@ -263,7 +266,7 @@ test("RED: `since` names a commit this repository does not have", () => {
 /**
  * The cheapest way to switch this guard off without deleting it, and it was reproduced by
  * accident: `"since": "HEAD"` makes the range `HEAD..HEAD`, so the guard printed
- * `kernel guard ok: … 0 commits since fb813ec` over a feat commit that had just rewritten a
+ * `kernel guard ok: … 0 commits judged since fb813ec` over a feat commit that had just rewritten a
  * pinned file. Any moving ref does it — a branch name, a re-pointed tag.
  */
 test("RED: `since` is a moving ref, so the range is empty and the guard is vacuous", () => {

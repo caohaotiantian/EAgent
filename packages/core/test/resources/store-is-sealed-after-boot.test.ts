@@ -82,10 +82,16 @@ test("THE FILESYSTEM SCAN HAS EXACTLY ONE CALL SITE, and it is the boot seed", (
   // Two occurrences in one file: the declaration `function readResources(` and the one call.
   assert.deepEqual(calls, ["cli.ts", "cli.ts"], "readResources must be declared once and called once");
   const cli = code(readFileSync(join(SRC, "cli.ts"), "utf8"));
+  // THE PROPERTY IS "the single call is the boot seed", not the exact expression. The seed now
+  // also carries a pin per `function`/`hook` ref an `--extension-module` registered a body for
+  // — `rule015Resources` asks the RESOLVER, so without one such a graph fails
+  // `GRAPH015_RESOURCE_NOT_FOUND` for a body that is registered and fine. Both halves are
+  // pinned separately so neither can quietly become a rescan.
+  assert.match(cli, /const published = readResources\(root\);/, "the single call must still be the boot seed");
   assert.match(
     cli,
-    /new ResourceStore\(\{ seed: readResources\(root\) \}\)/,
-    "the single call must still be the boot seed — a rescan anywhere else reopens the swap",
+    /new ResourceStore\(\{ seed: \[\.\.\.moduleRefs[^\n]*\.\.\.published\] \}\)/,
+    "…and that seed must be what the store is constructed from — a rescan anywhere else reopens the swap",
   );
 });
 

@@ -279,12 +279,21 @@ test("a row that is present but not an object is NO row, not a row of undefined 
 /**
  * A MODEL WITH NO ROW AND NO PRICED PREFIX STILL COSTS 0, AND THAT IS PINNED ON PURPOSE.
  *
- * A fallback that prices it at the dearest row in the table was built and removed: `cli.ts:2747`
- * decides which routes are unpriced by probing `priceOf(model, {1e6, 1e6}) === 0`, and
- * `test/cli/promote-live.test.ts:507` pins a live-judgement REFUSAL that rests on the same zero.
- * A total `priceOf` switches off an operator banner and an oversight refusal to close a hole an
- * embedder reaches, which is the worse trade. This test is here so that a later change which
- * makes `priceOf` total has to come past the two callers first — see `resolvePrice`.
+ * A fallback that prices it at the dearest row in the table was built and removed: `cli.ts`'s
+ * `pricedFor` decides which routes are unpriced, and `test/cli/promote-live.test.ts:507` pins a
+ * live-judgement REFUSAL that rests on the same zero. A total `priceOf` switches off an operator
+ * banner and an oversight refusal to close a hole an embedder reaches, which is the worse trade.
+ * This test is here so that a later change which makes `priceOf` total has to come past those
+ * callers first — see `resolvePrice`.
+ *
+ * WHAT CHANGED AROUND IT, so this docstring does not read as "and therefore an unpriced model is
+ * free". The zero is unchanged and still what the CLI probes; what the CLI does with it is not.
+ * `pricedFor` asks `ModelAdapter.hasPrice` first (optional, and neither HTTP adapter implements
+ * it yet — one line each in `providers/{anthropic,openai}.ts` would), then the operator's own
+ * `prices` row through `resolvePrice`, and only then this zero. And `RoutingAdapter` REFUSES a
+ * route it lands on, at `estimateOf`/`stream`/`priceOf`, so an unpriced model no longer runs
+ * against a budget it cannot bind. An explicitly free endpoint says so with a `{input: 0,
+ * output: 0}` row, which is the case the bare probe could never distinguish from this one.
  */
 test("...but a wholly unknown model still prices 0, because two guards two levels up read that", () => {
   const usage = { inputTokens: 1e6, outputTokens: 1e6 };

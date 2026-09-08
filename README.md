@@ -241,12 +241,36 @@ comment:
 ## Extending it, and where that stops
 
 Read this before you fork, not after. Loom's stated property is *unlimited extensibility*, and the
-honest version of that sentence names its set. **Twelve things need no fork. Three do**, and the two
-lists below were each driven through the shipped binary rather than read off a header.
+honest version of that sentence names its set. **Seventeen things need no fork. Three do**, and the
+two lists below were each driven through the shipped binary rather than read off a header.
 
 Both counts moved on 2026-09-01, in the same direction, from one change. The fork list has been six,
 then seven when an undercount was found, then five, and is now **three** — every row that was there
 because *nobody built the seam* is gone, and what is left is three rows that are there for a reason.
+
+**THE FIRST NUMBER WAS AN UNDERCOUNT, AND ON 2026-09-06 IT WAS PAID RATHER THAN RESTATED.**
+`EngineOptions` takes five more members — `functions` (`FunctionRegistry`), `hooks`
+(`HookRegistry`), `resolver` (`ResourceResolver`), `store` (`StateStore`), `payloads`
+(`PayloadStore`) — every one of their types is on `scripts/surface.json`, and `openWorkspace`
+constructed all five unconditionally with no fallback. So a library embedder reached all five and
+ARGV reached none: debts of exactly the shape the 5 → 3 change paid off, sitting under a section
+that claimed to have none. The measured consequence was that a host-realm async `function` body
+using `Date` ran from an embedder and could not be supplied from the CLI at all — at 294e713,
+`--extension-module` on a module calling `functions.register` failed with `threw while registering:
+Cannot read properties of undefined (reading 'register')`, because `functions` was not a key on the
+object. All five are rows below now, so twelve became seventeen.
+
+**AND TWO PRIVILEGED BUILT-INS ARE GONE.** This section's claim is "the things that ship in the box
+are written against the same surface a stranger would use", and two things were not. `builtinTools`
+registered AFTER the extension modules and `ToolRegistry.register` shadows on collision, so an
+extension tool named `fs.read` was registered, held its capability, appeared in the grant list, and
+was **never dispatched** — driven at 294e713 against a `tool` node calling `fs.read`, the run
+succeeded with the built-in's answer and printed no warning, while the identical collision on an
+adapter or channel name refused to boot. It refuses now, naming the module and the built-in names.
+And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
+apply the operator's own guards; the module is handed the same frozen
+`{root, deny, egressAllowlist, execAllowlist, execEnvAllow}` the built-ins get, from one derivation
+(`jailFor`) both callers share.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 
@@ -259,11 +283,16 @@ because *nobody built the seam* is gone, and what is left is three rows that are
 | a `hook` body, at any of the eight points | `resources/hook/*.js` | §3 |
 | a tool | `--mcp-file` — any MCP server, stdio | driven against a 30-line stdio server: `loom run --mcp-file …` reaches its tool as `mcp__demo__reverse`, holding capability `mcp:demo`, and it GATES before it runs, because an MCP tool is irreversible unless its own server row says otherwise. A row may declare `"irreversibility"` — the operator's judgement about that server, never the server's about itself — and on 2026-09-02 the two halves were driven one key apart on one graph: with no key, `awaiting_gate` and the server's `tools/call` reached 0 times; with `"irreversibility":"read_only"`, `succeeded`, reached once, and `! MCP OVERSIGHT LOWERED BY --mcp-file — demo: read_only (posture floor out)` on stderr. `test/mcp/client.test.ts` and `test/mcp/irreversibility.test.ts` are the shipped reproductions |
 | a provider on the OpenAI wire | `--models-file` — any OpenAI-wire endpoint at any `baseUrl`. A keyless endpoint says so: `"apiKeyEnv": null` | the adapters row `{"provider":"openai","name":"local","baseUrl":"http://127.0.0.1:9/v1","apiKeyEnv":null}`, in a file that also carries `routes` → `ok`, exit 0; the same row *without* `apiKeyEnv` → `E_CONFIG_INVALID: … adapters[0] ("local") needs the environment variable OPENAI_API_KEY, which is not set` |
-| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools, channels, identity}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it | a 25-line module on an invented wire, driven offline: an `agent` node routed to it answers `"draft": "[echowire] echo-1 answered"`, and `loom replay` of that run *without* the module → `{"match": true, "hermetic": true}`. `test/cli/extension-module.test.ts` is the shipped reproduction. `examples/extensions/bedrock-converse.mjs` is the worked real-provider version and needs an AWS signer it deliberately does not ship, so it is a reference and not a reproduction |
+| a provider on ANY OTHER wire | `--extension-module` — a module whose default export is handed `{models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}` and registers a `ModelAdapter` (which must implement `provider`, `stream`, `priceOf`, `estimateOf` and `outputCeilingOf`, and yield `provider` on its `done` frame); a `--models-file` `routes` row may then name it, and that row is where an operator declares such an endpoint FREE — `"prices": {"<model>": {"input": 0, "output": 0}}` on the route — because a third-wire adapter has no adapter row to put that on and an unpriced route now refuses at the model call. Zero is the only rate a route row may state, and it is refused otherwise: the row is read when deciding whether the route is priced at all and never reaches the adapter, which is what bills, so a non-zero rate there would lift the refusal while every call was still journaled at `costUsd: 0`. A REAL rate has two doors, both of which reach the thing that bills: the ADAPTER row's `prices`, and — for any other wire — the adapter's own `priceOf` behind the optional `hasPrice(model)` | a 25-line module on an invented wire, driven offline: an `agent` node routed to it answers `"draft": "[echowire] echo-1 answered"`, and `loom replay` of that run *without* the module → `{"match": true, "hermetic": true}`. `test/cli/extension-module.test.ts` is the shipped reproduction. `examples/extensions/bedrock-converse.mjs` is the worked real-provider version and needs an AWS signer it deliberately does not ship, so it is a reference and not a reproduction |
 | an in-process tool | `--extension-module` — the same module's `tools.register(…)`; it is registered before the grant list is derived, so its capability is held | `test/cli/extension-module.test.ts` |
 | a place a gate is delivered to, and answered from | `--channels-file` — any HTTP endpoint; `callbackSecret` makes it answerable | a file with a signed `slack` row and an unsigned `pager` row boots to `gates:  slack (answerable), pager (notify-only)`, and the perimeter says so: `! CALLBACK ROUTE OPEN — POST /runs/:id/callbacks/:channel accepts decisions WITHOUT the bearer token, on: slack` |
 | a delivery TRANSPORT that is not an HTTP webhook | `--extension-module` — the same module's `channels.register(…)`. A `DeliveryChannel` is `{name, deliver}`, plus `parseCallback` when a human can ANSWER through it. It needs no `--channels-file`, and merges with one when there is one | a module registering an SMTP channel called `ops-email`, with no channels file at all, boots to `ext:    …/smtp.mjs → no adapters, channel ops-email` and `gates:  ops-email (notify-only)` — and a gate raised on it reaches the module's own `deliver`, asserted in `test/cli/extension-module.test.ts` by the receipt the module writes beside itself. A name it shares with a file row refuses: `E_CONFIG_INVALID: --channels-file …: entry 0 repeats the channel name "ops-email", which an --extension-module already registered — a dispatcher keys channels by name, so one of them would never deliver` |
 | an identity source | `--extension-module` — the same module's `identity.register(…)`. An `IdentitySource` is `{name, identify}`, where `undefined` establishes NOBODY and throwing REFUSES. One per deployment | a module registering a proxy-header source boots to `who:    proxy-header`, and a graph naming an approver it cannot enumerate is reported per gate rather than passed: `! CANNOT TELL — root/gate names u:alice: proxy-header cannot enumerate its subjects, so whether any of u:alice can hold a credential is unknown here`. Beside a `--identity-file` it refuses: `E_CONFIG_INVALID: --identity-file and the --extension-module …/oidc.mjs both establish who a caller is ("proxy-header"), and a deployment has ONE answer to that` |
+| a `function` body the workspace seam cannot express | `--extension-module` — the same module's `functions.register(ref, body)`. A `resources/function/*.js` body is evaluated in a `node:vm` realm with `SAFE_GLOBALS` and refuses an async body at load; a module's body is host-realm code, so `Date`, `await` and anything else this process has are available | a module registering `function/stamp@stable` as an `async` body that awaits a timer and reads `new Date(0)`: `loom run` prints `"status": "succeeded"` and `"note": "stamped at epoch 0"`. `openWorkspace` also seeds a resolver pin for the ref, because `rule015Resources` asks the RESOLVER and would otherwise answer `GRAPH015_RESOURCE_NOT_FOUND` for a body that is registered and fine. A workspace file of the same ref still WINS — the file is the one an operator can open |
+| a `hook` body, the same way | `--extension-module` — `hooks.register(ref, body)` | same seam, same seeding, same precedence |
+| where refs resolve from | `--extension-module` — `resolver.register(r)`, a `ResourceResolver {resolve, document?, subgraph?}` — the REQUIRED member and only it, since demanding `document` refused a resolver implementing exactly the published interface. SUBSTITUTES rather than layers: a module supplying one owns ref resolution — `resolve`, `document`, `subgraph` — for the whole deployment, **`resources/` included**. The workspace scan still runs and still registers every `resources/function` and `resources/hook` body, but nothing can reach them: `rule015Resources` asks the RESOLVER, so a graph naming a workspace ref no longer compiles unless the module's resolver serves it. Driven: the same graph is `"status": "succeeded"` with no module and `GRAPH015_RESOURCE_NOT_FOUND` with a module resolver that answers `undefined`. Supplying one means taking on every ref the deployment's graphs name that `rule015Resources` checks — which is every kind but the two in `NAME_ONLY_KINDS` (`agent_profile`, `oversight`). Those two need no resolver at all and nothing reads their content, so a resolver that serves neither still COMPILES AND RUNS them: driven, an `agent` node on `agent_profile/writer@stable` beside a served `prompt/write@stable` is exit 0 and `"status": "succeeded"`, and a `human_gate` on `oversight/release@stable` under a resolver answering `undefined` for EVERY ref is exit 0 and `"status": "awaiting_gate"`. The ordinary half is the prompt beside them: unserved, `prompt/write@stable` refuses AT COMPILE — `✗ g.json: GRAPH015_RESOURCE_NOT_FOUND: resource "prompt/write@stable" does not resolve` then `E_GRAPH_INVALID: graph has 1 error(s): GRAPH015_RESOURCE_NOT_FOUND`, exit 1 | a second claim refuses: `registers a resolver, and <first module> already registered one` |
+| where the journal is | `--extension-module` — `store.register(s)`, any `StateStore`. This is the sharpest row on the list: a module supplying a `MemoryStateStore` makes a deployment whose runs do not survive the process, and the substitution is announced on whichever verb you used. `loom serve` says it in the boot banner, on stdout: `ext:    <path> → no adapters, store SUBSTITUTED (this deployment's journal is the module's)`. EVERY OTHER VERB, `loom run` included, says it on stderr instead — `! JOURNAL SUBSTITUTED by --extension-module <paths> — this deployment's journal is the module's, not <data-dir>. If it does not persist, nothing written by this command survives the process: no loom trace, no loom gates, no replay, and no restart can fold what this run recorded.` (three lines as printed) — and `serve` prints only the banner, never both | driven, both verbs on one module: `loom run` is exit 0, `"status": "succeeded"`, the `! JOURNAL SUBSTITUTED` lines on stderr; `loom serve` boots to the `store SUBSTITUTED` banner and writes no `JOURNAL SUBSTITUTED` line. On both, no `.loom/journal.db` is created, because none is opened — the `.loom` directory is made and stays empty. A member the object lacks refuses AT THE CALL, naming it — `store.register was given an object with no head(), listRuns() — a StateStore {append, read, head, listRuns, close}`, which is all five and not the three it first asked for: a partial store used to boot and die mid-run with `TypeError: this[#store].head is not a function` |
+| where externalised payloads go | `--extension-module` — `payloads.register(p)`, any `PayloadStore` | same single-slot rule, same refusal |
 
 **Fork required.** Each of these is a CLOSED SET, and the COMPILER names its members when you miss —
 all three are compiler refusals now, which is the shape the list converged on rather than a
@@ -275,11 +304,21 @@ re-driven on 2026-09-01 against the binary at `packages/core/src/cli.ts`.
 - **a reducer** — `GRAPH003_UNKNOWN_REDUCER … fix: use one of replace, append_ordered, merge_object, sum, max, min, union_set, last_write_wins_by_ts`
 - **a ninth hook point** — `GRAPH003_UNKNOWN_HOOK_POINT … fix: one of: preNode, preModel, postModel, preTool, postTool, onError, onGate, onComplete`
 
-**All three are there for ONE reason, and it is replay.** Each is a word a journal records and a
-fold re-reads, and a fold can only reproduce a decision whose vocabulary the folding binary already
-knows. A node type that arrived from a config file would make a recorded run unreadable by anything
-but the process that wrote it. These three are BOUNDS, and the tell that each is honest is that its
-refusal NAMES ITS MEMBERS — all three above do. There is no longer a second bullet under this
+**All three are there for ONE reason, and it is replay.** A fold can only reproduce a decision
+whose vocabulary the binary doing the folding already knows, so a node type that arrived from a
+config file would make a recorded run unreadable by anything but the process that wrote it. These
+three are BOUNDS, and the tell that each is honest is that its refusal NAMES ITS MEMBERS — all three
+above do.
+
+This paragraph used to say "each is a word a journal records and **a fold re-reads**", and the
+second half of that is false of all three. Measured: the journal does record each — `task.started`
+carries `nodeType`, `channel.written` carries `reducer`, `hook.applied` carries `point` — and
+`grep -an` for those three fields across `run/projection.ts` and `run/replay.ts` returns nothing.
+Even `evolution/trajectory.ts`, the one reader of a node's type, builds its map from
+`opts.graph.spec.nodes` rather than from the event. The mechanism is one layer up: what a later
+binary has to be able to do is COMPILE the graph the run was submitted against and dispatch its
+nodes, which is `graph/validate.ts`'s `GRAPH020_UNKNOWN_TYPE` and the executor's own switch. The
+bound is the same and its enforcement is not where this sentence said it was. There is no longer a second bullet under this
 heading, and getting to one reason is most of what this section's history is about: it used to carry
 the blanket claim *"the reason is replay, not taste — every one of those closed sets is journaled
 vocabulary"*, which was measurably false of the rows it covered, and then a split between three

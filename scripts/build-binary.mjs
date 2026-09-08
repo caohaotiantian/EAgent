@@ -36,14 +36,32 @@ const TARGET = join(OUT, NAME);
 
 mkdirSync(OUT, { recursive: true });
 
-// ── 0. photograph the sources ────────────────────────────────────────────────
-// The stamp is a digest of `src`, but what goes into the binary is `dist` — so refuse
-// to stamp at all unless dist was compiled from a tree at least this new. Otherwise the
-// binary would certify sources it does not contain, and report itself fresh forever.
+// ── 0. COMPILE, then photograph the sources ──────────────────────────────────
+//
+// THIS SCRIPT COMPILES `dist` ITSELF, and that is the whole fix for a binary that certifies
+// sources it does not contain. The stamp is a digest of `src`; what goes into the binary is
+// `dist`; and the only thing that used to connect them was `distIsBehindSources`, an MTIME
+// comparison. mtime cannot decide this and that function's own comment admits it. Anything
+// that makes `dist/*.js` newer than `src/*.ts` without recompiling — a `touch`, a `tar -x`,
+// an `rsync`, a CI build-cache restore — made the check answer "dist is at least as new",
+// after which this script bundled the UNEDITED dist and stamped the EDITED src. The binary
+// ran the old code and reported itself fresh forever, and `verify-binary.mjs` passed all four
+// of its cases on it, because it also only compares the stamp to src.
+//
+// Compiling here makes `dist` a function of `src` by construction, so there is no window in
+// which the two disagree. `build:binary` used to be `npm run build && node <this>`; the
+// compile moved INTO the script because the hazard is running the SCRIPT, and a hazard only
+// the wrapper protects against is a hazard.
+execFileSync(process.execPath, [join(repoRoot, "node_modules", "typescript", "bin", "tsc"), "-b", "--force"], {
+  cwd: repoRoot,
+  stdio: "inherit",
+});
+// KEPT AS THE POST-CONDITION, not deleted. After the line above it can only fire if the
+// compile emitted nothing at all, which is exactly the case a build must not stamp.
 const behind = freshness.distIsBehindSources(repoRoot);
 if (behind !== null) {
   console.error(`build FAILED: ${behind}.`);
-  console.error("Run `npm run build:binary`, which compiles first — not this script on its own.");
+  console.error("The `tsc -b --force` above emitted nothing for it — read its output.");
   process.exit(1);
 }
 // Taken BEFORE the bundle so the digest can only be of a tree at least as old as the

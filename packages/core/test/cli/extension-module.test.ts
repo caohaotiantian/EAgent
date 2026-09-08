@@ -346,10 +346,18 @@ test("TWO MODULES CLAIMING ONE ADAPTER NAME are refused — and NOT as \"registe
   }
 });
 
-test("a module that registers a tool OVER another module's tool still counts as having registered", async () => {
-  // `ToolRegistry` shadows on name collision, so `list().length` cannot tell "did nothing"
-  // from "replaced something" either. Shadowing is legal — the registry's whole disposal
-  // discipline is built on it — so this must NOT be refused.
+test("two modules claiming one TOOL NAME refuses to boot, naming both", async () => {
+  // THIS TEST USED TO PIN THE OPPOSITE, and its stated reason did not support its conclusion:
+  // "`ToolRegistry` shadows on name collision, so `list().length` cannot tell `did nothing`
+  // from `replaced something`. Shadowing is legal — the registry's whole disposal discipline
+  // is built on it — so this must NOT be refused." The premise is about counting and is
+  // answered by `ObservedToolRegistry.calls`; the conclusion is about two argv-named modules at
+  // boot, which is a different question. `ModelRegistry` also shadows and also supports
+  // disposal, and two modules claiming one ADAPTER name has always refused — for the reason
+  // that applies here unchanged: the registry silently keeps one and nothing says which, so
+  // one module's tool is permanently undispatchable and its author has no way to find out.
+  // Shadowing stays legal for the embedder who calls `register` and holds the `Disposable`;
+  // what is refused is two claims resolved by the order two paths appeared on argv.
   const w = workspace();
   try {
     const shadow = moduleAt(
@@ -359,8 +367,14 @@ test("a module that registers a tool OVER another module's tool still counts as 
         `capabilities: ["house:ping"], irreversibility: "read_only", idempotent: true, parameters: { type: "object", properties: {} }, ` +
         `execute: () => ({ pong: false }) }); };\n`,
     );
-    const ext = await loadExtensionModules([w.module, shadow]);
-    assert.equal(ext.tools.require("house.ping").version, "2.0", "the later module's definition is live");
+    await assert.rejects(
+      () => loadExtensionModules([w.module, shadow]),
+      (e: unknown) =>
+        isLoomError(e) &&
+        /registers the tool name "house.ping", which .* already registered/.test(e.message) &&
+        e.message.includes(w.module) &&
+        e.message.includes(shadow),
+    );
   } finally {
     w.dispose();
   }
