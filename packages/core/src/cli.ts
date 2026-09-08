@@ -1623,24 +1623,35 @@ export function openWorkspace(
   // and never a real tool. A guard that fails closed on a case it has already made impossible is
   // not tighter, it is just wrong, and 3d05cff booted these correctly.
   //
-  // THE WHOLE PREDICATE, IN THE ONE SENTENCE IT IS: a name is claimed by whichever registrar
-  // REGISTERS it, and a second claimant refuses at boot. A server re-listing its own tool never
-  // reaches this check — `McpClient.start` keeps the first and puts the rest on `rejectedTools`,
-  // and this loop reads `client.tools`. Nothing here needs to know which server claimed a name,
-  // only that somebody did.
+  // THE TWO-CLAIMANT HALF, IN THE ONE SENTENCE IT IS: a name is claimed by whichever registrar
+  // will register it, and a second claimant refuses at boot. (The ONE-claimant half is the `mcp__`
+  // reservation further down; between them they are the whole rule, and neither is it alone.) A
+  // server re-listing its own tool never reaches this check — `McpClient.start` keeps the first
+  // and puts the rest on `rejectedTools`, and this loop reads `client.tools`. Deciding to REFUSE
+  // needs only to know that somebody claimed the name; the message then says who.
   //
   // It took three fix rounds to get back to that. Two accommodations were built for a same-server
   // collision that cannot occur — an exemption keyed on the claiming server, and an attribution
-  // that GUESSED a name's owner from its `mcp__<server>__` prefix — and mutation proved both
-  // inert: deleting either left the suite at 8 pass, 0 fail. They are gone. The accretion of
-  // special cases in one predicate was the tell that the fix was mis-scoped rather than
-  // incomplete, and the answer was to delete rather than to add a fourth.
+  // that GUESSED a name's owner from its `mcp__<server>__` prefix — and mutation proved both inert
+  // TO THE SUITE: deleting either left it at 8 pass, 0 fail. That is not the same as "nothing
+  // changed", and the difference is the one CLAUDE.md means by "a builder's own green suite is not
+  // evidence" — on the library-embedder path they changed which message an operator reads, for the
+  // better, and the suite could not have told you either way. The accretion of special cases in one
+  // predicate was the tell that the fix was mis-scoped rather than incomplete, and the answer was
+  // to delete rather than to add a fourth.
   const claimed = new Map<string, string>();
   for (const t of tools.list()) {
     const owner = extensions?.toolOwners.get(t.name);
     // `shipped` RATHER THAN "not an extension", because "everything else is a built-in" is true
     // only while these are the only two registrars that have run — and this whole block exists
     // because a third one was added and nobody updated the reasoning that assumed two.
+    //
+    // AND THIS BRANCH IS KEPT ON A DIFFERENT RULE FROM THE TWO DELETED ABOVE, deliberately. Those
+    // two decided whether a boot REFUSES and decided it wrongly; this one only decides which words
+    // an operator reads. No built-in name carries the `mcp__` prefix, so a built-in's label is
+    // never actually printed by the refusal below — the branch is here so the map does not
+    // MISATTRIBUTE, which is the failure a fourth registrar would inherit. A branch with no
+    // behaviour is a comment's job to justify; a branch with the wrong behaviour is a deletion.
     claimed.set(
       t.name,
       owner !== undefined
