@@ -8854,8 +8854,7 @@ export class Engine {
         // THE THREE UNCONDITIONAL KINDS, NAMED. `default:` used to carry them, which meant it
         // also carried every kind this binary cannot read — and answered it by TAKING the edge
         // with its `when` never evaluated. Naming them leaves `default:` for the one case it
-        // should have had, and makes a new member of `EdgeKind` a compile error here rather than
-        // a silent unconditional edge.
+        // should have had.
         case "seq":
         case "fanout":
         case "join":
@@ -8872,6 +8871,14 @@ export class Engine {
           // being written again, and because a silent drop is the honest answer for a code path
           // the door has already made unreachable. Nothing throws here: `#edgesToTake` is called
           // from inside `#commit`, and a throw would reject `advance()` — see `#strayRoute`.
+          //
+          // AND A NEW MEMBER OF `EdgeKind` IS A COMPILE ERROR HERE — which this comment used to
+          // claim of the named cases alone, and which was false: with `default:` present the
+          // switch is total whatever the union holds, so adding a kind typechecked clean at both
+          // engine sites and was flagged at `compile.ts`'s `EDGE_KINDS` only. Measured, with
+          // `| "probe"` added: one error before this line, two after. At run time `e.kind` is
+          // whatever the journal holds, so the arm stays; the `satisfies` costs nothing there.
+          e.kind satisfies never;
           break;
       }
     }
@@ -9297,11 +9304,12 @@ export class Engine {
     // A safety net for lazy materialisation: never complete a run that still has
     // unmaterialised branches. Reaching here means a top-up was missed, and finishing
     // would silently report a partial result as a whole one.
+    // The same index and the same predicate `#topUpFanout` counts materialised siblings with,
+    // so the two cannot disagree about what "started" means.
+    const index = branchIndexOf(p);
     for (const [key, plan] of Object.entries(p.fanouts)) {
       const parentPath = key.slice(key.indexOf("@") + 1);
-      const started = Object.values(p.tasks).filter(
-        (t) => t.nodeId === plan.nodeId && encodeBranch({ segments: t.branch.segments.slice(0, -1) }) === parentPath,
-      ).length;
+      const started = (index.byParentPath.get(parentPath) ?? []).filter((t) => t.nodeId === plan.nodeId).length;
       if (started < plan.width) {
         await this.#failRun(ctx, p, {
           class: "internal",

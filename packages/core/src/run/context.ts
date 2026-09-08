@@ -143,12 +143,12 @@ export function project(value: unknown, projection: ContextProjection | undefine
 /**
  * The item count a `take` declares, or a refusal — and NOT `Number()`, which is the bug.
  *
- * Nothing checks this value before it arrives. `compile` runs `unknownKeys` over a
- * `contextProjection` and validates the KEY NAMES only, so `{take: "abc"}` produces zero
- * diagnostics and reaches this function at run time; `graph/validate.ts` is where a compile-time
- * check would belong, and there is none today. So the reading has to happen here, and a
- * `typeof take === "number"` gate would answer the undecidable case with the passing value —
- * a string is "not a slice", so a node asking for three items would be shown all of them.
+ * `graph/validate.ts`'s `checkProjectionValues` refuses a present-and-unreadable `take` at
+ * compile, so a graph that went through `compile` never reaches this arm with `"abc"`. The
+ * reading still happens here because `assembleContext` is a public function and a projection
+ * can arrive from a caller that compiled nothing; and a `typeof take === "number"` gate would
+ * answer the undecidable case with the passing value — a string is "not a slice", so a node
+ * asking for three items would be shown all of them.
  *
  * `Number()` LOOKED LIKE THE READER AND IS A COERCION. It maps `""`, `" "`, `[]` and `false` to
  * 0, and 0 is a legitimate bound meaning "show nothing" — so four bounds nobody can read emptied
@@ -367,15 +367,15 @@ function buildSections(input: AssembleInput, channels: Readonly<Record<string, u
  *     {"maxTokens":10,"overflow":"nonsense"}      -> {}              same
  *     {"maxTokens":"abc","overflow":"truncate_tail"} -> {"c":[]}     emptied
  *
- * Nothing checks either field: `compile` runs `unknownKeys` over `contextProjection` and reads
- * the key NAMES only. A bound nobody can read is not a licence to widen, and it is not a licence
- * to silently narrow to nothing either — the node is told a different story than its author
- * wrote, with no diagnostic anywhere. Both refuse now, for the same reason and in the same
- * words as `readTake`.
+ * A bound nobody can read is not a licence to widen, and it is not a licence to silently narrow
+ * to nothing either — the node is told a different story than its author wrote, with no
+ * diagnostic anywhere. Both refuse now, for the same reason and in the same words as `readTake`.
  *
- * THE COMPILE-TIME HALF BELONGS IN `graph/validate.ts`, where the other projection checks live.
- * That is a pinned kernel file and this refusal is the runtime half; a diagnostic there would
- * make this arm unreachable for any compiled graph, which is the right shape.
+ * THE COMPILE-TIME HALF IS `graph/validate.ts`'s `checkProjectionValues`: a present-and-unreadable
+ * `maxTokens` or `overflow` is a `GRAPH003_MALFORMED` at compile, so for a compiled graph these
+ * arms are reachable only when the field is ABSENT — which compile deliberately does not refuse,
+ * because a graph that declares neither runs correctly for as long as it stays under its bound.
+ * This is the runtime half, and it is what an uncompiled caller of `assembleContext` gets.
  */
 function applyOverflow(value: unknown, projection: ContextProjection): unknown {
   // EACH CHECK SITS WHERE ITS VALUE IS CONSUMED, and the first version of this guard put both at
@@ -413,8 +413,8 @@ function applyOverflow(value: unknown, projection: ContextProjection): unknown {
     default:
       // THE ARM THAT WAS MISSING. Without it an unknown rule fell off the end as `undefined` and
       // `projectAll` wrote that over the channel — a bare `TypeError` out of prompt assembly, not
-      // a `LoomError`. `overflow: "TRUNCATE_TAIL"` is a plausible thing to write by hand and
-      // `compile` reads only the KEY NAMES of `contextProjection`, so it gets this far.
+      // a `LoomError`. `overflow: "TRUNCATE_TAIL"` is a plausible thing to write by hand; compile
+      // refuses it now (`checkProjectionValues`), so this arm is for the uncompiled caller.
       throw err.validation(
         CODES.E_GRAPH_INVALID,
         `contextProjection.overflow is not a rule this build knows: ${describeTake(projection.overflow)} ` +
