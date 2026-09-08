@@ -65,9 +65,15 @@
  *     pin has ever named, and a departed path is printed. The build still stops failing for it,
  *     because that is what remedy 3 means.
  *
- * ── The census cannot be reset by moving `since`, OR by editing `files` ──────────
+ * ── The census cannot be reset by `since`, by editing `files`, or by both ───────
  *
- * It could be both ways, and that was this file's most-repeated false claim. Two knobs bound
+ * NOR BY THE TWO IN SEQUENCE, which is the correction this paragraph itself needed.
+ * `everPinnedPaths` read the pin's own history over `since..HEAD`, so de-pinning a file and
+ * THEN advancing `since` past the de-pin took the ledger to 0 with exit 0 and neither notice
+ * printed. Each knob was closed alone and tested alone, which is exactly why neither test saw
+ * the composition; it is closed by reading the pin's history over all of HEAD.
+ *
+ * It could be all three ways, and that was this file's most-repeated false claim. Two knobs bound
  * what is JUDGED, which is right — grandfathering and de-pinning are both legitimate, argued
  * acts, and remedy 3 in the failure text below offers the second one. What neither may do is
  * erase the number a reader watches, and both did: advancing `since` one commit printed
@@ -84,18 +90,21 @@
  * ── The escape hatch, and why it is not a rubber stamp ───────────────────────────
  *
  * `Kernel-seam:` in the commit body. It costs a sentence of design argument, and this script's
- * own output above is the debt census: it prints every seam declared in `since..HEAD` with the
- * reason its file is pinned.
+ * own output above is the debt census: it prints every seam declared over the WHOLE history —
+ * `since` bounds what is judged and nothing about what is counted — with the reason its file is
+ * pinned.
  *
  * READ IT FROM HERE AND NOWHERE ELSE, and this paragraph used to say the opposite. Measured on
  * one range: this guard 11, `git log --grep='^Kernel-seam:'` 12 (it matches prose ABOUT the
  * trailer as readily as the trailer), and git's own `%(trailers:key=Kernel-seam)` a third number
  * again, because it parses only the final paragraph of a body. Three commands, three answers.
  *
- * THE FIVE RESETS THIS PARAGRAPH USED TO LIST ARE CLOSED FOR THE CENSUS — the `since` advance,
- * the `files` edit, the rename, the subject spelling and the one-character trailer, each
- * described above with its measurement. What is left is the reset no tool can close, and it is
- * the next paragraph.
+ * SIX RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
+ * SEQUENCE, the rename, the subject spelling and the one-character trailer, each described
+ * above with its measurement. The sixth is the one worth remembering: five were closed and
+ * five were tested, each alone, and composing two of them reset the ledger anyway. Ask of a
+ * closed reset what it does NEXT TO the other closed ones. What is left is the reset no tool
+ * can close, and it is the next paragraph.
  *
  * THE LIMIT THAT FIRES MOST OFTEN IS `fix:`, which may touch the kernel freely — so a capability
  * landing under it is asked for no seam at all. It happened on the phase-2-4 merge: five pinned
@@ -208,7 +217,7 @@ if (typeof pin.since !== "string" || pin.since.trim().length === 0) {
 
 /**
  * An OBJECT NAME, never a ref. Reproduced while writing this guard: with `"since": "HEAD"` the
- * range `HEAD..HEAD` is empty, so the guard printed `kernel guard ok: … 0 commits since fb813ec`
+ * range `HEAD..HEAD` is empty, so the guard printed `kernel guard ok: … 0 commits judged since fb813ec`
  * over a `feat` commit that had just rewritten a pinned file. Any moving ref — `HEAD`, `@`, a
  * branch, a tag someone re-points — is the same vacuum, and it is the cheapest way to switch
  * this guard off without deleting it.
@@ -295,7 +304,20 @@ for (const p of paths) for (const name of historicalNames(p)) watched.add(name);
  */
 function everPinnedPaths() {
   const out = new Set(paths);
-  const log = git("log", "--format=%H", `${since.out}..HEAD`, "--", "scripts/kernel.json");
+  // ALL OF HEAD, NOT `since..HEAD`, AND THAT WAS THE SIXTH RESET — the two knobs composed.
+  // Scoping this read to the judged range meant a de-pin that happened BEFORE `since` was
+  // invisible to the census the de-pin rule exists to protect, so the two documented-legitimate
+  // acts, taken in order, erased the number a reader watches with NEITHER notice printed:
+  //
+  //     1. `refactor(kernel): src/engine.ts is not kernel after all`  → ledger 1, notice printed
+  //     2. `chore(kernel): grandfather everything up to the de-pin`   → ledger 0, exit 0, silent
+  //
+  // Measured on a fixture and reproduced independently by two readers. Each knob alone was
+  // closed and each was tested alone, which is exactly why neither test saw it. `since` bounds
+  // what is JUDGED and must bound nothing about what is COUNTED — including which paths were
+  // ever counted. The census reads the pin's whole history for the same reason it reads the
+  // whole commit history.
+  const log = git("log", "--format=%H", "HEAD", "--", "scripts/kernel.json");
   if (!log.ok) return out;
   for (const sha of log.out.split("\n").map((l) => l.trim()).filter(Boolean)) {
     const blob = git("show", `${sha}:scripts/kernel.json`);
@@ -395,8 +417,22 @@ const { violations, declared } = judge(commits);
  * Counting over the whole history costs one more pass and makes the reset visible instead.
  */
 const all = judge(commitsIn("HEAD"), everWatched);
-/** Feat commits that touched the kernel BEFORE `since` and declared nothing: the grandfathered debt. */
-const grandfathered = all.violations.length - violations.length;
+/**
+ * Feat commits that touched the kernel BEFORE `since` and declared nothing: the grandfathered
+ * debt, judged over exactly the commits `since` excludes.
+ *
+ * IT USED TO BE `all.violations.length - violations.length`, WHICH IS TWO SUBTRACTIONS AT ONCE.
+ * `all` is judged over `everWatched` and `violations` over `watched`, so a violation INSIDE
+ * `since..HEAD` against a DE-PINNED path fell into the difference and was reported as "touched
+ * the kernel before `since`" — untrue of that commit, and it files de-pin debt under the
+ * `since` heading when the de-pin notice below is what should carry it. Measured: a `feat`
+ * commit two commits AFTER `since`, de-pinned, printed `1 feat commit(s) touched the kernel
+ * before `since``.
+ *
+ * Judging `since` itself — the commits reachable FROM it — answers the question the notice
+ * asks, with no arithmetic between two differently-scoped runs.
+ */
+const grandfathered = judge(commitsIn(since.out), everWatched).violations.length;
 
 // ── the working tree: a notice, never a failure ──────────────────────────────────
 
@@ -444,7 +480,7 @@ if (violations.length > 0) {
 
 console.log(
   `kernel guard ok: ${paths.length} files pinned, ` +
-    `${commits.length} commits since ${since.out.slice(0, 7)}, ` +
+    `${commits.length} commits judged since ${since.out.slice(0, 7)}, ` +
     `${all.declared.length} declared seam${all.declared.length === 1 ? "" : "s"} over the full history` +
     (declared.length === all.declared.length ? "" : ` (${declared.length} of them judged, the rest before \`since\`)`),
 );
@@ -459,7 +495,7 @@ for (const d of all.declared) {
 const departed = [...everWatched].filter((f) => !watched.has(f)).sort();
 if (departed.length > 0) {
   console.log(
-    `  notice: ${String(departed.length)} path(s) were pinned as kernel earlier in this range and are not now. ` +
+    `  notice: ${String(departed.length)} path(s) were pinned as kernel earlier in this history and are not now. ` +
       "Their declared seams are still counted; an UNPAID violation against one no longer fails the build:",
   );
   for (const f of departed) console.log(`        ${f}`);

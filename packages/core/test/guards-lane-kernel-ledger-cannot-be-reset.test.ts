@@ -265,7 +265,7 @@ test("DROPPING A PATH FROM `files` no longer erases its seams from the census", 
   assert.equal(seams(after.output), 1, `the de-pin erased the seam:\n${after.output}`);
   // …and the fact that a path left is not silent, because an unpaid violation against it does
   // stop failing the build — that half is what remedy 3 means and cannot be closed.
-  assert.match(after.output, /path\(s\) were pinned as kernel earlier in this range and are not now/);
+  assert.match(after.output, /path\(s\) were pinned as kernel earlier in this history and are not now/);
   assert.match(after.output, /src\/engine\.ts/);
 });
 
@@ -281,4 +281,86 @@ test("…and a de-pinned file stops FAILING the build, which is what remedy 3 me
   assert.equal(after.status, 0, "the guard's own failure text offers this as remedy 3");
   // The debt is NAMED rather than erased — that is the whole of what the split buys.
   assert.match(after.output, /an UNPAID violation against one no longer fails the build/);
+});
+
+/**
+ * THE SIXTH RESET: THE TWO KNOBS IN SEQUENCE, which each of the tests above missed by testing
+ * its own knob alone.
+ *
+ * `everPinnedPaths` recovered the pin's history over `${since}..HEAD`, so a de-pin that
+ * happened BEFORE `since` was invisible to the census the de-pin rule exists to protect. Two
+ * ordinary commits — both of them acts this file documents as legitimate — took the ledger to
+ * zero with exit 0 and NEITHER notice printed. Measured on this fixture at dcc77fc:
+ *
+ *     1. refactor(kernel): src/engine.ts is not kernel after all
+ *        → "1 declared seam over the full history", departed-path notice printed
+ *     2. chore(kernel): grandfather everything up to the de-pin
+ *        → "1 files pinned, 1 commits judged since 4883204, 0 declared seams over the full history"
+ *
+ * The file's headline claim was "The census cannot be reset by moving `since`, OR by editing
+ * `files`" — true of each and false of their composition, which is the correction CLAUDE.md
+ * calls worse than the original defect if it lands half-done. The pin's history is read over
+ * all of HEAD now, for the same reason the commit history is.
+ */
+test("DE-PINNING AND THEN ADVANCING `since` PAST THE DE-PIN still cannot zero the ledger", () => {
+  const f = repo();
+  f.commit("feat(run): a posture", SEAM, { [KERNEL]: "export const engine = 2;\n" });
+  assert.equal(seams(f.run().output), 1);
+
+  // Knob 2: de-pin. Legitimate — it is the guard's own remedy 3 — and already covered above.
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.pin("src/other.ts");
+  f.commit("refactor(kernel): engine.ts is not kernel after all", "");
+  const dropped = f.git("rev-parse", "HEAD");
+  assert.equal(seams(f.run().output), 1, "the de-pin alone was already closed");
+
+  // Knob 1: advance `since` PAST the de-pin, so the de-pin commit itself leaves the judged
+  // range. Legitimate on its own too. Together they were a reset.
+  f.pin("src/other.ts", dropped);
+  f.commit("chore(kernel): grandfather everything up to the de-pin", "");
+  const after = f.run();
+  assert.equal(after.status, 0, after.output);
+  assert.equal(seams(after.output), 1, `the two knobs in sequence erased the seam:\n${after.output}`);
+  // …and the de-pin is still said out loud, which is the half that makes the number readable.
+  assert.match(after.output, /path\(s\) were pinned as kernel earlier in this history and are not now/);
+  assert.match(after.output, /src\/engine\.ts/);
+});
+
+/**
+ * The `grandfathered` notice counts commits `since` EXCLUDES, and nothing else.
+ *
+ * It was `all.violations.length - violations.length` — a difference between two runs judged
+ * over DIFFERENT path sets, so an unpaid violation inside `since..HEAD` against a de-pinned
+ * path fell into it and was announced as "touched the kernel before `since`". That is untrue of
+ * such a commit, and it files de-pin debt under the wrong heading: the departed-path notice is
+ * what carries that, and says so in its own words.
+ */
+test("THE GRANDFATHERED NOTICE DOES NOT COUNT A DE-PINNED IN-RANGE VIOLATION", () => {
+  const f = repo();
+  // An unpaid violation AFTER `since`, then de-pinned. It stops failing the build (remedy 3),
+  // and the departed-path notice is what reports it.
+  f.commit("feat(run): a posture, no seam", "", { [KERNEL]: "export const engine = 2;\n" });
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.pin("src/other.ts");
+  f.commit("refactor(kernel): engine.ts is not kernel after all", "");
+  const after = f.run();
+  assert.equal(after.status, 0, after.output);
+  assert.doesNotMatch(
+    after.output,
+    /feat commit\(s\) touched the kernel before `since`/,
+    `de-pin debt was filed under the \`since\` heading:\n${after.output}`,
+  );
+  assert.match(after.output, /an UNPAID violation against one no longer fails the build/);
+});
+
+/** THE ORDINARY HALF: a real pre-`since` violation is still counted under its own heading. */
+test("…and a genuine pre-`since` violation is still named, which is what that notice is for", () => {
+  const f = repo();
+  f.commit("feat(run): a posture, no seam", "", { [KERNEL]: "export const engine = 2;\n" });
+  assert.equal(f.run().status, 1);
+  f.pin(KERNEL, f.git("rev-parse", "HEAD"));
+  f.commit("chore: advance since", "");
+  const after = f.run();
+  assert.equal(after.status, 0, after.output);
+  assert.match(after.output, /1 feat commit\(s\) touched the kernel before `since`.*declared no seam/s);
 });
