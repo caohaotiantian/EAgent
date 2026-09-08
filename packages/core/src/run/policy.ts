@@ -182,7 +182,10 @@ export interface PolicyEngineOptions {
    * which costs exactly the interruptions the mechanism exists to enable.
    */
   readonly interventionWindowMs?: Partial<Record<IrreversibilityClass, number>>;
-  /** Escalation rules armed for this run. See D7.7 E1–E10 (E11 is declared there and not built). */
+  /**
+   * Escalation rules armed for this run. `ESCALATION_RULES` is the list; E11 is the only number
+   * D7.7 declares that nothing builds (provider fall-through — `providers/fallback.ts` names it).
+   */
   /**
    * THE GRAPH'S OWN ALLOWLIST — a ceiling, not a request.
    *
@@ -556,9 +559,10 @@ export class PolicyEngine {
    *
    * ## WHY NO ESCALATION IS CLAMPABLE, AND WHY THAT STILL LEAVES DE-ESCALATION USABLE
    *
-   * Every one of E1–E10 fires on evidence that arrived AFTER the graph was authored — a
-   * verdict that came back weak, three failures in a row, an n-gram nobody has seen, a
-   * graph that grew a node. None of it is in what the human read, so a ceiling is not an
+   * Every rule in `ESCALATION_RULES` fires on evidence that arrived AFTER the graph was
+   * authored — a verdict that came back weak, three failures in a row, an n-gram nobody has
+   * seen, a graph that grew a node, a fan that came back empty and skipped the gate on its
+   * branch. None of it is in what the human read, so a ceiling is not an
    * answer to any of it. Measured before this held: a run-scope de-escalation to `out`
    * clamped E10 `mutation_introduced_irreversible` — whose `engine.ts` comment promises it
    * gates "whatever the run's posture" — and an agent-introduced `pay.charge` node charged

@@ -1213,6 +1213,49 @@ export function parseTemplateExpr(expr: string): { readonly path: string; readon
 const TEMPLATE_JSON = /\s*\|\s*json$/;
 
 /**
+ * MAY THIS NODE HOLD OVERSIGHT THE GRAPH AROUND IT CANNOT ENUMERATE — the set, named by its
+ * property rather than by listing types, because the property is what both callers ask about.
+ *
+ * `human_gate`, because of the eight `NodeType`s it is the only one whose whole purpose is that
+ * the run STOPS until a person acts. A `tool` or an `agent` skipped or routed around did not
+ * happen either, but nothing about the graph promised it would, and their own oversight is about
+ * THEMSELVES — a tool at posture `in` raises a gate for its own call.
+ *
+ * `subgraph`, because ITS OWN BODY MAY HOLD ONE and no reader here can see it. A child is
+ * compiled and cached, so a walk is possible; three reasons it is not done. (1) One caller is on
+ * the SCHEDULING path, and `compileOrThrow` on a child spec that no longer compiles turns a
+ * refusal into a throw — a guard that fails OPEN by crashing the wave meant to raise it. (2) A
+ * child may itself hold a `subgraph`, so the honest walk is a recursive compile of a tree bounded
+ * only by `expansion.maxDepth`. (3) The answer would be no better: a child re-decides every node
+ * at full strictness under its own `PolicyEngine`, so a delegation is exactly where oversight the
+ * parent cannot enumerate lives — "the child declares no `human_gate` today" is a claim about a
+ * spec the parent froze, not about the run that would have happened.
+ *
+ * ## TWO CALLERS, ONE QUESTION, AND THEY HELD TWO ANSWERS
+ *
+ * `Engine.#fireEmptyJoin` asks it of a branch a zero-width fan passed over; `graph/mutate.ts`
+ * asks it of a dominator a proposed mutation would remove. Both are "was the only thing that
+ * could have stopped this taken out of the run", and the second answered `human_gate` alone
+ * while the first had already been widened. Each half was measured before it was merged:
+ *
+ *   - THE FAN. One graph driven twice, a `subgraph` in the fan body holding the only gate and a
+ *     `reversible_write` tool under the join:
+ *         the page yields none -> succeeded,     gates=0, wrote=1   (before)
+ *         the page yields none -> awaiting_gate, gates=1, wrote=0   (now)
+ *   - THE MUTATION. The same graft that MUT003 refuses around an authored `human_gate`, with the
+ *     gate replaced by a `subgraph` whose child holds it:
+ *         base -> lookup -> rejoin below the delegation  -> ok      (before)
+ *         the same mutation                              -> MUT003  (now)
+ *
+ * The cost is one escalation on an attacker-chosen empty fan whose branch delegates, and one
+ * refused expansion past a delegation. Both are gates or refusals a person can answer, and both
+ * are the direction that fails closed.
+ */
+export function carriesOversight(node: NodeSpec | undefined): boolean {
+  return node !== undefined && (node.type === "human_gate" || node.type === "subgraph");
+}
+
+/**
  * Every channel this node can OBSERVE — not the ones it declares in `reads`.
  *
  * `#runToolNode` resolves `tool.args` against `scopeFor(...)`, the WHOLE channel scope, so a
