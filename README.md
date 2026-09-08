@@ -293,6 +293,15 @@ was **never dispatched** — driven at 294e713 against a `tool` node calling `fs
 succeeded with the built-in's answer and printed no warning, while the identical collision on an
 adapter or channel name refused to boot. It refuses now, naming the module and the built-in names.
 
+And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
+apply the operator's own guards; the module is handed the same frozen
+jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a
+fixed five-member shape and a module must not assume one: it carries `root` and `deny` always, and
+`egressAllowlist`, `execAllowlist`, `execEnvAllow` only where the operator passed the matching flag.
+Measured, printing `Object.keys(jail).sort()` from inside a module: no flags → `["deny","root"]`;
+`--egress example.com --allow-exec echo` → `["deny","egressAllowlist","execAllowlist","root"]`;
+`--allow-exec echo --exec-env FOO` → `["deny","execAllowlist","execEnvAllow","root"]`.
+
 **And the refusal reaches all THREE registrars, not two.** `mcpTools` registers after both the
 modules and the built-ins, and `mcp__<server>__<tool>` is a name an extension module can spell —
 `ToolRegistry.register` takes any string — so at 3d05cff an extension tool named `mcp__docs__search`
@@ -322,14 +331,6 @@ body is invisible to it and still shadows — driven under `loom serve`. That ha
 **A real collision still refuses**, and that is what the operator can act on: two servers whose ids
 flatten together (`MCP_SERVER_FIELDS` allows `_`, so `a` offering `b__x` lands on `a__b`'s `x`), or
 an extension and a server claiming one id. Both name both claimants.
-And the extension registrar carried no jail, so an outsider's filesystem or network tool could not
-apply the operator's own guards; the module is handed the same frozen
-jail object the built-ins get, from one derivation (`jailFor`) both callers share. It is not a
-fixed five-member shape and a module must not assume one: it carries `root` and `deny` always, and
-`egressAllowlist`, `execAllowlist`, `execEnvAllow` only where the operator passed the matching flag.
-Measured, printing `Object.keys(jail).sort()` from inside a module: no flags → `["deny","root"]`;
-`--egress example.com --allow-exec echo` → `["deny","egressAllowlist","execAllowlist","root"]`;
-`--allow-exec echo --exec-env FOO` → `["deny","execAllowlist","execEnvAllow","root"]`.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 

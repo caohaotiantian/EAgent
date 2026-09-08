@@ -1623,41 +1623,35 @@ export function openWorkspace(
   // and never a real tool. A guard that fails closed on a case it has already made impossible is
   // not tighter, it is just wrong, and 3d05cff booted these correctly.
   //
-  // AND A CLAIM CARRIES WHO MADE IT, not just a sentence about them. The first cut stored a
-  // LABEL and asked whether it started with `mcp server "<name>"` — and every MCP label was
-  // written as `offered by mcp server "…"`, so that test was false for every value the map could
-  // hold. Two things followed and both shipped green: the same-server exemption below was dead
-  // code, so ONE server offering one name twice — which `McpClient` handles by keeping the first
-  // and recording the rest, precisely so a bad entry does not cost the operator the server —
-  // aborted the whole boot, a REGRESSION against 3d05cff and a deployment a third party's list
-  // could take down; and the message read "already claimed by offered by mcp server". A
-  // structured claimant is what makes the exemption checkable rather than spelled.
-  const claimed = new Map<string, { readonly label: string; readonly server?: string }>();
+  // THE WHOLE PREDICATE, IN THE ONE SENTENCE IT IS: a name is claimed by whichever registrar
+  // REGISTERS it, and a second claimant refuses at boot. A server re-listing its own tool never
+  // reaches this check — `McpClient.start` keeps the first and puts the rest on `rejectedTools`,
+  // and this loop reads `client.tools`. Nothing here needs to know which server claimed a name,
+  // only that somebody did.
+  //
+  // It took three fix rounds to get back to that. Two accommodations were built for a same-server
+  // collision that cannot occur — an exemption keyed on the claiming server, and an attribution
+  // that GUESSED a name's owner from its `mcp__<server>__` prefix — and mutation proved both
+  // inert: deleting either left the suite at 8 pass, 0 fail. They are gone. The accretion of
+  // special cases in one predicate was the tell that the fix was mis-scoped rather than
+  // incomplete, and the answer was to delete rather than to add a fourth.
+  const claimed = new Map<string, string>();
   for (const t of tools.list()) {
     const owner = extensions?.toolOwners.get(t.name);
     // `shipped` RATHER THAN "not an extension", because "everything else is a built-in" is true
     // only while these are the only two registrars that have run — and this whole block exists
     // because a third one was added and nobody updated the reasoning that assumed two.
-    if (owner !== undefined) {
-      claimed.set(t.name, { label: `--extension-module ${owner}` });
-      continue;
-    }
-    if (shipped.has(t.name)) {
-      claimed.set(t.name, { label: "a built-in of this binary" });
-      continue;
-    }
-    // AND AN ID THAT IS ALREADY THIS SERVER'S IS STILL THIS SERVER'S — checked only AFTER the two
-    // registrars that can own a name outright, or an extension squatting `mcp__docs__x` would be
-    // attributed to the docs server and exempted from the very collision it is. `openWorkspace` is
-    // exported and takes the registry as a parameter, so a library embedder can call it twice over
-    // one `extensions.tools`; without this the second call finds the FIRST call's MCP tools in the
-    // registry with nobody attributed and refuses each server its own names.
-    const own = mcp.find((m) => t.name.startsWith(mcpToolName(m.client.name, "")));
     claimed.set(
       t.name,
-      own === undefined
-        ? { label: "a tool already in this workspace's registry" }
-        : { label: `mcp server "${own.client.name}"`, server: own.client.name },
+      owner !== undefined
+        ? `--extension-module ${owner}`
+        : shipped.has(t.name)
+          ? "a built-in of this binary"
+          : // NEITHER, WHICH ONLY A LIBRARY EMBEDDER CAN PRODUCE — `openWorkspace` takes the
+            // registry as a parameter. Saying so is the point: calling it "a built-in" was a
+            // misattribution waiting for a fourth registrar, which is exactly how this block
+            // came to exist.
+            "a tool already in this workspace's registry",
     );
   }
   for (const { client } of mcp) {
@@ -1665,23 +1659,18 @@ export function openWorkspace(
       const tool = spec.name;
       const name = mcpToolName(client.name, tool);
       const by = claimed.get(name);
-      // A NAME THIS SAME SERVER ALREADY CLAIMED IS NOT A COLLISION BETWEEN TWO REGISTRARS.
-      // `McpClient` keeps the FIRST of a duplicated name and puts the rest on `rejectedTools`, so
-      // one server reaches here having claimed one id twice — as a plain duplicate, or as a valid
-      // entry beside a malformed twin. Which of its own entries wins is `McpClient`'s decision and
-      // this guard is about who owns the slot, so it says nothing.
-      if (by !== undefined && by.server !== client.name) {
+      if (by !== undefined) {
         throw err.validation(
           CODES.E_CONFIG_INVALID,
           `mcp server "${client.name}" offers the tool "${tool}", which this binary registers as "${name}" — ` +
-            `and that name is already claimed by ${by.label}. MCP tools are registered AFTER the extension modules ` +
+            `and that name is already claimed by ${by}. MCP tools are registered AFTER the extension modules ` +
             `and the built-ins, and ToolRegistry.register shadows on collision, so the existing definition would ` +
             `keep its capability in the grant list and its entry in the compiler's manifest and would never be ` +
             `dispatched. Rename one of them — an MCP tool's id is mcp__<server>__<tool>, so renaming the server ` +
             `in the --mcp-file works too.`,
         );
       }
-      if (by === undefined) claimed.set(name, { label: `mcp server "${client.name}"`, server: client.name });
+      claimed.set(name, `mcp server "${client.name}"`);
     }
   }
 
