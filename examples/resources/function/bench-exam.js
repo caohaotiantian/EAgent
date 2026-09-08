@@ -4,6 +4,16 @@
 // evaluators wrote): both are the work graph's own summary of its work, which a candidate may
 // rewrite, and an exam treats every output it reads as a CLAIM to be checked, never believed.
 //
+// WHAT THIS EXAM DOES NOT SETTLE, said here because a reader will otherwise take it for the
+// property's exemplar. `cases[j].defect` IS the answer key, and `cases` is `review-bench`'s own
+// declared INPUT — so a candidate's `fan` node reads the labels too, and one that ignored the
+// model and emitted a "concerns" review for every `defect: true` case would score 1.0 here at no
+// cost. That is true of the shipped in-graph graders as well (`bench-check-0…5.js` read the same
+// field), so it is a property of this fixture and not something the exam introduced; it is the
+// design's "a weak or trusting exam" (§5) — ownership of the grader is fixed, its quality is the
+// operator's. An exam whose answer key the work graph cannot see would have to CARRY the key
+// itself and read only the raw text, which is what `pick-bench`'s exam does by re-deriving.
+//
 // The parser is the balanced-object scan `bench-collate-v2.js` documents, so a review that buries
 // its JSON under a reasoning preamble is still read — which is exactly the improvement v2 makes,
 // and an exam using the naive first-brace-to-last-brace parser would be blind to it. `score` is

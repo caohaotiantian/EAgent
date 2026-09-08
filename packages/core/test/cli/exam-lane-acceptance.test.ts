@@ -597,6 +597,45 @@ test("A NEWEST ATTESTATION ROW THIS BINARY CANNOT READ REFUSES — no fallback t
 
 // ── the forged grade: a grade is verified before it is believed ──────────────
 
+/**
+ * THE ROW'S ACTOR IS RE-CHECKED WHERE THE RULER IS READ, not only where it is written.
+ * `attestExam` writes `{kind:"human"}` by construction and `attesterFlag` refuses the synthetic
+ * subjects, so today nothing else can write this kind — I grepped `src/` for the constant and
+ * there is one writer. But the READ is the side that decides what grades this workflow, and a
+ * guard that runs only on the write is one a future writer walks past. A machine-actor row is
+ * therefore not an attestation at all: it does not become the newest row, and it does not refuse
+ * the way an unreadable row does — it is simply not evidence, and the workflow keeps whatever
+ * a human attested before it.
+ */
+test("AN ATTESTATION ROW WITH A MACHINE ACTOR IS NOT ONE — the newest human row still decides", async () => {
+  const w = await workspace();
+  try {
+    assert.equal((await attest(w.dir, w.last)).code, 0);
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", w.dir]));
+    try {
+      // A well-formed attestation in every respect EXCEPT its actor, appended after the real one
+      // so it would win the `(ts, runId, seq)` ordering if it counted. Its `examGraphHash` names
+      // a graph this workspace does not have, so believing it would refuse every scoring verb.
+      const real = (await journal(w.dir, w.last)).findLast((e) => isEvent(e, "operator.command"))!;
+      const args = { ...(real.payload as { args: Record<string, unknown> }).args, examGraphHash: "sha256:notaround" };
+      await ws.store.append({
+        runId: w.last,
+        expectedSeq: await ws.store.head(w.last),
+        events: [{ type: "operator.command", payload: { kind: "evolution.exam-attest", args }, actor: { kind: "system", component: "executor" } }],
+      });
+    } finally {
+      ws.close();
+    }
+    const s = await cli(["score", w.last, "--workspace", w.dir]);
+    assert.equal(s.code, 0, `${s.out}\n${s.err}`);
+    assert.match(jsonOf<{ signals: { evidence: string }[] }>(s.out).signals[0]!.evidence, /^exam /, "the human row is still the ruler");
+    const promoted = await live(w.dir, "candidates/fixed.json", w.last);
+    assert.equal(promoted.code, 0, `${promoted.out}\n${promoted.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("A FORGED EXAM RUN IS NOT A GRADE: the attested hash with an edited body is refused by its manifest, and the body restored, the forgery is ignored", async () => {
   const w = await workspace();
   try {

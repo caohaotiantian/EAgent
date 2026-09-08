@@ -7916,7 +7916,11 @@ async function subjectInputsFor(
 ): Promise<ReturnType<typeof examInputsFor> | undefined> {
   const events = await journalOf(ws, subjectRunId);
   const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
-  const completed = events.find((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+  // THE LAST `run.completed`, NOT THE FIRST. A rewound run finishes twice, and every other reader
+  // of this journal — `foldTrajectory`, `lastScore` — takes the later state. Grading the earlier
+  // one would let the grade and the score disagree about the same run, which is the fold saying
+  // two things at once.
+  const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
   if (submitted === undefined || completed === undefined) return undefined;
   const recorded: Record<string, unknown> = { ...submitted.payload.inputs };
   for (const [channel, ref] of Object.entries(submitted.payload.external ?? {})) {
@@ -7944,7 +7948,7 @@ async function gradeWithExam(ws: Workspace, att: ExamAttestation, examGraph: Run
   const { runId } = await startAndDrive(ws, { graph: examGraph, inputs: built.inputs });
   process.stderr.write(`graded ${subjectRunId} by exam run ${runId} (exam ${att.examGraphHash})\n`);
   const events = await journalOf(ws, runId);
-  const completed = events.find((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+  const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
   const verdict = completed === undefined ? undefined : verdictOf(completed.payload.outputs);
   return { graphHash: att.examGraphHash, gradable: true, examRunId: runId, ...(verdict === undefined ? {} : { verdict }) };
 }
@@ -8024,7 +8028,14 @@ async function scanForExam(ws: Workspace, workflow: string, published: ReadonlyS
     // graph was published at the time; deleting that file later must not make the row — and
     // with it the ruler — disappear, so the read does not depend on graphs/ as it is today.
     for (const e of await journalOf(ws, h.runId)) {
-      if (isEvent(e, "operator.command") && e.payload.kind === EXAM_ATTEST_KIND) rows.push({ ts: e.ts, runId: h.runId, seq: e.seq, args: e.payload.args });
+      // A HUMAN ACTOR, RE-CHECKED ON THE READ. `attestExam` writes `{kind:"human"}` by
+      // construction and `attesterFlag` refuses the synthetic subjects, but this is the side that
+      // DECIDES what the ruler is, and a guard that only runs on the write is a guard a future
+      // writer can walk past. No other writer of this kind exists today (grep over `src/`); this
+      // is the direction "oversight only tightens" argues the check belongs on.
+      if (isEvent(e, "operator.command") && e.payload.kind === EXAM_ATTEST_KIND && e.actor.kind === "human") {
+        rows.push({ ts: e.ts, runId: h.runId, seq: e.seq, args: e.payload.args });
+      }
     }
   }
   rows.sort((a, b) => b.ts - a.ts || (a.runId < b.runId ? 1 : a.runId > b.runId ? -1 : 0) || b.seq - a.seq);
@@ -8045,7 +8056,7 @@ async function scanForExam(ws: Workspace, workflow: string, published: ReadonlyS
     const events = await journalOf(ws, h.runId);
     const submitted = events.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
     const compiled = events.find((e): e is Extract<JournalEvent, { type: "run.compiled" }> => isEvent(e, "run.compiled"));
-    const completed = events.find((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
+    const completed = events.findLast((e): e is Extract<JournalEvent, { type: "run.completed" }> => isEvent(e, "run.completed"));
     if (submitted === undefined || compiled === undefined || completed === undefined) continue;
     if (!sameManifest(compiled.payload.resolutionManifest, attestation.resolutionManifest)) continue;
     const subject = submitted.payload.inputs[EXAM_SUBJECT_INPUT];
