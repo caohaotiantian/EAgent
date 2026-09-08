@@ -591,7 +591,14 @@ function untakeableEdges(
   return bad;
 }
 
-/** The one sentence all four doors refuse with, so they cannot drift on what they mean. */
+/**
+ * The one sentence the THREE REFUSING doors share, so they cannot drift on what they mean:
+ * `Engine.steer`, `#strayRoute` and `#applyGateDecision`. The fourth door that applies
+ * `TAKEABLE_EDGE_KINDS` is not one of them — `#edgesToTake` DROPS the edge and says nothing,
+ * because it runs inside `#commit` and a throw there would reject `advance()`; its own comment
+ * argues that a silent drop is the only shape available to it. Four doors apply the predicate,
+ * three of them speak.
+ */
 function untakeableMessage(nodeId: NodeId, bad: readonly EdgeSpec[]): string {
   return (
     `node "${nodeId}" selected ${bad.map((e) => `"${e.id}" (kind "${e.kind}")`).join(", ")} — ` +
