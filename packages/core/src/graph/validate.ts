@@ -955,9 +955,20 @@ function isSafeId(id: unknown): boolean {
  * is among them and is already unreachable through `SAFE_ID`, which costs nothing and leaves
  * the set complete on its face if `SAFE_ID` ever widens.
  *
- * CHANNELS ONLY. Node and edge ids key objects too, and `plans["toString"]` has the same
- * shape — but they are not the reported defect, `plans` is built by the compiler rather than
- * from author-supplied keys, and widening a refusal is not something to do on a guess.
+ * CHANNELS AND NODE IDS. `plans["toString"]` has the exact same shape as `channels["toString"]`
+ * — `compile.ts` builds `plans` as a plain object literal, one own-property write per
+ * spec-declared node id, read back with raw bracket access all over `run/engine.ts` and
+ * `run/scheduler.ts` with no `hasOwnProperty` guard — so the node-id half of TODO.md §A0.19
+ * closes the same way, in the same loop (`checkStructure`'s node-id check, above the channel
+ * check). EDGE IDS ARE NOT: `edgeById`/`inbound`/`outbound` are all `Map`, and a `Map` does not
+ * consult `Object.prototype` on `get`/`set`, so an edge named `toString` is an ordinary key with
+ * no collision. SUBGRAPH REFS ARE NOT EITHER, though `subgraphs` (`compile.ts`'s
+ * `resolveSubgraphs`) is also a plain object assigned by bracket access: a ref is not a
+ * spec-declared id like a node/edge/channel name, it is resolved through the WORKSPACE'S
+ * resolver first (`out[ref] = child` only runs once `resolver.subgraph(ref)` already answered
+ * with a real subgraph), so exploiting it needs a workspace that publishes a subgraph literally
+ * named `toString` — a second trust boundary the other three don't have, and TODO.md §A0.19
+ * names `plans` by name, not `subgraphs`. Left open rather than widened on a guess.
  *
  * THE SET IS READ OFF THE RUNNING V8, AND THAT HAS A PRICE worth naming: the compiler's answer
  * stops being a pure function of its input. A future Node that adds an `Object.prototype` member
@@ -1259,7 +1270,31 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     d.push(at === undefined ? base : { ...base, at });
     fatal = true;
   };
-  for (const n of spec.nodes) if (!isSafeId(n.id)) badId("node id", n.id, typeof n.id === "string" ? { nodeId: n.id } : undefined);
+  // A node id is an object key in `plans` — `compile.ts` builds `plans[n.id] = {…}` as a plain
+  // object literal, one own-property write per node, exactly `channels`' shape below — and
+  // `run/engine.ts` reads it back with raw bracket access (`ctx.graph.plans[nodeId]?.posture`,
+  // `.outboundEdges`, `.timeoutMs`, `.retry`) at every call site, none guarded by
+  // `hasOwnProperty`. A node named `valueOf` compiled clean and handed the engine
+  // `Object.prototype.valueOf` for a node nobody declared.
+  for (const n of spec.nodes) {
+    if (!isSafeId(n.id)) {
+      badId("node id", n.id, typeof n.id === "string" ? { nodeId: n.id } : undefined);
+      continue;
+    }
+    if (PROTOTYPE_NAMES.has(n.id)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_RESERVED_NODE_ID",
+        message: `node id "${n.id}" is a name \`Object.prototype\` already carries, so no object keyed by node id (\`plans\`) can hold it`,
+        at: { nodeId: n.id },
+        fix: `rename the node; the reserved names are ${RESERVED_LIST}`,
+      });
+      fatal = true;
+    }
+  }
+  // Edge ids key `edgeById`/`inbound`/`outbound` — all `Map`, not plain objects — so a `Map#get`
+  // or `Map#set` on `"toString"` or `"__proto__"` is an ordinary key with no `Object.prototype`
+  // collision. No reserved-name rule needed here; only the charset rule below applies.
   for (const e of spec.edges) if (!isSafeId(e.id)) badId("edge id", e.id, typeof e.id === "string" ? { edgeId: e.id } : undefined);
   // A channel name is an object key in `ChannelState`, and `initialState` assigns it with
   // `out[name] = …` — which for `__proto__` writes the prototype and declares nothing.
