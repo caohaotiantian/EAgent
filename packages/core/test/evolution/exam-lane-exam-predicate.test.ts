@@ -146,8 +146,8 @@ test("a declared exam input no node reads is refused, and the refusal names it",
   const spec = examSpec();
   const grade = spec.nodes[0]!;
   // Declares [subject, items, picked]; reads ["items"]. `picked` is unreachable: the assertion
-  // arm builds the body's StateView from `node.reads` (`engine.ts` `viewFor(…, w.node.reads)`),
-  // so `view.get("picked")` is `undefined` however the body is written.
+  // arm scopes the body's view to `node.reads` (measured 2026-09-08), so `view.get("picked")` is
+  // `undefined` however the body is written.
   const problems = examShape(compileOf({ ...spec, nodes: [{ ...grade, reads: ["items"] }] }));
   assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
   assert.ok(!problems.some((p) => /"items"/.test(p)), `only the unread channel is named: ${problems.join("\n")}`);
@@ -175,12 +175,11 @@ test("a TRANSITIVE read satisfies the rule — the input need not be read by the
 });
 
 /**
- * A FANOUT EDGE'S `over` IS A READ, and it is the third route to a channel rather than the second.
- * `rule007` checks `e.over` against `spec.channels` alone (`validate.ts` GRAPH007_UNKNOWN_OVER),
- * never against the source node's `reads`, and the executor resolves it out of the whole scope
- * (`engine.ts` `const items = scope[e.over ?? ""]`), so this exam genuinely consumes `picked` while
- * no node declares it. The first cut of the rule refused it and told the operator "read by no
- * node", which was a false sentence printed at a refusal.
+ * A FANOUT EDGE'S `over` IS COUNTED, and it is the second place the rule looks. `rule007` checks
+ * `e.over` against `spec.channels` alone (`validate.ts` GRAPH007_UNKNOWN_OVER), never against the
+ * source node's `reads`, so this exam NAMES `picked` while no node declares it — and counting only
+ * `reads` would refuse every fanout exam there is. The first cut of the rule refused this one and
+ * told the operator "read by no node", which was a false sentence printed at a refusal.
  */
 test("a channel a FANOUT edge fans over is read, though no node declares it", () => {
   const spec = examSpec();
@@ -210,19 +209,14 @@ test("a channel a FANOUT edge fans over is read, though no node declares it", ()
  * AN EDGE CONDITION IS NOT A READ, AND THIS TEST FLIPPED TO SAY SO.
  *
  * It used to assert the opposite — `when: "picked.ok"` on a conditional edge counted, because the
- * executor evaluates it and `rule004Expressions` lets an edge's owner satisfy GRAPH004 by
- * DECLARING the channel among its `writes` (so the condition names a channel in no node's `reads`
- * and no fanout `over`). That was true of the condition and false of the RULE, and the reason is
- * the shape round four drove: `#edgesToTake` skips the whole `switch` whenever
- * `outcome.take !== undefined`, and `conditional` is in `TAKEABLE_EDGE_KINDS`, so a `function` or
- * `assertion` body — both node types an exam permits — returns `take: ["e"]` and the edge is taken
- * with `when` never evaluated. Driven at `5b46f86`: the graded node ran and wrote a verdict with
- * `picked.ok` false, having never seen `picked`.
+ * `rule004Expressions` lets an edge's owner satisfy GRAPH004 by DECLARING the channel among its
+ * `writes`, so the condition names a channel in no node's `reads` and no fanout `over`. Counting it
+ * was true of that condition and false of the RULE. Driven at `5b46f86`: a graph of this shape ran
+ * its graded node and wrote a verdict with `picked.ok` false, having never seen `picked` — one
+ * measurement, and enough, because the rule has no way to tell that graph from this one.
  *
- * Whether a body does that is not decidable from the spec, so the rule cannot tell which conditions
- * the executor evaluates and counts NONE of them — including the ones the spec could settle, such
- * as an edge leaving a bodyless `join`; that is the rule's choice of one predicate over a set of
- * per-source carve-outs, not a thing it cannot see. THE COST IS REAL AND STATED: an exam whose only
+ * The spec carries a resource ref rather than a body, so the rule cannot tell which conditions the
+ * executor evaluates and counts NONE of them. THE COST IS REAL AND STATED: an exam whose only
  * mention of the run's answer is an edge condition must name it in a node's `reads`, and the
  * refusal tells the operator exactly that.
  */
@@ -246,8 +240,8 @@ test("an edge condition is NOT a read — a producing body's `take` can skip it,
 
 /**
  * THE SHAPE THAT DECIDED IT, as a spec rather than as a prose citation. `step`'s body returns
- * `take: ["e"]` at run time; nothing in this spec says so, and nothing can. At `5b46f86` this
- * exam attested and its grader never saw `picked`.
+ * a `take` at run time; nothing in this spec says so, and nothing can. At `5b46f86` this exam
+ * attested and its grader never saw `picked`.
  */
 test("the `take`-bypass shape is refused — and the spec that produces it is indistinguishable from the one above", () => {
   const spec = examSpec();
@@ -256,8 +250,8 @@ test("the `take`-bypass shape is refused — and the spec that produces it is in
     ...spec,
     channels: { ...spec.channels, picked: { type: "object", reduce: "replace" } },
     nodes: [
-      // The body is `() => ({ writes: { picked: { ok: false } }, take: ["e"] })`. `function/pick`
-      // is a resolvable ref and the ref is all the SPEC carries — which is the point: the
+      // The body that made this shape blind at `5b46f86` returned a `take`. `function/pick` is a
+      // resolvable ref and the ref is all the SPEC carries — which is the point: the
       // predicate sees this graph and the previous one as the same graph, so it must answer both
       // the same way, and the safe answer is the refusing one.
       { id: "step" as NodeId, type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
@@ -272,8 +266,8 @@ test("the `take`-bypass shape is refused — and the spec that produces it is in
  * EVERY OTHER PLACEMENT OF A CONDITION, refused for the same one reason rather than for four.
  * The rule does not ask where the condition sits or whether this particular one would be evaluated;
  * it counts no condition at all. ONE rule now covers what a placement filter used to enumerate,
- * which is why the filter is gone — and it refuses some conditions the executor would certainly
- * have evaluated, which is the stated cost rather than an oversight.
+ * which is why the filter is gone — and refusing conditions that would in fact have run is the
+ * stated cost rather than an oversight.
  */
 test("no placement of a condition counts, whatever the edge kind", () => {
   const spec = examSpec();
@@ -302,8 +296,8 @@ test("no placement of a condition counts, whatever the edge kind", () => {
 /**
  * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The two places
  * the rule DOES count a channel — a node's own `reads` and a fanout's `over` — still count, on the
- * same fixture shape the conditions above are refused on. This test passes at base too: it is the
- * control, and it cannot fail. Its job is to be read beside the refusals, not to detect anything.
+ * same fixture shape the conditions above are refused on. This test passes at base too — it is the
+ * control, and what it detects is either counted route ceasing to count.
  */
 test("the reads that DO count still count — a node's `reads` and a fanout's `over`", () => {
   const spec = examSpec();

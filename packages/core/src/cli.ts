@@ -8347,9 +8347,8 @@ async function foldPeer(
  * evaluator-written outputs (grading the grader — `review-bench` as shipped), and — `examShape`'s
  * fifth rule — actually READS from some node every input it declares, since declaring the run's
  * answer and never reading it grades as blind as never declaring it. An EDGE CONDITION does not
- * count: the rule cannot tell which conditions the executor evaluates — a body may return `take`
- * and the `when` is then never read — so it counts none of them, and the exam must name the
- * channel in a node's `reads` or a fanout's `over` instead. `--as` is REQUIRED
+ * count: the rule cannot tell which conditions the executor evaluates, so it counts none of them,
+ * and the exam must name the channel in a node's `reads` or a fanout's `over` instead. `--as` is REQUIRED
  * and may not be the synthetic `cli`: a person is deciding what counts as ground truth, and the
  * row names them.
  *
