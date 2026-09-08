@@ -2408,8 +2408,15 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
   // whose bodies run — the argument `models` and `tools` already make one registry over.
   const functions = new ObservedFunctionRegistry();
   const hooks = new ObservedHookRegistry();
-  const resolver = new CollectedSlot<ResourceResolver>("resolver", ["resolve", "document"], "a ResourceResolver {resolve, document, subgraph?}");
-  const store = new CollectedSlot<StateStore>("store", ["append", "read", "close"], "a StateStore {append, read, close, …}");
+  // THE REQUIRED MEMBERS AND ONLY THOSE, which both of the first two got wrong in opposite
+  // directions. `ResourceResolver` declares `document?` and `subgraph?` OPTIONAL, so demanding
+  // `document` refused a resolver that implements exactly the published interface — a false
+  // positive against this repo's own type. `StateStore` declares FIVE, and asking for three let
+  // a partial one boot and die inside a run with an untyped `TypeError: this[#store].head is
+  // not a function` — the far side of the boundary this check exists to keep refusals on, which
+  // is the very thing its docstring claims.
+  const resolver = new CollectedSlot<ResourceResolver>("resolver", ["resolve"], "a ResourceResolver {resolve, document?, subgraph?}");
+  const store = new CollectedSlot<StateStore>("store", ["append", "read", "head", "listRuns", "close"], "a StateStore {append, read, head, listRuns, close}");
   const payloads = new CollectedSlot<PayloadStore>("payloads", ["put", "get"], "a PayloadStore {put, get}");
   const files: string[] = [];
   /** Which module registered each adapter name, so a collision refusal can name both. */
@@ -2639,7 +2646,25 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
  * `--extension-module`, which is a door that now exists.
  */
 const ADAPTER_FIELDS: readonly string[] = ["provider", "name", "baseUrl", "apiKeyEnv", "prices", "defaultMaxTokens"];
-const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback"];
+/**
+ * `prices` IS ON THE ROUTE ROW AS WELL AS THE ADAPTER ROW, and the reason is an
+ * `--extension-module` adapter.
+ *
+ * The unpriced refusal tells an operator to "add `prices` to that adapter's row", and for a
+ * third-wire adapter there IS no adapter row: `provider` accepts exactly `anthropic` and
+ * `openai`, and a row whose `name` collides with a registered extension adapter is refused so
+ * one of the two is never reachable. So the instruction was impossible to follow — and the
+ * refusal landed on exactly the population README's "a provider on ANY OTHER wire" row exists
+ * for, every extension adapter written before `ModelAdapter.hasPrice` existed. Measured: a
+ * 25-line free local adapter that ran at 294e713 could not be started at all, two spellings of
+ * the fix both refused.
+ *
+ * THE ROUTE IS WHERE THE OPERATOR CAN ALWAYS WRITE, because a route row is the one thing every
+ * routed model has. It is read by `pricedFor` and by nothing else — it does not reach the
+ * adapter, which keeps its own table private and is the thing actually billing. A module author
+ * has the other door and it is the better one: implement `hasPrice`.
+ */
+const ROUTE_FIELDS: readonly string[] = ["adapter", "model", "fallback", "prices"];
 const TIER_FIELDS: readonly string[] = ["adapter", "model", "when"];
 /**
  * `cacheRead`/`cacheWrite` are NOT here on purpose: both adapters' options carry them and
@@ -2819,6 +2844,8 @@ export function readModels(
   const declared: string[] = [];
   /** adapter name → the `prices` table its row declared, for `pricedFor`. */
   const declaredPrices = new Map<string, Readonly<Record<string, { input: number; output: number }>>>();
+  /** route key → the `prices` table THAT row declared. See `ROUTE_FIELDS`. */
+  const routePrices = new Map<string, Readonly<Record<string, { input: number; output: number }>>>();
   const fallbacks = fallbackFeed();
   /** Adapter names whose row omitted `defaultMaxTokens`. See `ModelConfig.unsetCeilings`. */
   const unsetCeilings: string[] = [];
@@ -2981,6 +3008,8 @@ export function readModels(
       refuse(`${where} names adapter "${adapter}", which is not declared. Declared: ${[...adapters.keys()].join(", ")}`);
     }
     const model = nonEmpty(row["model"], `${where} "model"`, refuse);
+    // See `ROUTE_FIELDS`: the only place an operator can price an extension adapter's model.
+    if (row["prices"] !== undefined) routePrices.set(key, priceTable(row["prices"], `${where} "prices"`, refuse));
 
     // DECLARATIVE FALLBACK CHAINS, which the README promised and nothing constructed.
     // `FallbackAdapter` has been written and tested since the provider layer landed;
@@ -3063,13 +3092,17 @@ export function readModels(
   // without limit the moment it falls through, and the run reports `costUsd: 0` for it.
   const unpriced = [...routes.entries()].flatMap(([key, r]) => {
     const reach = chainTiers.get(key) ?? [{ adapter: r.adapter, model: r.model }];
-    return reach.filter((t) => !pricedFor(adapters.get(t.adapter), declaredPrices.get(t.adapter), t.model)).map((t) => `${key} → ${t.adapter}/${t.model}`);
+    return reach
+      .filter((t) => !pricedFor(adapters.get(t.adapter), declaredPrices.get(t.adapter) ?? routePrices.get(key), t.model))
+      .map((t) => `${key} → ${t.adapter}/${t.model}`);
   });
   // The PRIMARY tier only, keyed by route, because that is the pair `RoutingAdapter` resolves
   // and prices. A chain's later tiers are priced inside `FallbackAdapter`, which this class
   // never sees — they stay a boot warning, which is the honest half this file can reach.
   const unpricedRoutes = new Set(
-    [...routes.entries()].filter(([, r]) => !pricedFor(adapters.get(r.adapter), declaredPrices.get(r.adapter), r.model)).map(([key]) => key),
+    [...routes.entries()]
+      .filter(([key, r]) => !pricedFor(adapters.get(r.adapter), declaredPrices.get(r.adapter) ?? routePrices.get(key), r.model))
+      .map(([key]) => key),
   );
   return {
     adapter: new RoutingAdapter(adapters, routes, path, unpricedRoutes),
@@ -3099,10 +3132,19 @@ export function readModels(
  *     on the interface (`run/registry.ts` says why), so today `MockModelAdapter` and
  *     `RoutingAdapter` answer and the two HTTP adapters do not — closing that costs one line
  *     each in `providers/{anthropic,openai}.ts`, which is a file this change does not own.
- *  2. The operator's OWN `prices` row for that adapter, resolved by the same `resolvePrice`
- *     the adapters use — so an exact row wins over a dated-base row exactly as it does inside
- *     them, and a row written for `m-pro` covers `m-pro-20260101`. This is what makes the
- *     explicit-zero escape hatch work for an adapter that cannot answer (1).
+ *  2. The operator's OWN `prices` table — the ADAPTER row's when there is one, else the ROUTE
+ *     row's — resolved by the same `resolvePrice` the adapters use, so an exact row wins over a
+ *     dated-base row exactly as it does inside them and a row for `m-pro` covers
+ *     `m-pro-20260101`. This is the explicit-zero escape hatch, and the ROUTE half of it is not
+ *     an ergonomic nicety: an `--extension-module` adapter HAS no adapter row (`provider`
+ *     accepts only `anthropic` and `openai`, and a row whose `name` collides with a registered
+ *     extension adapter is refused), so without it the refusal named a fix nobody could apply.
+ *
+ * SOURCE 1 IS UNREACHABLE FOR EVERY ADAPTER THIS FILE CONSTRUCTS, today, and saying so is the
+ * point: `MockModelAdapter` implements `hasPrice` and is never routed through here, and
+ * `RoutingAdapter` implements it and is never passed to this function. So the branch exists for
+ * extension adapters that opt in — which is exactly the population source 2's route row exists
+ * to rescue in the meantime.
  *
  * and only then the million-token probe, which is what every caller did before and is right
  * for every adapter whose table this file cannot see.
@@ -3184,8 +3226,11 @@ class RoutingAdapter implements ModelAdapter {
       CODES.E_CONFIG_INVALID,
       `route "${key}" in ${this.#file} points at ${to === undefined ? "an unrouted model" : `${to.adapter}/${to.model}`}, ` +
         `which no price table prices — so every call on it would be journaled as costing 0 and no budget could bound it. ` +
-        `Add "prices": {"${to?.model ?? key}": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter's row. ` +
-        `A genuinely free endpoint says so with {"input": 0, "output": 0}, which is a rate rather than a missing row.`,
+        `TWO WAYS TO SAY WHAT IT COSTS. As the operator: add "prices": {"${to?.model ?? key}": {"input": <usd per 1M>, ` +
+        `"output": <usd per 1M>}} to this ROUTE row, or to the adapter's row when it has one — an --extension-module ` +
+        `adapter has no adapter row, which is why the route row takes it too. As the adapter's author: implement the ` +
+        `optional ModelAdapter.hasPrice(model), which is the only answer that cannot be wrong. A genuinely free ` +
+        `endpoint says so with {"input": 0, "output": 0}: a rate, not a missing row.`,
     );
   }
 
@@ -4414,9 +4459,11 @@ export function modelWarnings(models: ModelConfig | undefined, command: string):
         `  (E_CONFIG_INVALID, at the budget reservation, before the network) rather than being journaled as costing 0:\n` +
         models.unpriced.map((r) => `    ${r}\n`).join("") +
         `  A journaled 0 is what made policy.budget.costUsd and --budget bound nothing and /health report a spend\n` +
-        `  that did not happen. A FALLBACK tier listed here refuses only if the chain falls through to it.\n` +
-        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that adapter in ${models.file}\n` +
-        `  A genuinely free endpoint says so with {"input": 0, "output": 0} — a rate, not a missing row.\n`,
+        `  that did not happen. A FALLBACK tier listed here is NOT refused — FallbackAdapter prices it, this file never\n` +
+        `  sees it, and a fall-through onto it bills at whatever that tier answers. For those, this line is the guard.\n` +
+        `  fix: add "prices": {"<model>": {"input": <usd per 1M>, "output": <usd per 1M>}} to that route or adapter row\n` +
+        `  in ${models.file}; an --extension-module adapter has no adapter row, so use the ROUTE row. Its author's own\n` +
+        `  door is the optional ModelAdapter.hasPrice(model). A free endpoint says {"input": 0, "output": 0} — a rate.\n`,
     );
   }
   // THE CEILING NOBODY CHOSE. A live GLM-5.2 turn ended `finishReason "max_tokens"` with

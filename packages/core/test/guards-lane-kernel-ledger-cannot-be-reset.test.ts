@@ -247,3 +247,38 @@ test("the real repo still passes, and its eleven seams still clear the trailer f
   assert.equal(r.status, 0, output);
   assert.equal(seams(output), 11, output);
 });
+
+test("DROPPING A PATH FROM `files` no longer erases its seams from the census", () => {
+  // The fifth reset, found by review and the same shape as the rename: `historicalNames`
+  // followed a file that MOVED and nothing followed one that was simply de-pinned. Measured on
+  // this fixture before the fix: the ledger went 1 → 0 and exit stayed 0, and on the real repo
+  // dropping `run/engine.ts` alone would have taken the published count from 11 to 1.
+  const f = repo();
+  f.commit("feat(run): a posture", SEAM, { [KERNEL]: "export const engine = 2;\n" });
+  assert.equal(seams(f.run().output), 1);
+
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.pin("src/other.ts");
+  f.commit("refactor(kernel): engine.ts is not kernel after all", "");
+  const after = f.run();
+  assert.equal(after.status, 0, "de-pinning is remedy 3 and must still pass");
+  assert.equal(seams(after.output), 1, `the de-pin erased the seam:\n${after.output}`);
+  // …and the fact that a path left is not silent, because an unpaid violation against it does
+  // stop failing the build — that half is what remedy 3 means and cannot be closed.
+  assert.match(after.output, /path\(s\) were pinned as kernel earlier in this range and are not now/);
+  assert.match(after.output, /src\/engine\.ts/);
+});
+
+test("…and a de-pinned file stops FAILING the build, which is what remedy 3 means", () => {
+  const f = repo();
+  f.commit("feat(run): a posture, no seam", "", { [KERNEL]: "export const engine = 2;\n" });
+  assert.equal(f.run().status, 1);
+
+  f.write("src/other.ts", "export const other = 1;\n");
+  f.pin("src/other.ts");
+  f.commit("refactor(kernel): engine.ts is not kernel after all", "");
+  const after = f.run();
+  assert.equal(after.status, 0, "the guard's own failure text offers this as remedy 3");
+  // The debt is NAMED rather than erased — that is the whole of what the split buys.
+  assert.match(after.output, /an UNPAID violation against one no longer fails the build/);
+});

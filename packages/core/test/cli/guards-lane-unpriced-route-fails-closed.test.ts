@@ -140,5 +140,76 @@ test("A FALLBACK TIER THAT NOBODY PRICES IS A WARNING, NOT A REFUSAL, and the li
   const cfg = readModels(p, {});
   assert.deepEqual([...cfg.unpriced], ["chain → local/nobody-prices-me"], "the tier is named");
   assert.ok(cfg.adapter.estimateOf(REQ("chain")) > 0, "…and the priced primary still runs");
-  assert.match(modelWarnings(cfg, "run").join(""), /A FALLBACK tier listed here refuses only if the chain falls through/);
+  // THE BANNER USED TO CLAIM THE TIER REFUSES ON FALL-THROUGH. It does not — `FallbackAdapter`
+  // prices it and this file never sees it — so the line said a guard existed where none does,
+  // which is worse than the silence it replaced. It now says the line IS the guard for a tier.
+  assert.match(modelWarnings(cfg, "run").join(""), /A FALLBACK tier listed here is NOT refused/);
+  assert.doesNotMatch(modelWarnings(cfg, "run").join(""), /refuses only if the chain falls through/);
+});
+
+test("AN EXTENSION ADAPTER PRICES ITSELF ON THE ROUTE ROW — the fix the refusal names must exist", () => {
+  // THE REFUSAL TOLD OPERATORS TO DO SOMETHING IMPOSSIBLE. Its fix was "add `prices` to that
+  // adapter's row", and a third-wire `--extension-module` adapter HAS no adapter row: `provider`
+  // accepts only `anthropic`/`openai`, and a row whose `name` matches a registered extension
+  // adapter is refused so one of the two would never be reachable. So every extension adapter
+  // that legitimately prices at 0 — the population README's "a provider on ANY OTHER wire" row
+  // exists for — became unrunnable, in the same change that claims to WIDEN that seam.
+  const free = {
+    provider: "freelocal",
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    stream: (): AsyncIterable<never> => ({ [Symbol.asyncIterator]: async function* () {} }) as AsyncIterable<never>,
+    priceOf: () => 0,
+    estimateOf: () => 0,
+    outputCeilingOf: () => 1024,
+  };
+  const d = mkdtempSync(join(tmpdir(), "loom-unpriced-ext-"));
+  made.push(d);
+  const p = join(d, "models.json");
+  writeFileSync(
+    p,
+    JSON.stringify({
+      routes: { local: { adapter: "freelocal", model: "llama-local", prices: { "llama-local": { input: 0, output: 0 } } } },
+    }),
+  );
+  const cfg = readModels(p, {}, undefined, new Map([["freelocal", free as never]]));
+  assert.deepEqual([...cfg.unpriced], [], "the operator wrote the rate on the row they actually have");
+  assert.equal(cfg.adapter.estimateOf(REQ("local")), 0, "…and the call is not refused");
+});
+
+test("…and without that row it still refuses, naming BOTH doors", () => {
+  const free = {
+    provider: "freelocal",
+    stream: (): AsyncIterable<never> => ({ [Symbol.asyncIterator]: async function* () {} }) as AsyncIterable<never>,
+    priceOf: () => 0,
+    estimateOf: () => 0,
+    outputCeilingOf: () => 1024,
+  };
+  const d = mkdtempSync(join(tmpdir(), "loom-unpriced-ext2-"));
+  made.push(d);
+  const p = join(d, "models.json");
+  writeFileSync(p, JSON.stringify({ routes: { local: { adapter: "freelocal", model: "llama-local" } } }));
+  const cfg = readModels(p, {}, undefined, new Map([["freelocal", free as never]]));
+  assert.deepEqual([...cfg.unpriced], ["local → freelocal/llama-local"]);
+  assert.throws(
+    () => cfg.adapter.estimateOf(REQ("local")),
+    (e: unknown) => isLoomError(e) && /this ROUTE row/.test(e.message) && /ModelAdapter\.hasPrice/.test(e.message),
+  );
+});
+
+test("AN ADAPTER THAT ANSWERS `hasPrice` IS BELIEVED, which is the module author's own door", () => {
+  const free = {
+    provider: "freelocal",
+    stream: (): AsyncIterable<never> => ({ [Symbol.asyncIterator]: async function* () {} }) as AsyncIterable<never>,
+    priceOf: () => 0,
+    estimateOf: () => 0,
+    outputCeilingOf: () => 1024,
+    hasPrice: () => true,
+  };
+  const d = mkdtempSync(join(tmpdir(), "loom-unpriced-ext3-"));
+  made.push(d);
+  const p = join(d, "models.json");
+  writeFileSync(p, JSON.stringify({ routes: { local: { adapter: "freelocal", model: "llama-local" } } }));
+  const cfg = readModels(p, {}, undefined, new Map([["freelocal", free as never]]));
+  assert.deepEqual([...cfg.unpriced], [], "the only answer that cannot be wrong is the adapter's own");
+  assert.equal(cfg.adapter.estimateOf(REQ("local")), 0);
 });

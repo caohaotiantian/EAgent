@@ -210,6 +210,27 @@ const CASES: readonly Case[] = [
     refusal: /node:module/,
   },
   {
+    // BRACKET NOTATION, which defeated every rule here because all of them key on a NAME and
+    // `dotted()` read only dot notation. Found by review after the origin rule landed: this
+    // reaches the same loader without naming `node:module` at all, and the guard printed ok
+    // while the file really did load `typescript` at run time.
+    how: "getBuiltinModule and createRequire reached by string-literal element access",
+    fixture: {
+      files: {
+        "index.ts":
+          'const p: any = process;\nconst mod = p["getBuiltinModule"]("module");\nconst req = mod["createRequire"](import.meta.url);\nexport const lodash = req("lodash");\n',
+      },
+    },
+    refusal: /getBuiltinModule|createRequire/,
+  },
+  {
+    // …and an ordinary element access is untouched. A rule that refused every computed member
+    // read would fire on every array index in the tree.
+    how: "an ordinary element access, which names no loader",
+    fixture: { files: { "index.ts": 'const rows = [1, 2, 3];\nexport const x = rows[0] + rows["length"];\n' } },
+    refusal: undefined,
+  },
+  {
     // THE OTHER DIRECTION, and it is why the rule reads `isTypeOnly`: `import type` is erased
     // by the time anything runs, so it hands out no value and loads no module. A rule that
     // refused it would be a false positive on the one construct that cannot be the defect.

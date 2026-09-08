@@ -49,13 +49,27 @@
  *     const req = cr(import.meta.url);         // a bare identifier with an innocent name
  *     export const x = req("typescript");
  *
- * The rule is now keyed to the ORIGIN instead: `node:module` is the only place
+ * The rule is now keyed to the ORIGIN instead: `node:module` is the only MODULE SPECIFIER
  * `createRequire` comes from, core imports it nowhere, so naming that module in any position
  * that HANDS OUT A VALUE — `import`, `export … from`, `import()` — is unauditable, and every
- * aliasing shape dies with one rule rather than one rule per spelling. `import type` is exempt
- * because it is erased before anything runs; see `isErasedImport`. A property access
- * whose name is `createRequire` or `getBuiltinModule` is unauditable whether or not it is
- * the callee of a call, for the same reason.
+ * IMPORT spelling dies with one rule rather than one rule per alias. `import type` is exempt
+ * because it is erased before anything runs; see `isErasedImport`. An access whose name is
+ * `createRequire` or `getBuiltinModule` is unauditable whether or not it is the callee of a
+ * call, for the same reason.
+ *
+ * THE FIRST VERSION OF THAT PARAGRAPH CLAIMED "every aliasing shape dies with one rule" AND
+ * WAS WRONG, which is the correction CLAUDE.md warns is worse than the original defect if it
+ * lands half-done. `process.getBuiltinModule("module")` reaches the same value without naming
+ * a specifier, and every rule here keys on a NAME that `dotted` produces — which handled only
+ * dot notation. So this passed with `typescript` genuinely loaded at run time:
+ *
+ *     const p: any = process;
+ *     const mod = p["getBuiltinModule"]("module");
+ *     const req = mod["createRequire"](import.meta.url);
+ *     export const ts = req("typescript");
+ *
+ * `dotted` reads string-literal element access now. What no name-keyed rule can reach is a
+ * COMPUTED key, and `dotted` says so rather than this paragraph claiming totality again.
  *
  * Checks 2 and 3 use the TypeScript PARSER, not a regex. The regex version reported
  * `from "${branch}"` inside an error-message template literal as a dependency — a guard with
@@ -190,13 +204,38 @@ function isErasedImport(node) {
   return bindings.elements.every((e) => e.isTypeOnly);
 }
 
-/** `a.b.c` for a property-access chain rooted at a plain identifier; otherwise undefined. */
+/**
+ * `a.b.c` for an access chain rooted at a plain identifier; otherwise undefined.
+ *
+ * `a["b"]` COUNTS AS `a.b`, and leaving it out was a hole with a real exploit. Every rule here
+ * is keyed to a NAME, and this function was the only thing that produced one — so
+ * `process["getBuiltinModule"]("module")["createRequire"](…)("typescript")` named nothing any
+ * rule could match, and the guard printed ok over a file that really did load `typescript` at
+ * run time. One character of difference from `.getBuiltinModule`, which was caught.
+ *
+ * WHAT IS STILL OUT OF REACH, named rather than claimed closed: a key that is not a literal —
+ * `p[k]` where `k` is computed. No rule keyed to a name can see that, and a rule that refused
+ * every computed element access would fire on every array index in the tree. Check 2's
+ * specifier rule is what bounds that case: reaching `node:module` at all is unauditable, and
+ * `process` is the only other root that hands out a loader.
+ */
 function dotted(node) {
   if (ts.isIdentifier(node)) return node.text;
   if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) {
     const left = dotted(node.expression);
     return left === undefined ? undefined : `${left}.${node.name.text}`;
   }
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)) {
+    const left = dotted(node.expression);
+    return left === undefined ? undefined : `${left}.${node.argumentExpression.text}`;
+  }
+  return undefined;
+}
+
+/** The name an access reads, whichever notation wrote it: `x.name` and `x["name"]` both. */
+function accessedName(node) {
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)) return node.argumentExpression.text;
   return undefined;
 }
 
@@ -266,11 +305,12 @@ function auditFile(file) {
       }
     } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
       named(node.argument.literal.text, true);
-    } else if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name) && TAIL_LOADERS.has(node.name.text)) {
-      // KEYED TO THE VALUE, NOT THE CALL. `const cr = mod.createRequire` is a
-      // PropertyAccessExpression that is nobody's callee, so every callee rule below missed
-      // it while the captured function loaded `typescript` at runtime.
-      unauditable.push(`reads .${node.name.text} — a runtime module loader this guard cannot follow once it is captured`);
+    } else if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && TAIL_LOADERS.has(accessedName(node) ?? "")) {
+      // KEYED TO THE VALUE, NOT THE CALL. `const cr = mod.createRequire` is an access that is
+      // nobody's callee, so every callee rule below missed it while the captured function
+      // loaded `typescript` at runtime. Both notations, because `mod["createRequire"]` reads
+      // the same property and used to name nothing — see `dotted`.
+      unauditable.push(`reads .${accessedName(node) ?? "?"} — a runtime module loader this guard cannot follow once it is captured`);
     } else if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
         const arg = node.arguments[0];

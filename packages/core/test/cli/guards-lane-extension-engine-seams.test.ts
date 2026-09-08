@@ -184,8 +184,35 @@ test("A SLOT GIVEN THE WRONG SHAPE REFUSES AT THE CALL, naming the members it la
   const m = mod(d, "bad.mjs", `export default ({ store }) => { store.register({ append() {} }); };\n`);
   await assert.rejects(
     () => loadExtensionModules([m]),
-    (e: unknown) => isLoomError(e) && /store\.register was given an object with no read\(\), close\(\)/.test(e.message),
+    (e: unknown) => isLoomError(e) && /store\.register was given an object with no read\(\), head\(\), listRuns\(\), close\(\)/.test(e.message),
   );
+});
+
+test("…and the member list is ALL FIVE, because three let a partial store die inside a run", async () => {
+  // The check's whole stated purpose is to keep the refusal on the near side of the boundary.
+  // Asking for `append`, `read` and `close` only did not: a store with exactly those booted and
+  // failed mid-run with an untyped `TypeError: this[#store].head is not a function`, which is
+  // the far side. `StateStore` declares five and the CLI uses five.
+  const d = dir();
+  const m = mod(
+    d,
+    "partial.mjs",
+    `export default ({ store }) => { store.register({ append: async () => ({ seq: 1 }), read: async function* () {}, close: () => {} }); };\n`,
+  );
+  await assert.rejects(
+    () => loadExtensionModules([m]),
+    (e: unknown) => isLoomError(e) && /no head\(\), listRuns\(\)/.test(e.message),
+  );
+});
+
+test("A RESOLVER WITH ONLY THE REQUIRED MEMBER IS ACCEPTED — `document` is optional on the type", async () => {
+  // The other direction, and it was a false positive against this repo's own published
+  // interface: `ResourceResolver` declares `document?` and `subgraph?`, and the slot demanded
+  // `document`, so a resolver implementing exactly what the type requires was refused.
+  const d = dir();
+  const m = mod(d, "res.mjs", `export default ({ resolver }) => { resolver.register({ resolve: () => undefined }); };\n`);
+  const ext = await loadExtensionModules([m]);
+  assert.notEqual(ext.resolver, undefined);
 });
 
 test("AN EXTENSION TOOL NAMED LIKE A BUILT-IN REFUSES TO BOOT", async () => {
