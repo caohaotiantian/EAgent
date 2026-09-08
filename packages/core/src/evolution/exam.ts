@@ -203,8 +203,14 @@ export function attestationProblems(exam: GraphSpec, baseline: GraphSpec): strin
  * missing answer must not guess. Whose fault that is depends on which side of a pair the run sits
  * on, and that is the caller's asymmetry, not this function's. A name present in both (a channel
  * that is both an input and an output of the work graph) is resolved in favour of the RECORDED
- * input, and reported: the recording is the question, and a work graph that overwrote its own
- * question does not get to re-ask it.
+ * input: the recording is the question, and a work graph that overwrote its own question does not
+ * get to re-ask it.
+ *
+ * `collisions` NAMES those channels AND NOTHING READS IT — this docstring used to say "and
+ * reported", which was false: `cli.ts`'s `gradeWithExam` drops the field and the only readers are
+ * assertions in `test/evolution/exam-lane-exam-predicate.test.ts`. It is returned so the decision
+ * is checkable, and it is not on any page an operator sees. Left as it is rather than wired into
+ * a stderr line nobody asked for; corrected here so the next reader is not told it exists.
  */
 export function examInputsFor(
   exam: GraphSpec,

@@ -155,8 +155,18 @@ export interface EvalReport {
    * specs meet.
    *
    * Keys are `"node:<id>"`; `digest` is the `resolutionManifest` entry for `evaluator.ref`, and is
-   * absent when the compile did not resolve the ref (a compile refuses that, so absence is only
-   * reachable from a hand-built report — and the check fails closed on it).
+   * absent when the compile did not resolve the ref — a compile refuses that, so absence is only
+   * reachable from a hand-built report. IT IS NOT FAILED CLOSED ON, and this sentence used to say
+   * it was: `shaped()` tests that the two maps are objects, and two reports whose digests are both
+   * `undefined` compare equal on that field and pass. Unreachable from `runEvalSuite`, corrected
+   * rather than guarded, because inventing a refusal for a shape the compiler cannot produce is
+   * the guard nobody can satisfy.
+   *
+   * NOT COVERED, named rather than implied, the same way `budgets` names its own gap four fields
+   * up: this walks `graph.spec.nodes`, so an evaluator inside a CHILD spec frozen into
+   * `RunGraph.subgraphs` is invisible to it. A hand-authored candidate that edits a child graph's
+   * grader is not seen here. Suspected, not driven — a rigged child grader also moves the parent
+   * channel a frozen suite pins, so `1-must-pass` usually refuses it first.
    *
    * `threshold` IS ONE OF THE FIELDS, and it was added after the first review round rather than
    * with the others: `#checkConfidence` (`run/engine.ts`) raises the E1 `low_confidence` posture
@@ -928,8 +938,9 @@ export function gateCandidate(input: PromotionInput): PromotionVerdict {
   // `loom score` reads S1 off the rigged grader, `isGolden` marks garbage golden, and the next
   // `loom suite freeze` pins that garbage as must-pass ground truth.
   //
-  // WHAT IS COMPARED: the two graphs' evaluator sets — id, kind, ref, resolved digest, `reads` —
-  // at EVERY scope, additions included. `11-budget-exercised` skips candidate-only scopes because
+  // WHAT IS COMPARED: the two graphs' evaluator sets — id, kind, ref, resolved digest, `reads`,
+  // `threshold` — at every scope THE REPORT CARRIES, additions included; that is the parent spec's
+  // nodes and not a subgraph child's, which the field's own docstring now says. `11-budget-exercised` skips candidate-only scopes because
   // the loop's mutation operator adds nodes; an ADDED always-pass evaluator inflates k/n in `loom
   // score`, so the same latitude here would be the hole one step over, and `compileMutation` adds
   // no evaluator. If it ever does, that is the moment to revisit this line.
