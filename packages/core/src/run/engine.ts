@@ -2085,6 +2085,13 @@ export class Engine {
       // `e.to`, the fan body's head, NOT the planner. See `#escalateSkippedGate`.
       if (isEvent(ev, "fanout.planned")) {
         if (ev.payload.width !== 0) continue;
+        // AN EDGE THIS INDEX DOES NOT HOLD SKIPS THE RE-DERIVATION, which is the passing value and
+        // is the same door `taintedOn` documents: `#rehydrateGraph` runs on the ADVANCE path only,
+        // so a fold reached from `#rewindSerially` can meet a mutation-added fanout edge against
+        // the authored index. It is the same self-healing shape — the rewind clears
+        // `policySeeded`, so the next advance rehydrates and re-derives, and `PolicyEngine.escalate`
+        // is idempotent — and the compensation tools that rewind dispatches are the window. Named
+        // in both places rather than only where a reviewer happened to look.
         const fanEdge = ctx.index.edgeById.get(ev.payload.edgeId as EdgeId);
         if (fanEdge !== undefined) this.#escalateSkippedGate(ctx, fanEdge, parseTaskId(ev.taskId).branch);
         continue;
@@ -2526,6 +2533,13 @@ export class Engine {
     // runnable — parked on a gate, or finished — returns before that line, so a re-raise would
     // live only in this process's `PolicyEngine`. That is the failure this fold exists to close,
     // one layer out.
+    //
+    // A REJECTION HERE THROWS WITH `policySeeded` ALREADY TRUE (set at the top of this method), so
+    // no later call in THIS process re-folds. In-process safety holds — `PolicyEngine.escalate`
+    // applies the posture before `onEscalate` is called, so the guard is armed whether or not the
+    // row landed — and a fresh process re-derives from `fanout.planned`, which is the whole point
+    // of the fold above. It is a pre-existing shape that this line adds a new rejection source
+    // to, and it is stated rather than closed.
     const raised = ctx.escalationWrites.splice(0);
     if (raised.length > 0) await Promise.all(raised);
   }
@@ -11506,7 +11520,34 @@ function choiceOf(
   // `case "compensation": break;` and rollback is journal-driven.
   if (failed) {
     const outbound = (index.outbound.get(node.id) ?? []).filter((e) => e.kind !== "compensation");
-    return { space: outbound, byTheNode: true };
+    // A `human_gate`'s FAILURE IS A PERSON, AND THE ONE THING IT IS NOT IS THE PAGE. This is the
+    // exception to the paragraph above and the reason it is `byTheNode` rather than an early
+    // return. `#applyGateDecision` answers a REJECT with `{status:"failed",
+    // E_HUMAN_APPROVAL_REQUIRED}`, so a rejection arrives here as an ordinary failed commit — and
+    // a gate's `reads` are, very often, exactly the fetched channel the gate exists to SHOW the
+    // person deciding. Offering those reads as evidence made "show a person the page and let them
+    // say no" into the attacker's decision: the gate's error region control-tainted, and a SECOND
+    // human asked on the cleanup path.
+    //
+    //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (before)
+    //     the gate reads the page, human rejects  -> awaiting_gate, gates=2, charged=0  (the bug)
+    //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (now)
+    //
+    // AND IT IS NOT THE UNDECIDABLE CASE THE ARM ABOVE PAYS FOR. That price is owed because
+    // `#commit` records `E_INTERNAL` whether a body threw on the page or on a clock. This one is
+    // decidable twice over: the node is a `human_gate`, which computes nothing of its own, and
+    // the journal carries `gate.decided{decision:"reject"}`. The node type is the cheaper of the
+    // two and needs no second journal read, so it is what this uses — and it covers a gate's
+    // other failures for the same reason: a timeout is a clock, and `E_GATE_REQUIRED` is a
+    // deployment fact. None of them is content.
+    //
+    // THE WIDE SPACE STAYS, so the other two evidence sources still apply: an edge expression
+    // that reads a tainted channel, and — the one that matters — the gate ITSELF sitting in an
+    // earlier tainted choice's region, which makes whether it ran at all an attacker's decision.
+    // A gate an attacker's choice selected is still marked; a gate a person answered is not.
+    // `test/run/taint-failed-commits.test.ts`'s `A HUMAN SAYING NO IS NOT THE PAGE CHOOSING` is
+    // the pin, with the control that says the row is about the taint and not about the shape.
+    return { space: outbound, byTheNode: node.type !== "human_gate" };
   }
   if (node.type === "router") {
     const ids = new Set<EdgeId>();

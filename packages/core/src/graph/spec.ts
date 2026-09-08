@@ -1233,12 +1233,16 @@ const TEMPLATE_JSON = /\s*\|\s*json$/;
  *
  * ## IT WAS WRITTEN FOR TWO CALLERS AND HAS ONE, WHICH IS A MERGE RESOLUTION AND NOT A REGRET
  *
- * `Engine.#fireEmptyJoin` asks it of a branch a zero-width fan passed over — and `#runSubgraph`
- * and `applyTaint` reach it through the same engine. `graph/mutate.ts` was the second caller on
+ * `Engine.#escalateSkippedGate` asks it of a branch a zero-width fan passed over, and it is the
+ * ONLY call site in the tree — `engine.ts:9927`, reached from `#fireEmptyJoin` live and from
+ * `#restoreEvidence` at attach. (The sentence here named three callers under a heading that says
+ * one, for one commit, which is the shape CLAUDE.md warns about: a correction that replaces a
+ * false claim with a differently-false one is worse than the original. Two of the three did not
+ * call it at all.) `graph/mutate.ts` was the second caller on
  * `phase1-taint`, asking it of a dominator a proposed mutation would remove; the 2026-09-08 merge
  * kept `loom`'s mutation rule instead, which preserves EVERY dominator and therefore asks no such
- * question (`/usr/bin/grep -a -rn carriesOversight packages/core/src/` finds `spec.ts` and
- * `run/engine.ts` and nothing else). The MUTATION row below is kept because it is the measurement
+ * question (`/usr/bin/grep -a -rn carriesOversight packages/core/src/` finds this file, one
+ * import and one call in `run/engine.ts`, and nothing else). The MUTATION row below is kept because it is the measurement
  * that decided the predicate, not because `mutate.ts` still produces it: on the merged tree that
  * graft is refused by dominance alone, under the code `MUT003_NOT_DOMINATED`. Both halves were
  * measured before they were merged:

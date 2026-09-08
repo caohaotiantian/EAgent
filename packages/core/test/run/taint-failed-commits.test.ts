@@ -449,3 +449,72 @@ test("A RETRIED ATTEMPT MARKS NOTHING THE FOLD CANNOT REBUILD — live and fold,
   assert.equal(inProcess, "succeeded/1/1", `the ordinary answer moved: ${inProcess}`);
   assert.equal(acrossRestart, inProcess, `a restart reached a different answer: ${inProcess} in one process, ${acrossRestart} across two`);
 });
+
+/** `fetch → hold(human_gate, reads:[X]) --error--> charge`, plus a `seq` arm past it. */
+function rejectSpec(gateReads: "untrusted" | "request"): GraphSpec {
+  return envelope(
+    "taint-reject",
+    {},
+    [
+      FETCH,
+      { id: "hold", type: "human_gate", reads: [gateReads], humanGate: { ref: "oversight/hold@stable" } },
+      CHARGE,
+      { id: "skip", type: "function", reads: ["request"], writes: ["merged"], function: { ref: "function/skip@stable", effects: [] } },
+    ],
+    [
+      { id: "e0", from: "fetch", to: "hold", kind: "seq" },
+      { id: "onErr", from: "hold", to: "charge", kind: "error" },
+      { id: "ok", from: "hold", to: "skip", kind: "seq" },
+    ],
+  );
+}
+
+async function driveReject(gateReads: "untrusted" | "request"): Promise<string> {
+  const store = new MemoryStateStore({ now: NOW });
+  const { engine, charged } = engineOver(store, INJECTED);
+  const graph = compileOrThrow({ spec: rejectSpec(gateReads), resolver: resolver(), tools: MANIFESTS, tenantCapabilities: CAPS });
+  const runId = await engine.submit({ graph, inputs: { request: "PAY the invoice" } });
+  await engine.deescalate(runId, `run:${runId}`, "on", "reviewed the graph, watching it run", { kind: "human", id: "u:alice" });
+  const held = await engine.advance(runId);
+  const gate = Object.values(held.gates).find((g) => g.nodeId === "hold");
+  assert.ok(gate !== undefined, `precondition: the authored gate is open: ${held.status}`);
+  await engine.resolveGate(runId, {
+    gateId: gate.gateId,
+    decision: { kind: "reject", reason: "no" },
+    actor: { kind: "human", subject: "u:alice", via: "console" },
+    idempotencyKey: "k1",
+  });
+  const p = await engine.advance(runId);
+  return `${p.status}/${String(Object.keys(p.gates).length)}/${String(charged())}`;
+}
+
+test("A HUMAN SAYING NO IS NOT THE PAGE CHOOSING — a rejected gate seeds no region", async () => {
+  // THE ONE CASE THE FAILED ARM MUST NOT CLAIM, and it is the product's central oversight flow.
+  // `#applyGateDecision` answers a REJECT with `{status:"failed", E_HUMAN_APPROVAL_REQUIRED}`, so
+  // a rejection arrives at `#commit` as an ordinary failed commit — and a `human_gate`'s `reads`
+  // are, very often, exactly the fetched channel the gate exists to SHOW a person. With the
+  // failed arm handing every failed node its own reads as evidence, "show a person the page and
+  // let them say no" made the person's refusal the attacker's decision, control-tainted the
+  // gate's error region, and asked a SECOND human on the cleanup path:
+  //
+  //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (base)
+  //     the gate reads the page, human rejects  -> awaiting_gate, gates=2, charged=0  (the bug)
+  //     the gate reads the page, human rejects  -> succeeded,     gates=1, charged=1  (now)
+  //
+  // WHY IT IS NOT THE §10 PRICE. That price is paid for a case no fold can decide — `#commit`
+  // records `E_INTERNAL` whether a body threw on the page or on a clock. This one IS decidable,
+  // twice over: the node is a `human_gate`, which computes nothing of its own, and the journal
+  // carries `gate.decided{decision:"reject"}`. A guard that fails closed on a case it can decide
+  // is not failing closed, it is not deciding.
+  //
+  // THE FIX IS `byTheNode`, NOT AN EXEMPTION. `choiceOf`'s failed arm still gives a gate the wide
+  // space; what it no longer does is offer the gate's own `reads` as evidence. So the other two
+  // sources still apply — an edge expression that reads a tainted channel, and the gate itself
+  // being inside an earlier tainted choice's region — and a gate an attacker's choice SELECTED is
+  // still marked. The row below is the pair that says which of those two happened.
+  assert.equal(await driveReject("untrusted"), "succeeded/1/1", "a human's rejection was read as the page's decision");
+
+  // The control: the same graph with the gate reading only the run's own input. Identical on
+  // every tree, which is what makes the row above about the taint and not about the shape.
+  assert.equal(await driveReject("request"), "succeeded/1/1", "control");
+});
