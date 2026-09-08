@@ -45,10 +45,10 @@ import type { GraphSpec } from "./spec.ts";
  * HOW MANY UNDECLARED KEYS THE MESSAGE NAMES BEFORE IT COUNTS THE REST.
  *
  * The CLI's caller typed the keys into argv and there are a handful. The plane's caller is a
- * program and the key set is CALLER-CONTROLLED — a body with ten thousand keys would otherwise
- * produce a ten-thousand-name error string, which is an amplification the request itself paid
- * nothing for. Eight is enough to show the operator a typo and its neighbours; past that the
- * problem is not which key, it is the shape of the request.
+ * program and the key set is CALLER-CONTROLLED — measured without this cap, a body of 500 keys
+ * produced a 500-name error string, which is an amplification the request itself paid nothing
+ * for. Eight is enough to show the operator a typo and its neighbours; past that the problem is
+ * not which key, it is the shape of the request.
  *
  * `spec.inputs` is NOT capped: it comes from the graph the deployment published, not from the
  * caller, so its length is the graph author's own choice and a truncated declared set would
@@ -58,10 +58,15 @@ const MAX_NAMED = 8;
 
 /**
  * HOW MUCH OF ONE KEY IS RENDERED. Capping the COUNT is not capping the LENGTH, and the second
- * was measured missing: a body carrying a single 900,000-character key produced a 900,267-character
- * message. `server/http.ts`'s own `truncate` states the rule this broke — "a caller-supplied string
- * on its way into a message. Bounded, because a header is not" — and 120 is its number, taken
- * rather than invented so the two bounds are one bound.
+ * was measured missing — this function against `{"a".repeat(900_000): 1}`, with and without the
+ * clip:
+ *
+ *     WITHOUT clip: one 900,000-char key → message 900486 chars
+ *     WITH    clip: one 900,000-char key → message    607 chars
+ *
+ * `server/http.ts`'s own `truncate` states the rule that was being broken one file over — "a
+ * caller-supplied string on its way into a message. Bounded, because a header is not" — and 120
+ * is its number, taken rather than invented so the two bounds are one bound.
  */
 const MAX_KEY_CHARS = 120;
 
@@ -106,10 +111,17 @@ function undeclaredInputs(spec: GraphSpec, inputs: Readonly<Record<string, unkno
  *     submit {paths, hint} → status = awaiting_gate | hint channel = "read me"
  *
  * That graph compiles, that key IS read, and this rule refuses it — so the tail must state the
- * fix rather than a false diagnosis. It states GRAPH005_UNPRODUCED_READ's fix verbatim, because
- * the compiler already tells that author the same thing at compile time: `add "<channel>" to
- * inputs:, or have an upstream node write it` (`graph/validate.ts`). This rule is that warning,
- * enforced at the door instead of printed and ignored.
+ * fix rather than a false diagnosis. It names GRAPH005_UNPRODUCED_READ and gives that
+ * diagnostic's own remedy in a sentence rather than word for word; the `fix` field itself reads
+ * ``add "${r}" to inputs:, or have an upstream node write it`` (`graph/validate.ts`). So this
+ * rule is that warning, enforced at the door instead of printed and scrolled past, and the
+ * refusal points at the place the author was already told.
+ *
+ * `clip` GUARDS ONLY THE LENGTH, and on a key whose 120th and 121st UTF-16 units are a surrogate
+ * PAIR the slice leaves a lone high surrogate. That is deliberate rather than unnoticed: the
+ * bound still holds at 121 units, `JSON.stringify` escapes a lone surrogate to `\udXXX` so the
+ * response body stays well-formed JSON, and the character renders as one replacement glyph. A
+ * code-point-aware slice would buy a nicer glyph in a message about a key the caller mistyped.
  */
 export function undeclaredInputsMessage(
   subject: string,

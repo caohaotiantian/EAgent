@@ -176,8 +176,8 @@ test("the message is bounded in BOTH dimensions — key count and key length", a
     assert.match(message, /and 492 more/, message.slice(0, 400));
     assert.ok(message.length < 1000, `the refusal must not grow with the key COUNT: ${message.length} chars`);
 
-    // LENGTH, which capping the count does NOT give. Measured before `clip` existed: a single
-    // 900,000-character key produced a 900,267-character message. `http.ts`'s own `truncate` —
+    // LENGTH, which capping the count does NOT give. Measured on the function with and without
+    // the clip, one 900,000-character key: 900486 chars → 607 chars. `http.ts`'s own `truncate` —
     // "a caller-supplied string on its way into a message. Bounded, because a header is not" —
     // is the rule that was being broken, one file over.
     const huge = await post(r, { workflow: "skeleton-summarize", inputs: { [`x`.repeat(50_000)]: 1 } });
