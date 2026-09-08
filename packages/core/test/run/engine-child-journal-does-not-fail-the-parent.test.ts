@@ -1,5 +1,5 @@
 /**
- * A broken CHILD journal does not fail the PARENT's own verb.
+ * A broken CHILD journal does not fail the PARENT's `advance`.
  *
  * `#answerMirrorsTheChildAlreadyDecided` runs inside the parent's `for(;;)` drive loop and reads
  * the CHILD's journal to see whether the gate a mirror stands for has already been decided. That
@@ -8,6 +8,12 @@
  * error`. It is round 4's `#forwardToParentMirrorsQuietly` defect one direction over, and the
  * argument is the same one with the roles swapped — refusing to ANSWER A MIRROR is always allowed,
  * refusing to answer the caller's question is not.
+ *
+ * ONE READ, AND THE SET IS NAMED. Three other cross-run child reads are still unwrapped and still
+ * fail the parent's verb — `#runSubgraph` (`engine.ts:7482`) and `#planRollbackChild`
+ * (`engine.ts:1755`), which throw out of `resolveGate` on a mirror AFTER that decision is durable,
+ * and `#forwardGateDecision`/`#endChildRun` (`engine.ts:7734`, `7756`). They are the next round's,
+ * not this one's, and nothing here claims otherwise.
  *
  * FAIL CLOSED HERE MEANS THE MIRROR STAYS OPEN: never approved, never marked, so a human can still
  * see it and the next pass tries again. The fixture is `engine-lane-mirror-follows-the-child.test.ts`'s,
@@ -135,7 +141,12 @@ async function parked(r: ReturnType<typeof rig>) {
   return { runId, childRunId, mirror };
 }
 
-test("A BROKEN CHILD JOURNAL NEVER FAILS THE PARENT'S OWN VERB — the mirror answer refuses, it does not propagate", async () => {
+test("A BROKEN CHILD JOURNAL NEVER FAILS THE PARENT'S `advance` — the mirror-answer read refuses, it does not propagate", async () => {
+  // THE TITLE NAMES ONE VERB AND ONE READ, and it used to name every verb. `resolveGate` on a
+  // MIRROR still throws on the child's disk through two other unwrapped cross-run reads —
+  // `#runSubgraph` (`engine.ts:7482`) and `#planRollbackChild` (`engine.ts:1755`) — and
+  // `#forwardGateDecision`/`#endChildRun` are a third and fourth. This lane was authorised for
+  // the mirror-answer read only; the rest are named in the lane report as the next round.
   let breakChild = false;
   class BrokenChildReads extends MemoryStateStore {
     override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
@@ -165,7 +176,7 @@ test("A BROKEN CHILD JOURNAL NEVER FAILS THE PARENT'S OWN VERB — the mirror an
     // `process.emitWarning` defers to the next tick, so drain before reading the listener.
     await new Promise((res) => setImmediate(res));
     const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_ANSWER_FAILED");
-    assert.equal(mine.length, 1, `exactly one warning per failed read, not one per open mirror per pass: ${JSON.stringify(warnings)}`);
+    assert.equal(mine.length, 1, `one open mirror, one pass, one warning: ${JSON.stringify(warnings)}`);
     assert.ok(mine[0]!.message.includes(String(runId)), `it names the run whose pass refused: ${mine[0]!.message}`);
     assert.ok(mine[0]!.message.includes(String(childRunId)), `and the child whose journal is broken: ${mine[0]!.message}`);
     assert.match(mine[0]!.message, /child disk I\/O error/);
@@ -184,7 +195,7 @@ test("A BROKEN CHILD JOURNAL NEVER FAILS THE PARENT'S OWN VERB — the mirror an
   }
 });
 
-test("A BROKEN SIBLING DOES NOT HIDE A HEALTHY CHILD'S ANSWER — the read is wrapped per mirror, not per pass", async () => {
+test("THE REFUSAL IS NOT STICKY — a pass that could not read the child reads again on the next one", async () => {
   // The parent-side half answers a mirror whose child gate is ALREADY decided, and the method
   // returns whether it wrote so the drive loop can restart on a fresh projection. Wrapping the
   // whole method would have to answer `false` on any failure — a partial write reported as none,
@@ -192,10 +203,10 @@ test("A BROKEN SIBLING DOES NOT HIDE A HEALTHY CHILD'S ANSWER — the read is wr
   // scoped to the one mirror whose child could not be read.
   //
   // ONE ENGINE, TWO CHILDREN is not a shape this fixture can build (one subgraph node, one child),
-  // so the property is shown the way it is actually reachable: the SAME advance that refuses one
-  // unreadable read still returns the parent's honest projection and marks nothing, and the very
-  // next pass — with the store healthy — writes. Asserted above. Here the narrower fact: a read
-  // that fails does not leave `mirrorsChecked` or the gate record touched, so the retry is real.
+  // so the sibling half of D1 is argued and not pinned. What IS pinned here is the fact the retry
+  // rests on: a failed read records nothing anywhere, so the next pass genuinely re-reads rather
+  // than short-circuiting on a memo. (`mirrorsChecked` is NOT that memo — it belongs to
+  // `#forwardToParentMirrors`, the other direction, and this method is never passed it.)
   let breakChild = false;
   let reads = 0;
   class BrokenChildReads extends MemoryStateStore {
@@ -215,4 +226,45 @@ test("A BROKEN SIBLING DOES NOT HIDE A HEALTHY CHILD'S ANSWER — the read is wr
   assert.equal((await r.engine.advance(runId)).status, "awaiting_gate", "and again — the refusal is not sticky");
   assert.ok(reads >= 2, `each pass genuinely re-read the child: ${String(reads)}`);
   assert.equal((await r.engine.projection(runId))!.gates[mirror.gateId]?.state, "open");
+});
+
+test("A CHILD STORE THAT REJECTS WITH A NON-ERROR IS STILL SWALLOWED — the guard's own failure path cannot throw", async () => {
+  // `StateStore` is an extension point (README's twelve rows), so nothing forces a third-party
+  // store to reject with an `Error`. `String(e)` on an object with a null prototype throws inside
+  // the catch, and the exception escapes `advance` — the guard producing the outcome the guard
+  // exists to prevent. Measured before this was fixed:
+  // `PARENT ADVANCE OUTCOME (non-Error child failure): threw:Cannot convert object to primitive value`.
+  let breakChild = false;
+  class HostileChildReads extends MemoryStateStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      // Not a string, not an Error, and its own `toString` is unreachable: `Object.create(null)`
+      // has no prototype, so every implicit conversion of it throws.
+      if (breakChild && String(runId).includes("~")) throw Object.create(null) as unknown as Error;
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const warnings: { code?: string; message: string }[] = [];
+  const onWarning = (w: Error & { code?: string }): void => {
+    warnings.push({ ...(w.code === undefined ? {} : { code: w.code }), message: w.message });
+  };
+  process.on("warning", onWarning);
+  try {
+    const r = rig(new HostileChildReads({ now: () => NOW }));
+    const { runId, mirror } = await parked(r);
+
+    breakChild = true;
+    const p = await r.engine.advance(runId);
+    assert.equal(p.status, "awaiting_gate", "the parent still answers its own question");
+    assert.equal(p.gates[mirror.gateId]?.state, "open", "and the mirror is still fail-closed");
+
+    await new Promise((res) => setImmediate(res));
+    const mine = warnings.filter((w) => w.code === "LOOM_MIRROR_ANSWER_FAILED" && w.message.includes(String(runId)));
+    assert.equal(mine.length, 1, `it is still said out loud: ${JSON.stringify(warnings)}`);
+    assert.ok(
+      /a non-Error value/.test(mine[0]!.message),
+      `and the warning says what it could not describe rather than dying trying: ${mine[0]!.message}`,
+    );
+  } finally {
+    process.off("warning", onWarning);
+  }
 });

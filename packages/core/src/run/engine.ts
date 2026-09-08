@@ -663,6 +663,28 @@ interface RollbackWalkStep {
  * `{}` exactly. What it cannot reconstruct is an absent key, a `null`, or a non-object, and
  * those three are the ones that now come back `undefined` for `#compensateOne` to refuse.
  */
+/**
+ * What was thrown, as a string, when the point of the string is that the thrower cannot be trusted.
+ *
+ * `e instanceof Error ? e.message : String(e)` is the idiom everywhere a failure is described
+ * rather than rethrown, and it has a hole: `String(Object.create(null))` throws. That is harmless
+ * where the catch rethrows anyway, and it is the whole defect where the catch exists to SWALLOW —
+ * a guard whose failure path can fail is not a guard, and the thrower is a third-party
+ * `StateStore`, an extension point that owes nobody an `Error`.
+ *
+ * Names the shape rather than inventing a message: an operator reading `a non-Error value
+ * (object)` knows to look at whoever rejected, which is more than a swallowed `TypeError` tells
+ * them.
+ */
+function describeThrown(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  try {
+    return String(e);
+  } catch {
+    return `a non-Error value (${typeof e}) whose own string conversion threw`;
+  }
+}
+
 function detailsOf(result: unknown): Record<string, unknown> | undefined {
   const details = (result as { readonly details?: unknown } | undefined)?.details;
   return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
@@ -2774,13 +2796,27 @@ export class Engine {
         // operator filtering stderr by code is asking exactly which journal is broken. Both run
         // ids are in the message for the same reason.
         //
-        // ONCE PER FAILED READ, and that is once per operator action here rather than the storm
-        // the forward side produces: a parent parked `awaiting_gate` is not `due`, so no run clock
-        // re-enters this loop and nothing re-attempts the read except a verb somebody called. No
-        // dedupe set, deliberately — it would be memory a restart empties whose only reader is
-        // "do we print", and suppressing the repeat of a store that is still broken is the wrong
-        // direction for a pass that has just refused to act.
-        const why = e instanceof Error ? e.message : String(e);
+        // ONCE PER OPEN MIRROR PER PASS. The rate that was MEASURED is one warning per
+        // `advance` of a parent whose only remaining work is the mirror — that parent is not
+        // `due`, so no run clock re-enters this loop. It is NOT the general rate: a parent with
+        // any other `ready` or `leased` task IS due, and then the clock re-enters every lap and
+        // this warns every lap, the storm `#forwardToParentMirrorsQuietly` already produces. No
+        // dedupe set even so, deliberately — it would be memory a restart hands back empty whose
+        // only reader is "do we print", and suppressing the repeat of a store that is still broken
+        // is the wrong direction for a pass that has just refused to act.
+        //
+        // AND IT IS NOT ONLY ANOTHER RUN'S DISK. `projection` also raises `E_TRACE_INCONSISTENT`
+        // and whatever `foldRun` throws on a malformed journal — invariant-2 alarms, reduced here
+        // to a warning because they arrived through a DIFFERENT run's verb, where they are not
+        // decidable; the child's own verb still raises them. A throw inside `ctx.folder.restart()`
+        // also leaves the child's live folder reset to seq 0, which the next `#project` re-folds
+        // from 1.
+        //
+        // THE STRINGIFY CANNOT THROW. `StateStore` is an extension point, so nothing forces a
+        // third-party store to reject with an `Error`, and `String(Object.create(null))` throws —
+        // out of the catch, out of `advance`, which is the one outcome this block exists to
+        // prevent. A guard whose failure path can fail is not a guard.
+        const why = describeThrown(e);
         process.emitWarning(
           `could not read child run ${String(childRunId)}'s journal to answer run ${String(ctx.runId)}'s mirror ${String(mirror.gateId)}: ${why}; the mirror stays open and the next pass will try again`,
           { code: "LOOM_MIRROR_ANSWER_FAILED", detail: JSON.stringify({ runId: ctx.runId, childRunId, error: why }) },
