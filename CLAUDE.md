@@ -131,7 +131,11 @@ Do not treat this as a bug list. **Until a measurement exists whose inputs the c
 cannot write, this property is aspirational**, and the audit found none in the tree. The three
 defeated attempts to pin a verifier are recorded at `aabdc63`; the shape that defeated all three is
 that the candidate owns both sides of any channel the graph produces. `docs/audit-2026-09-02.md`
-has the reproductions.
+has the reproductions. **The design for such a measurement is merged** —
+`docs/design-property3-2026-09-05.md`, an operator-attested exam graph the runtime runs — and its
+implementation exists only on the unmerged `wave2-exam` branch, whose own report claims both
+reproductions are refused through the shipped binary; that claim is the lane's, not yet verified
+by a fresh agent on `loom`, and this paragraph stays true of `loom` until it is.
 
 ## What follows from those, and is not negotiable
 
@@ -220,14 +224,17 @@ scripts/           build and the three guards that are worth their cost:
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records: audit findings and backlog re-checks, with reproductions
-                   START HERE: `handoff-2026-09-03-merged.md`, then `audit-2026-09-02.md`
+                   START HERE: `handoff-2026-09-08.md`, then `audit-2026-09-02.md`
 .agent/<task>/     per-task working state (gitignored)
 ```
 
 **The three phase-2-4 branches are MERGED into `loom`** — `phase2-4-engine`, `phase2-4-plane`
-and `phase2-4-subsystems` went in with zero conflicts, as predicted. `phase1-taint` is still
-unmerged and parked: RC-6 is a design change, not a patch, and the design comes before the code
-(see the handoff §5).
+and `phase2-4-subsystems` went in with zero conflicts, as predicted — **and so are the five
+wave-1 lanes (`294e713`) and two of six wave-2 lanes (`9b45c7c`, `8d43127`).** Four wave-2
+branches hold part-reviewed work and are not merged; the handoff §6 is the list. `phase1-taint`
+is still unmerged, and the design its parking waited for now exists:
+`docs/design-taint-rc6-2026-09-05.md` measured that RC-6 is not a scope defect and recommends
+merging the branch with a `Kernel-seam:` trailer (handoff §5).
 
 ## Commands
 
