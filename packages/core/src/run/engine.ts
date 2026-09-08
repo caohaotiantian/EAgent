@@ -8838,6 +8838,16 @@ export class Engine {
     if (outcome.mutation !== undefined) {
       const applied = this.#applyMutation(ctx, w, outcome.mutation);
       if (applied.error !== undefined) {
+        // A REFUSED MUTATION STILL COMMITS, so it still folds. This exit journals its own
+        // `task.committed{status:"failed"}` and returns, and `#restoreEvidence` cannot tell it
+        // from any other failed commit — so without this line the fold applied
+        // `applySuppressedWrites` for an event the live path had not, and a restart came back
+        // with MORE taint than the process that ran. Tightening rather than loosening, and
+        // bounded (`take` is `[]`, so three of the four are no-ops today), but "live and fold
+        // apply the identical folds in the identical order" is either true or it is a sentence
+        // nobody can rely on. Found by a reviewer asking which CODE PATHS reach the recorder,
+        // which is the same question that found the retry path one commit earlier.
+        this.#foldCommitEvidence(ctx, w, [], false, true);
         return void (await ctx.log.commit(
           p.seq,
           [
@@ -8921,14 +8931,7 @@ export class Engine {
     // restart switches off silently — five of those, then a sixth. This is the first piece of
     // evidence that does not live in `#recordEvidence`, so it is the first that could be missed
     // by reading only that method; the pairing is written down in both places for that reason.
-    // THE WRITES A FAILURE SUPPRESSED, and this is below the retry early-return on purpose: a
-    // retried attempt journals `task.retry_scheduled` and no `task.committed`, so applying it
-    // there would be a mark the fold can never rebuild. Same position relative to the fanout
-    // halves as `#restoreEvidence` uses.
-    if (outcome.status === "failed") applySuppressedWrites(ctx, w.task.branch, w.node);
-    applyFanoutTaint(ctx, w.task.branch, take);
-    applyFanoutWidthTaint(ctx, w.task.branch, w.node, take);
-    applyControlTaint(ctx, w.task.branch, w.node, take, takeSuppliedByProducer, outcome.status === "failed");
+    this.#foldCommitEvidence(ctx, w, take, takeSuppliedByProducer, outcome.status === "failed");
 
     if (outcome.status === "failed") {
       events.push({
@@ -9309,6 +9312,37 @@ export class Engine {
    * Called once per committed Task, which is the only point where the outcome, the tools
    * it used, and the channels it wrote are all known together.
    */
+  /**
+   * The four folds a COMMIT applies, in the order `#restoreEvidence` applies them.
+   *
+   * ONE CALLER PER `task.committed`, WHICH IS THE POINT. `engine.ts` journals that event from two
+   * places — the ordinary end of `#commit` and the exit that refuses a proposed mutation — and
+   * the fold cannot tell them apart. When these four lines lived inline at the first site only,
+   * the second wrote an event the fold folded and the live path did not. Adding a third exit
+   * later is now a call rather than four lines somebody has to remember.
+   *
+   * IT IS NOT REACHED FROM `#recordEvidence`, and that separation is load-bearing: that method
+   * runs ABOVE `#commit`'s retry early-return, where an attempt journals `task.retry_scheduled`
+   * and no `task.committed` at all. Anything applied there is a mark no fold can rebuild — see
+   * `applySuppressedWrites` for the measurement.
+   *
+   * The order is `applySuppressedWrites` → `applyFanoutTaint` → `applyFanoutWidthTaint` →
+   * `applyControlTaint`, after `applyTaint`, which `#recordEvidence` already ran. Each of the
+   * later three reads what the earlier ones wrote, so the order is the answer and not a style.
+   */
+  #foldCommitEvidence(
+    ctx: RunContext,
+    w: Wave,
+    take: readonly EdgeId[],
+    takeSuppliedByProducer: boolean,
+    failed: boolean,
+  ): void {
+    if (failed) applySuppressedWrites(ctx, w.task.branch, w.node);
+    applyFanoutTaint(ctx, w.task.branch, take);
+    applyFanoutWidthTaint(ctx, w.task.branch, w.node, take);
+    applyControlTaint(ctx, w.task.branch, w.node, take, takeSuppliedByProducer, failed);
+  }
+
   #recordEvidence(ctx: RunContext, w: Wave, outcome: NodeOutcome): void {
     // Also at commit: a run can drift over the line through settled spend across many
     // cheap tasks, without any single reservation reaching it.
@@ -9892,6 +9926,14 @@ export class Engine {
     if (source === undefined || fanoutWidthEvidence(ctx, parent, source, fanout) === undefined) return;
     const skipped = [...fanBody(ctx.index, fanout)].filter((id) => carriesOversight(ctx.index.byId.get(id)));
     if (skipped.length === 0) return;
+    // THE EXIT JOIN IS THE ONE A `join` EDGE LEAVES `fanout.to` BY, which is what `#fireEmptyJoin`
+    // schedules and therefore what this must escalate — the two scan the same set on purpose.
+    // `GRAPH021` is looser: it requires only that a join node be DOWNSTREAM, so
+    // `plan --fanout--> head --seq--> work --join--> J` compiles and neither method finds
+    // anything. That fan strands rather than releasing anything (the join is never readied
+    // either), so there is nothing to escalate ABOUT today; naming it because the gap is
+    // inherited from `#fireEmptyJoin` rather than introduced here, and because the day
+    // `#fireEmptyJoin` learns to walk further this must walk with it.
     const seen = new Set<NodeId>();
     for (const e of ctx.index.outbound.get(fanout.to) ?? []) {
       if (e.kind !== "join") continue;
@@ -10724,10 +10766,21 @@ function taintedOn(ctx: RunContext, branch: BranchCoordinate, channel: string): 
     // AN EDGE ID THIS INDEX DOES NOT HOLD FALLS THROUGH AS "not tainted", which is the passing
     // value and therefore owes an argument. It cannot happen and here is why, rather than a
     // shrug: `seg.edgeId` was written by `childBranch` from an edge of THIS graph's index, the
-    // index is rebuilt from the compiled graph on every attach (`#rehydrateGraph` folds every
-    // `graph.mutated` before the fold that reads this), and `compileMutation` is
-    // additive-only — no verb removes an edge from a compiled graph. So an id in a segment is an
-    // id in `edgeById`, and the miss is unreachable rather than merely unlikely. The refusing
+    // index is rebuilt from the compiled graph on the ADVANCE path (`#rehydrateGraph` folds every
+    // `graph.mutated` before the fold that reads this), and `compileMutation` is additive-only —
+    // no verb removes an edge from a compiled graph.
+    //
+    // ONE DOOR DOES NOT REHYDRATE, and a reviewer found it: `#rehydrateGraph` is called from
+    // `#advanceSerially` alone, while `#seedPolicy` — and therefore `#restoreEvidence`, and
+    // therefore this function — is also reached from `#rewindSerially`. So `attach(runId, the
+    // AUTHORED graph)` followed by a rewind with no advance in between folds a journal whose
+    // branch segments may carry a mutation-added fanout edge id against an index that does not
+    // hold it, and the miss fires. It self-heals — the rewind clears `policySeeded`, so the next
+    // advance rehydrates and re-folds, and these sets are monotone — but the compensation tools
+    // that rewind dispatches see the short set. That is the same "which verbs reach this guard"
+    // shape `#seedPolicy` exists for, one level in, and it is recorded here rather than fixed
+    // because the fix is a rehydrate on the rewind path and that is a change to the rewind verb.
+    // The refusing
     // value would be worse than useless here anyway: it would report every channel tainted on
     // any branch whose edge went missing, which is a constant gate rather than a fail-closed
     // answer.
