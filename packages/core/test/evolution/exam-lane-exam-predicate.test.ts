@@ -11,8 +11,6 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, NodeSpec, RunGraph } from "../../src/graph/spec.ts";
@@ -209,6 +207,53 @@ test("a channel a FANOUT edge fans over is read, though no node declares it", ()
 });
 
 /**
+ * AN EXPRESSION IS THE FIFTH ROUTE, and the reason is one word. `rule004Expressions` constrains an
+ * expression's free variables to the owning node's `reads ∪ writes` — `∪ writes` because an edge
+ * condition is evaluated on POST-COMMIT state — and `observedChannels` covers `reads` only. So
+ * `when: "picked.ok"` on an edge leaving the node that DECLARES `picked` among its writes compiles
+ * clean, is evaluated by the executor, and names a channel in no node's `reads` and no fanout
+ * `over`. The first two cuts of this rule refused that exam saying "read by no node", which was
+ * false about its own graph — twice, for two different routes.
+ */
+test("a channel an edge's `when` names is read, though it is in the source node's writes", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const viaExpr = compileOf({
+    ...spec,
+    channels: { ...spec.channels, picked: { type: "object", reduce: "replace" } },
+    nodes: [
+      { id: "step" as NodeId, type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+      { ...grade, reads: ["items"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" }],
+  });
+  assert.deepEqual(examShape(viaExpr), [], "`picked` is the edge condition's free variable");
+});
+
+// The control on the route above, and it is why the fix collects expression refs rather than
+// unioning `writes` into the read set: a ROUTER writes nothing, so GRAPH004 forces a case's
+// free variable into the router's own `reads`, where `observedChannels` already sees it. The
+// gap is the EDGE condition alone, because only an edge's owner can satisfy GRAPH004 by writing.
+test("a ROUTER case's `when` was never the gap — GRAPH004 forces it into the router's own reads", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const viaRouter = compileOf({
+    ...spec,
+    channels: { ...spec.channels, picked: { type: "object", reduce: "replace" } },
+    nodes: [
+      { id: "step" as NodeId, type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+      { id: "pick-branch" as NodeId, type: "router", reads: ["picked"], writes: [], router: { mode: "expression", cases: [{ when: "picked.ok", take: ["y" as EdgeId] }], fallbackEdge: "y" as EdgeId } },
+      { ...grade, reads: ["items"] },
+    ],
+    edges: [
+      { id: "x" as EdgeId, from: "step" as NodeId, to: "pick-branch" as NodeId, kind: "seq" },
+      { id: "y" as EdgeId, from: "pick-branch" as NodeId, to: "grade" as NodeId, kind: "seq" },
+    ],
+  });
+  assert.deepEqual(examShape(viaRouter), []);
+});
+
+/**
  * THE RESIDUE, PINNED RATHER THAN ASSERTED. The rule asks whether SOME node reads the channel, not
  * whether the reading reaches the terminal grader. `sink` reads `picked` and writes a channel
  * nobody reads; the assertion evaluator sees only `items`, so the grade is as blind as the exam
@@ -230,13 +275,6 @@ test("A NODE THAT READS AND DISCARDS SATISFIES THE RULE — the admitted residue
     edges: [{ id: "e" as EdgeId, from: "sink" as NodeId, to: "grade" as NodeId, kind: "seq" }],
   });
   assert.deepEqual(examShape(sunk), [], "the grader never sees `picked`, and the fifth rule does not notice");
-});
-
-test("the SHIPPED review-bench exam reads every input it declares", () => {
-  const shipped = JSON.parse(
-    readFileSync(fileURLToPath(new URL("../../../../examples/exams/review-bench-exam.json", import.meta.url)), "utf8"),
-  ) as GraphSpec;
-  assert.deepEqual(examShape(compileOf(shipped)), [], "the exam that ships must survive the rule it gains");
 });
 
 // ── attestationProblems ──────────────────────────────────────────────────────

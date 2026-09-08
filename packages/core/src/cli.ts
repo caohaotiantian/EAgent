@@ -8374,8 +8374,9 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
-        `inputs, READS every one of those channels from some node, has exactly one output "verdict", and runs ` +
-        `deterministic bodies ending in an evaluator{kind:"assertion"} that writes it.`,
+        `inputs, READS every one of the GRADED channels somewhere in the graph ("subject" excepted — no node may read ` +
+        `it), has exactly one output "verdict", and runs deterministic bodies ending in an evaluator{kind:"assertion"} ` +
+        `that writes it.`,
     );
   }
 
