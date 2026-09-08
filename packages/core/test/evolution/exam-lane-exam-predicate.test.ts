@@ -207,15 +207,25 @@ test("a channel a FANOUT edge fans over is read, though no node declares it", ()
 });
 
 /**
- * AN EXPRESSION IS THE FIFTH ROUTE, and the reason is one word. `rule004Expressions` constrains an
- * expression's free variables to the owning node's `reads ∪ writes` — `∪ writes` because an edge
- * condition is evaluated on POST-COMMIT state — and `observedChannels` covers `reads` only. So
- * `when: "picked.ok"` on an edge leaving the node that DECLARES `picked` among its writes compiles
- * clean, is evaluated by the executor, and names a channel in no node's `reads` and no fanout
- * `over`. The first two cuts of this rule refused that exam saying "read by no node", which was
- * false about its own graph — twice, for two different routes.
+ * AN EDGE CONDITION IS NOT A READ, AND THIS TEST FLIPPED TO SAY SO.
+ *
+ * It used to assert the opposite — `when: "picked.ok"` on a conditional edge counted, because the
+ * executor evaluates it and `rule004Expressions` lets an edge's owner satisfy GRAPH004 by
+ * DECLARING the channel among its `writes` (so the condition names a channel in no node's `reads`
+ * and no fanout `over`). That was true of the condition and false of the RULE, and the reason is
+ * the shape round four drove: `#edgesToTake` skips the whole `switch` whenever
+ * `outcome.take !== undefined`, and `conditional` is in `TAKEABLE_EDGE_KINDS`, so a `function` or
+ * `assertion` body — both node types an exam permits — returns `take: ["e"]` and the edge is taken
+ * with `when` never evaluated. Driven at `5b46f86`: the graded node ran and wrote a verdict with
+ * `picked.ok` false, having never seen `picked`.
+ *
+ * Whether a body does that is not decidable from the spec, and CLAUDE.md says a guard that cannot
+ * decide FAILS CLOSED. So the rule counts only reads the executor performs without consulting a
+ * condition, and this exam is refused. THE COST IS REAL AND STATED: an exam whose only read of the
+ * run's answer is an edge condition must move that read into a node's `reads`, and the refusal
+ * tells the operator exactly that.
  */
-test("a channel an edge's `when` names is read, though it is in the source node's writes", () => {
+test("an edge condition is NOT a read — a producing body's `take` can skip it, so the rule fails closed", () => {
   const spec = examSpec();
   const grade = spec.nodes[0]!;
   const viaExpr = compileOf({
@@ -227,23 +237,48 @@ test("a channel an edge's `when` names is read, though it is in the source node'
     ],
     edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" }],
   });
-  assert.deepEqual(examShape(viaExpr), [], "`picked` is the edge condition's free variable");
+  const problems = examShape(viaExpr);
+  assert.ok(problems.some((p) => /read by no node/.test(p) && /"picked"/.test(p)), problems.join("\n"));
+  // AND THE REFUSAL SAYS WHAT TO DO, because this is the shape the design call knowingly costs.
+  assert.ok(problems.some((p) => /EDGE CONDITION does not count/.test(p) && /Read it in a node/.test(p)), `the refusal must name the cost: ${problems.join("\n")}`);
 });
 
 /**
- * AND THE ROUTE MUST BE ONE THE EXECUTOR CAN TAKE, which is the ADMIT half and the only one of
- * these findings that pointed the dangerous way. `#edgesToTake` evaluates `when` in `case
- * "conditional":` alone, and even there `if (w.node.type === "router") break;`; `until` is
- * evaluated only inside `#loopMayContinue`, reached only from `case "loop":`. Collecting `when`
- * and `until` off EVERY edge therefore let one inert field satisfy the whole fifth rule: a `seq`
- * edge is always taken and its `when` is never read, so `when: "picked.ok"` on one bought an exam
- * whose grader never sees `picked` — the exact blindness this rule exists to refuse, restored by
- * a field the compiler tolerates.
+ * THE SHAPE THAT DECIDED IT, as a spec rather than as a prose citation. `step`'s body returns
+ * `take: ["e"]` at run time; nothing in this spec says so, and nothing can. At `5b46f86` this
+ * exam attested and its grader never saw `picked`.
  */
-test("an inert `when` does NOT count — a seq edge is always taken and its condition never evaluated", () => {
+test("the `take`-bypass shape is refused — and the spec that produces it is indistinguishable from the one above", () => {
   const spec = examSpec();
   const grade = spec.nodes[0]!;
-  const inert = (kind: string, over: Record<string, unknown>): readonly string[] =>
+  const taking = compileOf({
+    ...spec,
+    channels: { ...spec.channels, picked: { type: "object", reduce: "replace" } },
+    nodes: [
+      // The body is `() => ({ writes: { picked: { ok: false } }, take: ["e"] })`. `function/pick`
+      // is a resolvable ref and the ref is all the SPEC carries — which is the point: the
+      // predicate sees this graph and the previous one as the same graph, so it must answer both
+      // the same way, and the safe answer is the refusing one.
+      { id: "step" as NodeId, type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+      { ...grade, reads: ["items"] },
+    ],
+    edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" }],
+  });
+  assert.ok(examShape(taking).some((p) => /"picked".*read by no node/s.test(p)));
+});
+
+/**
+ * EVERY OTHER PLACEMENT OF A CONDITION, refused for the same one reason rather than for four.
+ * `seq`/`fanout`/`join` never read `when`; a conditional never reads `until`; a conditional
+ * leaving a ROUTER is chosen by the router's `take` and its `when` is skipped; and a `loop`'s
+ * `until` — the one condition the executor does evaluate on both the switch AND the `take` path —
+ * is still not counted, because the loop edge itself may be absent from a body's `take`.
+ * ONE rule now covers what a placement filter used to enumerate, which is why the filter is gone.
+ */
+test("no placement of a condition counts, whatever the edge kind", () => {
+  const spec = examSpec();
+  const grade = spec.nodes[0]!;
+  const cond = (kind: string, over: Record<string, unknown>): readonly string[] =>
     examShape(
       compileOf({
         ...spec,
@@ -255,40 +290,54 @@ test("an inert `when` does NOT count — a seq edge is always taken and its cond
         edges: [{ id: "e" as EdgeId, from: "step" as NodeId, to: "grade" as NodeId, kind, ...over } as never],
       }),
     );
-  assert.ok(inert("seq", { when: "picked.ok" }).some((p) => /read by no node/.test(p)), "a seq edge's `when` is never evaluated");
-  assert.ok(inert("conditional", { until: "picked.ok" }).some((p) => /read by no node/.test(p)), "`until` is a loop's field; a conditional never reads it");
-  // The ORDINARY half of the same measurement, so the filter is not just refusing everything:
-  // the two placements the executor DOES evaluate still count.
-  assert.deepEqual(inert("conditional", { when: "picked.ok" }), [], "a conditional's `when` IS evaluated");
+  for (const [label, kind, over] of [
+    ["a seq edge's `when`", "seq", { when: "picked.ok" }],
+    ["a conditional's `until`", "conditional", { until: "picked.ok" }],
+    ["a conditional's `when`", "conditional", { when: "picked.ok" }],
+  ] as const) {
+    assert.ok(cond(kind, over).some((p) => /read by no node/.test(p)), `${label} must not count`);
+  }
 });
 
-test("a ROUTER's outgoing conditional `when` is never evaluated either — the router already chose", () => {
+/**
+ * THE ORDINARY HALF, and it is what stops the change from being "refuse everything". The two
+ * routes the executor performs without consulting a condition still count, on the same fixture
+ * shape that the conditions above are refused on.
+ */
+test("the reads that DO count still count — a node's `reads` and a fanout's `over`", () => {
   const spec = examSpec();
   const grade = spec.nodes[0]!;
-  const viaRouterEdge = compileOf({
+  assert.deepEqual(
+    examShape(compileOf({ ...spec, nodes: [{ ...grade, reads: ["items", "picked"] }] })),
+    [],
+    "route 1: the grader declares it",
+  );
+  const fan = compileOf({
     ...spec,
-    channels: { ...spec.channels, picked: { type: "object", reduce: "replace" }, flag: { type: "boolean", reduce: "replace" } },
+    channels: { ...spec.channels, one: { type: "object", reduce: "replace" }, part: { type: "array", reduce: "append_ordered" } },
     nodes: [
-      { id: "step" as NodeId, type: "function", reads: ["items"], writes: ["flag"], function: { ref: "function/pick@stable" } },
-      { id: "r" as NodeId, type: "router", reads: ["flag", "picked"], writes: [], router: { mode: "expression", cases: [{ when: "flag", take: ["y" as EdgeId] }], fallbackEdge: "y" as EdgeId } },
-      { ...grade, reads: ["items"] },
+      { id: "start" as NodeId, type: "function", reads: ["items"], writes: ["part"], function: { ref: "function/pick@stable" } },
+      { id: "each" as NodeId, type: "function", reads: ["one"], writes: ["part"], function: { ref: "function/pick@stable" } },
+      { id: "gather" as NodeId, type: "join", reads: ["part"], writes: [], join: { branches: ["each" as NodeId], mode: "all", onBranchError: "fail" } },
+      { id: "grade" as NodeId, type: "evaluator", reads: ["part"], writes: ["verdict"], evaluator: { kind: "assertion", ref: "function/exam-pick@stable", threshold: 0 } },
     ],
     edges: [
-      { id: "x" as EdgeId, from: "step" as NodeId, to: "r" as NodeId, kind: "seq" },
-      { id: "y" as EdgeId, from: "r" as NodeId, to: "grade" as NodeId, kind: "conditional", when: "picked.ok" },
+      { id: "f" as EdgeId, from: "start" as NodeId, to: "each" as NodeId, kind: "fanout", over: "picked", as: "one", maxWidth: 4 },
+      { id: "j" as EdgeId, from: "each" as NodeId, to: "gather" as NodeId, kind: "join", branches: ["each" as NodeId] },
+      { id: "g" as EdgeId, from: "gather" as NodeId, to: "grade" as NodeId, kind: "seq" },
     ],
   });
-  // `picked` is in the router's own `reads`, so route 1 carries it and the exam is fine — the
-  // point of the case is that edge `y`.when contributed NOTHING, which the next assertion shows
-  // by taking `picked` out of that `reads` list.
-  assert.deepEqual(examShape(viaRouterEdge), []);
+  assert.deepEqual(examShape(fan), [], "route 2: the fanout consumes it");
 });
 
-// The control on the route above, and it is why the fix collects expression refs rather than
-// unioning `writes` into the read set: a ROUTER writes nothing, so GRAPH004 forces a case's
-// free variable into the router's own `reads`, where `observedChannels` already sees it. The
-// gap is the EDGE condition alone, because only an edge's owner can satisfy GRAPH004 by writing.
-test("a ROUTER case's `when` was never the gap — GRAPH004 forces it into the router's own reads", () => {
+/**
+ * A ROUTER CASE'S `when` WAS NEVER A ROUTE, and dropping it with the rest cost nothing. A router
+ * may not declare `writes` (`GRAPH005_ROUTER_WRITES`), so GRAPH004 forces every case's free
+ * variable into the router's own `reads`, where route 1 already has it. This test passed before
+ * the term existed, while it existed, and now that it is gone — which is what "dead code" means
+ * and why it is stated here rather than in a comment beside a term nobody can reach.
+ */
+test("a ROUTER case's `when` was never a route — GRAPH004 forces it into the router's own reads", () => {
   const spec = examSpec();
   const grade = spec.nodes[0]!;
   const viaRouter = compileOf({
@@ -304,7 +353,7 @@ test("a ROUTER case's `when` was never the gap — GRAPH004 forces it into the r
       { id: "y" as EdgeId, from: "pick-branch" as NodeId, to: "grade" as NodeId, kind: "seq" },
     ],
   });
-  assert.deepEqual(examShape(viaRouter), []);
+  assert.deepEqual(examShape(viaRouter), [], "`picked` is in the router's `reads` — route 1, not a condition");
 });
 
 /**
