@@ -181,12 +181,14 @@ test("AND SO IS AN `added -> existing` EDGE THAT KEEPS THE REGION, which is why 
   assert.equal(r.ok, true, r.ok ? "" : JSON.stringify(r.diagnostics.filter((d) => d.severity === "error")));
 });
 
-test("EVERY EDGE KIND, because the check runs over `dagEdges` and two kinds are not in it", () => {
-  // `seq`, `conditional`, `error`, `join` and `fanout` are all in `dagEdges`, so the graft is
-  // caught for each. `loop` and `compensation` are not — and cannot form the shape: a `loop`
-  // edge whose target cannot reach its source is GRAPH006_STUCK_LOOP, and reaching an added
-  // node from an existing one needs an `existing -> added` edge, which the older MUT003 clause
-  // already refuses for everything but the proposer.
+test("EVERY EDGE KIND THE EXECUTOR CAN TAKE, which is not `dagEdges`", () => {
+  // THE LOOP ARM IS THE ONE THAT MATTERS, and it is here because the first version of this rule
+  // ran over `indexGraph().dagEdges` and missed it. `dagEdges` drops `loop`, the argument for
+  // that being that a `loop` edge whose target cannot reach its source is GRAPH006_STUCK_LOOP —
+  // which was an accident of the fixture it was measured on. `rule006Cycles` asks `nodesInCycle`,
+  // so the loop is refused only when neither endpoint writes a channel the `until` reads. Give
+  // the added node one read the `until` touches (the `hopReading` case below) and it compiled,
+  // and `#edgesToTake` takes a loop edge, so the human rejected and the tool ran anyway.
   const base = compiled();
   const extra = (kind: string): Record<string, unknown> => {
     if (kind === "conditional") return { when: "has(plan)" };
@@ -213,28 +215,60 @@ test("EVERY EDGE KIND, because the check runs over `dagEdges` and two kinds are 
     );
   }
 
-  // AND THE TWO THAT ARE NOT IN `dagEdges`. A loop back to the PROPOSER is the only one that
-  // compiles, and it takes nothing away: a path through the proposer passes through every
-  // dominator the proposer has.
-  const loopTo = (to: string) =>
-    attempt(
-      base,
-      mutation({
-        addEdges: [
-          { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
-          { id: e("m1"), from: n("hop"), to: n(to), kind: "loop", until: "has(plan)", maxIterations: 2 } as unknown as EdgeSpec,
-        ],
-      }),
-    );
-  assert.equal(loopTo("plan").ok, true, "a loop back to the proposer is legal and harmless");
-  for (const to of ["gate", "pay"]) {
-    const r = loopTo(to);
-    assert.equal(r.ok, false, to);
-    assert.ok(
-      r.diagnostics.some((d) => d.code === "GRAPH006_STUCK_LOOP"),
-      `${to}: ${r.diagnostics.filter((d) => d.severity === "error").map((d) => d.code).join(", ")}`,
-    );
-  }
+  // THE LOOP GRAFT THAT COMPILES. `hop` reads `out` and the `until` reads `out`, so
+  // GRAPH006_STUCK_LOOP does not fire and only this rule stands between the proposal and the
+  // gated tool.
+  const hopReading: NodeSpec = { ...HOP, reads: ["out"] } as unknown as NodeSpec;
+  const loopGraft = attempt(
+    base,
+    mutation({
+      addNodes: [hopReading],
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "loop", until: "has(out)", maxIterations: 2 } as unknown as EdgeSpec,
+      ],
+    }),
+  );
+  assert.equal(loopGraft.ok, false, "a loop edge is a path the executor takes");
+  assert.ok(
+    loopGraft.diagnostics.some((d) => d.code === "MUT003_NOT_DOMINATED" && d.at?.nodeId === "pay"),
+    `loop: ${loopGraft.diagnostics.filter((d) => d.severity === "error").map((d) => `${d.code} ${d.message}`).join(" | ")}`,
+  );
+
+  // AND THE ONE LOOP THAT IS STILL LEGAL: back to the PROPOSER, which takes nothing away —
+  // a path through the proposer passes through every dominator the proposer has. The control
+  // that keeps the arm above from being vacuous. `until` reads `plan` here rather than `out`
+  // because the cycle is {hop, plan} and GRAPH006 wants a writer inside it.
+  const backToProposer = attempt(
+    base,
+    mutation({
+      addNodes: [{ ...HOP, reads: ["plan", "out"] } as unknown as NodeSpec],
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("plan"), kind: "loop", until: "has(plan)", maxIterations: 2 } as unknown as EdgeSpec,
+      ],
+    }),
+  );
+  assert.equal(
+    backToProposer.ok,
+    true,
+    backToProposer.ok ? "" : JSON.stringify(backToProposer.diagnostics.filter((d) => d.severity === "error")),
+  );
+
+  // `compensation` IS THE ONE KIND THE CHECK MAY DROP, and not because of anything about
+  // cycles: `#edgesToTake` answers `case "compensation": break;`, so nothing ever traverses one
+  // and it is not a path. It is refused here by GRAPH012 for its own unrelated reason.
+  const comp = attempt(
+    base,
+    mutation({
+      addEdges: [
+        { id: e("m0"), from: n("plan"), to: n("hop"), kind: "seq" },
+        { id: e("m1"), from: n("hop"), to: n("pay"), kind: "compensation" } as unknown as EdgeSpec,
+      ],
+    }),
+  );
+  assert.equal(comp.ok, false);
+  assert.ok(comp.diagnostics.some((d) => d.code === "GRAPH012_NO_COMPENSATES"));
 });
 
 // ── end to end, through the engine ───────────────────────────────────────────
@@ -289,6 +323,21 @@ const GRAFTER: MockScript = () => ({
   text: JSON.stringify({ plan: { ok: true }, mutation: GRAFT }),
   finishReason: "stop",
 });
+
+/** The same bypass one edge kind over — the shape the first version of this rule let through. */
+const LOOP_GRAFTER: MockScript = () => ({
+  text: JSON.stringify({
+    plan: { ok: true },
+    mutation: {
+      addNodes: [{ ...HOP, reads: ["out"] }],
+      addEdges: [
+        { id: "m0", from: "plan", to: "hop", kind: "seq" },
+        { id: "m1", from: "hop", to: "pay", kind: "loop", until: "has(out)", maxIterations: 2 },
+      ],
+    },
+  }),
+  finishReason: "stop",
+});
 const HONEST: MockScript = () => ({ text: JSON.stringify({ plan: { ok: true } }), finishReason: "stop" });
 
 test("A HUMAN REJECTS AND THE TOOL DOES NOT RUN, on a graph a model tried to graft around", async () => {
@@ -310,6 +359,23 @@ test("A HUMAN REJECTS AND THE TOOL DOES NOT RUN, on a graph a model tried to gra
   }
   assert.notEqual(p.status, "succeeded");
   assert.deepEqual(r.ran, [], "the tool the gate stands in front of must not have run");
+});
+
+test("…AND THE SAME THING THROUGH A `loop` EDGE, which is how the first version of this rule was defeated", async () => {
+  const r = rig(LOOP_GRAFTER);
+  const runId = await r.engine.submit({ graph: compiled(), inputs: { goal: "go" } });
+  let p = await r.engine.advance(runId);
+  if (p.status === "awaiting_gate") {
+    const gate = Object.values(p.gates).find((g) => g.state === "open")!;
+    p = await r.engine.resolveGate(runId, {
+      gateId: gate.gateId,
+      decision: { kind: "reject", reason: "no" },
+      actor: { kind: "human", subject: "u:a", via: "console" },
+      idempotencyKey: "k",
+    });
+  }
+  assert.notEqual(p.status, "succeeded");
+  assert.deepEqual(r.ran, [], "a loop edge is a path the executor takes, so it is a path this rule must see");
 });
 
 test("THE ORDINARY HALF END TO END: the same graph, no mutation, approve and the tool runs", async () => {

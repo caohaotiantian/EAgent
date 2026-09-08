@@ -162,38 +162,70 @@ export function compileMutation(input: MutateInput): MutationResult {
   // on is "every path to this node still passes through what it passed through before", which
   // is what this module's opening claim — a model "cannot propose one that weakens oversight" —
   // already promises. A ban would refuse by shape and would have to be reopened the first time
-  // a mutation legitimately feeds an existing node; this admits exactly the cases that keep the
-  // property, such as a step added in front of a node only the proposer dominated.
+  // a mutation legitimately feeds an existing node; this admits a step added in front of a node
+  // only the proposer dominated.
+  //
+  // WHAT IT ADMITS IS NARROW, and saying it "admits exactly the cases that keep the property"
+  // overstated it. An accepted graft must descend from EVERY existing dominator of its target,
+  // so in most graphs the admitted set is close to the shape-ban. It also refuses one shape that
+  // TIGHTENS oversight: a mutation inserting a new `human_gate` in front of an existing node
+  // displaces that node's prior dominator and is refused with everything else. Refusing a
+  // tightening is safe and is the direction this project always takes when a guard cannot
+  // decide, but it is a real limitation and not a design intent.
+  //
+  // AND IT GUARDS THE NODE, NOT THE ACTION. A mutation that adds its OWN `tool` node naming the
+  // same tool the gate stands in front of is not an `added -> existing` edge at all, reaches
+  // none of this, and still runs after a rejection. That hole is older than this rule and wider
+  // than it: `gatedNodes` below escalates an added node only when `isHardToUndo`, so a
+  // `reversible_write` whose only oversight is an authored gate is not covered anywhere. The
+  // invariant that would close it is about the TOOL rather than the node id.
   //
   // PROPOSER-DOMINANCE WOULD NOT HAVE WORKED, and it was the obvious rule: the proposer of a
   // mutation is almost always an ancestor of everything it could graft onto — in the measured
   // repro `plan` is the entry node — so "is the target already dominated by the proposer" is
   // satisfied by the exact graph the rule exists to refuse.
   //
+  // WHICH VERBS REACH THIS GUARD: one. `compileMutation` is called from `#applyMutation`, on the
+  // live commit path, and from nowhere else. `#rehydrateGraph` — the attach and replay path —
+  // folds every `graph.mutated` onto the authored spec and calls `compile`, so a journal that
+  // ALREADY carries a grafting mutation is rebuilt with none of this checked. Two things follow,
+  // and the second is owed to `run/engine.ts` rather than to this file. Nothing here breaks
+  // replay, which is the opposite of what `03b03fb`'s commit body says: the grafted spec still
+  // compiles, so an old journal still folds. And a pre-fix journal keeps its bypass, because the
+  // only door that refuses it is the one the mutation already came through.
+  //
   // ONLY WHEN SUCH AN EDGE EXISTS, which is what keeps this free for every other mutation. An
   // existing node's inbound edges can only change through an `added -> existing` edge, and a
   // path that leaves the added region can only come back through one, so with none of them
   // present no existing node's dominators can move.
   //
-  // OVER `dagEdges`, so `loop` and `compensation` are excluded — and that is not the hole it
-  // looks like. Measured on the gated graph above, every other kind is caught here (`seq`,
-  // `conditional`, `error`, `join`, `fanout` all report MUT003), and the two excluded ones
-  // cannot form the shape at all: a `loop` edge whose target cannot reach its source is
-  // GRAPH006_STUCK_LOOP, and reaching an added node from an existing one needs an
-  // `existing -> added` edge, which clause 1 above already refuses for everything but the
-  // proposer. So the only loop a mutation can add re-enters AT OR ABOVE the proposer — `hop ->
-  // plan` compiles, `hop -> gate` and `hop -> pay` are refused — and a path through the
-  // proposer passes through every dominator the proposer has, which is a superset of the ones
-  // its own ancestors need.
+  // OVER EVERY EDGE THE EXECUTOR CAN TRAVERSE, which is not `dagEdges` and was `dagEdges` first.
+  // Dominance means "every execution path to this node passes through that one", so the edge set
+  // has to be the one the executor actually walks; an edge left out of it is a path the check
+  // cannot see. `dagEdges` drops `loop` AND `compensation`, and the argument that this was safe —
+  // that a `loop` edge whose target cannot reach its source is GRAPH006_STUCK_LOOP — was an
+  // accident of the fixture it was measured on. `rule006Cycles` asks `nodesInCycle`, so the loop
+  // is refused only when neither endpoint writes a channel the `until` reads; give the added node
+  // one read the `until` touches and it compiles:
+  //
+  //     m1 = { from: hop, to: pay, kind: "loop", until: "has(out)" }, hop reads ["out"]
+  //     -> ok = true, and `#edgesToTake` DOES take a loop edge, so the human rejects and the
+  //        tool runs: ran = ["hop", "note.append"]
+  //
+  // which is the defect this rule exists to close, arriving one edge kind over. `compensation`
+  // is the ONLY kind that may be dropped, and for a reason `dagEdges` does not encode: nothing
+  // ever traverses one — `#edgesToTake` answers `case "compensation": break;` and rollback is
+  // journal-driven. `error` edges stay in, because `#errorEdges` dispatches them on failure.
   const grafts = mutation.addEdges.filter((e) => added.has(e.from) && !added.has(e.to) && existingNodes.has(e.to));
   if (grafts.length > 0) {
-    const before = dominators(spec.nodes, indexGraph(spec).dagEdges);
+    const traversable = (g: GraphSpec): readonly EdgeSpec[] => g.edges.filter((e) => e.kind !== "compensation");
     const grafted: GraphSpec = {
       ...spec,
       nodes: [...spec.nodes, ...mutation.addNodes],
       edges: [...spec.edges, ...mutation.addEdges],
     };
-    const after = dominators(grafted.nodes, indexGraph(grafted).dagEdges);
+    const before = dominators(spec.nodes, traversable(spec), indexGraph(spec).topoOrder);
+    const after = dominators(grafted.nodes, traversable(grafted), indexGraph(grafted).topoOrder);
     const named = grafts.map((e) => `"${e.id}"`).join(", ");
     for (const v of spec.nodes) {
       const lost = [...(before.get(v.id) ?? [])].filter((id) => !(after.get(v.id)?.has(id) ?? false));
@@ -309,11 +341,32 @@ export function compileMutation(input: MutateInput): MutationResult {
  * safe side — a node the walk never reaches keeps the full set rather than the empty one, so an
  * unreachable region cannot report a LOST dominator it never had.
  *
- * Callers compare the result against the same computation over a graph with edges ADDED. That
- * direction is one-way: adding an edge can only remove dominators, never add one, so a base
- * node whose set is unchanged is one whose oversight region is intact.
+ * IN TOPOLOGICAL ORDER, and that is a cost fix rather than a preference. Sweeping in
+ * declaration order needs one pass per level when a graph is declared backwards, and this runs
+ * on the RUN path because `#commit` calls `compileMutation`. Measured on a chain of N nodes
+ * declared in reverse, one added node, one grafting edge:
+ *
+ *     N          declaration order      topological order      no graft (rule skipped)
+ *     200                  155 ms                    8 ms                       4 ms
+ *     400                1,160 ms                   18 ms                       8 ms
+ *     800               13,947 ms                   76 ms                      18 ms
+ *
+ * Visiting a node after its predecessors converges in one sweep, and it also makes declaration
+ * order stop mattering: the same 800-node graph declared FORWARD costs 75 ms either way.
+ * `topoOrder` is empty when the forward graph is cyclic and omits nodes only `loop` edges
+ * reach, so anything missing from it is appended and the loop still runs to a fixpoint; the
+ * ORDER is an optimisation and never part of the answer.
+ *
+ * Callers compare the result against the same computation over a graph with edges ADDED, and
+ * look only at what a node LOST. Not at what it gained: a node with no inbound edge starts at
+ * `{itself}`, so acquiring a predecessor GROWS its set — "adding an edge can only remove
+ * dominators" is false for exactly that node, and this used to say so.
  */
-function dominators(nodes: readonly NodeSpec[], edges: readonly EdgeSpec[]): ReadonlyMap<NodeId, ReadonlySet<NodeId>> {
+function dominators(
+  nodes: readonly NodeSpec[],
+  edges: readonly EdgeSpec[],
+  topoOrder: readonly NodeId[],
+): ReadonlyMap<NodeId, ReadonlySet<NodeId>> {
   const ids = nodes.map((n) => n.id);
   const preds = new Map<NodeId, NodeId[]>();
   for (const id of ids) preds.set(id, []);
@@ -322,9 +375,12 @@ function dominators(nodes: readonly NodeSpec[], edges: readonly EdgeSpec[]): Rea
   const dom = new Map<NodeId, Set<NodeId>>();
   for (const id of ids) dom.set(id, preds.get(id)!.length === 0 ? new Set([id]) : new Set(ids));
 
+  const seen = new Set<NodeId>(topoOrder);
+  const order = [...topoOrder.filter((id) => preds.has(id)), ...ids.filter((id) => !seen.has(id))];
+
   for (let changed = true; changed; ) {
     changed = false;
-    for (const id of ids) {
+    for (const id of order) {
       const p = preds.get(id)!;
       if (p.length === 0) continue;
       let next: Set<NodeId> | undefined;
