@@ -243,6 +243,50 @@ test("THE CLAIM DOOR IS NARROWER THAN THE DECISION DOOR — an actor `#authorize
   assert.equal(out.resolved, true, "the decision path admits it; the claim path does not");
 });
 
+test("…AND ON A GATE THAT NAMES NOBODY, which is the only input the approvers arm cannot answer for", async () => {
+  // THE TEST ABOVE DOES NOT REACH THE KIND CHECK AT ALL, and that is why this one exists.
+  // Every gate it builds names `u:alice`; a SYSTEM actor and an agent actor both have no
+  // `.subject`, so `approvers.includes(undefined)` is false and the NEXT arm — the
+  // approvers one — refuses them with the same `E_GATE_NOT_AUTHORIZED` its predicate
+  // checks. Delete `actor.kind !== "human"` and it still passes.
+  //
+  // A gate that names NOBODY is the input where the two arms diverge: the approvers arm
+  // admits everyone there by construction, so the kind check is the only thing standing.
+  // Without it a clock actor walks past both arms, APPENDS `gate.claimed` — telling the
+  // approvers that a person is looking at this gate, which is the one thing a soft lock
+  // must never do — and only then fails, with a different and misleading code.
+  const b = bench();
+  const open = await b.broker.raise(b.log, request(b, { approvers: undefined }));
+  assert.deepEqual((await gateOf(b, open)).approvers ?? [], [], "the gate names nobody");
+
+  const notPeople: readonly Actor[] = [
+    SYSTEM_ACTOR("gate-broker:timeout"),
+    SYSTEM_ACTOR("executor:subgraph"),
+    { kind: "agent", profile: "p", taskId: "approve@root#0" as TaskId, model: "m" },
+  ];
+  for (const actor of notPeople) {
+    await assert.rejects(
+      () => b.broker.claim(b.log, { gateId: open, actor }),
+      (e: unknown): true => {
+        // ON THE MESSAGE, not only on the code: two arms raise E_GATE_NOT_AUTHORIZED and
+        // only one of them is the one under test.
+        assert.ok(isLoomError(e), `expected a LoomError, got ${String(e)}`);
+        assert.equal(e.code, CODES.E_GATE_NOT_AUTHORIZED, e.message);
+        assert.match(e.message, /says a PERSON is looking at it/, e.message);
+        return true;
+      },
+    );
+  }
+  assert.deepEqual(await rows(b, "gate.claimed"), [], "and a refused claim wrote nothing");
+
+  // THE ORDINARY HALF. The narrowing is about actor KIND and nothing else: a person on no
+  // approvers list still claims a gate that names nobody, because "somebody is looking" is
+  // the whole content of a claim there.
+  const held = await b.broker.claim(b.log, { gateId: open, actor: mallory });
+  assert.deepEqual(held, { claimed: true, by: "u:mallory", until: T0 + TTL });
+  assert.equal((await rows(b, "gate.claimed")).length, 1, "one claim, and it is the person's");
+});
+
 // ---------------------------------------------------------------------------
 // IT BLOCKS NOTHING
 // ---------------------------------------------------------------------------

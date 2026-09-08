@@ -33,7 +33,7 @@ import { SYSTEM_ACTOR, type Actor, type JournalEvent, type NewEvent } from "../j
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { GateDispatcher, formatRecipients, nextTier, tierRecipients, type DeliverySpec } from "./delivery.ts";
-import { RunFolder, foldRun, gateOf, isTerminal, openGates, type GateRecord, type RunProjection } from "./projection.ts";
+import { RunFolder, gateOf, isTerminal, openGates, type GateRecord, type RunProjection } from "./projection.ts";
 import { RunLog } from "./log.ts";
 
 export type TimeoutAction = "escalate" | "default_action" | "fail";
@@ -288,6 +288,35 @@ const SEQ_CONFLICT = Symbol("gate-decision-seq-conflict");
 const MAX_DECISION_LAPS = 8;
 
 /**
+ * How many runs' folds `project` keeps between calls.
+ *
+ * The same number as `DEFAULT_SWEEP_LIMIT` and for the same reason: it is what a tick and the
+ * gate queue each look at, so a broker that remembers fewer would evict exactly the runs the
+ * next poll asks about. Evicting costs a re-fold and never an answer, so the number decides
+ * memory against reads and nothing else.
+ */
+const MAX_FOLD_CACHE = 500;
+
+/**
+ * An incremental fold, and the last event it consumed.
+ *
+ * The mark is what makes the fold's identity checkable. A `RunLog` offers a run id and nothing
+ * else, so a cache keyed on that alone cannot tell two journals apart; re-reading the marked
+ * event says whether THIS journal is the one the fold describes. `(seq, ts, type)` is enough —
+ * the seq is where to look, and a store that answers there with a different instant or a
+ * different event type is not continuing the history this fold holds.
+ */
+interface CachedFold {
+  readonly folder: RunFolder;
+  readonly at: { readonly seq: number; readonly ts: number; readonly type: string };
+}
+
+/** Whether the event a journal answers with is the one a fold last consumed. */
+function describes(e: JournalEvent | undefined, at: CachedFold["at"]): boolean {
+  return e !== undefined && e.seq === at.seq && e.ts === at.ts && e.type === at.type;
+}
+
+/**
  * In-process gate broker over the journal.
  *
  * Its non-durable state is deliberately minimal — and, since the authorization defect,
@@ -303,6 +332,13 @@ export class HumanGateBroker {
   readonly #ephemeral = new Map<GateId, EphemeralGate>();
   /** `(gateId, approverId)` → decision, so a double-click collapses to one decision. */
   readonly #idempotency = new Map<string, GateDecisionKind>();
+  /**
+   * runId → the fold `project` has already reached, and the mark that proves whose it is.
+   *
+   * LRU by construction — `project` deletes before it sets — and holding only NON-terminal
+   * runs, so the ordinary long-lived process keeps one projection per live gated run.
+   */
+  readonly #folds = new Map<RunId, CachedFold>();
   readonly #dispatcher: GateDispatcher | undefined;
 
   constructor(opts: GateBrokerOptions = {}) {
@@ -2161,10 +2197,121 @@ export class HumanGateBroker {
     );
   }
 
+  /**
+   * The run as this broker's every decision reads it — folded FORWARD from where it left off.
+   *
+   * This did `log.read(1)` on every call and folded the whole journal, which made it the most
+   * expensive thing in the gate subsystem and the only part of it with no cursor at all.
+   * `GateSweeper.#catchUp` has kept one since it was written and its docstring says why —
+   * "O(Δ), not O(history)" — and it then reaches this method through `sweepTimeouts` and pays
+   * the full fold anyway. `resolve` pays it once per lap. `GET /gates` pays it once per run
+   * per poll, on a journal the same handler folded incrementally one line earlier: measured
+   * on 8 runs each parked on an open gate, 1,056 journal events read on poll #1 and 1,056
+   * again on poll #2, every one of them from here.
+   *
+   * WHAT IS CACHED IS A FOLD, NOT AN ANSWER, and that distinction is the whole safety
+   * argument. Every call still reads the tail, so a gate raised one event ago is in the very
+   * next projection this returns; what is skipped is re-reading events already folded, whose
+   * meaning cannot change. Nothing here is authoritative — the journal is — and a process
+   * that starts with an empty map folds from seq 1, which is what this method did for
+   * everyone before. A restart therefore costs correctness nothing and cost everything.
+   *
+   * IT IS TAKEN OUT OF THE MAP FOR THE DURATION OF THE FOLD. Two callers on one run — a poll
+   * racing a decision — must not share one folder across an `await`: `restart()` puts
+   * `lastSeq` back to 0, and a concurrent push of a TAIL onto a folder somebody else has just
+   * rewound would produce a projection missing everything before that tail. Whoever finds the
+   * map empty builds their own and folds from seq 1, which is correct and merely slower. The
+   * delete-then-set also makes the eviction order LRU rather than insertion order, which is
+   * the order worth having.
+   *
+   * A RUN ID IS NOT A JOURNAL, AND THE FOLD RE-READS ONE EVENT TO PROVE IT. This map is keyed
+   * by run id, which is the only handle a `RunLog` offers — so a broker handed logs over two
+   * DIFFERENT stores that both hold the same run id would, keyed on that alone, answer about
+   * the wrong journal. Not a crash: the second store's caller would be handed the FIRST
+   * store's gates, for a run that never raised them, which is this method inventing a question
+   * out of a cache. That direction is not one a guard is allowed to fail in, and "no caller in
+   * `src/` does it" is a fact about today's callers rather than a property of the cache.
+   *
+   * So the tail is read from `lastSeq`, not `lastSeq + 1`, and the first event it returns must
+   * be the one this fold last consumed — same seq, same ts, same type. It costs ONE event per
+   * call and no extra round trip (the same read, one lower bound), `RunFolder.push` skips it as
+   * already folded, and a journal that disagrees about its own history — a different store, a
+   * truncated one, a rewritten one — drops the fold and starts from seq 1.
+   *
+   * WHAT THAT CLOSES, AND WHAT IT DOES NOT — stated exactly, because a mark on ONE event
+   * cannot speak for a prefix and a THREE-FIELD mark cannot even speak for that event. It
+   * closes every second journal that is SHORTER than the mark, and every one whose event there
+   * differs in seq, ts or type. It does NOT close one that agrees on those three: the mark is
+   * PAYLOAD-BLIND, so `run.suspended{reason:"gate"}` and `run.suspended{reason:"operator"}` at
+   * the same seq and instant are the same mark, and the earlier events — which are never
+   * re-read — keep the first journal's meaning. Reproduced both ways: a second store whose
+   * marked event is a copy, and one whose marked event differs only in a payload field `apply`
+   * actually reads (`status` came back `awaiting_gate` where that journal alone folds to
+   * `interrupted`).
+   *
+   * Comparing payloads would close the second of those and not the first, at the price of a
+   * structural compare per call on the decision path — and nothing closes a genuinely identical
+   * prefix short of a running digest of the whole fold. Neither is paid here, because the
+   * configuration is one nothing constructs: `Engine` builds its own broker, `replayRun` deletes
+   * `gates` from the options it forwards, and reaching the residual at all needs the same ULID
+   * run id minted into two stores on purpose. `gates-lane-queue-second-fold.test.ts` pins both
+   * halves — the refusal, and this bound — so strengthening the mark moves a test rather than
+   * passing silently.
+   *
+   * The re-fold loop is `#catchUp`'s, including the bound: a `while (folder.stale)` whose
+   * termination rests on `RunFolder` keeping its promise about learning each marker once is a
+   * loop that livelocks the moment that promise breaks, so `reached` measures it. Refusing is
+   * the direction a guard is allowed to fail in; here it also drops the folder, so the next
+   * call starts over rather than inheriting a fold that could not be finished.
+   */
   async project(log: RunLog): Promise<RunProjection | undefined> {
-    const events = [];
-    for await (const e of log.read(1)) events.push(e);
-    return foldRun(events);
+    const cached = this.#folds.get(log.runId);
+    this.#folds.delete(log.runId);
+
+    let folder = cached?.folder ?? new RunFolder();
+    let events = await this.#tail(log, (cached === undefined ? 1 : cached.at.seq) as Seq);
+    if (cached !== undefined && !describes(events[0], cached.at)) {
+      // NOT THE JOURNAL THIS FOLD DESCRIBES. Everything folded so far is about some other run
+      // of events, so none of it may be carried forward.
+      folder = new RunFolder();
+      events = await this.#tail(log, 1 as Seq);
+    }
+
+    folder.push(events);
+    let reached = -1;
+    while (folder.stale) {
+      if (folder.lastSeq <= reached) {
+        throw err.internal(
+          CODES.E_TRACE_INCONSISTENT,
+          `run ${log.runId} did not fold past its rewind marker at seq ${folder.lastSeq + 1} on a second pass`,
+          { details: { runId: log.runId, lastSeq: folder.lastSeq } },
+        );
+      }
+      reached = folder.lastSeq;
+      folder.restart();
+      events = await this.#tail(log, 1 as Seq);
+      folder.push(events);
+    }
+
+    const p = folder.projection();
+    // A FINISHED RUN KEEPS NOTHING. `raisedAGate` accumulates for the life of a deployment and
+    // most of what it holds is finished, so remembering those is the one way this map could
+    // grow without bound in the process that most needs it not to.
+    //
+    // AND NOTHING IS KEPT WITHOUT A MARK TO CHECK IT AGAINST: the fold is remembered only when
+    // the last event pushed is the last event folded, which is what the next call re-reads.
+    const last = events[events.length - 1];
+    if (p !== undefined && !isTerminal(p.status) && last !== undefined && last.seq === folder.lastSeq) {
+      if (this.#folds.size >= MAX_FOLD_CACHE) this.#folds.delete(this.#folds.keys().next().value!);
+      this.#folds.set(log.runId, { folder, at: { seq: last.seq, ts: last.ts, type: last.type } });
+    }
+    return p;
+  }
+
+  async #tail(log: RunLog, fromSeq: Seq): Promise<readonly JournalEvent[]> {
+    const out: JournalEvent[] = [];
+    for await (const e of log.read(fromSeq)) out.push(e);
+    return out;
   }
 }
 
