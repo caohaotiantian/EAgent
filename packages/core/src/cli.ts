@@ -48,6 +48,7 @@ import {
   type ModelAdapter,
   type ModelEvent,
   type ModelRequest,
+  type ToolDefinition,
 } from "./run/registry.ts";
 import { AnthropicAdapter } from "./providers/anthropic.ts";
 import { OpenAIAdapter } from "./providers/openai.ts";
@@ -1366,6 +1367,20 @@ export function openWorkspace(
   // and the grant list below is derived from THIS object — so an extension tool has to be in
   // it before `capabilitiesOf` runs or the capability it needs is one nobody holds.
   const tools = extensions?.tools ?? new ToolRegistry();
+  // THE mcp__ RESERVATION, made HERE when there is no `extensions` object to have made it
+  // already — this is the only other place a `tools` registry is constructed. When `extensions`
+  // exists, `loadExtensionModules` reserved the prefix before any module's factory ran, and
+  // `extensions.mcpRegistrar` is that same claim; there is nothing to reserve twice.
+  const mcpRegistrar =
+    extensions?.mcpRegistrar ??
+    tools.reservePrefix(
+      "mcp__",
+      "reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is " +
+        "registered by this binary from a server an operator named, carries the capability " +
+        "mcp:<server>, and is irreversible unless that server's row says otherwise. A tool spelling " +
+        "one is read by an operator as that server's, under whatever oversight class it chose for " +
+        "itself",
+    );
   // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`.
   const jail = jailFor(args);
   const execPrograms = jail.execAllowlist;
@@ -1685,45 +1700,29 @@ export function openWorkspace(
     }
   }
 
-  // AND THE `mcp__` PREFIX IS RESERVED FOR THAT REGISTRAR, WHOLE, whether or not any server is
-  // configured. The check above only fires when there are TWO claimants, and the one-claimant case
-  // is the worse one: with no `--mcp-file` at all, an extension tool named `mcp__docs__search`
-  // registered and DISPATCHED under an id an operator reads as the docs server's search tool.
-  // That is not a naming collision, it is impersonation, and it LOWERS oversight — `mcpTools`
-  // gives every MCP tool `irreversible` (a posture floor of `in`) and the capability
-  // `mcp:<server>`, while the squatter declares its own class and its own capability and can run
-  // unattended. Oversight only tightens, so the prefix belongs to the registrar that earns it
-  // rather than to whoever spells it first.
+  // THE `mcp__` PREFIX ITSELF IS RESERVED FOR THAT REGISTRAR, WHOLE, whether or not any server is
+  // configured — the check above only fires when there are TWO claimants, and the one-claimant
+  // case is the worse one: with no `--mcp-file` at all, an extension tool named
+  // `mcp__docs__search` would register and DISPATCH under an id an operator reads as the docs
+  // server's search tool. That is not a naming collision, it is impersonation, and it LOWERS
+  // oversight — `mcpTools` gives every MCP tool `irreversible` (a posture floor of `in`) and the
+  // capability `mcp:<server>`, while a squatter declares its own class and its own capability and
+  // can run unattended. Oversight only tightens, so the prefix belongs to the registrar that
+  // earns it rather than to whoever spells it first.
   //
-  // AFTER the collision loop, so the operator who configured BOTH gets the message that names
-  // both claimants rather than this more general one.
+  // THIS RESERVATION IS NO LONGER A LOOP HERE. `tools.reservePrefix("mcp__", …)`, made above (or,
+  // when `extensions` exists, inside `loadExtensionModules` before any module's factory ran) does
+  // the enforcing, INSIDE `ToolRegistry.register()` — the one door every caller uses, at any time,
+  // not a scan run once at this point in `openWorkspace`. That used to matter concretely: a
+  // one-shot scan over `tools.list()` here saw only what was registered by the moment it ran, so
+  // a module registering `mcp__docs__search` from a `setTimeout` rather than from its factory
+  // body sailed past it and dispatched under `loom serve`. `register()` now refuses that
+  // registration itself, whenever it happens.
   //
-  // AT BOOT, AND ONLY AT BOOT — which is what this reserves and all it reserves. `ToolRegistry`
-  // permits registration after `seal()` unless the embedder asked otherwise
-  // (`registerAfterSeal: "deny"`, opt-in, see its docstring), and `extensions.toolNames` is a
-  // snapshot `loadExtensionModules` took when the factory returned. So a module that registers
-  // from a timer rather than from its factory body is invisible here and still shadows at
-  // dispatch — measured under `loom serve`, a `setTimeout` registering `mcp__docs__search`
-  // answered a node compiled against the MCP tool's manifest. That is `ToolRegistry`'s own
-  // documented hazard and it is NOT closed here; do not read this loop as more than a boot check.
-  // OVER THE LIVE REGISTRY, not `extensions.toolNames`. That field is a snapshot
-  // `loadExtensionModules` took when the factory returned, and the loop above already folds
-  // `tools.list()`; reading the registry costs nothing, is strictly stronger, and keeps the two
-  // checks in this block asking the same object the same question. No built-in name carries the
-  // prefix, so nothing shipped is caught by widening it.
-  for (const { name } of tools.list()) {
-    if (!name.startsWith("mcp__")) continue;
-    throw err.validation(
-      CODES.E_CONFIG_INVALID,
-      `--extension-module ${extensions?.toolOwners.get(name) ?? "(unknown module)"} registers the tool name "${name}". ` +
-        `The "mcp__" prefix is reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is ` +
-        `registered by this binary from a server an operator named, carries the capability mcp:<server>, and is ` +
-        `irreversible unless that server's row says otherwise. A tool spelling one is read by an operator as that ` +
-        `server's, under whatever oversight class it chose for itself. Rename it.`,
-    );
-  }
+  // Registering the real per-server tools THROUGH `mcpRegistrar` (not `tools.register` directly)
+  // is what makes them exempt from the very reservation that refuses everyone else.
   for (const { client, irreversibility } of mcp) {
-    for (const t of mcpTools(client, irreversibility)) tools.register(t);
+    for (const t of mcpTools(client, irreversibility)) mcpRegistrar.register(t);
   }
 
   const granted = capabilitiesOf(tools, grantFlag(args));
@@ -2405,6 +2404,16 @@ export interface ExtensionModules {
    * one registry where it did not. `openWorkspace` reads this to say which module lost.
    */
   readonly toolOwners: ReadonlyMap<string, string>;
+  /**
+   * The capability to register a real `mcp__<server>__<tool>` name — the ONE thing `openWorkspace`
+   * uses this for, after MCP servers connect. Reserved on `tools` before any module's factory
+   * ran (see `loadExtensionModules`), so no module — from its factory body or from anything it
+   * schedules for later — ever sees `tools` in a state where the prefix is still open. This is
+   * deliberately NOT part of the public `ToolRegistry` API surface an embedder can reach by
+   * holding the registry: see `ToolRegistry.reservePrefix`'s docstring for why a public bypass
+   * method would defeat the reservation as completely as a boolean flag would.
+   */
+  readonly mcpRegistrar: { register(tool: ToolDefinition): LoomDisposable };
   /** Channel names the modules registered, for the boot banner. Order matches `channels`. */
   readonly channelNames: readonly string[];
   /** Resolved paths, in load order, for the boot banner. */
@@ -2627,6 +2636,19 @@ class CollectedSlot<T> {
 export async function loadExtensionModules(paths: readonly string[], jail?: BuiltinOptions): Promise<ExtensionModules> {
   const models = new ObservedModelRegistry();
   const tools = new ObservedToolRegistry();
+  // RESERVED BEFORE ANY MODULE'S FACTORY RUNS, so no module — from its factory body or from
+  // anything it schedules for later, a timer included — ever sees `tools` in a state where the
+  // `mcp__` prefix is still open. `mcpRegistrar` is handed back on `ExtensionModules` for
+  // `openWorkspace` to use once real MCP servers connect; it is never passed to a module. See
+  // `ToolRegistry.reservePrefix`'s docstring for why this must be a capability and not a flag.
+  const mcpRegistrar = tools.reservePrefix(
+    "mcp__",
+    "reserved for the --mcp-file registrar: every id of the form mcp__<server>__<tool> is " +
+      "registered by this binary from a server an operator named, carries the capability " +
+      "mcp:<server>, and is irreversible unless that server's row says otherwise. A tool spelling " +
+      "one is read by an operator as that server's, under whatever oversight class it chose for " +
+      "itself",
+  );
   const channels = new CollectedChannels();
   const identity = new CollectedIdentity();
   // The engine looks up by ref in THESE objects, so a module registering into them is a module
@@ -2864,6 +2886,7 @@ export async function loadExtensionModules(paths: readonly string[], jail?: Buil
     store: store.claims[0],
     payloads: payloads.claims[0],
     toolOwners: new Map(toolOwner),
+    mcpRegistrar,
     files,
     // `get()` WITH NO ARGUMENT is the registry's own question — "is there a default?" —
     // rather than a second rule invented here. `ModelRegistry.register` claims the default

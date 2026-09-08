@@ -188,12 +188,34 @@ function checkManifest(t: ToolDefinition): void {
  * would break `combineDisposables` on shutdown. A caller that disposes a BASE registration
  * post-seal can still change what `get()` answers; closing that needs the registration to
  * become a journal fact, which is a much larger change than a constructor option.
+ *
+ * RESERVED PREFIXES (`reservePrefix`). A caller of `cli.ts`'s shape needed a way to say "this
+ * name pattern belongs to one registrar, and every OTHER caller of `register()` — now, or at any
+ * later point in this process's life — is refused it." That used to be a one-shot scan over
+ * `tools.list()` run once at boot: it caught a collision that existed at the moment it ran and
+ * had no way to catch one created afterward, because nothing re-ran it. Measured: an
+ * `--extension-module` that registered its `mcp__docs__search` squatter from a `setTimeout`
+ * rather than from its factory body sailed straight past the boot scan and dispatched. The fix
+ * is not a bigger scan (there is no scan that re-runs at the right moments), it is asking the
+ * question at the one place every registration MUST pass through: `register()` itself.
+ *
+ * `reservePrefix` returns a capability object, not a boolean or a name string, because either of
+ * those is exactly as reachable by an impostor as by the legitimate caller: anything holding this
+ * `ToolRegistry` instance already executes code in this process (the same fact `registerAfterSeal`
+ * is built on), so a `register(tool, {reserved: true})` flag or a public "register as MCP" method
+ * would let an extension module claim the prefix for itself by simply passing the flag or calling
+ * the method — the reservation would protect nothing. The closure `reservePrefix` returns is
+ * created once, at the moment the legitimate caller reserves the prefix, and is never handed to
+ * anything else; `register()` checks every name against every reserved prefix regardless of who
+ * calls it, and only a call made through the matching closure is exempt.
  */
 export class ToolRegistry {
   /** Stack per name so `dispose` restores the shadowed definition exactly. */
   readonly #stacks = new Map<string, ToolDefinition[]>();
   readonly #afterSeal: "allow" | "deny";
   #sealed = false;
+  /** Prefix → the one closure allowed to register a name starting with it. See `reservePrefix`. */
+  readonly #reserved = new Map<string, { readonly owner: symbol; readonly reservedFor: string }>();
 
   /**
    * The option type is inline rather than an exported `ToolRegistryOptions` because
@@ -214,12 +236,59 @@ export class ToolRegistry {
   }
 
   register(tool: ToolDefinition): LoomDisposable {
+    return this.#doRegister(tool, undefined);
+  }
+
+  /**
+   * Claim `prefix` for one caller, for the rest of this registry's life.
+   *
+   * `reservedFor` is a human-readable clause naming who the prefix belongs to — it is spliced
+   * straight into the refusal message everyone ELSE gets from `register()`, so write it as the
+   * back half of a sentence: "reserved for the --mcp-file registrar: every id of the form …".
+   *
+   * THROWS if `prefix` is already reserved (on this instance) or if a name under it is already
+   * registered — reserving after the fact would let the reservation appear to hold while an
+   * un-vetted registration from before it sits underneath, live.
+   *
+   * Returns a capability object whose `register` is the ONLY way to register a name under
+   * `prefix` from here on; `register()` on `this` refuses every other attempt. See the class
+   * docstring for why this is a returned closure and not a flag or a second public method.
+   */
+  reservePrefix(prefix: string, reservedFor: string): { register(tool: ToolDefinition): LoomDisposable } {
+    if (this.#reserved.has(prefix)) {
+      throw err.policy(CODES.E_NOT_AUTHORIZED, `the prefix "${prefix}" is already reserved on this registry`);
+    }
+    for (const name of this.#stacks.keys()) {
+      if (name.startsWith(prefix)) {
+        throw err.policy(
+          CODES.E_NOT_AUTHORIZED,
+          `cannot reserve the prefix "${prefix}": ${label(name)} is already registered under it, from before the reservation`,
+        );
+      }
+    }
+    const owner = Symbol(prefix);
+    this.#reserved.set(prefix, { owner, reservedFor });
+    return { register: (tool: ToolDefinition) => this.#doRegister(tool, owner) };
+  }
+
+  #doRegister(tool: ToolDefinition, owner: symbol | undefined): LoomDisposable {
     // THE MANIFEST IS CHECKED BEFORE THE SEAL IS, because the two refusals answer different
     // questions and the author fixing one should not be told about the other first: "this
     // manifest is malformed" is true whatever the seal says, and it is the one they can act
     // on. Both throw, and neither mutates the stack — a refused registration leaves whatever
     // was already there as the live definition.
     checkManifest(tool);
+    // THE RESERVATION IS CHECKED AT THE DOOR ITSELF, not by a scan run once elsewhere — see the
+    // class docstring's "RESERVED PREFIXES" paragraph for why a one-shot scan cannot catch a
+    // registration made later, from a timer or any other path a caller controls.
+    for (const [prefix, claim] of this.#reserved) {
+      if (claim.owner !== owner && tool.name.startsWith(prefix)) {
+        throw err.validation(
+          CODES.E_CONFIG_INVALID,
+          `tool name ${label(tool.name)} uses the "${prefix}" prefix, which is ${claim.reservedFor}.`,
+        );
+      }
+    }
     // THROW, never no-op. A silent refusal leaves the caller believing its definition is
     // the live one, and the discrepancy surfaces later as the WRONG tool running with no
     // trace of the decision that caused it — which is the audit failure this knob exists
