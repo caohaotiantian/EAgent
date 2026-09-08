@@ -1,5 +1,93 @@
 # Property 3 — a measurement the candidate cannot write
 
+## Corrections after implementation (2026-09-08)
+
+**This design is BUILT and MERGED** — `wave2-exam` at `ec2ad88` on `loom`. The header below still
+says "design only. Nothing here is built"; read it as the status on 2026-09-05. **The body is left
+exactly as written**, because a design document's value after the fact is the record of what was
+predicted, and rewriting it to match the outcome destroys that. This section is the diff between
+the two.
+
+Seven claims in the body were measured FALSE. Four are the implementing lane's measurements
+(`ec2ad88`); three carry an independent re-drive on `loom` at `ce9e7b4`, through `./bin/loom`, by a
+fresh agent given this §6 and nothing else.
+
+1. **§6 step 3's control is false as stated.** The body predicts `candidates/fixed.json` against
+   the same legacy suite gives 12 passes and `✗ 1-must-pass`. Measured: for a suite frozen by an
+   HONEST grader the goldens are the odd-length (correct) runs, `fixed` reproduces them, `✓ 2-non-
+   inferior Δ 0.0pp`, promote true. `✗ 1-must-pass` is the POISONED-suite shape — step 11's
+   subject — not a legacy suite's. (Lane measurement, `ec2ad88`.)
+
+2. **§6 step 4's `loom audit` sentence is false.** `loom audit` prints rule verdicts and skips,
+   not `operator.command` rows; the attestation row is read back through the store. (Lane
+   measurement, `ec2ad88`.)
+
+3. **§6 step 5's numbers do not reproduce, and were re-driven today.** The body predicts
+   `loom cohort <last>` reports `excludedForWeights 30` and `members 0` right after attestation.
+   Observed on `ce9e7b4`, immediately after `loom exam attest … --as haotian` → exit 0:
+   `members 30`, `excludedForWeights 0`, `golden true 10`, `p90Score 0.6`. Two reasons, one from
+   each measurement: `case "cohort"` keys on the queried run's OWN last row (`mine = lastScore(
+   events)`) and therefore always counts self (lane); and the FIRST `loom score` after an
+   attestation grades the whole corpus in one invocation — 30 `graded … by exam run …` lines —
+   rather than one run per invocation, so the state the body describes is not observable at that
+   point (today's re-drive).
+
+4. **§6's `models.json` line — "one priced route" — is refused by the binary, measured today.**
+   A ROUTE row may declare only a FREE endpoint; a real rate goes on the ADAPTER row. Four
+   successive refusals before an accepted file:
+
+   ```
+   E_CONFIG_INVALID: … "routes" must be an object mapping each ModelRequest.model the engine sends
+     to {"adapter":…,"model":…}
+   E_CONFIG_INVALID: … routes["default"] declares "priceInPerMTok", "priceOutPerMTok", which are
+     fields nothing reads … This row may declare: adapter, model, fallback, prices.
+   E_CONFIG_INVALID: … routes["default"] "prices".input must be {"input":n,"output":n}
+   E_CONFIG_INVALID: … routes["default"] "prices"."gpt-4o-mini" declares {"input": 0.15, "output":
+     0.6}, and a ROUTE price row may only declare a FREE endpoint: {"input": 0, "output": 0}. …
+     A REAL RATE HAS TWO DOORS: put it on the ADAPTER row's "prices" …
+   ```
+
+   Accepted: `adapters:[{name,provider,baseUrl,apiKeyEnv:null,prices:{"<model>":{input,output}}}]`
+   with `routes:{"default":{adapter,model}}`. **The lane's own owed-docs note said the refused keys
+   were `inputPerMTok`/`outputPerMTok`; that is not a correction this document owes** —
+   `/usr/bin/grep -a -c 'inputPerMTok\|outputPerMTok' docs/design-property3-2026-09-05.md` → `0`.
+   The sentence to fix is "one priced route", above.
+
+5. **§4.1's traversal claim is false.** "reading each journal's first events (`run.submitted`, and
+   `operator.command` rows) and never folding": attestation rows sit at a journal's TAIL. The scan
+   reads the first event of EVERY run in the listing plus the whole journal of every run of the
+   workflow, published or not, and of every exam run made under the attested hash. Nothing caches
+   it. (Lane measurement, `ec2ad88`.)
+
+6. **§4.6's cost table under-states `loom score`.** The first `loom score` after an attestation
+   starts one exam run per ungraded cohort member — 30 on the §6 fixture — and every scoring verb
+   walks the whole listing by cursor, so the 0.173 s figure moves with workspace size, not cohort
+   size. Corroborated today by the 30 `graded …` lines in item 3.
+
+7. **§B′'s premise is false, and §4.4's rule changed because of it.** "Once an exam exists the
+   in-graph grader is not read by anything that decides" — `#checkConfidence` reads it on every run
+   and escalates a posture. So §4.4's skip of `12-grader-unchanged` under an attestation is
+   REMOVED (`673c3b3`): check 12 applies to EVERY `promote --suite`, including suites this binary
+   froze under an attestation. §4.4's "the invariant these produce" paragraph should also say that
+   an evaluator's THRESHOLD is part of what may not change — lowering `threshold: 0.5 → 0` had the
+   identical oversight effect while the check printed "the evaluator set is unchanged"
+   (`92a0a46`).
+
+**Two rules the body does not contain were added during implementation**, both because the
+candidate still reached the deciding number one edge over the previous fix: a candidate-added
+rubric raised the outcome of a run the exam FAILED, 0 → 0.2308, because `outcomeOf` averages over
+the signals present (`a7bc2ee`); an attested spec was compiled and RUN without `examShape` ever
+being applied to the row, so a relay exam in the row took `rigged.json` from `✗ L1 Δ 0.0000` to
+`✓ L1 Δ +0.4000 exit 0` (`5b3f568`); and an exam reading no baseline OUTPUT attested and measured
+nothing, closed by the mirror of §4.5's input rule (`b8fc664`, comment corrected at `b55f6b1`).
+**Five candidate-owned paths to S1 in total, three of them reopenings of the previous fix one edge
+over.** That is the shape to expect of the next one.
+
+**What the built thing does NOT cover** is in `CLAUDE.md` §3 as five assumptions, and §5 of this
+document is still the right reading of the rest.
+
+---
+
 **Status: design only. Nothing here is built.** Written 2026-09-05 against `95a3dde` plus this
 lane's three `fix(evolution)` commits (`9dbfc10`, `1c307a9`, `beded56`), for the implementer of
 `.agent/full-audit-2026-09-02/plan.md` Phase 6. Every claim about the tree below was checked by
