@@ -1175,7 +1175,8 @@ export class Engine {
    */
   readonly #driving = new Map<RunId, Promise<void>>();
   /** Serializes journal commits. Work runs in parallel; the log has one writer. */
-  #commitChain: Promise<unknown> = Promise.resolve();
+  /** runId → the tail of that run's journal-write chain. See `#serialize`. */
+  readonly #chains = new Map<RunId, Promise<unknown>>();
 
   constructor(opts: EngineOptions) {
     this.#store = opts.store;
@@ -1674,7 +1675,7 @@ export class Engine {
       else if (outcome.outcome === "failed") tally.failed++;
       else tally.notAttempted++;
       const log = logFor(item.runId, item.ctx);
-      await this.#serialize(() => log.append([compensationRecord(item.step, outcome, trigger)]));
+      await this.#serialize(item.runId, () => log.append([compensationRecord(item.step, outcome, trigger)]));
     }
     return tally;
   }
@@ -1989,7 +1990,7 @@ export class Engine {
    */
   async #journalHooks(ctx: RunContext, task: TaskRecord, point: HookPoint, changedBy: readonly string[]): Promise<void> {
     if (changedBy.length === 0) return;
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         changedBy.map((ref) => ({
           type: "hook.applied" as const,
@@ -2360,7 +2361,7 @@ export class Engine {
         // already ended, with the action behind it never taken. Re-suspending says what is
         // true, and the next decision resumes it again.
         if (openGates(p).length > 0) {
-          await this.#serialize(() =>
+          await this.#serialize(runId, () =>
             ctx.log.append([{ type: "run.suspended", payload: { reason: "gate" }, actor: SYSTEM_ACTOR("scheduler") }]),
           );
           return (await this.#project(ctx))!;
@@ -2501,7 +2502,7 @@ export class Engine {
     // to be the ceiling the journal can show, not one that a failed append may have left in
     // memory. `p.ceilings` is folded from `policy.deescalated` alone.
     const before = (await this.#project(ctx))?.ceilings[scope] ?? "in";
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append([
         {
           type: "policy.deescalated",
@@ -2855,7 +2856,7 @@ export class Engine {
     // Journal the command BEFORE dispatching it, so a crash here re-drives the cancel
     // on restart rather than losing it. The reason travels down the tree, so a child's own
     // log says why it stopped and names what stopped it.
-    await this.#serialize(() =>
+    await this.#serialize(runId, () =>
       log.append([
         { type: "operator.command", payload: { kind: "cancel", args: { reason } }, actor: by },
       ]),
@@ -2875,7 +2876,7 @@ export class Engine {
     const p = await this.projection(runId);
     if (p !== undefined && isTerminal(p.status)) return;
 
-    await this.#serialize(() =>
+    await this.#serialize(runId, () =>
       log.append([
         // AND THE TASKS GO WITH IT — REGISTER E6, and C1's `task.cancelled` finally has an
         // appender. `#commit` returns early on a terminal run, so a Task that was `leased`
@@ -3049,7 +3050,7 @@ export class Engine {
       try {
         // `undefined` means "the decision was to append nothing"; a projection is that
         // already-true answer, returned as `pause`'s documented no-op.
-        const settled = await this.#serialize(async (): Promise<RunProjection | undefined> => {
+        const settled = await this.#serialize(runId, async (): Promise<RunProjection | undefined> => {
           const p = await this.#requireLive(runId, verb);
           const events = decide(p);
           if (events === undefined) return p;
@@ -3161,7 +3162,7 @@ export class Engine {
         { details: { runId, nodeId: route.nodeId, take: route.take, declared: outbound } },
       );
     }
-    await this.#serialize(() =>
+    await this.#serialize(runId, () =>
       ctx.log.append([
         {
           type: "operator.command",
@@ -3440,7 +3441,7 @@ export class Engine {
       if (typeof hash === "string") seen.add(hash);
     }
     if (seen.has(plan.planHash)) return;
-    await this.#serialize(() =>
+    await this.#serialize(ctx.log.runId, () =>
       ctx.log.append([
         {
           type: "operator.command",
@@ -3907,7 +3908,7 @@ export class Engine {
     // authorized. The `rewind.plan` preview rows are inside it and that is the correct
     // asymmetry: what was merely SHOWN belongs to the history being undone, and what was
     // AUTHORIZED belongs to the run that comes after.
-    await this.#serialize(() =>
+    await this.#serialize(runId, () =>
       ctx.log.append([
         {
           type: "checkpoint.restored",
@@ -4026,7 +4027,7 @@ export class Engine {
     // reason to look. The two repairs do not interact in the fold — `task.ready` moves tasks,
     // `budget.settled` moves `reservedUsd` — so their order inside the batch is legibility and
     // nothing else: release the money the rewind orphaned, then re-arm the work it stranded.
-    await this.#serialize(() =>
+    await this.#serialize(runId, () =>
       ctx.log.append([
         ...orphaned.map((r) => ({
           type: "budget.settled" as const,
@@ -4293,7 +4294,7 @@ export class Engine {
         ...(limits === undefined ? {} : { budget: { ...this.#policyOpts.budget, ...limits } }),
         onEscalate: (rule, from, to, scope, detail) => {
           ctx.escalationWrites.push(
-            this.#serialize(() =>
+            this.#serialize(runId, () =>
               ctx.log.append([
                 {
                   type: "policy.escalated",
@@ -4421,15 +4422,39 @@ export class Engine {
     return ctx.folder.projection();
   }
 
-  /** Every journal write goes through here, one at a time, in submission order. */
-  #serialize<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.#commitChain.then(fn, fn);
+  /**
+   * Every journal write for ONE RUN goes through here, one at a time, in submission order.
+   *
+   * PER RUN, NOT PER ENGINE. The chain was a single engine-wide promise, so a `#commit` that
+   * awaited a payload store's `put` — arbitrary I/O, 400 ms on a slow backend — or an `onGate`
+   * filter held every other run's appends behind it: measured, a two-node function graph that
+   * takes 3 ms alone took 808 ms while an unrelated run externalised two payloads. Nothing in
+   * the ordering argument this queue exists for spans runs — rule 2 of this file's header is
+   * about one run's journal, and `StateStore.append` compare-and-swaps on that run's
+   * `expectedSeq` — so serialising runs against each other bought nothing and cost a shared
+   * throughput ceiling proportional to the slowest store or hook in the deployment.
+   *
+   * A CHILD RUN'S APPENDS ARE ON THE CHILD'S CHAIN. `#runSubgraph` appends to the parent's log
+   * from the body phase, never from inside a commit slot, and `#dispatchRollback` names each
+   * step's own run — so no caller holds one run's slot while entering another's, which is the
+   * shape that would deadlock here exactly as it did engine-wide (see `#journalHooks`).
+   *
+   * Self-evicting: a chain whose last write has settled is dropped, so the map holds at most
+   * the runs with a write in flight, not every run the process has ever seen.
+   */
+  #serialize<T>(runId: RunId, fn: () => Promise<T>): Promise<T> {
+    const prev = this.#chains.get(runId) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
     // Swallow on the chain so one failed commit does not poison every later one;
     // the caller still sees the rejection through `next`.
-    this.#commitChain = next.then(
+    const settled = next.then(
       () => undefined,
       () => undefined,
     );
+    this.#chains.set(runId, settled);
+    void settled.then(() => {
+      if (this.#chains.get(runId) === settled) this.#chains.delete(runId);
+    });
     return next;
   }
 
@@ -4472,7 +4497,7 @@ export class Engine {
         // journal's seq is the only monotonic source every process already shares — the
         // store's compare-and-set assigns it — so the lease's own seq is the token, and a
         // re-lease by another worker necessarily gets a higher one.
-        const leasedAt = await this.#serialize(() =>
+        const leasedAt = await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               {
@@ -4508,7 +4533,7 @@ export class Engine {
     // … commits serialized, in a deterministic order.
     const ordered = [...outcomes].sort((a, b) => compareBranch(a.w.task.branch, b.w.task.branch));
     for (const { w, outcome } of ordered) {
-      await this.#serialize(() => this.#commit(ctx, w, outcome));
+      await this.#serialize(ctx.runId, () => this.#commit(ctx, w, outcome));
     }
   }
 
@@ -4699,7 +4724,7 @@ export class Engine {
       carriesSecret: observedChannels(node).some((c) => ctx.carriesSecret.has(c)),
     });
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
           {
@@ -4728,7 +4753,7 @@ export class Engine {
       // The pre-irreversible hold (D4 deviation 5). Without it, "the supervisor may
       // interrupt" is a promise the system cannot keep — by the time a human sees the
       // action in a stream it has already happened.
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [
             {
@@ -5521,7 +5546,7 @@ export class Engine {
     // does not predate the seed effect, and a derived seed is counted against `hermetic`.
     // `seedFromKey` is only the derivation.
     const seed = this.#replay !== undefined ? this.#replay.seed(key, seedFromKey) : randomInt(0, 2 ** 32);
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
           { type: "effect.started", payload: { key, kind: "random", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
@@ -6303,7 +6328,7 @@ export class Engine {
         // re-raises anything that is not `E_BUDGET_EXHAUSTED` — the run fails and the process
         // that holds the orphaned number is the one that dies with it. The other order —
         // append, then reserve — would put a promise in the journal that no engine ever made.
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               {
@@ -6344,7 +6369,7 @@ export class Engine {
         const action = ctx.graph.spec.policy?.onBudgetExhausted ?? "fail";
         // Run-level, not branch-level: journal it so a join cannot absorb it and so
         // it survives a restart.
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               {
@@ -6388,7 +6413,7 @@ export class Engine {
       let finish = "stop";
 
       if (servedTurn === undefined) {
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               {
@@ -6445,7 +6470,7 @@ export class Engine {
       } catch (e) {
         ctx.policy.settle(reservation, 0);
         const le = toLoomError(e);
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               { type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId },
@@ -6482,7 +6507,7 @@ export class Engine {
       // a second derivation is a second chance to disagree. `actualUsd` is what goes ON, and it
       // is the same tri-state the line above settles: a served turn cost nothing THIS time, so
       // the run's spend is not billed twice for one call.
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [
             {
@@ -6510,7 +6535,7 @@ export class Engine {
       // `effect.completed` under one key in one attempt — the state `auditRun` reports as
       // unhealthy, correctly, because it is a re-do of something still standing.
       if (servedTurn === undefined) {
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               // `*.called` BEFORE `effect.completed`: the span fold closes the effect
@@ -6768,7 +6793,7 @@ export class Engine {
       // reference, forever, for a run that is still answerable. Writing it first inverts the
       // failure — a reference to a child that does not exist yet, which the cascade skips
       // and the retry re-states.
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [
             {
@@ -6941,7 +6966,7 @@ export class Engine {
       writes[parentCh] = await store.get(childRunId, ref);
     }
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
           { type: "effect.started", payload: { key, kind: "subgraph", attempt: 1 }, actor: SYSTEM_ACTOR("executor"), taskId: w.task.taskId },
@@ -7177,7 +7202,7 @@ export class Engine {
       // questions with no such window, so the pair goes down together — the shape
       // `#randomSeedEffect` and the subgraph effect already use, and it keeps
       // `effect.completion-has-a-start` satisfied either way.
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [
             { type: "effect.started", payload: { key, kind: "quote", attempt: 1 }, actor: SYSTEM_ACTOR("agent"), taskId: w.task.taskId },
@@ -7262,7 +7287,7 @@ export class Engine {
     const refusal = turnRefusal(finish, `node "${w.node.id}" context summary ${String(ordinal)}`, summary.length, outputTokens, ceiling);
     if (refusal !== undefined) throw refusal;
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
           { type: "effect.started", payload: { key, kind: "summarize", attempt: 1 }, actor: SYSTEM_ACTOR("context"), taskId: w.task.taskId },
@@ -7452,7 +7477,7 @@ export class Engine {
         // JOURNAL THE REFUSAL. Returning only an error string tells the model and nobody
         // else, and a refused irreversible action is exactly what an operator reading the
         // trace afterwards needs to see.
-        await this.#serialize(() =>
+        await this.#serialize(ctx.runId, () =>
           ctx.log.append(
             [
               {
@@ -7481,7 +7506,7 @@ export class Engine {
       // node's. Without it "the supervisor may interrupt" is a promise the system keeps
       // only for tools a graph author named — never for the ones a model chose. A tool
       // node already served its window in `#executeTask`; a second would double it.
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [
             {
@@ -7516,7 +7541,7 @@ export class Engine {
     calls.push(tool.name);
     ctx.toolCalls.set(task.taskId, calls);
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [{ type: "effect.started", payload: { key, kind: effectKind, attempt: 1 }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
         { taskId: task.taskId },
@@ -7535,7 +7560,7 @@ export class Engine {
         signal: ctx.abort.signal,
         progress: (chunk) => {
           // Streams to the UI; never enters the model's context.
-          void this.#serialize(() =>
+          void this.#serialize(ctx.runId, () =>
             ctx.log.append([{ type: "task.progress", payload: { chunk }, actor: SYSTEM_ACTOR("tool"), taskId: task.taskId }], {
               taskId: task.taskId,
             }),
@@ -7546,7 +7571,7 @@ export class Engine {
     } catch (e) {
       const le = toLoomError(e);
       if (le.code === CODES.E_REPLAY_DIVERGENCE) throw le;
-      await this.#serialize(() =>
+      await this.#serialize(ctx.runId, () =>
         ctx.log.append(
           [{ type: "effect.failed", payload: { key, error: errorRecord(le) }, actor: SYSTEM_ACTOR("tool-executor"), taskId: task.taskId }],
           { taskId: task.taskId },
@@ -7561,7 +7586,7 @@ export class Engine {
     // and only the transcript needs bounding.
     result = await this.#filterHook(ctx, task, "postTool", result);
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append(
         [
           {
@@ -7790,7 +7815,7 @@ export class Engine {
       const narrowed = policyRetry === undefined ? { changedBy: [] } : await this.#narrowRetry(ctx, w, policyRetry);
       const retry = narrowed.retry;
       // THE HOOK'S RECORD RIDES THE SAME BATCH AS ITS EFFECT, and it has to. `#journalHooks`
-      // goes through `#serialize`, which chains onto `#commitChain` — and this code path is
+      // goes through `#serialize`, which chains onto this run's write chain — and this code path is
       // already ON that chain, so awaiting a second entry from inside one deadlocks. The first
       // draft did exactly that and hung on the first `advance` with the tool already called.
       // Committing them together is also the better answer: the decision and the reason for it
@@ -9076,7 +9101,7 @@ export class Engine {
       return;
     }
 
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append([
         ...cancelOpenGates(p, "the run completed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
         {
@@ -9130,7 +9155,7 @@ export class Engine {
    */
   async #failRun(ctx: RunContext, p: RunProjection, error: ErrorRecord): Promise<void> {
     await this.#compensate(ctx, p, "run_failed");
-    await this.#serialize(() =>
+    await this.#serialize(ctx.runId, () =>
       ctx.log.append([
         ...cancelOpenGates(p, "the run failed before this gate was answered", SYSTEM_ACTOR("executor"), this.#gates),
         { type: "run.failed", payload: { error }, actor: SYSTEM_ACTOR("executor") },
