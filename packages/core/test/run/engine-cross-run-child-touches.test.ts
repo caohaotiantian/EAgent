@@ -3,7 +3,8 @@
  *
  * `engine-child-journal-does-not-fail-the-parent.test.ts` pins ONE cross-run child touch,
  * `#answerMirrorsTheChildAlreadyDecided`. Its residue named five more of the same shape, and this
- * file pins those five. At least one test each, and the rest are the costs and the controls that
+ * file pins those five — plus F, the SEVENTH, which the five-site lane named as residue and left
+ * unwrapped on scope. At least one test each, and the rest are the costs and the controls that
  * two review rounds asked to be paid rather than asserted — the guard's own printer on a hostile
  * payload, the method-vs-read decision, the bounded warning rate, a deterministic alarm's code
  * surviving the re-class, and the rewind door. Named rather than claimed total, and these are the
@@ -15,6 +16,10 @@
  *   C  `#forwardGateDecision`   READ   `childP = projection(childRunId)` — which gate to answer
  *   D  `#resolveGateAsSystem`   WRITE  answering that gate, in the CHILD's log
  *   E  `#endChildRun`           READ + WRITE  stopping a child the parent has rejected
+ *   F  `#runSubgraph`           DRIVE  `childP = advance(childRunId)` — the nested drive of the
+ *                                      child's own run, wrapped later than A–E and for the same
+ *                                      reason: a throw out of it was `internal`/`E_INTERNAL` on
+ *                                      the PARENT
  *
  * THE TWO EXPOSURES ARE DIFFERENT, and that is why the fix is not one behaviour.
  *
@@ -58,11 +63,10 @@
  *     read #1  `#runSubgraph`          (B)
  *     read #2  `#forwardGateDecision`  (C)
  *     reads #3..#6  the child's OWN advance, driven by `#runSubgraph`'s `advance(childRunId)` —
- *                   NOT wrapped, and the reason is SCOPE: it is not one of the five sites this
- *                   lane was authorised for, and wrapping a whole nested drive is a much wider
- *                   behaviour change. This paragraph said "because it would swallow a cancel" for
- *                   four rounds; that argument is measured and dead — see the cancel-race test.
- *                   This lane's recorded residue, on the honest reason.
+ *                   site F, NOW WRAPPED. It was residue of the five-site lane on scope, not on
+ *                   cancels: this paragraph said "because it would swallow a cancel" for four
+ *                   rounds, and that argument is measured and dead at D's cancel-race test and
+ *                   again at F's own.
  *     read #7  `#answerMirrorsTheChildAlreadyDecided` — already wrapped; warns and continues.
  *
  *   The pass that carries a REJECTION to a child whose gate was answered at another door:
@@ -504,6 +508,136 @@ test("B · A HOSTILE REJECTION does not defeat the guard that catches it — `in
   //   here       (`loomCodeOf`)         running                   — deferred, and it will retry
   assert.notEqual(outcome, "failed:E_INTERNAL", `a hostile rejection must not defeat the guard that catches it: ${outcome}`);
   assert.ok(!outcome.startsWith("threw"), `and it must not escape the verb either: ${outcome}`);
+});
+
+test("F · `#runSubgraph`'s NESTED `advance(childRunId)` refuses retryably — the seventh touch, and the last unwrapped one", async () => {
+  // THE SITE THIS FILE'S HEADER USED TO NAME AS RESIDUE. Reads #3..#6 of the resume pass are the
+  // CHILD's own drive, reached through `#runSubgraph`'s `const childP = await this.advance(...)`.
+  // Measured at `d1b42ae`, one-shot failure at each read of that pass:
+  //
+  //     failReadAt=1  succeeded          (B, already wrapped)
+  //     failReadAt=2  succeeded          (C, already wrapped)
+  //     failReadAt=3  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=4  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=5  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=6  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=7  succeeded          (the already-wrapped mirror read)
+  //
+  // `internal` is not retryable, so one transient read of ANOTHER RUN's disk was a permanent
+  // verdict on this one — and on a parent that had already run irreversible work, a compensation
+  // cascade over it.
+  const r = gateRig(new BreakableChildStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+
+  // The human answers in the CHILD's own console, so the parent's next pass really drives the
+  // child rather than parking on the mirror again.
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.reads = 0;
+  r.store.failReadAt = 3;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  const p = settled;
+  assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE SITE IS ASSERTED, NOT ASSUMED, the way B and C had to learn to. Breaking the third read is
+  // positional; the sentence is what says WHICH touch refused — "could not be advanced" is this
+  // call's and nobody else's, and it is not "could not read the journal" (B's probe).
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused drive, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not be advanced/, `the nested drive, not the start-or-resume probe: ${mine[0]!.message}`);
+
+  assert.notEqual(p.status, "failed", `the parent must survive a transient child read: ${p.status}/${p.error?.code ?? ""} ${p.error?.message ?? ""}`);
+  assert.equal(p.status, "succeeded", "and the delegation completes when the store comes back");
+  assert.deepEqual(r.charges, [20], "the child's charge ran exactly once — a re-entry is not a second child run");
+  assert.deepEqual(p.outputs, { result: { ok: true, amount: 20 } });
+});
+
+test("F · THE ORDINARY HALF — a healthy child still completes, and nothing is said out loud", async () => {
+  // THE HALF A BUILDER'S OWN GREEN SUITE SKIPS. A wrap that converted EVERY nested drive into a
+  // refusal would still pass the test above once the store came back; what separates it from a
+  // correct one is that an UNBROKEN store produces no refusal at all.
+  const r = gateRig(new BreakableChildStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(settled.status, "succeeded", `nothing was broken, so nothing is deferred: ${settled.error?.message ?? ""}`);
+  assert.deepEqual(r.charges, [20], "one delegation, one charge");
+  assert.deepEqual(settled.outputs, { result: { ok: true, amount: 20 } });
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a healthy child is not warned about: ${JSON.stringify(mine.map((w) => w.message))}`);
+});
+
+test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the run", async () => {
+  // THE FALSE CLAIM THE ROW NAMES, DRIVEN AT THIS SITE. The argument for leaving this call
+  // unwrapped was "it would swallow a cancel"; `d1b42ae`'s own comment at the D site says that
+  // argument is measured and dead, but it was measured at D, not here. So it is measured here:
+  // `cancel` aborts OUTSIDE the per-run drive lock, so the signal really can flip inside this
+  // catch, and the answer is that the re-class cannot matter — `cancel` decides the run's status
+  // by journaling `run.cancelled`, so a task deferred during a cancelled run defers into a run
+  // that is already over.
+  //
+  // IT IS GREEN AT `d1b42ae` TOO, and that is said here rather than left for the next reader to
+  // discover: it pins no behaviour this change altered, and it is not the defect pin. It is the
+  // ORDINARY half — the control that says the wrap did not buy its retryability by losing an
+  // operator's stop. The pin is the test three above, which is RED at `d1b42ae`.
+  let engineRef: Engine | undefined;
+  let parentRef: RunId | undefined;
+  class CancelRacingStore extends BreakableChildStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (isChild(runId)) {
+        this.reads++;
+        if (this.failReadAt === this.reads) {
+          this.failReadAt = undefined;
+          await engineRef!.cancel(parentRef!, "the operator stopped it mid-delegation");
+          throw new Error("sqlite: child disk I/O error");
+        }
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  const r = gateRig(new CancelRacingStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  engineRef = r.engine;
+  parentRef = runId;
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.reads = 0;
+  r.store.failReadAt = 3;
+
+  const outcome = await outcomeOf(async () => settle(r.engine, runId));
+  assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+  assert.notEqual(outcome, "running", `a cancelled run does not keep deferring: ${outcome}`);
+  const p = (await r.engine.projection(runId))!;
+  assert.equal(p.status, "cancelled", `the operator's cancel is what decided this run: ${p.status}`);
+  assert.deepEqual(r.charges, [], "and nothing was charged");
 });
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {

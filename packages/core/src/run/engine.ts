@@ -415,11 +415,11 @@ const MAX_INTERVENTION_LAPS = 8;
  *      consulted. **A third, retryable arm added at that site would silently join this set** — if
  *      one is ever added, split the code rather than widening this comment.
  *
- *      THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
- *      for the three cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
- *      forward's read of the child, and the forward's WRITE to the child's gate — so "only the
- *      poll can reach it" is no longer true and SIX raises share the code, of which four are
- *      retryable. They MEET this set's criterion for the case they were written for: a child
+ *      FOUR MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
+ *      for the four cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
+ *      forward's read of the child, the forward's WRITE to the child's gate, and the nested
+ *      `advance(childRunId)` that drives the child — so "only the poll can reach it" is no longer
+ *      true and SEVEN raises share the code, of which five are retryable. They MEET this set's criterion for the case they were written for: a child
  *      journal this node could not read is not this node's failure, and uncharged re-entry inside
  *      `DEFERRAL_BUDGET_MS` is what a transient foreign store wants. What the instruction above
  *      was defending is the word SILENTLY, and that is what this paragraph pays; the split it asks
@@ -789,7 +789,7 @@ function loomCodeOf(e: unknown): string | undefined {
  *
  * THE OTHER HALF OF `describeThrown`'S RULE, for the sites where swallowing is not available.
  * `#planRollbackChild` and `#endChildRun` can refuse a child outright, because the parent has
- * already decided what it is doing and reaching into the child is a courtesy. The three touches
+ * already decided what it is doing and reaching into the child is a courtesy. The four touches
  * inside `#runSubgraph` cannot: the task's whole job IS the child, and a swallow there would make
  * the parent proceed on a value it did not read — at the `existing` probe, "the read failed"
  * would look like "there is no child yet", and the parent would SUBMIT A SECOND CHILD RUN over
@@ -8171,7 +8171,41 @@ export class Engine {
       }
     }
 
-    const childP = await this.advance(childRunId);
+    // THE SEVENTH CROSS-RUN TOUCH, AND THE LAST UNWRAPPED ONE. Everything this drive does happens
+    // on ANOTHER RUN's journal, and a throw out of it reached `#runWave`'s catch as
+    // `internal`/`E_INTERNAL` — not retryable, so one transient read of the child's disk was a
+    // permanent verdict on the PARENT and a compensation cascade over the parent's irreversible
+    // effects. Measured at `d1b42ae` on the resume pass, one-shot failure per read:
+    //
+    //     read 1  succeeded   (the `existing` probe, wrapped)     read 5  failed:E_INTERNAL
+    //     read 2  succeeded   (the forward's read, wrapped)       read 6  failed:E_INTERNAL
+    //     read 3  failed:E_INTERNAL                               read 7  succeeded (mirror, wrapped)
+    //     read 4  failed:E_INTERNAL
+    //
+    // REFUSE, NEVER SWALLOW, for the reason `childUnavailable`'s docstring gives: this task's whole
+    // job IS the child, so a swallow would make the parent map outputs out of a projection it did
+    // not read.
+    //
+    // AROUND THE WHOLE DRIVE, not around a store read inside it, and the cost is named rather than
+    // waved past: a programmer error inside the child's own drive is now re-classed retryable and
+    // deferred instead of failing the parent at once. The alternative is a taxonomy of which
+    // foreign failures may fail this run's verb, which is what every wrap in this file exists to
+    // avoid, and `advance` gives its caller nothing to tell them apart with. It is BOUNDED —
+    // `DEFERRABLE_CODES`, then the charged retries, then the run fails, which the
+    // permanently-broken-store test measures — and it is not a loosening: the code is not in
+    // `RUN_FATAL_CODES`, so nothing about routing or oversight changes.
+    //
+    // AND NOT BECAUSE OF CANCELS. The argument that wrapping this would "swallow a cancel" was
+    // made four times and is dead: `cancel` decides a run's status by journaling `run.cancelled`,
+    // so a task deferred during a cancelled run defers into a run that is already over. Driven at
+    // THIS site, not only at the forward's — a `cancel` landing inside this catch still ends the
+    // run `cancelled` with nothing charged.
+    let childP: RunProjection;
+    try {
+      childP = await this.advance(childRunId);
+    } catch (e) {
+      throw childUnavailable(childRunId, `subgraph "${describeThrown(sub.ref)}" could not be advanced`, e);
+    }
 
     if (childP.status === "awaiting_gate") {
       // DETERMINISTIC, by the journal's own order rather than by however the projection
