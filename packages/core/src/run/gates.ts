@@ -1116,10 +1116,10 @@ export class HumanGateBroker {
    * and becomes `E_GATE_ALREADY_RESOLVED`, which is the right answer and the one the
    * concurrent case never used to give.
    *
-   * The idempotency entry is written before the commit and REMOVED on a conflict. It is
-   * what makes a double-click one decision, so it must exist while the write is in flight;
-   * a lap that wrote nothing must not leave the second attempt answering "already done"
-   * about a decision that never landed.
+   * The idempotency entry is written before the commit and REMOVED on ANY commit failure,
+   * not only a conflict. It is what makes a double-click one decision, so it must exist
+   * while the write is in flight; a lap that wrote nothing must not leave the second
+   * attempt answering "already done" about a decision that never landed.
    */
   async resolve(log: RunLog, input: ResolveInput): Promise<{ resolved: boolean }> {
     for (let attempt = 0; ; attempt++) {
@@ -1205,11 +1205,14 @@ export class HumanGateBroker {
     try {
       await log.commit(p.seq, [decidedEvent(gate, checked, this.#now()), resumedEvent(input.actor)], { taskId: gate.taskId });
     } catch (e) {
-      // NOTHING LANDED, so nothing may be remembered as landed. Leaving the entry behind
-      // would make the retry — and every later redelivery of the same decision — answer
-      // `{ resolved: false }` about an event no journal holds.
+      // NOTHING LANDED, so nothing may be remembered as landed — on ANY throw, not only a
+      // lost compare-and-swap. Leaving the entry behind on some other failure (a store
+      // outage, a disk error) would make the retry — and every later redelivery of the same
+      // decision — answer `{ resolved: false }` about an event no journal holds, for the
+      // life of the process; it self-heals only on a restart that refolds the map from the
+      // journal and finds no `gate.decided` row for the failed attempt.
+      this.#idempotency.delete(idemKey);
       if (isLoomError(e) && e.code === CODES.E_SEQ_CONFLICT) {
-        this.#idempotency.delete(idemKey);
         return SEQ_CONFLICT;
       }
       throw e;
