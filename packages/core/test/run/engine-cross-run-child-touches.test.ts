@@ -48,10 +48,10 @@
  * That sentence was a false universal for two rounds — B and C broke the Nth read and then
  * asserted only outcomes any of the five fixes would satisfy, and C's title promised it named its
  * site while its body named nothing. It is true now because each of the FOUR retryable sites
- * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B, C and F assert theirs: "could not
- * read the journal" is `#runSubgraph`'s probe, "could not be advanced" is its nested drive, "could
- * not be forwarded — reading the journal failed" is `#forwardGateDecision`'s read, and "answering
- * gate … failed" is the WRITE. E asserts its own code,
+ * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B, C, D and F all assert theirs:
+ * "could not read the journal" is `#runSubgraph`'s probe, "could not be advanced" is its nested
+ * drive, "could not be forwarded — reading the journal failed" is `#forwardGateDecision`'s read,
+ * and "answering gate … failed" is the WRITE. E asserts its own code,
  * `LOOM_CHILD_STOP_FAILED`, which one method emits.
  *
  * EVERY SUCH FILTER IS BY RUN ID AS WELL AS BY CODE. `process.emitWarning` defers to the next
@@ -607,10 +607,15 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
   // by journaling `run.cancelled`, so a task deferred during a cancelled run defers into a run
   // that is already over.
   //
-  // IT IS GREEN AT `d1b42ae` TOO, and that is said here rather than left for the next reader to
-  // discover: it pins no behaviour this change altered, and it is not the defect pin. It is the
-  // ORDINARY half — the control that says the wrap did not buy its retryability by losing an
-  // operator's stop. The pin is the first F test, which is RED at `d1b42ae`.
+  // IT IS RED AT `d1b42ae`, and an earlier draft of this paragraph claimed the opposite. That was
+  // true while the test asserted only "the run ends cancelled" — a property the base commit also
+  // has — and stopped being true when the site assertion below was added, because "could not be
+  // advanced" is a sentence the base commit never emits:
+  //
+  //     AssertionError: one refused drive, one warning: []   0 !== 1
+  //
+  // So it is a SECOND pin on the wrap as well as the ordinary half — the control that says the
+  // wrap did not buy its retryability by losing an operator's stop.
   let engineRef: Engine | undefined;
   let parentRef: RunId | undefined;
   // TWO FIXTURE BUGS PAID FOR THIS SHAPE, and both made the test measure something else.
@@ -675,16 +680,21 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
 
 test("F · A RUN-FATAL CODE OUT OF THE CHILD'S DRIVE IS NOT RE-CLASSED — the wrap is not a way around `RUN_FATAL_CODES`", async () => {
   // THE FINDING THAT MADE THIS WRAP A LOOSENING BEFORE IT WAS GUARDED. `advance` is not one store
-  // read: `#advanceSerially` awaits `#rehydrateGraph` with nothing between it and `advance`, and
-  // that method raises `E_REPLAY_DIVERGENCE` — a RUN_FATAL_CODES member — when a child's recorded
-  // mutation chain does not reproduce its recorded graph hash. Unguarded, the parent re-classed it
-  // as `E_CHILD_UNREACHABLE`: retryable, deferrable, and NOT run-fatal, so an `error` edge could
-  // route around it and the run could report `succeeded` on a rescue arm's value. That is the
-  // exact shape `RUN_FATAL_CODES` exists to prevent.
+  // read: `#advanceSerially` runs `#assertBound` and `#rehydrateGraph` before the drive loop and
+  // nothing between them catches, and `#rehydrateGraph` raises `E_REPLAY_DIVERGENCE` — a
+  // `RUN_FATAL_CODES` member — when a child's recorded mutation chain does not reproduce its
+  // recorded graph hash. Unguarded, the parent re-classed it as `E_CHILD_UNREACHABLE`: retryable,
+  // deferrable, and NOT run-fatal, so an `error` edge could route around it and the run could
+  // report `succeeded` on a rescue arm's value. That is the exact shape `RUN_FATAL_CODES` exists
+  // to prevent.
   //
-  // The fixture raises the code from the child's store rather than by desynchronising a mutation
-  // chain, because what is under test is the GUARD — "does a run-fatal code survive this catch" —
-  // and the reachability of a real raiser is established at the call site's comment.
+  // WHAT IS UNDER TEST IS THE GUARD, not the raiser. The fixture throws the code from the child's
+  // store rather than desynchronising a real mutation chain, so this test says "a run-fatal code
+  // survives this catch" and says nothing about how one gets there. That a real raiser exists is
+  // read off `#rehydrateGraph`'s own `throw`, not measured — stated plainly here because the call
+  // site's paragraph cites an injection for it too, and two injections are not a reachability
+  // proof.
+  //
   // ITS OWN ONE-SHOT FIELD, and it counts the read it swallows. Sharing `failReadAt` with the base
   // class would arm both, and incrementing `reads` before `yield* super.read` would count every
   // real read twice — the fixture bug the cancel test above documents, which cost a scan of eight
@@ -735,6 +745,57 @@ test("F · A RUN-FATAL CODE OUT OF THE CHILD'S DRIVE IS NOT RE-CLASSED — the w
   assert.deepEqual(r.charges, [], "nothing was charged");
 
   // AND IT IS NOT WARNED ABOUT AS AN UNREACHABLE CHILD, because it was never re-classed as one.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a run-fatal code does not travel as a deferred delegation: ${JSON.stringify(mine.map((w) => w.message))}`);
+});
+
+test("D · THE GATE WRITE IS A NESTED DRIVE TOO — a run-fatal code is not re-classed there either", async () => {
+  // THE SITE THE PREVIOUS ROUND ASSERTED WAS SAFE. The guard went in at F with a comment saying
+  // "the other three reach a single journal read or a single gate write rather than a whole nested
+  // run drive". A reviewer measured that false at D: `#resolveGateAsSystem` ENDS IN
+  // `this.advance(childRunId)`, so this `try` spans a child drive — `#rehydrateGraph` included —
+  // and the message "answering gate … failed" hides it. Unguarded, a `RUN_FATAL_CODES` member out
+  // of that drive was deferred and the parent ended `succeeded`.
+  //
+  // The hole is OLDER than this change — `5fe7614` wrapped this site and `d1b42ae` descends from
+  // it — so this test is red at the base commit for a defect the base commit already had. It is
+  // pinned here rather than left as residue because the fix is the same one line as F's.
+  class DivergentOnWrite extends BreakableChildStore {
+    divergeAtAppend: number | undefined;
+    override async append(input: AppendInput): Promise<AppendResult> {
+      if (isChild(input.runId) && this.divergeAtAppend === this.appends + 1) {
+        this.divergeAtAppend = undefined;
+        this.appends++;
+        throw err.internal(CODES.E_REPLAY_DIVERGENCE, "recorded graph sha256:a but replaying its mutations produced sha256:b");
+      }
+      return super.append(input);
+    }
+  }
+  const store = new DivergentOnWrite({ now: () => clock });
+  const r = gateRig(store);
+  const { runId, childRunId } = await parked(r);
+  const mirror = openGate((await r.engine.projection(runId))!)!;
+
+  // The first append to the CHILD during the forwarding pass is `#resolveGateAsSystem`'s, which is
+  // the call that goes on to drive the child — the same position D's own test breaks.
+  store.appends = 0;
+  store.divergeAtAppend = 1;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await outcomeOf(async () => r.engine.resolveGate(runId, {
+      gateId: mirror.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: LEAD, via: "console" },
+      idempotencyKey: "mirror",
+    })).then(async () => settle(r.engine, runId));
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(store.divergeAtAppend, undefined, "the fixture's one-shot failure really did fire");
+
+  assert.equal(settled.status, "failed", `a run-fatal failure out of the gate write's drive still ends the parent: ${settled.status}`);
+  assert.equal(settled.error?.code, CODES.E_REPLAY_DIVERGENCE, `and keeps its own code: ${settled.error?.code ?? ""}`);
+  assert.deepEqual(r.charges, [], "nothing was charged");
   const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
   assert.deepEqual(mine, [], `a run-fatal code does not travel as a deferred delegation: ${JSON.stringify(mine.map((w) => w.message))}`);
 });

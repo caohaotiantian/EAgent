@@ -8222,9 +8222,11 @@ export class Engine {
     // LOOSENING. Two drafts of this comment claimed the exposure away — "the code this raises is
     // not run-fatal, so nothing about routing changes" — which is a claim about what this RAISES
     // doing duty for a claim about what it CATCHES. A reviewer found the raiser. `advance` is not
-    // one store read: `#advanceSerially` awaits `#rehydrateGraph` with nothing between it and
-    // `advance`, and that method throws `E_REPLAY_DIVERGENCE` when a child's recorded mutation
-    // chain does not reproduce its recorded graph hash. Measured, one-shot at child reads 3..6:
+    // one store read: `#advanceSerially` runs `#assertBound` and then `#rehydrateGraph` before it
+    // reaches the drive loop, and NOTHING between them catches, so a throw from either leaves
+    // `advance` intact. `#rehydrateGraph` throws `E_REPLAY_DIVERGENCE` when a child's recorded
+    // mutation chain does not reproduce its recorded graph hash. Measured, one-shot at child
+    // reads 3..6 (1, 2 and 7 do not reach this catch):
     //
     //     d1b42ae    failed:E_REPLAY_DIVERGENCE   run-fatal — no error edge routes around it
     //     unguarded  succeeded                    deferred, then a rescue arm answered for it
@@ -8239,19 +8241,27 @@ export class Engine {
     // FAILS CLOSED the useful way round — a value that cannot say its own code is not treated as
     // run-fatal, so it gets the bounded retryable answer rather than a permanent verdict.
     //
-    // THE SET THIS ARM COVERS IS ONE SITE, not four. The other three `childUnavailable` calls
-    // reach a single journal read or a single gate write rather than a whole nested run drive, and
-    // no run-fatal raiser has been demonstrated through them; they are unchanged.
+    // THE SET THIS ARM COVERS IS TWO SITES, and the first draft of this paragraph said ONE and
+    // was wrong. The test is not "how big is the call" but "does a child DRIVE run inside this
+    // try", and it does at exactly two of the four: here, and the forward's gate WRITE — because
+    // `#resolveGateAsSystem` ends in `this.advance(childRunId)`, which its own message ("answering
+    // gate … failed") hides. A reviewer demonstrated the hole there with this file's fixture and
+    // the guard is now at both. The remaining two, the start-or-resume probe and the forward's
+    // READ, call `projection` — one fold over one journal, no rehydrate and no drive — and are
+    // deliberately unguarded, so a `E_TRACE_INCONSISTENT` from a child's fold still defers.
     //
-    // AND THE COSTS THAT STAY ARE NAMED, not left as "a programmer error". Everything `advance`
-    // raises that is DETERMINISTIC and not run-fatal is now deferred for the full budget under a
-    // code that says "storage", and the set is small enough to list: `#rehydrateGraph`'s
-    // `E_OVERSIGHT_LOOSEN_FORBIDDEN` (`policy` — the child recorded a mutation this binary
-    // refuses), and `#assertBound`'s `E_GRAPH_INVALID` (`validation`) and `E_RUN_NOT_FOUND`
-    // (`not_found`). Each costs ~19 uncharged re-entries and the deferral budget before the
-    // parent fails, and each arrives mislabelled. None of them changes ROUTABILITY — all three
-    // were ordinary, routable task failures at base too — so this is latency and a wrong word,
-    // which is the trade, and not a loosening, which the arm above is what prevents.
+    // AND THE COST THAT STAYS IS A RULE, NOT A LIST, because two attempts at the list were both
+    // incomplete. THE RULE: anything escaping the child's `advance` that is DETERMINISTIC and NOT
+    // run-fatal is deferred for the whole budget and then reported under a code that says
+    // "storage" — ~19 uncharged re-entries and a wrong word. Members found so far, named as
+    // examples and NOT as the closed set: `#rehydrateGraph`'s `E_OVERSIGHT_LOOSEN_FORBIDDEN`
+    // (`policy`); `#assertBound`'s `E_GRAPH_INVALID` (`validation`) and its three
+    // `E_GRAPH_MISMATCH` raises (`conflict` once, `policy` twice); `#project`'s
+    // `E_TRACE_INCONSISTENT`; and `#advanceSerially`'s own `E_RUN_NOT_FOUND` — which comes from
+    // there and NOT from `#assertBound`, whose `not_found` arm this call site disarms with
+    // `requireRecord: false`. None of them changes ROUTABILITY: every one was an ordinary,
+    // routable task failure at base too. That is the trade. The loosening — a run-fatal code
+    // becoming routable — is what the arm above prevents, and it is a different thing.
     //
     // AND NOT BECAUSE OF CANCELS. The argument that wrapping this would "swallow a cancel" was
     // made four times and is dead: `cancel` decides a run's status by journaling `run.cancelled`,
@@ -8512,6 +8522,17 @@ export class Engine {
         // `#runSubgraph`'s own `advance(childRunId)` was left unwrapped on SCOPE rather than on
         // cancels; it IS wrapped now, at that call, and its own cancel-race test drives the same
         // argument at that site. The half worth keeping is why no guard stands here.
+        // A RUN-FATAL CODE IS NOT RE-CLASSED HERE EITHER, and this site needs the arm for exactly
+        // the reason the nested drive does: `#resolveGateAsSystem` ENDS IN `this.advance(runId)`
+        // on the child, so this `try` spans a whole child drive — `#rehydrateGraph` included — and
+        // not just the gate write its message names. A reviewer demonstrated it with the same
+        // one-shot `E_REPLAY_DIVERGENCE` fixture the F test uses, armed at this site: the parent
+        // deferred it and ended `succeeded`. The wrap at the drive said this site "reaches a
+        // single gate write" and that was wrong.
+        //
+        // Older than this change — `5fe7614` wrapped this site and `d1b42ae` is its descendant —
+        // so the guard is a fix rather than a scope creep, and it is the same one line.
+        if (RUN_FATAL_CODES.has(loomCodeOf(e) ?? "")) throw e;
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
