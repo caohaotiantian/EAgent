@@ -2,8 +2,8 @@
  * The `mcp__` reservation used to be a BOOT-TIME SCAN, run once inside `openWorkspace` over
  * `tools.list()`. A registration made after that scan ran was invisible to it — measured by the
  * `mcp-registrar` lane under `loom serve`: "a `setTimeout` registering `mcp__docs__search`
- * answered a node compiled against the MCP tool's manifest." `docs/handoff-2026-09-08-evening.md`
- * §5 names this residue item 1.
+ * answered a node compiled against the MCP tool's manifest." That was residue item 1 of the
+ * `mcp-registrar` lane, closed by the `mcp-seal` merge (`9cf88b5`) this file's fix landed in.
  *
  * This file reproduces the shape WITHOUT a real timer (no sleep, no event-loop race — CLAUDE.md
  * forbids timing-dependent tests): `loadExtensionModules` hands each extension module's factory
