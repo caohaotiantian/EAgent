@@ -4,33 +4,23 @@ Everything unfinished, self-contained. **Nothing here is a plan** — the roadma
 Sequence, the decisions live in the commit history, and this file is only the list of what is
 still true and still open.
 
-## How to read this, and the four rules that govern edits to it
+## How to read this — four rules
 
-- **Reproduce by RUNNING, not by reading**, including when correcting an entry. *A correction that
-  replaces a false claim with a differently-false one is worse than the original, because it
-  asserts verified accuracy and is believed harder.* Every row below carries the command that
-  settled it; a row you cannot run is a row you must not write.
-- **Name the set a claim covers.** "This is total" cannot be checked; a claim naming its members
-  can. **A count nobody can enumerate is a count nobody checked** — so a section table's number
-  must be countable off the rows beneath it, and where it is not, the table goes rather than the
-  rows. §A.19 is the one row here that admits it fails this test, and it says so.
-- **A self-describing claim has no fixed point.** State the invariant, not the measurement, when
-  the claim is about the artifact containing it. That is why there is no "this file has N items"
-  line anywhere.
-- **Deleting an item is a choice and so is keeping one.** Every row states **what would close it**.
-  A row with no closing condition is a row nobody owns, and it should be deleted with an argument
-  instead of carried.
+- Rule 1 — **Reproduce by RUNNING, not by reading.** Every row carries the command that settles it;
+  a row you cannot run is a row you must not write.
+- Rule 2 — **Name the set a claim covers.** A count nobody can enumerate is a count nobody checked.
+- Rule 3 — **A self-describing claim has no fixed point.** State the invariant, not the
+  measurement, when the claim is about the artifact containing it.
+- Rule 4 — **Every row states what would close it.** A row with no closing condition is a row
+  nobody owns; delete it with an argument instead of carrying it.
 
-`§Z` at the bottom is the register of what was closed 2026-08-25 → 2026-09-02 and must not be
-re-fixed. It is short on purpose: the argument for each closure lives in the commit that made it,
-and the sha is the citation. **The narrative version — what moved, which three published claims
-turned out false, and what is still open with the measurement that refused it — is
-`docs/backlog-close-2026-09-02.md`**, written because `DESIGN.md`'s live Sequence list is now
-empty and an empty roadmap is the moment the remaining work stops being self-describing.
+Convention: a row struck through (`- ~~**A.N …**~~`) is CLOSED and must not be re-fixed. Row ids
+are stable — other files cite them — so a closed row keeps its id rather than being renumbered
+away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — re-measured 2026-09-09 on `dcf54c9`, one command each
+## State — one command each, re-run 2026-09-09 on `45294b4`
 
 | fact | value | command |
 |---|---|---|
@@ -39,2085 +29,590 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 | pinned exports | 540 | `node scripts/check-surface.mjs` |
 | kernel | 10 files pinned, 12 declared seams | `node scripts/check-kernel.mjs` |
 | zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8, of 462 tracked | read every `git ls-files` path; see CLAUDE.md |
+| NUL census | 5 files, 0 invalid UTF-8, of 463 tracked | read every `git ls-files` path; see CLAUDE.md |
 
-**Every lane branch is merged and there are no wave worktrees.** The five wave-1 lanes landed at
-`294e713`, all six wave-2 lanes by `ec2ad88`, `phase1-taint` at `02a5e84`, and the seven lanes of
-the 2026-09-08-night wave at `5fe7614 86193e3 878001c 4bc3ce1 706b88a 9cf88b5 dcf54c9` —
-`git worktree list` prints two rows (`EAgent` on `loom`, `eagent-ref` on `init`) and
-`git status --short` is empty. `docs/handoff-2026-09-09.md` is the current handoff and says what
-each lane did and what it left open.
+The kernel guard also prints a commits-judged count (581 at `45294b4`). It is deliberately not a
+cell above: it moves with every commit, this file's own included — rule 3.
 
-The kernel guard also prints a commits-judged count (575 at `dcf54c9`). It is deliberately not a
-cell above: it moves with every commit, this file's own included, and this file's third rule says
-to state the invariant rather than the measurement when the claim is about the artifact holding it.
+**Every wave lane is merged into `loom`.** `CLAUDE.md`'s Layout lists the merge shas and
+`git merge-base --is-ancestor <sha> loom` is the check per lane — a merge that REPORTS merged is not
+evidence the work arrived (§A.14). `docs/handoff-2026-09-09.md` is the current handoff.
 
-**The kernel row moved 11 → 12 seams for a reason that is not a new declaration.** `706b88a`
-(the `seam-ledger` merge) gave the guard's CENSUS a second arm — `git interpret-trailers --parse`
-on any NON-`feat:` subject — so `fbbdac4`'s `Kernel-seam:` trailer, a real declaration on a merge
-commit that the feat-only path could not see, is counted. Nothing new was declared this wave: of
-the 35 commits, 26 are `fix:`, 2 are `test:` and 7 are the merges themselves, and none of the
-three carries a trailer.
-
-**Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
-wave moved which number. Every one of those paragraphs was true when written and none was re-run,
-which is the failure this file's own second rule names. A number here is a command's output or it
-is not here.
-
-## The 2026-09-02 audit — 207 findings, and where they live
-
-Seventeen read-only lenses over the whole tree, every finding carrying a pasted reproduction, then
-one fresh skeptic per finding instructed to REFUTE it. **207 findings — 24 blocking, 83 major,
-71 minor, 29 opportunity. 118 verified: 94 CONFIRMED, 17 downgraded, 7 REFUTED.** Every blocking
-finding was verified; the 89 unverified are minor/opportunity plus 10 major.
-
-- The record, with what holds and what does not: **`docs/audit-2026-09-02.md`**
-- Where the branches are and what is open: **`docs/handoff-2026-09-08.md`**
-- The full register, per-lens reports and every verdict: `.agent/full-audit-2026-09-02/`
-
-**These findings are NOT copied into the sections below.** A second copy of a dated, reproducible
-fact is the copy that rots — this file's most-repeated finding about itself. The register is the
-list; the sections below remain the older backlog, and where the audit falsified one of their rows
-that row was corrected in place.
-
-## What is still open, by section
-
-**§A0 is the newest and reads first.** What the phase-2-4 merge's three attackers reproduced and
-did not fix, minus what the waves of 2026-09-05 → 09-09 closed (those moved to §Z with their
-shas), plus what those waves found and recorded rather than fixed. Its rows are countable with
-the first grep below using `A0` in place of `[A-Z]`: **17 rows, 9 struck, 8 open** as this file
-now stands. (Run it on this file, not on `dcf54c9` — the six rows the 2026-09-08-night wave added
-arrived with the settlement commit, so `git show dcf54c9:TODO.md` gives 11 and 6.) Two of the
-eight — A0.12 and A0.13 — are what is left of the original fifteen; the other six are that wave's
-own residue.
-
-**EVERY OTHER OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
-`docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
-required to paste a command it had actually run: **14 BUILDABLE** (a command fails at
-`9f81f77`), **13 OPEN-HARD** (blocked on a named thing), **16 REFUSED** (with a measurement),
-**3 STALE** (the row own claim is false). The fourteen are now `DESIGN.md`s live Sequence,
-items 15-28, ordered by this project rule that silent-and-wrong outranks loud-and-missing.
-
-**The verdicts are NOT copied into the rows below.** A per-row verdict here would be a second
-copy of a fact whose first copy is dated and reproducible, and the second copy is the one that
-rots - this file most-repeated finding about itself. What the survey changed IN this file is
-the three false rows, and only those.
-
-
-**Recounted 2026-09-02 by running the grep, not by arithmetic on the previous number** — which is
-the only method that has ever produced a right answer here. **Re-run again when `--otlp` added §H.4 and §A.36, and again when the
-2026-09-02 survey struck A.15: three cells moved** (§H 4 → 5 rows, 3 → 4 open; §A 34 → 35 rows, 19 → 20 open),
-and the struck column did not, because both new rows are open. The member enumeration below is therefore unchanged, which is a fact the greps produced
-rather than one anybody assumed. Every column below comes from one of
-these three commands, and a reader who does not believe a cell should run them rather than argue:
+## Row census — three commands, run on this file
 
 ```bash
-# every row id, in order — §A–§E and §G–§H
-/usr/bin/grep -aoE '^- (~~)?\*\*[A-Z]\.[0-9]+ ' TODO.md | /usr/bin/grep -aoE '[A-Z]\.[0-9]+'
-# the struck subset, which is what "closed" means in this file's convention
-/usr/bin/grep -aoE '^- ~~\*\*[A-Z]\.[0-9]+ '  TODO.md | /usr/bin/grep -aoE '[A-Z]\.[0-9]+'
-# §F is a numbered list and is counted its own way
-/usr/bin/grep -acE '^[0-9]+\. \*\*' TODO.md
+/usr/bin/grep -aoE '^- (~~)?\*\*[A-Z0-9]+\.[0-9]+ ' TODO.md   # every row
+/usr/bin/grep -aoE '^- ~~\*\*[A-Z0-9]+\.[0-9]+ '    TODO.md   # the struck (closed) subset
+/usr/bin/grep -acE '^[0-9]+\. \*\*' TODO.md                   # §F, a numbered list, counted its own way
 ```
 
-**Three columns, because one was the bug.** The old table had a single `rows` number and no rule
-saying whether a struck-through row counted, so it drifted every time a row closed: it said **27**
-for §A against **31** present rows and **25** unstruck ones — a number matching neither reading —
-and **1** for §H against **3**. A closed row is kept on purpose (§Z's header says why), so "rows
-present" and "rows still open" are different facts, and a table that states only their difference
-can be wrong without being falsifiable.
+"Rows present" and "rows still open" are different facts; a table stating only their difference can
+be wrong without being falsifiable, which is why there are three columns.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
+| §A0 | 17 | 9 | 8 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
 | §A | 36 | 21 | 15 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 6 | 4 | 2 | decisions still owed, all of them narrow |
+| §D | 6 | 4 | 2 | decisions still owed, both narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
-| §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
-| §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
+| §F | 19 | — | — | properties to preserve; nothing here is "open" |
+| §G | 7 | 0 | 7 | field-survey work the redesign creates |
 | §H | 5 | 4 | 1 | housekeeping |
 
-The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.1, D.2, D.4, D.6;
-**§H** H.1, H.2, H.3, H.4.
-(**Re-run 2026-09-09**, after the night wave's docs settlement added `D.6`: one cell moved,
-§D 5 → 6 rows and 3 → 4 struck, and "still open" did not, because the new row is answered. Every
-other cell is what the three greps above printed today.)
-(A.34 and A.35 joined this list a commit later than they should have: both were written with the
-`~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
-grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
-convention is `- ~~**A.N · …`, and the column is only checkable if every row obeys it.)
-
-**§A's `rows` column counts 35 LINES against 34 distinct ids, and the extra one is deliberate.**
-A.20 matches the grep twice — the struck row that closed it, and the superseded four-sighting
-record kept beneath it because the *shape* of that record is the lesson. The last recount said
-**9** struck against 12, having named its members and then not re-derived them when A.1, A.14 and
-A.20 were struck; the member list above is what makes that failure visible rather than a
-disagreement between two numbers.
-
-**The §A numbering has two holes and they are not errors.** A.7 and A.9 are absent because both
-closed and moved bodily into §Z, where the argument for each closure is the commit. Ids are never
-reused — §H.2 is the record of what a renumber cost the last time one happened.
+The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
+`docs/audit-2026-09-02.md` and the per-row survey is `docs/backlog-survey-2026-09-02.md`.
 
 ---
 
-## A0 · Reproduced and NOT fixed — the phase-2-4 merge's remainder, and what the two waves recorded
+## A0 · Reproduced and NOT fixed
 
-Three agents attacked `7eaa206..the merge` on 2026-09-03 and recorded fifteen rows here; the two
-waves of 2026-09-05 → 09-08 closed ten of them and half of three more, and every closure is in
-§Z with its sha. What follows is the remainder — each with the command that settles it on
-`8d43127` — plus five rows the waves found and recorded rather than fixed. Where a fix exists on
-an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a closure.
-
-**Re-measured 2026-09-08, after the four reviewed wave-2 branches merged** (`3cfd363`,
-`6b3513b`, `3656d69`, `ec2ad88`). Four more rows closed and are struck in place with their
-merge sha, their argument moved to §Z: §A0.5 (its compile half, which was the remaining one),
-§A0.8, §A0.14 (its loud half, likewise) and §A0.20 — and §A0.16 followed at `02a5e84` (the
-`taint` merge). The one row those merges ADDED, §A0.21,
-closed separately at `ff8fdac` (the `a0-21-take-kind` merge) — see §Z. The struck rows stay
-here rather than being deleted, for the reason §Z's header gives.
-
-**Re-measured again 2026-09-09, after the seven-lane 2026-09-08-night wave merged** (`5fe7614`
-… `dcf54c9`). Three more rows are struck in place with their merge sha: §A0.17 (`86193e3`),
-§A0.18 (`4bc3ce1`) and §A0.19 (`878001c`). §A0.13 is NARROWED and stays open — its row is
-rewritten below rather than struck. **Two rows of the original fifteen are still open: §A0.12
-and §A0.13.** Six rows the night wave found and recorded rather than fixed are added as
-§A0.22–§A0.27, and the wire-contract decision the `plane-inputs` lane took is recorded as §D.6
-rather than here, because it is a decision and not a defect. Counted rather than asserted:
-
-```bash
-/usr/bin/grep -aoE '^- (~~)?\*\*A0\.[0-9]+ ' TODO.md | /usr/bin/grep -aoE 'A0\.[0-9]+'   # 17 rows
-/usr/bin/grep -aoE '^- ~~\*\*A0\.[0-9]+ '    TODO.md | /usr/bin/grep -aoE 'A0\.[0-9]+'   # 9 struck
-```
-
-- ~~**A0.5 · A channel named `toString` still compiles clean.**~~ CLOSED at `3cfd363` (the
-  `wave2-graph` merge), which brought `3fd7ad5` onto `loom`; both halves are now shut and the
-  row is in §Z. The record of what it was: the runtime half — `reduceState`,
-  `foldPartial` and the `__proto__` put in `state/channels.ts` — closed at `29e32b1` (§Z), so
-  the run no longer dies with `E_INTERNAL`; the graph is still accepted:
-  `/usr/bin/grep -a -c GRAPH003_RESERVED_CHANNEL packages/core/src/graph/validate.ts` → `0`.
-  **Fix on `wave2-graph`, unmerged** (`3fd7ad5`): `GRAPH003_RESERVED_CHANNEL`, the set read off
-  `Object.getOwnPropertyNames(Object.prototype)` rather than hand-kept, with the lane's probe
-  `toString channel: ok= true diags= []` → `ok= false diags= ["GRAPH003_RESERVED_CHANNEL"]`.
-  The NODE-id half was a separate row and closed later, at `878001c` — §A0.19.
-- ~~**A0.8 · `#edgesToTake`'s exhaustiveness claim is false.**~~ CLOSED at `6b3513b` (the
-  `wave2-engine` merge), which brought `3622ca4` onto `loom`. The record of what it was: Adding a member to `EdgeKind` and
-  typechecking flags ONE site, `compile.ts:289`; neither `engine.ts` site. `#assertBound` refuses
-  at run time — fail-closed, unflagged at build time.
-  `/usr/bin/grep -a -c 'satisfies never' packages/core/src/run/engine.ts` → `0`.
-  **Fix on `wave2-engine`, unmerged** (`3622ca4`): `e.kind satisfies never` in the `default:`
-  arm; the lane measured `| "probe"` → one error at base, two at head. What the compiler now
-  flags is the KIND SET; which kinds `#edgesToTake` may actually TAKE is §A0.21, and that is a
-  different question.
-- **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every
-  tick.** This one IS caused by the merge's fix round, and is recorded rather than fixed because
-  the cheap fixes are wrong and the right one is a cache-invalidation design. `runClockTick`'s
-  `due` now counts a `leased` task, which reaches `index ??= graphsByHash(ws).index` — the call
-  whose own comment says a tick with nothing due should cost "no compiles at all". A run whose
-  graph hash no longer resolves, or whose leased node is one of the four types with no enforced
-  deadline (`join`, `router`, `human_gate`, `subgraph`), is due on every tick and drives nothing.
-  Measured, 31 published graphs, six consecutive ticks:
-
-      HEAD      tick ms: 5.9, 2.2, 2.0, 1.8, 2.3, 2.2   (one graphsByHash sweep per tick)
-      dbe0528   tick ms: 0.4, 0.2, 0.2, 0.1, 0.2, 0.2
-
-  ~10x per tick, forever, for zero progress, and it scales with WORKSPACE size rather than with
-  the stranded run. ORDINARY half: a tick with no stranded run is unchanged, and a stranded run
-  whose graph does resolve is driven once and finishes.
-  **Two candidate fixes, neither free.** Cache the compiled index across ticks — but the sweep
-  re-reads the workspace on purpose, so this needs an invalidation rule that does not make a
-  republished graph invisible. Or skip a run whose `compiledGraphHash` failed to resolve on an
-  earlier tick — process-local memo, empty after a restart (which is safe: it costs one more
-  compile), but a hash that is unresolvable now resolves later if someone publishes that graph,
-  so the memo needs a way to expire. Restricting the `leased` arm to tasks whose node declares a
-  `timeoutMs` is NOT available: the clock cannot know the node's deadline without the graph,
-  which is the thing being resolved. Untouched by both waves.
-- **A0.13 · The usage floor's dollar residual is ~10×, narrowed from ~80× at `dcf54c9`, and it
-  is not closable by any function of the two numbers a wire reports.** The `=== 1` defeat closed
-  at `49624c0` (§Z): the floor fires when `inputTokens + cacheRead + cacheWrite` cannot account
-  for the estimate within `USAGE_TOLERANCE = 8` (`providers/usage.ts`, the constant chosen off a
-  measured table). The **~80× compounding is closed** at `dcf54c9` (the `usage-floor` merge,
-  `3161506`/`99c659a`): `dearestRateFloor(estimated, cacheCredit) = max(0, floor((estimated -
-  cacheCredit) / USAGE_TOLERANCE))` in `providers/usage.ts`, applied by `anthropic.ts`'s
-  `stream()` input-floor block as a `Math.max` beside the sum floor, so a wire can no longer
-  choose WHICH counter absorbs the floored amount. Driven by the lane on a stub adapter, same
-  wire reply both sides: `inputTokens 0, costUsd 0.00075, cacheReadTokens 2500` before →
-  `inputTokens 2187, costUsd 0.007311, cacheReadTokens 2500` after;
-  `test/providers/usage-per-rate-floor.test.ts` is the pin, five of its nine tests the ordinary
-  half — a real full cache hit, a real cache write, a real partial hit and the no-cache degenerate
-  case, all four byte-identical to before, and a FIFTH that is not: `ORDINARY 5 (NOT unchanged,
-  and pinned as such)` charges $0.007875 where an honest split charges $0.007500, the ~5%
-  over-charge this row's last paragraph names. The ordinary half is four clean rows and a
-  disclosed regression, not five clean ones.
-  **What remains is ~10×**, the raw cacheRead-to-input rate ratio ($0.30 against $3 per million
-  on the row's own price table), and the reason it is open is structural rather than unfinished:
-  the adversary's optimum is `cacheCredit` close to `estimated`, and **a wire claiming a full
-  cache hit reports the identical two numbers as an honest one** — so no function of `estimated`
-  and `cacheCredit` alone can tell them apart, and re-charging the pair would reopen the other
-  direction of this floor (an honest full cache hit priced at the uncached rate), which two
-  earlier rounds already had to pay back once. Closes with a **cap on credited cache tokens at
-  the tools-plus-system prefix the request body actually marks `cache_control` on** — which
-  needs real cached-deployment measurement to parameterise without breaking the honest-hit pins
-  — or with an explicit decision to accept ~10× as inherent. Two smaller carriers ride with it:
-  `dearestRateFloor` assumes `inputTokens` is the dearest rate, so an operator price table
-  pricing cacheWrite below input reopens the compounding on the write dimension (fixing it means
-  threading a price row into `usage.ts`, which has none); and a genuine partial hit with a small
-  honest remainder is over-charged, measured ~5% on one fixture, shrinking to nothing as the
-  remainder clears the floor.
-- ~~**A0.14 · A model with no price row and no dated base still prices 0.**~~ CLOSED at
-  `3656d69` (the `wave2-guards` merge), which brought `cb1df3a`/`ce14397` onto `loom`; both
-  halves are now shut and the row is in §Z. The record of what it was: the silent half closed
-  at `49624c0` (§Z): `claude-sonnet-5-20260101` prices at `claude-sonnet-5`'s row by longest
-  `-`-boundary prefix. The loud half — `my-gateway-model` at $0 — is left to the boot banner,
-  which probes `priceOf(m, {1e6, 1e6}) === 0` (`cli.ts:2747`, the only such probe in `cli.ts` on
-  `8d43127`) into `ws.models.unpriced`, and to `promote-live`'s refusal that reads that list
-  (`test/cli/promote-live.test.ts:507` pins it); pricing at the dearest row was built and removed
-  because it switched both off.
-  `/usr/bin/grep -a -c hasPrice packages/core/src/run/registry.ts` → `0`.
-  The fix, now merged (`cb1df3a`/`ce14397`): `ModelAdapter.hasPrice`, optional, and an unpriced
-  route refusing at the model call — the guard fails closed at the call rather than pricing a
-  route at $0, and `test/cli/guards-lane-unpriced-route-fails-closed.test.ts` is the pin.
-
-- ~~**A0.16 · Three injection paths are live on `loom`, on no register row.**~~ CLOSED at
-  `02a5e84` (the `taint` merge), which brought `phase1-taint` and five fix commits onto `loom`;
-  the argument and the residue are in §Z. The record of what it was:
-  `docs/design-taint-rc6-2026-09-05.md` §4 names them with the graph shape and the three-arm
-  measurement (dirty / page-safe / clean) for each: **`errfan`** — a clean fan whose body reads
-  the page and THROWS iff it says PAY, join `onBranchError:"skip"`, join arms on `!has(parts)`:
-  a failed body writes nothing, so the fold channel is never tainted (`dirty succeeded gates=0
-  charged=1`); **`mutedge5`** — a control-tainted `canMutate` agent grafts `agent→x→charge`;
-  `#applyMutation` consults no taint set (`dirty succeeded gates=0 charged=1`, page-safe `failed
-  E_OUTPUT_MISSING charged=0`); **`errthrow`** — a node reads the page and throws iff PAY onto a
-  catch-all `error` edge; `choiceOf` drops `error` edges so the choice space is empty (`dirty
-  succeeded gates=0 charged=1`). Identical at `a638e7d` and `294e713`. The probes were
-  `probes/rc6/{errfan,mutedge5,errthrow}.test.ts` in the taint lane's scratchpad, importing the
-  `wt-phase1` worktree — `prunable` in `git worktree list` because its `.git` link file is
-  missing, though the directory is still there. Closed by
-  `test/run/taint-failed-commits.test.ts` and `test/run/control-flow-taint.test.ts` on the merged
-  `phase1-taint`: `errfan` and `errthrow` move their dirty arm to `awaiting_gate gates=1
-  charged=0` with both clean arms byte-identical, and `mutedge5` was already refused on `loom` by
-  the dominator rule, byte-identical on all three arms.
-- ~~**A0.17 · `POST /runs` accepts the input the CLI refuses.**~~ CLOSED at `86193e3` (the
-  `plane-inputs` merge), which brought `24b5ee3`..`16da438` onto `loom`; the argument is in §Z.
-  The row closed by the FIRST of the two outcomes it named — the wire is strict now, not
-  permissive-by-decision. The rule moved into `graph/declared-inputs.ts` and both doors call it:
-  `cli.ts`'s `assertDeclaredInputs` is three lines over it (`E_CONFIG_INVALID`), and `POST /runs`
-  calls it after `graphIn`'s 404 and before `engine.submit` (`E_PROVIDER_BAD_REQUEST`, a 400
-  because `err.validation`'s CLASS is what `httpStatusFor` switches on). The disclosure the
-  refusal makes — it names the graph's declared input set to any authenticated credential,
-  creating no run — is accepted for the reason the sibling graph routes already make it. **The
-  door that stays permissive is the delegation one**, and it is §A0.22. The record of what it
-  was: `loom run --input
-  '{"documnet":…}'` refuses `E_CONFIG_INVALID` naming the key and the declared set, with zero
-  `run.submitted` rows. The plane does not: lane P measured `POST /runs {"workflow":
-  "fan-out-join","inputs":{"documnet":"a b"}}` → **202**, a run created, failing downstream
-  `E_CHANNEL_UNDECLARED` classed `E_INTERNAL` — the shape the CLI fix exists to prevent, and
-  against a real provider it has already spent. Kept split on purpose (a typo in argv is not
-  evidence for narrowing a wire contract — lane P's report §8.1); it is an inconsistency all the
-  same. Closes when the plane applies the same declared-inputs check and answers 400 naming the
-  key, or when a decision records that the wire stays permissive.
-- ~~**A0.18 · A flake in `test/server/plane-watch-and-stop.test.ts`.**~~ CLOSED at `4bc3ce1`
-  (the `flake` merge), which brought `5f2f99b`..`83e2950` onto `loom`; the argument is in §Z.
-  It closed by the FIRST of the two outcomes it named — reproduced on demand and the collection
-  made single-render — and the reproduction has no timing dependency at all. **The cause is the
-  test harness's DOM mock, not the console**: the mock element's `innerHTML` had no setter that
-  cleared `children`, so a second `drawControls()` under load appended a second set of controls
-  where a real element's `innerHTML = ""` removes every child node. `console.ts` was never
-  touched and was never the defect. The mock now clears children on `innerHTML = ""`, and the
-  pin forces a second `drawControls()` before the assertion and still gets
-  `"pause,advance,cancel"`. The record of what it was: "THE CONSOLE'S OWN
-  command() STOPS A RUN" (its assertion is at `:935` on `8d43127`) once collected
-  `'pause,advance,cancel,pause,advance,cancel'` against `'pause,advance,cancel'` — one failure in
-  six full-suite runs at `wave2-graph`'s head, none in three at `294e713`, 21/21 in isolation on
-  both. Observation, not attribution: that lane touches nothing in the console. It reads as the
-  test collecting controls from two renders under parallel load. Closes when it is reproduced on
-  demand and the collection made single-render, or when a hundred full runs show nothing.
-- ~~**A0.19 · A NODE id may still be an `Object.prototype` name.**~~ CLOSED at `878001c` (the
-  `node-id` merge), which brought `a86bc1e`..`1ab9508` onto `loom`; the argument is in §Z. It
-  closed by BOTH outcomes it named — a `GRAPH003_RESERVED_NODE_ID` compile refusal, and a
-  recorded argument for the compiler-built maps that need no rule (now in `validate.ts`'s
-  `PROTOTYPE_NAMES` docstring rather than in a gitignored plan). **The mechanism this row named
-  is not the one the fix closes, and that is the lesson worth carrying**: `plans` turned out to
-  be unreachable — every read of `ctx.graph.plans[nodeId]` in `run/engine.ts` and
-  `run/scheduler.ts` is `?.field ?? default`, which degrades a prototype function to the same
-  default an absent plan gives. The REACHABLE defect is one object over, in `validate.ts`
-  itself: `ctx.baselinePostures?.[n.id]` feeds `isLoosening`, which fails closed on a baseline
-  it cannot read as a `Posture`, so a node named `toString` FABRICATES
-  `GRAPH014_OVERSIGHT_LOOSENED` and `compile.ts` escalates it to `E_OVERSIGHT_LOOSENED` — a
-  policy-class refusal for a graph that never reached policy. The record of what it was: `plans`
-  is a plain object, so
-  `plans['valueOf']` is a function — a node nobody declared. Measured by the graph lane at
-  `294e713` and at its head: `node id toString: ok= true []`. The channel rule (§A0.5's compile
-  half) was scoped to channels deliberately; the rule for ids belongs in the same
-  `graph/validate.ts` loop, and the decision is whether `plans` and the projection's per-id maps
-  need the channel treatment. Closes with a compile refusal, or a recorded argument that a
-  compiler-built map is safe.
-- ~~**A0.20 · The mirror-gate asymmetry.**~~ CLOSED at `6b3513b` (the `wave2-engine` merge),
-  which brought `d4115c9` onto `loom` and then held the forward on every verb that reaches it —
-  the child's last advance (`9a0568c`) and its retired-terminal poll (`396767c`) — with both
-  cross-run call sites wrapped so a parent store failure is never the answer to a verb about the
-  child (`946a8c8`). Driven end to end on a real `loom serve`: the mirror was raised 929 ms after
-  the child had finished and self-answered in 2 ms by `executor:subgraph`. **What stays open is
-  the listing, not the door:** `GET /gates` still shows both rows (`server/http.ts`), and the
-  decision on that is unmade. The record of what it was: for a `subgraph` node whose child raises a human gate,
-  the engine raises a mirror on the parent; `GET /gates` lists BOTH rows. Since `8c734ce` +
-  `60ff53d` made the child's row answerable, approving it leaves the parent stranded — lane P's
-  behaviour check (f): child `succeeded`, parent `awaiting_gate` with the mirror `open` through
-  5 s of sweeper ticks and an explicit `advance`; approving the mirror first resolves both. The
-  wrong door is the one the console renders buttons for. `#forwardGateDecision`'s docstring
-  (lane P cites `engine.ts` ~6987 in its own tree) describes a re-raise nobody observed. The gates lane measured it cannot be
-  fixed from `gates.ts` (a broker holds one `RunLog`; the child's journal carries no reverse
-  pointer). **Fix on `wave2-engine`, unmerged** (`d4115c9`): journal-driven, every decided child
-  gate whose parent mirror is open is answered `approve` by `executor:subgraph` from
-  `#advanceSerially`, so the door that decided the child does not matter.
-  `/usr/bin/grep -a -c forwardToParentMirrors packages/core/src/run/engine.ts` → `0` at
-  `8d43127`, non-zero on `loom` now. **The operator note this owes:** a parent's mirror may be
-  decided `approve` by `executor:subgraph` after a human answered the CHILD's gate — including
-  after a human REJECTED it, because the refusal is the child's to handle through its own graph;
-  `mirrorOf` and `decidedBy: "system"` are what tell that row from a human's approval. And the
-  parent-side operator can no longer reject a delegation once any door has decided the child's
-  gate — `cancel` is the remaining parent-side brake.
+- ~~**A0.5 · A channel named `toString` still compiles clean.**~~ CLOSED at `3cfd363`.
+- ~~**A0.8 · `#edgesToTake`'s exhaustiveness claim is false.**~~ CLOSED at `6b3513b`.
+- ~~**A0.14 · A model with no price row and no dated base still prices 0.**~~ CLOSED at `3656d69`.
+- ~~**A0.16 · Three injection paths are live on `loom`, on no register row.**~~ CLOSED at `02a5e84`.
+- ~~**A0.17 · `POST /runs` accepts the input the CLI refuses.**~~ CLOSED at `86193e3`.
+- ~~**A0.18 · A flake in `test/server/plane-watch-and-stop.test.ts`.**~~ CLOSED at `4bc3ce1`.
+- ~~**A0.19 · A NODE id may still be an `Object.prototype` name.**~~ CLOSED at `878001c`.
+- ~~**A0.20 · The mirror-gate asymmetry.**~~ CLOSED at `6b3513b`. `GET /gates` still lists both
+  rows; that listing is the disclosed residue and its decision is unmade.
 - ~~**A0.21 · A router's `take` selects a `compensation` edge and walks past a human gate.**~~
-  CLOSED at `ff8fdac` (the `a0-21-take-kind` merge), which brought `c0a45e1` onto `loom`. The
-  record of what it was: Recorded by the `wave2-graph` lane in its fourth review round and merged knowingly at
-  `3cfd363` rather than fixed, because the mechanism is not in the file that lane owns.
-  `graph/mutate.ts`'s `traversable` drops `compensation` on the claim that "nothing ever
-  traverses one; `#edgesToTake` answers `case 'compensation': break;`" — and that switch is
-  never reached when a producer supplies a `take`. `run/engine.ts`'s take path returns
-  `outcome.take` filtered ONLY for spent `loop` edges; `#strayRoute` and `rule005RouterEdges`
-  check that the edge leaves the node and never its KIND; `#activate` falls through to the
-  generic `task.ready`. The code is dated 2026-08-19 and needs no mutation to reach — it is a
-  hole for AUTHORED graphs too. Reproduced at `8fd58f5`
-  (`node --test /private/tmp/rev5/comp.test.ts` → 1 pass 1 fail):
+  CLOSED at `ff8fdac`.
+- **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every tick.**
+  Repro: `/usr/bin/grep -anc 'graphsByHash(ws).index' packages/core/src/cli.ts` → 4. `runClockTick`'s
+  `due` predicate counts a `leased` task, so a run whose graph hash no longer resolves, or whose
+  leased node is one of the four types with no enforced deadline (`join`, `router`, `human_gate`,
+  `subgraph`), sweeps the whole workspace on every tick and drives nothing — measured at ~10× per
+  tick over 31 published graphs, scaling with WORKSPACE size rather than with the stranded run.
+  **Closes when** the compiled index is cached with an invalidation rule that keeps a republished
+  graph visible, or an unresolvable hash is memoised with an expiry; restricting the `leased` arm to
+  nodes declaring a `timeoutMs` is not available, because the clock cannot read a node's deadline
+  without the graph it is trying to resolve.
+- **A0.13 · The usage floor's dollar residual is ~10×, and no function of the two numbers a wire
+  reports can close it.** Repro:
+  `node --test packages/core/test/providers/usage-per-rate-floor.test.ts` → 9 pass / 0 fail, five
+  named `ORDINARY`. The `=== 1` defeat closed at `49624c0` and the ~80× compounding at
+  `dcf54c9` (`dearestRateFloor` in `providers/usage.ts`, a `Math.max` beside the sum floor). What
+  remains is the raw cacheRead-to-input rate ratio, and it is structural: the adversary's optimum is
+  `cacheCredit` close to `estimated`, and a wire claiming a full cache hit reports the identical two
+  numbers as an honest one. **Closes with** a cap on credited cache tokens at the tools-plus-system
+  prefix the request body actually marks `cache_control` on — which needs real cached-deployment
+  measurement to parameterise without breaking the honest-hit pins — or with an explicit decision to
+  accept ~10× as inherent. Two carriers ride with it: an operator price table pricing cacheWrite
+  below input reopens the compounding on the write dimension (`dearestRateFloor` assumes
+  `inputTokens` is the dearest rate); and a genuine partial hit with a small honest remainder is
+  over-charged, ~5% on one fixture, pinned as `ORDINARY 5 (NOT unchanged)`.
+- **A0.22 · The delegation door still permits the input the plane now refuses.** Repro:
+  `/usr/bin/grep -anc 'Object.hasOwn(child.channels, childCh)' packages/core/src/graph/validate.ts`
+  → 2. `rule016Subgraphs` tests a `subgraph` node's mapping against the child's `channels`, never its
+  `inputs`, and `Engine.#runSubgraph` submits that map — so a parent may hand a child exactly the key
+  `POST /runs` refuses at the wire (§A0.17) and `loom run --input` has refused since `8c734ce`.
+  **Closes when** §D.6 is settled, and not before: keying `rule016Subgraphs` on the child's `inputs`
+  tightens the delegation, while §D.6's option (f) keys all three doors on `channels` and relaxes the
+  plane instead. They are opposite directions and the decision is §D.6's.
+- **A0.23 · The seventh cross-run child touch is unwrapped, and still answers `E_INTERNAL`.** Repro:
+  `/usr/bin/grep -an 'const childP = await this.advance(childRunId)' packages/core/src/run/engine.ts`
+  → one hit, inside `#runSubgraph`. `5fe7614` wrapped five cross-run touches so another run's store
+  failure is never this run's answer; this call is the one it did not, and the lane measured
+  `failAt=3..6 => status=failed err=E_INTERNAL` — not retryable, so one transient read of another
+  run's disk permanently fails the parent's delegation and starts a compensation cascade over the
+  parent's irreversible effects. The honest reason it is open is scope: an earlier draft claimed
+  wrapping it would swallow a cancel, and driving the guard showed that is false. **Closes by**
+  giving this call the same two-way treatment the other five got, with the ordinary half measured.
+- **A0.24 · `gates.ts` keeps its idempotency entry after a non-`E_SEQ_CONFLICT` throw.** Repro:
+  `/usr/bin/grep -an '#idempotency.set\|#idempotency.delete' packages/core/src/run/gates.ts` — the
+  `set` precedes `log.commit` and the catch deletes it again only for `E_SEQ_CONFLICT`; every other
+  throw leaves the entry behind, against the comment two lines above ("NOTHING LANDED, so nothing
+  may be remembered as landed"). Consequence: the cross-run WRITE `#resolveGateAsSystem` retries
+  into a broker answering from the stale entry, so §A0.23's sibling retry is inert for the life of
+  the process. It self-heals on restart, which is why this is a defect and not a member of the
+  journal-authority list. **Closes by** deleting the entry on ANY throw, with a test that a second
+  delivery after a store failure actually commits.
+- **A0.25 · `E_SUBGRAPH_FAILED` carries six raises of two different meanings.** Repro:
+  `/usr/bin/grep -anc 'childUnavailable' packages/core/src/run/engine.ts` → 8, and the set comment
+  above them says so in the file. `childUnavailable` raises the code for the three cross-run touches,
+  so "only the poll can reach it" is no longer true and four of the six raises are retryable. The
+  cost: an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
+  child's disk is broken", and a DETERMINISTIC child-journal alarm (`E_TRACE_INCONSISTENT` out of
+  `projection`) is deferred as if it were a disk. **Closes with** a new `CODES` member for the
+  unreachable-child arm and the `RETRYABLE`/`onlyIf` sets re-derived against it.
+- **A0.26 · The kernel guard's merge coverage is conflict-resolving merges only.** Repro:
+  `git show --name-only --format='' 878001c | wc -l` → 0, while the same command on `fbbdac4` prints
+  seven files. `706b88a` made the CENSUS count a `Kernel-seam:` trailer on any subject via `git
+  interpret-trailers --parse`, which is how `fbbdac4` reached the ledger — but the guard only looks
+  at commits that TOUCH a pinned path, and git prints no paths for a clean merge, so a trailer on a
+  clean merge is still invisible. Two carriers: the REQUIREMENT path still classifies subjects with
+  its own `FEAT` regex rather than with git's parser, so the two paths disagree about what a
+  declaration is; and a sub-`MIN_SEAM_CHARS` trailer on a non-`feat` subject is dropped in silence
+  where the same trailer on a `feat` subject is a violation. **Closes when** the guard reads a
+  merge's effective diff (`git show --name-only -m`, or `--first-parent` against each parent) and
+  the two paths share one definition of a trailer.
+- **A0.27 · The `mcp__` reservation holds at `register()`, and two things beside it do not.** Repro:
+  `/usr/bin/grep -anc 'reservePrefix' packages/core/src/run/registry.ts` → 5. `9cf88b5` moved the
+  reservation into `ToolRegistry.#doRegister`, so a registration made from a timer, a library embedder
+  or any later verb is refused. Two residue items its lane recorded and did not fix.
+  (a) **Overlapping prefixes are not checked** — `reservePrefix` throws only on an EXACT duplicate,
+  so a module that registers one benign tool and then calls `reservePrefix("mcp")` can make the
+  legitimate `mcp__` registration fail with attacker-authored text in an operator-facing
+  `E_CONFIG_INVALID`. Fail-closed denial of service, not an escalation. **Closes by** refusing a
+  `reservePrefix` whose argument is a prefix of, or prefixed by, one already reserved.
+  (b) **Only `name` is snapshotted** — `list()`, `manifests()` and every downstream reader of
+  `.irreversibility` and `.capabilities` re-read the caller's object, so a getter that flips AFTER
+  registration shows the boot banner, the manifest map and the posture computation a different value
+  than the one checked. An `irreversibility` flip is a live oversight-posture bypass. **Closes by**
+  freezing every `ToolDefinition` field at registration, not just the name.
 
-      mutation = addNodes: [ hop, type "router", router{cases:[{when:"has(plan)", take:["m1"]}],
-                             fallbackEdge:"m1"} ]
-                 addEdges: [ {m0: plan->hop seq},
-                             {m1: hop->pay kind "compensation", compensates: "pay"} ]
-         (note.append declares compensation {tool:"note.undo"}, so GRAPH012 is satisfied)
-
-      ok = true    [only GRAPH002_DEAD_END, GRAPH009_UNBOUNDED_NODE — both warnings]
-      status after advance: awaiting_gate
-      final status: failed   ran = ["note.append"]        <- the human REJECTED
-      control (the diff's own rejection control): ran = []
-
-  A second finding rides with it: the branch's `EVERY EDGE KIND THE EXECUTOR CAN TAKE` test
-  builds its compensation case WITHOUT `compensates`, so it stops on
-  `GRAPH012_NO_COMPENSATES` and never reaches a compiling compensation graft — green for the
-  wrong reason, and it should go red with the fix rather than alone.
-  **The lane's recommendation, and the reason this row exists instead of a one-line patch:** fix
-  it in `#edgesToTake`'s `take` path, NOT by adding a sixth bounding sentence to
-  `graph/mutate.ts`. An enumeration maintained in the compiler of behaviour defined in the
-  executor has now been wrong five times out of five — "join edges cannot hide an AND-barrier
-  dominator", "the join node itself was the one hole", "nothing ever traverses a compensation
-  edge" — each correct about the shape its author had seen and wrong about the set. A graph-side
-  patch would make MUT003 refuse the mutation while leaving the engine free to traverse a
-  compensation edge on an authored graph. The engine should answer "which edges can carry
-  control to this node, and what can satisfy a barrier without executing what stands in front of
-  it" rather than have the compiler guess. Two neighbours belong with the same decision: a node
-  whose only inbound edge is `compensation` is seeded `{itself}` by `dominators` while
-  `indexGraph.entryNodes` deliberately does not treat it as an entry (round 3's N2, not
-  reproduced), and a dead `conditional` edge shrinks `before` (round 2's N1, measured through an
-  authored `when:"false"`). Closes with a refusal in `run/engine.ts`, its ordinary half measured,
-  and the vacuous test arm made load-bearing.
-
-**The six rows below are what the 2026-09-08-night wave found and recorded rather than fixed.**
-Each is residue its lane named in its own report and each carries a `file:line` on `dcf54c9` or a
-command. The wire-contract decision the same wave took is §D.6, not here.
-
-- **A0.22 · The delegation door still permits the input the plane now refuses.** `POST /runs`
-  refuses an input channel the graph does not declare (§A0.17, closed at `86193e3`), and `loom
-  run --input` has refused it since `8c734ce` — but a PARENT handing inputs to a child is checked
-  against a different set. `rule016Subgraphs` tests the mapping against the child's
-  `channels`, never its `inputs` (`packages/core/src/graph/validate.ts:3439` and `:3457`, both
-  `if (!Object.hasOwn(child.channels, childCh))`), and `Engine.#runSubgraph` submits that map. So
-  a parent may hand a child exactly the key the plane refuses at the wire. CLAUDE.md names the
-  delegated child run as the standing blind spot; this is one more sighting of it. Two ways to
-  close: key `rule016Subgraphs` on the child's `inputs` for the keys a parent SUPPLIES, or take
-  §D.6's option (f) and key the whole rule — all three doors — on `channels`, which relaxes the
-  plane instead of tightening the delegation. **They are opposite directions and the decision is
-  §D.6's**, so this row closes only after that one is settled.
-
-- **A0.23 · The seventh cross-run child touch is unwrapped, and still answers `E_INTERNAL`.**
-  `5fe7614` (the `engine-cross-run` merge) wrapped five cross-run touches so another run's store
-  failure is never this run's answer; `const childP = await this.advance(childRunId);` at
-  `packages/core/src/run/engine.ts:8174`, inside `#runSubgraph` (which begins at `:7981`), is the
-  one it did not. The lane's probe at `c54b0c2` numbered it reads #3–#6 of one `advance(parent)`
-  and measured `failAt=3..6 => status=failed err=E_INTERNAL` — not retryable, so one transient
-  read of another run's disk permanently fails the parent's delegation and starts a compensation
-  cascade over the parent's irreversible effects. **The honest reason it is open is SCOPE**, and
-  the lane corrected itself on that in `dc969c8`: an earlier draft said wrapping it would swallow
-  a cancel, and driving the guard showed that is false — `cancel` journals `run.cancelled`, so a
-  task re-classed as "come back later" defers into a run that is already over. Closes by giving
-  this call the same two-way treatment the other five got, with the ordinary half measured.
-
-- **A0.24 · `gates.ts` keeps its idempotency entry after a non-`E_SEQ_CONFLICT` throw, which
-  makes §A0.23's sibling retry inert in-process.** `packages/core/src/run/gates.ts:1203` sets
-  `this.#idempotency.set(idemKey, checked.decision.kind)` BEFORE the `log.commit`, and the catch
-  at `:1211` deletes it again only `if (isLoomError(e) && e.code === CODES.E_SEQ_CONFLICT)`;
-  every other throw leaves the entry behind. The comment two lines above states the rule the code
-  then applies to one code only: *"NOTHING LANDED, so nothing may be remembered as landed."* The
-  consequence measured by the `engine-cross-run` lane: the cross-run WRITE it made retryable
-  (`#resolveGateAsSystem`, site D) retries into a broker that now answers from the stale entry, so
-  the retry is inert for the life of the process. It self-heals on restart, which is why this is a
-  defect and not a member of the journal-authority list. Closes by deleting the entry on ANY
-  throw, with a test that a second delivery after a store failure actually commits.
-
-- **A0.25 · `E_SUBGRAPH_FAILED` now carries six raises of two different meanings.** The set
-  comment at `packages/core/src/run/engine.ts:409-430` says so itself, in the file: the code was
-  documented as three raises and *"THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT"* —
-  `childUnavailable` raises it for the three cross-run touches, so *"only the poll can reach it"
-  is no longer true and SIX raises share the code, of which four are retryable.* What membership
-  costs is stated there as a set: an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate
-  "still working" from "the child's disk is broken", and a DETERMINISTIC child-journal alarm
-  (`E_TRACE_INCONSISTENT` out of `projection`) is deferred as if it were a disk. Closes with a new
-  `CODES` member for the unreachable-child arm and the `RETRYABLE`/`onlyIf` sets re-derived
-  against it — which is why the lane that found it did not take it inside its own scope.
-
-- **A0.26 · The kernel guard's new merge coverage is conflict-resolving merges only, and the
-  requirement path still uses the loose regex.** `706b88a` (the `seam-ledger` merge) made the
-  CENSUS count a `Kernel-seam:` trailer on any subject, via `git interpret-trailers --parse`
-  (`scripts/check-kernel.mjs:514`), which is how `fbbdac4` reached the ledger. But the guard only
-  looks at commits that TOUCH a pinned path, and git prints no paths for a clean merge — driven:
-  `git show --name-only --format='' 878001c` prints nothing, while the same command on `fbbdac4`
-  prints seven files. **So a trailer on a clean merge is still invisible**, and the census's
-  coverage of merges must not be stated unqualified. Two smaller carriers: the REQUIREMENT path
-  still classifies subjects with `const FEAT = /^[ \t]*feat(?:ure)?(\([^)]*\))?!?:/i`
-  (`:462`) rather than with git's parser, so the two paths disagree about what a declaration is;
-  and a sub-`MIN_SEAM_CHARS` trailer on a non-`feat` subject is dropped in silence where the same
-  trailer on a `feat` subject is a violation (`:539`). Closes when the guard reads a merge's
-  effective diff (`git show --name-only -m` or `--first-parent` against each parent) rather than
-  its printed path list, and the two paths share one definition of a trailer.
-
-- **A0.27 · The `mcp__` reservation holds at `register()`, and two things beside it do not.**
-  `9cf88b5` (the `mcp-seal` merge) moved the reservation from a one-shot boot scan to
-  `ToolRegistry.#doRegister` (`packages/core/src/run/registry.ts:257` for `reservePrefix`), so a
-  registration made from a timer, a library embedder or any later verb is refused — driven
-  through the binary today, and CLAUDE.md §2 has the refusal it prints. Two residue items its
-  lane recorded and did not fix.
-  (a) **Overlapping prefixes are not checked**: `reservePrefix` throws only on an EXACT duplicate,
-  so a module that registers one benign tool and then calls `reservePrefix("mcp")` itself can make
-  the legitimate `mcp__` registration fail with attacker-authored text in an operator-facing
-  `E_CONFIG_INVALID`. It is a fail-closed denial of service and not an escalation — the real claim
-  still wins, because the loop checks every reserved prefix and not just the first match. Closes by
-  refusing a `reservePrefix` whose argument is a prefix of, or prefixed by, one already reserved.
-  (b) **Only `name` is snapshotted.** `#doRegister` reads `tool.name` into one binding, but
-  `list()`, `manifests()` and every downstream reader of `.irreversibility` and `.capabilities`
-  re-read the caller's object, so a getter that flips AFTER registration can show the boot banner,
-  the compiler's manifest map and the policy engine's posture computation a different value than
-  the one checked. Dispatch still fails closed on a NAME mismatch; an `irreversibility` flip is a
-  live oversight-posture bypass in the same family as the defect that merge closed. Closes by
-  defensive-copying or freezing every `ToolDefinition` field at registration, not just the name.
+---
 
 ## A · Open defects and unguarded behaviour
 
-### The replay-fidelity class — three refusals a replay could not re-derive
+### The replay-fidelity class
 
-This was the sharpest class in the file, because it was the first non-negotiable failing in the one
-place the project sells: *the journal is the only authoritative state.* **A.1 is fixed and the
-three are closed**; the comment that named them, at `run/engine.ts`'s `THE CLASS THAT IS NOW
-CLOSED`, names them still and says what each now reads. A.2 is the class one level out — the
-same blindness about a refusal's TEXT rather than its identity — and is open.
-
-- ~~**A.1 · Three token/cost refusals cannot be re-derived by a replay, all for one reason.**~~
-  **FIXED.** The quantity is an ADAPTER's answer and the journal now carries it: `effect.started.kind`
-  has a seventh member, `quote`, written by `Engine.#quoteEffect` under
-  `effectKey(taskId, "quote", turn)` and served by `ReplayEffects` like every other effect. It
-  records `{estimateUsd, outputCeiling}` — the two answers all three refusals are computed from.
-  The census goes to **9**; the trailer is on the commit that added it.
-  All three are driven in `test/run/replay-fidelity.test.ts`, each with a control that strips the
-  quote rows out of the SAME recording and shows the old answer coming back:
-
-      node tokens 500   LIVE 1041 / REPLAY 1041   (was: REPLAY E_REPLAY_DIVERGENCE)
-      node costUsd      LIVE $0.0010 refused      (was: REPLAY refused nothing at all)
-      run  runTokens    LIVE 1041 / REPLAY 1041   (was: REPLAY reserved 17)
-
-  **The `match: true` half is fixed as well**, because the fix would otherwise be unobservable:
-  `compare()` weighed `status` alone, so two runs that failed for unrelated reasons scored green.
-  It weighs the error code now — `expected failed:E_BUDGET_EXHAUSTED, got failed:E_REPLAY_DIVERGENCE`.
-  A.2's MESSAGE frame is a different item and is untouched.
-  **What is left is confined to OLD journals**, which carry no quote to serve and keep the
-  `ceiling ?? 0` lower bound: they can fail to reproduce a refusal and can never invent one. That
-  residual is pinned in the same file and now ANNOUNCES itself through the code frame.
-
-- ~~**A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**~~
-  **CLOSED by `34a7f14`.** `compare()` gains a `run.message` frame that grades the terminal
-  error's MESSAGE, emitted only when a refusal is in evidence on either side — a completed pair
-  has no sentence to weigh, and a frame that is always green teaches its reader to skip the
-  family. It folds into `match` like every other frame, so a divergence reaches `cli.ts`'s exit
-  code and `evolution/gate.ts`'s `identicalToRecording`: terminal and loud, per §G.3.
-  **THE STANDING OBJECTION WAS TESTED RATHER THAN INHERITED.** `run/replay.ts` argued against a
-  message frame because "a message carries numbers that legitimately differ between a recording
-  and its replay (`spent`, `estimated`, an adapter name)". Driven on the named counter-example —
-  a node budget of 500 tokens — LIVE and REPLAY print byte-identical sentences, because A.1 put
-  the quote effect in the journal and the adapter name moved off the text. The objection was
-  true when written and the commit that made it false never came back to it.
-  **Residual, deliberate and named:** `details` is NOT graded. That is where path-dependent
-  values live by design, so a difference confined to `details` still replays green — which is
-  the case the survey originally reproduced (`adapter: "wrapper"` vs `adapter: null`). The
-  MESSAGE was the half that reaches a human.
-  ORIGINAL TEXT: A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.
-  **The instance is fixed; the class is not.** The provider refusal opened with
-  `model adapter "<name>"` live and `the recorded turn` in replay, because `adapter` is undefined
-  under replay — same code, same status, different text, and `match: true` throughout. The wording
-  is path-independent now and the adapter's name stays on `details.adapter`.
-  **Still open:** `run/replay.ts`'s `compare()` has no message frame, so any OTHER refusal whose
-  text depends on the live path diverges the same way and nothing announces it. **Closes when**
-  `compare()` grades the message, or when a test pins that no refusal's text can vary by path.
-  **Narrowed by A.1's fix**, which is worth saying precisely rather than as progress: `compare()`
-  now grades the error CODE, so a refusal that becomes a DIFFERENT refusal is announced. A refusal
-  that keeps its code and changes its wording still is not.
-
-- ~~**A.3 · Three sites named the wrong set for "a journal with no `provider`".**~~ **FIXED.**
-  All three now say *journals written before `e6d00f2`* rather than *every journal written before
-  this field*. The difference is one real window — between `e6d00f2` and `633e265^` D.7.6's
-  refusal existed while nothing wrote the field, so a journal from that range replays a provider
-  refusal as a SUCCESS with the refused string on the channel. **The behaviour is unchanged and
-  cannot be changed**: the value genuinely is not in those journals. Naming the window was the
-  whole remedy, and it is recorded at `engine.ts`'s three-state table.
-
-- ~~**A.4 · `hermetic`'s third conjunct had no producer in `src/`.**~~ **FIXED.**
-  `Engine.#functionBody` now calls `bodyEntered(taskId, isRealmBounded(body))` at FETCH, and —
-  the half that makes the first mean anything — `resources/functions.ts` carries the realm's brand
-  onto the wrapper it returns, via a `carryRealmBrand` that propagates and cannot mint. Without
-  that second line `isRealmBounded` was true on the `RealmCall` and false on everything the engine
-  holds, so every body would have read as unvouched-for and a term false for everything
-  distinguishes nothing. The census test fired exactly as designed and is kept inverted (one
-  caller, at the fetch site); the `fromStore` patch is gone, replaced by the pair D.9 asked for.
-  **Three existing assertions changed value**, each true only while the term was inert — including
-  the flagship `incident-triage` workflow, which is how we learned it does not exercise the
-  product's own function-loading path.
-
-- ~~**A.5 · Two kernel files stated a set as total and were not.**~~ **FIXED, and one of them
-  was a real hole rather than a wrong sentence.** `run/replay.ts`'s two enumerations named two
-  cases where `compileRealm`'s checks had grown to six; both now state the PROPERTY — *this module
-  did not make the realm, or could not finish vouching for it* — and let `resources/realm.ts` hold
-  the set beside the checks that decide it, which is the only place it can be right.
-  `graph/spec.ts`'s "every authoring scope" was false for `sla.reminders[i]`, and that scope is
-  now guarded. **Why it had stayed open is the part worth keeping:** `reminders` was an anonymous
-  inline type, and `allowed-fields.test.ts` checks each `NESTED_FIELDS` row against the interface
-  it covers — so a row for it would have sat OUTSIDE the drift guard that keeps the others honest.
-  Naming the shape `GateReminderSpec` put it back inside. A false total is expensive; a true one
-  that cannot be checked is not much better.
-
-- **A.6 · A pass-through value with a two-faced `then` getter still crosses the realm boundary,
-  and it is left open deliberately.** The thenable refusal now lives once at the seam in
-  `resources/realm.ts`, covers both loaders, and its
-  `WHAT IT STILL DOES NOT CATCH — TWO MEMBERS` heading enumerates what it does NOT
-  catch as two members rather than one — which matters, because **the `Map` case (member 1) IS
-  caught**, by the canonicalizer refusing a `Map` at all. The survivor is member 2: `rebuild`
-  returns a value as-is whenever its prototype's constructor is not named `Object`, i.e. every
-  class instance. Measured through the hook loader at `callTimeoutMs: 100`, a body returning
-  `new Thing()` whose `Thing.prototype.then` is a getter answering `undefined` on read one and a
-  spinning function on read two: `PASS-THROUGH CROSSED at 1 ms; host proto? false` then
-  `AWAIT resolved at 1945 ms`. The in-context guard took the first face, the host-side check
-  declined to read at all, and `runFilters`' own `await` took the second; `canonicalize(new
-  Thing())` is `{"a":1}`, not a refusal, and would be too late anyway. **No read closes it** —
-  reading `.then` host-side runs the getter on the host thread, which is the hazard the gate
-  exists to avoid, and a counting getter just moves its second face to the `await`. **Closes only
-  by** refusing every non-plain return outright (which deletes the clear canonicalizer message
-  member 1 depends on) **or a process boundary** — the same limit A.10 ends on, and they should be
-  paid for once.
+- ~~**A.1 · Three token/cost refusals cannot be re-derived by a replay.**~~ CLOSED — the `quote`
+  member of `effect.started.kind`, seam trailer `a8d62fb`; `test/run/replay-fidelity.test.ts`.
+- ~~**A.2 · A replay grades no MESSAGE, so a path-dependent refusal diverges in silence.**~~ CLOSED
+  by `34a7f14`. `details` is deliberately not graded.
+- ~~**A.3 · Three sites named the wrong set for "a journal with no `provider`".**~~ CLOSED — all
+  three now name the window (journals written before `e6d00f2`); the behaviour cannot change.
+- ~~**A.4 · `hermetic`'s third conjunct had no producer in `src/`.**~~ CLOSED — `bodyEntered` at
+  FETCH plus `carryRealmBrand` in `resources/functions.ts`.
+- ~~**A.5 · Two kernel files stated a set as total and were not.**~~ CLOSED — both now state the
+  PROPERTY, and `sla.reminders[i]` is named `GateReminderSpec` so it sits inside the drift guard.
+- **A.6 · A pass-through value with a two-faced `then` getter still crosses the realm boundary, and
+  it is left open deliberately.** Repro:
+  `/usr/bin/grep -anc 'WHAT IT STILL DOES NOT CATCH' packages/core/src/resources/realm.ts` → 1, and
+  that heading names the two members. Member 1 (a `Map`) IS caught, by the canonicalizer refusing a
+  `Map` at all; the survivor is member 2 — `rebuild` returns a value as-is whenever its prototype's
+  constructor is not named `Object`, i.e. every class instance. Measured through the hook loader at
+  `callTimeoutMs: 100`: `PASS-THROUGH CROSSED at 1 ms; host proto? false`, then `AWAIT resolved at
+  1945 ms`. **No read closes it** — reading `.then` host-side runs the getter on the host thread,
+  the hazard the gate exists to avoid. **Closes only by** refusing every non-plain return outright
+  (deleting the canonicalizer message member 1 depends on) **or a process boundary** — the same limit
+  A.10 ends on, and they should be paid for once.
 
 ### Oversight, and the places a floor is weaker than it reads
 
-- ~~**A.34 · `Engine.rewind` had no floor.**~~ **DONE 2026-09-01 — the GATED half; the LOUD half is A.35, also done.**
-  `rewind(runId, atSeq, reason, by = SYSTEM_ACTOR("operator"))` defaulted to a system actor and
-  checked it nowhere. Driven, 2026-09-01: `rewind(runId, before, reason)` with no fourth argument
-  at all was accepted and journaled `system:operator`, and over HTTP a plane whose `identify`
-  returned `{kind: "service", subject: "svc:deployer"}` rewound to seq 2 with a **200**, journaled
-  `system:principal:svc:deployer`. So `trigger: "rewind"` was indistinguishable from an automated
-  path.
-  **This was found by testing a decision's PRECONDITION rather than its conclusion**, and it
-  killed the decision: the plan was to let a rewind's undos inherit its authorization
-  (`nodeApproved: true`), on the argument that the operator had already passed the oversight floor
-  at the rewind. They had not. Granting it would have been the automated loosening the
-  non-negotiable forbids, so the undos stay `nodeApproved: false` and an undo whose class demands a
-  human is journaled `failed` with its reason — which is now at least VISIBLE for a delegated run,
-  where it used to be silent.
-  **Done:** `by: HumanActor` with no default, and `by.kind !== "human"` →
-  `E_HUMAN_APPROVAL_REQUIRED` as the FIRST check, `steer`'s shape. **Unconditionally, not only
-  when the rewind has undos to dispatch** — `plannedUndo` is computed after four refusals and a
-  full journal read, so a caller cannot know whether theirs has any until it has already run, and
-  a rule nobody can follow is not a floor. The HTTP route is a 403 for a service token and for an
-  open plane, and the refusal names both ways out (authenticate as a person; `cancel` still works
-  for you). 36 test call sites, 32 of which relied on the default, now name a person.
-  **A.34 and A.35 are both DONE, and what they were the precondition for is §A.8's decision:**
-  the seventh argument to `#invokeTool` in `#compensateOne` — `nodeApproved`, cited by NAME here
-  because every `engine.ts:NNNN` this file carried was stale when re-checked (see §F.18).
-
-- ~~**A.35 · A rewind's authorization is blind.**~~ **DONE 2026-09-01, and the plan it was written
-  from was wrong about its own premise.** The decision is `b90b137`'s fifth — a compensation edge
-  fires on rewind as well as on run failure, so "an operator inspecting history can trigger
-  real-world undo", which must be "loud, gated by the same oversight floor an irreversible action
-  gets, and never silent".
-  **Cited by commit, because A.34 used to call it "§D.5" and that pointer is now wrong**: §D was
-  renumbered to `D.1`–`D.5` and today's D.5 is the graph-scoped-durable-fact question. Same
-  failure `CLAUDE.md` records for the journal-violation enumeration — a pointer into an
-  enumeration is only as good as that enumeration's discipline about being renumbered.
-  **Built:** `planRewind(runId, atSeq, by) -> {steps, dispatch, blocked, attached, planHash}` and
-  `rewind(runId, atSeq, reason, by, {planHash})`, plus `GET /runs/:id/rewind-plan?atSeq=N` beside
-  the existing command route. Both halves need a human; the plan enumerates a run's undoable
-  effects, and gating the act while publishing the reconnaissance is not a floor.
-  **THE ROW'S OWN PREMISE WAS FALSE AND THAT IS THE LESSON.** This row said "`plannedUndo` inside
-  `Engine.rewind` IS the list the operator should see — it names every `tool -> undo` pair the
-  rewind will dispatch". It was not. `plannedUndo` was `planCompensation` over the rewound run's
-  OWN journal; the dispatcher was `#compensate`'s TREE walk, which splices each child run's plan
-  in at the parent's `subgraph.started` seq. Driven on `rewind-through-subgraph`'s delegated leg:
-  `plannedUndo = 0`, its hash the digest of `[]`, and one `pay.refund` dispatched in the CHILD.
-  Wrapping it would have shown an empty plan over a charge about to be reversed and hashed the
-  emptiness. So the walk was extracted (`#planRollback`) and both halves consume it, which makes
-  "the preview is the dispatch list" true by construction rather than by a test that only ever
-  exercises the non-delegated case. **A row that names a variable as the answer has usually not
-  checked which of two computations that variable is.**
-  **AND "BOTH HALVES CONSUME IT" WAS STILL ONE STEP SHORT — the extraction is not the fix, the
-  THREADING is.** As first written, `rewind` called `#planRollback` for the hash check and then
-  `#compensate`, which planned AGAIN from a fresh read; a reviewer disposed the undo tool between
-  the two and the rewind was ACCEPTED, journaling an authorization that asserted
-  `pay.refundable -> pay.refund` while `compensation.recorded` said `not_attempted, names a
-  compensation that is not a registered tool`. The audit artifact was describing a dispatch that
-  did not happen. `rewind` now destructures `{plan, walk}` from ONE call and dispatches that
-  `walk` — `#dispatchRollback(walk, "rewind")` — the one whose digest the operator authorized,
-  pinned by `rewind-plan.test.ts`'s "THE PREVIEW IS THE LIST THAT DISPATCHES", 7/7 at `5ffc223`.
-  **`dispatch` means WILL BE ATTEMPTED, not will run**, and the difference is the whole of §A.8:
-  it counts steps with an `undo` that are not `undispatchable`, so a step policy then refuses is
-  IN the number the operator authorized. A plan that promised "will run" would be false today on
-  every delegated leg.
-  **And the same false premise had already produced a live loosening:** the detached-rewind
-  refusal read `plannedUndo`, so a detached rewind of a fully-delegated run was ACCEPTED, wrote no
-  `compensation.recorded` in any journal, and left the charge standing — "nothing to undo" and "an
-  effect stands and nobody will try" were one answer. It reads the tree walk now and refuses.
-  **The hash does not close a concurrent second rewind and the chain does.** Two rewinds plan from
-  the same journal, so both hashes matched and both dispatched: measured, two
-  `compensation.recorded` rows for one `compensatesSeq`. `rewind` has a per-run chain now, the
-  shape `advance` has carried in `#advancing`; the second caller then re-plans after the
-  first settled its steps and the hash refuses it. **A check at the top of a method that is not
-  serialized end-to-end checks nothing about the second caller.**
-  **What the operator saw is journaled on `operator.command`** — `kind: "rewind.plan"` for what
-  was shown and `kind: "rewind"` for what was authorized, appended AFTER the marker so the rewind
-  cannot suppress its own authorization. No
-  new event type, so no `Kernel-seam:` and the census is still 10: the payload is
-  `{kind: string, args: Record<string, unknown>}`, deliberately open, and `run/projection.ts`
-  folds only `kind: "steer"`. The plan TEXT rides along with the hash because the plan is NOT
-  recomputable from the journal later — it depends on the process's `ToolRegistry` and on which
-  child graphs rehydrate — so a bare hash would certify a list nobody can reproduce.
-  **Two things about the preview row that a first draft got wrong in the same direction — it
-  recorded WHAT and not WHO, and it was idempotent for one caller only.** Its `actor` is now the
-  human who asked, not `SYSTEM_ACTOR`: a route that requires a person precisely because
-  enumerating a run's undoable effects is sensitive, and then does not record which person asked,
-  keeps the half that is not the audit record. And the idempotence compares EVERY prior hash on
-  the log rather than the last row — measured, 25 previews alternating between `atSeq` 1 and 2
-  wrote 25 rows and took the journal from 18 events to 43, because each preview differed from the
-  one immediately before it. **"Idempotent" that holds only while a caller does not change its
-  mind is a cache, not idempotence.**
-  **Residues, named rather than implied.** (1) The chain is `rewind`-against-`rewind` only; a
-  rewind concurrent with an `advance` is still unserialized, and sharing `#advancing` risks a
-  deadlock nothing has evidence for. (2) A DETACHED run whose steps are all BLOCKED still journals
-  nothing — the refusal has no `undo` to catch — though `planRewind` now shows those steps.
-  **A.8 is what is left**: `#compensateOne`'s `nodeApproved` may now be *argued* for
-  `trigger === "rewind"`, because the operator has passed a floor against the specific undos —
-  and A.8's fixture, which this row's first draft said was still missing, exists as a side effect
-  of the preview work. The decision is the whole of what is open.
-
+- ~~**A.34 · `Engine.rewind` had no floor.**~~ CLOSED — `by: HumanActor` with no default and
+  `E_HUMAN_APPROVAL_REQUIRED` as the first check, unconditionally; the route is a 403 for a service
+  token and for an open plane.
+- ~~**A.35 · A rewind's authorization is blind.**~~ CLOSED (seam `52da0e8`) — `planRewind` +
+  `GET /runs/:id/rewind-plan`, both halves needing a human, preview and dispatch sharing ONE
+  `#planRollback` walk, and a per-run chain serialising concurrent rewinds. `rewind-plan.test.ts`.
 - ~~**A.8 · The compensation dispatch's `nodeApproved: false` is load-bearing and nothing tests
-  it.**~~ **DECIDED AND BUILT 2026-09-02: `nodeApproved: trigger === "rewind"`.**
-  The maintainer's answer, with the argument: a rewind's operator is a verified human (A.34) who
-  was SHOWN this exact `tool -> undo` pair and bound it with a hash the rewind re-checks (A.35), so
-  the approval is a floor against THESE UNDOS rather than against the verb — which is precisely
-  what `#compensateOne`'s old objection ("a rollback is not a human's yes to anything") was true
-  about before A.35 existed. A `run_failed` rollback keeps `false`: nothing human authorized a
-  run's own failure, and an automated path may not approve itself.
-  The fixture caught the change in both directions, which is why it was built first — the one
-  character turned two tests red across two files, and both now assert the money comes back.
-  **RESIDUE CLOSED 2026-09-02, and the claim was true.** The row said an edit dropping the
-  condition — leaving an unconditional `true` — would keep every test green while turning a run's
-  own failure into a path that approves its own irreversible undos. That had been asserted on a
-  READ; the close wave said so explicitly, having been unable to run it. Run now: replacing
-  `trigger === "rewind"` with `true` left the whole tree at **2776 pass / 0 fail**. The diagnosis
-  was exact — every undo in `compensation-fires.test.ts` is a `reversible_write`, so none reaches
-  the gate and all of them read `compensated` either way.
-  The fixture the row specified now exists in the same file ("a run's own failure does not approve
-  an undo that needs a human"): `db.insert` compensates with `db.purge`, which is itself
-  `irreversible` — the shape `GRAPH012_COMPENSATION_VISIBLE` warns about rather than refuses, so
-  the graph is legal and the question is what the runtime does. It asserts the write happened, the
-  rollback was attempted with `trigger: "run_failed"`, the outcome is `failed`, `world.purged` is
-  empty, and the refusal reached the JOURNAL as a `policy.decided` deny saying a human was needed
-  — not merely a string handed back to a caller. Mutation-checked in both directions: the
-  unconditional `true` now fails it with "a run's own failure approved an irreversible undo".
-
-
-- **A.10 · An async body cannot be bounded by any deadline, so it is refused.** `vm`'s timeout
-  covers synchronous execution only. The refusal is correct and is stated once at the seam
-  (`realm.ts`'s `ASYNC_RULE`). **Closes when** there is a process boundary to run one in — which
-  is the same prerequisite as `node:vm is not a sandbox` (§F.10), and should be built once for
-  both.
-
-- **A.11 · A 429 arriving after a non-idempotent `effect.started` with NO `effect.completed`
-  refuses both a retry and a deferral.** The world may already have changed and the journal
-  cannot say. This is the one row of the rate-limit table that stays red and it is deliberate —
-  *refusing is always allowed.* **Closes when** the journal can distinguish "the effect ran" from
-  "the effect may have run", which is a different item from this one and probably A.1's seam.
-
-- **A.12 · A deferral counts toward E4's consecutive-failure streak.** `#recordEvidence` runs
-  before the retry decision, so a long rate-limit outage escalates a node's posture sooner than
-  it used to. **Left alone deliberately: not counting it would be LOOSENING oversight.** Recorded
-  so the next reader does not "fix" it. **Closes only** if somebody argues that a provider being
-  busy is evidence about the node — and that argument has to be made, not assumed.
+  it.**~~ CLOSED at `552d999` — `nodeApproved: trigger === "rewind"`, with the fixture that goes red
+  in both directions in `compensation-fires.test.ts`.
+- **A.10 · An async body cannot be bounded by any deadline, so it is refused.** Repro:
+  `/usr/bin/grep -anc 'ASYNC_RULE' packages/core/src/resources/realm.ts` → 7 — the refusal is stated
+  once at the seam. `vm`'s timeout covers synchronous execution only, so the refusal is correct.
+  **Closes when** there is a process boundary to run one in — the same prerequisite as §F.10, and it
+  should be built once for both.
+- **A.11 · A 429 arriving after a non-idempotent `effect.started` with NO `effect.completed` refuses
+  both a retry and a deferral.** The world may already have changed and the journal cannot say. The
+  one row of the rate-limit table that stays red, deliberately — *refusing is always allowed.*
+  **Closes when** the journal can distinguish "the effect ran" from "the effect may have run", which
+  is a different item and probably A.1's seam.
+- **A.12 · A deferral counts toward E4's consecutive-failure streak.** `#recordEvidence` runs before
+  the retry decision, so a long rate-limit outage escalates a node's posture sooner than it used to.
+  **Left alone deliberately: not counting it would be LOOSENING oversight.** Recorded so the next
+  reader does not "fix" it. **Closes only** if somebody argues that a provider being busy is evidence
+  about the node — and that argument has to be made, not assumed.
 
 ### Bounds and backpressure
 
-- ~~**A.13 · `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s**, so a wide
-  fan-out of rate-limited tasks can exhaust the CLI's patience.~~ **CLOSED by `96a03bf`, on the
-  condition this row set: the CLI now waits on a JOURNAL PREDICATE rather than a wait count.**
-  `MAX_BACKOFF_WAITS` is deleted. `driveToRest` returns when the run reaches rest, and its only
-  backstop fires on a run that is NOT MOVING — `seq` unchanged across `MAX_STALLED_ADVANCES`
-  advances — because `seq` moves iff something durable was written, for every decision the
-  engine takes. A run that IS moving now runs to the bounds its author declared, however long
-  that is; that is the trade, and `driveToRest`'s docstring states it rather than implying the
-  backstop covers both cases (an earlier draft of that paragraph claimed it did).
-
-- ~~**A.14 · `run.submitted.inputs` is the last inline copy of a payload.**~~ **CLOSED**
-  (`6d830d7`, `eba2a63`). The stated blocker — "`submit` cannot reach a payload store" — was
-  false: the store is `Engine`'s own field, and what looked like an access problem was an ORDER
-  one. `run.submitted.external` now names which inputs left the journal, and the trajectory fold
-  puts them back as HANDLES rather than dropping them, which matters for a reason that is not
-  obvious: `defaultBucket` digests `shapeOf(inputs)`, so an input silently missing from that map
-  would change a run's COHORT — two runs of one workflow would bucket apart on nothing but
-  whether a document crossed 64 KiB.
-  **HOW THIS NEARLY DID NOT LAND, which is the durable part.** The lane renamed its own branch,
-  so the orchestrator's merge-by-expected-name took an earlier state and reported success. It was
-  found only by auditing `git worktree list` at cleanup, three waves later. **A merge that
-  reports MERGED is not evidence the work arrived**; `git merge-base --is-ancestor <commit> loom`
-  is, and it is one command per lane.
-
-- ~~**A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual** — a run past 10,000 reached by no lap, with
-  `RunClockTick.truncated` the only reason anyone knows.~~ **CLOSED, AND THE ROW WAS THE LAST
-  THING STILL SAYING OTHERWISE.** It carried its own closure in prose while its id did not obey
-  this file's struck-row convention (`- ~~**A.N`), so every recount since has counted it open —
-  and it nested a second `~~` inside the first, which is why no reader noticed. **Same defect
-  A.34 and A.35 had**, recorded beside them, and it survived that recount because the fix was
-  applied to those two rows rather than to the way rows are checked. Re-run 2026-09-02:
-  `node --test packages/core/test/deployment/run-clock-window.test.ts` → 6 pass, 0 fail, and
-  `RUN_CLOCK_SCAN_CEILING` has no declaration left in `src/`. `StateStore.listRuns`
-  grew `RunFilter.after` — a keyset cursor, exclusive, refusing a cursor its own filter does not
-  admit — with four conformance cases behind it over both backends. `runClockTick` traverses in
-  pages of `limit` instead of indexing into a capped array, so no run is out of reach at any N;
-  `RUN_CLOCK_SCAN_CEILING`, `truncated`, `runClockWindow` and the ceiling banner are deleted, and
-  `run-clock-window.test.ts`'s pin of the two unreachable runs is now its opposite. The cost is
-  named rather than hidden: a tick reads `N` `run_head` rows where it read `min(N, 10 000)`, and
-  the fold budget is untouched at `limit`.
-
-  **AND THE TRAVERSAL NOW REFUSES A STORE THAT WILL NOT TERMINATE IT.** Deleting the ceiling
-  moved the loop's exit condition entirely into `StateStore` — every break is a property of the
-  page — so a backend that accepts `after` and ignores it returns the same full page forever.
-  Both shipped backends conform and `test/journal/conformance.ts` pins that, but `StateStore` is
-  an extension point, and the stall was the worst possible shape: `startRunClock`'s `running`
-  latch stays true, so the clock stops advancing runs AND its failure line never prints, because
-  that line is on a rejection path and the promise never settles. `runClockTick` now throws
-  `E_CONFIG_INVALID` the first time a page boundary repeats — decidable with no false positive,
-  since an exclusive cursor over a strict order can never hand back a boundary already taken.
-  Pinned by `run-clock-window.test.ts`'s sixth case.
-
-  **THE HALF OF THIS ROW THAT WAS WRONG, and finding out is what building it bought.** It said two
-  planes duplicating one window "want the same cursor". They do not, and no cursor could have
-  served them: dividing one listing between two processes needs a fact that spans runs, and
-  `journal/store.ts`'s header is the standing argument for why this system has nowhere to keep
-  one. That half is **§E.2's coordinator** and nothing smaller. The duplication stays correct and
-  wasteful — every write compare-and-swaps on its seq, so the loser writes nothing.
-
-- ~~**A.16 · What else is process-local and unreconstructable?**~~ **CLOSED — the sweep is done
-  and the set is named in `cli.ts`.** Ten long-lived mutable
-  producers, each classified above `runDispatcher` with what reads it and what a restart costs;
-  the set was closed by a census of every module-level binding (`workspaceOrdinal` is the only
-  mutable one of thirty-seven) plus every container construction that outlives its call. **Nine
-  lose only work.** The tenth, `planeWorkerId`'s counter, loses a bounded WAIT — §A.17.
-  **What the sweep found that a re-fold does not repair, and it is not a container at all:** a
-  plane that dies between `task.leased` and `task.committed` leaves that task `leased` forever,
-  so `runClockTick`'s `due` predicate never offers the run again. Measured — in view, never
-  driven, with a control — in `test/deployment/run-clock-survives-restart.test.ts`. Widening the
-  predicate would not help, because `InProcessScheduler.eligible` returns `ready` tasks only;
-  it is a cost of **§B.1** and is recorded there.
-
-- ~~**A.17 · A plane that RESTARTS cannot reclaim its own pre-restart leases.**~~ **CLOSED —
-  measured, and the number is written at `planeWorkerId`.** Driven against
-  `LeasedScheduler.select` with `leaseMs` 30,000: a restarted plane's wait is **exactly one
-  `leaseMs`** (first eligible at `at + leaseMs + 1`, the boundary being inclusive-live), it
-  applies **only** to tasks that are `ready` while still carrying a lease, and it is **zero** for
-  a task that was genuinely `leased` — `reclaimable` expires every holder including the one that
-  took it, so there was no head start to lose. Less in practice: the residual is
-  `max(0, leaseMs - downtime)`. **Accepted rather than fixed**, because no identity does better:
-  a name stable across a restart that still separates two live planes on one host is not
-  derivable from `hostname:pid`, and not from the journal either — nothing journals a plane
-  starting or stopping, so a fold cannot tell "A restarted" from "B booted beside A". Anything
-  stronger is a coordinator, and D.2 is single machine / single tenant. Pinned by
-  `test/deployment/two-planes.test.ts`, which goes red if the identity is made stable — that
-  direction re-opens the double-execution defect the identity fix closed.
+- ~~**A.13 · `loom run`'s `MAX_BACKOFF_WAITS` is 64 and a deferral can be up to 60 s.**~~ CLOSED by
+  `96a03bf` — the CLI waits on a journal predicate (`seq` not moving) rather than a wait count.
+- ~~**A.14 · `run.submitted.inputs` is the last inline copy of a payload.**~~ CLOSED (`6d830d7`,
+  `eba2a63`) — `run.submitted.external` names which inputs left the journal and the trajectory fold
+  puts them back as handles, so `defaultBucket` cannot split a cohort on a 64 KiB threshold.
+- ~~**A.15 · `RUN_CLOCK_SCAN_CEILING`'s residual.**~~ CLOSED (seam `3762a0e`) — `RunFilter.after`
+  and a paged `runClockTick`, which throws `E_CONFIG_INVALID` the first time a page boundary repeats.
+  The constant has no declaration left in `src/` — its two mentions are comments. `run-clock-window.test.ts`.
+- ~~**A.16 · Process-local and unreconstructable state.**~~ CLOSED — the set of ten is named in
+  `cli.ts`; nine lose only work, the tenth is A.17.
+- ~~**A.17 · A plane that RESTARTS cannot reclaim its own pre-restart leases.**~~ CLOSED — measured
+  at exactly one `leaseMs` and accepted, because no identity does better under §D.2's single-machine
+  answer. `test/deployment/two-planes.test.ts`.
 
 ### Boundaries that are unexamined rather than broken
 
-- ~~**A.18 · A branch choice made from untrusted content raises nothing.**~~ **CLOSED by
-  `b2f4002` and the round that followed it.** Control taint is folded at the deciding commit:
-  the CONTROL REGION is `reachable(edges taken) \ reachable(the arms it could have taken
-  instead)`, and `PolicyEngine` reads it as escalation evidence that a human ceiling of `on`
-  cannot clamp. It is not a constant gate — the region ends where the branches rejoin, is empty
-  for a node whose arms lead to the same place, and E8 clamps hard-to-undo actions only, so a
-  region full of reads costs nothing.
-  **THE GUARD SHIPPED WITH FOUR BYPASSES AND A REVIEWER FOUND THEM, which is the part worth
-  keeping.** It was keyed on `node.type === "router"`, and a router is not the only way this
-  engine chooses a branch from channel data: a `conditional` edge's `when` is evaluated for
-  every non-router source, a `loop` edge's `until` likewise, and a `function`/`evaluator` body
-  can return a `take` outright. Each was DRIVEN with the router deleted and each charged
-  unwatched. Separately, the alternatives walk followed `loop` edges — which run BACKWARD — so
-  one loop edge on the arm the router did NOT take swallowed the router, the taken arm and the
-  irreversible node, emptying the region and switching the guard off in silence.
-  It is now keyed on the CHOICE rather than the node type, and the covered set is NAMED at
-  `choiceOf` — four mechanisms in, five out with a reason each. Ten tests, six mutations, each
-  caught by exactly one.
-  ORIGINAL TEXT: A branch choice made from untrusted content raises nothing.** Bounded twice — a router
-  is confined to edges the author declared, and every target re-decides at full strictness — so it
-  is a boundary rather than a hole, but an unexamined one. **Closes when** somebody drives a
-  hostile-content router and either finds the escape or writes down what the two bounds prove.
-
-- **A.19 · CORRECTED 2026-09-02 BY RUNNING IT: the one runnable claim in this row is FALSE, and
-  the row's own escape hatch is now the close.** It said three files each carry a private array
-  guard. There are **two** — `telemetry/spans.ts`'s `isList` and `run/delivery.ts`'s
-  `isArrayValue`. `security/redact.ts` defines neither: a grep for either name over that file
-  returns nothing, and its four `Array.isArray` sites are ordinary. **The number came from
-  `resources/realm.ts`'s own docstring**, which names the same three files, so the stale claim
-  had two homes and this row was the copy. That sentence is corrected in the same commit.
-
-  **The headline is unfalsifiable as written, and that is the finding rather than a detail.**
-  "~25 files" names no predicate, so it cannot be re-derived: `/usr/bin/grep -arl 'Array\.isArray'
-  packages/core/src | wc -l` gives **31** files and 250 occurrences, which is a different set
-  measured a different way and is evidence neither for nor against 25. This file's second rule —
-  *name the set a claim covers* — refuses a row shaped like this, and the row said so itself.
-  **Closes by deletion with the argument above, OR by naming the predicate** (which read counts
-  as a partial read of an untrusted value?) and re-deriving the set from it. Until one of those
-  happens it is a row nobody can check, which is the thing it warns about.
-
-  ORIGINAL TEXT, kept because the shape of the error is the lesson: Partial reads of untrusted values remain in "~25 files", and that count fails this
-  file's own §F.8.** A revoked `Proxy` throws on `Array.isArray`; three files were swept, the
-  rest were not, and there are now three private copies of the same guard under three different
-  names. **The number is not enumerable as stated and nobody has re-derived it.** **Closes when**
-  it is re-derived against a named scope (which files, which predicate) — or dropped with an
-  argument. Keeping it in its present shape past the next re-check is the wrong choice.
-
-- ~~**A.20 · A rare suite flake: four sightings, never reproduced.**~~ **CLOSED, 2026-09-01. The
-  cause is a 0.28–0.32 ms window in which `stop()` was not a stop but a KILL.** `serve` installs
-  its SIGINT handler in `serveUntilInterrupt`, which it calls *after* `announce` returns; until
-  then SIGINT has its DEFAULT disposition and the kernel terminates the child where it stands. The
-  harness returned from `serving()` on the last STDOUT banner line, which is inside that window, so
-  a `stop()` landing in it killed the child mid-banner and every stderr line `announce` had not yet
-  written was never written at all.
-
-  **Measured, not argued.** An external `--import` hook (no source edit) timestamping each banner
-  write and the first `process.on("SIGINT", …)`, ten boots: `  models:` at *t*, `! CALLBACK ROUTE
-  OPEN` at *t*+0.15 ms, `! NO CALLBACK BASE URL` at *t*+0.17 ms, handler installed at *t*+0.28 ms
-  (min 0.28, median 0.31, max 0.32). **Held still** — the same hook busy-waiting 60 ms right after
-  `! CALLBACK ROUTE OPEN`, which is the OS deschedule made visible rather than a change to the
-  program — the fifth sighting reproduces 10/10, exactly as reported: `code=null signal=SIGINT`,
-  stderr holding every line through `CALLBACK ROUTE OPEN` and never `NO CALLBACK BASE URL`. That
-  is why five sightings never reproduced and why 144 boots under 12-way load are green: the window
-  is not unlikely, it is SHORT.
-
-  **The other hypothesis was ELIMINATED, not assumed away.** "`close` can fire before stderr has
-  drained": 30 children writing 4 MB of stderr each through a parent whose loop is deliberately
-  starved so the pipe backs up — `close` fired on a truncated buffer 0/30 times. `close` means
-  drained. The truncation is entirely on the CHILD's side of the pipe. (A child that calls
-  `process.exit()` with a backed-up pipe *does* lose the queue — 30/30 — which is a real hazard
-  and is not this one: every banner write flushed synchronously, 0 queued across 10 boots.)
-
-  **The fix is `harness.ts`'s `awaitStoppable`, and it is a proof rather than a delay.** In
-  `cli.ts`'s `serve`, `announce(…)` and `process.on("SIGINT", onSigint)` run in ONE synchronous
-  stretch — the listener goes on inside a `new Promise` executor, and there is no `await` between
-  them — so the child's event loop cannot turn between the last banner byte and the handler. One
-  ANSWERED `/health` round trip is therefore evidence the handler exists, by construction. That
-  proof rests on another file's control flow, so `stopVerdict` is the fail-closed net under it:
-  `close`'s second argument is the only place a signal death is visible and `stop()` returned only
-  the first, unread, which is why five sightings surfaced as "this line is missing" hundreds of
-  lines from the cause. It now refuses by name. Tests: the two A.20 cases in
-  `test/deployment/boot-banner.test.ts` (hand-driven, for the reason that file already argues —
-  a 0.3 ms window is not something a real child can be asked about), plus the exit code asserted
-  at the sighting's own call site in `cli/cli.test.ts`.
-
-  The superseded entry, kept because the *shape* of the four-sighting record is the lesson — a
-  helper invariant was repaired, the flake was declared unexplained, and the unrepaired half was
-  in the other stream:
-
-- **A.20 (superseded) · A rare suite flake: four sightings, never reproduced.** The last one was captured — a
-  child process's stderr read as a prefix — and `5ebad55` fixed the *decidable* half: both spawn
-  helpers waited for `"  clock:"` calling it "the LAST stdout line", and `announce` writes
-  `  models:` after it, so `serving` returned with 60 bytes still in flight on ten of ten boots.
-  That commit explicitly declines to claim the sightings: ten loops under sixteen CPU burners are
-  10/10 green before and after. **Closes when** a sighting is reproduced. Until then the honest
-  statement is that a helper invariant was repaired and the flake is unexplained.
-
-  **FIFTH SIGHTING, 2026-09-01, and it is the first one caught with its assertion.** In a full
-  `npm run check`, `cli.test.ts`'s "`loom serve` SAYS which perimeter it has, including the second
-  hole" failed on `assert.match(s.err, /NO CALLBACK BASE URL/)`. Not reproducible: that suite alone
-  is 35/35, and three consecutive full runs afterwards are 2728/2728. Driving the same workspace
-  through the binary by hand prints the line, so the banner is not conditional on anything the test
-  varies — what differed was that ~2,700 tests were spawning children in parallel around it.
-  **What this sighting adds, and it is the reason to write it down rather than re-run and move on:**
-  the failing assertion is on `s.err` AFTER `await s.stop()`, which resolves on `close` — the event
-  that fires once every stdio pipe has drained. So either that promise can resolve before stderr is
-  drained, or the child was killed before it wrote. Both are testable, and neither was on the list
-  of causes `5ebad55` considered; it repaired the STDOUT wait, and every sighting since has been on
-  STDERR.
+- ~~**A.18 · A branch choice made from untrusted content raises nothing.**~~ CLOSED by `b2f4002` —
+  control taint folded at the deciding commit, keyed on the CHOICE rather than on `node.type` after a
+  reviewer drove four bypasses; the covered set is named at `choiceOf`.
+- **A.19 · "Partial reads of untrusted values remain in ~25 files" names no predicate, so it cannot
+  be re-derived.** Repro: `/usr/bin/grep -arl 'Array\.isArray' packages/core/src | wc -l` → 34 today
+  — a different set measured a different way, evidence neither for nor against 25. The row's one
+  runnable claim was corrected 2026-09-02: of the three files `resources/realm.ts`'s docstring names
+  as each carrying a private array guard, only two do — `telemetry/spans.ts`'s `isList` and
+  `run/delivery.ts`'s `isArrayValue`; `security/redact.ts` defines neither
+  (`/usr/bin/grep -anc 'isList\|isArrayValue' packages/core/src/security/redact.ts` → 0), and its
+  four `Array.isArray` sites are ordinary. **Closes by deletion with that argument, OR by naming the predicate** (which read
+  counts as a partial read of an untrusted value?) and re-deriving the set from it. Until one of
+  those happens it is a row nobody can check, which is the thing it warns about.
+- ~~**A.20 · A rare suite flake: four sightings, never reproduced.**~~ CLOSED — a 0.28–0.32 ms
+  window between `announce`'s last banner line and `serveUntilInterrupt` installing the SIGINT
+  handler, in which `stop()` was a KILL. `harness.ts`'s `awaitStoppable` proves the handler exists by
+  one answered `/health`; `stopVerdict` refuses a signal death by name.
+  `test/deployment/boot-banner.test.ts`.
+- **A.20 (superseded) · the four-sighting record.** No separate work: superseded by the struck A.20
+  above, and kept only because the id is cited. Repro and closing condition are that row's.
 
 ### Guards over states nobody has constructed
 
 - **A.21 · `suite freeze`'s unresolved-gate exclusion is a guard over a state nobody has
-  constructed.** A run must be `succeeded` AND `delivered` to reach that line, and `gateShapeOf`
-  counts a gate as unresolved only when its folded state is neither `decided` nor `cancelled`.
-  Measured, and the test says so in its own prose (`test/cli/suite-freeze.test.ts`, the case
-  "every frozen case carries the safety invariant"): mutating the exclusion away leaves the suite
-  9/9. **The comment that cited "TODO.md §A0" now cites this row by number**, along with the twelve
-  other citations the renumber broke — see §H.2. Two possibilities wanting different answers: the state is unreachable for an eligible run
-  (delete it and say why), or it is reachable by a path nobody has found (build the fixture).
-  **Closes when** somebody decides which, by
-  construction rather than by argument. A `gate.timeout{fail}` leaves a gate `expired` and fails
-  the run, and an `open` gate suspends it, both excluded upstream — which is the argument for
-  "unreachable" and is not the same as having shown it.
-
-- ~~**A.22 · `loom score`'s `! N run(s) folded without their graph` line is a backstop with no
-  end-to-end test.**~~ **CLOSED by `fabc360` — the branch is reachable, and its message was
-  wrong.** The route was the one
-  stated: a peer that reached the cohort key through `graph.mutated` while its spec is looked up
-  by `run.submitted`'s hash. Driven, not argued — `compileMutation` builds a successor as
-  `{...spec, nodes: [...nodes, ...added]}`, so a graph that is a PREFIX of another compiles to
-  the other's hash exactly (`sha256:dd019089…` + one node = `sha256:bf1f5820…`), and a run of the
-  unpublished parent joins the published child's cohort. The fixture is in
-  `test/cli/evolution-score.test.ts`, and on its first firing it caught the note printing the
-  FOLDED hash — the successor, which is the judged run's own published graph — under "publish
-  those graphs". `Trajectory.authoredGraphHash` is the repair.
+  constructed.** Repro: mutate the exclusion away and run
+  `node --test packages/core/test/cli/suite-freeze.test.ts` → 9/9 still green (the case "every frozen
+  case carries the safety invariant" says so in its own prose). A run must be `succeeded` AND
+  `delivered` to reach that line, and `gateShapeOf` counts a gate unresolved only when its folded
+  state is neither `decided` nor `cancelled`. Two possibilities wanting different answers: the state
+  is unreachable for an eligible run (delete it and say why), or it is reachable by a path nobody has
+  found (build the fixture). **Closes when** somebody decides which, by construction rather than by
+  argument.
+- ~~**A.22 · `loom score`'s `! N run(s) folded without their graph` line has no end-to-end test.**~~
+  CLOSED by `fabc360` — the branch is reachable (a prefix graph compiles to its successor's hash) and
+  its message named the wrong hash; `Trajectory.authoredGraphHash` is the repair.
 
 ### The self-improvement loop — what it still cannot see
 
-- ~~**A.23 · HALF CLOSED. The `maxTurns` shape is refused; the `policy.budget` one is not.**~~
-  **CLOSED by `276e05c`, and the ROW’S STATED BLOCKER TURNED OUT NOT TO BIND.** It said the
-  narrower refusal is "not expressible either, because the recording’s SPEC is not in the journal
-  (A.24)". A.24 is real and it does not bind AT THIS DOOR: `promote --suite` compiles a
-  `--baseline` and a candidate and hands both to `runEvalSuite`, so both specs are already in
-  hand. `EvalReport.budgets` projects each graph’s stated ceilings by scope, and the thirteenth
-  check `11-budget-exercised` refuses a candidate that MOVED a ceiling the replayed corpus never
-  crossed — the unearned certificate. A replayed suite makes no provider calls, so it spends the
-  RECORDING’s money; a ceiling it does cross fails the case on the existing `unservedEffects`
-  reason instead, which is why there is no evidence branch. **cli.ts needed no patch.**
-  **THE NAIVE ANSWER THIS ROW REFUSED IS STILL REFUSED**, and the two sets are named at the check:
-  a candidate whose budgets EQUAL the baseline’s passes however many it declares — `skeleton.ts`’s
-  `summarize`, both graphs the loop actually runs on, every graph that took
-  `GRAPH009_UNBOUNDED_NODE`’s advice — and a candidate that ADDS a node with its own budget passes,
-  which is exactly what `compileMutation` produces. Only a MOVED ceiling at a shared scope refuses.
-  **The reviewer found three defects in it and all three are fixed:** a renamed node carried its
-  ceiling out of the comparison entirely and the check then claimed "no spending ceiling moved"
-  (baseline-only scopes are now reported as a cap that left); the refusal named "re-record the
-  corpus" as a remedy, which cannot lift it because the check is a pure function of the two SPECS;
-  and the fail-closed arm tested `undefined` and let `null` reach `Object.entries`, throwing the
-  byte-identical error its own docstring cites as its reason for existing.
-  **RESIDUAL, carried rather than hidden:** `GraphPolicy.expansion` is a ceiling of the same class
-  (`maxNodes`, `maxDepth`, `maxFanout`, `maxLoopIterations`, enforced by `MUT004_EXPANSION_EXHAUSTED`)
-  and is NOT compared — driven, a candidate raising all four 100× promotes. **Closes fully when**
-  `expansion` joins the projection under the `graph` scope, or when somebody argues it is not a
-  spending ceiling and writes that at the check.
-  ORIGINAL TEXT: the blanket refusal was measured rather than argued.** The turns half needed no new evidence: a
-  candidate that lowers `agent.maxTurns` leaves recorded effects UNSERVED, `ReplayReport` has
-  carried `unservedEffects` all along, and `unexercised` was not reading it. It now refuses, and
-  every control stays green including the function-body candidate. The budget half is worse than
-  unimplemented — the obvious fail-closed answer, refusing any different-graph candidate that
-  declares a budget, turns the gate off for every well-formed graph: `test/run/skeleton.ts`'s own
-  `summarize` declares `policy: {budget: {costUsd: 0.15}}` (`skeleton.ts:73`), and so do nodes in
-  **both** of the graphs the loop is actually driven on — `examples/graphs/review-bench.json` and
-  `examples/graphs/self-review.json`, two `costUsd` occurrences each — while
-  `GRAPH009_UNBOUNDED_NODE` tells authors to ADD that field to any spending node
-  (`graph/validate.ts`'s `GRAPH009_UNBOUNDED_NODE`, and `evolution/gate.ts`'s `unexercised`
-  docstring says so where the refusal would go).
-  **So "refuse a candidate whose policy the offline gate cannot exercise" is not free: it turns
-  the offline gate into a refuse-everything gate for every well-formed graph.** That is the
-  measurement, and it is the reason this half is carried rather than attempted again.
-  The narrower refusal is not
-  expressible either, because the recording's SPEC is not in the journal (A.24), so nothing can
-  tell "the candidate lowered the ceiling" from "it kept it and changed a body".
-  **The named precondition is met: A.1's seam landed, and it moved this on its own.** Driven,
-  a recording with no node ceiling replayed under a candidate that adds one, `onGraphChange:
-  "allow"`: `budget.tokens: 500` and `budget.costUsd: 0.0005` each now replay
-  `failed E_BUDGET_EXHAUSTED, match false`, where both replayed CLEAN before — the reservation is
-  the recording's own quote instead of zero. **Closes when** someone measures whether that is
-  enough: it catches a ceiling the recording's quote crosses, not one lowered to somewhere above
-  it, and it does nothing for journals written before the quote effect. Stated with the two rows
-  at `unexercised`.
+- ~~**A.23 · The `maxTurns` shape is refused; the `policy.budget` one is not.**~~ CLOSED by
+  `276e05c` — `11-budget-exercised` refuses a candidate that MOVED a ceiling the replayed corpus
+  never crossed. Residual: `GraphPolicy.expansion` is not compared — raising all four 100× promotes.
+- **A.24 · `run.compiled` carries node counts, not the spec.** Repro:
+  `/usr/bin/grep -anc 'resolutionManifest' packages/core/src/journal/events.ts` → 1, and the payload
+  beside it is `{graphHash, nodes, edges, resolutionManifest}`. So a trajectory's S1/S4/S5 depend on a
+  file on disk and `isGolden` reads a value the journal cannot reconstruct across a restart — the
+  first non-negotiable. Both the peer-fold fix and `loom score` work around it by threading a
+  filesystem index into the fold. **Closes when** `run.compiled` carries the spec, or a graph store
+  the journal can address does.
+- **A.25 · A promotion's subject is a graph and the store is keyed by runId.** Repro:
+  `/usr/bin/grep -anc 'evolution.promote' packages/core/src/cli.ts` → 3. The decision rides on
+  `operator.command {kind: "evolution.promote"}` appended to the FIRST case's run, with `caseRunIds`
+  naming the rest; the live mode makes the same borrow, anchoring on the first selected baseline run.
+  Never on a candidate run — hanging the record of a judgement inside the thing being judged is a
+  different defect. **Closes when** §D.5 is answered: whether the kernel needs a graph-scoped durable
+  fact, and whether that is one event type or a second keyspace.
+- **A.26 · The Wilcoxon bound is built; the repeated-runs half is not.** Repro:
+  `/usr/bin/grep -anc 'L1-paired-improvement' packages/core/src/evolution/live.ts` → 3.
+  `L1-paired-improvement` now requires the t bound AND the Hodges–Lehmann bound to clear 0, and each
+  binds where the other does not. What is left is the second strengthening — repeated runs per input,
+  so within-input model variance separates from between-graph difference. No statistic computed from
+  one run per input can see it, and neither bound removes the SYMMETRY assumption (the signed-rank
+  null IS sign symmetry; what it removes is normality). **Closes when** the mode can run an input
+  more than once.
+- ~~**A.27 · The live cost check divides TOTALS where D10.d says medians.**~~ CLOSED by `50f7c03`,
+  corrected by `160985c` — `pairedCostRatio` gates on the UPPER median, an undefined pair unbounded.
+  `gateCandidate`'s `3-cost` still divides totals; `EvalReport` has no median to divide.
+- ~~**A.28 · A saturated outcome ranks cheapness.**~~ CLOSED by `a0f0cec` — `outcomeSpread` measures
+  the saturation and `isGolden` condition 2 refuses the rank on it. What cannot be fixed here stands:
+  a workflow whose only signal is human approval cannot rank its own runs.
+- **A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN
+  verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression.** Repro:
+  `/usr/bin/grep -anc 'task.started' packages/core/src/journal/events.ts` → 3, all of them naming it
+  as a decided-DELETE member with no appender — which is the fact the fix needs and does not have.
+  **THREE MECHANISMS HAVE BEEN REFUSED**, the third having shipped at `ec1047b`+`ce76bf3` and been
+  REVERTED: a `VerifierPin` over WHO verified, WHAT IT SAID and WHAT FED IT, plus two topology
+  conditions, was defeated by four games that each reached `promote: true` with the grader
+  certifying garbage. The shape of the hole is that the pin reconstructs *what the grader saw* from
+  the run's FINAL channel value and the graph's STATIC edge ancestry, **neither of which is a
+  statement about time, and the candidate owns the graph**. A fourth structural patch is the wrong
+  move. **Closes when** a fold can answer "what did channel C hold when task T read it" — a per-task
+  ordering of channel state, which `RunProjection` does not carry and the journal cannot supply
+  while `task.started` has no appender. DESIGN item 20 is the second customer for that fact.
 
-- **A.24 · `run.compiled` carries node counts, not the spec.** `{graphHash, nodes, edges,
-  resolutionManifest}` — so a trajectory's S1/S4/S5 depend on a file on disk, and `isGolden` reads
-  a value the journal cannot reconstruct across a restart. **That is the first non-negotiable**,
-  and both the peer-fold fix and `loom score` work around it by threading a filesystem index into
-  the fold; `promotedGraphHashes` comes from `<workspace>/graphs/` for the same reason. **Closes
-  when** `run.compiled` carries the spec, or a graph store the journal can address does.
+### Compensation — what runs, and the gaps that do not
 
-- **A.25 · A promotion's subject is a graph and the store is keyed by runId.** The decision rides
-  on `operator.command {kind: "evolution.promote"}` appended to the FIRST case's run, with
-  `caseRunIds` naming the rest. The live mode makes the same borrow and is now the SECOND caller,
-  anchoring on the first selected baseline run. Never on a candidate run — hanging the record of a
-  judgement inside the thing being judged is a different defect. **Two callers borrowing one
-  coordinate is the argument for deciding this, not a reason to.** **Closes when** §D.5 is
-  answered: whether the kernel needs a graph-scoped durable fact, and whether that is one event
-  type or a second keyspace.
+Rollback RUNS: `run/compensation.ts` plans it, `Engine.#compensate` performs it in reverse-seq order
+through `#invokeTool`, journaled `compensation.recorded` in three states. What is left:
 
-- **A.26 · The Wilcoxon bound is built; the repeated-runs half is not.** It needed no table:
-  under the null the differences are sign-symmetric, so `W⁺ = Σ Zᵢ·i` with `Zᵢ` iid Bernoulli(½)
-  and its distribution is a subset-sum count over the ranks — twenty lines, and checked against
-  the published one-sided 0.05 table at n = 5…20 and 25 (seventeen exact agreements; the
-  eighteenth, n = 30, is the table being loose — `P(T ≤ 152) = 0.050199` against
-  `P(T ≤ 151) = 0.048051`). `L1-paired-improvement` now requires the t bound AND the
-  Hodges–Lehmann bound to clear 0, and each binds where the other does not. **What is left is the
-  second strengthening — repeated runs per input**, so within-input model variance separates from
-  between-graph difference; no statistic computed from one run per input can see it, and neither
-  bound removes the SYMMETRY assumption (the signed-rank null IS sign symmetry — what it removes
-  is normality). **Closes when** the mode can run an input more than once.
+- **A.30 · What is still uncovered, after the run-failure sites and child runs were wired.** Repro:
+  `/usr/bin/grep -anc 'case "compensation": break' packages/core/src/run/engine.ts` → 1 — deliberate,
+  because rollback is journal-driven, and the arm carries that argument where a reader reaches it.
+  Four things remain open:
+  - **`#compensateOne` with an `effect.completed` that carries no `details`** still yields `args = {}`
+    (`detailsOf(result)` handed straight to `#invokeTool`, because `effect.completed.result` is typed
+    `unknown`). An undo invoked with no arguments is not a refusal. **Closes when** that case is
+    `not_attempted` too — one arm, the same fail-closed shape its three neighbours already use.
+  - **`JoinNode.onBranchError: "compensate"`**, refused at compile
+    (`/usr/bin/grep -anc 'GRAPH008_COMPENSATE_UNIMPLEMENTED' packages/core/src/graph/validate.ts` → 1).
+    What it would take is recorded at `#absorbedByJoin`: a BRANCH-PATH scope the planner does not
+    have, a trigger in the failing Task's commit rather than at the barrier, and a fourth answer from
+    `#absorbedByJoin`, since `boolean` cannot say whether a branch's rollback actually cleaned up.
+    **Closes when** those exist; the refusal deletes in the same change.
+  - **A DETACHED PARENT whose steps are all blocked journals nothing**, because the `not_attempted`
+    rows go through a `RunContext` that cannot be rebuilt without the graph. **Closes** by the move
+    that closed the child-run case: `#logFor` writes the rows without a context.
+  - **§F.13 at `#finish`** — a task LEASED BY ANOTHER WORKER is still producing while the rollback
+    runs, and `ctx.abort` reaches only this process. **Closes when** there is a way to fence a lease
+    this engine does not hold.
 
-- ~~**A.27 · The live cost check divides TOTALS where D10.d says medians.**~~ **CLOSED by
-  `50f7c03`, and corrected by `160985c` — the median gates in the LIVE mode; the replayed one
-  still cannot express one.** §D.4 is decided: a pair's ratio is `candidate / baseline` when the baseline spent
-  anything, 1 when neither side spent, and UNBOUNDED when a free input became a paid one — the
-  limit of the ratio, not a convention, and a median is an order statistic so it never does
-  arithmetic on it. That makes the rule total, which is what the "a check that sometimes has no
-  answer" objection was asking for; the old code met that objection by not gating at all, and the
-  reviewer's six-pairs-at-$0-baseline-and-$100-candidate fixture went from PROMOTE at "1.00×" to
-  `ran: false` to a refusal. The total is reported in the detail. `gateCandidate`'s `3-cost` is
-  untouched and still divides `EvalReport` totals, because that type has no median to divide —
-  see its docstring; closing THAT needs a `medianCostUsd` where `p95WallMs` already is.
-  **AND THE FIRST VERSION PICKED THE WRONG MIDDLE, which is worth keeping because the gate read
-  as built while it was still off for half its domain.** `Math.floor((length - 1) / 2)` is index 2
-  of 6 — the permissive side — so at an even count THREE pairs could go from a $0 baseline to a
-  paying candidate and `3-cost` still passed: driven, `3 × $0 → $100` plus `3 × $1 → $1` reported
-  `median pair cost ratio 1.00x` and PROMOTED while its own passing line printed
-  `totals 303.000000 vs 3.000000`. The upper median (`Math.floor(length / 2)`, in
-  `pairedCostRatio`) is
-  what makes "half the pairs went from free to paid" refuse. A check closed at 6-of-6 and open at
-  3-of-6 is not a check, and only an even-count fixture could show it.
-
-- ~~**A.28 · A saturated outcome ranks cheapness.**~~ **CLOSED by `a0f0cec`.** The original
-  reading is kept in full, because the MEASUREMENT is what made it findable and the escape it
-  names is still the only real one. Measured on five real runs sharing a cohort:
-  every one had `outcome: 1`, `costNormalized` clamps at the cohort median, two ranked and three
-  tied at exactly 0.600, unrankable — and `isGolden` condition 2 is "top decile", so a saturated
-  outcome makes that read "the cheapest decile". The cause is **S2, the human gate decision**
-  (`DECISION_VALUE.approve = 1` at weight 0.9), not S5, whose weight is 0.0. **A workflow whose
-  only signal is human approval cannot rank its own runs.** The escape is a ground-truth signal
-  and it is measured, not argued: `examples/graphs/review-bench.json` drives S1 to `k/n` and the
-  score then reads correctness rather than cheapness. **CLOSED by the first of the two:**
-  `CohortStats.outcomeSpread` measures the saturation and `isGolden` condition 2 refuses the rank
-  on it, so the verdict reads UNRANKABLE instead of crowning the cheapest run. The SCORES are
-  unchanged — the score was not what was wrong, the rank was — and `loom score` prints the
-  refusal at the terminal as well as journaling it in `goldenBlockers`. What cannot be fixed here
-  stands: a workflow whose only signal is human approval still cannot rank its own runs.
-
-- **A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the
-  graph's OWN verifier certifies is refused by `1-must-pass` and reported as a 33.3pp
-  regression.** **OPEN, and it now carries THREE REFUSED MECHANISMS rather than two.** In
-  order: (1) a two-axis pin — WHO verified and WHAT IT SAID — refused as strictly weaker than
-  the byte pin it replaced (`THE SECOND REFUSAL` below); (2) the same pin with a third axis,
-  WHAT FED IT, refused because the candidate owns both sides of a comparison
-  (`THE THIRD REFUSAL` below); and (3) that pin plus conditions 7 and 8, which SHIPPED at
-  `ec1047b`+`ce76bf3` and is **REVERTED at this HEAD**. The reproduction is red again and a
-  golden case is once again pinned by its recorded channel bytes.
-
-  **WHAT WAS REVERTED.** `EvalCase.expect.verifiedBy` carried a `VerifierPin` per certifying
-  evaluator — `verifier` (a digest over the evaluator's declaration AND its resolved body),
-  `verdict` (the channel the recording's verifier wrote and the `pass` it carried, read off the
-  evaluator TASK's own writes) and `fed` (the digest of every channel the verifier reads that
-  the recording served from OUTSIDE the graph) — plus `soleGradedRead`'s two conditions: the
-  verifier reads exactly ONE graph-produced channel, and every node writing that channel is a
-  static ANCESTOR of the verifier. `loom suite freeze` wrote the pin and `runCase` WAIVED the
-  byte comparison on the certified channel while the pin held. Gone with it: `VerifierPin`,
-  `verificationPin`, `waivedBy`, `soleGradedRead`, `verifierPinFailures`, the `certified` set in
-  `runCase`, the `withVerifierPin` freeze summary field, and two names off `scripts/surface.json`
-  (540 → 538). Nothing else in either file moved — `11-budget-exercised` and the MCP
-  irreversibility work landed in the same window and both stand.
-
-  **THE FOUR GAMES THAT DEFEATED IT.** Every one produces garbage — or nothing at all — and
-  every one reached `promote: true` with the grader certifying `pass: true`. Two were driven end
-  to end through `loom suite freeze` + `loom promote --suite`; all four are refused at this HEAD:
-  - **rewrite what FED the verifier, restore it after grading.** Axis 3 compares the run's FINAL
-    value, so a `pick` that stashes `items`, narrows `items` AND `picked` to `["GARBAGE"]`, and a
-    node after the grader that puts `items` back, gave `mustPassFailures 0  passRate 1.000
-    promote true` — and `game-a.json promote=true` through the verbs. Now
-    `mustPassFailures 8  passRate 0.000  promote false`, `channel "picked" differs`.
-  - **the same, with the graded channel NEVER WRITTEN.** `runCase` waived before the
-    "was never written by this run" guard, so `picked: undefined` gave
-    `mustPassFailures 0  passRate 1.000  promote true`. Now `mustPassFailures 6  passRate 0.000
-    promote false`, `channel "picked" was never written by this run`.
-  - **fabricate static ancestry, reach the spoiler by a `loop` back-edge.** Two `conditional`
-    edges nobody takes (`len(picked) == 999`) make the spoiler an ancestor of the grader for
-    condition 8, while a `loop` edge the ancestor walk deliberately skips runs it AFTER the
-    grader: tasks `pick#0 check#0 spoil#1`, final `picked: ["GARBAGE"]`,
-    `mustPassFailures 0  passRate 1.000  promote true` — and `game-c.json promote=true` through
-    the verbs. Now `mustPassFailures 4  passRate 0.000  promote false`.
-  - **the same restore trick against the topology `VerifierPin` note 5 RECOMMENDS as the
-    remedy** — grader reads one produced channel, ground truth declared a graph `input`, which
-    the now-deleted `test/evolution/verifier-pin.test.ts` held up under `THE TRUTH AS A GRAPH
-    INPUT` as the shape the pin is entitled to waive. `pinned 6, mustPassFailures 0, passRate 1.000, promote true`, final
-    `answer: ["GARBAGE"]`. Now `mustPassFailures 6  passRate 0.000  promote false`.
-
-  **WHAT THE REVERT COSTS, named rather than left implied.** One thing the pin caught and
-  the byte pin does not: a candidate that overwrites a `fed` channel AFTER the grader ran and does
-  NOT restore it went from `mustPassFailures 6  promote false` (axis 3 saw the changed final
-  value) to `mustPassFailures 0  promote true`. It is not a garbage promotion — `picked` stays
-  byte-identical and correct, and only `items`, a declared graph INPUT that `freezeSuite`
-  deliberately keeps out of `channels` because replay serves inputs from the recording, is
-  trashed. It is also not a new hole: it is the floor this repo had before `ec1047b`.
-
-  **AND A REAL FALSE NEGATIVE, in the direction the mechanism existed to fix.** Note 1's own
-  prescribed remedy — "a suite author who wants more pinned writes a stronger assertion body,
-  which is a change to the graph and not to the gate" — REFUSES the honest candidate.
-  Strengthening `check` from a length comparison to a sorted-set comparison and fixing the work
-  channel with it scored `mustPassFailures 6 of 6  passRate 0.000  promote false`:
-  `the verifier "check" is not the one that certified this case — its declaration or its body
-  changed | channel "picked" differs`. Axis 1 pins the grader's own body digest, so the remedy
-  breaks the pin, and the byte pin behind it then refuses the work channel.
-
-  **THE SHAPE OF THE HOLE, which is the useful part.** The pin reconstructs *what the grader saw*
-  from two things: the run's FINAL channel value and the graph's STATIC edge ancestry. **Neither
-  is a statement about time, and the candidate owns the graph** — so it can make both agree with
-  the recording while the grader consumed something else. Three structural patches (axis 3,
-  condition 7, condition 8), three defeats, each by a graph shape the previous patch had no
-  vocabulary for. A fourth structural patch is the wrong move.
-
-  **WHAT WOULD ACTUALLY CLOSE IT — a journal fact, not another condition.** The gate needs a
-  PER-TASK ORDERING OF CHANNEL STATE: what each task was SERVED when it ran, not what the run
-  ended with. **`RunProjection` does not carry it** — `channels` is the final fold, `bindings` is
-  per-BRANCH rather than per-task, and `tasks[*].writes` is what a Task PROPOSED and never what
-  it read. The journal cannot supply it today either: `state.reduced` and `task.leased` are both
-  appended and both carry a seq, but **`task.started` has NO APPENDER** — `journal/events.ts`
-  names it as one of the three decided-DELETE members — so nothing marks the moment a body was
-  handed its view. **Closes when** a fold can answer "what did channel C hold when task T read
-  it", and the gate reads that instead of guessing it. DESIGN item 20 already wants
-  `task.started` wired for a different reason (B.2's concurrency assertion comparing 0 to 0);
-  this row is the second customer for the same durable fact.
-
-  **AND THE PROSE WAS TRACKING THE INTENT RATHER THAN THE CODE**, which is the second lesson and
-  the reason the mechanism read as sound for a whole wave. **Five** claims in the reverted
-  mechanism's own docstrings were measured false, each by running it:
-  1. `soleGradedRead` §8 — "`compensation` and `loop` edges are not followed … excluding them
-     only SHRINKS the ancestor set, which is the direction that refuses rather than waives."
-     True of the SET, false of the conclusion: the shrink is on the side that decides who is an
-     ancestor, while the `loop` edge is what actually orders the spoiler AFTER the grader.
-     Game 3, `promote true`.
-  2. `VerifierPin` note 6 — ancestry is "the condition that stops a candidate spoiling the graded
-     channel after it was graded." Same measurement, same game: the spoiler ran at iteration 1,
-     after the grader, and the waiver held.
-  3. `VerifierPin` note 5 — "A suite author who wants the waiver narrows the evaluator's `reads`
-     to the single channel it grades and moves the ground truth into the graph's declared
-     `inputs`, where axis 3 pins it." Game 4 is that exact topology, `promote true`.
-  4. `VerifierPin` note 1 — "A suite author who wants more pinned writes a stronger assertion
-     body, which is a change to the graph and not to the gate." Measured: 6 of 6 must-pass
-     failures on an honest candidate.
-  5. `EvalCase.expect.channels` — "AN ABSENT CHANNEL IS A FAILED CASE, NOT A CRASH", a comment
-     sitting inside the very loop the waiver short-circuits. With the waiver, an absent CERTIFIED
-     channel was neither: game 2 passed the case with `picked: undefined`.
-
-  **WHAT THE REVERTED ATTEMPT DID ESTABLISH, kept because each finding named an axis.**
-  THE THIRD REFUSAL: a pin covering all three axes still promoted a candidate that certifies
-  garbage, because axis 3 only covers reads that are graph INPUTS and every other read had its
-  byte pin waived. In the canonical eval topology — a `fixture` node writing the ground truth, a
-  `work` node writing the answer, a comparator reading both — the candidate owns BOTH SIDES:
-  rewrite `expected` and `answer` to the same garbage, equality holds, the untouched grader says
-  `pass`, and it promoted (`pinned 6, mustPassFailures 0, promote true` without the narrowing;
-  `pinned 0, mustPassFailures 6, promote false` with it). That produced condition 7 — a verifier
-  reading more than one graph-produced channel is not pinned at all. A FOURTH finding, from the
-  same pass: the waiver lifts the byte comparison from the run's FINAL value while the verifier
-  certified the value it was SERVED, so a candidate that keeps every node byte-identical and ADDS
-  one downstream of the barrier promoted `picked: ["GARBAGE"]` at
-  `mustPassFailures 0, promote true` with every axis clean. That produced condition 8 — and game
-  3 above is condition 8 walked around by a `loop` edge. AND `certifies` WAS A FILE-DRIVEN
-  WIDENING, a failure mode `CLAUDE.md` names: read verbatim out of the suite file and intersected
-  with nothing, appending one entry waived a channel the verifier does not read
-  (`mustPassFailures` 3 → 0, and 4 → 0 on this repo's drive). All three findings are real and
-  none of them survives the revert as code; they are kept because a fourth attempt that does not
-  know them will re-derive them and stop where this one did.
-  THE SECOND REFUSAL, kept: The defect reproduces: a frozen golden case pins the
-  whole work channel verbatim, so a candidate whose every run the graph's OWN deterministic
-  verifier certifies as `pass` is refused by `1-must-pass` and reported as a 33.3pp regression.
-  The lane proposed pinning `verifiedBy` — the verifier's declaration digest, its body digest,
-  and that it said `pass` — instead of the artifact.
-  **It is STRICTLY WEAKER, and the lane's own docstring claimed otherwise.** It pins WHO the
-  verifier is and WHAT IT SAID, and nothing pins WHAT FED IT. A candidate that leaves the
-  evaluator node byte-identical and instead rewrites the channel the evaluator READS makes the
-  grader certify garbage, and the case passes. Driven on the same 30-run corpus, same selection,
-  same pin, with one candidate whose body narrows both the graded channel and its own input:
-  `byChannels: mustPassFailures 10, promote false` against `byVerifier: mustPassFailures 0,
-  passRate 1`. A self-improvement loop that can be gamed by the thing it measures is the one
-  failure `CLAUDE.md` §3 names, so trading a false negative for that false positive is not a
-  trade this row accepts. The branch was NOT merged.
-  **What the lane did establish, and it is the useful half:** the axis a pin has to cover is
-  three-wide — who the verifier is, what it said, AND what fed it — and the third is the one
-  nobody had named. That was the closing condition, and it turned out to be necessary and not
-  sufficient: three axes still let the two-sided comparison through, and condition 7 is what
-  the fourth attempt would otherwise have had to find.
-  ORIGINAL TEXT: A suite frozen from a corpus is a REGRESSION FLOOR, not a claim of improvement.**
-  `EvalCase.expect` can name a status, a channel VALUE, a cost and `noIrreversibleWithoutGate` —
-  every one of which describes what already happened, so an expectation derived from a recording
-  can only say *keep doing this*. Measured: the good candidate promotes over the frozen suite at
-  **Δ 0.0pp**, so `2-non-inferior` is what passes it, not an improvement. **The residual cost,
-  stated:** a golden case pins the channels the recording produced, so a subtly-wrong output a
-  deterministic verifier certified becomes a must-pass regression and a candidate that corrects it
-  fails `1-must-pass`. Bounded by `isGolden` condition 1, not eliminated. **Closes when**
-  `EvalCase.expect` can name an assertion node's `pass` rather than its whole verdict object —
-  `extractSignals`' `firstVerdict` already knows which channel that is. That is a change to the
-  gate's vocabulary, not to the freeze verb. **That closing condition is superseded:** it is
-  exactly what refused mechanism 1 built, and the live one is the per-task ordering of channel
-  state named at the top of this row.
-
-### Compensation — what runs, and the four gaps that do not
-
-Rollback RUNS: `run/compensation.ts` plans it, `Engine.#compensate` performs it in reverse-seq
-order through `#invokeTool`, journaled `compensation.recorded` in three states. What is left:
-
-- **A.30 · What is still uncovered, after the run-failure sites and child runs were wired.**
-  `#edgesToTake` still has `case "compensation": break;` — **deliberate**, because rollback is
-  journal-driven (an effect needs undoing whether or not an author drew an edge, and an edge names
-  a NODE while a rollback must name a CALL); the arm now carries that argument where a reader
-  reaches it. **Closed since 2026-09-01:** every `run.failed` site compensates, because there is
-  now exactly one — `Engine.#failRun`, which all three exits of `#finish` call, so the
-  unmaterialised fan-out and `E_OUTPUT_MISSING` roll back for the same reason a failed task does;
-  and `#compensate` DESCENDS INTO CHILD RUNS, splicing each child's plan into the parent's reverse
-  walk at the seq of the parent's own `subgraph.started` (the only order across two journals the
-  journal can justify), rebuilding the child's context from the parent's frozen
-  `subgraphs[ref]`, and journaling `not_attempted` **in the child's journal** where it cannot.
-  `test/run/compensation-reaches-children.test.ts` fails without both halves.
-  **Also closed since, by `160985c`, and each was a guard recording a thing as handled when
-  nothing had handled it:** a rollback made every CHILD journal fail the repo's own audit
-  (`loom audit <childRunId>` said `3 violation(s)` on a rollback the engine had just performed
-  correctly, because a child is already terminal when its parent fails — `audit.ts` gains an arm
-  opened only by `effect.started{kind:"compensate"}`, not a relaxation); a TRANSIENT block was
-  settled as if structural (`planCompensation` settled a seq on any `compensation.recorded`, so
-  planning after "this engine cannot rebuild the child's graph" gave `steps= 0  settled= [8]` —
-  a zero-step plan produced by following the row's own advice — and `compensation.recorded` now
-  carries an optional `retryable`, absent meaning not retryable so every existing journal settles
-  exactly as it did); and a GRANDCHILD's effects were dropped in silence, `#compensateChild`
-  having journaled one level and returned.
-  **A residue of `#compensateOne`, narrower than the row it came from and still there:** the
-  "no `effect.completed` recorded at all" case is now `not_attempted` with a reason, but a record
-  that EXISTS and carries no `details` still yields `args = {}` — `#compensateOne` calls
-  `detailsOf(result)` and hands the result straight to `#invokeTool`, because
-  `effect.completed.result` is typed `unknown` and nothing constrains it. An undo invoked with no
-  arguments is not a refusal. **Closes when** that case is `not_attempted` too, which is one arm
-  and the same fail-closed shape its three neighbours already use.
-  **Still open:**
-  - ~~**A REWIND ACROSS A `subgraph` NODE IS PERMITTED BECAUSE THE CHILD DECLARED AN UNDO, AND
-    THEN DOES NOT RUN IT.**~~ **NOT CLOSED, MOVED — this was the THIRD live statement of
-    `DESIGN.md` item 9, and the only one still asserting a cause that no longer exists.** It said
-    the blocker was `rewind`'s entry condition, `if (plan.steps.length > 0 && live !== undefined)`
-    over the parent's own events. That condition is DELETED — `rewind` reads
-    `if (live !== undefined)` and dispatches the tree walk — and the descent is entered,
-    journaling the refusal in the CHILD's journal.
-    Nothing about compensation WIRING is left here, which is why it does not
-    belong in this row: what remains is whether the undo may run `nodeApproved: true`, and that
-    is **§A.8**, with the mutation that proves the two are one flag. **A backlog row that keeps
-    restating a roadmap item's cause will always be the last copy to hear that the cause moved.**
-  - **`JoinNode.onBranchError: "compensate"`**, refused at compile by
-    `GRAPH008_COMPENSATE_UNIMPLEMENTED`. What it would take is recorded at `#absorbedByJoin`:
-    a BRANCH-PATH scope the planner does not have (its only scope is `sinceSeq`, and branches
-    interleave in seq by construction — that is the planner's central claim, not an oversight);
-    a trigger in the failing Task's commit rather than at the barrier; and a fourth answer from
-    `#absorbedByJoin`, because a branch is contained only if its rollback actually cleaned up,
-    which `boolean` cannot say. The refusal deletes in the same change.
-  - **A DETACHED PARENT whose steps are all blocked** journals nothing, because the
-    `not_attempted` rows go through a `RunContext` that cannot be rebuilt without the graph. The
-    child-run case of this is now closed — `#logFor` writes the rows without a context — and the
-    same move would close the parent's, which is why this is smaller than it was.
-  - **§F.13 AT `#finish`**, which the collapse into `#failRun` makes easier to believe is fixed
-    and is not: a task LEASED BY ANOTHER WORKER is still producing while the rollback runs. Both
-    callers can be reached with one — the budget/fatal floor, and the drain path, which sees an
-    empty READY set when a peer holds every lease — and `ctx.abort` reaches only this process.
-    Closing it needs a way to fence a lease this engine does not hold.
-  **Whether an author should ALSO get a graph-level cleanup node on failure is a design question,
-  not a wiring gap** — §D.3.
-
-- ~~**A.36 · A SUBGRAPH'S CHILD RUN IS UNREACHABLE BY URL ON THE CONTROL PLANE, and the route's
-  own docstring sends a reader there.**~~ **CLOSED by `d9a8173`.** A child run id is `${parent}~${nodeId@branchPath#iteration}`
-  and therefore contains a `#`. Every `/runs/([^/]+)/…` route reads `params[0]` raw — the channel
-  segment two screens below `GET /runs/:id/trace` goes through `safeDecode`, and the run-id
-  captures do not — so `%23` never becomes `#` and the request never reaches the handler, while
-  `GET /runs` lists that same run. **Found by wiring the OTLP push**, whose `--otlp` sends one
-  document per run: the pull door can serve the parent's and not the child's, so for a delegated
-  run `README.md`'s "three doors, one encoder" is two. Pre-existing, and the line asserting the
-  follow-up GET is one the `--otlp` change rewrote, so `server/http.ts` now states the gap where
-  it lives rather than promising a URL that cannot be built.
-  **THE ROW SAID THREE CAPTURES AND THERE ARE NINE, which is why the closure is worth more than
-  the row.** `/usr/bin/grep -ac 'runIdIn(params\[0\]!)' packages/core/src/server/http.ts` answers
-  9: the summary, the event stream (read inside `#streamEvents`, not in the route table), the
-  trace, the rewind plan, commands, oversight, gates, a gate decision, and the callback. Fixing
-  the three this row named would have closed the row and left the defect in six places.
-  The blast radius was measured rather than argued, and the argument is in `runIdIn`'s
-  docstring: routing does not move (the pattern matches the RAW pathname, so no `%2F` can reach
-  a different route or past `#requiresBearer`), `ownsRun` still reads the RUN and never the URL
-  (a second principal gets 404 — not 403 — on the child, so the door is not an existence oracle
-  for delegated runs), and a run id is a store KEY bound as a parameter, so a decoded `/` or
-  `..` is a lookup that misses rather than traversal. `test/server/child-run-by-url.test.ts`.
-  **The half nobody had noticed, fixed in the same wave:** `run/delivery.ts`'s `callbackFor`
-  built the webhook URL with the run id RAW, on a comment that said a `RunId` is a ULID so
-  encoding would be the identity function. It is not, for a child. So the door learning to
-  decode would not have helped: the only in-tree producer of that URL was emitting one every
-  client truncates at the `#`. Both halves now agree — the emitter encodes, the route decodes —
-  and the comment that asserted otherwise is corrected where it lived.
-
-- **A.37 · A COMPENSATION REFUSED FOR MISSING ARGUMENTS IS THE LAST WORD, and the operator's
-  obvious next move quietly makes it worse.** `e639d2b` stopped `#compensateOne` dispatching an
-  undo with `args = {}` when `effect.completed` carried no `details`, and journals
-  `outcome: "not_attempted"` instead of a false `"compensated"` — the right refusal, and it
-  settles the seq. **But `planCompensation` skips settled seqs**
-  (`compensation.ts`, `if (e.payload.retryable !== true) settled.add(...)`), so an operator who
-  reads that honest reason and then runs `rewind` to put it right gets a ZERO-STEP plan and a
-  rewind that is ACCEPTED — suppressing the `effect.completed` while the effect is still in the
-  world. Not a regression: the pre-fix path settled the seq too, and lied about why. Found by
-  the wave-1 verifier for that lane, not by the lane.
-  **Closes when** the rewind refusal (`#uncompensatedIrreversible`) reads the same fact the
-  plan does — a step the plan already knows cannot be dispatched — rather than permitting the
-  rewind because the tool merely DECLARES a compensation. That is the same fact the `dispatch`
-  count now reads, so the seam exists; what is missing is the refusal consulting it.
+  Whether an author should ALSO get a graph-level cleanup node on failure is §D.3, not a wiring gap.
+- ~~**A.36 · A subgraph's child run is unreachable by URL on the control plane.**~~ CLOSED by
+  `d9a8173` — `runIdIn` decodes all NINE run-id captures in `server/http.ts` (the row said three),
+  and `run/delivery.ts`'s `callbackFor` encodes, so emitter and route agree.
+  `test/server/child-run-by-url.test.ts`.
+- **A.37 · A compensation refused for missing arguments is the last word, and the operator's obvious
+  next move quietly makes it worse.** Repro:
+  `/usr/bin/grep -anc 'retryable !== true' packages/core/src/run/compensation.ts` → 1 —
+  `planCompensation` skips settled seqs, so an operator who reads `#compensateOne`'s honest
+  `not_attempted` reason and then runs `rewind` to put it right gets a ZERO-STEP plan and a rewind
+  that is ACCEPTED, suppressing the `effect.completed` while the effect is still in the world. Not a
+  regression: the pre-fix path settled the seq too, and lied about why. **Closes when** the rewind
+  refusal (`#uncompensatedIrreversible`) reads the same fact the plan does — a step the plan already
+  knows cannot be dispatched — rather than permitting the rewind because the tool merely DECLARES a
+  compensation. The `dispatch` count already reads that fact, so the seam exists.
 
 ### Two things that are NOT defects, written down so nobody "fixes" them
 
-- **A.31 · An adapter yielding a `UsageRecord` with an absent or non-finite `costUsd` crashes the
-  run inside the journal commit.** Reproduced: `usage: {inputTokens: 10, outputTokens: 20,
-  wallMs: 1}` with no `costUsd` throws a raw `CanonicalizationError` — `non-finite number NaN at
-  usage.costUsd` — from `canonical.ts` through `journal/store.ts` into `RunLog.commit`. Not a
-  `LoomError`, not a run failure: an unhandled throw. **Decided: build nothing.** A `ModelAdapter`
-  is host-realm trusted code like a `function` body or a `ToolRegistry` entry, and `--extension-
-  module` is named on ARGV by the operator, so it carries exactly the trust the operator already
-  extends to the binary — the trust boundary does not move, which is why argv-only is load-bearing
-  rather than stylistic. **Coercing a non-finite `costUsd` to 0 is explicitly REFUSED**: that is
-  this project's signature failure, a guard answering an undecidable case with the passing value,
-  and the passing value here is a journaled cost of `0` — exactly what the unpriced-route banner
-  exists to shout about. **The dissent, recorded because it could flip this on evidence:** an
-  unhandled throw escaping `#commit` is a worse artifact than a `LoomError` even when equally
-  safe — no `run.failed`, an operator sees a run that simply stops. **Reopens if** an adapter is
-  ever loaded from anywhere but argv (a path in the data directory, a `--models-file` field, a
-  resource ref, a hosted deployment), or if a real adapter produces this in a real run and the
-  journal cannot be told from a crash. At that moment validation becomes mandatory, it lands in
-  `run/engine.ts` as a `feat`, and it needs a `Kernel-seam:` trailer.
-
-- **A.32 · `you cannot fan out from a graph's entry`, and it costs a user one node.** A fan-out
-  edge needs a source node, so every fan-out graph opens with a no-op `function` node whose only
-  job is to exist. Not a correctness bug. **Closes when** somebody decides the entry is a node;
-  worth a decision only if a second shape needs it.
-
-### One more, found while writing this file — a decision that was made and not executed
-
+- **A.31 · An adapter yielding a `UsageRecord` with an absent or non-finite `costUsd` crashes the run
+  inside the journal commit.** Repro:
+  `/usr/bin/grep -anc 'non-finite number' packages/core/src/canonical.ts` → 1; a `usage` record with
+  no `costUsd` throws a raw `CanonicalizationError` out of `RunLog.commit` — not a `LoomError`, not a
+  run failure. **Decided: build nothing.** A `ModelAdapter` is host-realm trusted code and
+  `--extension-module` is named on ARGV by the operator, so the trust boundary does not move.
+  Coercing a non-finite `costUsd` to 0 is explicitly REFUSED — a guard answering its undecidable case
+  with the passing value, here a journaled cost of `0`. **Dissent, recorded:** an unhandled throw
+  escaping `#commit` is a worse artifact than a `LoomError` even when equally safe. **Reopens if** an
+  adapter is ever loaded from anywhere but argv, or if a real adapter produces this in a real run;
+  validation then lands in `run/engine.ts` as a `feat` with a `Kernel-seam:` trailer.
+- **A.32 · You cannot fan out from a graph's entry, and it costs a user one node.** A fan-out edge
+  needs a source node, so every fan-out graph opens with a no-op `function` node whose only job is to
+  exist (`examples/graphs/fan-out-join.json`). Not a correctness bug. **Closes when** somebody
+  decides the entry is a node; worth a decision only if a second shape needs it.
 - ~~**A.33 · `PolicyEngine.clearCeiling` existed in a kernel file with no caller but a test.**~~
-  **FIXED — the decided deletion has now landed.** The row is kept because of how it was found:
-  the closing sweep nearly recorded it as closed on the strength of the DECISION rather than the
-  code, and two independent readers caught that. A decision is not a diff.
-  The reason held up under re-derivation: a human ceiling is folded from `policy.deescalated` and
-  **no event ever clears one**, so `clearCeiling` deleted an in-memory entry that
-  `PolicyEngine.restore` re-installed from the projection on the next attach — the ceiling came
-  back at the LOWERED posture. Its docstring ("Always allowed: it tightens") was true about the
-  direction and silent about the durability, which is §F.1's class inside the object built to
-  defend against it. The capability never needed the method: `deescalate(scope, "in", …)` is the
+  CLOSED — deleted. No event ever clears a human ceiling, so the method deleted an in-memory entry
+  `PolicyEngine.restore` re-installed at the LOWERED posture; `deescalate(scope, "in", …)` is the
   same tightening, refused for a non-human, and folded.
 
 ---
 
 ## B · Declared and wired to nothing
 
-Mechanism that exists in the schema or the types and executes nowhere — each a place a reader
-believes a feature is present. This section was thirteen rows and is two.
-
-- **B.1 · `LeasedScheduler` has zero callers in `src/`. ANSWERED 2026-09-02: NEITHER of the two
-  options this row offers is right, and the third one is what is already true.**
-  The row says "either plug it in or delete it. Both are decisions and neither is the current
-  state." That framing assumes the only two states are CLI-wired or gone. It is a false
-  dichotomy, and **this project has already made the other call twice**: the fork ledger went
-  5 → 3 when `DeliveryChannel`/`GateDispatcher` and `IdentitySource`/`startControlPlane` turned
-  out to be "pinned public types a library embedder always reached, so those two were never
-  bounds, only debts". `LeasedScheduler` is the same shape and the measurement is the same.
-
-  **Driven rather than read** — an embedder reaches it from the package root today:
-
-      import { Engine, LeasedScheduler, MemoryStateStore, InProcessEventBus } from "@loom/core";
-      const sched = new LeasedScheduler({ leaseMs: 30_000, now: () => 1_700_000_000_000 });
-      new Engine({ store, bus, scheduler: sched });   // accepted
-
-  `index.ts` re-exports `run/scheduler.ts`; `EngineOptions.scheduler?: Scheduler` is the seam;
-  `LeasedScheduler` and `LeasedSchedulerOptions` are BOTH on the pinned public surface, so
-  deleting them is a breaking change by `check-surface.mjs`'s own rule ("REMOVAL IS BREAKING");
-  and four suites exercise it — `run/scheduler.test.ts`, `run/contention.test.ts`,
-  `deployment/two-planes.test.ts`, `deployment/run-clock-survives-restart.test.ts`. It is not
-  dead code. It is a library capability the single-tenant CLI deliberately does not use,
-  which is exactly what §D.2's answer — one machine, one tenant, one `loom serve`, one
-  operator — implies the CLI should do.
-
-  **So the row is reclassified rather than actioned**, and the honest state is: built, public,
-  tested, reachable by an embedder, and not wired into the CLI on purpose. What remains open is
-  NOT this class — it is the price the row itself found and which stands regardless: a plane
-  that dies between `task.leased` and `task.committed` strands that run permanently under
-  `InProcessScheduler`, because reclaiming needs a lease DEADLINE and the CLI's scheduler has
-  none. **That is the real item**, and it is about `loom serve`'s recovery story, not about
-  whether a class has callers.
-  **Closes when** either the CLI grows a way to survive its own death mid-lease (which may or
-  may not be `LeasedScheduler` — a single-process deadline would also do it), or somebody
-  argues that a stranded run is an acceptable outcome for one operator on one machine and
-  writes that here. **A recommendation to delete this was made and withdrawn on the evidence
-  above**, which is recorded because the deletion would have removed two pinned exports and a
-  working capability to close a row that was miscategorised.
-
-  ORIGINAL TEXT: `LeasedScheduler` has zero callers in `src/`. `run/scheduler.ts` implements two of the
-  three distributed behaviours its own docstring names — skip live leases, reclaim expired ones —
-  with contention tests exercising them against folded journals for two workers. `cli.ts` never
-  names a Scheduler, so `loom serve` always runs `InProcessScheduler`; the only mentions outside
-  the file are two docstrings in `cli.ts` and one in `engine.ts`. **Either plug it in or delete
-  it. Both are decisions and neither is the current state.** This lived in §E under "distributed
-  deployment"; it is a §B item and belongs here, which is the whole reason the row moved.
-  **THE ROW NOW HAS A PRICE, found by §A.16's sweep and measured rather than argued.** A plane
-  that dies between `task.leased` and `task.committed` strands that run permanently: the fold
-  puts the task back in `leased`, `runClockTick`'s `due` predicate wants a `ready` one, and
-  `InProcessScheduler.eligible` would return nothing even if the clock did offer it. Driven on a
-  real journal truncated after its `task.leased` —
-  `status: running, tasks: [apply@root#0 leased] · run clock visited: 2 · drove: []` — with a
-  control run one event shorter that IS driven, in
-  `test/deployment/run-clock-survives-restart.test.ts`. **Reclaiming it needs a lease DEADLINE,
-  which is the one signal that separates a dead holder from a slow one, and `LeasedScheduler` is
-  where that lives.** So "delete it" is no longer free: it deletes the only design in the tree
-  for a crash-stranded task.
-
-- **B.2 · THREE event types have no appender**, each pinned in `test/registries.test.ts` with a
-  written reason and a `blockedOn` file list, and a test that goes red the moment the reason stops
-  holding. The members: **`task.skipped`** (wire, behind the join's branch-error accounting),
-  **`channel.written`** and **`task.started`** (both delete).
-
-  **THE TWO THAT MATTERED ARE WIRED.** `budget.reserved` and `budget.settled` were the pair
-  decided `wire`, for the first non-negotiable: `PolicyEngine.reserve` held the reservation in
-  memory, so an operator reading `GET /runs/:id` mid-flight saw committed spend and not money
-  already promised, and a crashed worker's reservation was unrecoverable by folding. Measured on
-  a paused adapter before and after — folded `reservedUsd` **0 → 0.001048** against a settled cost
-  of 0.000027 — in `test/run/budget-reservation-is-durable.test.ts`, which also drives a SECOND
-  `Engine` over the same store to show the number is in the log and not in the object. The
-  appenders are at the engine's own `ctx.policy.reserve`/`settle` call sites; `projection.ts`
-  needed no change, because it had folded both since before either had a writer.
-  `journal/audit.ts`'s `budget.reservation-is-settled` — one of the two rules that file's own
-  header says were deleted for being rules over events nothing writes, "they come back when the
-  events do" — is back, and the `todo` ratchet in `test/journal/audit-coverage.test.ts` forced
-  that rather than permitted it: the cap is five todos and the list was AT five, so there was no
-  way to defer the rule and keep the tree green. Cost: one `Kernel-seam:`
-  trailer, the ledger's eleventh.
-
-  **`task.started`'s DEFECT IS CLOSED WITHOUT ITS DELETION.** The row's price was a silent false
-  negative: `test/run/advance-reentrancy.test.ts` filtered the journal for a type nothing appends,
-  so its headline assertion — every Task starts once — compared **0 to 0** on a run that leases
-  seven times. It reads `task.leased`, keyed `taskId#attempt` (a retry legitimately re-leases the
-  same id), and the mutation that deletes `Engine.advance`'s `#advancing` chain now fails it
-  `10 !== 7` where before the headline passed and only the side-effect assertion caught it. The
-  deletion itself still waits on `test/scale.test.ts`, which is the remaining `blockedOn` entry.
-
-  **The error-code half of this row is CLOSED**: the unraised set is asserted as the EMPTY set
-  (`registries.test.ts`), not a pinned list with excuses. **Closes when** each of the three left
-  is wired or deleted, per its own row's decision.
+- **B.1 · `loom serve` cannot survive its own death mid-lease.** Repro:
+  `/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` → one hit, in a `cli.ts` docstring
+  asserting it appears zero times; there is no construction site. **The row's original framing —
+  "`LeasedScheduler` has zero callers, so plug it in or delete it" — was ANSWERED 2026-09-02 and both
+  options refused.** It is a library capability an embedder reaches from the package root today
+  (`EngineOptions.scheduler` is the seam, both names are on the pinned surface so removal is
+  breaking, and four suites exercise it), deliberately unused by the single-tenant CLI per §D.2.
+  What stands regardless is the price the row found: a plane that dies between `task.leased` and
+  `task.committed` strands that run permanently, because reclaiming needs a lease DEADLINE and
+  `InProcessScheduler` has none (`test/deployment/run-clock-survives-restart.test.ts`, with the
+  one-event-shorter control). **Closes when** the CLI grows a way to survive its own death mid-lease
+  — a single-process deadline would also do it — or somebody argues that a stranded run is
+  acceptable for one operator on one machine and writes that here.
+- **B.2 · Three event types have no appender.** Repro:
+  `/usr/bin/grep -anc 'task.skipped' packages/core/test/registries.test.ts` → 1; that file pins each
+  with a written reason and a `blockedOn` list, and goes red the moment the reason stops holding. The
+  members: **`task.skipped`** (wire, behind the join's branch-error accounting), **`channel.written`**
+  and **`task.started`** (both delete). `budget.reserved`/`budget.settled` were the pair decided
+  *wire* and are wired (`test/run/budget-reservation-is-durable.test.ts`, seam `b28c343`), which also
+  brought back `journal/audit.ts`'s `budget.reservation-is-settled`. `task.started`'s own defect is
+  closed without its deletion — `advance-reentrancy.test.ts` reads `task.leased` keyed
+  `taskId#attempt` instead of comparing 0 to 0 — and the deletion waits on `test/scale.test.ts`, the
+  remaining `blockedOn` entry. **Closes when** each of the three is wired or deleted.
 
 ---
 
 ## C · Unbuilt observability, which several other items depend on
 
-**This block gates the UI direction.** A richer operator surface over a plane that is not emitting
-is a better view of nothing.
+**This block gates the UI direction.** A richer operator surface over a plane that is not emitting is
+a better view of nothing.
 
-- **C.1 · Six designed span names are unbuilt, and five of the six are closed decisions
-  rather than open work.** **`loom.effect` was built 2026-09-01** and the count went 7 → 6 by a
-  build. **Nine names are minted now**: `loom.run`, `loom.gate`, `loom.task`, `loom.policy`,
-  `loom.effect`, `loom.state.reduce`, `loom.checkpoint` — the seven that
-  `/usr/bin/grep -an 'name: "loom\.' packages/core/src/telemetry/spans.ts` returns — plus
-  **`loom.model` and `loom.tool`, which that grep misses**, because both are minted through one
-  ternary. So the grep undercounts the built set by TWO, and the seventh literal it does see
-  used to be the `subgraph.started` arm saying `loom.tool` — the mis-classification itself.
-  **`loom.effect` used to carry the opposite trap**: `loom.effect.key` is an ATTRIBUTE, so a
-  bare `grep -c` on it returned nonzero and read as built while no span bore the name.
-
-  **What `loom.effect` fixed.** `effect.started.kind` is a closed six-member union
-  (`model | tool | subgraph | summarize | random | compensate`) and the fold partitioned it with
-  `modelish` and its NEGATION — but `!modelish` is not `tool`. Measured by driving a `function`
-  body of `Math.random()` through `Engine`: the PRNG seed the engine journals so a body can be
-  replayed folded to `loom.tool  effect.kind=random  tool.name=undefined`, a seed draw named a
-  tool call, and it carried `tool.attempt` too. `subgraph` had the same defect, papered over in
-  `cli.ts` by printing the kind in parentheses. The partition is now three arms:
-  `model|summarize → loom.model`, `tool|compensate → loom.tool` (a compensation IS a tool call —
-  `#callTool` journals `tool.called` on both paths), `subgraph|random → loom.effect`. NOT a
-  generic parent over all four: that would either double the span count this file's header
-  budgets or delete the `gen_ai.*`/`tool.*` groupings that are the reason those names exist.
-
-  **The remaining six, each with the event that would have to exist.** The constraint is that
-  `spansFrom` is a pure fold over one journal, so a name is buildable only if the journal
-  already covers it.
-  - **`loom.request`** — no journal event covers ingress; the first append is `run.submitted`.
-    Not fixable by an event: a request is accepted before a runId exists, so it has no journal
-    to go in. Needs a durable stream that is not keyed on a run.
-  - **`loom.compile`** — **not "possible but redundant", MEASURED IMPOSSIBLE.** `run.submitted`,
-    `run.compiled`, `run.started` and the entry `task.ready`s are ONE append inside
-    `Engine.submit` — re-checked at `5ffc223`, `run.compiled` still has exactly one appender in
-    `src/` — and `journal/store.ts`'s `prepare` stamps one `ts` per batch. Driven with a
-    clock ticking +7ms per call, all four came back `ts: 1700000000014`, so a span bracketed
-    submitted→compiled is zero-width by construction. Worse, `compileOrThrow` runs in the
-    CALLER — `engine.submit` receives an already-compiled graph — so `run.compiled` records the
-    RESULT of work that finished before the journal existed. Its three attributes are already
-    on `loom.run`. Would need a `durationMs` on `run.compiled`, i.e. a `journal/events.ts`
-    change, which is the kernel.
-  - **`loom.schedule.pick`** — the INTERVAL is journaled (`task.ready` → `task.leased`, and
-    C.3 notes the wait is already a span event on `loom.task`); the DECISION is not. The name
-    means "which task did the scheduler choose, out of what queue, against what limit", and
-    three of its four designed attributes (`queue.depth`, `concurrency.used`,
-    `concurrency.limit`) are scheduler state no event carries. A span minted with one of four
-    would manufacture C.2 defects. Needs a `schedule.picked` event carrying those three.
-  - **`loom.context.assemble`** — `run/context.ts` assembles and journals nothing.
-  - **`loom.replay`** — the gap is TWO deep, not one. `replayRun` submits a shadow run through
-    the ordinary `engine.submit`, so its journal carries no marker; and the shadow lives in a
-    fresh `MemoryStateStore` (`replayRun`'s `shadow`) that dies with the call, so there is no durable
-    replay journal to fold at all. Needs an optional `replayOf: RunId` on `run.submitted` —
-    which has optional-field precedent in `submittedBy` — plus a durable shadow store.
-  - **`loom.scheduler.tick`** — C.3, and a design gap rather than a wiring one: there is no
-    tick loop in `run/scheduler.ts` to instrument.
-
-  **The two movements of this count are different things and the row says which is which.**
-  8 → 7 was a DECISION: `loom.schedule.admit` is not among the six because §D refused admission
-  control permanently, so the name has no subject and never will — nothing was built and nothing
-  is owed. 7 → 6 was a BUILD: `loom.effect` is minted and folded. A backlog count that falls
-  because work landed and a backlog count that falls because the work was cancelled are the same
-  arithmetic and opposite facts, and a row that reports only the number reports neither.
-
-- **C.2 · Three of the eleven are built; the remaining eight are NOT DERIVABLE, and that
-  falsifies this row's own premise rather than shrinking it.** The row used to say eleven
-  documented span attributes are set on no built span *and* that "every one of them is a value the
-  journal fold already has in hand". `deafe43` tested the second half by trying to build all
-  eleven. **It is false for eight of them, and this row must be read as a correction and not as a
-  tick.**
-
-  **Three were journaled fields this fold already read the event for and discarded** — a span
-  poorer than the journal by accident. `policy.decided.capability` → `capability` on `loom.policy`;
-  `gate.raised.batch.id` → `gate.batched` on `loom.gate`; `effect.started.attempt` →
-  `tool.attempt`, on the `loom.tool` arm only. Reproduced by folding a journal carrying all three
-  (`capability: "fs:write"`, `batch.id: "g0"`, `attempt: 3`) and finding none on any span; driven
-  on the one that varies today, `gate-saturation`'s five-branch fan-out now gives five
-  `loom.gate` spans all reading the founder's gate id. **Two of the three are faithful reads of
-  DEAD WRITERS and saying so is the point:** `run/engine.ts` builds both `policy.decided` payloads
-  literally and neither includes `capability`, and all five `effect.started` writers pass the
-  literal `1`.
-
-  **Eight are not in the journal at all**, each for a stated reason, and a span attribute carrying
-  a guess is worse than an absent one: `node.type` (only on `task.started`, which has no writer —
-  §B.2); `budget.cost_usd` (the ceiling is never journaled — and the second half of this clause,
-  "`budget.reserved`/`budget.settled` have no writer either", STOPPED BEING TRUE when §B.2 wired
-  both. The attribute is still not derivable for the reason that survives: `budget.reserved`
-  carries `remainingUsd` only when a dollar ceiling exists, so `spent + reserved + remaining`
-  reconstructs the ceiling on exactly the runs that declared one and reconstructs nothing on the
-  rest — an attribute present on some runs and absent on others is a worse answer than an absent
-  one. Re-measure before moving this row); `reducers` (`channel.written` has no writer, and `state.reduced` carries
-  channels rather than reducers); `trigger.kind` (nothing journals a trigger —
-  `run.submitted.submittedBy.kind` is WHO, and relabelling it is a different fact under a
-  documented name); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never
-  the request; the spelling was checked against the OpenTelemetry gen_ai conventions and is right,
-  the value is absent); `tool.source` (no `source` on `ToolManifestLite`, `ToolDefinition` or
-  `tool.called` — the concept is not in the tree); `loom.replayed`, on both its spans (a served
-  effect appends nothing, and a replay rewrites `model.called.provider` to the recorded leaf **on
-  purpose**, so a replayed journal is designed to be indistinguishable); `gate.posture` (a
-  constant `"in"` reached by pairing two events — a constant obtained by an inference is both
-  things this file refuses).
-
-  **The grep this row was previously re-verified with was itself an undercount, which is why the
-  eleven must be counted two ways.** `/usr/bin/grep -ac '"<attr>"'` returns 0 for `capability` at
-  HEAD even though it IS set, because `spans.ts` writes it as a bare identifier (`capability:`,
-  on the `policy.decided` arm). Counting both spellings —
-  `/usr/bin/grep -aoE '"(budget\.cost_usd|…|gate\.batched)"|(^|[^.\w"])(capability|reducers|trigger|source)\s*:' packages/core/src/telemetry/spans.ts`
-  — returns exactly three today: `capability:`, `"gate.batched"`, `"tool.attempt"`. The control
-  that proves the grep discriminates rather than failing silently is still
-  `state.hash.before`/`state.hash.after`, **2 each**, set on `loom.state.reduce` and not on the
-  span the source table used to blame.
-
-  **Closes when** each of the eight either gains the journal event it needs — which is a
-  `journal/events.ts` change and therefore a seam, for every one of them — or is struck from the
-  documented set with the reason above beside it. **It does not close by emitting them.**
-
-- **C.3 · No scheduler-tick telemetry, and there is no tick loop to instrument.** A design gap,
-  not a wiring gap. **Per-task queue wait is already measurable** — `task.ready` and `task.leased`
-  are journaled for every task and `spans.ts` attaches `task.leased` as a span event, so the p99
-  is a fold over what is already emitted. What is missing is scheduler-level behaviour.
-
-- ~~**C.4 · There is no OTLP exporter in the repo and no HTTP trace endpoint**, so
-  `SpanLink.traceId` has no consumer outside the splice.~~ **CLOSED — both halves exist.**
-  `telemetry/otlp.ts` is `otlpTraceRequest`, a pure `Span[] → ExportTraceServiceRequest`
-  encoder for **OTLP/HTTP with the JSON encoding** (the stable `v1` proto shape; its header
-  names the five encoding rules the payload depends on, so a reader can check it against the
-  spec), plus `OtlpHttpExporter`, which POSTs one to `{endpoint}/v1/traces`.
-  `GET /runs/:id/trace` on the control plane is the pull half, with `?format=otlp` answering
-  the collector's own bytes from that same encoder.
-  **The row's "it belongs outside the core" was answered rather than obeyed:** there is one
-  package, and the reason for keeping an exporter out — dependencies — does not apply, because
-  OTLP/JSON over the platform `fetch` takes none. `check-zero-dep.mjs` is green at 62 files.
-  `SpanLink.traceId` now has its consumer: a subgraph link becomes an OTLP
-  `Link{traceId, spanId}`, so the join `spliceSubgraph` does in-process is done by the
-  COLLECTOR instead, and the route deliberately does not splice for that reason.
-  Three things the tests pin rather than assume — the encoder is downstream of `spansFrom`'s
-  redactor and never reads a `JournalEvent` (a credential in the journal is absent from the POST
-  body); the ids need no conversion, since `spans.ts` already mints 32- and 16-char lowercase
-  hex, which is exactly OTLP's two widths; and `export` never throws, whatever the collector or
-  the options bag does. Driven: `test/telemetry/otlp.test.ts` 17/17,
-  `test/server/trace-endpoint.test.ts` 6/6.
-
-  **Left undone and named — the SET is six, and this row used to name one of them.** The lane's
-  own review (`.agent/finish-the-backlog/review-w11-otlp-exporter.md`) carried six findings
-  against the file C.4 closes and only the first reached a document; the audit caught the
-  omission, and each was then re-checked BY RUNNING rather than by reading. **FOUR are real and fixed** — it
-  said three until `--otlp` flipped residue 1, which is the summary-that-did-not-grow failure
-  this file names in §F.1 and `CLAUDE.md` names in its journal-authority bullet:
-
-  1. **FIXED — `loom trace <runId> --otlp <endpoint>` posts the fold to a collector**, so the
-     exporter has a caller in the binary and a deployment no longer embeds the library to get a
-     push. Driven offline against a `node:http` collector on 127.0.0.1: `POST /v1/traces`,
-     `service.name=loom loom.run_id=<runId>`, 9 spans, exit 0. Four decisions are worth more than
-     the wiring and each is pinned by a test that goes red when it is reverted
-     (`test/cli/trace-otlp.test.ts`, 27/27 — the mutation count below is the authoritative one):
-     - **argv decides both whether to send and where.** No environment variable can make this
-       command export. A bare `--otlp` was going to fall back to `OTEL_EXPORTER_OTLP_ENDPOINT`
-       and that arm was DELETED rather than guarded, for three measured reasons: `--otlp "$UNSET"`
-       arrives as the empty string and would have become an export to whatever env named; the two
-       OTel endpoint variables have different append contracts and `OtlpHttpExporter` applies one
-       of them to both (`https://vendor.example/otlp/traces` → `…/traces/v1/traces`); and a shell
-       that happens to export the standard variable is not an operator asking for egress.
-     - **One request per RUN, unspliced.** `spliceSubgraph` rewrites the child's `traceId` onto
-       the parent's, so exporting what the terminal renders would put the same child spans on the
-       wire under a different id than `GET /runs/<child>/trace?format=otlp` answers. Unspliced,
-       the parent's `SpanLink.traceId` is `digest(childRunId)` — byte-identical to the child's
-       own — so the collector performs the join. **That is `SpanLink.traceId`'s consumer outside
-       the in-process splice**, which is the thing this row was opened for.
-     - **The credential is an environment variable and there is no flag that takes one**
-       (`OTEL_EXPORTER_OTLP_HEADERS`), because a key on argv is readable out of `ps` — the finding
-       `KNOWN_FLAGS` already records about `--token`. A malformed entry refuses, and no refusal
-       on this path quotes a value.
-     - **Exit 1 now means "did not conform OR did not export"**, and `cli.ts`'s own exit-code
-       docstring — which enumerates the meaning verb by verb — grew the member in the same commit.
-       `reason: "empty"` is excluded: `otlp.ts` returns it to distinguish "nothing to say" from
-       "said it", and folding it in would erase the distinction the field exists to make.
-
-     **FIVE defects in the shipped exporter were found BY WIRING IT, and they are this change's**,
-     because this is the first caller in the binary that hands `OtlpHttpExporter` a credential and
-     a destination. Every one was driven on loopback, not read:
-     - **A COLLECTOR COULD RE-ADDRESS THE CREDENTIAL AND THE WHOLE TRACE.** `fetch` defaults to
-       `redirect: "follow"`, and nothing set it. A "collector" answering
-       `307 Location: http://<elsewhere>/v1/traces` moved the API key and the run's spans to
-       another origin — the second server printed
-       `ATTACKER RECEIVED: POST /v1/traces auth= sk-SUPER-SECRET bodyBytes= 438` — while
-       `export` returned `{ok: true, spans: 1, rejected: 0}`, so the caller was told the spans
-       reached the host it named. Now `redirect: "error"`.
-     - **The mask covered the endpoint and not the API key**, in the class whose own docstring
-       says "this is where a vendor's API key goes". And covering the WHOLE header value was not
-       enough either: a gateway answering `invalid api key: <token>` — echoing the token rather
-       than `Bearer <token>` — matched nothing. Each word of 8+ characters now joins the list,
-       and `partialSuccess.errorMessage` goes through the same `mask` as `detail`.
-     - **Every transport failure said `TypeError: fetch failed` and nothing else**, because Node
-       puts the reason on `.cause`. So `endpointSecrets`' stated justification — that the
-       hostname is left legible because `ENOTFOUND collector.internal` is what an operator
-       diagnoses with — had never once been true of this exporter's output. The cause is now
-       appended, through the same mask.
-     - **`__proto__` as a header name is undeliverable and now says so.** Two layers: the CLI's
-       parser accumulated into an object literal, where `out["__proto__"] = v` runs
-       `Object.prototype`'s setter and creates nothing; and then `fetch` drops that one name
-       before the socket however the `Headers` is built — as a record, with `set`, or as an
-       entries array — while `node:http` given the identical name carries it. `constructor` is
-       the control and reaches the wire. Since sending is measured impossible, the CLI refuses.
-     - **A query string or fragment in the endpoint POSTed to a path nobody named.** The exporter
-       appends `/v1/traces` by string concatenation, so `http://h:4318/?a=b` became
-       `http://h:4318/?a=b/v1/traces` — the identical failure this row's D1 deleted the
-       environment fallback over, reachable straight through argv. Refused, fail-closed.
-
-     **And the CLI prints the collector's HOST, not its origin** — measured, `endpointSecrets`
-     masks the scheme-qualified origin and leaves the bare hostname legible, so printing the
-     origin would have printed in plaintext the exact string the sibling line redacts. This row's
-     own finding 5 is the register of somebody reaching the opposite false conclusion about the
-     same function by reading the mask list instead of running it; both directions have now been
-     settled by running it. **Twenty-seven mutations, all CAUGHT.** The count grew twice under
-     review and the shape of both growths is the point: the first claimed "one per decision that
-     carries weight" and a reader found three decisions it did not cover — the 8-character mask
-     floor, `legible`'s bidi class, and the subgraph-bound report. The third had been written up
-     in the source as needing 65 child runs and having "no seam to lower", which was FALSE on its
-     own terms: `unread` is a plain parameter of the function the previous round had already
-     exported so two other arms could be driven, and nobody re-read the confession against the
-     seam. **There are now no coverage confessions in this feature's source.**
-  2. **FIXED — an `Object.prototype` key defeated both enum fallbacks.** `KIND_CODE["constructor"]`
-     is a FUNCTION, not `undefined`, so `?? 0` never fired. Measured through the real encoder:
-     `kind: "constructor"` shipped a span with NO `kind` field (`JSON.stringify` drops a
-     function-valued key) and `kind: "__proto__"` shipped `kind: {}` — an object where OTLP
-     requires an integer enum, which is the worse one because it survives JSON and a collector
-     rejects the batch over it. This is the dominant defect class (a lookup answering its
-     undecidable case with an inherited value) reached through the guard meant to stop it, and it
-     mattered because `otlpTraceRequest`'s contract is TOTAL OVER ITS INPUT and names hand-built
-     arrays as the reason. `codeOf` consults the map only via `Object.hasOwn`. Mutation-checked:
-     restoring the `??` form fails the new test 16/17.
-  3. **FIXED — `?format=otlp` silently dropped the `truncated` flag.** The route's docstring
-     promises the response says `truncated: true` "so nobody reads a partial waterfall as a
-     finished one"; the `spans` branch kept that and the `otlp` branch did not, because
-     `ExportTraceServiceRequest` has no body field for it. It is now the resource attribute
-     `OTLP_TRUNCATED_ATTR` (`loom.trace.truncated`), declared in `telemetry/spans.ts` because
-     that file owns the `loom.*` vocabulary and `registries.test.ts` enforces it — the same rule
-     that caught `server/http.ts` minting its own `"loom.run_id"`. Emitted ONLY when true: an
-     absent attribute and `false` say the same thing to a collector.
-  4. **FIXED, and it was a test defect rather than a behaviour one — the credential mask was
-     dead.** Replacing `mask`'s body with `return text;` left `otlp.test.ts` 16/16, because
-     neither stub ever put the secret in the message it threw: the 400 body is
-     `invalid span: traceId "abc"` and the transport stub threw a bare `"fetch failed"`. The stub
-     now throws what real `fetch` throws — it quotes the URL, credential and all — and the same
-     mutation is 16/17.
-  5. **NOT A DEFECT, and the review had it backwards.** The review said `endpointSecrets` pushes
-     `u.origin` into the mask list so the hostname IS masked, contradicting its own docstring
-     ("the HOSTNAME is deliberately left legible"). Driven against the real exporter on three
-     message shapes, the docstring is TRUE: `origin` is `https://collector.internal:4318`, not
-     the bare host, so `getaddrinfo ENOTFOUND collector.internal` survives verbatim while the
-     full URL form — the one that carries the credential — is masked. That is the intended split
-     and it now has an assertion (finding 4's test pins both directions). **Recorded because the
-     review reached a false conclusion by reading the mask LIST instead of running the mask**,
-     which is this repo's standing rule stated as a defect.
-  6. **Judged not worth a change.** `otlpTraceRequest`'s "TOTAL OVER ITS INPUT" was called false
-     for three hand-built inputs; two of the three were finding 2 and are fixed. The third is
-     that a `Symbol`-keyed attribute bag is silently dropped rather than reported, which is what
-     "a span that fails is DROPPED, not throwing and not repaired" already promises.
-
-- ~~**C.5 · The span taxonomy was NOT grown for subgraphs: a subgraph renders as `loom.tool`.**~~
-  **CLOSED by `aaa4a9a`, and NOT by adding a name — §D.2 was answered "no ninth name".** The
-  original reading was right about the defect and wrong about the remedy: `subgraph.started` did
-  open a span named `loom.tool`, and every attribute a reader needs (`effect.kind: "subgraph"`,
-  `subgraph.child_run_id`, `.ref`, `.graph_hash`, `.budget_usd`, a `SpanLink`) was already on it.
-  What was actually broken was the partition — the fold split a six-member union with `modelish`
-  and its NEGATION, and `!modelish` is not `tool` — so `subgraph` and `random` both landed on
-  `loom.tool` for the same reason. Three arms fix all of it: `model|summarize → loom.model`,
-  `tool|compensate → loom.tool`, `subgraph|random → loom.effect`. `subgraph.started` now opens
-  `loom.effect` in `spansFrom`'s `isEvent(e, "subgraph.started")` arm, and the two literals that
-  can name that span agree by
-  construction because `start` is a no-op on an open id — if they disagreed, a span's name would
-  depend on which events a read happened to contain. Driven:
-  `test/telemetry/subgraph-trace-driven.test.ts`, 2/2, selecting the span by
-  `attributes["effect.kind"] === "subgraph"` rather than by name — which is the check that shows
-  a ninth name was never what the reader needed.
+- **C.1 · Six designed span names are unbuilt.** Repro:
+  `/usr/bin/grep -anc 'name: "loom\.' packages/core/src/telemetry/spans.ts` → 7, and the grep
+  UNDERCOUNTS by two: `loom.model` and `loom.tool` are minted through one ternary, so nine names
+  exist. The constraint is that `spansFrom` is a pure fold over one journal, so a name is buildable
+  only if the journal already covers it — and each of the six names the event it would need:
+  **`loom.request`** (nothing covers ingress; a request is accepted before a runId exists, so it
+  needs a durable stream not keyed on a run); **`loom.compile`** (measured impossible —
+  `run.submitted`/`run.compiled`/`run.started` and the entry `task.ready`s are ONE append with one
+  `ts`, and `compileOrThrow` runs in the caller; needs a `durationMs` on `run.compiled`, a kernel
+  change); **`loom.schedule.pick`** (three of its four attributes are scheduler state no event
+  carries; needs a `schedule.picked` event); **`loom.context.assemble`** (`run/context.ts` journals
+  nothing); **`loom.replay`** (the shadow run's journal carries no marker and its `MemoryStateStore`
+  dies with the call; needs `replayOf: RunId` on `run.submitted` plus a durable shadow store);
+  **`loom.scheduler.tick`** (C.3 — no tick loop to instrument). **Closes** name by name, each with
+  the event it names. `loom.schedule.admit` is NOT among them and never will be: §D refused
+  admission control permanently, so the name has no subject.
+- **C.2 · Eight of eleven documented span attributes are NOT DERIVABLE, which falsifies this row's
+  own premise rather than shrinking it.** Repro: count both spellings, since `spans.ts` writes
+  `capability` as a bare identifier —
+  `/usr/bin/grep -aoE '"(gate\.batched|tool\.attempt)"|(^|[^.\w"])capability\s*:' packages/core/src/telemetry/spans.ts`
+  → 3, the three that were journaled fields this fold read and discarded and are now set. The other
+  eight each have a stated reason: `node.type` (only on `task.started`, no writer — §B.2);
+  `budget.cost_usd` (`budget.reserved` carries `remainingUsd` only when a dollar ceiling exists, so
+  the ceiling reconstructs on some runs and not others, worse than absent); `reducers`
+  (`channel.written` has no writer, `state.reduced` carries channels); `trigger.kind` (nothing
+  journals a trigger); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never
+  the request); `tool.source` (the concept is not in the tree); `loom.replayed` on both its spans (a
+  replay rewrites `model.called.provider` to the recorded leaf ON PURPOSE, so a replayed journal is
+  designed to be indistinguishable); `gate.posture` (a constant reached by an inference). **Closes
+  when** each of the eight gains the journal event it needs — a `journal/events.ts` change and
+  therefore a seam, every one — or is struck from the set. **It does not close by emitting them.**
+- **C.3 · No scheduler-tick telemetry, and there is no tick loop to instrument.** Repro:
+  `/usr/bin/grep -anc 'tick' packages/core/src/run/scheduler.ts` → 1. A design gap, not a wiring gap.
+  Per-task queue wait is already measurable — `task.ready` and `task.leased` are journaled and
+  `spans.ts` attaches the latter as a span event, so the p99 is a fold over what is already emitted.
+  **Closes when** there is scheduler-level behaviour to instrument.
+- ~~**C.4 · There is no OTLP exporter in the repo and no HTTP trace endpoint.**~~ CLOSED —
+  `telemetry/otlp.ts` (`otlpTraceRequest` + `OtlpHttpExporter`), `GET /runs/:id/trace?format=otlp` as
+  the pull half, and `loom trace <runId> --otlp <endpoint>` as the push half (`96a03bf`). Zero
+  dependencies, so "it belongs outside the core" was answered rather than obeyed. Wiring it found
+  five defects in the shipped exporter, all fixed and each pinned: `redirect: "follow"` let a
+  "collector" re-address the credential and the whole trace; the mask covered the endpoint and not
+  the API key; every transport failure said only `TypeError: fetch failed`; `__proto__` as a header
+  name is undeliverable and now refuses; and a query string in the endpoint POSTed to a path nobody
+  named. `test/telemetry/otlp.test.ts`, `test/cli/trace-otlp.test.ts`.
+- ~~**C.5 · A subgraph renders as `loom.tool`.**~~ CLOSED by `aaa4a9a`, and NOT by adding a name
+  (§D.2 answered "no ninth name") — the fold's two-arm partition became three:
+  `model|summarize → loom.model`, `tool|compensate → loom.tool`, `subgraph|random → loom.effect`.
 
 ---
 
 ## D · Decisions still owed
 
-**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remained, renumbered `D.1`–`D.5`, and
-`D.6` was added 2026-09-09. Of the six, TWO are still owed — `D.3`, `D.5`.** `D.4` was answered
-by `50f7c03`, `D.2` by `aaa4a9a`, `D.1` by the commit that added `irreversibility` to
-`MCP_SERVER_FIELDS`, and `D.6` by `86193e3`; all four are struck below and kept, because a
-decision's argument is the thing a future reader needs and deleting the row deletes it.
-Twelve were answered on 2026-08-28 and are in §Z with the commit that executed each — the rest had
-already closed before this session. **The surviving five do NOT keep their old numbers**, which is
-why §H.2 exists. Many were answered by DELETION, which is the honest direction for a tree whose §B
-table carried thirteen rows under a header claiming eleven. The framing question was answered by the
-maintainer: **single machine, single tenant, the maintainer's own workflows** — tens of runs per
-day, retention in weeks, one `loom serve`, one operator. Four items resolved on that answer and
-three of them resolved to *do not build*.
+Each row states what a decision would settle; none is the implementer's to answer alone. The framing
+question was answered by the maintainer: **single machine, single tenant, the maintainer's own
+workflows** — one `loom serve`, one operator. Answered rows stay struck rather than deleted, because
+a decision's argument is the thing a future reader needs.
 
-Each row below states what a decision would settle. None is the implementer's to answer alone.
-
-- ~~**D.1 · Per-server `irreversibility` on `--mcp-file`.**~~ **ANSWERED: yes, an operator may,
-  and the argument is written at `MCP_SERVER_FIELDS` rather than here.** Four parts, and the
-  load-bearing one is that this file is ALREADY the arbitrary-code door: a row names `command`
-  and `args` and `startMcp` spawns them with no allow-list, and names `envAllow`, which selects
-  out of the process holding provider API keys — so `"irreversibility":"read_only"` is strictly
-  weaker than the `"command":"/bin/sh"` the same row could always have said. The rule it had to
-  clear is `loadExtensionModules`', and that rule is about the PATH: the path here comes from
-  `requireFileFlag` off `Args`, `Args` from `parseArgs`, `parseArgs` from
-  `main(process.argv.slice(2))`, and nothing in `src/` writes an mcp file or synthesises argv.
-  What stayed closed is the server's claim about ITSELF — `mcpTools` takes the class as a
-  parameter and has no expression reaching `tools/list` — so the thing being governed still does
-  not write its own governance. **The condition, recorded because it is not a caveat:** all of it
-  assumes the writer of the mcp file and the runner of the binary are one person. At a second
-  operator the argument inverts and the field must be taken away. Driven end to end, same graph,
-  same server, one key apart: no key → `awaiting_gate`, `tools/call` reached 0 times; with
-  `"irreversibility":"read_only"` → `succeeded`, reached 1 time, and `! MCP OVERSIGHT LOWERED BY
-  --mcp-file — demo: read_only (posture floor out)` on stderr.
-  `test/mcp/irreversibility.test.ts` is that pair, and its CONTROL is the half that matters.
-  The unknown-key half had landed earlier, at `96a03bf`. The original row, whose argument is the
-  case FOR making it: `mcp/tools.ts`'s `mcpTools` hardcodes `irreversibility: "irreversible"`
-  on every tool from every MCP server, so **every MCP tool gates** — and `cli.ts`'s `readMcpServers`
-  validates exactly `name`, `command`, `args` and `envAllow` and then builds its result from those
-  four keys, with no unknown-field refusal anywhere, so an operator writing a per-server class
-  today is silently ignored. That is the same defect class `GRAPH020_UNKNOWN_FIELD` exists to
-  close for graphs. Together: the only no-fork tool route the binary offers is unusable for
-  anything called more than a few times a day. A mailbox-as-tool delivering ten messages raises
-  ten human gates. **This is the item that actually blocks somebody without commit access from
-  building a message bus, a cache or a counter**, and it would be the first entry ever to move
-  README's fork-required list in the SHRINKING direction, which is what property 2 means in
-  practice. **Shape if built:** an optional `irreversibility` on each server entry, validated
-  against the four `IrreversibilityClass` members, plus the unknown-key refusal, plus a test whose
-  CONTROL (field absent) asserts `awaiting_gate` so the assertion cannot be satisfied by a gate
-  that never fires. No kernel file; census stays at 8. **Refused outright, in writing:** inferring
-  the class from the server's own advertised metadata — that is the thing being governed writing
-  its own permission. **The decision it needs** is whether an operator lowering an oversight class
-  from a config file is a threshold this binary should cross. Under one operator it is defensible;
-  at more than one it must be reconsidered, because "the operator" and "the person who wrote the
-  mcp file" stop being the same person. **Dissent, recorded:** filing rather than building is how
-  findings die, and a §D item nobody picks up is functionally the silence that gave §B thirteen
-  entries. If this is still open at the next re-check, filing it was the wrong call.
-  (It was not: the shape above is what shipped, unchanged, including the CONTROL and the
-  outright refusal — and the dissent is the reason it shipped at all.)
-
-- ~~**D.2 · A ninth span name for a subgraph.**~~ **ANSWERED: no ninth name.** The question was
-  whether the span taxonomy is a closed vocabulary. It is, and the decision landed with the code
-  in `aaa4a9a` rather than as a note: a subgraph is named by the existing `loom.effect` and told
-  apart by `effect.kind`, which is how the shipped test already selects it. **The alternative was
-  rejected on a measurement, not on taste** — a generic parent over all four effect kinds would
-  either mint a second span per effect (doubling a row count `spans.ts`'s own header budgets at
-  "~500 task spans, not 2,500") or rename `loom.model` and `loom.tool` out of existence, losing
-  the `gen_ai.*` and `tool.*` groupings that are the reason those two names are worth having.
-  A parent whose only content is the union of its children is an indirection, not a taxonomy.
-
+- ~~**D.1 · Per-server `irreversibility` on `--mcp-file`.**~~ ANSWERED: yes, an operator may, and the
+  argument is at `MCP_SERVER_FIELDS` rather than here. The load-bearing part: that file is ALREADY
+  the arbitrary-code door (a row names `command` and `args`, and `startMcp` spawns them with no
+  allow-list), so `"irreversibility":"read_only"` is strictly weaker than the `"command":"/bin/sh"`
+  the same row could always have said, and the path comes from argv. **The condition, not a caveat:**
+  it assumes the writer of the mcp file and the runner of the binary are one person; at a second
+  operator the field must be taken away. Inferring the class from the server's own advertised
+  metadata is refused outright. `test/mcp/irreversibility.test.ts`.
+- ~~**D.2 · A ninth span name for a subgraph.**~~ ANSWERED: no ninth name — the taxonomy is a closed
+  vocabulary, and a subgraph is `loom.effect` told apart by `effect.kind` (`aaa4a9a`). The rejected
+  alternative — a generic parent over all four effect kinds — would either double a span count
+  `spans.ts`'s header budgets or delete the `gen_ai.*`/`tool.*` groupings those names exist for.
+- ~~**D.4 · Whether the median gates, and what an undefined pair does to it.**~~ ANSWERED by
+  `50f7c03`: the median gates, and an undefined pair is UNBOUNDED rather than dropped. See §A.27.
+- ~~**D.6 · Whether `POST /runs` may refuse a graph that only WARNS at compile time.**~~ ANSWERED at
+  `86193e3`: yes — the wire refuses, keyed on `spec.inputs`, 400 `E_PROVIDER_BAD_REQUEST` with zero
+  `run.submitted` rows. A graph on which `GRAPH005_UNPRODUCED_READ` only WARNS is therefore refused
+  at the wire when a caller supplies that channel. **This is the decision of that lane most likely to
+  be overturned**, so the counter-argument is kept: `engine.submit` enforces NEITHER set, so this
+  door invents an authority the engine does not have, and invents the STRICTER of the two available.
+  The alternative, option (f), keys the shared rule on `spec.channels` at all three doors — it still
+  closes §A0.17's whole complaint and refuses nothing that compiles. **If it is taken, the change is
+  one line in `undeclaredInputs` plus the message's second clause, and the test that would flip is
+  `A GRAPH THAT COMPILES AND READS THE CHANNEL IS REFUSED TOO` in
+  `test/server/plane-declared-inputs.test.ts`.** Three options were rejected: a defaulted
+  `strictInputs` body field, 202 plus a `Warning:` header, and doing nothing. It does NOT reach the
+  delegation door — §A0.22, which cannot close until this is settled for all three doors at once.
 - **D.3 · Whether an author gets a graph-level cleanup node on failure**, beside journal-driven
   rollback. Compensation edges are a compile-time declaration by design (§A.30); this asks whether
-  there should also be a node an author can point at.
-
-- ~~**D.4 · Whether the median gates, and what an undefined pair does to it.**~~
-  **ANSWERED by `50f7c03`: the median gates, and an undefined pair is UNBOUNDED rather than
-  dropped.**
-  See §A.27 for the rule and `pairedCostRatio` in `evolution/live.ts` for the derivation. The
-  live mode gates on the median pair; the replayed one still divides totals because `EvalReport`
-  carries no median, and that divergence is now stated at both `3-cost` docstrings rather than
-  read as one rule implemented twice.
-
-- **D.5 · Whether the kernel needs a graph-scoped durable fact.** See §A.25. Two callers now
-  borrow one coordinate — `operator.command` on the first case's run. The question is whether that
-  is one new event type or a second keyspace, and either answer is a kernel change with a
-  `Kernel-seam:` trailer.
-
-- ~~**D.6 · Whether `POST /runs` may refuse a graph that only WARNS at compile time.**~~
-  **ANSWERED at `86193e3` (the `plane-inputs` merge): yes — the wire refuses, keyed on
-  `spec.inputs`.** The decision is recorded here rather than on §A0.17 because the row it closed
-  did not ask it, and because **this is the decision of that lane most likely to be overturned**;
-  whoever reopens it should read the counter-argument and not this summary of it.
-  **What was decided.** `POST /runs {"workflow":X,"inputs":{"k":…}}` where `k` is not in the
-  graph's `spec.inputs` now answers **400 `E_PROVIDER_BAD_REQUEST`** naming the key and the
-  declared set, with **zero `run.submitted` rows** — the same rule `loom run --input` has applied
-  since `8c734ce`, now one function in `graph/declared-inputs.ts` called by both doors. The
-  consequence that makes this a decision and not a bug fix: **a graph on which
-  `GRAPH005_UNPRODUCED_READ` is only a WARNING — it compiles, and a node really does read the
-  channel — is now refused at the wire when a caller supplies that channel.** The lane's own
-  refusal message says so: *"add it to the graph's `inputs` list, which is what
-  GRAPH005_UNPRODUCED_READ warns about at compile time without refusing."*
-  **The counter-argument, in the diff reviewer's form, which is the strongest one.**
-  `engine.submit` enforces NEITHER set — driven at `c54b0c2`, a body `{"pahts":…}` produced a
-  projection channel `pahts` in neither `inputs` nor `channels` — so this door invents an
-  authority the engine does not have, and invents the STRICTER of the two available. The
-  alternative, option (f), is to key the SHARED rule on `spec.channels` at both doors: it still
-  closes §A0.17's whole complaint (a typo'd key names no channel at all) and refuses nothing that
-  compiles. **If it is taken, the change is one line in `undeclaredInputs` plus the message's
-  second clause, and the test that would flip is `A GRAPH THAT COMPILES AND READS THE CHANNEL IS
-  REFUSED TOO` in `test/server/plane-declared-inputs.test.ts`.** Three other options were recorded
-  and rejected: a defaulted `strictInputs` body field (loses — the default stays the one that
-  spends); 202 plus a `Warning:` header (a warning on a 202 that then SPENDS is a note, not a
-  guard); and doing nothing, recording that the wire stays permissive.
-  **What the decision does NOT reach**, and the reason it is not settled by taking it: the
-  delegation door. `rule016Subgraphs` checks a `subgraph` node's mapping against the child's
-  `channels`, so a parent may still hand a child the key the plane refuses — §A0.22, which cannot
-  close until this row's `inputs`-or-`channels` question is settled for all three doors at once.
+  there should also be a node an author can point at. **Closes when** the maintainer answers.
+- **D.5 · Whether the kernel needs a graph-scoped durable fact.** See §A.25: two callers now borrow
+  one coordinate — `operator.command` on the first case's run. The question is whether that is one new
+  event type or a second keyspace, and either answer is a kernel change with a `Kernel-seam:` trailer.
+  **Closes when** the maintainer answers.
 
 ---
 
 ## E · Deferred on purpose, with the reason — do not silently revive
 
 **"Do not silently revive" is not "never revive."** The reason IS the deferral, so a reason that
-stops being true takes the deferral with it. Reading the label instead of testing the reason is
-how a deferral becomes a permanent exemption nobody re-examines — which is what happened to four
-of these on 2026-08-26.
+stops being true takes the deferral with it.
 
-**Vintage, stated rather than implied: every reason below was last tested by running on
-2026-08-25/26, not on 2026-09-01.** The two facts re-checked today are E.1's — `LeasedScheduler`
-still has no construction site anywhere in `src/`
-(`/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` returns ONE line — in `cli.ts`, the
-docstring asserting it appears zero times — and that self-reference is the whole result: no
-construction site exists. The bare name returns ten: four in `run/scheduler.ts`, which is its
-declaration rather than "its own definition", and six docstrings, five in `cli.ts` and one in
-`engine.ts`. An earlier wording here said "its own definition and four docstring mentions" and
-miscounted both halves, and the correction to it first said the construction grep returns ZERO,
-which is also wrong for the same reason — a claim about a grep has to be run, not reasoned. See §B.1) — and E.5's
-fork-list membership, where `README.md` still names **a reducer** among the three things that need
-a fork. **A reason nobody has re-run in a week is still the best evidence there is for these, and
-it is not the same as a measurement taken now.** The gap has widened by four days since this
-paragraph was written, which is exactly the fact it exists to expose rather than to excuse.
-
-- **E.1 · Distributed deployment.** A distributed v1 by a small team yields a distributed
-  prototype, not a product. **The half of this that was false is now §B.1**, where it belongs: the
-  interfaces are not merely "shaped for it", `LeasedScheduler` is built and uncalled.
-- **E.2 · Partition assignment and cross-run fairness.** Deciding which runs a worker considers
-  needs a coordinator, and half a coordinator is worse than none. **Still true and still unbuilt.**
-  The sentence must stop implying nothing decides it: a silent newest-200-first starvation policy
-  had already shipped. That starvation is now closed at the call site — §A.15 — and closing it is
-  what showed the REST of this row lands here and nowhere else: a cursor lets one plane traverse
-  the whole listing, and gives two planes no way to divide it. Both take the same page and pay the
-  same folds. Dividing needs a fact that spans runs, which `journal/store.ts` says the journal has
-  nowhere to hold, so the coordinator is not an optimisation of the clock — it is the missing
-  thing.
+- **E.1 · Distributed deployment.** A distributed v1 by a small team yields a distributed prototype,
+  not a product. The half of this that was false is now §B.1.
+- **E.2 · Partition assignment and cross-run fairness.** Half a coordinator is worse than none: a
+  cursor lets one plane traverse the listing and gives two no way to divide it, and dividing needs a
+  fact that spans runs, which `journal/store.ts` says the journal has nowhere to hold.
 - **E.3 · Automated candidate generation, canaries and auto-promotion.** "Under roughly thirty
-  scored trajectories per cohort, any candidate is fitted to noise." The sample argument survives;
-  **its premise did not** — the scorer was inverted and the cohort could not assemble until the
-  bucket seam was wired. Both are fixed, so **this deferral has to be re-argued rather than
-  inherited.** `MIN_COHORT_SIZE = 30` is the encoded form and it is enforced.
+  scored trajectories per cohort, any candidate is fitted to noise" (`MIN_COHORT_SIZE = 30`). The
+  sample argument survives; **its premise did not**, so this must be re-argued rather than inherited.
 - **E.4 · Subtractive graph mutation.** Additive-only keeps the executed graph a superset of the
-  compiled one, which is what makes the compiled artifact meaningful. **Reason holds, verified:**
-  base node specs survive a mutation deepEqual-identical and removal is unrepresentable in the
-  mutation type.
+  compiled one, which is what makes the compiled artifact meaningful. Verified: removal is
+  unrepresentable in the mutation type.
 - **E.5 · Custom user-authored reducers.** Reason: arbitrary code inside the determinism boundary.
-  **Worth re-examining on the merits** — that boundary now exists and is proven (a seeded PRNG
-  from a journaled draw, a clock bound to a journaled task boundary, `Date` and `Intl` absent, an
-  embedder `globals` seam that refuses a governed name). A user-authored reducer would run under
-  exactly the machinery that was not there when the deferral was written, and a closed reducer set
-  is one of the three things README says still needs a fork (**it said five until 2026-09-02**; `README.md` has said three since the ledger went 5 -> 3 on 2026-09-01, and this section own closing paragraph said three while TWO of its sentences said five - this one and the preamble is fork-list line - so it contradicted itself in both directions at once. Both are corrected; the closing paragraph is historical statement that it went five to three on 2026-09-01 is about a transition and stays).
-- **E.6 · Free-form agent chatter.** "Makes termination unprovable and replay quadratic."
-  **Unverifiable**: there is no chatter to replay, so "replay quadratic" has no measurable
-  referent. The precondition holds; the reason names nothing that can be checked.
+  **Worth re-examining on the merits** — that boundary now exists and is proven, and a closed reducer
+  set is one of the three things `README.md` says still needs a fork.
+- **E.6 · Free-form agent chatter.** "Makes termination unprovable and replay quadratic." The
+  precondition holds; the reason is **unverifiable** — there is no chatter to replay.
 - **E.7 · seccomp / Landlock.** "Platform-specific" holds — both are Linux-only and this tree runs
-  darwin. **The clause claiming the threat model is covered was false and is corrected**: the
-  three mitigations bind this plane's OWN tools, and a child process does its own `open()` and
-  `connect()`, so `proc.exec` is outside all three. What was missing was not a mitigation but a
-  sentence at the moment it happens; the boot banner now names this guard among the ones that are
-  off. **The deferral stands; the sentence did not.**
-- **E.8 · Vendor callback parsing.** Wrong in both directions as originally written. Signature
-  verification IS built, wired and tested — `SignedWebhookChannel` implements Slack's scheme end
-  to end. **What is actually missing is per-vendor payload SHAPE parsing, and an email transport
-  that does not exist at all** (`email` is only an `Actor.via` label).
+  darwin. The clause claiming the threat model was covered was false (the three mitigations bind this
+  plane's OWN tools, and `proc.exec` is outside all three); the boot banner now names it as off.
+- **E.8 · Vendor callback parsing.** Signature verification IS built and tested
+  (`SignedWebhookChannel` implements Slack's scheme end to end). Missing: per-vendor payload SHAPE
+  parsing, and an email transport (`email` is only an `Actor.via` label).
 
 **Do not re-enumerate the fork list here.** It lives in `README.md`, "Extending it, and where that
-stops" — **twelve things need no fork, three do**, each quoted from the refusal the binary prints.
-That list moving the wrong way is property 2's alarm; shrinking it is what property 2 means in
-practice. **It went five → three on 2026-09-01**, when `--extension-module`'s object widened from
-`{models, tools}` to `{models, tools, channels, identity}` — no new flag, because the argv-only
-trust argument is written once at that flag and a second door would have to re-earn it.
-**The remaining three have no DEBTS in them**: a node type, a reducer and a ninth hook point are
-all bounds closed by replay, so the honest next move on this property is a new capability rather
-than another row off this list. This paragraph opens by saying not to re-enumerate and then
-carried the numbers anyway, which is why it was stale twice.
+stops"; count it with
+`sed -n '/^## Extending it, and where that stops$/,/^## Why this exists$/p' README.md | /usr/bin/grep -a -c '^- \*\*'`
+→ 3 today. That list moving the wrong way is property 2's alarm; shrinking it is what property 2
+means in practice.
 
 ---
 
 ## F · Properties to preserve, not history to honour
 
-Each cost real debugging time and would cost it again. They are stated as properties, not as
-anecdotes.
+Each cost real debugging time and would cost it again.
 
-1. **Every durable fact must be rebuildable by folding the log.** The unit needing a restore path
-   is the *producer*, not the field. **The enumeration is SPLIT, and that is the lesson:** five
-   are named in `packages/core/test/run/oversight-survives-restart.test.ts:1-20` (PolicyEngine
-   escalations, human ceilings, accumulated spend, the taint set, E4's failure streak) and the
-   sixth is in `packages/core/test/run/escalation.test.ts` — search either for `MEMBER`. This line
-   used to say "cite that file rather than repeating the number", and the device failed on its
-   first test: the sixth landed in a different file and the cited one still said five. **A pointer
-   to an enumeration is only as good as that enumeration's own discipline about growing.**
+1. **Every durable fact must be rebuildable by folding the log.** The unit needing a restore path is
+   the *producer*, not the field. The enumeration is SPLIT across
+   `packages/core/test/run/oversight-survives-restart.test.ts` and
+   `packages/core/test/run/escalation.test.ts` — search either for `MEMBER`. **A pointer to an
+   enumeration is only as good as that enumeration's own discipline about growing.**
 2. **A vocabulary with two representations will drift**, and every gate walking the wrong one is
-   silently switched off. Prefer a form the type checker can walk; where a test must do it, gate
-   all representations as one set and read them from the source.
-3. **A guard's permissive branch is where the surprise lives.** Refusals attract tests; the arm
-   that lets something through does not.
-4. **Mutation-test every guard.** A test whose expected value could also come from a fallback path
-   is a tautology waiting to be discovered. §A.8's NAMED RESIDUE is the live instance in this
-   file: the row itself is struck, and what it left behind is one line carrying two answers with
-   only one of them under a test.
-5. **Driving beats sweeping.** Every wave that found real defects found them by running a new
-   shape of thing. Sweeps derived from the last finding mostly find nothing, because in a
+   silently switched off. Prefer a form the type checker can walk; where a test must do it, gate all
+   representations as one set and read them from the source.
+3. **A guard's permissive branch is where the surprise lives.** Refusals attract tests; the arm that
+   lets something through does not.
+4. **Mutation-test every guard.** A test whose expected value could also come from a fallback path is
+   a tautology waiting to be discovered.
+5. **Driving beats sweeping.** Sweeps derived from the last finding mostly find nothing, because in a
    disciplined codebase most findings are exceptions rather than instances of a class.
 6. **A test built from the same mental model as the fix certifies the model, not the mechanism.**
-7. **Reproduce by running, not by reading** — including when correcting a document. A correction
-   that replaces a false claim with a differently-false one is worse than the original, because it
-   asserts verified accuracy and is believed harder.
-8. **Name the set a claim covers.** "This boundary is total" cannot be checked; a claim that names
-   its members can. A count nobody can enumerate is a count nobody checked.
-9. **A self-describing claim has no fixed point.** State the invariant, not the measurement, when
-   the claim is about the artifact containing it.
+7. **Reproduce by running, not by reading** — including when correcting a document. A correction that
+   replaces a false claim with a differently-false one is worse than the original.
+8. **Name the set a claim covers.** A count nobody can enumerate is a count nobody checked.
+9. **A self-describing claim has no fixed point.** State the invariant, not the measurement, when the
+   claim is about the artifact containing it.
 10. **`node:vm` is not a sandbox** — it is scoping. Untrusted code needs a process boundary.
 11. **Absence is not zero, and an empty allow-list is the permissive case.** "Named nobody" and
     "could not read who it names" must never produce the same value.
-12. **Approve means "go ahead", not "consider it done"** — on every node type except the gate
-    itself, there is work behind the gate. Pinned by the type system rather than by a count:
-    `test/run/approve-means-go-ahead.test.ts` drives one gated graph per node type off a
-    `Record<NodeType, Case>`, so a ninth member is a COMPILE error there.
+12. **Approve means "go ahead", not "consider it done"** — on every node type except the gate itself,
+    there is work behind the gate. Checked by
+    `node --test packages/core/test/run/approve-means-go-ahead.test.ts`, which drives one gated graph
+    per node type off a `Record<NodeType, Case>`, so a ninth member is a COMPILE error there.
 13. **A terminal operation is not final until every producer of the state it ends is stopped.**
 14. **Cross-realm values look identical and are not**; assert on the prototype, and know that
     `Array.isArray` is realm-agnostic and throws on a revoked proxy.
-15. **A plain `grep` can silently skip a file, and empty output is not evidence of absence.**
-    Always `/usr/bin/grep -a`, and the path matters — this shell's `grep` is a ugrep wrapper that
-    passes `-I`. **The trigger set is NUL ∪ invalid UTF-8**, not non-ASCII: valid non-ASCII
-    matches fine. **Do not count the affected files with grep** — a skipped file is only reported
-    when it also matches your pattern, so grep undercounts and the count moves with the search
-    term. Census instead. Today: **5 files carry a NUL byte and none is invalid UTF-8** —
-    `evolution/trajectory.ts`, `journal/payloads.ts`, `test/builtin/fs-search.test.ts`,
-    `test/run/delivery.test.ts`, `test/server/http.test.ts`.
-16. **A fake credential in a doc must LOOK fake, or a scanner is right to stop you.** And the
-    lesson that cost more: **a secret scan that names one vendor's shape is not a secret scan.**
-    The pre-push scan that declared the tree clean searched for `sk-` with a HYPHEN; Stripe uses
-    `sk_` with an underscore, so the pattern could not match and the claim was broader than the
-    check.
-17. **A ratio of two timings is not more robust than one timing.** The noise does not cancel, it
-    compounds, and it compounds asymmetrically — so a gate written as `t_big / t_small < K` is
-    **likeliest to pass when its own denominator sample is worst.** Measured twice this session on
-    two different assertions: `compile scales sub-quadratically` went green only on the run whose
-    100-node baseline was 15.5 ms against 4.5–5.0 ms everywhere else, and the layout bound's
-    500-node sample twice came back *faster* than its 100-node one. **The replacement in both
-    cases was a deterministic counter** — a `Proxy` counting the property reads the code makes —
-    which is byte-identical run to run and ten times tighter than the timing it replaced. Where a
-    timing must stay, make it ONE absolute bound with an order-of-magnitude margin, never a ratio.
-    **This entry has now carried a claim that did not reproduce three separate times, always about
-    this same measurement**, which is why it states the rule and not a fourth set of numbers.
-18. **Cite a source by SYMBOL, never by line number.** §H.2 is the record of what renumbering
-    *this file* cost; this is the same failure pointed the other way, at the source. Measured on
-    the two documents AS THEY STOOD AT `5ffc223`, before this entry existed:
-    `/usr/bin/grep -aon 'engine\.ts:[0-9]*' TODO.md DESIGN.md` found **eleven citations across
-    eight distinct line numbers, and all eight were stale** — every one landed on an unrelated
-    comment. `:1457` (the `nodeApproved` argument) is at 1636; `:2980` (a condition that has since
-    been DELETED) is mid-docstring; `:7412` (`#failRun`) is at 8116. They were replaced by symbol
-    names in the same commit as this entry.
-    **AND THE INVARIANT THAT FOLLOWED WAS WRONG THE DAY IT WAS WRITTEN, for the reason this entry
-    is about.** It said "no line-numbered citation into `src/` remains anywhere in these two
-    files", and it inferred that from a grep for **`engine.ts` alone**. Widened on 2026-09-02 to
-    `/usr/bin/grep -aon '[a-zA-Z_/-]*\.ts:[0-9][0-9]*' TODO.md DESIGN.md`, **sixteen** more turned
-    up — twelve in this file (`realm.ts`, `graph/validate.ts`, `evolution/gate.ts`,
-    `evolution/live.ts`, `run/replay.ts`, `telemetry/spans.ts` twice, `mcp/tools.ts`, `cli.ts`
-    twice, `graph/compile.ts` twice) and four in `DESIGN.md` (`run/projection.ts`,
-    `graph/compile.ts`, `run/hooks.ts`, `journal/events.ts`) — and five had already gone stale
-    exactly as predicted: `spans.ts:798` and `:993` both land on unrelated comments,
-    `replay.ts:640` is 28 lines short of the `shadow` store it named, `cli.ts:2408` is 339 short
-    of `readMcpServers`, and `hooks.ts:89` was two lines short of the `HookContext` docstring it named and landed on a closing brace — and it named no directory, so a reader could not tell which `hooks.ts` was meant. An earlier wording of THIS sentence said the path had no file at all; `packages/core/src/run/hooks.ts` exists and has a line 89. That is §F.18's own failure mode committed inside §F.18. All sixteen are
-    symbols now. **A claim about a SET checked by a grep over one MEMBER of it is the
-    same defect as a stale line number**: it fails silently, by looking checked.
-    **The invariant, restated with its exemptions named so it is falsifiable:** every remaining
-    match of that widened grep is one of exactly two kinds — a path under `test/` (§A.23's
-    `skeleton.ts:73`, and the `test.ts:N`s in §B.2, §F.1, §H.2 and `DESIGN.md`'s D2), or a record
-    of what a pointer
-    USED TO BE, which is this paragraph's own five examples plus §H.2's historical
-    `engine.ts:7096`, the exception below. **Not one is a live pointer into `src/`, which is what
-    makes this rule checkable rather than merely stated.** (§A.34 also names the *pattern*
-    `engine.ts:NNNN`; it has no digits, so the widened grep does not see it and it is listed here
-    only so a reader who greps for `engine.ts` is not surprised by a fourth hit.)
-    An earlier draft of this sentence said the narrow grep "returns exactly two lines". It returns
-    three, and the third is THIS ENTRY — the line describing the grep matches it. That is
-    §F.9 ("a self-describing claim has no fixed point") broken by the row asserting §F.18, which
-    is the second time that session a rule was violated by the paragraph stating it. State the
-    invariant; never total the matches of a grep inside the text the grep searches. A symbol is greppable, survives every edit above it,
-    and fails LOUDLY when it is renamed; a line number into a nine-thousand-line file goes stale
-    on the next commit and fails SILENTLY, by pointing at something plausible. One exception, and
-    §H.2's own rows are it: a citation that records what a pointer *was* is the one use a stale
-    number is correct for.
-19. **The kernel guard's job is to force a question, and "relabel until it passes" is the failure
-    it exists to catch.** §A.8's change was first committed `feat(run)`, and
-    `scripts/check-kernel.mjs` refused it because it touches `run/engine.ts`. Two answers were
-    available and only one of them is honest: take a `Kernel-seam:` trailer, or argue the label.
-    It was re-committed as `fix(run)` — `552d999` — with the argument IN THE BODY rather than
-    assumed, and the argument is checkable: **no mechanism is added** (`nodeApproved` was already
-    a parameter of `#invokeTool`, and `trigger` was already a parameter of `#dispatchRollback`,
-    the caller — `git show 552d999^:packages/core/src/run/engine.ts` shows both), **no vocabulary
-    is added** (no journal event, no schema field, nothing a fold must learn), and it RESTORES a
-    property the code already claimed. What changed is which value an existing parameter carries.
-    A seam trailer would have recorded a debt that does not exist, and the ledger is only worth
-    reading if every entry in it is real.
-    **The tell that separates this from the failure, and it is the part to copy:** the argument
-    was written down where the guard's own ledger can be audited against it, and it names what
-    would falsify it. Had `#compensateOne` needed a new parameter *threaded from a new place*, or
-    a new `effect.started.kind`, the honest answer would have been the trailer and this row would
-    say the census is 11. **A `fix` label that cannot survive being spelled out in the commit body
-    is a `feat` wearing a disguise**, and the guard cannot tell the two apart — only the argument
-    can, which is why the guard demands one rather than deciding.
+15. **A plain `grep` can silently skip a file, and empty output is not evidence of absence.** Always
+    `/usr/bin/grep -a`, and the path matters — this shell's `grep` is a ugrep wrapper passing `-I`.
+    **The trigger set is NUL ∪ invalid UTF-8**, not non-ASCII. **Do not count the affected files with
+    grep** — a skipped file is only reported when it also matches your pattern, so grep undercounts
+    and the count moves with the search term. Census instead: read every `git ls-files` path and test
+    for a zero byte (5 files today, 0 invalid UTF-8).
+16. **A fake credential in a doc must LOOK fake, or a scanner is right to stop you.** And the lesson
+    that cost more: **a secret scan that names one vendor's shape is not a secret scan** — a scan for
+    `sk-` cannot match Stripe's `sk_`, so the claim was broader than the check.
+17. **A ratio of two timings is not more robust than one timing.** The noise compounds
+    asymmetrically, so a gate written as `t_big / t_small < K` is **likeliest to pass when its own
+    denominator sample is worst.** THE MEASUREMENTS, which `CLAUDE.md` cites this entry for:
+    `compile scales sub-quadratically` went green only on the run whose 100-node baseline was
+    15.5 ms against 4.5–5.0 ms everywhere else, and the layout bound's 500-node sample twice came
+    back FASTER than its 100-node one. The replacement in both cases was a deterministic counter (a
+    `Proxy` counting the property reads the code makes), byte-identical run to run. Where a timing
+    must stay, make it ONE absolute bound with an order-of-magnitude margin, never a ratio.
+18. **Cite a source by SYMBOL, never by line number.** Checked by
+    `/usr/bin/grep -aon '[a-zA-Z_/-]*\.ts:[0-9][0-9]*' TODO.md DESIGN.md` — every remaining match must
+    be either a path under `test/` or a record of what a pointer USED TO BE. **Not one is a live
+    pointer into `src/`, which is what makes this rule checkable rather than merely stated.** A symbol
+    fails LOUDLY when renamed; a line number goes stale on the next commit and fails SILENTLY, by
+    pointing at something plausible. **A claim about a SET checked by a grep over one MEMBER of it is
+    the same defect as a stale line number**: it fails silently, by looking checked.
+19. **The kernel guard's job is to force a question, and "relabel until it passes" is the failure it
+    exists to catch.** The honest answers are a `Kernel-seam:` trailer or an argument for the label,
+    written in the commit body where the ledger can be audited against it. `552d999` is the worked
+    example: no mechanism added, no vocabulary added, and it RESTORES a property the code already
+    claimed. **A `fix` label that cannot survive being spelled out in the commit body is a `feat`
+    wearing a disguise**, and the guard cannot tell the two apart — only the argument can.
 
 ---
 
@@ -2125,610 +620,181 @@ anecdotes.
 
 Each traces to a decision in `DESIGN.md`.
 
-- **G.1 · Declared effects (D2) for `evaluator` bodies and the sandbox. THE ROW'S REASON WAS ONE
-  REASON DOING TWO JOBS, AND IT WAS ONLY EVER TRUE OF ONE OF THEM.** Done for `function` nodes:
-  `FunctionNode.effects` names the tools a body may invoke, `reachableToolNames` sees them, and
-  the body gets one bound invoker per name through `ctx.effects`.
-
-  This row used to say evaluators and sandboxed bodies were both open because "a resource-loaded
-  body runs synchronously inside `vm.runInContext` and cannot await, so `ctx.effects` is honestly
-  absent there rather than broken". Driven, 2026-09-02, that sentence is wrong twice:
-
-  - **It is the SANDBOX's reason and it applies to `function` nodes identically.** A `function`
-    node whose body is resource-loaded does not get effects either — and they are not "absent",
-    they are a THROWING STUB. `ARGUMENT_BRIDGE` builds one `E_EFFECT_UNAVAILABLE` thrower per
-    declared name; `test/resources/functions.test.ts` measures it. So the sandbox is a limit of
-    the REALM, not of the node type, and naming evaluators in the same breath hid that.
-  - **It is not the evaluator's reason at all.** An in-process assertion body AWAITS: measured in
-    `test/run/evaluator-body-contract.test.ts`, a body that `await`s a host round trip inside an
-    `evaluator{kind:"assertion"}` node completes and the run succeeds, exactly as under a
-    `function` node. `ctx.effects` is `undefined` there because nobody wired it, not because the
-    executor cannot.
-
-  **The real blocker is where the DECLARATION would live**, and it is a good one: `evaluator`
-  cannot say `effects` at all — `ALLOWED_FIELDS.evaluator` refuses it with
-  `GRAPH020_UNKNOWN_FIELD`, which is the correct fail-closed state and is pinned by that test.
-  Opening it is therefore a schema change to `graph/spec.ts` and a wiring change to
-  `run/engine.ts`, **both kernel files, under a `feat`** — so it costs a `Kernel-seam:` trailer
-  and is a maintainer's call, not a lane's. The change set, if it is ever spent:
-
-  - `EvaluatorNode.effects` + `ALLOWED_FIELDS.evaluator` + `reachableToolNames` reading
-    `node.evaluator?.effects` unconditionally, so the ceiling and floor apply on both arms even
-    if the refusal below is bypassed by a graph folded out of a journal;
-  - `validate.ts`'s `GRAPH003_MALFORMED` effects-shape check, today `n.type === "function"`,
-    widened — the shape is load-bearing for the same guard here as there;
-  - `#effectsFor` keyed off the node rather than `w.node.function`, and `#runEvaluator`'s
-    assertion arm passing the result, which is where the rest of that contract already lives;
-  - **`isExternal` MUST MOVE IN THE SAME COMMIT.** Its docstring trusts an `assertion` evaluator
-    on the stated ground that the arm "runs a function body with no `ctx.effects` bound at all".
-    That is true today and stops being true the moment this lands, and the hole it opens is the
-    laundering hole `declared-effects.test.ts` already names for `function`. The rule to copy is
-    `function`'s: untrusted unless `effects: []`, `Array.isArray` and not `.length`.
-  - **`kind: "rubric"` gets nothing, and should be REFUSED rather than accepted-and-inert.** A
-    rubric arm is one model call, and `effects` means *declared, never chosen at run time* — the
-    exact opposite of a model's tool set, which is `agent.tools`. `#runAgent` reads
-    `w.node.agent?.tools`, and an `evaluator` node has no `agent` block, so a rubric can reach
-    nothing whatever the field says.
-
-  The sandbox half stays open on its own terms: giving a sandboxed body real effects means an
-  async bridge, which is its own design and is §A.10's prerequisite. One fact that narrows its
-  shape — `functions.ts` derives `declaredEffects` from `callCtx.effects` and never from the node
-  type, so whatever the bridge ends up being, it serves both node types with no further edit.
-
-  **The one piece that was a defect landed 2026-09-02** — the assertion arm dropped a body's
-  `take`, so an assertion asking for one of two outgoing edges took both. Same file, same
-  measurement, `fix` not `feat`.
-- **G.2 · `Date` in the realm.** It stays absent, and **the reason changed**: not "no seed could
-  make it reproducible" but "a frozen `Date` that silently never advances is more surprising than
-  an absent one". Restoring it means binding the whole constructor to `ctx.now`. **Bind `Temporal`
-  in the same change** when it becomes a default global.
-- **G.3 · Divergence must be terminal and loud.** The known failure mode of every replay-based
-  runtime is a silent stall: the task retries forever without entering a failed state.
-  `E_REPLAY_DIVERGENCE` is fatal, so the recorded-effect path is covered. **A repeated divergence
-  signature with no forward progress still needs its own terminal state.**
-- **G.4 · Two-axis labels (D4): unlabelled ⇒ untrusted. DONE on the integrity axis, 2026-09-01.**
-  Both axes exist — `tainted`/`applyTaint` for integrity, `carriesSecret`/`applySecretFlow` for
-  confidentiality — and `isExternal` no longer defaults to trusted. It is now a named set of pure
-  types (`router`, `join`, `human_gate`) plus two label reads: a `function` is untrusted unless it
-  declares `effects: []`, and an `evaluator` splits on `kind`. `agent` is unconditionally
-  untrusted, which widened the old `tools: []` arm. Reproduction and the label's limits (it
-  declares ORIGINATION and never launders) are in `test/run/unlabelled-is-untrusted.test.ts`.
-  **What is left is the CONFIDENTIALITY axis**: `applySecretFlow` still reads the declared
-  classification, so an unclassified channel carrying a secret is still trusted by default, and
-  the fix there is not symmetric — there is no `effects: []` equivalent, and marking every
-  unclassified channel sensitive is the constant-gate failure that arm's docstring already
-  refuses. Branch-coordinate scoping was built and reverted; see `DESIGN.md` D4.
-- **G.5 · Prompt text is bound by the MANIFEST, not by the hash (D7). Closed 2026-09-01, and the
-  row as written was half stale.** `graphHash` is still `digest(spec)` and a ref'd prompt's text
-  is still not in it — that part was always true and is deliberate. What the row got wrong is the
-  conclusion: the text is bound anyway, by `RunGraph.resolutionManifest`, which pins every ref to
-  a CONTENT digest and is journaled on `run.compiled`. Reproduced two ways, and the difference
-  matters to whoever re-runs it. In-tree and repeatable: `test/run/graph-binding.test.ts`'s
-  "THE SAME SPEC WITH DIFFERENT RESOURCES IS REFUSED", which asserts the graphHash is IDENTICAL
-  while the manifest moves and `resolveGate` throws — 5/5. And once through the binary, against a
-  workspace the driver constructed for the purpose: run to a gate, edit the prompt file, and
-  `loom approve` refuses with `E_GRAPH_MISMATCH: … matches run …'s spec, but the resources behind
-  its refs have changed since it was compiled`. **That second one names no repo path**, because
-  the workspace was temporary — an auditor looking for `resources/prompt/writer.md` in this tree
-  correctly found nothing. The test is the artifact; the binary run is evidence that was not
-  written down in a form anyone can repeat. Three doors check it (`Engine.#assertBound` on
-  gate decisions and on `advance`, and `replayRun`'s `refsBound`), and `RunGraph.documents`
-  freezes the bytes by value so `#documentFor` asks no resolver at run time.
-  **What was NOT bound, and is the half that was real: a SUBGRAPH's own refs.**
-  `resolveManifest` walked only the root spec while `resolveSubgraphs` walked children
-  recursively, so a parent naming `subgraph/child@stable` pinned that ref and nothing inside it —
-  the child's `prompt/…` and `function/…` were in neither the manifest nor `documents`, and
-  `Engine.#compileChild` (which runs during `advance`, while the parent's Task is executing) fell
-  through `frozenFirst` to the LIVE resolver. Reproduced in ONE process with no restart: a
-  promotion landing between `submit` and `advance` reached a running node, the model was sent the
-  edited prompt, and the run reported `succeeded` — nothing refused, because
-  `run.compiled.resolutionManifest` named only the subgraph ref. Fixed in `graph/compile.ts` by
-  walking the frozen child specs into the manifest; `frozenFirst` then serves them, so no engine
-  change was needed. `graphHash` is untouched **on purpose**: `cohortKeyOf` keys on it, so the run
-  is pinned and the cohort is not, and the evolution loop can still compare two runs of
-  `review-bench` across a prompt edit — which is the one candidate kind D6 defines self-improvement
-  as producing. Test: `test/resources/store.test.ts`, "THE PINNING RULE REACHES INTO A SUBGRAPH".
-  **Residue, both narrow and both pre-existing:** (a) `#assertBound` checks the manifest only when
-  the attached graph IS the compiled one, so a MUTATED run's successor carries no recorded manifest
-  to compare — the engine says so where the gap is, and mutation is unreachable from the binary
-  today; (b) ~~`#compileChild`'s docstring still says a child's own refs "go to the live resolver
-  on every compile"~~ — **CLOSED by `6af4a02`, verified at `5ffc223` by running the grep the row
-  was written against:** `/usr/bin/grep -arn 'live resolver on every compile' packages/core/src`
-  returns nothing, and the paragraph now reads "It used to be TWO… `0f605a9` made the manifest
-  walk the frozen child specs too, which closed it; this paragraph outlived the fix by two
-  commits and would have sent a reader to re-fix something already fixed." That is exactly the
-  rewrite the closing condition asked for, keeping the `tools.manifests()` half. **(a) is now the
-  whole of what this row carries**, and it is a gap the engine states where it lives rather than
-  a false claim anywhere.
-- **G.6 · Proposed-API mechanism and a version pin (D5).** Both halves unbuilt: no proposed-API
-  declaration file, no opt-in, no publish-time refusal for an extension that uses one, and no
-  runtime version pin.
-- **G.7 · One retry budget per run. THE MULTIPLICATION IS GONE; THE BUDGET WAS NOT BUILT, AND
-  that is the decision rather than the omission.** The rationale named three layers and there
-  were two: the agent loop ADDS rather than multiplies (a completed turn is served from the
-  journal under `<taskId>:model:<turn>`), and a 429 never multiplied either because `postJson`
-  rethrows it without a hold. What did multiply was engine node retry × provider transport retry,
-  measured through the engine on one agent node against a permanent 503:
-  `{requests: 9, retriesScheduled: 2}`.
-
-  A fourth `Budget` dimension would have touched `graph/spec.ts`, `run/policy.ts` and
-  `run/engine.ts` — three kernel files, so a `feat` needing a seam — to buy what deleting the
-  duplicate layer buys for nothing. `HttpOptions.maxAttempts` now defaults to 1, so the engine's
-  journaled curve is the only one: `{requests: 3, retriesScheduled: 2}`, same journal, a third of
-  the traffic. Pinned both ways in `test/run/retry-does-not-multiply.test.ts`.
-
-  **What that cost, named.** An embedder driving an adapter with no engine above it loses two
-  silent pre-response retries and gets the retryable error instead; `maxAttempts: 3` restores the
-  old curve exactly. Nothing about a mid-stream failure moves — `postJson` never retried past the
-  first byte. The one shape that genuinely loses a retry is a `RunGraph` whose `plans` a caller
-  assembled WITHOUT the compiler: `#retryDecision` returns on `policy === undefined`, and the
-  transport was the only retry such a graph had.
-
-  **Reopen a run-scoped budget if fan-out width turns out to be the real multiplier** — it is
-  still a free variable, and 3 requests × a wide fan-out is the same arithmetic one level up.
+- **G.1 · Declared effects (D2) for `evaluator` bodies and the sandbox.** Repro:
+  `/usr/bin/grep -anc 'GRAPH020_UNKNOWN_FIELD' packages/core/src/graph/validate.ts` → 1;
+  `ALLOWED_FIELDS.evaluator` refuses `effects`, which is the correct fail-closed state and is pinned
+  by `test/run/evaluator-body-contract.test.ts`. Done for `function` nodes. **The row's old reason
+  was wrong twice** (driven 2026-09-02): a resource-loaded body's missing effects is the SANDBOX's
+  limit and applies to `function` nodes identically — they get a throwing `E_EFFECT_UNAVAILABLE`
+  stub, not an absence — and an in-process assertion body AWAITS fine, so `ctx.effects` is undefined
+  there because nobody wired it. The real blocker is where the DECLARATION would live: opening it is
+  a schema change to `graph/spec.ts` and a wiring change to `run/engine.ts`, **both kernel files,
+  under a `feat`** — a `Kernel-seam:` trailer and a maintainer's call. **Closes with**
+  `EvaluatorNode.effects` + `ALLOWED_FIELDS.evaluator` + `reachableToolNames` reading it
+  unconditionally, `validate.ts`'s effects-shape check widened past `n.type === "function"`,
+  `#effectsFor` keyed off the node, and — **in the same commit** — `isExternal` moved, because its
+  docstring trusts an `assertion` evaluator on the ground that the arm binds no `ctx.effects`, which
+  stops being true the moment this lands. `kind: "rubric"` gets nothing and should be REFUSED.
+- **G.2 · `Date` in the realm.** It stays absent, and the reason changed: not "no seed could make it
+  reproducible" but "a frozen `Date` that silently never advances is more surprising than an absent
+  one". **Closes by** binding the whole constructor to `ctx.now` — and bind `Temporal` in the same
+  change when it becomes a default global.
+- **G.3 · Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
+  is a silent stall: the task retries forever without entering a failed state. `E_REPLAY_DIVERGENCE`
+  is fatal, so the recorded-effect path is covered. **Closes when** a repeated divergence signature
+  with no forward progress gets its own terminal state.
+- **G.4 · Two-axis labels (D4): unlabelled ⇒ untrusted. DONE on the integrity axis.** Repro:
+  `/usr/bin/grep -anc 'applySecretFlow' packages/core/src/run/engine.ts` → 4. Both axes exist
+  (`tainted`/`applyTaint`, `carriesSecret`/`applySecretFlow`) and `isExternal` no longer defaults to
+  trusted (`test/run/unlabelled-is-untrusted.test.ts`). **What is left is the CONFIDENTIALITY axis:**
+  `applySecretFlow` still reads the declared classification, so an unclassified channel carrying a
+  secret is trusted by default — and the fix is not symmetric, because there is no `effects: []`
+  equivalent and marking every unclassified channel sensitive is the constant-gate failure that arm's
+  docstring already refuses. **Closes when** that asymmetry has an answer.
+- **G.5 · Prompt text is bound by the MANIFEST, not by the hash (D7). Closed 2026-09-01 except one
+  residue.** Repro: `node --test packages/core/test/run/graph-binding.test.ts` → 6 pass / 0 fail;
+  "THE SAME SPEC WITH DIFFERENT RESOURCES IS REFUSED" asserts the graphHash is IDENTICAL while
+  `resolutionManifest` moves and `resolveGate` throws. A subgraph's own
+  refs were the half that was real and are now walked into the manifest (`graph/compile.ts`;
+  `test/resources/store.test.ts`, "THE PINNING RULE REACHES INTO A SUBGRAPH"). **The residue, and the
+  whole of what this row carries:** `#assertBound` checks the manifest only when the attached graph IS
+  the compiled one, so a MUTATED run's successor carries no recorded manifest to compare — mutation
+  is unreachable from the binary today. **Closes when** it records one.
+- **G.6 · Proposed-API mechanism and a version pin (D5).** Repro:
+  `/usr/bin/grep -arc 'proposed' packages/core/src/index.ts` → 0. Both halves unbuilt: no
+  proposed-API declaration file, no opt-in, no publish-time refusal for an extension that uses one,
+  and no runtime version pin. **Closes when** they exist.
+- **G.7 · One retry budget per run. THE MULTIPLICATION IS GONE; THE BUDGET WAS NOT BUILT, and that is
+  the decision rather than the omission.** Repro:
+  `node --test packages/core/test/run/retry-does-not-multiply.test.ts` — `HttpOptions.maxAttempts`
+  defaults to 1, so the engine's journaled curve is the only one: `{requests: 3, retriesScheduled: 2}`
+  where engine × transport gave `{requests: 9, retriesScheduled: 2}`. A fourth `Budget` dimension
+  would have touched three kernel files under a `feat` to buy what deleting the duplicate layer buys
+  for nothing. **The cost, named:** an embedder driving an adapter with no engine above it loses two
+  silent pre-response retries (`maxAttempts: 3` restores the old curve), and a `RunGraph` whose
+  `plans` a caller assembled WITHOUT the compiler loses its only retry. **Reopen a run-scoped budget
+  if fan-out width turns out to be the real multiplier** — 3 requests × a wide fan-out is the same
+  arithmetic one level up.
 
 ---
 
 ## H · Housekeeping
 
-- **H.0 · A delegating chain now raises one gate per level, and that was the maintainer's call.**
-  Closing A.7 means `top → mid → leaf` over an irreversible child asks a human three times where
-  it asked once. Put to the maintainer with the alternatives (gate only the outermost; revert to a
-  compile diagnostic only) and **decided: keep it.** The argument that carried it is consistency —
-  a non-subgraph graph already asks at every node that transitively reaches the tool, so the old
-  behaviour was the subgraph route being LOOSER, not the new one being stricter — plus the human
-  being asked BEFORE the child does reversible work rather than at the innermost irreversible
-  call. **What would reopen it:** an operator reporting that nested delegation is unusable in
-  practice. The mechanism to reach for then is one approval covering a chain, which needs a rule
-  for what happens when the chain's shape changes mid-run, and that is a new decision rather than
-  a tuning knob.
-
-
-
-- ~~**H.1 · `bin/loom` is gitignored and goes stale on any source edit.**~~
-  **CLOSED — but not the way the row asked, and the measurement that redirected it is the point.**
-  The row's remaining half was "nothing rebuilds the binary automatically". That half is now a
-  **documented operating condition rather than open work**: under the framing answer §D's header
-  records — single machine, single tenant, the maintainer's own workflows, one operator — a rebuild
-  is a command a person runs, and a daemon watching the tree is ceremony for an audience of one. It is stated where an operator meets it, in `README.md`'s
-  install block, not only here.
-
-  **What was actually open was something else, and it took a measurement to see.** The fix the row
-  credits — `binary-freshness.cjs`, a guard that rides INSIDE the artifact — has a hole no guard of
-  that shape can close about itself: **a binary built before the guard existed does not carry it,
-  and cannot say so.** Measured 2026-09-02 on the maintainer's checkout, four commands:
-
-  ```
-  stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' bin/loom                      2026-08-25 13:52:23
-  find packages/core/src -name '*.ts' -newer bin/loom | wc -l        48   (of 62)
-  /usr/bin/grep -ac 'THIS BINARY IS STALE' bin/loom                  0
-  ./bin/loom --help >/dev/null; echo $?                              0
-  ```
-
-  Eight days and 48 files behind, exit 0, silent — because the guard shipped on 2026-08-28, three
-  days after that binary was built, and `.github/workflows/ci.yml` never built the binary, so
-  nothing outside a human's hands ever produced one to look at.
-
-  **What already covered what, named rather than waved at.** The two freshness suites stamp a fake
-  `bin/loom.cjs` with `banner(stampFor(root))` — they prove the CHECK decides correctly.
-  `readme-gaps.test.ts`'s "THE BUILD ACTUALLY BAKES IT IN" greps `build-binary.mjs`'s TEXT for
-  `binary-freshness.cjs`, `.banner(` and `banner: {` — it proves the wiring is written down. **The
-  artifact was the hole, and a source grep cannot close it.** Driven here: `build-binary.mjs`
-  edited to compute `freshness.banner(stamp)` into a variable and inject `bannerText.slice(0, 0)`,
-  so every string that grep requires is still present. `readme-gaps.test.ts` — 22 pass, 0 fail,
-  including that probe. The build printed its success line, *"it refuses to run once
-  packages/core/src moves"*. `/usr/bin/grep -ac 'THIS BINARY IS STALE' bin/loom` returned **0**.
-  The build's own success line is a claim about the artifact that nothing checked.
-
-  **What shipped:** `scripts/verify-binary.mjs`, which drives the produced artifact through the
-  guard's four cases — CURRENT (runs), STALE (refuses, exit 1), OVERRIDE (`LOOM_STALE_BINARY=allow`
-  runs it and still prints the report), SHIPPED (no sources beside it, runs silently) — plus a
-  `binary` job in CI that runs `npm run build:binary` then the verifier. Against a binary built
-  from this tree all four hold; against the 08-25 binary **CURRENT and SHIPPED pass and STALE and
-  OVERRIDE fail**, which is precisely why nobody noticed for eight days: the two cases a guardless
-  binary satisfies are the two anybody exercises by accident.
-
-  **Not in `npm run check`, deliberately** — `binary-freshness.cjs`'s own header argues that gate
-  down ("both people were running the binary directly, hours after the last check"), and it is
-  right. A separate CI job blocks nothing `check` does. Cost measured on this machine: `tsc` 2s,
-  bundle + SEA + inject 5s, verify 4s.
-
-  **What would reopen it:** more than one operator, or a published binary. Both make "the person
-  who edits the sources is the person who rebuilds" stop being true, and the answer then is a
-  release step that stamps and uploads, not a watcher.
-- ~~**H.2 · The 2026-08-29 renumber broke FOURTEEN in-tree citations of this file.**~~
-  **CLOSED — thirteen by `814e283`, and a fourteenth its own command could not see.** Kept, not deleted, because the TABLE is
-  the thing a future renumber needs and the command at the end of it is the cheap half of the
-  lesson. **IT SAID THIRTEEN, AND THE FOURTEENTH IS THE ONE ITS OWN COMMAND COULD NOT SEE:**
-  `cli.ts` wrote `TODO §D.19` with no `.md`, and the grep this row published hard-required
-  `TODO\.md` — so the row shipped a checklist that undercounts by exactly the shape it exists to
-  catch. Found by an auditor re-running it, not by the command. The grep below is loosened. Recorded as a set rather than described, because two of them had the dangerous
-  shape — after the renumber they resolved to a *plausible, unrelated, live* row instead of to
-  nothing, which is worse than dangling. `src/run/engine.ts:7096` cited `§B.1` for a compensation
-  gap and landed on `LeasedScheduler`; `test/deployment/boot-banner.test.ts:18` cited `A.15` for
-  the suite flake and landed on `RUN_CLOCK_SCAN_CEILING`.
-
-  | was | is now | sites |
-  |---|---|---|
-  | `§A0` | `§A` | `DESIGN.md` ×3 |
-  | `§A0` | `§A.21` | `test/cli/suite-freeze.test.ts` |
-  | `§D.4` | `§Z` | `src/run/engine.ts`, `test/run/cancel-does-not-wait.test.ts`, `test/run/operator-steer.test.ts` |
-  | `§D.14` | `§Z` | `README.md`, `test/readme-gaps.test.ts` |
-  | `§B.1` | `§A.30` | `src/run/engine.ts` |
-  | `§E.1` | `§B.1` | `src/cli.ts` |
-  | `§D.19` | `§Z` | `src/cli.ts` |
-  | `A.15` | `A.20` | `test/deployment/boot-banner.test.ts` |
-
-  Four citations were checked and left alone because they still resolve: `§E.2` (`src/cli.ts`) and
-  §F items 11, 12 and 13, which survived because §F is a numbered list whose numbering did not
-  move. **The command that enumerates the whole set**, so the next renumber can run it first:
+- **H.0 · A delegating chain raises one gate per level, and that was the maintainer's call.** Repro:
+  `node --test packages/core/test/run/approve-means-go-ahead.test.ts`. Closing A.7 means
+  `top → mid → leaf` over an irreversible child asks a human three times where it asked once. Put to
+  the maintainer with the alternatives (gate only the outermost; revert to a compile diagnostic) and
+  **decided: keep it** — a non-subgraph graph already asks at every node that transitively reaches
+  the tool, so the old behaviour was the subgraph route being LOOSER, and the human is asked BEFORE
+  the child does reversible work. **Reopens if** an operator reports that nested delegation is
+  unusable in practice; the mechanism then is one approval covering a chain, which needs a rule for
+  what happens when the chain's shape changes mid-run.
+- ~~**H.1 · `bin/loom` is gitignored and goes stale on any source edit.**~~ CLOSED — not by a
+  watcher (under §D's single-operator framing a rebuild is a command a person runs) but by
+  `scripts/verify-binary.mjs`, which drives the PRODUCED ARTIFACT through the freshness guard's four
+  cases (CURRENT, STALE, OVERRIDE, SHIPPED) plus a `binary` CI job. The hole was that a source grep
+  cannot check an artifact: a binary built before the guard existed does not carry it and cannot say
+  so — measured 8 days and 48 files behind, exit 0, silent. Deliberately NOT in `npm run check`.
+  **Reopens on** more than one operator, or a published binary.
+- ~~**H.2 · The 2026-08-29 renumber broke FOURTEEN in-tree citations of this file.**~~ CLOSED —
+  thirteen by `814e283` and a fourteenth its own command could not see (`cli.ts` wrote `TODO §D.19`
+  with no `.md`, and the published grep hard-required `TODO\.md`). Two resolved after the renumber to
+  a *plausible, unrelated, live* row instead of to nothing. **Run BEFORE the next renumber:**
   `/usr/bin/grep -arno 'TODO\(\.md\)\?[^"]\{0,4\}§\?[A-Z]0\?\.\?[0-9]*' packages/core/src packages/core/test scripts *.md`
-  — and running it BEFORE renumbering is the cheap half of the lesson §F.1 states about pointers
-  into enumerations.
-
-- ~~**H.4 · `--otlp` is the only verb-scoped flag on this CLI, and the asymmetry is tracked
-  rather than argued away.**~~ **CLOSED by `96a03bf`, on the condition this row set: a verb -> flag
-  applicability table now exists, so a flag on a verb that does not read it is REFUSED rather than
-  ignored, and `refuseOtlpOutsideTrace` is one row of that table rather than a one-off. The
-  general form was built rather than the exception being defended, which is the outcome this row
-  said it wanted.** The original argument, kept because it is why the exception was made first: `assertKnownFlags` gates the flag NAME set and nothing gates which
-  verb may read a flag, so every other flag is accepted everywhere: driven at `c8bdf22`,
-  `loom trace <runId> --port 9999 --token sekret --suite x` is accepted and fails only for the
-  run id. `refuseOtlpOutsideTrace` makes `--otlp` the exception, on the ground that it is the
-  only flag whose silent no-op is an EGRESS THAT DID NOT HAPPEN — an operator believing a trace
-  reached their collector while the collector never heard from the process. That ground is narrow
-  and it is deliberately not generalised. **The precedent this row exists to refuse:** the first
-  draft of that function cited `promote`'s "THE REPLAYED MODE'S FLAGS ARE REFUSED RATHER THAN
-  IGNORED" as one, and it is not — that refuses `--baseline`/`--suite` between two MODES OF ONE
-  VERB, both of which read them. **Closes when** either a verb→flag applicability table exists
-  (which would also catch `--token` on `trace`, the same class with a smaller consequence), or
-  somebody argues that egress is the only case worth the guard and writes that down here instead.
-- ~~**H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four.**~~
-  **CLOSED by `e8c2fb5`, and THE ROW UNDERCOUNTED ITS OWN SURVIVOR SET** — it named one
-  surviving clause and the grep found two. Four count-claims in the region now name their
-  members instead. `test/graph/deadline-set-is-named-not-counted.test.ts` pins the two bullet
-  enumerations to the sets the compiler actually applies (parsing the `NodeType` union out of
-  `graph/spec.ts`, so a ninth node type fails there rather than landing on neither side) and
-  refuses a count of either set outside quoted text.
-  **The guard did not enforce its own rule until a reviewer drove it.** It matched six
-  determiners followed by a number-word, so `and exactly three can:` — a stale count sitting
-  directly above the four bullets, which is this row's defect verbatim — passed it green.
-  Measured both ways: with the determiner form that phrasing gives 2 pass / 0 fail, with any
-  bare number-word it fails. Quoted spans stay exempt, because the docstring QUOTES the counts
-  it is warning about and quoting is not counting.
-  ORIGINAL TEXT: TWO OF THE
-  THREE ARE FIXED; ONE IS NOT, and the survivor is the one no summary line carries.** Found while
-  re-checking §Z's deadline claim, and it is §F.8 inside the comment written to satisfy §F.8. The
-  two headline numbers now read four — `graph/compile.ts`'s `effectiveTimeout` docstring says
-  "THE SET IS `agent`, `tool`, `evaluator`, `function`" and "why the other four do not", against
-  the "three"/"five" this row was opened for. **What is still wrong is mid-sentence:** the same
-  opening paragraph ends "so the question is not … but *can its BODY fail to settle*, and only
-  **these three** can", immediately above four bullets. The CODE was always right — the function
-  tests all four types — so nothing is mis-executed. **Closes when** that clause reads four, and
-  the fix is one word. Recorded rather than done because this lane owns `TODO.md` and `DESIGN.md`
-  and not `src/`. **The lesson is why a partial correction is worth a row of its own:** the two
-  loud numbers were the ones a reader checks and the ones somebody fixed; the quiet one inside a
-  sentence survived, and it is the one that still contradicts the bullets beneath it.
+- ~~**H.4 · `--otlp` is the only verb-scoped flag on this CLI.**~~ CLOSED by `96a03bf` on the
+  condition this row set — a verb→flag applicability table now exists, so a flag on a verb that does
+  not read it is REFUSED rather than ignored. The general form was built rather than the exception
+  defended.
+- ~~**H.3 · `effectiveTimeout`'s docstring names a set of three and then enumerates four.**~~ CLOSED
+  by `e8c2fb5`, and the row UNDERCOUNTED its own survivor set — four count-claims in the region now
+  name their members instead, pinned by `test/graph/deadline-set-is-named-not-counted.test.ts`, which
+  parses the `NodeType` union out of `graph/spec.ts` so a ninth node type fails there.
 
 ---
 
 ## Z · Closed 2026-08-25 → 2026-09-09 — do not re-fix these
 
-The register. Each line names what closed and the commit carrying the argument; `git show <sha>`
-is the citation, and it is durable in a way a working-notes directory is not.
+The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
+An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
+names. Ids below the rule are lanes and decisions that closed with no row of their own.
 
-**Closed 2026-09-09, the seven-lane 2026-09-08-night wave merged** (`docs/handoff-2026-09-09.md`;
-the argument for each is its commit, and every number here was re-run on `dcf54c9`). Three §A0
-rows and one §D decision, plus two closures with no row of their own.
-
-§A0.17 `POST /runs` accepts the input the CLI refuses — one rule in `graph/declared-inputs.ts`
-called by both doors, `E_CONFIG_INVALID` at the CLI and `E_PROVIDER_BAD_REQUEST` (a 400) at the
-plane, with zero `run.submitted` rows either way (`24b5ee3`..`16da438`, merged at `86193e3`).
-It closed by the FIRST outcome the row named — the wire is strict, not permissive-by-decision —
-and the suite is red at base by assertion: `ℹ tests 11 / ℹ pass 3 / ℹ fail 8`,
-`AssertionError: an undeclared input channel must be a bad request, not a 202 / 202 !== 400`.
-The lane's behaviour agent drove six legs and all six passed, including
-`select count(*) … where type='run.submitted'` → **0 before, 0 after**. **The decision it forced
-is §D.6** — a graph on which `GRAPH005_UNPRODUCED_READ` only warns is now refused at the wire
-when a caller supplies that channel — and **the residue is §A0.22**, the delegation door.
-
-§A0.18 the `plane-watch-and-stop.test.ts` flake — the mock element's `innerHTML` now clears
-`children`, mirroring a real element (`5f2f99b`..`83e2950`, merged at `4bc3ce1`). The cause was
-the test harness's DOM mock and **not `console.ts`**, which was never touched: the diagnosis
-reproduced the exact failing string `'pause,advance,cancel,pause,advance,cancel'` with **zero
-timing dependency**, which is what discriminated hypothesis 1 from the four others. The pin
-forces a second `drawControls()` before the assertion rather than looping the suite. The
-behaviour agent ran the file six times and the whole `test/server` glob once — 23/23 each and
-229/229 — and grepped every run's output for the doubled string: it did not appear.
-
-§A0.19 a NODE id may be an `Object.prototype` name — `GRAPH003_RESERVED_NODE_ID` in
-`graph/validate.ts`'s `checkStructure`, the set read off `Object.getOwnPropertyNames(
-Object.prototype)` rather than hand-kept, mirroring `3fd7ad5`'s channel rule (`a86bc1e`..
-`1ab9508`, merged at `878001c`). Red at base `node id toString: ok=true diags=[]`, green at head
-`ok=false diags=["GRAPH003_RESERVED_NODE_ID"]`; every `examples/graphs/*.json` still compiles
-`ok` with byte-identical output, and `plan` is a node id in two of them. **The row's own stated
-mechanism was wrong and the fix is right anyway** — `plans` is unreachable, because every read
-of `ctx.graph.plans[nodeId]` is `?.field ?? default`; the reachable defect is
-`ctx.baselinePostures?.[n.id]` fabricating `GRAPH014_OVERSIGHT_LOOSENED`, which `compile.ts`
-escalates to a policy-class `E_OVERSIGHT_LOOSENED` on a graph that never reached policy. The
-row's second closing condition was met too, and durably: the safety argument for
-`run/projection.ts`'s per-id maps moved out of the gitignored plan and into `validate.ts`'s
-`PROTOTYPE_NAMES` docstring. One gap left unclosed and named: a third-party `ResourceResolver`
-reached through `--extension-module` could still resolve a bare reserved name to a subgraph —
-a different namespace, worth its own row if anyone wants it.
-
-**Also closed 2026-09-09, from the same wave's lane reports rather than from an §A0 row.**
-`engine-cross-run` (merged at `5fe7614`): five cross-run child touches in `run/engine.ts` —
-`#planRollbackChild`, `#runSubgraph`'s start-or-resume probe, `#forwardGateDecision`'s read, the
-cross-run WRITE `#resolveGateAsSystem`, and `#endChildRun` — now answer a foreign store failure
-with one of TWO closed answers rather than with `E_INTERNAL`: a swallow plus
-`LOOM_ROLLBACK_CHILD_UNREADABLE` / `LOOM_CHILD_STOP_FAILED` where this run has already decided,
-and a retryable `err.unavailable(E_SUBGRAPH_FAILED)` plus `LOOM_CHILD_UNREACHABLE` where the
-task's whole job IS the child. At `c54b0c2` the same inputs gave `THREW sqlite: child disk I/O
-error` out of `advance` (site A escapes `#runWave`'s catch) and `status=failed
-err=E_INTERNAL` for the rest. Four review rounds, the cap raised 3 → 4 for one confirmed
-blocking finding — and **round 4's answer was to DELETE the guard round 3 had added**:
-`isCancellation` decided "this run was cancelled" from the thrown value's NAME, so any
-fetch- or deadline-backed `StateStore` rejecting with an `AbortError` ended the parent run.
-Substituting `if (false) throw e` for the replacement guard left all fourteen tests green,
-including the cancel-race one written for it, because `cancel` journals `run.cancelled` and a
-task re-classed as "come back later" defers into a run that is already over. `dc969c8` removes
-it; the honest reason the seventh touch stays unwrapped is SCOPE, and it is §A0.23. The rest of
-the residue is §A0.24 and §A0.25.
-`mcp-seal` (merged at `9cf88b5`): `ToolRegistry.reservePrefix` returns a capability object, and
-`#doRegister` checks every reserved prefix at the one place every registration must pass through,
-so the `mcp__` claim holds for a registration made from a timer, from a library embedder, or after
-`seal()` — where the boot scan it replaces caught only what existed the moment it ran. Measured
-at base: an `--extension-module` registering its `mcp__docs__search` squatter from a `setTimeout`
-rather than from its factory body sailed past the scan and dispatched. `#doRegister` also reads
-`tool.name` into ONE binding used by the reservation check, the stack key and the `dispose`
-closure — a caller-supplied getter answering an innocuous name on one read and the reserved
-spelling on the next used to register the impersonation under a name the check never saw. This
-closes `mcp-registrar`'s residue item 1 (`docs/handoff-2026-09-08-evening.md` §5); its own
-residue is §A0.27.
-`usage-floor` (merged at `dcf54c9`) narrowed §A0.13 from ~80× to ~10× and did not close it; the
-row carries the argument.
-
-**Closed 2026-09-05 → 2026-09-08, the two waves** (`docs/handoff-2026-09-08.md`; the argument for
-each is its commit, and where a number is given without a sha it was re-run on `8d43127`).
-§A0.1 the canonical string arm — raw length checked before quoting (`74b62d9`;
-`canonicalize("\n".repeat(300_000_000))` → `E_PAYLOAD_TOO_LARGE … emits over 300000000
-characters` in about a millisecond — 0 and 1 ms on two runs). §A0.2 `flushHeaders()` after `writeHead` (`60ff53d`). §A0.3 a child run's
-gate reachable with no `--graph`: `graphsByHash` indexes `SPEC_KINDS`, a `ControlPlaneOptions.subgraphs`
-inventory that is attach-only, and every console path percent-encoded (`8c734ce`, `60ff53d`).
-§A0.4 a `max_tokens`-truncated tool turn floored from the raw argument text both adapters now
-accumulate (`49624c0`, corrected at `04586aa`). §A0.5's runtime half — `reduceState` and
-`foldPartial` read and write by own key and `__proto__` goes through `defineProperty`
-(`29e32b1`); the compile half is still §A0.5. §A0.6 the console's fold carries the same
-`TERMINAL` / `RUN_STATUS_EVENTS` pair `projection.ts` keeps, evaluated in the test rather than
-grepped (`60ff53d`). §A0.7 the arming scan inside `listen()`'s try after `#server` is claimed —
-mid-scan `GET /health` is refused, not answered — and `#endedAtHead` answering a finished run
-from one indexed row (`60ff53d`). §A0.9 `filePayloads`'s docstring (`702f785`). §A0.10
-`GLOB_SCAN_BATCH`'s docstring COUNTED: 512 paths walked by `fs.glob`, 1,536 walked / 1,366 read
-by `fs.grep` on a 60,000-file tree, both constants in `fs.grep`'s number (`61e8185`, attribution
-corrected at `04586aa`). §A0.11 `wireCount` shared through `providers/usage.ts`, not barrelled,
-surface 539 unchanged — the row's reason was false, the pin is `dist/index.d.ts`'s export set
-and a module `index.ts` does not re-export adds nothing (`49624c0`). §A0.13's `=== 1` defeat —
-the floor is quantitative, `USAGE_TOLERANCE = 8` off a measured table, a lying wire charged
-131× more through the binary and an honest one byte-identical (`49624c0`, `04586aa`); the
-dollar residual is still §A0.13. §A0.14's silent half — a date-suffixed variant prices at its
-base row (`49624c0`); the loud half is still §A0.14. §A0.15 Anthropic input usage as the MAX of
-the `message_start` and `message_delta` positions (`49624c0`). And the two compile diagnostics
-`handoff-2026-09-03-merged.md` §5 left in `graph/validate.ts` — `checkProjectionValues` refuses
-a present-and-unreadable `take`/`overflow`/`maxTokens`, an absent one still refusing at rung 2
-by design (`086fe75`). **None of these was caused by the two waves; what the waves found and
-did not fix is §A0.16–A0.20.**
-
-**Closed 2026-09-08, the four reviewed wave-2 branches merged.** §A0.5's compile half —
-`GRAPH003_RESERVED_CHANNEL`, its set read off `Object.getOwnPropertyNames(Object.prototype)`
-rather than hand-kept (`3fd7ad5`, merged at `3cfd363`); with the runtime half already shut at
-`29e32b1` the row is closed, and the NODE-id question stays §A0.19. §A0.8 `e.kind satisfies
-never` in `#edgesToTake`'s `default:` arm, measured `| "probe"` → one error at base and two at
-head (`3622ca4`, merged at `6b3513b`) — the KIND SET is flagged at build time now; which kinds
-may be TAKEN is the new §A0.21. §A0.14's loud half — `ModelAdapter.hasPrice` and an unpriced
-route refusing at the model call rather than pricing it $0 (`cb1df3a`/`ce14397`, merged at
-`3656d69`), pinned by `test/cli/guards-lane-unpriced-route-fails-closed.test.ts`; with the
-silent half already shut at `49624c0` the row is closed. §A0.20 the mirror-gate asymmetry —
-journal-driven, every decided child gate whose parent mirror is open answered `approve` by
-`executor:subgraph`, and held on every verb that reaches it (`d4115c9`, `9a0568c`, `396767c`,
-`946a8c8`, merged at `6b3513b`), observed on a real `loom serve` as a mirror raised 929 ms after
-the child finished and self-answered in 2 ms; `GET /gates` listing both rows is the residue and
-is stated on the row. **What these merges did NOT close, and recorded instead, is §A0.21** — a
-router's `take` selecting a `compensation` edge past a human gate, merged knowingly at `3cfd363`
-because the fix belongs in `run/engine.ts` and not in the compiler that guessed at it.
-
-**Closed 2026-09-08, `a0-21-take-kind` merged.** §A0.21 — `TAKEABLE_EDGE_KINDS = {seq,
-conditional, fanout, join, loop}`, the one predicate all four `take` doors now share
-(`#strayRoute`, `Engine.steer`, `#applyGateDecision`, `#edgesToTake`), so a router naming a
-`compensation` edge no longer walks control past a human gate (`8a157e6`..`c0a45e1`, merged at
-`ff8fdac`). `E_ROUTE_INVALID` joined `RUN_FATAL_CODES` because the first cut was ornamental on
-any node carrying a catch-all `error` edge — a refused route otherwise still routed, down the
-node's own error edge. Four review rounds, all blocking findings confirmed and fixed. Gate at
-`c0a45e1`: 3485 pass / 0 fail, kernel/surface/zero-dep unchanged. Residue, unfixed and disclosed
-on the row: `E_ROUTE_INVALID` being run-fatal is itself a new, unpinned cost — a graph that
-rescued an invented edge with an `error` edge no longer can; a journal recorded before this fix
-now replays as a loud divergence under `replayRun` (attach-and-advance of the same old journal
-still folds and keeps the old bypass, silently); the compiler stays silent — the refusal is
-per-task at run time, not a compile-time diagnostic.
-
-**Closed 2026-09-08, `exam-reads` merged (`3b983f7`).** CLAUDE.md §3's fifth `examShape` rule:
-every declared exam input other than `subject` must be NAMED in a node's own `reads`, in a `${…}`
-template root in a node's tool args, or in a fanout edge's `over`; edge conditions never count,
-because the rule cannot tell which of them the executor evaluates — a producing body's `take` makes
-a `when` inert and no check of the spec can rule that out — so it counts none (`2eeea6b`..`5caee87`,
-merged at `3b983f7`; the three residue items fixed at `8c86559`). Driven on the binary: an exam
-declaring `picked` and reading only `items` is refused `E_CONFIG_INVALID` naming the channel and
-journals nothing, the same exam with `picked` in its grader's `reads` attests exit 0, and
-`examples/exams/review-bench-exam.json` attests exit 0 against a real `review-bench` cohort. Eight
-review rounds, nine reviewers; the predicate has not changed since `6898a8d` and every finding after
-it was in PROSE — four wrong enumerations of the executor's evaluation sites, then a count made
-wrong by shortening. **The lesson, which is worth more than the rule: a prose contract that must
-stay true of a 10,000-line executor is a second copy of that executor and drifts as fast; where a
-comment is load-bearing the replacement is a TEST, not a shorter comment.** Residue, disclosed:
-the rule checks NAMES, not use, so an exam naming the channel in `reads` and ignoring it still
-attests (driven — `names-only.json`, an always-pass body, attested exit 0 and replaced the honest
-ruler); closing that is a dataflow analysis from each declared input to the terminal node, and the
-five other shapes it would also close are listed in the lane report's Residue. The COST is stated
-in the refusal: an exam whose only mention of the answer is an edge condition must move it into a
-node's `reads`. And there is a migration effect — the predicate also runs on the READ side, so an
-exam attested before this rule makes `loom score`, `promote --against-cohort` and `suite freeze`
-throw rather than fall back to in-graph S1; the refusal names the re-attest command.
-
-**Closed 2026-09-08, three more reviewed branches merged.** §A0.16 the three injection paths —
-control-flow taint, brought on with `phase1-taint` and five fix commits closing five confirmed
-blocking findings over three review rounds (`fbbdac4`..`ca1a43c`, merged at `02a5e84`; gate 3539
-pass / 0 fail). `errfan` and `errthrow` move their dirty arm from `succeeded gates=0 charged=1`
-to `awaiting_gate gates=1 charged=0`, both clean arms byte-identical; `mutedge5` was already
-refused on `loom` by the dominator rule and is byte-identical on all three arms, measured not
-assumed. The merge commit `fbbdac4` carries a `Kernel-seam` trailer naming three vocabulary
-items — `run.submitted.taintedInputs`, `task.committed.takeSuppliedByProducer`, and the
-`fanout_skipped_gate` escalation rule E12 — which the guard could not count at the time, because
-its census then judged `feat:` subjects only. That was closed at `706b88a` and the trailer is the
-twelfth and first-listed row of the ledger now; the sentence this replaces said it was "recorded
-in `git log` and not in the ledger's count of 11", and it was true until that merge. **Residue, disclosed and not fixed:**
-`CLAUDE.md`'s journal-authority bullet reads eight where the enumeration it cites now reads nine
-(E12 re-derived at attach is the ninth member, pinned by
-`test/run/empty-fanout-oversight.test.ts`); RC-2's five exclusive-reach rows, the legibility
-`Cause` map and the prefix-rebuild sweep stay open from design §6; `loom`'s dominator rule
-refuses the canonical expansion, pinned INVERTED in `test/graph/mutation-dominator.test.ts` so a
-later narrowing is deliberate; `#rehydrateGraph` throws `E_OVERSIGHT_LOOSEN_FORBIDDEN` forever on
-a run whose recorded mutation this binary refuses, and validates with `tenantCapabilities` where
-the proposal-time call does not; `taintedOn` is short on the REWIND verb, self-healing on the
-next advance; E12's `detail.skipped` is unbounded when `fanoutDepth` is ambiguous and E12 misses
-a fan whose exit join is one `seq` hop from the fan head; `loom replay` of a recording made
-before this change diverges on any run with a failure below a fetch; and the attach-time fold's
-cost is unbounded in journal length × graph size and unmeasured. The lane's report §Residue
-after three rounds is the full list, including a tenth line of pre-existing mutation-replay
-items that the shipped binary cannot reach today because mutation is not reachable from it.
-
-**Also closed 2026-09-08, from the same day's lane reports rather than from an §A0 row** — both
-were residue named by earlier lanes and neither had a row here. `engine-child-journal` (merged
-at `0de48c4`): `#answerMirrorsTheChildAlreadyDecided` read the CHILD's journal unwrapped inside
-the PARENT's drive loop, so a child whose store failed became the answer to `advance` on the
-parent — the engine lane's round-4 residue item 1, the mirror image of the one that round closed.
-The read is wrapped PER MIRROR (`wrote` is load-bearing, so a whole-method wrapper would report
-`false` after a partial write), emitting `LOOM_MIRROR_ANSWER_FAILED` exactly once per advance and
-leaving the mirror open; the parent's own `#gates.resolve` stays unwrapped on purpose. Its own
-residue is the four unwrapped cross-run child reads of the same shape — `#planRollbackChild`,
-`#runSubgraph`, `#forwardGateDecision`, `#endChildRun` — plus the cross-run WRITE
-`#resolveGateAsSystem`, which are the next lane. `mcp-registrar` (merged at `010510e`): of the
-three registrars `openWorkspace` fills into one `ToolRegistry`, only the extension-vs-built-in
-pair refused a name collision, so an extension module spelling `mcp__docs__search` beside an
-`--mcp-file` server `docs` offering `search` compiled `ok` at `3d05cff`; it now refuses
-`E_CONFIG_INVALID` naming both claimants before any MCP tool registers, and MCP × MCP is covered
-too. Residue: the prefix message hardcodes `--extension-module`, wrong on the two embedder paths;
-the reservation refuses read-only verbs; and the reservation is a BOOT check that a post-`seal()`
-registration still walks around, which is `ToolRegistry`'s own documented hazard.
-
-**Closed 2026-09-01, the last three waves.** (§A.7's and §A.9's own closures are the "Two floors"
-paragraph below; what `ff4888d` added to both is that the deadline default had skipped the one
-body type with no realm — `function`, excluded first on a false argument and added after a
-reviewer drove a hand-registered async body hanging forever — and that the subgraph descent was
-order-dependent and now keys on `reachedAt`.) The promotion gate: the saturated ladder (`a0f0cec` — §A.28), the paired
-cost median (`50f7c03`, corrected at `160985c` — §A.27), the improvement bound (`8482859` —
-§A.26's first half), the no-graph note (`fabc360` — §A.22), and the `maxTurns` half of §A.23
-(`a702063`). `loom.effect` is minted and the fold no longer names a PRNG seed draw `loom.tool`
-(`aaa4a9a` — §C.5 with it). Three span attributes the fold read and threw away (`deafe43`).
-Compensation reaches children and every `run.failed` exit — of which there is now exactly one
-(`7c8b89c`) — and a rollback no longer fails the repo's own audit, a transient block is no longer
-recorded as settled, and a grandchild's effects are no longer dropped (`160985c`). Unlabelled ⇒
-untrusted on the integrity axis (`5bff93b` — §G.4's first half). A subgraph's own prompt was read
-live while the parent's task was executing (`0f605a9` — §G.5). Transport retry collapsed into the
-engine's journaled curve, 9 HTTP requests per dead turn down to 3 (`683d928` — §G.7). And a
-malformed `effects` value could claim the PURITY label: `isExternal` asked
-`effects === undefined || effects.length > 0`, so `null` and `""` read as "declared, and empty" —
-the author's claim that a node is pure computation — while `{}`, `0` and `{length: 0}` crashed
-`reachableToolNames`, the helper the capability ceiling, the unknown-tool diagnostic and the
-oversight floor all share. Refused at compile and failed closed in `isExternal` (`7e889a1`).
-**None of these opened a row here, and that is deliberate: a defect found and closed inside one
-wave is history, not backlog.**
-
-**Answered by DELETION (a decision, not a shortfall).** `JoinNode.timeoutMs` and
-`E_JOIN_TIMEOUT` (`21be5ce`) — a barrier deadline's undecidable case has no journaled answer, and
-every branch already has an enforced bound at its own locus; the "waits forever" hole itself moved
-to §A.9 rather than going with the field, **and §A.9 is now closed** — that argument was only true
-of a branch whose author had written a number, and a default node deadline is what made it true of
-every branch. `FunctionNode.cpuBound` and
-`GRAPH019_CPUBOUND_NO_EFFECT` (`aaa8e3b`) — measured 1.997x wall for two independent nodes and
-5.989x for four on 16 cores, exactly serial; work that needs a process goes out as a TOOL.
-`journal/retention.ts`, its 26-test suite and its 15 pinned exports (`d57c984`) — argued on
-property 3, not on storage: a terminal run's journal **is** the corpus self-improvement measures
-over. `ApprovalSpec.mode`, `.k`, `.delegation`, `DelegationSpec` (`583ecd9`) — quorum was never
-missing; `join{mode:"quorum", k}` over N `human_gate` nodes does k-of-n today, measured, and
-`examples/graphs/two-person-approval.json` ships the composition. Two `effect.started.kind`
-members (`d078368`), one of them a feature `DESIGN.md` explicitly refuses; the union is six.
-`TenantId`, `ProjectId`, `Budget.tenantUsd` (`065a9e1`) — three types waiting on a question now
-answered. **`run.cancelled.forced`** — the field is gone; `run.cancelled` now carries `clean` and
-`unknownEffects` only. Its own docstring had said "decided for deletion" while §D assigned it to a
-`kill` verb, and those could not both be acted on; the operator lane then measured that `cancel`
-does not wait (`test/run/cancel-does-not-wait.test.ts`), so `kill` as specified is a second name
-for `cancel` and the field was not being held for anything.
-
-**Answered by REFUSAL, permanently.** Admission control — `POST /runs` admits everything it can
-authenticate and always will, because under one tenant the right answer to "too much work" is to
-make it wait, never to say no; `E_ADMISSION_REJECTED` stays deleted and so do a queue-depth field,
-a token bucket and the `loom.schedule.admit` span. What shipped instead is a CEILING:
-`--max-runs-in-flight` (default 4), with the surplus waiting and `runClockTick`'s widened `due`
-predicate re-deriving it from the journal. The circuit breaker (`378e965`) — a breaker's verdict
-is a per-source failure count SPANNING RUNS and `StateStore.read(runId, fromSeq)` addresses the
-journal per run, so no fold can reconstruct it; three false claims about it were deleted and what
-shipped is the sightline, `providerNotice`, one latched stderr line down and one back.
-`preAuthorization` (`e42c572`) — six of its seven parts already exist as orthogonal mechanisms
-that bind, and the `metadata` scope was closed so the refusal is total.
-
-**Built.** The operator's levers (`cc64481`): `loom deescalate` — the one verb that LOWERS
-oversight, with no `--force` and no way to skip `--why` — plus `--max-runs-in-flight`,
-`--max-parallelism`, `--budget-usd/-tokens/-wall-ms`, each refusing to boot on a malformed value.
-`pause`/`resume`/`steer` as journaled facts that survive a restart. The fork ledger's two missing
-doors (`cc320d1`): `--extension-module` gives a provider on any wire and an in-process tool a
-CLI-reachable seam, moving README's fork-required list from seven to five — **the first time that
-list has moved the right way.** Compensation runs. Payload externalisation runs. The evolution
-loop is closed end to end against a live provider.
-
-**Two floors that read as claims about a node and were claims about its declaration** (`f5a047e`,
-`02d3db0`). §A.9 — a node declaring no `timeoutMs` had NO deadline, measured as `Engine.advance`
-unsettled at 1,500 ms on one `tool` node and never going to settle; `NodePlan.timeoutMs` now
-carries an effective deadline for **`agent`, `tool`, `evaluator` and `function`** — four, not the
-three `f5a047e` shipped. `ff4888d` added the fourth after the exclusion's argument was driven and
-found false: `functions.register("function/hang@stable", async () => new Promise(() => {}))` on a
-node declaring no `timeoutMs` gave `STILL HANGING after 1500ms`, the identical reproduction that
-opened the item for `tool`. The engine reads the PLAN, `loom compile` prints it with `declared` or
-`default`, and the FOUR that get none — `router`, `join`, `human_gate`, `subgraph` — each carry a
-stated reason at `compile.ts`'s `effectiveTimeout`. §A.7 — `reachableToolNames` does not descend, and it still does not: the
-descent is `reachableToolNamesThrough` in `graph/validate.ts`, folded into the parent's class
-floor, capability ceiling and mutation gate. **Billed honestly: it closed no oversight hole** — the
-child always gated on its own floor — what it bought is the parent's missing
-`policy.escalated{rule: mutation_introduced_irreversible}` record, a human asked before the child
-does reversible work, and an `E_CAP_DENIED` that was a run-time death becoming a compile
-diagnostic.
-
-**Fixed defects whose measurement is no longer needed to read the residue.** A gate decision that
-retried; every plane calling itself `worker-0`; the run clock's rotation cursor living in process
-memory; the auditor guarding a run's start and not its end; `foldRun` never folding `model.called`;
-`ctx.now()` not reproducing on replay; hook bodies getting the real `Math.random()`; a static
-sibling-branch join double-counting; gate payloads served unredacted on six routes; a router `when`
-expression reaching `Object.prototype` (and the same read in the VALIDATOR, where GRAPH004
-accepted `constructor` as a declared channel); a truncated model turn written as `""` and reported
-`succeeded`; `cohortKeyOf` making every run its own cohort of one; `gateCandidate` promoting a
-candidate that passed nothing; `loom score` folding every peer without its graph; the promotion
-gate failing open on a prompt candidate; `loom score` reporting outcome 0 for a run whose graph it
-could not resolve; a cancelled run that kept scheduling (`a64b05b`); a tool manifest's
-irreversibility class checked by the type system alone (`55c653d`); a declaration one level inside
-`retry` discarded, turning a bounded retry unbounded (`bd6ef8b`); an unknown key inside `humanGate`
-dropped in silence, on the one block oversight exists for (`cf491fe`); the thenable refusal living
-in one loader of two (`347cb98`); the global proxy's prototype being the host's, so a body reached
-the host realm and the wall clock (`c69356c`); `L4-gated-at-least-as-much` having no end-to-end
-coverage, and the live promotion refusal blaming a missing measurement where a run was parked on a
-human gate (`test/cli/promote-live-gates.test.ts`); a truncation refusal that named neither the
-ceiling nor which of two failures it was — `turnRefusal` now discriminates on `contentChars === 0`
-and tells the operator to raise the ceiling by an order of magnitude rather than a margin
-(`99557f7`); the compiler's silence about a secret-laundering hop, now `GRAPH014_SECRET_LAUNDERED`.
+| id | sha | what closed |
+|---|---|---|
+| A0.1 | `74b62d9` | canonical string arm, raw length |
+| A0.2 | `60ff53d` | `flushHeaders()` after `writeHead` |
+| A0.3 | `8c734ce`, `60ff53d` | child gate reachable without `--graph` |
+| A0.4 | `49624c0` | truncated tool turn floored |
+| A0.5 | `3cfd363` | reserved `Object.prototype` channel names |
+| A0.6 | `60ff53d` | console fold shares terminal set |
+| A0.7 | `60ff53d` | arming scan inside `listen()` |
+| A0.8 | `6b3513b` | `e.kind satisfies never` exhaustiveness |
+| A0.9 | `702f785` | `filePayloads` docstring corrected |
+| A0.10 | `61e8185` | `GLOB_SCAN_BATCH` docstring counted |
+| A0.11 | `49624c0` | `wireCount` shared, not barrelled |
+| A0.14 | `3656d69` | unpriced route fails closed |
+| A0.15 | `49624c0` | Anthropic input usage MAX |
+| A0.16 | `02a5e84` | three control-flow injection paths |
+| A0.17 | `86193e3` | plane refuses undeclared input |
+| A0.18 | `4bc3ce1` | DOM mock clears children |
+| A0.19 | `878001c` | reserved `Object.prototype` node ids |
+| A0.20 | `6b3513b` | child gate forwards to mirror |
+| A0.21 | `ff8fdac` | `TAKEABLE_EDGE_KINDS` shared predicate |
+| A.1 | `a8d62fb` | quote effect makes refusals replayable |
+| A.2 | `34a7f14` | replay grades the terminal message |
+| A.3 | — | the no-`provider` window named |
+| A.4 | — | realm brand carried onto wrappers |
+| A.5 | — | two false totals became properties |
+| A.8 | `552d999` | `nodeApproved: trigger === "rewind"` |
+| A.13 | `96a03bf` | CLI waits on journal predicate |
+| A.14 | `6d830d7`, `eba2a63` | run inputs externalised, folded back |
+| A.15 | `3762a0e` | keyset cursor replaces scan ceiling |
+| A.16 | — | process-local producer sweep named |
+| A.17 | — | restart lease wait measured, accepted |
+| A.18 | `b2f4002` | taint keyed on the choice |
+| A.20 | — | SIGINT window closed by `awaitStoppable` |
+| A.22 | `fabc360` | `authoredGraphHash` fixes cohort note |
+| A.23 | `276e05c` | `11-budget-exercised` refuses moved ceilings |
+| A.27 | `50f7c03`, `160985c` | upper median gates pair cost |
+| A.28 | `a0f0cec` | `outcomeSpread` refuses saturated rank |
+| A.33 | — | `clearCeiling` deleted, ceiling durable |
+| A.34 | — | rewind requires a human |
+| A.35 | `52da0e8` | rewind plan previews what dispatches |
+| A.36 | `d9a8173` | nine run-id captures now decoded |
+| C.4 | `96a03bf` | OTLP encoder, endpoint and push |
+| C.5 | `aaa4a9a` | three-arm effect span partition |
+| D.1 | — | per-server `irreversibility` allowed |
+| D.2 | `aaa4a9a` | no ninth span name |
+| D.4 | `50f7c03` | median gates, undefined pair unbounded |
+| D.6 | `86193e3` | wire refuses on `spec.inputs` |
+| H.1 | — | `verify-binary.mjs` drives the artifact |
+| H.2 | `814e283` | fourteen broken citations repaired |
+| H.3 | `e8c2fb5` | four count-claims name their members |
+| H.4 | `96a03bf` | verb→flag applicability table |
+| — | — | — |
+| `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
+| `mcp-seal` | `9cf88b5` | prefix reservation at every registration |
+| `mcp-registrar` | `010510e` | three registrars refuse name collisions |
+| `engine-child-journal` | `0de48c4` | mirror answer wrapped per mirror |
+| `usage-floor` | `dcf54c9` | dollar residual narrowed 80× → 10× |
+| `exam-reads` | `3b983f7`, `8c86559` | exam must read the answer |
+| `seam-ledger` | `706b88a` | census counts non-`feat` trailers |
+| A.7, A.9 | `f5a047e`, `02d3db0`, `ff4888d` | four node types get default deadlines |
+| span attributes | `deafe43` | three journaled fields reach spans |
+| compensation | `7c8b89c`, `160985c` | one `run.failed` site, children reached |
+| unlabelled ⇒ untrusted | `5bff93b` | integrity axis defaults to untrusted |
+| subgraph prompt binding | `0f605a9` | manifest walks frozen child specs |
+| retry multiplication | `683d928` | transport retry folded into engine |
+| malformed `effects` | `7e889a1` | purity label refused at compile |
+| answered by DELETION | `21be5ce` `aaa8e3b` `d57c984` `583ecd9` `d078368` `065a9e1` | `JoinNode.timeoutMs`, `FunctionNode.cpuBound`, `journal/retention.ts`, `ApprovalSpec.mode`/`.k`, two `effect.started.kind` members, `TenantId`/`Budget.tenantUsd` |
+| D.4's `kill` verb, and `run.cancelled.forced` with it | `e50a2e7` | the field is gone and `run.cancelled` carries `clean` and `unknownEffects` only. Its docstring said "decided for deletion" while §D assigned it to a `kill` verb, and those could not both be acted on; `test/run/cancel-does-not-wait.test.ts` then measured that `cancel` does NOT wait, so `kill` as specified is a second name for `cancel` and the field was being held for nothing. That test and `run/engine.ts`'s steer docstring cite this row. |
+| answered by REFUSAL | `378e965` `e42c572` | circuit breaker (no fold spans runs), `preAuthorization`, admission control (a ceiling shipped instead) |
+| operator levers | `cc64481` | `deescalate`, in-flight and budget caps |
+| `--extension-module` | `cc320d1` | fork list moved the right way |
 
 **The defect class that accounted for nearly every real finding, stated once because it will
 recur:** *a guard answering its undecidable case with the passing value.* Members: `gateCandidate`
 certifying a candidate it never ran; 0% vs 0% satisfying "non-inferior"; an empty suite reported
 valid; an audit rule firing on healthy journals the product itself writes; a cost ratio over a zero
-baseline reported as "1.00x"; a deferral budget that bounded everything except the last deferral;
-`loom score` reporting outcome 0 for a run whose graph it could not find; and a ratio-of-timings
-gate that passed hardest when its baseline was worst. Several were introduced by the session that
-found them and caught by its own reviewers.
+baseline reported as "1.00x"; a deferral budget bounding everything except the last deferral; `loom
+score` reporting outcome 0 for a run whose graph it could not find; and a ratio-of-timings gate that
+passed hardest when its baseline was worst.
