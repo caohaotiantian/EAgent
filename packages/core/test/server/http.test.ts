@@ -28,8 +28,10 @@ import { CONSOLE_HTML } from "../../src/server/console.ts";
 import { ConsoleChannel, GateDispatcher, SignedWebhookChannel, WebhookChannel, type DeliveryChannel } from "../../src/run/delivery.ts";
 import type { Actor, HumanActor, JournalEvent } from "../../src/journal/events.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
-import type { GateId, RunId } from "../../src/ids.ts";
+import type { GateId, RunId, Seq } from "../../src/ids.ts";
+import type { AppendInput, AppendResult, RunFilter, RunSummary, StateStore } from "../../src/journal/store.ts";
 import { compileSkeleton, harness, skeletonSpec, DOCS } from "../run/skeleton.ts";
+import { truncate } from "../../src/server/http.ts";
 
 const CALLBACK_SECRET = "shhh";
 /** The harness clock. The plane is given the same one, so replay windows are decidable. */
@@ -72,10 +74,12 @@ interface RigOptions {
   requestTimeoutMs?: number;
   /** An extra delivery channel, so a test can make the callback route misbehave. */
   channel?: DeliveryChannel;
+  /** A store the test wants to fault-inject into, in place of the harness's own `MemoryStateStore`. */
+  store?: StateStore;
 }
 
 async function rig(opts: RigOptions = {}): Promise<Rig> {
-  const h = harness();
+  const h = harness(opts.store === undefined ? {} : { store: opts.store });
   const graph = compileSkeleton(opts.approvers === undefined ? skeletonSpec() : specWithApprovers(opts.approvers));
   const channel = new SignedWebhookChannel({
     name: "slack",
@@ -1654,6 +1658,110 @@ test("TWO PRINCIPALS SHARING AN Idempotency-Key GET TWO RUNS, NOT ONE ANOTHER'S"
     const retry = await submit(r, { ...asAlice, "idempotency-key": "nightly" });
     assert.equal(retry["runId"], hers["runId"]);
     assert.equal((await listAs(asAlice)).length, 1, "a retry still creates nothing");
+  } finally {
+    await r.close();
+  }
+});
+
+/**
+ * A store whose `listRuns` — the call `#restoreIdempotency` makes before the FIRST submission
+ * with a given key falls through to `engine.submit` — can be held pending on demand, so a test
+ * can park the first submission exactly where a second one, sharing its key, is guaranteed to
+ * find `#inflightSubmits` already claimed rather than empty.
+ */
+class PausableListRunsStore implements StateStore {
+  readonly #inner: MemoryStateStore;
+  #hold: Promise<void> | undefined;
+  #fail: ((e: unknown) => void) | undefined;
+  #started: (() => void) | undefined;
+  readonly firstCallStarted: Promise<void>;
+  constructor(inner: MemoryStateStore) {
+    this.#inner = inner;
+    this.firstCallStarted = new Promise((resolve) => {
+      this.#started = resolve;
+    });
+  }
+  /** Park the NEXT `listRuns` call until `release()` is called. */
+  pauseNextCall(): void {
+    this.#hold = new Promise((_resolve, reject) => {
+      this.#fail = reject;
+    });
+  }
+  /** Reject the paused call with `e` — the store fault the first submission dies on. */
+  release(e: unknown): void {
+    this.#fail?.(e);
+  }
+  async listRuns(limit?: number, filter?: RunFilter): Promise<readonly RunSummary[]> {
+    this.#started?.();
+    this.#started = undefined;
+    if (this.#hold !== undefined) {
+      const hold = this.#hold;
+      this.#hold = undefined;
+      await hold;
+    }
+    return this.#inner.listRuns(limit, filter);
+  }
+  append(input: AppendInput): Promise<AppendResult> {
+    return this.#inner.append(input);
+  }
+  read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+    return this.#inner.read(runId, fromSeq, toSeq);
+  }
+  head(runId: RunId): Promise<Seq> {
+    return this.#inner.head(runId);
+  }
+  close(): void {
+    this.#inner.close();
+  }
+}
+
+test("a concurrent same-key submission gets the SAME refusal the first got, not a hang or a bare 500", async () => {
+  // CONSTRUCTED, not argued from reading. `send(res, 202, await inflight)` (http.ts ~:3449) sits
+  // outside the handler's own local `try`, so a rejection there is not caught locally — but
+  // `#dispatch`'s outer try/catch (~:2460-2472) catches every throw out of route handling,
+  // including this one, and maps it with the same `toLoomError`/`httpStatusFor` the FIRST
+  // caller's local `catch (e) { abandoned?.(e); throw e; }` (~:3657) also funnels into by
+  // rethrowing. The prediction under test: both callers, receiving the SAME rejection reason,
+  // get the SAME status and body — not a hang, not a generic 500 the second caller cannot
+  // attribute to its own request.
+  const store = new PausableListRunsStore(new MemoryStateStore({ now: () => NOW }));
+  const r = await rig({ store });
+  try {
+    store.pauseNextCall();
+    const firstReq = fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "race" },
+      body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+    });
+    // WAIT FOR THE FIRST REQUEST TO BE PARKED, not for a fixed delay. `#inflightSubmits.set`
+    // (http.ts ~:3462) runs synchronously, in the same tick as the claim, strictly BEFORE the
+    // `listRuns` call this promise reports — so by the time it resolves, the slot the second
+    // request will find is already there.
+    await store.firstCallStarted;
+
+    const secondReq = fetch(`${r.base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "race" },
+      body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+    });
+    // Give the second request time to actually reach the server and attach to `inflight` before
+    // the store fault fires — an ABSOLUTE bound with an order-of-magnitude margin over a loopback
+    // round trip, not a ratio (CLAUDE.md).
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const fault = new Error("journal is unavailable");
+    store.release(fault);
+
+    const [firstRes, secondRes] = await Promise.all([firstReq, secondReq]);
+    const [firstBody, secondBody] = await Promise.all([json(firstRes), json(secondRes)]);
+
+    assert.equal(firstRes.status, secondRes.status, "same rejection reason must map to the same status");
+    assert.notEqual(firstRes.status, 202, "the fault must actually have been observed, not silently swallowed");
+    assert.deepEqual(firstBody, secondBody, "the second caller gets literally the same refusal the first got");
+    assert.ok(typeof firstBody["error"] === "object" && firstBody["error"] !== null, "a real error body, not an empty one");
+
+    // …AND THE PLANE IS STILL UP, with the slot released for the next real attempt.
+    assert.equal((await fetch(`${r.base}/health`)).status, 200);
   } finally {
     await r.close();
   }
@@ -3867,6 +3975,75 @@ test("AN OPAQUE OR MISMATCHED Origin IS REFUSED TOO — Sec-Fetch-Site is not th
       const res = await fetch(`${r.base}/runs`, { method: "POST", headers: { "sec-fetch-site": site, "content-type": "application/json" }, body });
       assert.equal(res.status, 403, `Sec-Fetch-Site: ${site} — a sibling subdomain is not this origin either`);
     }
+  } finally {
+    await r.close();
+  }
+});
+
+// ── truncate: sanitised, not just bounded ────────────────────────────────────
+//
+// `truncate` feeds four call sites (Host, Content-Type, Sec-Fetch-Site, Origin), all header
+// VALUES, into a 4xx JSON body — an operator-facing surface a terminal or log viewer may print
+// raw. The function itself, not a request, is what carries the ESC/CR/LF/NUL through below: see
+// the next test for why a live request cannot.
+
+test("truncate neutralises control characters, and leaves the visible length of a plain string alone", () => {
+  // Ordinary half first: plain long strings still truncate to the same 120-char-plus-ellipsis
+  // bound as before. The fix must not change this case, only the one with control bytes in it.
+  const plain = "x".repeat(200);
+  assert.equal(truncate(plain), `${"x".repeat(120)}…`);
+  assert.equal(truncate("short and plain"), "short and plain");
+
+  // The attack this item names: an ANSI escape sequence, a fake extra header line via CR/LF, and
+  // a NUL. None of the raw bytes survive into the result.
+  const hostile = `a\x1b[31mRED\x1b[0m\r\nX-Injected: yes\x00b`;
+  const cleaned = truncate(hostile);
+  assert.equal(/[\x00-\x1f\x7f]/.test(cleaned), false, "no C0 control or DEL byte survives");
+  assert.equal(cleaned.includes("\x1b["), false, "no raw ANSI escape survives");
+  assert.equal(cleaned.includes("\r\n"), false, "no raw CRLF survives — cannot forge a second header line");
+  assert.equal(cleaned.includes("RED"), true, "the surrounding text is untouched, only the control bytes are");
+
+  // One replacement character per control byte, and the bound is applied AFTER sanitising, on
+  // the sanitised string — so a hostile string that is already short by raw length is not
+  // silently grown past 120 by the fix.
+  const short = "a\x1bb";
+  assert.equal(truncate(short).length, 3, "one replacement char in, one substitute char out");
+});
+
+test("today, none of truncate's own call sites can DELIVER those bytes — Node's parser refuses the request first", async () => {
+  // REPRODUCED, not assumed. `X-Test: a<ESC>b` on the wire, against the plain `createServer`
+  // this plane actually uses (no `insecureHTTPParser`), never reaches ANY application code: the
+  // HTTP parser answers 400 and closes the connection before routing, before auth, before
+  // `crossSite`/`#refusedHost`/`#readBody` — the three functions that call `truncate`. So the
+  // literal threat named for this item (`\x1b[`, `\r`, `\n`, NUL arriving via a header value)
+  // is not reachable through this plane's real listener today. `truncate`'s sanitising is
+  // defence for the day a deployment sets `insecureHTTPParser: true` (a real, supported Node
+  // option — verified separately, off by default and not set here) or a future call site reads
+  // something other than a header value; it is not closing a hole that is open now.
+  const r = await rig();
+  try {
+    for (const bytes of [
+      Buffer.from("GET / HTTP/1.1\r\nHost: localhost\r\nOrigin: a\x1bb\r\n\r\n", "latin1"),
+      Buffer.from("GET / HTTP/1.1\r\nHost: localhost\r\nSec-Fetch-Site: a\rb\r\n\r\n", "latin1"),
+      Buffer.from("GET / HTTP/1.1\r\nHost: a\x00b\r\n\r\n", "latin1"),
+    ]) {
+      const answer = await new Promise<string>((resolve) => {
+        const port = Number(new URL(r.base).port);
+        const socket = connect(port, "127.0.0.1", () => socket.write(bytes));
+        let out = "";
+        socket.setEncoding("utf8");
+        socket.on("data", (d: string) => (out += d));
+        socket.on("close", () => resolve(out));
+        socket.on("error", () => resolve(out));
+        setTimeout(() => {
+          socket.destroy();
+          resolve(out);
+        }, 2000);
+      });
+      assert.match(answer, /^HTTP\/1\.1 400 /, `a header value carrying a control byte must be refused at the parser: got ${JSON.stringify(answer)}`);
+    }
+    // The plane is still up — a parser-level refusal does not take the process down either.
+    assert.equal((await fetch(`${r.base}/health`)).status, 200);
   } finally {
     await r.close();
   }
