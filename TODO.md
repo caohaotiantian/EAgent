@@ -30,23 +30,33 @@ empty and an empty roadmap is the moment the remaining work stops being self-des
 
 ---
 
-## State — re-measured 2026-09-08 after the two waves, one command each
+## State — re-measured 2026-09-09 on `dcf54c9`, one command each
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,284 pass / 0 fail** | `npm test` |
-| pinned exports | 539 | `node scripts/check-surface.mjs` |
-| kernel | 10 files, 11 seams, 325 commits since `86b84c9` | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 64 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8, of 426 tracked | read every `git ls-files` path; see CLAUDE.md |
+| tests on `loom` | **3,611 pass / 0 fail** | `npm test` |
+| pinned exports | 540 | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 12 declared seams | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
+| NUL census | 5 files, 0 invalid UTF-8, of 462 tracked | read every `git ls-files` path; see CLAUDE.md |
 
-**The five wave-1 lanes are merged at `294e713` and two of six wave-2 lanes at `9b45c7c` (the
-taint design) and `8d43127` (gates).** Four wave-2 branches — `wave2-graph`, `wave2-engine`,
-`wave2-guards`, `wave2-exam` — hold committed, part-reviewed work and are NOT merged;
-`docs/handoff-2026-09-08.md` §6 says what each holds and what its next step is. `phase1-taint`
-is still unmerged; the design its parking waited for (`docs/design-taint-rc6-2026-09-05.md`)
-recommends merging it with a `Kernel-seam:` trailer.
+**Every lane branch is merged and there are no wave worktrees.** The five wave-1 lanes landed at
+`294e713`, all six wave-2 lanes by `ec2ad88`, `phase1-taint` at `02a5e84`, and the seven lanes of
+the 2026-09-08-night wave at `5fe7614 86193e3 878001c 4bc3ce1 706b88a 9cf88b5 dcf54c9` —
+`git worktree list` prints two rows (`EAgent` on `loom`, `eagent-ref` on `init`) and
+`git status --short` is empty. `docs/handoff-2026-09-09.md` is the current handoff and says what
+each lane did and what it left open.
+
+The kernel guard also prints a commits-judged count (575 at `dcf54c9`). It is deliberately not a
+cell above: it moves with every commit, this file's own included, and this file's third rule says
+to state the invariant rather than the measurement when the claim is about the artifact holding it.
+
+**The kernel row moved 11 → 12 seams for a reason that is not a new declaration.** `706b88a`
+(the `seam-ledger` merge) made the guard's CENSUS read `git interpret-trailers --parse` on any
+subject, so `fbbdac4`'s `Kernel-seam:` trailer — a real declaration on a merge commit, which the
+old feat-only path could not see — is counted. Nothing new was declared this wave; all 35 commits
+are `fix:` or `test:`.
 
 **Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
 wave moved which number. Every one of those paragraphs was true when written and none was re-run,
@@ -72,9 +82,11 @@ that row was corrected in place.
 ## What is still open, by section
 
 **§A0 is the newest and reads first.** What the phase-2-4 merge's three attackers reproduced and
-did not fix, minus what the two waves of 2026-09-05 → 09-08 closed (those moved to §Z with their
+did not fix, minus what the waves of 2026-09-05 → 09-09 closed (those moved to §Z with their
 shas), plus what those waves found and recorded rather than fixed. Its rows are countable with
-the first grep below using `A0` in place of `[A-Z]`.
+the first grep below using `A0` in place of `[A-Z]`: **17 rows, 9 struck, 8 open** on `dcf54c9`.
+Two of the eight — A0.12 and A0.13 — are what is left of the original fifteen; the other six are
+the 2026-09-08-night wave's own residue.
 
 **EVERY OTHER OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
 `docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
@@ -117,15 +129,18 @@ can be wrong without being falsifiable.
 | §A | 36 | 21 | 15 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 5 | 3 | 2 | decisions still owed, all of them narrow |
+| §D | 6 | 4 | 2 | decisions still owed, all of them narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve, not history to honour; nothing here is "open" |
 | §G | 7 | 0 | 7 | field-survey work the redesign creates; G.1, G.4, G.5 and G.7 are part-done and each names which half remains |
 | §H | 5 | 4 | 1 | housekeeping |
 
 The struck members, so the column is checkable and not merely asserted: **§A** A.1, A.3, A.4, A.5,
-A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.1, D.2, D.4;
+A.2, A.8, A.13, A.14, A.15, A.16, A.17, A.18, A.20, A.22, A.23, A.27, A.28, A.33, A.34, A.35, A.36; **§C** C.4, C.5; **§D** D.1, D.2, D.4, D.6;
 **§H** H.1, H.2, H.3, H.4.
+(**Re-run 2026-09-09**, after the night wave's docs settlement added `D.6`: one cell moved,
+§D 5 → 6 rows and 3 → 4 struck, and "still open" did not, because the new row is answered. Every
+other cell is what the three greps above printed today.)
 (A.34 and A.35 joined this list a commit later than they should have: both were written with the
 `~~` INSIDE the id — `**A.35 · ~~…~~ — DONE**` — which reads as closed and does not match the
 grep above, so §A's "still open" column counted two rows the same commit declared DONE. The
@@ -156,10 +171,22 @@ an UNMERGED branch the row says so; a fix nobody has reviewed on `loom` is not a
 `6b3513b`, `3656d69`, `ec2ad88`). Four more rows closed and are struck in place with their
 merge sha, their argument moved to §Z: §A0.5 (its compile half, which was the remaining one),
 §A0.8, §A0.14 (its loud half, likewise) and §A0.20 — and §A0.16 followed at `02a5e84` (the
-`taint` merge), so the count of rows the waves recorded and did not fix is now §A0.12, §A0.13
-and §A0.17–A0.19. The one row those merges ADDED, §A0.21,
+`taint` merge). The one row those merges ADDED, §A0.21,
 closed separately at `ff8fdac` (the `a0-21-take-kind` merge) — see §Z. The struck rows stay
 here rather than being deleted, for the reason §Z's header gives.
+
+**Re-measured again 2026-09-09, after the seven-lane 2026-09-08-night wave merged** (`5fe7614`
+… `dcf54c9`). Three more rows are struck in place with their merge sha: §A0.17 (`86193e3`),
+§A0.18 (`4bc3ce1`) and §A0.19 (`878001c`). §A0.13 is NARROWED and stays open — its row is
+rewritten below rather than struck. **Two rows of the original fifteen are still open: §A0.12
+and §A0.13.** Six rows the night wave found and recorded rather than fixed are added as
+§A0.22–§A0.27, and the wire-contract decision the `plane-inputs` lane took is recorded as §D.6
+rather than here, because it is a decision and not a defect. Counted rather than asserted:
+
+```bash
+/usr/bin/grep -aoE '^- (~~)?\*\*A0\.[0-9]+ ' TODO.md | /usr/bin/grep -aoE 'A0\.[0-9]+'   # 17 rows
+/usr/bin/grep -aoE '^- ~~\*\*A0\.[0-9]+ '    TODO.md | /usr/bin/grep -aoE 'A0\.[0-9]+'   # 9 struck
+```
 
 - ~~**A0.5 · A channel named `toString` still compiles clean.**~~ CLOSED at `3cfd363` (the
   `wave2-graph` merge), which brought `3fd7ad5` onto `loom`; both halves are now shut and the
@@ -170,7 +197,7 @@ here rather than being deleted, for the reason §Z's header gives.
   **Fix on `wave2-graph`, unmerged** (`3fd7ad5`): `GRAPH003_RESERVED_CHANNEL`, the set read off
   `Object.getOwnPropertyNames(Object.prototype)` rather than hand-kept, with the lane's probe
   `toString channel: ok= true diags= []` → `ok= false diags= ["GRAPH003_RESERVED_CHANNEL"]`.
-  The NODE-id half is a separate row and is still open: §A0.19.
+  The NODE-id half was a separate row and closed later, at `878001c` — §A0.19.
 - ~~**A0.8 · `#edgesToTake`'s exhaustiveness claim is false.**~~ CLOSED at `6b3513b` (the
   `wave2-engine` merge), which brought `3622ca4` onto `loom`. The record of what it was: Adding a member to `EdgeKind` and
   typechecking flags ONE site, `compile.ts:289`; neither `engine.ts` site. `#assertBound` refuses
@@ -203,16 +230,35 @@ here rather than being deleted, for the reason §Z's header gives.
   so the memo needs a way to expire. Restricting the `leased` arm to tasks whose node declares a
   `timeoutMs` is NOT available: the clock cannot know the node's deadline without the graph,
   which is the thing being resolved. Untouched by both waves.
-- **A0.13 · The usage floor is quantitative now, and its residual is ~80× in dollars.** The
-  `=== 1` defeat closed at `49624c0` (§Z): the floor fires when `inputTokens + cacheRead +
-  cacheWrite` cannot account for the estimate within `USAGE_TOLERANCE = 8`
-  (`providers/usage.ts:95`, the constant chosen off a measured table). What remains, measured by
-  the lane that built it: the floor tests the SUM of three counts billed at three rates, so a
-  wire may declare the whole floored amount as a cache read — 8× in tokens, and with cache read
-  at $0.30 against input at $3 per million (the row's own price table), ~80× in dollars on the
-  Anthropic input dimension. `USAGE_TOLERANCE`'s docstring names the evidence that would close
-  it and why it was not taken. Closes with a per-rate floor, or a measurement showing the
-  cache-read dimension is bounded elsewhere.
+- **A0.13 · The usage floor's dollar residual is ~10×, narrowed from ~80× at `dcf54c9`, and it
+  is not closable by any function of the two numbers a wire reports.** The `=== 1` defeat closed
+  at `49624c0` (§Z): the floor fires when `inputTokens + cacheRead + cacheWrite` cannot account
+  for the estimate within `USAGE_TOLERANCE = 8` (`providers/usage.ts`, the constant chosen off a
+  measured table). The **~80× compounding is closed** at `dcf54c9` (the `usage-floor` merge,
+  `3161506`/`99c659a`): `dearestRateFloor(estimated, cacheCredit) = max(0, floor((estimated -
+  cacheCredit) / USAGE_TOLERANCE))` in `providers/usage.ts`, applied by `anthropic.ts`'s
+  `stream()` input-floor block as a `Math.max` beside the sum floor, so a wire can no longer
+  choose WHICH counter absorbs the floored amount. Driven by the lane on a stub adapter, same
+  wire reply both sides: `inputTokens 0, costUsd 0.00075, cacheReadTokens 2500` before →
+  `inputTokens 2187, costUsd 0.007311, cacheReadTokens 2500` after;
+  `test/providers/usage-per-rate-floor.test.ts` is the pin, five of its nine tests the ordinary
+  half (a real full cache hit, a real cache write, a real partial hit, the no-cache degenerate
+  case, and an honest over-charge) all byte-identical to before.
+  **What remains is ~10×**, the raw cacheRead-to-input rate ratio ($0.30 against $3 per million
+  on the row's own price table), and the reason it is open is structural rather than unfinished:
+  the adversary's optimum is `cacheCredit` close to `estimated`, and **a wire claiming a full
+  cache hit reports the identical two numbers as an honest one** — so no function of `estimated`
+  and `cacheCredit` alone can tell them apart, and re-charging the pair would reopen the other
+  direction of this floor (an honest full cache hit priced at the uncached rate), which two
+  earlier rounds already had to pay back once. Closes with a **cap on credited cache tokens at
+  the tools-plus-system prefix the request body actually marks `cache_control` on** — which
+  needs real cached-deployment measurement to parameterise without breaking the honest-hit pins
+  — or with an explicit decision to accept ~10× as inherent. Two smaller carriers ride with it:
+  `dearestRateFloor` assumes `inputTokens` is the dearest rate, so an operator price table
+  pricing cacheWrite below input reopens the compounding on the write dimension (fixing it means
+  threading a price row into `usage.ts`, which has none); and a genuine partial hit with a small
+  honest remainder is over-charged, measured ~5% on one fixture, shrinking to nothing as the
+  remainder clears the floor.
 - ~~**A0.14 · A model with no price row and no dated base still prices 0.**~~ CLOSED at
   `3656d69` (the `wave2-guards` merge), which brought `cb1df3a`/`ce14397` onto `loom`; both
   halves are now shut and the row is in §Z. The record of what it was: the silent half closed
@@ -246,7 +292,17 @@ here rather than being deleted, for the reason §Z's header gives.
   `phase1-taint`: `errfan` and `errthrow` move their dirty arm to `awaiting_gate gates=1
   charged=0` with both clean arms byte-identical, and `mutedge5` was already refused on `loom` by
   the dominator rule, byte-identical on all three arms.
-- **A0.17 · `POST /runs` accepts the input the CLI refuses.** Since `8c734ce`, `loom run --input
+- ~~**A0.17 · `POST /runs` accepts the input the CLI refuses.**~~ CLOSED at `86193e3` (the
+  `plane-inputs` merge), which brought `24b5ee3`..`16da438` onto `loom`; the argument is in §Z.
+  The row closed by the FIRST of the two outcomes it named — the wire is strict now, not
+  permissive-by-decision. The rule moved into `graph/declared-inputs.ts` and both doors call it:
+  `cli.ts`'s `assertDeclaredInputs` is three lines over it (`E_CONFIG_INVALID`), and `POST /runs`
+  calls it after `graphIn`'s 404 and before `engine.submit` (`E_PROVIDER_BAD_REQUEST`, a 400
+  because `err.validation`'s CLASS is what `httpStatusFor` switches on). The disclosure the
+  refusal makes — it names the graph's declared input set to any authenticated credential,
+  creating no run — is accepted for the reason the sibling graph routes already make it. **The
+  door that stays permissive is the delegation one**, and it is §A0.22. The record of what it
+  was: `loom run --input
   '{"documnet":…}'` refuses `E_CONFIG_INVALID` naming the key and the declared set, with zero
   `run.submitted` rows. The plane does not: lane P measured `POST /runs {"workflow":
   "fan-out-join","inputs":{"documnet":"a b"}}` → **202**, a run created, failing downstream
@@ -255,14 +311,36 @@ here rather than being deleted, for the reason §Z's header gives.
   evidence for narrowing a wire contract — lane P's report §8.1); it is an inconsistency all the
   same. Closes when the plane applies the same declared-inputs check and answers 400 naming the
   key, or when a decision records that the wire stays permissive.
-- **A0.18 · A flake in `test/server/plane-watch-and-stop.test.ts`.** "THE CONSOLE'S OWN
+- ~~**A0.18 · A flake in `test/server/plane-watch-and-stop.test.ts`.**~~ CLOSED at `4bc3ce1`
+  (the `flake` merge), which brought `5f2f99b`..`83e2950` onto `loom`; the argument is in §Z.
+  It closed by the FIRST of the two outcomes it named — reproduced on demand and the collection
+  made single-render — and the reproduction has no timing dependency at all. **The cause is the
+  test harness's DOM mock, not the console**: the mock element's `innerHTML` had no setter that
+  cleared `children`, so a second `drawControls()` under load appended a second set of controls
+  where a real element's `innerHTML = ""` removes every child node. `console.ts` was never
+  touched and was never the defect. The mock now clears children on `innerHTML = ""`, and the
+  pin forces a second `drawControls()` before the assertion and still gets
+  `"pause,advance,cancel"`. The record of what it was: "THE CONSOLE'S OWN
   command() STOPS A RUN" (its assertion is at `:935` on `8d43127`) once collected
   `'pause,advance,cancel,pause,advance,cancel'` against `'pause,advance,cancel'` — one failure in
   six full-suite runs at `wave2-graph`'s head, none in three at `294e713`, 21/21 in isolation on
   both. Observation, not attribution: that lane touches nothing in the console. It reads as the
   test collecting controls from two renders under parallel load. Closes when it is reproduced on
   demand and the collection made single-render, or when a hundred full runs show nothing.
-- **A0.19 · A NODE id may still be an `Object.prototype` name.** `plans` is a plain object, so
+- ~~**A0.19 · A NODE id may still be an `Object.prototype` name.**~~ CLOSED at `878001c` (the
+  `node-id` merge), which brought `a86bc1e`..`1ab9508` onto `loom`; the argument is in §Z. It
+  closed by BOTH outcomes it named — a `GRAPH003_RESERVED_NODE_ID` compile refusal, and a
+  recorded argument for the compiler-built maps that need no rule (now in `validate.ts`'s
+  `PROTOTYPE_NAMES` docstring rather than in a gitignored plan). **The mechanism this row named
+  is not the one the fix closes, and that is the lesson worth carrying**: `plans` turned out to
+  be unreachable — every read of `ctx.graph.plans[nodeId]` in `run/engine.ts` and
+  `run/scheduler.ts` is `?.field ?? default`, which degrades a prototype function to the same
+  default an absent plan gives. The REACHABLE defect is one object over, in `validate.ts`
+  itself: `ctx.baselinePostures?.[n.id]` feeds `isLoosening`, which fails closed on a baseline
+  it cannot read as a `Posture`, so a node named `toString` FABRICATES
+  `GRAPH014_OVERSIGHT_LOOSENED` and `compile.ts` escalates it to `E_OVERSIGHT_LOOSENED` — a
+  policy-class refusal for a graph that never reached policy. The record of what it was: `plans`
+  is a plain object, so
   `plans['valueOf']` is a function — a node nobody declared. Measured by the graph lane at
   `294e713` and at its head: `node id toString: ok= true []`. The channel rule (§A0.5's compile
   half) was scoped to channels deliberately; the rule for ids belongs in the same
@@ -337,6 +415,94 @@ here rather than being deleted, for the reason §Z's header gives.
   reproduced), and a dead `conditional` edge shrinks `before` (round 2's N1, measured through an
   authored `when:"false"`). Closes with a refusal in `run/engine.ts`, its ordinary half measured,
   and the vacuous test arm made load-bearing.
+
+**The six rows below are what the 2026-09-08-night wave found and recorded rather than fixed.**
+Each is residue its lane named in its own report and each carries a `file:line` on `dcf54c9` or a
+command. The wire-contract decision the same wave took is §D.6, not here.
+
+- **A0.22 · The delegation door still permits the input the plane now refuses.** `POST /runs`
+  refuses an input channel the graph does not declare (§A0.17, closed at `86193e3`), and `loom
+  run --input` has refused it since `8c734ce` — but a PARENT handing inputs to a child is checked
+  against a different set. `rule016Subgraphs` tests the mapping against the child's
+  `channels`, never its `inputs` (`packages/core/src/graph/validate.ts:3439` and `:3457`, both
+  `if (!Object.hasOwn(child.channels, childCh))`), and `Engine.#runSubgraph` submits that map. So
+  a parent may hand a child exactly the key the plane refuses at the wire. CLAUDE.md names the
+  delegated child run as the standing blind spot; this is one more sighting of it. Two ways to
+  close: key `rule016Subgraphs` on the child's `inputs` for the keys a parent SUPPLIES, or take
+  §D.6's option (f) and key the whole rule — all three doors — on `channels`, which relaxes the
+  plane instead of tightening the delegation. **They are opposite directions and the decision is
+  §D.6's**, so this row closes only after that one is settled.
+
+- **A0.23 · The seventh cross-run child touch is unwrapped, and still answers `E_INTERNAL`.**
+  `5fe7614` (the `engine-cross-run` merge) wrapped five cross-run touches so another run's store
+  failure is never this run's answer; `const childP = await this.advance(childRunId);` at
+  `packages/core/src/run/engine.ts:8174`, inside `#runSubgraph` (which begins at `:7981`), is the
+  one it did not. The lane's probe at `c54b0c2` numbered it reads #3–#6 of one `advance(parent)`
+  and measured `failAt=3..6 => status=failed err=E_INTERNAL` — not retryable, so one transient
+  read of another run's disk permanently fails the parent's delegation and starts a compensation
+  cascade over the parent's irreversible effects. **The honest reason it is open is SCOPE**, and
+  the lane corrected itself on that in `dc969c8`: an earlier draft said wrapping it would swallow
+  a cancel, and driving the guard showed that is false — `cancel` journals `run.cancelled`, so a
+  task re-classed as "come back later" defers into a run that is already over. Closes by giving
+  this call the same two-way treatment the other five got, with the ordinary half measured.
+
+- **A0.24 · `gates.ts` keeps its idempotency entry after a non-`E_SEQ_CONFLICT` throw, which
+  makes §A0.23's sibling retry inert in-process.** `packages/core/src/run/gates.ts:1203` sets
+  `this.#idempotency.set(idemKey, checked.decision.kind)` BEFORE the `log.commit`, and the catch
+  at `:1211` deletes it again only `if (isLoomError(e) && e.code === CODES.E_SEQ_CONFLICT)`;
+  every other throw leaves the entry behind. The comment two lines above states the rule the code
+  then applies to one code only: *"NOTHING LANDED, so nothing may be remembered as landed."* The
+  consequence measured by the `engine-cross-run` lane: the cross-run WRITE it made retryable
+  (`#resolveGateAsSystem`, site D) retries into a broker that now answers from the stale entry, so
+  the retry is inert for the life of the process. It self-heals on restart, which is why this is a
+  defect and not a member of the journal-authority list. Closes by deleting the entry on ANY
+  throw, with a test that a second delivery after a store failure actually commits.
+
+- **A0.25 · `E_SUBGRAPH_FAILED` now carries six raises of two different meanings.** The set
+  comment at `packages/core/src/run/engine.ts:409-430` says so itself, in the file: the code was
+  documented as three raises and *"THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT"* —
+  `childUnavailable` raises it for the three cross-run touches, so *"only the poll can reach it"
+  is no longer true and SIX raises share the code, of which four are retryable.* What membership
+  costs is stated there as a set: an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate
+  "still working" from "the child's disk is broken", and a DETERMINISTIC child-journal alarm
+  (`E_TRACE_INCONSISTENT` out of `projection`) is deferred as if it were a disk. Closes with a new
+  `CODES` member for the unreachable-child arm and the `RETRYABLE`/`onlyIf` sets re-derived
+  against it — which is why the lane that found it did not take it inside its own scope.
+
+- **A0.26 · The kernel guard's new merge coverage is conflict-resolving merges only, and the
+  requirement path still uses the loose regex.** `706b88a` (the `seam-ledger` merge) made the
+  CENSUS count a `Kernel-seam:` trailer on any subject, via `git interpret-trailers --parse`
+  (`scripts/check-kernel.mjs:514`), which is how `fbbdac4` reached the ledger. But the guard only
+  looks at commits that TOUCH a pinned path, and git prints no paths for a clean merge — driven:
+  `git show --name-only --format='' 878001c` prints nothing, while the same command on `fbbdac4`
+  prints seven files. **So a trailer on a clean merge is still invisible**, and the census's
+  coverage of merges must not be stated unqualified. Two smaller carriers: the REQUIREMENT path
+  still classifies subjects with `const FEAT = /^[ \t]*feat(?:ure)?(\([^)]*\))?!?:/i`
+  (`:462`) rather than with git's parser, so the two paths disagree about what a declaration is;
+  and a sub-`MIN_SEAM_CHARS` trailer on a non-`feat` subject is dropped in silence where the same
+  trailer on a `feat` subject is a violation (`:539`). Closes when the guard reads a merge's
+  effective diff (`git show --name-only -m` or `--first-parent` against each parent) rather than
+  its printed path list, and the two paths share one definition of a trailer.
+
+- **A0.27 · The `mcp__` reservation holds at `register()`, and two things beside it do not.**
+  `9cf88b5` (the `mcp-seal` merge) moved the reservation from a one-shot boot scan to
+  `ToolRegistry.#doRegister` (`packages/core/src/run/registry.ts:257` for `reservePrefix`), so a
+  registration made from a timer, a library embedder or any later verb is refused — driven
+  through the binary today, and CLAUDE.md §2 has the refusal it prints. Two residue items its
+  lane recorded and did not fix.
+  (a) **Overlapping prefixes are not checked**: `reservePrefix` throws only on an EXACT duplicate,
+  so a module that registers one benign tool and then calls `reservePrefix("mcp")` itself can make
+  the legitimate `mcp__` registration fail with attacker-authored text in an operator-facing
+  `E_CONFIG_INVALID`. It is a fail-closed denial of service and not an escalation — the real claim
+  still wins, because the loop checks every reserved prefix and not just the first match. Closes by
+  refusing a `reservePrefix` whose argument is a prefix of, or prefixed by, one already reserved.
+  (b) **Only `name` is snapshotted.** `#doRegister` reads `tool.name` into one binding, but
+  `list()`, `manifests()` and every downstream reader of `.irreversibility` and `.capabilities`
+  re-read the caller's object, so a getter that flips AFTER registration can show the boot banner,
+  the compiler's manifest map and the policy engine's posture computation a different value than
+  the one checked. Dispatch still fails closed on a NAME mismatch; an `irreversibility` flip is a
+  live oversight-posture bypass in the same family as the defect that merge closed. Closes by
+  defensive-copying or freezing every `ToolDefinition` field at registration, not just the name.
 
 ## A · Open defects and unguarded behaviour
 
@@ -1627,11 +1793,11 @@ is a better view of nothing.
 
 ## D · Decisions still owed
 
-**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remain, renumbered `D.1`–`D.5`, and
-of those five only TWO are still owed — `D.3`, `D.5`.** `D.4` was answered by
-`50f7c03`, `D.2` by `aaa4a9a` and `D.1` by the commit that added `irreversibility` to
-`MCP_SERVER_FIELDS`; all three are struck below and kept, because a decision's argument is
-the thing a future reader needs and deleting the row deletes it.
+**§D's re-check table carried 22 rows (`D.0`–`D.21`); five remained, renumbered `D.1`–`D.5`, and
+`D.6` was added 2026-09-09. Of the six, TWO are still owed — `D.3`, `D.5`.** `D.4` was answered
+by `50f7c03`, `D.2` by `aaa4a9a`, `D.1` by the commit that added `irreversibility` to
+`MCP_SERVER_FIELDS`, and `D.6` by `86193e3`; all four are struck below and kept, because a
+decision's argument is the thing a future reader needs and deleting the row deletes it.
 Twelve were answered on 2026-08-28 and are in §Z with the commit that executed each — the rest had
 already closed before this session. **The surviving five do NOT keep their old numbers**, which is
 why §H.2 exists. Many were answered by DELETION, which is the honest direction for a tree whose §B
@@ -1711,6 +1877,37 @@ Each row below states what a decision would settle. None is the implementer's to
   borrow one coordinate — `operator.command` on the first case's run. The question is whether that
   is one new event type or a second keyspace, and either answer is a kernel change with a
   `Kernel-seam:` trailer.
+
+- ~~**D.6 · Whether `POST /runs` may refuse a graph that only WARNS at compile time.**~~
+  **ANSWERED at `86193e3` (the `plane-inputs` merge): yes — the wire refuses, keyed on
+  `spec.inputs`.** The decision is recorded here rather than on §A0.17 because the row it closed
+  did not ask it, and because **this is the decision of that lane most likely to be overturned**;
+  whoever reopens it should read the counter-argument and not this summary of it.
+  **What was decided.** `POST /runs {"workflow":X,"inputs":{"k":…}}` where `k` is not in the
+  graph's `spec.inputs` now answers **400 `E_PROVIDER_BAD_REQUEST`** naming the key and the
+  declared set, with **zero `run.submitted` rows** — the same rule `loom run --input` has applied
+  since `8c734ce`, now one function in `graph/declared-inputs.ts` called by both doors. The
+  consequence that makes this a decision and not a bug fix: **a graph on which
+  `GRAPH005_UNPRODUCED_READ` is only a WARNING — it compiles, and a node really does read the
+  channel — is now refused at the wire when a caller supplies that channel.** The lane's own
+  refusal message says so: *"add it to the graph's `inputs` list, which is what
+  GRAPH005_UNPRODUCED_READ warns about at compile time without refusing."*
+  **The counter-argument, in the diff reviewer's form, which is the strongest one.**
+  `engine.submit` enforces NEITHER set — driven at `c54b0c2`, a body `{"pahts":…}` produced a
+  projection channel `pahts` in neither `inputs` nor `channels` — so this door invents an
+  authority the engine does not have, and invents the STRICTER of the two available. The
+  alternative, option (f), is to key the SHARED rule on `spec.channels` at both doors: it still
+  closes §A0.17's whole complaint (a typo'd key names no channel at all) and refuses nothing that
+  compiles. **If it is taken, the change is one line in `undeclaredInputs` plus the message's
+  second clause, and the test that would flip is `A GRAPH THAT COMPILES AND READS THE CHANNEL IS
+  REFUSED TOO` in `test/server/plane-declared-inputs.test.ts`.** Three other options were recorded
+  and rejected: a defaulted `strictInputs` body field (loses — the default stays the one that
+  spends); 202 plus a `Warning:` header (a warning on a 202 that then SPENDS is a note, not a
+  guard); and doing nothing, recording that the wire stays permissive.
+  **What the decision does NOT reach**, and the reason it is not settled by taking it: the
+  delegation door. `rule016Subgraphs` checks a `subgraph` node's mapping against the child's
+  `channels`, so a parent may still hand a child the key the plane refuses — §A0.22, which cannot
+  close until this row's `inputs`-or-`channels` question is settled for all three doors at once.
 
 ---
 
@@ -2209,10 +2406,82 @@ Each traces to a decision in `DESIGN.md`.
 
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-08 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-09 — do not re-fix these
 
 The register. Each line names what closed and the commit carrying the argument; `git show <sha>`
 is the citation, and it is durable in a way a working-notes directory is not.
+
+**Closed 2026-09-09, the seven-lane 2026-09-08-night wave merged** (`docs/handoff-2026-09-09.md`;
+the argument for each is its commit, and every number here was re-run on `dcf54c9`). Three §A0
+rows and one §D decision, plus two closures with no row of their own.
+
+§A0.17 `POST /runs` accepts the input the CLI refuses — one rule in `graph/declared-inputs.ts`
+called by both doors, `E_CONFIG_INVALID` at the CLI and `E_PROVIDER_BAD_REQUEST` (a 400) at the
+plane, with zero `run.submitted` rows either way (`24b5ee3`..`16da438`, merged at `86193e3`).
+It closed by the FIRST outcome the row named — the wire is strict, not permissive-by-decision —
+and the suite is red at base by assertion: `ℹ tests 11 / ℹ pass 3 / ℹ fail 8`,
+`AssertionError: an undeclared input channel must be a bad request, not a 202 / 202 !== 400`.
+The lane's behaviour agent drove six legs and all six passed, including
+`select count(*) … where type='run.submitted'` → **0 before, 0 after**. **The decision it forced
+is §D.6** — a graph on which `GRAPH005_UNPRODUCED_READ` only warns is now refused at the wire
+when a caller supplies that channel — and **the residue is §A0.22**, the delegation door.
+
+§A0.18 the `plane-watch-and-stop.test.ts` flake — the mock element's `innerHTML` now clears
+`children`, mirroring a real element (`5f2f99b`..`83e2950`, merged at `4bc3ce1`). The cause was
+the test harness's DOM mock and **not `console.ts`**, which was never touched: the diagnosis
+reproduced the exact failing string `'pause,advance,cancel,pause,advance,cancel'` with **zero
+timing dependency**, which is what discriminated hypothesis 1 from the four others. The pin
+forces a second `drawControls()` before the assertion rather than looping the suite. The
+behaviour agent ran the file six times and the whole `test/server` glob once — 23/23 each and
+229/229 — and grepped every run's output for the doubled string: it did not appear.
+
+§A0.19 a NODE id may be an `Object.prototype` name — `GRAPH003_RESERVED_NODE_ID` in
+`graph/validate.ts`'s `checkStructure`, the set read off `Object.getOwnPropertyNames(
+Object.prototype)` rather than hand-kept, mirroring `3fd7ad5`'s channel rule (`a86bc1e`..
+`1ab9508`, merged at `878001c`). Red at base `node id toString: ok=true diags=[]`, green at head
+`ok=false diags=["GRAPH003_RESERVED_NODE_ID"]`; every `examples/graphs/*.json` still compiles
+`ok` with byte-identical output, and `plan` is a node id in two of them. **The row's own stated
+mechanism was wrong and the fix is right anyway** — `plans` is unreachable, because every read
+of `ctx.graph.plans[nodeId]` is `?.field ?? default`; the reachable defect is
+`ctx.baselinePostures?.[n.id]` fabricating `GRAPH014_OVERSIGHT_LOOSENED`, which `compile.ts`
+escalates to a policy-class `E_OVERSIGHT_LOOSENED` on a graph that never reached policy. The
+row's second closing condition was met too, and durably: the safety argument for
+`run/projection.ts`'s per-id maps moved out of the gitignored plan and into `validate.ts`'s
+`PROTOTYPE_NAMES` docstring. One gap left unclosed and named: a third-party `ResourceResolver`
+reached through `--extension-module` could still resolve a bare reserved name to a subgraph —
+a different namespace, worth its own row if anyone wants it.
+
+**Also closed 2026-09-09, from the same wave's lane reports rather than from an §A0 row.**
+`engine-cross-run` (merged at `5fe7614`): five cross-run child touches in `run/engine.ts` —
+`#planRollbackChild`, `#runSubgraph`'s start-or-resume probe, `#forwardGateDecision`'s read, the
+cross-run WRITE `#resolveGateAsSystem`, and `#endChildRun` — now answer a foreign store failure
+with one of TWO closed answers rather than with `E_INTERNAL`: a swallow plus
+`LOOM_ROLLBACK_CHILD_UNREADABLE` / `LOOM_CHILD_STOP_FAILED` where this run has already decided,
+and a retryable `err.unavailable(E_SUBGRAPH_FAILED)` plus `LOOM_CHILD_UNREACHABLE` where the
+task's whole job IS the child. At `c54b0c2` the same inputs gave `THREW sqlite: child disk I/O
+error` out of `advance` (site A escapes `#runWave`'s catch) and `status=failed
+err=E_INTERNAL` for the rest. Four review rounds, the cap raised 3 → 4 for one confirmed
+blocking finding — and **round 4's answer was to DELETE the guard round 3 had added**:
+`isCancellation` decided "this run was cancelled" from the thrown value's NAME, so any
+fetch- or deadline-backed `StateStore` rejecting with an `AbortError` ended the parent run.
+Substituting `if (false) throw e` for the replacement guard left all fourteen tests green,
+including the cancel-race one written for it, because `cancel` journals `run.cancelled` and a
+task re-classed as "come back later" defers into a run that is already over. `dc969c8` removes
+it; the honest reason the seventh touch stays unwrapped is SCOPE, and it is §A0.23. The rest of
+the residue is §A0.24 and §A0.25.
+`mcp-seal` (merged at `9cf88b5`): `ToolRegistry.reservePrefix` returns a capability object, and
+`#doRegister` checks every reserved prefix at the one place every registration must pass through,
+so the `mcp__` claim holds for a registration made from a timer, from a library embedder, or after
+`seal()` — where the boot scan it replaces caught only what existed the moment it ran. Measured
+at base: an `--extension-module` registering its `mcp__docs__search` squatter from a `setTimeout`
+rather than from its factory body sailed past the scan and dispatched. `#doRegister` also reads
+`tool.name` into ONE binding used by the reservation check, the stack key and the `dispose`
+closure — a caller-supplied getter answering an innocuous name on one read and the reserved
+spelling on the next used to register the impersonation under a name the check never saw. This
+closes `mcp-registrar`'s residue item 1 (`docs/handoff-2026-09-08-evening.md` §5); its own
+residue is §A0.27.
+`usage-floor` (merged at `dcf54c9`) narrowed §A0.13 from ~80× to ~10× and did not close it; the
+row carries the argument.
 
 **Closed 2026-09-05 → 2026-09-08, the two waves** (`docs/handoff-2026-09-08.md`; the argument for
 each is its commit, and where a number is given without a sha it was re-run on `8d43127`).
@@ -2307,8 +2576,10 @@ to `awaiting_gate gates=1 charged=0`, both clean arms byte-identical; `mutedge5`
 refused on `loom` by the dominator rule and is byte-identical on all three arms, measured not
 assumed. The merge commit `fbbdac4` carries a `Kernel-seam` trailer naming three vocabulary
 items — `run.submitted.taintedInputs`, `task.committed.takeSuppliedByProducer`, and the
-`fanout_skipped_gate` escalation rule E12 — and the guard does not judge merge commits, so it is
-recorded in `git log` and not in the ledger's count of 11. **Residue, disclosed and not fixed:**
+`fanout_skipped_gate` escalation rule E12 — which the guard could not count at the time, because
+its census then judged `feat:` subjects only. That was closed at `706b88a` and the trailer is the
+twelfth and first-listed row of the ledger now; the sentence this replaces said it was "recorded
+in `git log` and not in the ledger's count of 11", and it was true until that merge. **Residue, disclosed and not fixed:**
 `CLAUDE.md`'s journal-authority bullet reads eight where the enumeration it cites now reads nine
 (E12 re-derived at attach is the ninth member, pinned by
 `test/run/empty-fanout-oversight.test.ts`); RC-2's five exclusive-reach rows, the legibility
