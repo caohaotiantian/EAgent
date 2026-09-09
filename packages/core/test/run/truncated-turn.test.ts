@@ -381,8 +381,16 @@ test("FX13 — in the fan-out that found it, the truncated branch contributes NO
   // to argue it.
   assert.equal(p?.status, "succeeded", `the author declared skip; the branch failure is not the run's: ${String(p?.status)}`);
 
-  const failed = Object.values(p?.tasks ?? {}).filter((t) => t.state === "failed");
-  assert.equal(failed.length, 1, `exactly one branch failed: ${JSON.stringify(failed.map((t) => t.nodeId))}`);
+  // SELECTED BY THE ERROR, NOT BY THE STATE. The line above says this graph declared `skip` and
+  // `E_PROVIDER_BAD_REQUEST` is not run-fatal — and B.2 made the engine write that decision down:
+  // `Engine.#skippedByJoin` journals `task.skipped` for a branch a join absorbs, so this task now
+  // folds to `skipped` and `state === "failed"` would select nothing and compare 0 to 1. What this
+  // test is about is unchanged and is asserted more tightly than before: the truncation is on the
+  // journal, attached to the branch it killed, with its reason readable — and now also that the
+  // join is what swallowed it.
+  const failed = Object.values(p?.tasks ?? {}).filter((t) => t.error !== undefined);
+  assert.equal(failed.length, 1, `exactly one branch failed: ${JSON.stringify(failed.map((t) => `${t.nodeId}/${t.state}`))}`);
+  assert.equal(failed[0]?.state, "skipped", "absorbed by the join the author declared, not routed around");
   assert.match(JSON.stringify(failed[0]?.error ?? {}), /max_tokens/, JSON.stringify(failed[0]?.error ?? {}));
 });
 

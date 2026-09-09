@@ -447,7 +447,7 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // EVENT_TYPES is `as const satisfies readonly EventType[]`, so the compiler already rejects
   // an entry that is NOT an EventType. The other direction — a payload added to the map and
   // forgotten in the runtime list — is what this test claimed to catch and did not: neither a
-  // duplicate check nor a length of 52 changes when a key is added only to `EventPayloads`.
+  // duplicate check nor a length of 51 changes when a key is added only to `EventPayloads`.
   //
   // Reproduced before fixing. With one extra key in the map and nothing added here, this file
   // passed 65/0, `audit-coverage.test.ts` passed 3/0, `docs-drift.test.ts` passed 42/0, and
@@ -456,11 +456,27 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
   // from the has-an-appender check, and from D3.10's documented vocabulary. FOUR gates, every
   // one of them iterating this array, all switched off for that one type by an omission.
   assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, "no duplicates");
-  // 53 → 52: `config.reloaded` was DELETED from the vocabulary, not renamed. It had no
-  // appender, no reader, and no planned reload path anywhere in the tree, so the row
-  // promised a durable fact the log never recorded. A count moving down is the same
-  // deliberate act as a count moving up, and this line is where it is seen.
-  assert.equal(EVENT_TYPES.length, 53, "update this count when the vocabulary changes, deliberately");
+  // THE LEDGER OF DELIBERATE MOVES, newest first. A count moving DOWN is the same reviewable act
+  // as a count moving up — `journal/events.ts` says so at the top — and this line is where either
+  // is seen. It is prose as much as an integer: the number alone cannot say which member moved or
+  // why, and this comment was once left naming the previous move while the assertion had already
+  // advanced past it.
+  //
+  // RE-DERIVED FROM GIT, NOT FROM THE COMMENT THIS REPLACED — which said "53 → 52:
+  // `config.reloaded`" above an assertion that already read 53, and was therefore describing a
+  // move two generations old. Reading the old comment forward would have invented a `54 → 53`
+  // that never happened; the vocabulary went DOWN, then UP, then down.
+  //
+  //   52 → 51  `task.started` DELETED (B.2). Leasing IS the start and no code distinguishes them;
+  //            while it stood, a concurrency test filtered the journal for it and compared 0 to 0.
+  //   53 → 52  `channel.written` DELETED (B.2). Its authoritative value always rode
+  //            `task.committed.writes`, so the per-channel row was an audit trail nothing wrote,
+  //            costing a `run/projection.ts` fold arm whose body was `Nothing to fold`.
+  //   52 → 53  `compensation.recorded` ADDED by `f0aa81e` — a run that undoes what it did needs a
+  //            durable record of each undo. A count moving UP is the same reviewable act.
+  //   53 → 52  `config.reloaded` DELETED by `62bdf5b`. No appender, no reader, and no planned
+  //            reload path in the tree, so the row promised a fact the log never recorded.
+  assert.equal(EVENT_TYPES.length, 51, "update this count when the vocabulary changes, deliberately");
 
   // THE MISSING DIRECTION, ENFORCED BY THE COMPILER RATHER THAN COUNTED. `Exclude` is empty
   // exactly when every `EventPayloads` key appears in the array; when it is not, this fails to

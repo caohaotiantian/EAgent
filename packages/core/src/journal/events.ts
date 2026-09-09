@@ -20,13 +20,32 @@
  * permanently inert. So the test for a row here is a WRITER, not a design — and a row that
  * loses its last writer is removed by the change that removed it, not excused.
  *
- * `config.reloaded` was removed under that rule (see the operator section). THREE members have
- * no appender and are pinned, decided, and blocked in `test/registries.test.ts`. It was five:
+ * `config.reloaded` was removed under that rule (see the operator section). EVERY MEMBER OF THIS
+ * UNION NOW HAS AN APPENDER, and `test/registries.test.ts` asserts that as a RULE over the empty
+ * set rather than as a list with rows to hide in — so a new declared-and-unappended member fails
+ * it with nowhere to be excused. It was five:
  * `budget.reserved` and `budget.settled` were the two decided WIRE, and they were wired — the
  * reservation `PolicyEngine` held in memory is now a durable fact, which is the non-negotiable
- * this union exists to serve. The three left are `task.skipped` (wire, behind the join's
- * branch-error accounting), `channel.written` and `task.started` (both delete); read the
- * decisions there, not here, because that file is the one a test keeps honest.
+ * this union exists to serve. `task.skipped` was the third, and it is wired too:
+ * `Engine.#skippedByJoin` appends it from both of `#commit`'s terminal-failure exits when a
+ * downstream join declares `onBranchError: "skip"`, so the `skipped` state that `run/projection.ts`,
+ * `evolution/trajectory.ts` and `telemetry/spans.ts` all already read can finally be SET. Precisely
+ * that, and not more: `#foldJoin`'s `skipped` disjunct is reachable now only where a node carries
+ * BOTH a `skip` join edge and a `fail` one, so an ordinary `onBranchError: "fail"` join still
+ * counts `failed` branches and nothing else.
+ *
+ * `channel.written` AND `task.started` WERE THE TWO DELETIONS, and they are the shape this
+ * docstring's rule exists for. `channel.written`'s authoritative value always rode
+ * `task.committed.writes`, so the per-channel row was a designed audit trail nobody ever wrote —
+ * and its cost was precisely the one named above, a fold arm in `run/projection.ts` whose whole
+ * body was `Nothing to fold`, reading to anyone who opened that file like proof something appends
+ * it. `task.started` cost something subtler: LEASING IS THE START, no code distinguishes the two,
+ * and a concurrency test filtered the journal for `task.started` to assert that every Task starts
+ * once — so its HEADLINE assertion compared 0 to 0 on a run that leases seven times. Under the
+ * mutation that file exists to catch, that headline PASSED and only the side-effect assertion
+ * below it went red; the test was carried by its backup rather than by the thing it claimed to
+ * measure (`test/run/advance-reentrancy.test.ts` holds both measurements). A declared name with no
+ * writer is not inert; it is available to be believed.
  */
 
 import type { LoomError } from "../errors.ts";
@@ -307,7 +326,6 @@ export interface EventPayloads {
    * process already shares, so the lease's own seq is the token, and the fold reads `e.seq`.
    */
   "task.leased": { readonly workerId: string; readonly attempt: number };
-  "task.started": { readonly nodeType: string; readonly attempt: number };
   "task.progress": { readonly chunk: string };
   "task.committed": {
     readonly status: TaskStatus;
@@ -426,7 +444,6 @@ export interface EventPayloads {
      */
     readonly external?: Readonly<Record<string, PayloadRef>>;
   };
-  "channel.written": { readonly channel: string; readonly reducer: string; readonly valueDigest: string };
 
   // ── effects ──────────────────────────────────────────────────────────────
   /**
@@ -1185,9 +1202,9 @@ export type EventType = keyof EventPayloads;
 export const EVENT_TYPES = [
   "run.submitted", "run.compiled", "run.started", "run.suspended", "run.resumed",
   "run.completed", "run.failed", "run.cancelled",
-  "task.ready", "task.leased", "task.started", "task.progress", "task.committed",
+  "task.ready", "task.leased", "task.progress", "task.committed",
   "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
-  "state.reduced", "channel.written",
+  "state.reduced",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
   "compensation.recorded",
   "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.callback_rejected",

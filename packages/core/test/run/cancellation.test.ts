@@ -130,7 +130,10 @@ test("AND THE TASKS GO WITH IT — a cancelled run does not leave a Task reading
   // It is also C1's `task.cancelled` finally gaining an appender. THREE folds were written for
   // this event and none of them could ever run — `projection.ts`, `evolution/trajectory.ts` and
   // `telemetry/spans.ts` — so the dead code was on the READING side, which is where it is
-  // hardest to see and where a registry of never-appended types is the only thing that finds it.
+  // hardest to see and where a census of never-appended types is the only thing that finds it.
+  // That census was a pinned LIST when this was written and is now a rule over the EMPTY SET in
+  // `registries.test.ts`: the list emptied, so it went, and a new unappended type fails with
+  // nowhere to be excused rather than being argued into a row.
   const { h, runId, gateId } = await parked();
 
   const before = (await h.engine.projection(runId))!;

@@ -6,10 +6,11 @@
  * information that would have caught that at birth was already in this repo: `docs-drift.test.ts`
  * pins those types in a never-appended registry. Nothing connected the two.
  *
- * This is that connection, and it is the half that makes the rule set stick. The vocabulary grows
- * — 52 types today — and without a gate the rules silently cover a smaller and smaller fraction of
- * it while the report keeps saying `ok`. That is the same decay `check-surface.mjs` exists to stop
- * for the public API, and it made this repo pay the same bill once already.
+ * This is that connection, and it is the half that makes the rule set stick. The vocabulary MOVES
+ * — 51 types today, and it has moved in both directions — and without a gate the rules silently
+ * cover a smaller and smaller fraction of it while the report keeps saying `ok`. That is the same
+ * decay `check-surface.mjs` exists to stop for the public API, and it made this repo pay the same
+ * bill once already.
  *
  * The excuse list is deliberately uncomfortable to write. An entry saying "todo" is a promise
  * somebody has to keep; an entry saying "no relation" is a claim that can be argued with. Both
@@ -40,8 +41,11 @@ function constrainedTypes(): Set<string> {
 }
 
 type Excuse =
-  /** Nothing in `src/` appends it, so a rule over it would be inert. Cross-checked below. */
-  | "never-appended"
+  // `never-appended` WAS A MEMBER HERE and is deliberately not one now. Every declared type has an
+  // appender (asserted as a rule over the empty set in `registries.test.ts`), so no row can
+  // legitimately carry that kind — and a kind nothing can legitimately carry is a door left ajar
+  // for the next member declared ahead of its writer. Re-adding it is the thing to argue in a
+  // commit message.
   /** Read by the auditor, but not through a branch of its own. */
   | "indirect"
   /** There is no relation to check: the event constrains nothing another event must satisfy. */
@@ -50,24 +54,33 @@ type Excuse =
   | "todo";
 
 const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: string }>> = {
-  // ── nothing writes these ────────────────────────────────────────────────────
+  // ── nothing writes these: NONE, and the category is gone ────────────────────
   //
-  // Each of these three now carries a DECISION and what it is blocked on, in
-  // `registries.test.ts` — two are `delete`, one is `wire` behind the join accounting. There
-  // were five, and the two that left are the reason this comment is worth re-reading:
-  // `budget.reserved` and `budget.settled` were excused here as never-appended, gained
-  // appenders in `run/engine.ts`, and left BY BEING CONSTRAINED — `budget.reservation-is-settled`
-  // is back in `AUDIT_RULES`, so `constrainedTypes()` finds them and an excuse would now fail
-  // the "excused AND constrained" assertion below. That is this file working as designed: the
-  // `todo` ratchet is capped at 5 and was AT 5, so there was no way to defer the rule, which is
-  // exactly what the ratchet is for. The sixth, `config.reloaded`, was excused here and is
-  // gone: nothing in the tree referred to it and no work item planned a reload path, so the row
-  // was a promise the log could not keep. An excuse that a rule set can hold forever is what
-  // this file exists to make uncomfortable; an excuse that names the file blocking it is one
-  // that can end.
-  "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
-  "task.skipped": { kind: "never-appended", why: "no appender; the skip arm resolves the task without its own event" },
-  "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
+  // THE PEAK WAS SEVEN — counted, not remembered: at `d113c2a` this list held `budget.reserved`,
+  // `budget.settled`, `channel.written`, `config.reloaded`, `task.cancelled`, `task.skipped` and
+  // `task.started`. All seven have left, by exactly TWO doors, which is the whole lesson: an
+  // excuse ends when the member gains a WRITER, or when the member goes.
+  //
+  //   - GAINED A WRITER, AND SO GAINED A RULE — `task.cancelled` (E6), `budget.reserved` and
+  //     `budget.settled` (the reservation wiring), `task.skipped` (`Engine.#skippedByJoin`, which
+  //     appends it from both of `#commit`'s terminal-failure exits). Each left BY BEING
+  //     CONSTRAINED: `constrainedTypes()` finds it, so an excuse would now fail the "excused AND
+  //     constrained" assertion below. Each also cost a rule —
+  //     `task.cancelled-not-after-commit`, `budget.reservation-is-settled`,
+  //     `task.skipped-follows-a-failed-commit` — because the `todo` ratchet was AT its cap of five
+  //     every time and would not let one be deferred. Three rules rather than three excuses; that
+  //     is what the ratchet is for.
+  //   - DELETED — `config.reloaded`, `channel.written` and `task.started`. Nothing referred to the
+  //     first and no reload path was planned; the second's authoritative value always rode
+  //     `task.committed.writes`; the third named a moment `task.leased` already records, and while
+  //     it stood a concurrency test filtered for it and compared 0 to 0. Rows in a closed
+  //     vocabulary promising a fact nobody records — `journal/events.ts` says a row's test is a
+  //     WRITER, not a design.
+  //
+  // So `EVERY DECLARED EVENT TYPE HAS AN APPENDER` is now a rule over the empty set in
+  // `registries.test.ts`, and the `never-appended` excuse KIND is gone from the union above: a
+  // kind no row can legitimately carry is a door left ajar. An excuse that a rule set can hold
+  // forever is what this file exists to make uncomfortable.
 
   // ── read, but not through a branch of its own ───────────────────────────────
   "checkpoint.restored": {
@@ -122,7 +135,7 @@ test("EVERY EVENT TYPE IS CONSTRAINED OR EXCUSED — and nothing is both", () =>
   const universe = new Set<string>(EVENT_TYPES);
 
   // The scanner must not have broken: if it finds nothing, every type looks unconstrained and
-  // the excuse list would have to grow to 52 to keep this green — a failure that reads like work.
+  // the excuse list would have to grow to 51 to keep this green — a failure that reads like work.
   assert.ok(constrained.size >= 8, `the source scan found only ${constrained.size} branches — the regex broke, not the rules`);
 
   const unexcused = [...universe].filter((t) => !constrained.has(t) && EXCUSED[t] === undefined).sort();
@@ -146,20 +159,18 @@ test("EVERY EVENT TYPE IS CONSTRAINED OR EXCUSED — and nothing is both", () =>
   );
 });
 
-test("every excuse says something, and `never-appended` agrees with the other registry", () => {
+test("every excuse says something", () => {
   for (const [type, e] of Object.entries(EXCUSED)) {
     assert.ok(e.why.length > 30, `${type}: an excuse under 30 characters is a shrug, not a reason`);
   }
-  // The two registries must not disagree: a type pinned here as never-appended and pinned there
-  // as having an appender means one of them is stale, and either way a rule was skipped for a
-  // reason that is no longer true.
-  const drift = readFileSync(fileURLToPath(new URL("../registries.test.ts", import.meta.url)), "utf8");
-  const seg = drift.slice(drift.indexOf("NEVER_APPENDED"), drift.indexOf("const RULES_NEVER_RAISED"));
-  const pinnedThere = new Set([...seg.matchAll(/type: "([a-z_]+\.[a-z_]+)"/g)].map((m) => m[1]!));
-  for (const [type, e] of Object.entries(EXCUSED)) {
-    if (e.kind !== "never-appended") continue;
-    assert.ok(pinnedThere.has(type), `${type} is excused here as never-appended but registries.test.ts does not pin it — one of the two is stale`);
-  }
+  // THE CROSS-REGISTRY DRIFT CHECK WENT WITH ITS SUBJECT. It parsed `registries.test.ts``s
+  // `NEVER_APPENDED` block and asserted that anything excused HERE as never-appended was pinned
+  // THERE too, so the two could not disagree about who has a writer. That list is now empty and
+  // gone — every declared type has an appender, asserted there as a rule over the empty set — so
+  // the parse had nothing left to read and would have reported green over an absent block, which
+  // is the shape this whole file exists to refuse. The `never-appended` excuse KIND is gone from
+  // the union above for the same reason: a kind no row can legitimately carry is a door left ajar.
+  assert.ok(Object.keys(EXCUSED).length > 0, "an empty excuse list would make the assertions above vacuous");
 });
 
 test("THE `todo` LIST MUST NOT GROW", () => {

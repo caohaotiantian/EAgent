@@ -945,6 +945,47 @@ test("budget.reservation-is-settled — money the run promised and never release
   assert.match(r.skipped.find((x) => x.rule === "budget.reservation-is-settled")?.why ?? "", /the run did not complete/);
 });
 
+test("A SKIP IS A VERDICT ON A FAILURE — `task.skipped` with no failed commit behind it is refused", () => {
+  // The rule exists because the EVENT is new. `task.skipped` sat in the never-appended registry
+  // with decision `wire`; `Engine.#skippedByJoin` now appends it from both of `#commit`'s
+  // terminal-failure exits, and the moment it gained an appender the coverage guard next door
+  // asked for a rule — with the `todo` ratchet already at its cap of five, so there was no way to
+  // defer one. That is the THIRD time that ratchet has produced a rule rather than an excuse —
+  // `task.cancelled-not-after-commit` and `budget.reservation-is-settled` came the same way.
+  //
+  // THE FORGERY: a Task that SUCCEEDED, followed by a skip. A join absorbs a failure, so this
+  // journal claims a branch was absorbed that never failed — the one way the quieter word could
+  // be used to make a run read tidier than it was.
+  const forged = fixture(() => [
+    ev("task.ready", { nodeId: "n", branchPath: "root", edgesIn: [] }, { taskId: "n@root#0" }),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "n@root#0" }),
+    ev("task.committed", { status: "succeeded", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "n@root#0" }),
+    ev("task.skipped", { reason: "forged" }, { taskId: "n@root#0" }),
+    DONE(),
+  ]);
+  const hit = audit(forged).violations.filter((v) => v.rule === "task.skipped-follows-a-failed-commit");
+  assert.equal(hit.length, 1, JSON.stringify(audit(forged).violations));
+  assert.match(hit[0]!.detail, /no prior task\.committed/);
+
+  // THE ORDINARY HALF, which is what the engine actually writes: the same journal with the commit
+  // saying `failed`. Clean — so the rule rejects the forgery rather than rejecting every skip.
+  const honest = fixture(() => [
+    ev("task.ready", { nodeId: "n", branchPath: "root", edgesIn: [] }, { taskId: "n@root#0" }),
+    ev("task.leased", { workerId: "w", attempt: 1 }, { taskId: "n@root#0" }),
+    ev("task.failed", { error: { code: "E_X", message: "no", class: "internal", retryable: false }, attempt: 1 }, { taskId: "n@root#0" }),
+    ev("task.committed", { status: "failed", writes: {}, take: [], usage: {}, attempt: 1 }, { taskId: "n@root#0" }),
+    ev("task.skipped", { reason: "absorbed" }, { taskId: "n@root#0" }),
+    DONE(),
+  ]);
+  assert.deepEqual(
+    audit(honest).violations.filter((v) => v.rule === "task.skipped-follows-a-failed-commit"),
+    [],
+    "the shape the engine produces must be clean, or the rule cries wolf on every absorbed branch",
+  );
+  // AND IT IS `checked` ON THAT RUN, not merely unviolated — the distinction this file exists for.
+  assert.ok(audit(honest).checked.includes("task.skipped-follows-a-failed-commit"));
+});
+
 // ── and the gate that keeps the rule set honest ─────────────────────────────
 
 test("EVERY AUDIT RULE HAS A FIXTURE THAT TRIPS IT", () => {

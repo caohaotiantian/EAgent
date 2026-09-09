@@ -34,8 +34,11 @@ test("TWO CONCURRENT ADVANCES DO NOT EXECUTE ANY TASK TWICE", async () => {
   const log = await events(h.store, runId);
   // `task.leased`, NOT `task.started`, AND THAT WAS THIS TEST'S OWN SILENT FALSE NEGATIVE.
   //
-  // `task.started` is declared in `journal/events.ts` and appended by nothing — pinned as such
-  // in `test/registries.test.ts`, decision `delete`, with this file named as what blocks it.
+  // `task.started` WAS declared in `journal/events.ts` and appended by nothing — pinned as such
+  // in `test/registries.test.ts`, decision `delete`, with this file named as what BLOCKED it.
+  // That decision has since been executed: the member is gone from the vocabulary and the pin went
+  // with it — that registry emptied and was replaced by a rule over the empty set. The
+  // measurements below stay because the lesson is about the ASSERTION, not about the event.
   // So the filter matched zero events and the headline assertion below compared 0 to 0 on a
   // run that leases seven times. Measured before this line changed:
   //

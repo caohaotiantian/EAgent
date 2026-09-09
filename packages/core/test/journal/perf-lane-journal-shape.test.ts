@@ -210,7 +210,12 @@ test("A JOURNAL FILE THAT ALREADY CARRIES journal_by_task STILL OPENS, READS AND
       runId: RUN,
       expectedSeq: 2 as Seq,
       taskId: "n@root#0" as never,
-      events: [{ type: "task.started", payload: { nodeType: "function", attempt: 1 }, actor: SYSTEM_ACTOR("perf") }] as never,
+      // `task.leased`, because `task.started` was deleted from the vocabulary (B.2). This site was
+      // NOT in that decision's `blockedOn` list — the `as never` hid it from the compiler and from
+      // the pin alike, which is `e50a2e7`'s "the docstring said three files; there were nine"
+      // happening again. What this test asserts (head advances, the dead index is gone) is
+      // unchanged by which event rides the append.
+      events: [{ type: "task.leased", payload: { workerId: "w", attempt: 1 }, actor: SYSTEM_ACTOR("perf") }] as never,
     });
     assert.equal(await store.head(RUN), 3);
     store.close();

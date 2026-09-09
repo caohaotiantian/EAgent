@@ -5197,8 +5197,6 @@ function frame(e: JournalEvent, graph: RunGraph | undefined): unknown {
  *   - NOT `policy.escalated.detail` — a rule's evidence, keyed by whatever the rule reports.
  *   - NOT `operator.command.args` — a command's arguments, keyed by parameter name.
  *
- * `channel.written` is absent for a different reason: it carries `valueDigest`, never a value.
- *
  * Legs 2 and 3 are `CHANNEL_VALUED`'s, and they cover the shapes this grep cannot see.
  */
 const CHANNEL_KEYED: Readonly<Record<string, string>> = {
@@ -5227,12 +5225,11 @@ const CHANNEL_KEYED: Readonly<Record<string, string>> = {
  *
  * **THE RE-DERIVATION, COVERING BOTH SHAPES AND A THIRD.** Leg 1 is `CHANNEL_KEYED`'s grep.
  * Leg 2 finds every field that NAMES a channel —
- * `grep -an channel packages/core/src/journal/events.ts | grep -a readonly` — six
+ * `grep -an channel packages/core/src/journal/events.ts | grep -a readonly` — five
  * declarations, and the word means two different things among them:
  *
  *   - `task.ready.binding`            — a DATA channel and its value. The member below.
  *   - `state.reduced.channels`        — the list of NAMES that moved. Metadata; stays.
- *   - `channel.written`               — `{channel, reducer, valueDigest}`. A digest, never a value.
  *   - `gate.delivered.channel`        — a DELIVERY channel: slack, email, console. Not a data
  *     channel, and its `receipt` is the transport's id, not channel data.
  *   - `gate.delivery_failed.channel`  — the same homonym.
