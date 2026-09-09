@@ -406,14 +406,32 @@ const MAX_INTERVENTION_LAPS = 8;
  *      `E_BUDGET_EXHAUSTED` shares that class and is a verdict about this run — it is fatal,
  *      caught by `RUN_FATAL_CODES`, and the code test here is the second lock on that door.
  *
- *   `E_SUBGRAPH_FAILED` · **only its retryable arm**, and the two arms are what make this safe
- *      to key on the code alone. `#runSubgraph` raises this code twice: `err.unavailable` for a
- *      child that HAS NOT FINISHED ("not finished is not failed", as that site's own comment
- *      says) and `err.internal` for a child that ended failed. `internal` is not in `RETRYABLE`,
+ *   `E_SUBGRAPH_FAILED` · **only its retryable arm**, and the arms are what make this safe
+ *      to key on the code alone. `#runSubgraph` raises this code THREE times, not twice as this
+ *      line said for two rounds — `err.unavailable` for a child that HAS NOT FINISHED ("not
+ *      finished is not failed", as that site's own comment says), and `err.internal` twice, for a
+ *      child that ended failed and for one "awaiting a gate it does not have". `internal` is not in `RETRYABLE`,
  *      so the `!error.retryable` refusal above has already returned by the time this set is
- *      consulted, and only the poll can reach it. **A third, retryable arm added at that site
- *      would silently join this set** — if one is ever added, split the code rather than
- *      widening this comment.
+ *      consulted. **A third, retryable arm added at that site would silently join this set** — if
+ *      one is ever added, split the code rather than widening this comment.
+ *
+ *      THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
+ *      for the three cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
+ *      forward's read of the child, and the forward's WRITE to the child's gate — so "only the
+ *      poll can reach it" is no longer true and SIX raises share the code, of which four are
+ *      retryable. They MEET this set's criterion for the case they were written for: a child
+ *      journal this node could not read is not this node's failure, and uncharged re-entry inside
+ *      `DEFERRAL_BUDGET_MS` is what a transient foreign store wants. What the instruction above
+ *      was defending is the word SILENTLY, and that is what this paragraph pays; the split it asks
+ *      for needs a new `CODES` member and the argument for taking it anyway is at
+ *      `childUnavailable`. What membership costs, stated as a set rather than a headline:
+ *      an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
+ *      child's disk is broken"; and a DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT`
+ *      out of `projection`, which is a real invariant-2 alarm and not a disk — is deferred as if
+ *      it were transient. Measured: 19 uncharged re-entries and 20 stderr lines for a failure that
+ *      is identical every pass. It is bounded and it is not a loosening (neither code is in
+ *      `RUN_FATAL_CODES`, so nothing about routing changes), and the alarm's own code now travels
+ *      in `details.cause` so the parent's row still says WHICH failure it was.
  *
  * Why the poll belongs here at all: measured. With only the rate limit deferring, a 429 in a
  * CHILD asking for two minutes killed the PARENT, because `DEFAULT_SUBGRAPH_RETRY` spends its
@@ -684,6 +702,15 @@ function detailsOf(result: unknown): Record<string, unknown> | undefined {
 /**
  * What was thrown, as a string, when the point of the string is that the thrower cannot be trusted.
  *
+ * AND, SINCE THE CROSS-RUN LANE, ANY VALUE A GUARD'S FAILURE PATH PRINTS THAT THIS PROCESS DID NOT
+ * CREATE — a `runId` or a `ref` read out of a store's `subgraph.started` payload as much as a
+ * rejection. The name says "thrown" because that was the first case; the rule is provenance, not
+ * position. It was learned the expensive way twice: `#planRollbackChild`'s catch ran this on the
+ * rejection and then coerced two store-supplied strings raw, and a store answering
+ * `ref: Object.create(null)` killed the guard through the template literal instead of through the
+ * `catch`. Every argument below applies to those values identically, because a hostile `Proxy` or
+ * a throwing `toString` does not care which slot it arrived in.
+ *
  * `e instanceof Error ? e.message : String(e)` is the idiom everywhere a failure is described
  * rather than rethrown, and it has a hole: `String(Object.create(null))` throws. That is harmless
  * where the catch rethrows anyway, and it is the whole defect where the catch exists to SWALLOW —
@@ -725,6 +752,151 @@ function describeThrown(e: unknown): string {
     // this catch has nowhere left to fall.
     return `<undescribable ${typeof e}: threw while describing>`;
   }
+}
+
+/**
+ * The `code` of a thrown value, when it is safe to ask and the value is one of ours.
+ *
+ * `isLoomError` IS `e instanceof LoomError`, AND `instanceof` IS A TRAPPABLE OPERATION — the very
+ * hole `describeThrown` spent four rounds closing, re-opened the moment a guard's failure path
+ * asked "was this one of ours?" about an untrusted value. `OrdinaryHasInstance` walks
+ * `[[GetPrototypeOf]]`, which a `Proxy` traps; reading `.code` afterwards is a property read on a
+ * caller's object, which a getter traps. Both are inside the `try` and the catch does nothing
+ * trappable, which is what makes this total on the same argument `describeThrown` makes.
+ *
+ * IT ANSWERS `undefined` FOR TWO DIFFERENT FACTS — "not one of ours" and "could not tell" — and
+ * that conflation is deliberate rather than overlooked. Both callers want the same thing from
+ * both: `childUnavailable` omits `details.cause`, and the cancellation guard declines to treat an
+ * undescribable value as a cancellation. Neither is a loosening: an undescribable throw is
+ * converted to the same retryable refusal any other foreign failure gets, which is bounded, and
+ * at base it killed the run outright.
+ *
+ * AND `isLoomError` DOES NOT MEAN "ONE OF OURS" — `errors.ts` says so itself, because an
+ * `instanceof` proves a prototype and not provenance. So the string this returns is still a value
+ * a third party may have chosen, which is why it goes out through `describeThrown` rather than
+ * raw.
+ */
+function loomCodeOf(e: unknown): string | undefined {
+  try {
+    return isLoomError(e) ? describeThrown(e.code) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A cross-run touch that could not happen, as a RETRYABLE failure of the task that tried it.
+ *
+ * THE OTHER HALF OF `describeThrown`'S RULE, for the sites where swallowing is not available.
+ * `#planRollbackChild` and `#endChildRun` can refuse a child outright, because the parent has
+ * already decided what it is doing and reaching into the child is a courtesy. The three touches
+ * inside `#runSubgraph` cannot: the task's whole job IS the child, and a swallow there would make
+ * the parent proceed on a value it did not read — at the `existing` probe, "the read failed"
+ * would look like "there is no child yet", and the parent would SUBMIT A SECOND CHILD RUN over
+ * the first one's effects. Refusing is allowed; guessing is not.
+ *
+ * SO THE REFUSAL IS THE ANSWER THIS METHOD ALREADY GIVES ONE CASE EARLIER. `#runSubgraph` answers
+ * "the child has not finished" with `err.unavailable(E_SUBGRAPH_FAILED)`, and its comment says
+ * why `internal` is wrong twice over: it is not a bug in Loom, and its class is not retryable, so
+ * the first backoff kills the run. A foreign store that rejected once is the same shape of fact.
+ * Measured at `c54b0c2` with a single child read broken: `status=failed err=E_INTERNAL/internal`
+ * on the PARENT — a transient read of another run's disk, promoted to a permanent verdict on this
+ * one and a compensation cascade over its irreversible effects.
+ *
+ * IT WARNS TOO, AND THE FIRST VERSION DID NOT — that was the sharpest finding of this lane's
+ * review, and it was a false premise rather than a taste. The claim was "no warning needed: this
+ * refusal reaches the operator as a `task.committed` failure carrying the reason and the child's
+ * id". Driven on the B fixture, dumping every parent event appended on the broken pass:
+ *
+ *   task.leased          {"attempt":3,"workerId":"worker-0"}
+ *   task.retry_scheduled {"afterMs":1000,"attempt":2,"code":"E_SUBGRAPH_FAILED","deferred":true}
+ *   task.ready           {"branchPath":"root","edgesIn":[],"nodeId":"delegate"}
+ *   task.committed count on that pass: 0        events naming the child or the cause: []
+ *
+ * Three ways over: a DEFERRED failure appends no `task.committed` at all (this file says so at
+ * `#retryDecision`'s streak comment), `task.retry_scheduled`'s payload is `{attempt, afterMs,
+ * code, deferred}` and holds neither reason nor child id, and `task.committed` carries no error
+ * field in the first place — `ErrorRecord` lives on `task.failed`. So in the ORDINARY case, a
+ * transient failure that clears on the next pass, the journal says "a delegation was deferred"
+ * and nothing anywhere says which child or why. Only a run that spends the whole deferral budget
+ * ever writes the cause down.
+ *
+ * That is the same argument `#forwardToParentMirrorsQuietly` makes for its own warning — a
+ * failure nobody can see is indistinguishable from one that did not happen — so all five
+ * cross-run sites now say something out loud, and this one adds NO journal vocabulary to do it.
+ *
+ * THE RATE IS ONE PER REFUSAL AND IT IS BOUNDED, measured on a PERMANENTLY broken child store
+ * rather than the one-shot the tests use:
+ *
+ *   outcome=failed/E_SUBGRAPH_FAILED  passes=20  simulatedMs=1140000
+ *   warnings={"LOOM_CHILD_UNREACHABLE":20,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
+ *   task attempt=3 deferrals=19 deferredMs=843000
+ *
+ * Nineteen uncharged deferrals inside the 900 s budget, then the charged retries, then the run
+ * ENDS — which is the fact worth having, because the sibling warning at
+ * `#answerMirrorsTheChildAlreadyDecided` has no such bound (a parent parked on a mirror is
+ * re-driven by verbs, not by a budget, and warns once per verb forever). Twenty lines of stderr
+ * for a quarter hour of a broken disk is the right order of magnitude; a dedupe set would be
+ * memory a restart hands back empty whose only reader is "do we print".
+ *
+ * WHAT ACTUALLY RESCUES THE RUN IS THE DEFERRAL ARM, NOT THE GRAPH'S `retry` — measured, because
+ * the first version of this docstring said the opposite ("a node with no `retry` policy still
+ * fails immediately") and both halves of that were false. `E_SUBGRAPH_FAILED` is in
+ * `DEFERRABLE_CODES`, and `#retryDecision` takes the deferral BEFORE it consults the policy at
+ * all — that ordering is the fix its own comment describes — so these three refusals are
+ * re-entered UNCHARGED on a 1 s curve inside a 900 s budget, and only after that budget do they
+ * reach `NodeSpec.retry`. A `subgraph` node cannot have no policy anyway: `compile.ts` floors it
+ * with `DEFAULT_SUBGRAPH_RETRY`. Driven: this file's B fixture with `maxAttempts: 1` still
+ * succeeds, on `deferrals 1 / deferredMs 1000`.
+ *
+ * AND THAT MEMBERSHIP IS DELIBERATE, WHICH `DEFERRABLE_CODES` ASKS TO BE TOLD — read its entry for
+ * this code, which says a third retryable arm "would silently join this set" and asks for the code
+ * to be SPLIT rather than the comment widened. Three arms are added here and the code is NOT
+ * split, so this is a departure from a written instruction and is stated as one:
+ *
+ *   WHY MEMBERSHIP IS RIGHT. The set's own criterion is "the failures that are NOT this node's
+ *   failure". A child journal this node could not read is exactly that, and uncharged patient
+ *   re-entry bounded by `DEFERRAL_BUDGET_MS` is the behaviour a transient foreign store wants.
+ *   The vice the instruction guards against is a SILENT join, and silence is what this paragraph
+ *   and the one now in `DEFERRABLE_CODES` remove.
+ *
+ *   WHAT IT COSTS, named rather than waved past, and COUNTED rather than carried: the code now
+ *   carries FOUR meanings, not three as this paragraph said for a round — `DEFERRABLE_CODES`
+ *   enumerates three pre-existing arms ("has not finished", "ended failed", "awaiting a gate it
+ *   does not have") and this adds "the child's journal is unreachable". So a graph's
+ *   `retry.onlyIf` cannot separate them, and neither can an operator filtering by code.
+ *   `details.childRunId`, `details.cause` and the message separate them; a code would separate
+ *   them better. The split was not taken because it needs a new member of `CODES` in `errors.ts`,
+ *   which is outside this lane's authorised file set — see the lane report, where it is the
+ *   recommended follow-up rather than a thing quietly left undone.
+ *
+ * THE STORE'S OWN TEXT GOES IN `details.error`, AND THE MESSAGE NAMES THE ACT — which is a choice
+ * about what an operator reads first, and NOT the secrets argument this paragraph used to make.
+ * That argument was wrong twice over and a reviewer took it apart: `errorRecord` puts the message
+ * on `task.failed`, not on `task.committed` (which has no error field at all — this docstring says
+ * so correctly further up), and `details` is journaled in that same row and redacted no more than
+ * `message` is. Splitting the text across the two fields hides it from nobody, and the warning one
+ * line above prints it to stderr regardless. It is kept split because "which act failed, for which
+ * child" is the sentence a failed delegation should lead with, and the store's own words are the
+ * detail underneath it.
+ */
+function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomError {
+  const why = describeThrown(e);
+  const child = describeThrown(childRunId);
+  // THE ORIGINAL CODE TRAVELS IN `details.cause`. Re-classing an alarm as `unavailable` is what
+  // makes the delegation retryable, and it also throws away WHICH failure it was — a reviewer
+  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent as a
+  // plain `E_SUBGRAPH_FAILED` with its code nowhere. Through `loomCodeOf`, never a bare
+  // `isLoomError` — that is an `instanceof`, and asking it about an untrusted value is the
+  // trappable operation this file already paid four rounds for.
+  const cause = loomCodeOf(e);
+  process.emitWarning(`${what} for child run ${child}: ${why}; the delegation is deferred and the next pass will try again`, {
+    code: "LOOM_CHILD_UNREACHABLE",
+    detail: JSON.stringify({ childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) }),
+  });
+  return err.unavailable(CODES.E_SUBGRAPH_FAILED, `${what} for child run ${child}`, {
+    details: { childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) },
+  });
 }
 
 /**
@@ -1856,7 +2028,7 @@ export class Engine {
    * carry down. The two answering differently about the same journal is the defect neither of
    * them should be able to have.
    */
-  async #planRollbackChild(
+  async #planRollbackChildSteps(
     parent: RunContext | undefined,
     child: { readonly runId: RunId; readonly ref: string },
     depth: number,
@@ -1897,6 +2069,131 @@ export class Engine {
         `the graph for child run ${child.runId} cannot be rebuilt from "${child.ref}", so this engine ` +
           `cannot dispatch an undo in it — attach it and rewind, or the effect stands`,
     });
+  }
+
+  /**
+   * `#planRollbackChildSteps`, with the CHILD's problems kept out of the PARENT's verb.
+   *
+   * THIS IS THE ONE OF THE FIVE THAT ESCAPED THE VERB — five, not "the only one in the file",
+   * because the sixth read named below escapes too and does so correctly. Everything else that
+   * reaches into a child from `#runSubgraph` runs under `#runWave`'s `try/catch`, which turns a
+   * throw into a failed task; this runs inside `#failRun`'s compensation walk, which does not. Measured at
+   * `c54b0c2` on `engine-cross-run-child-touches.test.ts`'s fixture, with the child's store
+   * rejecting during iteration:
+   *
+   *   THREW sqlite: child disk I/O error
+   *       at #project -> Engine.projection -> #planRollbackChild -> #planRollback
+   *
+   * — `advance(parent)` REJECTED, mid-compensation, with the parent's own remaining undos never
+   * dispatched and the run left `running` after a walk that had already failed some of it.
+   *
+   * WHICH VERBS REACH IT — DRIVEN, NOT ASSUMED, and the answer is ONE DOOR, not two. Statically
+   * there are two callers: `#failRun` → `#compensate`, and `#rewindPlanOf`, which `rewind` and
+   * `planRewind` share. The first is reached by every verb that DRIVES, and that set is named
+   * rather than gestured at, because a reviewer found `steer` wrongly in it: the file has ONE
+   * `#advanceSerially` call site, inside `advance`, and two internal `this.advance(runId)` calls,
+   * in `resolveGateBatch` and `#resolveGateAsSystem`. So it is `advance`, `resolveGate`,
+   * `resolveGateBatch`, a parent's `#runSubgraph` driving this run as its child, and the run
+   * clock. `steer` appends and returns its own projection; it drives nothing.
+   * With an unreadable child the SECOND caller never arrives:
+   * `#rewindRefusals` runs first and `#uncompensatedIrreversible` follows `subgraph.started` into
+   * the child's journal below, so it throws before a walk is planned. That is a sixth cross-run
+   * read of this shape and it is deliberately NOT wrapped — it is a refusal guard, so its
+   * undecidable case must fail CLOSED, and swallowing it would answer "no uncompensated
+   * irreversible effect in that child" about a journal nobody read. Only its ATTRIBUTION is
+   * wrong: the operator sees a raw store error instead of this engine's refusal. Both halves are
+   * pinned in `engine-cross-run-child-touches.test.ts` — "WHICH VERBS REACH IT".
+   *
+   * AROUND THE METHOD, NOT AROUND THE READ, and the difference is not cosmetic. There are TWO
+   * throwing reads here — `projection(child.runId)`, and the recursive `#planRollback`'s own
+   * `log.read` over the child's journal one frame down — so wrapping the first would leave the
+   * second producing the identical defect. It is safe to wrap the whole thing for the reason the
+   * mirror-answer read could NOT be: planning writes nothing. Every append in this neighbourhood
+   * is `#dispatchRollback`'s, which runs after the walk is complete, so a child abandoned
+   * half-planned and one abandoned before its first read return the same `[]`.
+   *
+   * FAIL CLOSED IS AN EMPTY SHARE OF THE WALK: this child AND ITS WHOLE SUBTREE contribute no
+   * steps — the recursion into grandchildren happens inside the wrapped body, so a failure
+   * anywhere below drops everything below it, which is the honest reading and not "this child" —
+   * while the parent's own
+   * steps and its OTHER children are still planned and dispatched, and no `compensation.recorded`
+   * row is written for anything here — so nothing unattempted is recorded as attempted, and the
+   * next `rewind` re-plans the child from its journal. That is strictly more undo than the throw
+   * it replaces, which abandoned the rest of the walk as well.
+   *
+   * AND IT COSTS THE THIRD STATE, which is the rule `#planRollbackChildSteps` itself lives on —
+   * that method's own docstring says an undispatchable step is "carried forward `undispatchable`
+   * RATHER THAN DROPPED", so `#dispatchRollback` journals `not_attempted` and "nobody even tried"
+   * survives in the CHILD's log. A swallow here writes no such row: the child's subtree is dropped
+   * and the only evidence is a `process.emitWarning` a restart does not have. That is the weaker
+   * position and it is stated rather than left for a reader to notice. It is taken because the
+   * three-state design needs the child's journal to write the row IN, and the child's journal is
+   * precisely what could not be reached; carrying a step forward with no step to carry needs a
+   * journal word for "a subtree nobody could enumerate", which is vocabulary, not a fix.
+   *
+   * "PLANNING WRITES NOTHING" IS ABOUT THE JOURNAL, and two in-memory writes do survive the
+   * swallow: `#planRollback` adds descendants to the shared `seen` set before it can throw, and
+   * `#childContextFor` registers a rebuilt child context in `#runs`. Neither is a defect —
+   * every verb builds a fresh `seen`, and a registered context equals what a later rebuild would
+   * produce — but the sentence above would be a false universal without them named.
+   *
+   * IT SWALLOWS EVERYTHING, including a programmer error from a future edit inside the planner,
+   * and that is the same argument `#forwardToParentMirrorsQuietly` makes rather than a weaker one:
+   * the alternative is a taxonomy of which cross-run failures may abort a parent's own rollback,
+   * and every entry in it is a way for another run's fault to become this one's. What keeps a
+   * swallowed bug visible is the warning, which is why it is unconditional.
+   *
+   * AND IT IS SAID OUT LOUD, on the same channel and for the same reason as
+   * `LOOM_MIRROR_ANSWER_FAILED`: a swallowed refusal is indistinguishable from a child that had
+   * nothing to undo. Its own code, because the fact and the remediation differ — this one says a
+   * child's effects may still stand, and the operator's move is to fix that store and rewind
+   * again. Not a journal row: the failure is the CHILD's, and the child's log is the very journal
+   * that could not be read.
+   *
+   * AND IF THE REWIND DOOR EVER DOES REACH IT — a child readable at `#rewindRefusals` and broken
+   * a moment later — the `[]` costs nothing extra: `rewind` refuses a `planHash` that no longer
+   * matches the walk it would dispatch, so a plan taken while the store was down cannot
+   * authorise a rewind that later includes the child.
+   */
+  async #planRollbackChild(
+    parent: RunContext | undefined,
+    child: { readonly runId: RunId; readonly ref: string },
+    depth: number,
+    seen: Set<RunId>,
+    inherited?: string,
+  ): Promise<readonly RollbackWalkStep[]> {
+    try {
+      return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited);
+    } catch (e) {
+      // `describeThrown` ON ALL THREE, not on the thrown value alone. The first version of this
+      // block ran it on `e` and then coerced `child.runId` and `child.ref` raw, and those two are
+      // not this engine's strings: they are read out of `subgraph.started.payload` at
+      // `#planRollback`, i.e. out of the same third-party `StateStore` the guard exists to
+      // survive. A store that answers `ref: Object.create(null)` therefore killed the guard's own
+      // failure path — measured by this round's reviewer:
+      //
+      //   HOSTILE outcome: threw: Cannot convert object to primitive value
+      //     at #planRollbackChild (engine.ts:2004:84)  <- the `"${child.ref}"` template
+      //     -> #planRollback -> #compensate -> #failRun -> #finish
+      //   undone: []   rows: [1,7]
+      //
+      // which is byte for byte the outcome this method was written to remove. `JSON.stringify` was
+      // the second door (a `1n` or a throwing `toJSON` in the same payload) and it is closed by
+      // giving it three values that are already strings.
+      //
+      // THE RULE THIS PAYS FOR, and it is the general one: `describeThrown` is not "how to print a
+      // rejection", it is "how to print a value this process did not create". Every such value in
+      // a guard's failure path goes through it.
+      const why = describeThrown(e);
+      const childRunId = describeThrown(child.runId);
+      const ref = describeThrown(child.ref);
+      process.emitWarning(
+        `could not plan the undo of child run ${childRunId} from "${ref}": ${why}; ` +
+          `its effects are left as they are, the rest of this rollback still runs, and a later rewind will try again`,
+        { code: "LOOM_ROLLBACK_CHILD_UNREADABLE", detail: JSON.stringify({ childRunId, ref, error: why }) },
+      );
+      return [];
+    }
   }
 
   /**
@@ -7787,7 +8084,18 @@ export class Engine {
     const remaining = ctx.policy.remainingUsd;
     const slice = Number.isFinite(remaining) ? minDefined(remaining * share, this.#policyOpts.budget?.runUsd) : undefined;
 
-    const existing = await this.projection(childRunId);
+    // ANOTHER RUN'S DISK, AND THE ANSWER IT DECIDES IS "START OR RESUME". A throw here used to
+    // reach `#runWave`'s catch as `internal`/`E_INTERNAL`, which is not retryable, so a store
+    // that hiccupped once failed the delegation permanently. `childUnavailable` says the same
+    // fact in the class this method already uses for "come back later". Swallowing is NOT an
+    // option at this particular read — see that function's docstring: an unread journal would
+    // look like "no child yet" and submit a second one.
+    let existing: RunProjection | undefined;
+    try {
+      existing = await this.projection(childRunId);
+    } catch (e) {
+      throw childUnavailable(childRunId, `subgraph "${describeThrown(sub.ref)}" could not read the journal`, e);
+    }
     if (existing === undefined) {
       // THE REFERENCE IS JOURNALED FIRST, and the order matters more than it looks.
       // `subgraph.started` is the only thing that tells a later `cancel` this child exists,
@@ -7847,8 +8155,17 @@ export class Engine {
         // short-circuit in `#executeTask` used to produce before a mirror's decision had
         // to travel: E_HUMAN_APPROVAL_REQUIRED, carrying the human's own reason. The
         // difference is that the child has now been told — either rejected through its own
-        // gate, or cancelled when that gate was already answered elsewhere. Nothing is
-        // left suspended behind a refusal.
+        // gate, or cancelled when that gate was already answered elsewhere.
+        //
+        // "NOTHING IS LEFT SUSPENDED BEHIND A REFUSAL" USED TO END THIS PARAGRAPH AND IS NOW
+        // FALSE, in exactly the case it was written for: `#endChildRun` swallows a cross-run
+        // failure rather than overturning the human's answer with it, so a child whose store was
+        // unreachable at this moment IS left running. That is the trade and it is the right way
+        // round — the alternative measured at `c54b0c2` is the parent reporting
+        // `failed / E_INTERNAL` where a person's refusal belonged — and the leak is said out loud
+        // on `LOOM_CHILD_STOP_FAILED`. Measured on that path: parent `failed`
+        // `E_HUMAN_APPROVAL_REQUIRED`, child left `running`, and nothing charged, because the
+        // child re-parks on its own posture gate.
         await this.#endChildRun(childRunId, `the parent rejected this delegation: ${forwarded.justification ?? "no reason given"}`);
         return this.#applyGateDecision(ctx, forwarded, w.node, ctx.graph.plans[w.node.id]?.outboundEdges ?? []);
       }
@@ -8040,15 +8357,71 @@ export class Engine {
       ? { kind: "reject", reason: settled.justification ?? "rejected on the parent graph" }
       : { kind: "approve" };
 
-    const childP = await this.projection(childRunId);
+    // THE READ AND THE WRITE ARE BOTH THE CHILD'S, and both are refused the same way and for the
+    // same reason as the `existing` probe above: this task exists to run that child, so it cannot
+    // proceed on a journal it could not read, and it must not report the child's store failure as
+    // a permanent verdict on the parent. Swallowing is not available here either — a silent skip
+    // would leave the human's decision unforwarded while the parent walked on as if it had been.
+    //
+    // THE WRITE IS THE SAME SHAPE AS THE READ, which is the member the previous lane's
+    // "cross-run READS" enumeration would have hidden. The retry cannot do HARM — the target is
+    // re-read and `idempotencyKey: parent:<taskId>` is derived, so a repeat under a store that has
+    // come back neither re-decides nor double-appends — but it also cannot SUCCEED in this
+    // process, and that half has to be said or the sentence is an advertisement. `HumanGateBroker`
+    // writes its idempotency entry BEFORE the commit and removes it only on `E_SEQ_CONFLICT`, so a
+    // store failure leaves the key behind and every later redelivery of it answers
+    // `{resolved:false}` about an event no journal holds. Measured: one-shot append failure, store
+    // healthy again, twenty parent drives approving whatever is open — parent `awaiting_gate`,
+    // child's gate still `open`, nothing charged.
+    //
+    // THAT IS STILL THE BETTER OF THE TWO. At `c54b0c2` the same input killed the run
+    // (`failed / E_INTERNAL`) and compensated its irreversible effects; here the child's gate is
+    // left in the one state a person can act on, and answering it in the CHILD's console finishes
+    // the delegation through `#answerMirrorsTheChildAlreadyDecided`. It fails CLOSED — nothing
+    // runs twice, nothing is charged — so it is not a loosening. The remaining half is
+    // `gates.ts`'s pre-commit entry, which is that file's to fix and this lane's recorded residue.
+    let childP: RunProjection | undefined;
+    try {
+      childP = await this.projection(childRunId);
+    } catch (e) {
+      throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — reading the journal failed`, e);
+    }
     const target = childP === undefined ? undefined : gateOf(childP, settled.mirrorOf);
     if (target?.state === "open") {
-      await this.#resolveGateAsSystem(childRunId, {
-        gateId: target.gateId,
-        decision,
-        actor: SYSTEM_ACTOR("executor:subgraph"),
-        idempotencyKey: `parent:${w.task.taskId}`,
-      });
+      try {
+        await this.#resolveGateAsSystem(childRunId, {
+          gateId: target.gateId,
+          decision,
+          actor: SYSTEM_ACTOR("executor:subgraph"),
+          idempotencyKey: `parent:${w.task.taskId}`,
+        });
+      } catch (e) {
+        // THE CANCELLATION GUARD THAT USED TO STAND HERE IS GONE, and its removal is the most
+        // useful thing this line has to say. FOUR predicates shipped, not three as this sentence
+        // first said — `isLoomError(e) && e.code === E_CANCELLED`, then `loomCodeOf(e) ===
+        // E_CANCELLED`, then `toLoomError(e).code === E_CANCELLED`, then
+        // `ctx.abort.signal.aborted`; the omitted one is the sha the table below gives its own
+        // row, which is how a reviewer caught it. The THIRD was a defect — `toLoomError` maps any `Error`
+        // named `"AbortError"` to `E_CANCELLED`, which is what any deadline-backed `StateStore`
+        // rejects with, so a third party's error NAME decided a parent run's fate:
+        //
+        //   c54b0c2 base → failed:E_CANCELLED   1b37ef2 → running
+        //   fdeeb1a      → running              7f908a4 → failed:E_CANCELLED
+        //
+        // The third version was correct and INERT, which is why none of them is here now. With
+        // `if (false) throw e` substituted for it, all fourteen tests in
+        // `engine-cross-run-child-touches.test.ts` — including one written specifically to drive a
+        // `cancel` racing this forward — stay green. The reason is structural: `cancel` decides a
+        // run's status by journaling `run.cancelled`, so a task outcome re-classed as "come back
+        // later" during a cancelled run changes nothing. Nothing runs, because the run is over.
+        //
+        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN, and the honest reason
+        // `#runSubgraph`'s own `advance(childRunId)` is left unwrapped is SCOPE — it is not one of
+        // the five sites this lane was authorised for, and wrapping it is a much wider behaviour
+        // change — not "it would swallow a cancel". That argument was overstated three times; a
+        // fourth rewrite of it would be worth less than deleting it.
+        throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
+      }
     }
     return settled.decision === "reject" ? settled : undefined;
   }
@@ -8062,6 +8435,37 @@ export class Engine {
    * the rest, including a gate that was answered elsewhere while the parent deliberated.
    */
   async #endChildRun(childRunId: RunId, reason: string): Promise<void> {
+    try {
+      await this.#stopChildRun(childRunId, reason);
+    } catch (e) {
+      // SWALLOWED, WHERE THE THREE TOUCHES ABOVE ARE NOT, and the difference is that the parent
+      // has already decided. This runs after `#forwardGateDecision` returned a REJECTION, and the
+      // caller's very next line applies that rejection as the parent's own outcome. A throw here
+      // replaced the human's answer with a store error: measured at `c54b0c2`,
+      // `status=failed err=E_INTERNAL` where the operator's refusal belonged. Stopping a child
+      // the parent has finished with is a courtesy — `#forwardGateDecision` has already rejected
+      // the child's own gate in the common case — and refusing a courtesy is always allowed.
+      //
+      // IT SWALLOWS EVERYTHING, for the reason `#forwardToParentMirrorsQuietly` gives: the
+      // alternative is a taxonomy of which cross-run failures may overturn a human's decision,
+      // and every entry in it is a way for another run's fault to become this one's.
+      // `describeThrown` ON THE ID TOO, though this one is safe today by provenance rather than by
+      // check: `#runSubgraph` is the only caller and it derives `childRunId` as a template string.
+      // The sibling at `#planRollbackChild` reads its id out of a store payload and was defeated
+      // exactly there, so the rule is applied uniformly rather than per-caller — a check applied
+      // per-caller is a check the next caller forgets.
+      const why = describeThrown(e);
+      const child = describeThrown(childRunId);
+      process.emitWarning(
+        `could not stop child run ${child} after the parent finished with it: ${why}; ` +
+          `the parent's own decision still stands and the child may be left suspended`,
+        { code: "LOOM_CHILD_STOP_FAILED", detail: JSON.stringify({ childRunId: child, error: why }) },
+      );
+    }
+  }
+
+  /** `#endChildRun`'s body. Separated so the wrapper covers the READ and the `cancel` alike. */
+  async #stopChildRun(childRunId: RunId, reason: string): Promise<void> {
     const p = await this.projection(childRunId);
     if (p === undefined || isTerminal(p.status)) return;
     // NOT the human who rejected the mirror, and not `system:operator` either. The rejection
