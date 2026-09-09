@@ -42,8 +42,8 @@ output lists every seam declared in `since..HEAD`, with its reason.
 **That ledger WAS resettable three ways — measured 2026-09-02 — and `wave2-guards` (`3656d69`)
 closed all three.** Re-measured on `loom` rather than carried. **The `since` block below is from an
 earlier HEAD** — reproducing it means editing `scripts/kernel.json`, so it is not re-driven on every
-correction; what `node scripts/check-kernel.mjs` prints at `c2b5ff1` is
-`10 files pinned, 525 commits judged since 86b84c9, 11 declared seams over the full history`,
+correction; what `node scripts/check-kernel.mjs` prints at `dcf54c9` is
+`10 files pinned, 575 commits judged since 86b84c9, 12 declared seams over the full history`,
 followed by the same grandfathering notice, now against `86b84c9` and still `36`:
 
 - **Advancing `since` no longer erases the census.** It printed `0 declared seams` and exited 0 in
@@ -69,17 +69,36 @@ the one this line used to give: it cannot catch a capability landed under `fix:`
 squash-merge that collapses a `feat` into another subject type, capability added OUTSIDE the pinned
 list, or a rename git cannot detect. The convention IS the signal.
 
-Read it from the guard and nowhere else, and know what the guard leaves out. Counted today:
-`node scripts/check-kernel.mjs` lists **11**, `git log --grep='^Kernel-seam:' --oneline | wc -l`
-says **13**, and git's own trailer parser reads only the final paragraph. Three commands, three
-answers. The two extra rows in the grep are of opposite kinds: `2a9eda8` is a `docs:` commit whose
-PROSE quotes the trailer and declares nothing, while **`fbbdac4` is a real declaration the guard
-does not count — the `merge: phase1-taint` commit itself, naming three journal words**, and it
-reached `loom` inside `02a5e84`, which is why the two shas name one arrival. The guard judges
-`feat:` subjects only, so a seam declared on a `merge:` commit is in the history and outside the
-census. Neither number is wrong; the ledger a reviewer watches in the diff is the one that has to
-include both. `check-kernel.mjs`'s failure text used to recommend the grep and no longer does —
-that correction is paid.
+Read it from the guard and nowhere else, and know what the guard leaves out. **The requirement
+and the census are two different rules and the split is the thing to hold on to.** The REQUIREMENT
+is `feat:`-only and unchanged. The CENSUS counts two kinds of row on a commit touching a pinned
+path: a `feat:` subject's trailer, found by the same loose body regex the requirement uses; and —
+since `706b88a` — a trailer that `git interpret-trailers --parse` recognises in the FINAL
+PARAGRAPH of any OTHER subject, merges included. `judge()` in `check-kernel.mjs` is those two arms
+and nothing else. Counted today on `dcf54c9`, three commands and three answers:
+
+```
+node scripts/check-kernel.mjs | head -1                    → 12 declared seams over the full history
+git log --grep='^Kernel-seam:' --oneline | wc -l           → 13
+git log --format='%h@@%s@@%(trailers:key=Kernel-seam,valueonly)' | awk -F'@@' '$3!=""' | wc -l → 7
+```
+
+The differences are not noise and each names a real limit. **The grep's one extra row over the
+guard is `2a9eda8`**, a `docs:` commit whose PROSE quotes the trailer, declares nothing, and
+touches only `TODO.md` — it is excluded because it touches no pinned path, not because of the
+final-paragraph rule. **`fbbdac4` — the `merge: phase1-taint` commit, naming three journal words
+— IS counted now**, and it is the ledger's first row; it reached `loom` inside `02a5e84`, which is
+why the two shas name one arrival. **The five the guard counts and git's own parser does not are
+`b28c343 3762a0e 97a53a1 d0ca421 dcdb3f1`** — all `feat:` subjects whose trailer sits mid-body, so
+the requirement path's loose regex (`const FEAT = …`, `check-kernel.mjs:462`) sees them and
+`interpret-trailers` does not. The two paths disagree about what a declaration is, which is
+`TODO.md` §A0.26 along with the sharper gap: **a CLEAN merge carrying a trailer is still
+invisible**, because the guard filters on touched paths and git prints none for one — driven,
+`git show --name-only --format='' 878001c` prints nothing where the same command on `fbbdac4`
+prints seven files. So "the census counts merges" is true only of conflict-resolving ones.
+No number here is wrong; the ledger a reviewer watches in the diff is the one that has to know
+which of the three it is reading. `check-kernel.mjs`'s failure text used to recommend the grep and
+no longer does — that correction is paid.
 
 **The limit that fires most often is `fix:`, and the phase-2-4 merge is the worked example.** Five
 pinned files changed on it and the ledger recorded nothing, correctly by the rules: every commit
@@ -163,6 +182,29 @@ not apply the operator's own guards. It carries one now: the `jail` key above is
 holds whichever of `root`, `deny`, `egressAllowlist`, `execAllowlist`, `execEnvAllow` the operator
 set — `["deny","egressAllowlist","execAllowlist","root"]` under `--egress example.com --allow-exec
 echo`, `["deny","execAllowlist","execEnvAllow","root"]` under `--allow-exec echo --exec-env FOO`.
+
+**And the reservation an outsider cannot take is now held at the door rather than by a scan.**
+`ToolRegistry.reservePrefix(prefix, reservedFor)` (`run/registry.ts`) returns a capability object
+whose `register` is the only one exempt, and `#doRegister` checks every reserved prefix on every
+call — so the `mcp__` namespace holds against a registration made from a timer, from a library
+embedder, or after `seal()`, where the boot scan it replaced caught only what existed the instant
+it ran. It is a capability and not a flag for the reason the property itself demands: anything
+holding the registry already executes code in this process, so a `{reserved:true}` argument or a
+public "register as MCP" method would be exactly as reachable by an impostor as by the CLI. Driven
+today through `./bin/loom` on an extension module that registers `mcp__docs__search`:
+
+```
+loom run graphs/g.json --workspace . --extension-module ./squat.mjs
+E_CONFIG_INVALID: --extension-module …/squat.mjs: threw while registering: tool name
+"mcp__docs__search" uses the "mcp__" prefix, which is reserved for the --mcp-file registrar:
+every id of the form mcp__<server>__<tool> is registered by this binary from a server an
+operator named, carries the capability mcp:<server>, and is irreversible unless that server's
+row says otherwise. … Rename it.                                                          exit 1
+```
+
+and the ordinary half, the same module with the name `house.ping`, registers and the boot walks on
+past the registrar to the graph. What this does NOT yet cover is `TODO.md` §A0.27: an overlapping
+prefix, and every `ToolDefinition` field except `name` still being read live off the caller.
 
 ### 3 · Endless self-improvement
 
@@ -308,8 +350,14 @@ implementation forced on the design, and the residue it left, are dated at the t
   the ninth came later, on the taint merge.** `git diff 8d43127..ce9e7b4 --
   packages/core/src/journal/events.ts` prints NOTHING: no new event kind and no new durable payload
   field across all four, which is why property 3's attestation rides on the
-  `operator.command{kind, args}` vocabulary that already existed. `git diff ce9e7b4..HEAD` over the
-  same file is where the taint merge's three new words are. The
+  `operator.command{kind, args}` vocabulary that already existed. `git diff ce9e7b4..dcf54c9` over
+  the same file is where the taint merge's three new words are.
+  **The seven-lane 2026-09-08-night wave added no member either, checked the same way.**
+  `git diff c54b0c2..dcf54c9 -- packages/core/src/journal/events.ts` prints NOTHING across all
+  thirty-five commits — and the lens still has to be applied by hand, because that diff would also
+  be empty for a defect like `TODO.md` §A0.24, where `gates.ts` keeps an in-memory idempotency
+  entry after a failed commit. That one is not a member for the reason the next paragraph gives
+  about the broker: it fails CLOSED and a restart clears it. The
   nearest candidate short of a member is recorded and is deliberately NOT one — `wave2-engine`'s
   residue 1:
   `#resolveOnce`'s seen-key map and the broker's idempotency map are in memory, so a repeat
@@ -372,7 +420,7 @@ scripts/           build and the three guards that are worth their cost:
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records: audit findings and backlog re-checks, with reproductions
-                   START HERE: `handoff-2026-09-08-evening.md`, then `audit-2026-09-02.md`
+                   START HERE: `handoff-2026-09-09.md`, then `audit-2026-09-02.md`
 .agent/<task>/     per-task working state (gitignored)
 ```
 
@@ -394,6 +442,13 @@ journal could not say which inputs a delegation handed over already untrusted";
 `task.committed.takeSuppliedByProducer` — "It could not say WHO chose a `take`"; and "the
 `fanout_skipped_gate` escalation rule, E12" — "it had no word for the oversight a fan-out of width
 zero passes over".
+
+**Seven more lanes merged on 2026-09-09** — the 2026-09-08-night wave, `c54b0c2..dcf54c9`, 35
+commits and zero conflicts: `engine-cross-run` (`5fe7614`), `plane-inputs` (`86193e3`), `node-id`
+(`878001c`), `flake` (`4bc3ce1`), `seam-ledger` (`706b88a`), `mcp-seal` (`9cf88b5`) and
+`usage-floor` (`dcf54c9`). Every commit is `fix:` or `test:`, and no seam was declared.
+`docs/handoff-2026-09-09.md` is what each did, what it left open, and the decisions the
+orchestrator took without the user.
 
 ## Commands
 
