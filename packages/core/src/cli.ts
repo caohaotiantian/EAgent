@@ -14,7 +14,7 @@
 
 import { mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, existsSync, type Dirent } from "node:fs";
 import { hostname } from "node:os";
-import { basename, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { InProcessEventBus, type EventBus } from "./bus.ts";
@@ -85,7 +85,7 @@ import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spa
 import { OtlpHttpExporter } from "./telemetry/otlp.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
-import { digest, sameContent, shapeOf } from "./canonical.ts";
+import { digest, digestOf, sameContent, shapeOf, type Digest } from "./canonical.ts";
 import { foldTrajectory, type Trajectory } from "./evolution/trajectory.ts";
 import {
   cohortKeyOf,
@@ -3958,13 +3958,20 @@ function isVia(v: unknown): v is HumanActor["via"] {
  * `E_GRAPH_INVALID`, identically to its YAML sibling and to what `compile` reports for a
  * graph that parses and does not validate.
  */
-function readSpec(file: string): GraphSpec {
+function readSpec(file: string, source?: string): GraphSpec {
   const path = resolve(file);
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    throw err.validation(CODES.E_CONFIG_INVALID, `cannot read the graph file ${path}: ${(e as Error).message}`);
+  // `source` IS THE BYTES A CALLER ALREADY HOLDS, and there is exactly one such caller:
+  // `compiledFile`, which has to read the file to digest it before it can decide whether the
+  // compile is needed at all. Reading it twice would not merely cost a read — the file could
+  // change between the two, and the memo would then file the SECOND read's graph under the
+  // FIRST read's digest, where reverting the file would serve it back forever.
+  let text = source;
+  if (text === undefined) {
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (e) {
+      throw err.validation(CODES.E_CONFIG_INVALID, `cannot read the graph file ${path}: ${(e as Error).message}`);
+    }
   }
   // `as unknown as` because splitting the old one-line ternary split its single cast too:
   // `JSON.parse` returns `any` and absorbed the yaml branch's `Record<string, unknown>`,
@@ -4297,8 +4304,8 @@ export async function startMcp(servers: readonly McpServerConfig[]): Promise<rea
  * cannot be found. Letting a deleted extension file block human oversight of a live run is a
  * worse failure than the silence this check exists to end, so the check does not run there.
  */
-function loadGraph(ws: Workspace, file: string, introducing = true): RunGraph {
-  const spec = readSpec(file);
+function loadGraph(ws: Workspace, file: string, introducing = true, source?: string): RunGraph {
+  const spec = readSpec(file, source);
   const result = compile({
     spec,
     resolver: ws.resolver,
@@ -4970,15 +4977,17 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
   const failed: string[] = [];
+  const memo = compileMemo(ws);
+  const seen = new Set<string>();
   for (const rel of dirs) {
     const dir = join(ws.root, rel);
     if (!existsSync(dir)) continue;
     for (const file of readdirSync(dir).sort()) {
       if (!/\.(json|ya?ml)$/i.test(file)) continue;
+      const path = join(dir, file);
+      seen.add(path);
       try {
-        // `false`: every caller of this function is re-attaching a graph to a run that already
-        // exists — the run clock, and the door an approver answers a gate through.
-        const graph = loadGraph(ws, join(dir, file), false);
+        const graph = compiledFile(ws, memo, path);
         if (!index.has(graph.graphHash)) {
           index.set(graph.graphHash, graph);
           files.set(graph.graphHash, join(rel, file));
@@ -4988,7 +4997,173 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
       }
     }
   }
+  // PRUNED TO THE DIRECTORIES THIS SWEEP ACTUALLY WALKED, which is a separate decision from the
+  // memo and needs its own reason. A deleted graph would otherwise be remembered for the life of
+  // the plane, and the memo would grow with every file the workspace ever held rather than with
+  // the files it holds. It is scoped to `dirs` because this function has TWO callers with
+  // different directory sets — `graphsByHash` takes `graphs/` plus the spec resource dirs,
+  // `controlPlaneOptions` takes the resource dirs alone — and a whole-map prune from the
+  // narrower one would evict `graphs/` on every boot banner.
+  const walked = new Set(dirs.map((rel) => join(ws.root, rel)));
+  for (const path of memo.keys()) if (!seen.has(path) && walked.has(dirname(path))) memo.delete(path);
   return { index, files, failed };
+}
+
+/**
+ * ONE COMPILE PER (PATH, CONTENT) PAIR, INSTEAD OF ONE PER LOOKUP.
+ *
+ * The map is keyed by PATH and the digest is that entry's staleness check, so two files holding
+ * identical bytes are compiled once each and not deduplicated. That is deliberate: `indexGraphs`
+ * attributes every failure and every hash to the FILE it came from, and a shared entry would
+ * have to invent which of the two names to report.
+ *
+ * `indexGraphs` compiled every graph file in the workspace on every call, and `runClockTick`
+ * calls it on every tick that has a run which is DUE — including a run that is due at every tick
+ * and driveable at none, which is what a hash that resolves to no file, or a lease on one of the
+ * four node types the scheduler will not adjudicate, produces. TODO.md §A0.12 measured the
+ * result at 2.0-2.3 ms per tick against 0.1-0.4 ms over 31 published graphs, forever, scaling
+ * with the WORKSPACE and not with the stranded run. `test/deployment/stranded-run-tick-cost.test.ts`
+ * reproduces it as a COUNT rather than a duration: 8 graphs × 4 ticks = 32 compiles, now 8.
+ *
+ * THE KEY IS THE FILE'S CONTENT, and the alternatives were a directory mtime and the `stat`
+ * quad. Both are cheaper — measured on 31 × 5,326-byte graphs: `stat` 0.059 ms, read + sha256
+ * 0.474 ms, and the read + parse + validate this replaces 2.0-2.3 ms — and both buy that with an
+ * assumption this code did not previously make, namely that the filesystem's timestamp
+ * granularity is finer than the gap between two writes of the same byte length to one path. A
+ * stale index fails OPEN: it serves the OLD graph for a republished one, silently, which is the
+ * direction CLAUDE.md forbids. The content digest assumes nothing — `readSpec` already read
+ * every one of these files on every call, so this is strictly LESS work than before, not a
+ * different bet.
+ *
+ * PER `Workspace`, in a `WeakMap`, and that is what makes the restart question answerable.
+ * `compile()` reads three things beyond the file — `ws.resolver`, `ws.engine.tools.manifests()`
+ * and `ws.granted` — and the `Workspace` is what pins two of them: `granted` is `readonly` with
+ * one assignment site, and the built-in resolver closes over a `ResourceStore` seeded once from
+ * `readResources(root)` at `openWorkspace`, which nothing in `src/` publishes to afterwards. The
+ * THIRD is not pinned by anything and is the second half of the key — see `toolsToken`, which is
+ * also where the measurement is, and where the one thing neither covers is named.
+ *
+ * So a memo cannot outlive the context that justified it, a second plane over the same directory
+ * keeps its own, and a restart — `close()` plus a fresh `openWorkspace` — gets an empty one by
+ * construction. Empty costs a compile and can never cost a wrong answer, which is why this is
+ * not a member of the class `oversight-survives-restart.test.ts` enumerates.
+ *
+ * FAILURES ARE MEMOISED TOO, under the same key. A file that does not compile is the other half
+ * of §A0.12's cost — the graph whose hook was deleted, in this function's own docstring — and
+ * re-deriving its diagnostics twice a second tells an operator nothing the first line did not.
+ * Fixing the file changes its bytes, which is the invalidation.
+ *
+ * WHAT A MEMO HIT DOES NOT DO IS PRINT. `loadGraph` writes one stderr line per diagnostic, so a
+ * hit is silent where a compile is not. Every one-shot verb runs in a fresh process and is
+ * therefore byte-for-byte unchanged; inside `loom serve` the same warnings about the same
+ * unchanged bytes stop repeating at the sweep rate, which is the outcome this function's own
+ * docstring already argues for ("which is how an operator learns to stop reading it"). Driven
+ * through the binary — `loom serve --sweep-ms 300`, 8 graphs of which 6 warn, ~5 s, ~16 sweeps —
+ * the count is 6, where it would have been 6 per sweep.
+ *
+ * NOT ONE LINE PER FILE PER BOOT, THOUGH, and the difference is `discoverGraphs`: it compiles
+ * `graphs/` through `loadGraph` DIRECTLY, at boot, with `introducing` true, because it is the
+ * only pass that must refuse a missing hook or function body. So an operator sees each warning
+ * once from that pass and at most once more when this memo first fills. Twice, ever — not per
+ * sweep, which is the property that was worth buying.
+ */
+interface CompiledFile {
+  readonly digest: Digest;
+  readonly graph?: RunGraph;
+  readonly error?: unknown;
+}
+
+const compileMemos = new WeakMap<Workspace, { token: Digest; files: Map<string, CompiledFile> }>();
+
+/**
+ * THE MEMO'S OTHER HALF OF THE KEY: THE TOOLS THE COMPILER CAN SEE.
+ *
+ * The first draft of this memo argued that `compile()`'s three non-file inputs are fixed for a
+ * `Workspace`'s lifetime, and named `tools.register`'s call sites as the evidence. That is false
+ * for tools, and this repository proved it false the same week: `TODO.md` §A0.27 and the fix at
+ * `a688ec2` are about a registration made from a `setTimeout` inside an `--extension-module`,
+ * which holds the same `ToolRegistry` object and may call `register()` at any time — which is
+ * exactly why the `mcp__` reservation was moved INTO `register()` rather than left as a boot scan.
+ *
+ * AND IT CHANGES COMPILES, MEASURED — the same bytes, the same resolver, the same grant:
+ *
+ *     tools={}                    → ok=true  diagnostics=[]
+ *     tools={"late.tool": …}      → ok=false [warning:GRAPH011_UNHANDLED_IRREVERSIBLE,
+ *                                             error:GRAPH017_CAPABILITY_NOT_DECLARED]
+ *
+ * The direction is what makes it a defect rather than a staleness note. An UNREGISTERED tool has
+ * no manifest, so `rule017`'s `ctx.tools[name]?.capabilities ?? []` iterates nothing and the
+ * graph passes; registering it is what supplies the capabilities to refuse on. So a memo blind
+ * to the registry would keep serving a graph that a fresh compile REFUSES — a guard loosening
+ * itself over time, which is the one direction CLAUDE.md does not allow. The whole map is thrown
+ * away when the token moves, because a registration is not per-file.
+ *
+ * IT COSTS 0.022 ms PER SWEEP over 24 tools, measured — against the 0.474 ms of reads it sits
+ * beside and the 2.0-2.3 ms of compiles the memo removes. Cheap enough that there is no case for
+ * a narrower key than "everything the compiler can see".
+ *
+ * THE PROJECTION IS `ToolManifestLite`'S SIX FIELDS AND THAT SET IS CLOSED BY THE TYPE:
+ * `compile` takes `Readonly<Record<string, ToolManifestLite>>`, so those six are the whole of
+ * what it can read off a manifest. The values themselves cannot be digested — `manifests()`
+ * hands back the live `ToolDefinition`s, `execute` included.
+ *
+ * WHAT THIS TOKEN DOES NOT COVER, named rather than implied: a module-supplied `ResourceResolver`
+ * that answers the same ref differently over time. The built-in one cannot — it closes over a
+ * `ResourceStore` seeded once from `readResources(root)` at `openWorkspace`, and nothing in
+ * `src/` calls `publish` after — but a module's own object is its own object, and a resolver
+ * carries no version to key on. That is the residue; `ws.granted` is `readonly` on the
+ * `Workspace` with one assignment site, so it is not part of it.
+ */
+function toolsToken(ws: Workspace): Digest {
+  return digest(
+    Object.values((ws.engine.tools as ToolRegistry).manifests()).map((m) => [
+      m.name,
+      m.version,
+      [...m.capabilities],
+      m.irreversibility,
+      m.idempotent,
+      m.compensation?.tool ?? null,
+    ]),
+  );
+}
+
+function compileMemo(ws: Workspace): Map<string, CompiledFile> {
+  const token = toolsToken(ws);
+  let held = compileMemos.get(ws);
+  if (held === undefined || held.token !== token) {
+    held = { token, files: new Map<string, CompiledFile>() };
+    compileMemos.set(ws, held);
+  }
+  return held.files;
+}
+
+function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string): RunGraph {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    // UNREADABLE, AND `readSpec` OWNS THE SENTENCE FOR THAT. Falling through to the uncached
+    // compile keeps one wording for "cannot read the graph file" rather than a second one here,
+    // and the memo is dropped because there are no bytes to key an answer on.
+    memo.delete(path);
+    // `false`: every caller of this function is re-attaching a graph to a run that already
+    // exists — the run clock, and the door an approver answers a gate through.
+    return loadGraph(ws, path, false);
+  }
+  const key = digestOf(text);
+  const hit = memo.get(path);
+  if (hit !== undefined && hit.digest === key) {
+    if (hit.graph === undefined) throw hit.error;
+    return hit.graph;
+  }
+  try {
+    const graph = loadGraph(ws, path, false, text);
+    memo.set(path, { digest: key, graph });
+    return graph;
+  } catch (e) {
+    memo.set(path, { digest: key, error: e });
+    throw e;
+  }
 }
 
 /**
@@ -5658,9 +5833,9 @@ export async function runClockTick(
   // ABOVE `boundaries[at - 1]` and cannot shift this page.
   const visible = at === 0 ? head : await ws.store.listRuns(limit, { after: boundaries[at - 1]! });
 
-  // LAZY, because the traversal makes this run more often and `graphsByHash` re-reads and
-  // RE-COMPILES every graph in the workspace. A tick with nothing due should cost a listing
-  // and a fold per run in view, and no compiles at all.
+  // LAZY, because the traversal makes this run more often and `graphsByHash` walks every graph
+  // directory in the workspace. A tick with nothing due should cost a listing and a fold per
+  // run in view, and no walk at all.
   let index: ReadonlyMap<string, RunGraph> | undefined;
   for (const row of visible) {
     const p = await ws.engine.projection(row.runId);
@@ -5693,14 +5868,18 @@ export async function runClockTick(
     // `#handedOut` set this file cannot see; duplicating it would be a second spelling of one
     // predicate, which is how `#immediateReduce` and `#foldJoin` came to disagree.
     //
-    // AND THE COST OF BEING WRONG IS A WHOLE-WORKSPACE COMPILE PER TICK, not the "one extra
+    // AND THE COST OF BEING WRONG WAS A WHOLE-WORKSPACE COMPILE PER TICK, not the "one extra
     // fold" this comment first claimed. A run that is due and cannot progress reaches
     // `graphsByHash` below every time — measured on 31 published graphs, 2.0-2.3 ms per tick
-    // against 0.1-0.4 ms before, forever, and it scales with the WORKSPACE rather than with the
+    // against 0.1-0.4 ms before, forever, and it scaled with the WORKSPACE rather than with the
     // stranded run. It bites two shapes: a run whose graph hash no longer resolves, and one
     // whose leased node is a `join`, `router`, `human_gate` or `subgraph`, the four the
-    // scheduler will not adjudicate. TODO.md §A0.12 has the measurement and why both cheap
-    // fixes are wrong.
+    // scheduler will not adjudicate. TODO.md §A0.12 has the measurement and why narrowing THIS
+    // predicate was not available as the fix: the clock cannot read a node's declared deadline
+    // without the graph it is failing to resolve. So the cost was moved instead of the
+    // predicate — `compiledFile` memoises each file's compile on its CONTENT, and what is left
+    // per tick is a directory walk and a read. What this line still owes a stranded run is that
+    // walk, which no longer grows with how long the run has been stranded.
     const due = Object.values(p.tasks).some(
       (t) => (t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now)) || t.state === "leased",
     );
@@ -5727,8 +5906,12 @@ export async function runClockTick(
  *
  * HOW THE SET WAS CLOSED, because "every" is a claim that has to be checkable. Two passes: a
  * census of every module-level binding (`^(export )?(const|let|var|class)`), of which exactly
- * one — `workspaceOrdinal` — is mutable and the other thirty-six are frozen primitives or
- * literal tables; and every container construction (`new Map(`, `new Set(`, a mutable array
+ * TWO hold something mutable — `workspaceOrdinal` and `compileMemos`, members 1 and 11 — and
+ * the rest are frozen primitives or literal tables. (This line said "one, and the other
+ * thirty-six" until member 11 arrived. The 36 is not restored, because the regex it names
+ * matches 57 lines in this file today and 56 at the sha before member 11, so it never
+ * reproduced; the CLAIM the census rests on is the mutable set, which is named.) And every
+ * container construction (`new Map(`, `new Set(`, a mutable array
  * or object literal) checked for whether it outlives the call that built it. Everything else
  * is per-call and cannot survive anything. The question asked of each survivor is the one the
  * first non-negotiable asks: WHAT READS IT, and what does a decision do when a restart hands
@@ -5768,7 +5951,17 @@ export async function runClockTick(
  *       boot is invisible until the next one is a staleness property, the opposite direction
  *       from this sweep's question.
  *
- * SO: ten producers, nine of which lose only work, and the tenth loses a bounded wait. The
+ *  11 · `compileMemo`'s per-`Workspace` map, one compiled (or refused) graph per file. Read by
+ *       `indexGraphs`, which is `graphsByHash` and therefore every verb that resolves a run's
+ *       graph by hash. It is a `WeakMap` keyed by the `Workspace`, so a restart cannot hand it
+ *       back at all — the second plane's map is a different object, and empty. Empty costs one
+ *       compile per file and can never cost a wrong answer, which is the direction this whole
+ *       list asks about. MEMO. Its key has TWO halves and both invalidate: the file's CONTENT
+ *       per entry (`compiledFile`), and a digest of the live tool registry for the map as a
+ *       whole (`toolsToken`) — that second one is not an optimisation, it is what stops a
+ *       compile-time guard going stale in the loosening direction.
+ *
+ * SO: eleven producers, ten of which lose only work, and one of which loses a bounded wait. The
  * `Workspace`'s own fields are deliberately not on this list — they are read-only after
  * `openWorkspace` and are rebuilt from the workspace DIRECTORY, which is the same input the
  * pre-restart plane read, so a restart cannot hand any of them back different.
