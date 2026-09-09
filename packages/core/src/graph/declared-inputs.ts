@@ -101,13 +101,36 @@ const MAX_GUESSES = 3;
 const MAX_DECLARED = 24;
 
 /**
+ * Neutralises the C0 control range, DEL and the C1 range, one replacement character per control
+ * byte — replaced rather than dropped so the reader can see that something was there.
+ * `\u007f-\u009f` (DEL through C1) is in the sweep for the same reason C0 is: a TERMINAL reads
+ * that range too, not only C0.
+ *
+ * SHARED WITH `server/http.ts`'s `truncate`, which sanitised this same range via its own copy of
+ * the literal until now — `TODO.md` A.39. Both bound a caller-supplied string on its way into an
+ * operator-facing message: an ESC-bracket sequence forges color and cursor movement, CR/LF forges
+ * a second log line, a raw NUL truncates whatever reads it next. It lives HERE rather than in
+ * `server/http.ts` because `server/http.ts` already imports from `graph/` (`undeclaredInputsMessage`);
+ * the reverse edge would put an HTTP-plane import inside graph code, the wrong direction.
+ *
+ * A fresh `RegExp` literal per call, not a shared module-level one: a `g`-flagged regex is
+ * stateful (`lastIndex`), and while a `test`-then-`replace` pair happens to leave it reset by the
+ * time the call returns, a shared instance is one future edit away from being read mid-scan.
+ */
+export function stripControlChars(s: string): string {
+  // eslint-disable-next-line no-control-regex -- the C0 range, DEL and the C1 range ARE the thing being matched
+  const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
+  return CONTROL.test(s) ? s.replace(CONTROL, "\ufffd") : s;
+}
+
+/**
  * A caller-supplied key on its way into a message: length-bounded and control-character-free.
  *
  * THE CONTROL-CHARACTER HALF IS FOR THE CLI DOOR. On the wire the key is JSON-escaped and inert,
  * but the same shared string is written to a TERMINAL by `loom run`, where a key containing
  * `[31m` or a newline rewrites the operator's screen. `server/http.ts`'s `truncate` — the
- * function whose 120 this borrows — bounds length and does not sanitise, so adopting only its
- * length half would have made the two gaps one gap as well as the two bounds one bound.
+ * function whose 120 this borrows — now shares `stripControlChars` with this function, so the
+ * two bounds and the one sanitising range are all one thing instead of three.
  *
  * THE SLICE IS OVER UTF-16 UNITS, so a key whose 120th and 121st units are a surrogate PAIR loses
  * its low half. That is left alone deliberately: the bound holds at 121 units, `JSON.stringify`
@@ -116,9 +139,7 @@ const MAX_DECLARED = 24;
  */
 const clip = (k: string): string => {
   const cut = k.length <= MAX_KEY_CHARS ? k : `${k.slice(0, MAX_KEY_CHARS)}…`;
-  // The C0 and C1 control ranges plus DEL, replaced rather than dropped so the operator can see
-  // that something was there. `\u0080-\u009f` matters because a terminal reads those too.
-  return cut.replace(/[\u0000-\u001f\u007f-\u009f]/g, "\ufffd");
+  return stripControlChars(cut);
 };
 
 /** `did you mean …?`, or nothing. Bounded by `MAX_GUESSES`, and silent below two characters. */

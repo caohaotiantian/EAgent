@@ -223,7 +223,7 @@ import type { EdgeId, GateId, NodeId, RunId, Seq } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { RunSummary, StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
-import { undeclaredInputsMessage } from "../graph/declared-inputs.ts";
+import { stripControlChars, undeclaredInputsMessage } from "../graph/declared-inputs.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
@@ -4809,11 +4809,10 @@ function header(req: IncomingMessage, name: string): string | undefined {
  *
  * SAME RANGE AS `graph/declared-inputs.ts`'s `clip` -- which this function's own history once
  * wrongly said did not exist. `clip`'s own doc comment already says this function's 120 is the
- * bound it borrowed, and that borrowing only the length half (as this function did, until now)
- * left two gaps where `clip` closed one of them. The DEL-through-C1 range is in the sweep for
- * the same reason `clip` gives: a terminal reads that range too, not only C0. The two are kept
- * as separate literals rather than one shared import because this file owns nothing in
- * `graph/`; if `clip` is ever exported, this should call it instead of re-deriving its range.
+ * bound it borrowed. The two used to carry separate copies of the control-character literal
+ * (`TODO.md` A.39); `stripControlChars`, exported from `graph/declared-inputs.ts`, is now the
+ * one literal both call -- this file already imports from `graph/` (`undeclaredInputsMessage`),
+ * so the edge runs the direction it already ran.
  *
  * MEASURED, NOT ASSUMED: today's callers are all header values, and Node's default HTTP parser
  * refuses any header carrying a C0 control or DEL -- a header value with a raw ESC byte in it
@@ -4823,15 +4822,16 @@ function header(req: IncomingMessage, name: string): string | undefined {
  * stays strict. It stops being true the moment a deployment sets `insecureHTTPParser: true` --
  * Node then hands those same bytes straight through -- or the moment a call site reads
  * something other than a header value, so this is defence for that day rather than for one
- * that has already been ruled out.
+ * that has already been ruled out. `ControlPlane` never sets it (this file's only
+ * `createServer` call passes a bare callback, no options object) and
+ * `packages/core/test/server/http.test.ts`'s "today, none of truncate's own call sites can
+ * DELIVER those bytes" test drives a raw socket to pin that this stays true.
  *
  * One replacement character per control byte, so the 120-character bound this function has
  * always kept is unchanged for the plain strings that are the overwhelming common case.
  */
 export function truncate(v: string): string {
-  // eslint-disable-next-line no-control-regex -- the C0 range, DEL and the C1 range ARE the thing being matched
-  const CONTROL = /[\x00-\x1f\x7f-\x9f]/g;
-  const safe = CONTROL.test(v) ? v.replace(CONTROL, "\ufffd") : v;
+  const safe = stripControlChars(v);
   return safe.length <= 120 ? safe : `${safe.slice(0, 120)}…`;
 }
 
