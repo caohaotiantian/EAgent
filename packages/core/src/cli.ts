@@ -21,6 +21,7 @@ import { InProcessEventBus, type EventBus } from "./bus.ts";
 import { isLoomError, toLoomError, type LoomError } from "./errors.ts";
 import { parseYamlSpec } from "./graph/yaml.ts";
 import { compile } from "./graph/compile.ts";
+import { undeclaredInputsMessage } from "./graph/declared-inputs.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpToolName, mcpTools } from "./mcp/tools.ts";
 import type { GraphSpec, RunGraph } from "./graph/spec.ts";
@@ -10465,31 +10466,19 @@ function runInputs(args: Args): Record<string, unknown> {
  * `runInputs` deliberately runs before the compile so a flag typo does not cost one. Two checks,
  * two moments, one flag.
  *
- * THIS IS A NEW REFUSAL AND IT IS THE CLI'S DOOR ONLY. `POST /runs` takes its inputs from a
- * caller's program rather than a caller's keyboard, and widening a wire contract is not what a
- * typo in an argv is evidence for. The engine's own binding check is unchanged and still runs.
- *
- * THE DECLARED SET IS ALWAYS PRINTED, not only the guess: `assertKnownFlags`' same-first-two-
- * letters heuristic catches `documnet` and misses a wrong name that is not a transposition, and
- * an operator who was never going to guess needs the list rather than a shrug.
+ * IT IS NO LONGER THE CLI'S DOOR ONLY, and this paragraph used to say the opposite. The claim was
+ * "`POST /runs` takes its inputs from a caller's program rather than a caller's keyboard, and
+ * widening a wire contract is not what a typo in an argv is evidence for" — right on the evidence
+ * it had, and `TODO.md` §A0.17 is the evidence it lacked: the plane was MEASURED answering the
+ * same body 202, journaling the run, and failing it downstream as `E_INTERNAL`. The rule now lives
+ * in `graph/declared-inputs.ts` and both doors call it; the wording, the near-miss guess and the
+ * always-printed declared set are documented there. Only the error CLASS differs — configuration
+ * here, a bad request on the wire. The engine's own binding check is unchanged and still runs.
  */
 function assertDeclaredInputs(graph: RunGraph, inputs: Record<string, unknown>): void {
-  const declared = graph.spec.inputs ?? [];
-  const undeclared = Object.keys(inputs).filter((k) => !declared.includes(k));
-  if (undeclared.length === 0) return;
-  const near = (k: string): string => {
-    const head = k.toLowerCase().slice(0, 2);
-    const guesses = declared.filter((d) => d.toLowerCase().startsWith(head) && d !== k);
-    return guesses.length === 0 ? "" : ` (did you mean ${guesses.map((g) => `"${g}"`).join(" or ")}?)`;
-  };
-  throw err.validation(
-    CODES.E_CONFIG_INVALID,
-    `--input names ${undeclared.length === 1 ? "a channel" : "channels"} this graph does not declare as an input: ` +
-      `${undeclared.map((k) => `"${k}"${near(k)}`).join(", ")}. ` +
-      `It declares ${declared.length === 0 ? "no inputs at all" : declared.map((d) => `"${d}"`).join(", ")}. ` +
-      `A channel nothing reads is dropped in silence and the run then fails four layers below the mistake, ` +
-      `having already been submitted and — against a real provider — already spent.`,
-  );
+  const why = undeclaredInputsMessage("--input", graph.spec, inputs);
+  if (why === undefined) return;
+  throw err.validation(CODES.E_CONFIG_INVALID, why);
 }
 
 /**

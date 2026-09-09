@@ -169,6 +169,20 @@
  * Pinned by *EVERY CREDENTIAL READS THE GRAPH INVENTORY* in
  * `test/server/plane-watch-and-stop.test.ts`.
  *
+ * **AND `POST /runs`'s DECLARED-INPUTS REFUSAL IS THE THIRD ROUTE, added knowingly.** Since the
+ * change `TODO.md` §A0.17 asks for, a body naming a channel the graph does not declare comes back
+ * 400 with the graph's whole declared input SET in the message — which is more than either
+ * graph route hands out: `GET /graphs` returns `{name, graphHash, nodes: count, edges: count}`
+ * and `by-hash` returns layout `{id, type}` plus `{layoutRank, maxInstances, posture}`, and
+ * neither carries a channel name. So the enumeration above was short by one line the day that
+ * check landed, which is the exact defect the previous paragraph exists to prevent, and this is
+ * the line. The argument for it is the previous paragraph's own: a credential that receives
+ * this message could already SUBMIT the workflow, and a channel name it must supply to submit
+ * successfully is not a privilege withheld from it. The "404, NEVER 403" rule is untouched —
+ * the check runs AFTER `graphIn`'s 404, so an unknown graph is still 404 and no input set is
+ * named. If `POST /runs` ever grows a per-workflow predicate, this refusal has to move behind
+ * it, because at that moment the set stops being something the caller could get any other way.
+ *
  * ## AND THE CALLER MAY BE A BROWSER SOMEBODY ELSE IS DRIVING
  *
  * Everything above reasons about who can reach the socket. On the supported open posture
@@ -209,6 +223,7 @@ import type { EdgeId, GateId, NodeId, RunId, Seq } from "../ids.ts";
 import { SYSTEM_ACTOR, type HumanActor, type JournalEvent, type SubmittedBy } from "../journal/events.ts";
 import type { RunSummary, StateStore } from "../journal/store.ts";
 import type { RunGraph } from "../graph/spec.ts";
+import { undeclaredInputsMessage } from "../graph/declared-inputs.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
 import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
@@ -3518,6 +3533,38 @@ export class ControlPlane {
             if (graph === undefined) {
               throw err.notFound(CODES.E_RESOURCE_NOT_FOUND, `no compiled graph named "${name}"`);
             }
+
+            // THE SAME REFUSAL THE CLI HAS MADE SINCE `8c734ce`, and this door not making it is
+            // `TODO.md` §A0.17. Measured on the binary at `c54b0c2` against
+            // `examples/graphs/fan-out-join.json` (`"inputs": ["document"]`):
+            // `{"inputs":{"documnet":"a b"}}` answered **202**, wrote `run.submitted`, and then
+            // failed the run with `E_INTERNAL: E_CHANNEL_UNDECLARED: channel "document" …` —
+            // naming a channel the caller never typed, classing a caller's typo as a bug in Loom,
+            // and against a real provider SPENDING before the missing binding was found. That is
+            // the shape the CLI's check exists to prevent, on the door that carries the traffic.
+            //
+            // AFTER `graphIn` because the declared set IS the graph's, and BEFORE `engine.submit`
+            // because zero `run.submitted` rows is the whole point of the refusal. The `catch`
+            // below frees the idempotency claim and the `finally` deletes the in-flight slot, so a
+            // refused submission poisons nothing: the same key, corrected, is a fresh submission.
+            //
+            // IT IS A BREAK AND IT WAS TAKEN KNOWINGLY. A body that named an EXTRA key on top of
+            // the declared ones — `{"document":"a b","notes":"extra"}` — answered 202 and
+            // SUCCEEDED at `c54b0c2`, seeding `notes` as a run channel that is durable on
+            // `run.submitted`, read by nothing, and rendered `[secret]` in every projection
+            // forever. That caller now gets a 400 naming the key. Two things it is NOT: it is not
+            // "nobody can be broken because `packages/core` is `private` at version `0.0.0`" —
+            // that is a fact about npm, and a running `loom serve` has whatever scripts an
+            // operator already pointed at it, which nothing in this repository can enumerate. And
+            // it is not "these runs fail anyway" — the extra-key run SUCCEEDED. What decides it is
+            // that `cli.ts` has refused this exact body since `8c734ce`, that two doors onto one
+            // engine disagreeing about a legal submission is the whole of §A0.17, and CLAUDE.md's
+            // "refusing is always allowed; loosening never is". A `spec.channels` rule would have
+            // spared a graph that compiles with a GRAPH005_UNPRODUCED_READ warning and is seeded
+            // over the wire; `graph/declared-inputs.ts` records why `spec.inputs` was kept
+            // instead, and that graph is the residue.
+            const undeclared = undeclaredInputsMessage(`"inputs"`, graph.spec, (inputs ?? {}) as Record<string, unknown>);
+            if (undeclared !== undefined) throw err.validation(CODES.E_PROVIDER_BAD_REQUEST, undeclared);
 
             const runId = await engine.submit({
               graph,
