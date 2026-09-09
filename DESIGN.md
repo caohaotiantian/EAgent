@@ -246,7 +246,7 @@ admitting it turns the rule into a counterexample generator.
 | 27 | H.3 | **done `e8c2fb5`** |
 | 28 | H.1 | **closed** — not the way the row asked. under the one-machine/one-operator framing in `TODO.md` §D's header, a manual rebuild is a documented operating condition, not open work. `TODO.md` §H.1 |
 
-**What the waves added rather than took off.** `TODO.md` §A.37 and the delivery half of A.36, both
+**What the waves added rather than took off.** `TODO.md` §A.39 and the delivery half of A.36, both
 found by a verifier rather than a builder, and both the same shape — a fix that is right in itself
 leaving a second half nobody had looked at. **A wave that closes N items and opens zero is a wave
 nobody looked hard at.** One lane was refused outright: item 24's answer to A.29 was measured

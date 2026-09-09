@@ -333,7 +333,13 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   CLOSED — deleted. No event ever clears a human ceiling, so the method deleted an in-memory entry
   `PolicyEngine.restore` re-installed at the LOWERED posture; `deescalate(scope, "in", …)` is the
   same tightening, refused for a non-human, and folded.
-- **A.37 · `truncate` (`server/http.ts`) and `clip` (`graph/declared-inputs.ts`) sanitise the same
+- **A.38 · `truncate`'s control-character sanitisation has no live call path against this plane's own
+  listener.** Repro: a raw socket write of a header value carrying a C0/DEL byte to `ControlPlane`'s
+  server → `400` from Node's parser before application code runs; the same write against
+  `createServer({insecureHTTPParser:true})` reaches the handler with the byte intact. `ControlPlane`
+  never sets `insecureHTTPParser`. **Closes when** a test pins that `ControlPlane` never enables it,
+  or a non-header call site makes the sanitisation live.
+- **A.39 · `truncate` (`server/http.ts`) and `clip` (`graph/declared-inputs.ts`) sanitise the same
   character range via two separate literals.** Repro: `/usr/bin/grep -an 'CONTROL = /\[' packages/core/src/server/http.ts`
   and `/usr/bin/grep -an 'replace(/\[' packages/core/src/graph/declared-inputs.ts` → two literals
   covering the identical range, spelled `/[\x00-\x1f\x7f-\x9f]/g` in one file and
@@ -343,12 +349,6 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   merge (`scripts/surface.json`, 540 → 541), not a name anybody outside asked for. **Closes when**
   `clip` is exported and `truncate` calls it, or both move into one shared module — and that is the
   moment to decide whether the shared name should be public at all.
-- **A.38 · `truncate`'s control-character sanitisation has no live call path against this plane's own
-  listener.** Repro: a raw socket write of a header value carrying a C0/DEL byte to `ControlPlane`'s
-  server → `400` from Node's parser before application code runs; the same write against
-  `createServer({insecureHTTPParser:true})` reaches the handler with the byte intact. `ControlPlane`
-  never sets `insecureHTTPParser`. **Closes when** a test pins that `ControlPlane` never enables it,
-  or a non-header call site makes the sanitisation live.
 
 ---
 
