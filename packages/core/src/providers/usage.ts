@@ -79,14 +79,57 @@ export function wireCount(v: unknown): number | undefined {
  *     "input_tokens": 1                   floored to in 2501             $0.007503   8x
  *     "cache_read_input_tokens": 2500     floored to nothing, cr 2500    $0.000750  80x
  *
- * 80 is `USAGE_TOLERANCE x (input rate / cacheRead rate)`, and it is not closed here. THE EVIDENCE
- * THAT WOULD CLOSE IT is that `#body` puts `cache_control` on the last system block, so only the
- * tools-plus-system PREFIX is cacheable and a cache read larger than that prefix is not
- * accountable. It was not taken, because the prefix estimate is small on exactly the request shape
- * the existing tests call an honest full cache hit, and re-charging that turn at the uncached rate
- * is the over-charge two earlier rounds of this same floor already had to pay back. It needs the
- * ORDINARY half measured against real cached deployments first, which nobody here has. `TODO.md`
- * §A0.13 carries it.
+ * 80 is `USAGE_TOLERANCE x (input rate / cacheRead rate)` — TWO FACTORS COMPOUNDING — and
+ * `dearestRateFloor` CLOSES ONE OF THEM, NOT BOTH. `TODO.md` §A0.13 is still open; this is a
+ * narrowing, and the honest bound on what remains is stated below, driven rather than assumed.
+ *
+ * WHAT `dearestRateFloor` CLOSES: the `USAGE_TOLERANCE` factor. Before it, a wire could
+ * UNDER-REPORT the total down to the loose sum floor (`toleratedFloor`, `/USAGE_TOLERANCE`) AND
+ * mislabel that already-shrunk number as cache, paying twice. `dearestRateFloor(20000, 2500) =
+ * floor((20000-2500)/8) = 2187` charges the part of the ESTIMATE the wire's own cache claim does
+ * not cover at the input rate, so that combination alone no longer works: the example below turns
+ * $0.00075 into $0.007311.
+ *
+ * WHAT IT DOES NOT CLOSE: the raw rate-ratio factor. Driven by sweeping `cache_read_input_tokens`
+ * from 0 to 20,000 against this same 20,000-token estimate (`input_tokens: 0` throughout — the
+ * fixture in `usage-per-rate-floor.test.ts`), the adversary's OPTIMUM is not the sum-floor value
+ * 2500 — it is `cacheCredit` as close to `estimated` as the tolerance's own rounding allows:
+ *
+ *     cache_read_input_tokens   inputTokens forced to   costUsd
+ *     2500  (the sum floor)     2187                    $0.007311
+ *     10000                     1250                     $0.006750
+ *     19993 (estimated - 7)     0                        $0.005998   ← the minimum
+ *     20000 (the full estimate) 0                        $0.006000
+ *
+ * $0.005998 against $0.06 honest is a ~10.0x discount — not the ~8x this tolerance permits
+ * elsewhere, and LARGER than 8x, because `dearestRateFloor` cannot tell a wire that HONESTLY
+ * cache-hit the whole prompt from one that only CLAIMS to: both report `cacheCredit` close to
+ * `estimated`, and `dearestRateFloor(20002, 20000) = floor(2/8) = 0` is what makes the honest
+ * shape (pinned as "ORDINARY 1"/"ORDINARY 2" in the same test file) cost nothing extra. Closing
+ * this residual needs the OTHER evidence this paragraph used to name instead: `#body` puts
+ * `cache_control` on the last system block only, so only the tools-plus-system PREFIX is
+ * cacheable, and capping credited cache tokens at that prefix's size would tell the two apart.
+ * It is still not taken here, for the reason it never was: the prefix is small on exactly the
+ * request shape the existing tests call an honest full cache hit (8-character `system` fields
+ * claiming a 20,000-token cache hit — see those tests' fixtures), and nobody here has real
+ * cached-deployment data to re-parameterize that cap without breaking them. `TODO.md` §A0.13
+ * still needs updating to say the residual is ~10x, not ~80x, and that it is bounded rather than
+ * removed — see this lane's report.
+ *
+ * `dearestRateFloor` ALSO HAS A COST ON THE ORDINARY SIDE, and it is the price of not having the
+ * prefix bound above: a GENUINE partial cache hit whose real uncached remainder is small is
+ * over-charged, because subtracting the wire's (trusted) `cacheCredit` from this adapter's own
+ * (estimated) `billableTokens` amplifies the estimator's ordinary error onto whatever is left.
+ * Measured on a 100,000-character prompt (`estimated = 25000`, same prices): an honest
+ * `input_tokens: 500, cache_read_input_tokens: 20000` (a real partial hit summing to less than
+ * the estimate, which the pre-existing sum floor left untouched — `20500 >= toleratedFloor(25000)
+ * = 3125`) is forced to `inputTokens = max(500, dearestRateFloor(25000, 20000)) =
+ * max(500, floor(5000/8)) = 625`: $0.007875 against $0.007500 honest, a 5% over-charge on the
+ * whole turn (25% on the uncached dimension alone). This shrinks as the honest remainder grows
+ * relative to the estimator's error and vanishes once `inputTokens >= floor((estimated -
+ * cacheCredit)/8)`, which is the ordinary case for anything but a short new turn on a very large
+ * cached prefix — exactly the agent-loop shape this file's header names. Pinned, not silently
+ * present: `usage-per-rate-floor.test.ts`'s "ORDINARY 5".
  *
  * AND THE SOUNDNESS CONDITION HAS A SECOND HALF the eleven fixtures do not measure: the endpoint
  * has to have BILLED the request this adapter composed. See `billableTokens` for the one term
@@ -113,6 +156,60 @@ export function estimateTokens(chars: number): number {
  */
 export function toleratedFloor(estimated: number): number {
   return Math.max(1, Math.ceil(estimated / USAGE_TOLERANCE));
+}
+
+/**
+ * The least an adapter will charge `inputTokens` ALONE for whatever `cacheCredit` does not cover
+ * — the per-rate floor `USAGE_TOLERANCE`'s docstring names, and a PARTIAL closure of §A0.13, not
+ * a full one. Read `USAGE_TOLERANCE`'s docstring first for the sweep that says exactly how much.
+ *
+ * `toleratedFloor` bounds the SUM of `inputTokens + cacheReadTokens + cacheWriteTokens`, and
+ * nothing stops a wire from putting the WHOLE of that sum in whichever counter is billed
+ * cheapest — `cache_read_input_tokens` on the Anthropic wire, at roughly a tenth of the input
+ * rate. Measured on the 80,000-character / $3-$15-$0.30 fixture `USAGE_TOLERANCE` uses
+ * (`estimated = 20000`): `cache_read_input_tokens: 2500` (exactly `toleratedFloor(20000)`,
+ * `input_tokens: 0`) settled at $0.00075 against $0.06 honest — 80x, the two factors
+ * `USAGE_TOLERANCE`'s docstring names (`/8` under-report, `x10` rate) compounding.
+ * `dearestRateFloor(20000, 2500) = floor(17500 / 8) = 2187` closes the FIRST factor only:
+ * whatever the wire's own cache claim does not cover is charged at the input rate regardless of
+ * how the wire split the rest, settling that same turn at $0.007311.
+ *
+ * WHAT THIS DOES NOT CLOSE, because it CANNOT from inside this function: a wire that instead
+ * claims `cacheCredit` close to `estimated` — a fake full cache hit rather than a minimal one —
+ * pays close to the raw cache-rate discount regardless (`dearestRateFloor(20000, 19993) =
+ * floor(7/8) = 0`, `costUsd = $0.005998`, a ~10x discount, driven in `USAGE_TOLERANCE`'s
+ * docstring). That is not a bug in the rounding below; it is the same number an HONEST full
+ * cache hit legitimately costs, and no function of `(estimated, cacheCredit)` alone can tell the
+ * two apart — both report the same numbers. Telling them apart needs a THIRD input this function
+ * does not take: an independent bound on how much of `req` could ever legitimately be cached
+ * (the tools-plus-system prefix `#body` marks `cache_control`), which `USAGE_TOLERANCE`'s
+ * docstring explains is not built here for lack of real cached-deployment data.
+ *
+ * `Math.floor`, DELIBERATELY NOT `toleratedFloor`'s `Math.ceil`/`Math.max(1, …)` — the more
+ * permissive rounding, chosen because the strict one reopens the over-charge on an honest full
+ * cache hit that two earlier rounds of this same floor already had to pay back (see
+ * `USAGE_TOLERANCE`'s docstring). A wire reporting cache tokens within `USAGE_TOLERANCE` of
+ * `estimated` — the shape a real full cache hit takes, `cacheCredit` close to `estimated` — leaves
+ * a remainder too small for `Math.floor(.../8)` to round up to even one token, and pays nothing
+ * extra here: `dearestRateFloor(20002, 20000) = floor(2 / 8) = 0`. `Math.ceil` would instead force
+ * one extra `inputTokens` on that same honest turn, for no adversarial reason — a real but
+ * avoidable regression this function does not make.
+ *
+ * Clamped at 0 rather than allowed to go negative: a wire whose `cacheCredit` already exceeds
+ * `estimated` (a real over-estimate on the adapter's side, not a defect on the wire's) must not
+ * CREDIT `inputTokens` — this is a floor, not an adjustment.
+ *
+ * ASSUMES `inputTokens` IS THE DEAREST RATE, WHICH IS THE OPERATOR'S PRICE TABLE TO BREAK: this
+ * function takes no `PriceRow` and cannot know it. `AnthropicAdapter.priceOf` falls back
+ * `cacheWrite ?? input` / `cacheRead ?? input`, so the DEFAULT table (cache always cheaper than
+ * input) and any operator table that keeps that ordering are safe; an operator row that prices
+ * `cacheWrite` BELOW `input` reopens this same compounding on the write dimension, because
+ * `cacheCredit` sums both without weighting by which is actually dearest. Not driven here — no
+ * default or existing test uses such a table — and named as a residue rather than fixed, since
+ * fixing it means threading the price row through `usage.ts`, which today has none.
+ */
+export function dearestRateFloor(estimated: number, cacheCredit: number): number {
+  return Math.max(0, Math.floor((estimated - cacheCredit) / USAGE_TOLERANCE));
 }
 
 /**
