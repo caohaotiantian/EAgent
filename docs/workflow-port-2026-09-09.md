@@ -83,13 +83,20 @@ bottom, in ONE shell. Two things make that true and are easy to get wrong if you
 - **Run ids are captured into `$RUN` and `$GATE` by the commands themselves.** They are different
   on every run, so nothing here hard-codes one.
 - **The gate is answered ONCE.** Approving and cancelling are two different answers to the same
-  question, so this walkthrough starts a FRESH run for each — three runs in total. A second verb on
-  an already-answered gate is `E_GATE_ALREADY_RESOLVED`, exit 1, which is correct behaviour and not
-  what any of these steps is demonstrating.
+  question, so this walkthrough starts a FRESH run for each. A second verb on an already-answered
+  gate is `E_GATE_ALREADY_RESOLVED`, exit 1, which is correct behaviour and not what any of these
+  steps is demonstrating. **Five `loom run` invocations in all** — one to read the output of, one
+  captured as `$RUN`, one cancelled, one for the wrong-approver refusal, one for the empty-pattern
+  refusal. Two of them are deliberately left parked on an open gate; the cleanup at the end takes
+  the whole journal.
 
 Nothing below needs an API key, a network connection, or an editor.
 
+**Start in the repository root** — `$PWD` is captured on the second line and everything else hangs
+off it, so running the first block from anywhere else silently poisons every later step.
+
 ```bash
+cd /path/to/this/repository              # wherever you cloned it
 npm install && npm run build:binary      # → bin/loom, one file, 0 third-party modules
 export REPO="$PWD"                       # the repo root; the test block at the end needs it back
 export PATH="$REPO/bin:$PATH"
@@ -269,9 +276,9 @@ loom approve "$RUN" "$GATE" --as u:you
 cat out/triage.md
 ```
 
-`loom approve` is not silent: it prints the finished run as JSON, roughly ninety lines, ending in
-`"written": {"bytes": 1802, "path": "out/triage.md"}`. (`bytes` is a UTF-16 code-unit count, so
-`wc -c` on the file says 1838 — the report has multibyte dashes in it.) The file:
+`loom approve` is not silent: it prints the finished run as JSON — 131 lines — ending in
+`"written": {"bytes": 1820, "path": "out/triage.md"}`. (`bytes` is a UTF-16 code-unit count, so
+`wc -c` on the 52-line file says 1856 — the report has eighteen multibyte dashes in it.) The file:
 
 ```markdown
 # Test failure triage
@@ -346,6 +353,8 @@ loom approve "$RUN3" "$GATE3" --as u:someone-else
 
 loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
 # → "status": "failed" … no test-output files matched — check the --input pattern           exit 1
+#   It arrives wearing "class": "internal", "code": "E_INTERNAL" — see friction F8. That is the
+#   runtime reporting a DESIGNED refusal with the same code an accidental throw gets, not a crash.
 ```
 
 The second is deliberate. A fan-out over an empty array produces no branches and the join folds
@@ -372,10 +381,11 @@ block not swallowing the next one. `examples-run.test.ts` picks the new graph up
 edited — its set is the directory — so the compile and resource-reachability halves were already
 covered.
 
-**Tidy up.** The walkthrough leaves three runs in a journal and one report on disk:
+**Tidy up.** The walkthrough leaves five runs in one journal, one report on disk, and the server
+log it redirected:
 
 ```bash
-rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
+rm -rf "$REPO/examples/out" "$REPO/examples/.loom" /tmp/loom-serve.log
 ```
 
 ---
@@ -500,6 +510,11 @@ $ curl -s http://127.0.0.1:8791/runs/$RUN | python3 -c 'import json,sys; print(s
 — but `README.md`'s gate walkthrough (`loom run` → `loom approve`) never mentions `loom serve`, so
 a reader following it has no way to look. The smallest honest fix is for `loom gates` to print the
 channels the gate node reads.
+
+**And the digest is not a stand-in for the content**, which a second reader checked: three runs over
+byte-identical input produced three different `contentDigest` values, so it covers run-scoped data
+too. It is a binding — what the approver was shown, which `loom approve` later checks the graph
+against — not a summary you could recognise or compare across runs.
 
 ### F4 · `loom run` puts a human hint on **stdout**, after the JSON — so `| jq` breaks on exactly the gate path
 
@@ -632,6 +647,16 @@ pattern that matched nothing.
 passing value*. The workflow's headline promise is that "0 failures" and "you pointed me at the
 wrong thing" must not look the same; three separate mechanisms inside it made them look the same
 anyway, and the builder's own six passing tests said nothing about any of them.
+
+**Then a THIRD fresh agent was given only this document** and told to run §2 literally. Verdict:
+**COMPLETED** — every command ran as written, in order, in one shell, and it never had to open the
+source. What it still found was four stale NUMBERS, all in this section's prose: `written.bytes`
+said 1802 and is 1820, `wc -c` said 1838 and is 1856, "roughly ninety lines" is 131, and "three
+runs in total" is five. Every one of them was stale by exactly the edit that fixed defect 3 above —
+adding `(3 with failures)` to the summary line is 18 characters, and 1820 − 1802 = 1856 − 1838 = 18.
+A number pasted into prose is a fact with no test behind it, which is the one class of claim this
+document cannot defend and the reason the counts a test CAN hold are asserted in
+`examples-triage.test.ts` instead.
 
 ### What did NOT cause friction, and is worth saying
 
