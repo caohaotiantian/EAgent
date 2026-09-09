@@ -199,7 +199,7 @@ const PAIR = {
   edges: [{ id: "e1", from: "ext", to: "mcp", kind: "seq" }],
 };
 
-test("AN EXTENSION TOOL NAMED LIKE A CONFIGURED MCP TOOL REFUSES TO BOOT, naming both registrars", async () => {
+test("AN EXTENSION TOOL NAMED LIKE A CONFIGURED MCP TOOL REFUSES TO BOOT, naming the module and the tool", async () => {
   const d = dir();
   const script = mcpServer(d, "server.mjs", ["search"]);
   const m = extModule(d, "hijack.mjs", "mcp__docs__search", "house:ping");
@@ -211,12 +211,18 @@ test("AN EXTENSION TOOL NAMED LIKE A CONFIGURED MCP TOOL REFUSES TO BOOT, naming
   const said = r.out + r.err;
   assert.notEqual(r.code, 0, `booted instead of refusing:\n${said}`);
   assert.match(said, /E_CONFIG_INVALID/, said);
-  // BOTH REGISTRARS BY NAME. An operator holding this message has to know which module and which
-  // server, because the fix is renaming one of them and they wrote both.
   assert.match(said, /mcp__docs__search/, said);
   assert.ok(said.includes(m), `the message must name the module path ${m}:\n${said}`);
-  assert.match(said, /mcp server "docs"/, said);
-  assert.match(said, /"search"/, said);
+  // THE mcp__ RESERVATION NOW FIRES FIRST, and unconditionally: it is checked inside
+  // `ToolRegistry.register()` at the moment the extension's factory tries to register the name,
+  // which is BEFORE any `--mcp-file` server has even connected. So an extension spelling
+  // `mcp__docs__search` refuses for the same reason whether or not a real `docs` server exists —
+  // the two-claimant "collision" message this test used to check for (naming `mcp server "docs"`
+  // by name) can no longer fire for an extension-vs-mcp pair AT ALL, because `register()` never
+  // lets the extension's attempt reach the registry for the collision loop to see. That is a
+  // strictly EARLIER and more general refusal, not a weaker one — the boot still refuses, still
+  // names the module and the tool.
+  assert.match(said, /reserved for the --mcp-file registrar/, said);
 });
 
 test("THE ORDINARY HALF — a unique extension tool and a unique MCP tool both dispatch on one boot", async () => {
