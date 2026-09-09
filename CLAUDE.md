@@ -14,7 +14,12 @@ it run against a real provider, watch it, stop it, and trust what it did.
 
 That is the bar. A correct mechanism nobody has used is not a product, and this project has
 repeatedly mistaken the first for the second. **The next real workflow somebody ports is worth more
-than the next invariant somebody proves.**
+than the next invariant somebody proves.** One is ported:
+`examples/graphs/triage-failures.json` — eight nodes over four node types, three `function` bodies
+and an input directory, run end to end against the shipped binary with no fork, no
+`--extension-module` and **zero changes under `packages/core/src`** (`f24bcb7`, `77da881`,
+`422a730`); `docs/workflow-port-2026-09-09.md` is the commands a stranger runs and the eight things
+the product cost them.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -35,7 +40,7 @@ hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs
 `feat:`-only; the census counts every subject, merges included. They share ONE definition of a
 trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
 flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
-five of the thirteen declared seams are written as. Where they still differ is what "touched the
+five of the fourteen declared seams are written as. Where they still differ is what "touched the
 kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
 empty for a clean merge, the resolution's own changes for an evil one), the census reads its
 effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
@@ -178,12 +183,12 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-09.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-09-b.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-08-night wave is merged into `loom`; the handoff says what each
-lane did and left open.
+Every branch through the 2026-09-09-b wave is merged into `loom`; the handoff says what each lane
+did and left open.
 
 ## Commands
 

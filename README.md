@@ -174,16 +174,44 @@ a replay whose `match: false` is really about the graph.
 ## Examples that run
 
 [`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it, and
-follow [`examples/README.md`](examples/README.md). Its §§1–4 work offline with no key; §§5–6 have
-an `agent` node and want a real model, and that README's table says which is which.
-`packages/core/test/examples-run.test.ts` compiles every graph there on every `npm run check` and
-runs the three that need no model, so an example that stops working stops the build. Inside:
+follow [`examples/README.md`](examples/README.md). Its §§1–4 and §8 work offline with no key; §§5–6
+have an `agent` node and want a real model, and §7 registers an adapter for one — that README's
+table says which is which. `packages/core/test/examples-run.test.ts` compiles every graph there on
+every `npm run check` and runs the three that need no model, so an example that stops working stops
+the build; §8 is compiled there and run by `packages/core/test/examples-triage.test.ts`, a separate
+file because it needs `reports/` in the workspace copy. Inside:
 `graphs/fan-out-join.json` (fan-out → branch-ordered join, with a `loom replay` that comes back
 `{"match": true}`), `resources/function/*.js`, `resources/hook/no-secrets.js` (a `preTool` hook
 blocking a credential before it reaches the disk), `graphs/review-bench.json` (a benchmark whose
 answer is known — six diffs, three with a planted defect, and SIX `assertion` evaluators, one per
 case, because a single evaluator makes S1 one bit) and `graphs/self-review.json` (the first
 workflow this project ported against a live provider).
+
+`graphs/triage-failures.json` (§8) is the chore one: a red CI run leaves you a directory of
+test-runner output, and it buckets every failing test by its error signature, ranks the buckets, and
+asks you before it writes the report. Eight nodes over four node types, three `function` bodies, no
+model and no key. From a clean checkout:
+
+```bash
+npm install && npm run build:binary   # → bin/loom
+export PATH="$PWD/bin:$PATH"
+cd examples && rm -rf out .loom       # both are gitignored and an old run leaves them
+
+loom compile graphs/triage-failures.json                                   # ok, six deadlines
+loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' # "awaiting_gate"
+ls out                                # No such file or directory — nothing written before the gate
+loom gates <runId>                    # the gate id
+loom approve <runId> <gateId> --as u:you
+cat out/triage.md                     # 8 failing tests, 5 buckets, ranked
+loom replay <runId>                   # {"match": true, "hermetic": true}
+```
+
+Two things that walkthrough will do to you, both open rows in `TODO.md`. The `gate … — loom approve
+…` hint on `loom run` goes to **stdout, after the JSON**, so `| jq` fails on exactly the gate path
+(§A.41), and `loom gates` shows a `contentDigest` rather than the report the approver has to judge —
+that is on `loom serve`'s `GET /runs/<runId>`, and in the console (§A.43).
+[`docs/workflow-port-2026-09-09.md`](docs/workflow-port-2026-09-09.md) is the full transcript and the
+eight-entry friction log behind those rows.
 
 Two rules that fail a first attempt. A `resources/function/*.js` or `resources/hook/*.js` file is a
 BARE FUNCTION EXPRESSION — the loader evaluates `(<the file>)`, so `module.exports = function (…)
