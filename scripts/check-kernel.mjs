@@ -103,9 +103,22 @@
  * pinned.
  *
  * READ IT FROM HERE AND NOWHERE ELSE, and this paragraph used to say the opposite. Measured on
- * one range: this guard 11, `git log --grep='^Kernel-seam:'` 12 (it matches prose ABOUT the
- * trailer as readily as the trailer), and git's own `%(trailers:key=Kernel-seam)` a third number
- * again, because it parses only the final paragraph of a body. Three commands, three answers.
+ * one range at the point this guard only judged `feat:` subjects: this guard 11, `git log
+ * --grep='^Kernel-seam:'` 12 (it matches prose ABOUT the trailer as readily as the trailer), and
+ * git's own `%(trailers:key=Kernel-seam)` a third number again, because it parses only the final
+ * paragraph of a body. Three commands, three answers.
+ *
+ * THE GUARD NOW READS A TRAILER ON ANY SUBJECT, MERGES INCLUDED, THROUGH GIT'S OWN PARSER — one
+ * more thing this file used not to catch. `fbbdac4`, the `phase1-taint` merge, carries a real
+ * `Kernel-seam:` trailer naming three journal words in its own final paragraph; this guard was a
+ * `feat`-only reader and never looked at it, so a real declaration sat in `git log` and outside
+ * every number above. `nonFeatTrailerSeam` reads it exactly the way `%(trailers:key=...)` does —
+ * `git interpret-trailers --parse`, final paragraph only. The REQUIREMENT is untouched — only
+ * `feat` commits must carry one — so this is a census fix, not a new refusal. Measured after: this
+ * guard 12, the grep still 13. The grep's other extra row is `2a9eda8`, which this guard drops
+ * because it touches `TODO.md` and no pinned file — NOT because of the final-paragraph rule; that
+ * rule's own worked case is in `kernel-boundary.test.ts` and not in this history. See
+ * `nonFeatTrailerSeam`.
  *
  * EIGHT RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
  * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, HISTORY SIMPLIFICATION over
@@ -187,6 +200,20 @@ function gitRaw(...args) {
   const r = spawnSync("git", ["-C", root, ...args], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
   const err = (r.stderr ?? "").trim() || (r.error ? String(r.error.message ?? r.error) : "");
   return { ok: r.status === 0, out: r.stdout ?? "", err };
+}
+
+/**
+ * Like `gitRaw`, but feeds `input` on stdin — used to hand a commit's own message to
+ * `git interpret-trailers --parse`, which reads a message body from stdin rather than a ref.
+ */
+function gitInput(input, ...args) {
+  const r = spawnSync("git", ["-C", root, ...args], {
+    encoding: "utf8",
+    input,
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  const err = (r.stderr ?? "").trim() || (r.error ? String(r.error.message ?? r.error) : "");
+  return { ok: r.status === 0, out: (r.stdout ?? "").trim(), err };
 }
 
 // ── the pin ──────────────────────────────────────────────────────────────────────
@@ -451,22 +478,78 @@ function kernelFilesTouched(sha, set) {
   return shown.out.split("\n").filter((f) => set.has(f.trim()));
 }
 
+/**
+ * Whether a commit carries a `Kernel-seam:` trailer BY GIT'S OWN RULE, not this file's plain-text
+ * regex — used for commits `FEAT` does not classify as capability (merges included), which are
+ * never REQUIRED to declare but whose trailer, if git's own trailer parser recognizes one, is real
+ * design argument the census must not drop.
+ *
+ * `SEAM` (the regex `judge` uses for `feat` commits) matches any line starting `Kernel-seam:`
+ * ANYWHERE in the body, which over-counts exactly the way `git log --grep` over-counts: it credits
+ * a body that only QUOTES the trailer as an example inside a larger paragraph of prose with a
+ * declaration it never made. `git interpret-trailers --parse` recognizes a trailer only in the
+ * message's own FINAL paragraph, which is the same rule the escape hatch already claims to follow
+ * ("git's own trailer parser reads only the final paragraph") — so non-feat commits are read
+ * through it instead of the regex.
+ *
+ * STATE THE MECHANISM, NOT AN EXAMPLE THAT DOES NOT DEMONSTRATE IT. This docstring named
+ * `2a9eda8` — one of the two rows `git log --grep` has over this guard — as the commit the
+ * final-paragraph rule excludes, and that was false. `git show --name-only --format= 2a9eda8`
+ * prints `TODO.md` and nothing else, so `kernelFilesTouched` returns empty and it is out before
+ * any trailer rule runs at all; measured, a mutant of this function using the plain `SEAM` regex
+ * and no `git interpret-trailers` produces the byte-identical 12-row census on this repo. The
+ * rule is still the right general mechanism and the wrong one to justify by that example — what
+ * it is FOR is the commit nothing here has yet written: a body quoting the trailer mid-prose
+ * while ALSO touching a pinned file. `kernel-boundary.test.ts` supplies exactly that pair, the
+ * quoted one and the same string as a genuine final paragraph, because on this repo's own history
+ * the discriminating variable is never exercised.
+ *
+ * Only called for a commit whose body contains the literal fragment at all (a cheap check against
+ * the body `commitsIn` already fetched), so the `git show -s --format=%B` + `git interpret-trailers`
+ * pair this runs costs nothing on the hundreds of ordinary commits that plainly don't.
+ */
+function nonFeatTrailerSeam(sha) {
+  const msg = git("show", "-s", "--format=%B", sha);
+  if (!msg.ok) refuse(`could not read the message of ${sha}: ${msg.err}`);
+  const parsed = gitInput(msg.out, "interpret-trailers", "--parse", "--no-divider");
+  if (!parsed.ok) refuse(`could not parse the trailers of ${sha}: ${parsed.err}`);
+  const m = /^Kernel-seam:[ \t]*(\S.*)$/im.exec(parsed.out);
+  if (!m) return undefined;
+  const value = m[1].trim();
+  return value.length >= MIN_SEAM_CHARS && /\s/.test(value) ? value : undefined;
+}
+
+/**
+ * `FEAT` commits are judged for both the REQUIREMENT (a missing or thin trailer is a violation)
+ * and the CENSUS, via the plain regex — unchanged. Every other subject, merges included, is never
+ * required to declare and so can never violate; but if `nonFeatTrailerSeam` finds a trailer git's
+ * own parser recognizes as real, on a commit that touches the kernel, it is real design argument
+ * and belongs in `declared` — this is the fix for the ledger's most-cited gap: `fbbdac4`, a
+ * `merge:` commit, carries one naming three journal words, and until now the guard never looked.
+ */
 function judge(commits, set = watched) {
   const violations = [];
   const declared = [];
   for (const c of commits) {
-    if (!FEAT.test(c.subject)) continue;
+    if (FEAT.test(c.subject)) {
+      const touched = kernelFilesTouched(c.sha, set);
+      if (touched.length === 0) continue;
+      const seam = SEAM.exec(c.body);
+      const value = seam ? seam[1].trim() : "";
+      if (seam && (value.length < MIN_SEAM_CHARS || !/\s/.test(value))) {
+        violations.push({ ...c, touched, thin: value });
+      } else if (seam) {
+        declared.push({ ...c, touched, seam: value });
+      } else {
+        violations.push({ ...c, touched });
+      }
+      continue;
+    }
+    if (!/Kernel-seam/i.test(c.body)) continue;
     const touched = kernelFilesTouched(c.sha, set);
     if (touched.length === 0) continue;
-    const seam = SEAM.exec(c.body);
-    const value = seam ? seam[1].trim() : "";
-    if (seam && (value.length < MIN_SEAM_CHARS || !/\s/.test(value))) {
-      violations.push({ ...c, touched, thin: value });
-    } else if (seam) {
-      declared.push({ ...c, touched, seam: value });
-    } else {
-      violations.push({ ...c, touched });
-    }
+    const seam = nonFeatTrailerSeam(c.sha);
+    if (seam !== undefined) declared.push({ ...c, touched, seam });
   }
   return { violations, declared };
 }

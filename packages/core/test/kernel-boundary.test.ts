@@ -228,6 +228,77 @@ test("GREEN + NOTICE: an uncommitted kernel edit is reported and never fails", (
   assert.ok(r.output.includes(KERNEL_A), r.output);
 });
 
+test("GREEN + CENSUS: a merge commit's own Kernel-seam trailer is real design argument, though never required", () => {
+  const f = repo();
+  f.git("checkout", "-q", "-b", "side");
+  f.commit("fix(engine): side change", "", { [KERNEL_A]: "export const engine = 10;\n" });
+  f.git("checkout", "-q", "main");
+  f.commit("fix(engine): main change", "", { [KERNEL_A]: "export const engine = 11;\n" });
+  // An EVIL merge: the two branches conflict on KERNEL_A, and the merge commit resolves it with
+  // its own edit — which is what makes `git show` report a touched file for a merge at all.
+  spawnSync("git", ["-C", f.root, "merge", "--no-ff", "-q", "side"], { encoding: "utf8", env: GIT_ENV });
+  f.write(KERNEL_A, "export const engine = 12; // resolved\n");
+  f.git("add", "-A");
+  f.git(
+    "commit",
+    "-q",
+    "-m",
+    "merge: side into main",
+    "-m",
+    // THE SECOND LINE IS INDENTED, and that is git's rule rather than this fixture's taste: a
+    // trailer block ends at the first line that is neither a trailer nor an INDENTED
+    // continuation, so the same two lines flush-left parse as no trailer at all. Written
+    // flush-left first, this test failed with `0 declared seams` — which is the guard reading
+    // git's rule exactly, not a defect.
+    "Kernel-seam: the two branches both narrowed the same dispatch predicate, and the\n  resolution keeps the narrower of the two rather than re-deriving a third rule.",
+  );
+  const sha = f.git("rev-parse", "HEAD");
+  const r = f.run();
+  assert.equal(r.status, 0, r.output);
+  assert.match(r.output, /1 declared seam\b/);
+  assert.ok(r.output.includes(sha.slice(0, 7)), `names the merge commit:\n${r.output}`);
+  assert.ok(r.output.includes("narrowed the same dispatch predicate"), r.output);
+});
+
+/**
+ * ONE STRING, TWO PLACES — and the pair is the point. The first version of the quoted test used
+ * `Kernel-seam: <argument>`, ten characters and no space, which `MIN_SEAM_CHARS` rejects on its
+ * own: it passed against a mutant of `nonFeatTrailerSeam` that never called
+ * `git interpret-trailers` at all, so it proved nothing about the rule it is named for. The value
+ * below clears the floor, so the ONLY thing left to decide it is whether the line is the message's
+ * own final paragraph — and the control commits the same string as a real trailer to show the
+ * discriminating variable is the position and not the text.
+ *
+ * This history exercises neither case. `2a9eda8`, the commit the guard's docstring once cited
+ * here, touches `TODO.md` and no pinned file, so it never reaches a trailer rule.
+ */
+const QUOTED_SEAM = "Kernel-seam: an argument long enough to clear the forty character floor here.";
+
+test("a Kernel-seam trailer quoted inside PROSE, not the message's own final paragraph, is not counted", () => {
+  const f = repo();
+  const sha = f.commit(
+    "docs(guard): explain the trailer format",
+    `The escape hatch looks like this:\n\n${QUOTED_SEAM}\n\nWrite one when a feat touches the kernel.`,
+    { [KERNEL_A]: "// example only\nexport const engine = 13;\n" },
+  );
+  const r = f.run();
+  assert.equal(r.status, 0, r.output);
+  assert.match(r.output, /\b0 declared seams\b/, r.output);
+  assert.ok(!r.output.includes(sha.slice(0, 7)), `must not credit a quoted trailer:\n${r.output}`);
+});
+
+test("CONTROL: the SAME string, as the message's own final paragraph, IS counted", () => {
+  const f = repo();
+  const sha = f.commit("fix(engine): the join folded siblings out of order", QUOTED_SEAM, {
+    [KERNEL_A]: "export const engine = 14;\n",
+  });
+  const r = f.run();
+  assert.equal(r.status, 0, r.output);
+  assert.match(r.output, /1 declared seam\b/, r.output);
+  assert.ok(r.output.includes(sha.slice(0, 7)), `names the commit:\n${r.output}`);
+  assert.ok(r.output.includes("clear the forty character floor"), r.output);
+});
+
 // ── the pin's own failure modes ──────────────────────────────────────────────────
 
 test("RED: an empty kernel list passes everything while observing nothing", () => {
