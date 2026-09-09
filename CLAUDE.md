@@ -78,7 +78,10 @@ PARAGRAPH of any OTHER subject, merges included. `judge()` in `check-kernel.mjs`
 and nothing else. Counted today on `dcf54c9`, three commands and three answers:
 
 ```
-node scripts/check-kernel.mjs | head -1                    → 12 declared seams over the full history
+node scripts/check-kernel.mjs | head -1
+  → kernel guard ok: 10 files pinned, 575 commits judged since 86b84c9, 12 declared seams over
+    the full history                      (the commits-judged number moves with every commit; 575
+                                           is `dcf54c9`. The seam count is the one to read.)
 git log --grep='^Kernel-seam:' --oneline | wc -l           → 13
 git log --format='%h@@%s@@%(trailers:key=Kernel-seam,valueonly)' | awk -F'@@' '$3!=""' | wc -l → 7
 ```
@@ -90,7 +93,8 @@ final-paragraph rule. **`fbbdac4` — the `merge: phase1-taint` commit, naming t
 — IS counted now**, and it is the ledger's first row; it reached `loom` inside `02a5e84`, which is
 why the two shas name one arrival. **The five the guard counts and git's own parser does not are
 `b28c343 3762a0e 97a53a1 d0ca421 dcdb3f1`** — all `feat:` subjects whose trailer sits mid-body, so
-the requirement path's loose regex (`const FEAT = …`, `check-kernel.mjs:462`) sees them and
+the feat arm's `const SEAM = /^Kernel-seam:[ \t]*(\S.*)$/m` (`check-kernel.mjs:463`, an anywhere-in-
+the-body match; `const FEAT` on the line above only classifies the SUBJECT) sees them and
 `interpret-trailers` does not. The two paths disagree about what a declaration is, which is
 `TODO.md` §A0.26 along with the sharper gap: **a CLEAN merge carrying a trailer is still
 invisible**, because the guard filters on touched paths and git prints none for one — driven,
@@ -204,7 +208,9 @@ row says otherwise. … Rename it.                                              
 
 and the ordinary half, the same module with the name `house.ping`, registers and the boot walks on
 past the registrar to the graph. What this does NOT yet cover is `TODO.md` §A0.27: an overlapping
-prefix, and every `ToolDefinition` field except `name` still being read live off the caller.
+prefix, and every `ToolDefinition` field except `name` still being read live off the caller. It is
+a new refusal an extension author can meet, and it belongs on neither README list: the cost is a
+rename, not a fork, so it shrinks nothing and bounds nothing.
 
 ### 3 · Endless self-improvement
 
@@ -446,7 +452,9 @@ zero passes over".
 **Seven more lanes merged on 2026-09-09** — the 2026-09-08-night wave, `c54b0c2..dcf54c9`, 35
 commits and zero conflicts: `engine-cross-run` (`5fe7614`), `plane-inputs` (`86193e3`), `node-id`
 (`878001c`), `flake` (`4bc3ce1`), `seam-ledger` (`706b88a`), `mcp-seal` (`9cf88b5`) and
-`usage-floor` (`dcf54c9`). Every commit is `fix:` or `test:`, and no seam was declared.
+`usage-floor` (`dcf54c9`). Of the 35, **26 are `fix:`, 2 are `test:` and 7 are the merges
+themselves** — and no seam was declared on any of them, which the census would now count whichever
+of the three a declaration had landed on.
 `docs/handoff-2026-09-09.md` is what each did, what it left open, and the decisions the
 orchestrator took without the user.
 
