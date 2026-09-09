@@ -482,13 +482,27 @@ const MIN_SEAM_CHARS = 40;
  * `effective === false` is the commit's OWN diff: `git show --name-only`, which for a merge is
  * the COMBINED diff — empty for an ordinary merge, and exactly the resolution's own changes for
  * an evil one. That is the right question for the REQUIREMENT. A clean merge writes nothing its
- * parents did not already contain, and every commit it brings in is in the history and judged on
- * its own; refusing the merge as well would demand a second trailer for a seam already declared
- * on the branch, and would double-count it in the ledger. `guards-lane-kernel-ledger-cannot-be-
+ * parents did not already contain, and every commit it brings in is REACHABLE FROM HEAD and read
+ * by the same rule any commit is; refusing the merge as well would demand a second trailer for a
+ * seam already declared on the branch. `guards-lane-kernel-ledger-cannot-be-
  * reset.test.ts`'s "AN ORDINARY MERGE is still not a violation" pins exactly that, and it is the
  * reason this is a parameter rather than a flag switched on everywhere: `-m` on the requirement
  * path also judges a `feat:` merge against what the FIRST parent did, which is not its doing at
  * all.
+ *
+ * TWO THINGS THE SPLIT DOES NOT BUY, each reproduced by a reviewer and each written down rather
+ * than left to be rediscovered:
+ *
+ *   - "READ BY THE SAME RULE" IS NOT "CAUGHT". Only `feat` subjects inside `since..HEAD` are ever
+ *     refused, so a clean `feat:` merge of a branch whose kernel rewrite landed under `chore:`
+ *     passes with `0 declared seams` and no notice. That is the `fix:`/`refactor:` limit this
+ *     file already names, arriving one door over, and `-m` on the requirement path would not
+ *     close it either — the branch commit would still be the mislabelled one.
+ *   - IT DOES NOT STOP THE LEDGER DOUBLE-COUNTING; an earlier draft of this comment claimed it
+ *     did. What it stops is a merge being COMPELLED to repeat its branch's trailer. Repeat one
+ *     anyway and you get two rows — a `feat` clean merge carrying its branch's own trailer prints
+ *     `2 declared seams`. Both commits did declare; collapsing them would need the census to
+ *     decide that two arguments are the same argument.
  *
  * `effective === true` adds `-m`, one diff per parent, and is the right question for the CENSUS.
  * The census does not ask whether this commit added capability; it asks whether the declaration
@@ -500,6 +514,12 @@ const MIN_SEAM_CHARS = 40;
  *     git show --name-only    --format='' 878001c | wc -l   → 0   (a clean merge)
  *     git show --name-only -m --format='' 878001c | wc -l   → 9
  *     git show --name-only    --format='' fbbdac4 | wc -l   → 7   (an evil merge; unchanged)
+ *
+ * `-m` IS LOOSER THAN "THE DECLARATION CONCERNS THE KERNEL", and that is the census read's own
+ * residue: a routine `merge: main into topic` carrying a trailer is credited if EITHER side
+ * touched a pinned file since the merge base, including work the merge author did not do. On
+ * `fbbdac4` the two reads are 7 files and 177. It buys the clean-merge case and it cannot refuse
+ * anything, so the cost is a ledger row a reader must judge — which is what the reader is for.
  *
  * `--first-parent` was the alternative for the census read and is worse: it shows only what the
  * side branch brought, so an evil merge's own resolution against the second parent disappears.
@@ -562,6 +582,13 @@ function finalParagraph(body) {
  * relaxed in exactly one way — a flush-left continuation does not void the block. It accepts all
  * twelve, and it still refuses `02a5e84`, whose body says "the merge commit `fbbdac4` carries the
  * `Kernel-seam` trailer" inside a paragraph of prose that is not a declaration.
+ *
+ * NAME WHAT THAT LEAVES, because "it rejects a quotation" is not the claim: it rejects a
+ * quotation that is not the LAST paragraph. A body whose final paragraph is a fenced code block
+ * containing the trailer IS credited, where `git interpret-trailers` rejects it (the closing
+ * fence ends the block). Reproduced by a reviewer: old `0 declared seams`, new `1`. Census-only —
+ * it can never refuse anything — and the price of accepting the five flush-left declarations,
+ * since the rule that rejects the fence is exactly the rule that rejects them.
  *
  * CASE-SENSITIVE, WHICH IS A NARROWING ON THE NON-`feat` PATH AND IS THE DELIBERATE HALF OF
  * SHARING ONE RULE. `nonFeatTrailerSeam` matched `/^Kernel-seam:/im`; the `feat` path never did.
@@ -710,6 +737,11 @@ if (violations.length > 0) {
   console.error("     naming the seam that was missing:");
   console.error("");
   console.error("         Kernel-seam: <which seam was absent, and why adding one was worse>");
+  console.error("");
+  console.error("     IT MUST BE THE MESSAGE'S OWN FINAL PARAGRAPH — nothing may follow it but");
+  console.error("     its own continuation lines, which need not be indented. A trailer with a");
+  console.error("     paragraph of prose after it does not declare, and this line is here");
+  console.error("     because without it an author who DID write one is told to write one.");
   console.error("");
   console.error("     It is not a rubber stamp: this script's own output is the running census");
   console.error("     of every time the kernel absorbed a feature. Read it from here — `git log");

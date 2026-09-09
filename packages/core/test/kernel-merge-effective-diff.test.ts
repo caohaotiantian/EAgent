@@ -19,8 +19,9 @@
  *      notice, nor the violations — where the identical trailer on a `feat` subject was both a
  *      violation and a notice.
  *
- * FOUR OF THE SEVEN ROWS WERE WATCHED TO FAIL against `d1b42ae`'s `scripts/check-kernel.mjs` —
- * the census row, both `one definition:` rows, and the thin-trailer notice. THE OTHER THREE PASS
+ * FIVE OF THE EIGHT ROWS WERE WATCHED TO FAIL against `d1b42ae`'s `scripts/check-kernel.mjs` —
+ * the census row, both `one definition:` rows, the trailer-with-prose-after-it row, and the
+ * thin-trailer notice. THE OTHER THREE PASS
  * AGAINST IT AND ARE SAID SO IN PLACE, because a test that never failed has not been shown to
  * test anything and this guard's history is four rounds of fixes that each passed their author's
  * tests. They are preservation pins: the two merge rows hold the properties this change could
@@ -255,6 +256,29 @@ test("one definition: a trailer QUOTED mid-prose declares nothing, on a feat sub
       assert.ok(!r.output.includes(sha.slice(0, 7)), `must not credit a quotation:\n${r.output}`);
     }
   }
+});
+
+/**
+ * THE REFUSAL THIS TIGHTENING BUYS, AND THE SENTENCE THAT MAKES IT SURVIVABLE.
+ *
+ * A `feat` commit whose trailer is real but is followed by one more paragraph of prose now fails
+ * — not only one that quotes the trailer as an example. That is the widest shape the final-
+ * paragraph rule refuses and it refuses nothing in this repository's history, but an author who
+ * hits it HAS written a trailer, so a failure text that only says "amend the commit with a
+ * trailer" tells them to do what they already did. The assertion on the output is the point of
+ * the row: the rule has to be in the refusal, not only in the source.
+ */
+test("RED: a REAL trailer with a paragraph after it does not declare — and the refusal says why", () => {
+  const f = repo();
+  f.commit(
+    "feat(engine): a capability",
+    `${SEAM_TEXT}\n\nAnd then some closing prose that follows the trailer.`,
+    { [KERNEL_A]: "export const engine = 40;\n" },
+  );
+  const r = f.run();
+  assert.equal(r.status, 1, r.output);
+  assert.match(r.output, /MESSAGE'S OWN FINAL PARAGRAPH/, `the refusal must name the rule:\n${r.output}`);
+  assert.match(r.output, /need not be indented/, r.output);
 });
 
 /**
