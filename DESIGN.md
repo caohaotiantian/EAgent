@@ -176,7 +176,7 @@ worth, so closed items keep their numbers — `TODO.md` and the items cite each 
 copy is the one that rots.** This table's `status` column is re-derived from the TODO row or the
 sha, not carried forward.
 
-### Items 1–8 — the first list, all closed 2026-08-28
+### Items 1–8 — the first list, closed 2026-08-28 (item 8 in half)
 
 | # | item | status |
 |---|---|---|
@@ -184,7 +184,7 @@ sha, not carried forward.
 | 2 | An instrument for everything outside one process — restart, scale, a second machine | **done** — the lane is `packages/core/test/deployment/`; `restart-and-answer.test.ts` is the scenario. Five defects nothing in the in-process suite could see |
 | 3 | Finish realm determinism (D3): `ctx.now()`, hooks on replay, unseeded `Math.random` in hook bodies | **done** — two replays of one run return the same `ctx.now()` |
 | 4 | Port one real workflow | **done 2026-08-25** — a review workflow over this repo's own diff against a live GLM-5.2: 3 calls, $0.046, 456 s, stopped at the gate, wrote on approval, then replayed with no key: `match: true, hermetic: true`, side effect not repeated. **One real workload found in eight minutes what 2,215 tests could not** |
-| 5 | Close the self-improvement loop (D6) | **done 2026-08-27** — a PROMPT candidate promoted over a live cohort, `--against-cohort`, exit 0. Driver: `test/cli/promote-live.test.ts` |
+| 5 | Close the self-improvement loop (D6) | **done 2026-08-27** — a PROMPT candidate promoted over a live cohort, `loom promote --against-cohort --runs 20`, exit 0 — the case D6 aims at and the replayed door structurally cannot see. n=20 pairs at ONE input shape; the offline driver is `test/cli/promote-live.test.ts`. **`8-determinism` cannot run in this mode and is not reported as passed** — the row carries `ran: false, pass: false` and the verdict carries `notRun`, so a live certificate cannot be read as the replayed gate's (`evolution/live.ts`) |
 | 6 | Cut `packages/eagent` and delete it | **done** — `git ls-files packages/eagent` returns nothing. It also freed the word *kernel* to mean `packages/core` |
 | 7 | Give "the kernel" a referent and gate it | **done** — `scripts/kernel.json` pins ten files, `scripts/check-kernel.mjs` fails a `feat` diff touching one without a `Kernel-seam:` trailer |
 | 8 | The extension surface and its version pin (D5) | **surface half done** (`compileRealm` states the bare-function-expression rule in both refusals; `requireFunctionBodies` sits beside `requireHookBodies`). **Version pin NOT built** — see "Deliberately not sequenced" |
