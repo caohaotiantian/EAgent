@@ -20,23 +20,24 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-09 on `afa86e1`
+## State — one command each, re-run 2026-09-09 on `bc926f8`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,643 pass / 0 fail** | `npm test` |
+| tests on `loom` | **3,672 pass / 0 fail** | `npm test` |
 | pinned exports | 541 | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 13 declared seams | `node scripts/check-kernel.mjs` |
+| kernel | 10 files pinned, 14 declared seams | `node scripts/check-kernel.mjs` |
 | zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8, of 456 tracked | read every `git ls-files` path; see CLAUDE.md |
+| NUL census | 5 files, 0 invalid UTF-8, of 469 tracked | read every `git ls-files` path; see CLAUDE.md |
+| journal vocabulary | 51 event types | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
 
-The kernel guard also prints a commits-judged count (624 at `afa86e1`). It is deliberately not a
+The kernel guard also prints a commits-judged count (640 at `bc926f8`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-09.md` is the current handoff.
+`docs/handoff-2026-09-09-b.md` is the current handoff.
 
 ## Row census — three commands, run on this file
 
@@ -52,14 +53,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 38 | 21 | 17 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
-| §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
+| §A | 44 | 23 | 21 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, and five things a stranger's port ran into |
+| §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 6 | 4 | 2 | decisions still owed, both narrow |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
-| §G | 7 | 0 | 7 | field-survey work the redesign creates |
-| §H | 5 | 4 | 1 | housekeeping |
+| §G | 7 | 1 | 6 | field-survey work the redesign creates |
+| §H | 7 | 4 | 3 | housekeeping, two of it prose the 2026-09-09-b wave made false |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -207,6 +208,19 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   `test/deployment/boot-banner.test.ts`.
 - **A.20 (superseded) · the four-sighting record.** No separate work: superseded by the struck A.20
   above, and kept only because the id is cited. Repro and closing condition are that row's.
+- **A.45 · The live SSE console says `failed` where `GET /runs/:id` says `skipped`.** File:
+  `packages/core/src/server/console.ts`. Repro:
+  `/usr/bin/grep -an 'task\.\(committed\|failed\|skipped\|cancelled\|leased\)' packages/core/src/server/console.ts`
+  → 3 arms (`task.leased`, `task.committed`, `task.failed`) and NO arm for `task.skipped` or
+  `task.cancelled`. So a branch a join absorbed, which `a5937fe` now journals as `skipped` (§B.2),
+  reaches the console's fold as the `task.failed` it was preceded by and stays `failed` there, while
+  the control plane's own projection reports `skipped` — two views of one run disagreeing about a
+  word. **It is FAIL-SAFE and that is why it is a row and not a fix**: `server/layout.ts`'s
+  `STATE_PRIORITY` ranks `failed` first and `skipped` sixth, so the console over-reports severity in
+  the one view whose job is to show a person the worst thing in a collapsed fan-out. `task.cancelled`
+  has been missing an arm for longer and for the same reason nobody noticed. **Closes when** the
+  console's fold covers both terminal words, with a test that drives a skip join through SSE and
+  compares the console's state to `GET /runs/:id`'s.
 
 ### Guards over states nobody has constructed
 
@@ -258,8 +272,10 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   a workflow whose only signal is human approval cannot rank its own runs.
 - **A.29 · A frozen golden case pins the whole work channel verbatim, so a candidate the graph's OWN
   verifier certifies is refused by `1-must-pass` and reported as a 33.3pp regression.** Repro:
-  `/usr/bin/grep -anc 'task.started' packages/core/src/journal/events.ts` → 3, all of them naming it
-  as a decided-DELETE member with no appender — which is the fact the fix needs and does not have.
+  `/usr/bin/grep -anc 'task.started' packages/core/src/journal/events.ts` → 3 — but the three hits
+  are now PROSE ABOUT THE DELETION (`fa25cc7`, §B.2), not a declaration. The name is gone from
+  `EVENT_TYPES`; the count survived its own subject, which is why the repro is kept and re-read
+  rather than kept and trusted.
   **THREE MECHANISMS HAVE BEEN REFUSED**, the third having shipped at `ec1047b`+`ce76bf3` and been
   REVERTED: a `VerifierPin` over WHO verified, WHAT IT SAID and WHAT FED IT, plus two topology
   conditions, was defeated by four games that each reached `promote: true` with the grader
@@ -267,8 +283,12 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   the run's FINAL channel value and the graph's STATIC edge ancestry, **neither of which is a
   statement about time, and the candidate owns the graph**. A fourth structural patch is the wrong
   move. **Closes when** a fold can answer "what did channel C hold when task T read it" — a per-task
-  ordering of channel state, which `RunProjection` does not carry and the journal cannot supply
-  while `task.started` has no appender. DESIGN item 20 is the second customer for that fact.
+  ordering of channel state, which `RunProjection` does not carry.
+  **THE OLD CLOSING CONDITION WAS WRONG AND IS CORRECTED HERE.** It read "the journal cannot supply
+  [that ordering] while `task.started` has no appender". `task.leased` supplies exactly that seq and
+  always did: `#runWaveInner` appends it immediately before the bodies run, carrying `attempt`, with
+  its own seq as the fencing token — so what is missing is not a journal EVENT but a projection that
+  keys channel state by it. DESIGN item 20 is the second customer for that fact.
 
 ### Compensation — what runs, and the gaps that do not
 
@@ -333,50 +353,189 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   CLOSED — deleted. No event ever clears a human ceiling, so the method deleted an in-memory entry
   `PolicyEngine.restore` re-installed at the LOWERED posture; `deescalate(scope, "in", …)` is the
   same tightening, refused for a non-human, and folded.
-- **A.38 · `truncate`'s control-character sanitisation has no live call path against this plane's own
-  listener.** Repro: a raw socket write of a header value carrying a C0/DEL byte to `ControlPlane`'s
-  server → `400` from Node's parser before application code runs; the same write against
-  `createServer({insecureHTTPParser:true})` reaches the handler with the byte intact. `ControlPlane`
-  never sets `insecureHTTPParser`. **Closes when** a test pins that `ControlPlane` never enables it,
-  or a non-header call site makes the sanitisation live.
-- **A.39 · `truncate` (`server/http.ts`) and `clip` (`graph/declared-inputs.ts`) sanitise the same
-  character range via two separate literals.** Repro: `/usr/bin/grep -an 'CONTROL = /\[' packages/core/src/server/http.ts`
-  and `/usr/bin/grep -an 'replace(/\[' packages/core/src/graph/declared-inputs.ts` → two literals
-  covering the identical range, spelled `/[\x00-\x1f\x7f-\x9f]/g` in one file and
-  `/[\u0000-\u001f\u007f-\u009f]/g` in the other. Carrier: `truncate` is now `export`ed from
-  `server/http.ts` so its test can import it, and `index.ts`'s `export * from "./server/http.ts"`
-  puts that generic name in `@loom/core`'s public surface — pinned deliberately at the 2026-09-09
-  merge (`scripts/surface.json`, 540 → 541), not a name anybody outside asked for. **Closes when**
-  `clip` is exported and `truncate` calls it, or both move into one shared module — and that is the
-  moment to decide whether the shared name should be public at all.
+- ~~**A.38 · `truncate`'s control-character sanitisation has no live call path against this plane's
+  own listener.**~~ CLOSED at `ba5f8c4`: CONFIRMED, not built — the row's own closing condition was
+  already met by a test that PREDATES the row. `packages/core/test/server/http.test.ts:4023`, *"today,
+  none of truncate's own call sites can DELIVER those bytes — Node's parser refuses the request
+  first"*, drives a raw socket carrying a control byte in a header value against the real
+  `ControlPlane` listener and asserts the `400` with no application-level side effect; and
+  `ControlPlane`'s one `createServer` call passes a bare callback with no options object, so
+  `insecureHTTPParser` is never set. Repro of the provenance:
+  `git log --oneline -S "can DELIVER those bytes" -- packages/core/test/server/http.test.ts` → one
+  commit, `1b2afcf` (the C1 range was widened later at `36c07e2`), while
+  `git log --oneline -S "A.38 · \`truncate\`'s control-character" -- TODO.md` → `12a141b`. The row was
+  written by a pass that did not find the pin it was asking for. Both functions' doc comments now
+  point at that test instead of restating the claim; the test and the plain `createServer` call were
+  left untouched.
+- ~~**A.39 · `truncate` (`server/http.ts`) and `clip` (`graph/declared-inputs.ts`) sanitise the same
+  character range via two separate literals.**~~ CLOSED at `ba5f8c4`: one `stripControlChars` in
+  `graph/declared-inputs.ts`, called by both. Repro, re-run on `bc926f8` —
+  `/usr/bin/grep -an 'CONTROL = /\[' packages/core/src/server/http.ts` and
+  `/usr/bin/grep -an 'replace(/\[' packages/core/src/graph/declared-inputs.ts` now return NOTHING,
+  both exit 1; `/usr/bin/grep -an 'stripControlChars' packages/core/src/server/http.ts packages/core/src/graph/declared-inputs.ts`
+  → 6 lines, of which one import + one call in `http.ts` and one definition + one call in
+  `declared-inputs.ts`. Exactly one literal survives, at `declared-inputs.ts:122`. `server/http.ts`
+  already imported from `graph/`, so the new edge runs the direction the file's dependencies already
+  ran.
+  **RESIDUE — the decision this row asked for is still OPEN, and is now the whole of what it carries.**
+  `stripControlChars` is an INTERNAL export (`declared-inputs.ts` is not re-exported from `index.ts`),
+  but `truncate` itself is still in `@loom/core`'s public surface, because `index.ts:64` is
+  `export * from "./server/http.ts"` and a `export *` barrel has no narrower way to keep a name
+  importable by its own test. `scripts/surface.json` is unchanged at 541 — the name did not move, the
+  reason for it did. **Closes when** somebody decides whether `truncate` should be public at all;
+  the answer costs either named exports for `server/http.ts`'s barrel entry or a test that reaches
+  `truncate` without importing it.
+
+### The product as a stranger meets it — from the 2026-09-09 workflow port
+
+`examples/graphs/triage-failures.json` is one real chore ported against the public surface: a graph,
+three `function` bodies and an input directory, no fork and no source change. Eight friction points
+came out of it (`docs/workflow-port-2026-09-09.md` §3, F1–F8); three were fixed in that lane, F1 was
+documented rather than changed, and the four below are the ones with a file that has to move. Every
+repro here was run from `examples/` with `bin/loom` on `PATH`.
+
+- **A.40 · `GRAPH010` refuses a channel that is provably branch-local, and the workaround leaks into
+  the body.** *(F2 — the lane's judgement is that this is the one worth building.)* File:
+  `packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`. Repro, with `raw` declared the
+  natural way as `{"type": "string", "reduce": "replace"}`:
+  ```
+  $ loom compile graphs/triage-failures.json
+  ✗ triage-failures.json: GRAPH010_CONCURRENT_WRITE: node "read" runs up to 24 times in parallel and writes "raw", whose reducer `replace` is not multi-writer safe
+     fix: change channel "raw" to reduce: append_ordered (or another commutative reducer)
+  ```
+  (`24`, re-run on `bc926f8`. `docs/workflow-port-2026-09-09.md` §3 F2 pastes `8`, which was the
+  `fan` edge's `maxWidth` before `77da881` raised it — the message tracks the graph, and the doc's
+  paste is one edit stale.)
+  The rule counts `read`'s parallel width and stops, but the runtime IS branch-scoped and a branch
+  really does see only its own contribution — measured by swapping `triage-classify.js` for a probe
+  reporting `raw.length`, which prints `raw is an array of 1` three times, one per branch. The cost
+  is paid by every author of a multi-node fan-out branch: the shipped graph carries
+  `{"type": "array", "reduce": "append_ordered"}` and `triage-classify.js` carries a `join("\n")`
+  and a five-line comment explaining a one-element array. **Closes when** `rule010ConcurrentWriters`
+  exempts a channel whose every reader is inside the same fan-out subtree as its writer. That is a
+  real dataflow analysis and not a message, and *"refusing is always allowed; loosening never is"*
+  means it needs its own adversarial review rather than a drive-by.
+- **A.41 · `loom run` prints the human gate hint on STDOUT, after the JSON, so `| jq` breaks on
+  exactly the gate path.** *(F4.)* File: `packages/core/src/cli.ts`. Repro:
+  ```
+  $ loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null | tail -3
+    }
+  }
+  gate gate_01M22PTJ06F361S41NGBJDEW2H on node approve — loom approve 01M22PTHZ83C28BY1HG6E7GWA1 gate_01M22PTJ06F361S41NGBJDEW2H --as YOUR_ID
+  ```
+  The product already knows the rule — the `run … — inspect it with:` hint goes to **stderr** — so
+  this is one line on the wrong stream, and it makes `loom run … | jq .status` succeed for a run that
+  completes and fail for one that parks on a gate, which is precisely the case a script needs to
+  branch on. `packages/core/test/examples-triage.test.ts` carries a `summary()` helper whose only job
+  is to cut that line off. **Closes when** the gate hint moves to stderr, with a test that pins stdout
+  as parseable JSON on the `awaiting_gate` path.
+- **A.42 · A function body's DELIBERATE refusal is reported as `E_INTERNAL`, the same code a genuine
+  bug in the body produces.** *(F8 — `packages/core/src/run/engine.ts`, KERNEL, so this one cannot be
+  fixed from an extension at all, which is the point of recording it.)* Repro:
+  ```
+  $ loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
+    "error": { "class": "internal", "code": "E_INTERNAL",
+      "message": "Error: no test-output files matched — check the --input pattern, …" }
+  ```
+  `isLoomError` is an `instanceof` against the host class and a guest object can never satisfy it, so
+  every throw out of the `vm` is `E_INTERNAL`. A body's `return` channel already carries one
+  structured verdict (`{retry: {reason}}`); a REFUSAL has no equivalent, so an author who wants to
+  fail on purpose can only throw. Related to README's *`retry` on a function or evaluator node* row
+  but not the same one — that is about retryability, this is about a refusal. **Closes when** a body
+  can return a structured refusal that reaches a caller as its own class, which is a kernel change
+  and a `Kernel-seam:` trailer.
+- **A.43 · `loom gates` shows a `contentDigest`, not the thing being approved.** *(F3.)* File:
+  `packages/core/src/cli.ts`, the `gates` verb. Repro: `loom gates <runId>` prints
+  `{gateId, nodeId, policyRef, contentDigest, approvers, …}` and no channel value, while the gate
+  node declares `reads: ["report"]` and the run has computed it. `loom trace` shows the span tree
+  without channel values and `loom approve` prints the report only AFTER the decision, so on the
+  documented CLI path a human approves a hash. It is not missing from the PRODUCT — the control
+  plane has it (`curl -s http://127.0.0.1:8791/runs/$RUN` → `channels` includes `report`) and the
+  console renders it — but README's gate walkthrough never mentions `loom serve`. **And the digest is
+  not a stand-in for the content**: three runs over byte-identical input produced three different
+  `contentDigest` values, so it is a BINDING (what the approver was shown, which `loom approve` later
+  checks the graph against) rather than a summary anybody could recognise. **Closes when** `loom
+  gates` prints the channels the gate node reads.
+- **A.44 · A `function` body cannot read its own node's declared shape, so a bound is spelled twice.**
+  Repro: `SHARD_CEILING` in `examples/resources/function/triage-plan.js` and `maxWidth` on the `fan`
+  edge in `examples/graphs/triage-failures.json` are the same number, and
+  `packages/core/test/examples-triage.test.ts` pins them together by reading `maxWidth` out of the
+  graph — a patch on a seam rather than the seam. A body is handed channel values and nothing about
+  the node that called it: no `ctx.node`, no `ctx.graph`. It matters because a fan-out CLAMPS
+  silently, so a body that wants to REFUSE above the width (rather than drop shards in silence, which
+  is the defect the port shipped and fixed) has to hard-code the number the graph already declares.
+  **Closes when** a body's `ctx` carries its node's declared shape — a kernel change, and one that has
+  to decide what a body may see without letting it decide anything.
 
 ---
 
-## B · Declared and wired to nothing
+## B · Declared and wired to nothing — both members closed this wave
 
-- **B.1 · `loom serve` cannot survive its own death mid-lease.** Repro:
-  `/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` → one hit, in a `cli.ts` docstring
-  asserting it appears zero times; there is no construction site. **The row's original framing —
-  "`LeasedScheduler` has zero callers, so plug it in or delete it" — was ANSWERED 2026-09-02 and both
-  options refused.** It is a library capability an embedder reaches from the package root today
-  (`EngineOptions.scheduler` is the seam, both names are on the pinned surface so removal is
-  breaking, and four suites exercise it), deliberately unused by the single-tenant CLI per §D.2.
-  What stands regardless is the price the row found: a plane that dies between `task.leased` and
-  `task.committed` strands that run permanently, because reclaiming needs a lease DEADLINE and
-  `InProcessScheduler` has none (`test/deployment/run-clock-survives-restart.test.ts`, with the
-  one-event-shorter control). **Closes when** the CLI grows a way to survive its own death mid-lease
-  — a single-process deadline would also do it — or somebody argues that a stranded run is
-  acceptable for one operator on one machine and writes that here.
-- **B.2 · Three event types have no appender.** Repro:
-  `/usr/bin/grep -anc 'task.skipped' packages/core/test/registries.test.ts` → 1; that file pins each
-  with a written reason and a `blockedOn` list, and goes red the moment the reason stops holding. The
-  members: **`task.skipped`** (wire, behind the join's branch-error accounting), **`channel.written`**
-  and **`task.started`** (both delete). `budget.reserved`/`budget.settled` were the pair decided
-  *wire* and are wired (`test/run/budget-reservation-is-durable.test.ts`, seam `b28c343`), which also
-  brought back `journal/audit.ts`'s `budget.reservation-is-settled`. `task.started`'s own defect is
-  closed without its deletion — `advance-reentrancy.test.ts` reads `task.leased` keyed
-  `taskId#attempt` instead of comparing 0 to 0 — and the deletion waits on `test/scale.test.ts`, the
-  remaining `blockedOn` entry. **Closes when** each of the three is wired or deleted.
+- ~~**B.1 · `loom serve` cannot survive its own death mid-lease.**~~ CLOSED at `7952c6a`:
+  `InProcessScheduler` takes an optional `strandedLeaseMs` and reclaims a lease on a node whose plan
+  carries no `timeoutMs` once `task.lease.at + strandedLeaseMs` has passed; the node's own compiled
+  deadline still wins where it has one. Measured on a real journal — a two-node graph whose ENTRY is
+  a `router`, driven to `succeeded`, its journal truncated one event past `task.leased` (the prefix a
+  `kill -9` leaves), folded by a fresh plane and driven by one clock tick: before
+  `status=running pick@root#0=leased driven=true`, after `status=succeeded pick@root#0=succeeded`.
+  `driven=true` in both columns is the load-bearing half — the clock always offered the run, so what
+  changed is the scheduler's answer. Pinned by
+  `test/deployment/lease-deadline-survives-restart.test.ts` and
+  `test/run/inprocess-reclaims-a-dead-lease.test.ts`.
+  The row's ORIGINAL framing — "`LeasedScheduler` has zero callers, so plug it in or delete it" — was
+  answered 2026-09-02 and both options refused, and that answer stands: `LeasedScheduler` is a library
+  capability an embedder reaches through `EngineOptions.scheduler`, deliberately unused by the
+  single-tenant CLI per §D.2. Its repro is unchanged —
+  `/usr/bin/grep -arn 'new LeasedScheduler' packages/core/src` → 1, `cli.ts:1084`, a docstring
+  asserting the construction count is zero.
+  **RESIDUE, three parts, none of them a new row.**
+  (a) **The number lives in the DEPLOYMENT, not the graph.** `cli.ts:1193` `STRANDED_LEASE_MS =
+  600_000`, passed at `cli.ts:1829` by `openWorkspace`, which is the one `new InProcessScheduler` in
+  `src/` that supplies it (`/usr/bin/grep -arn 'new InProcessScheduler' packages/core/src` → 4, of
+  which two are docstrings and one is `run/engine.ts:1721`'s bare `opts.scheduler ?? new
+  InProcessScheduler()`). Unset stays exactly today's behaviour, so no embedder's live `subgraph`
+  becomes reclaimable because of a constant chosen here. It could not go in `compile.ts`:
+  `NodePlan.timeoutMs` is what `#withNodeDeadline` ENFORCES on a live body, and a recovery bound and
+  an enforcement bound are two different questions.
+  (b) **`run`, `resume` and `serve` get it; `replay` does NOT**, and that is a conjunction of three
+  hand-built literals rather than one refusal — `replayRun` spreads its caller's `engine` options, so
+  a `scheduler` in them would be inherited. The three that hand-build instead: `case "replay"` in
+  `cli.ts`, `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun` forwarding whatever
+  its caller gave. A fourth call site that spread `ws.engine`'s options would hand a replay this
+  scheduler. Written out at `cli.ts:1820-1829`.
+  (c) **A `subgraph` lease legitimately spanning more than 600 s is the ACCEPTED trade**, recorded at
+  the predicate (`run/scheduler.ts:231`) rather than dodged: reaching a LIVE peer's child needs the
+  parent's lease past this bound AND the child's own task past its own compiled deadline, because the
+  peer's scheduler applies the same rules one level down — two independent bounds lapsed is the shape
+  where the holder is most likely dead. And the parent's fencing token does NOT cover the child: the
+  store's compare-and-swap is per chain, so what it refuses is the loser's parent-side commit. The
+  bound that would remove the case is the child's own journal progress, a cross-run question
+  `SelectInput` cannot carry.
+- ~~**B.2 · Three event types have no appender.**~~ CLOSED at `a5937fe` (wire `task.skipped`),
+  `c816826` (delete `channel.written`) and `fa25cc7` (delete `task.started`). **Every declared event
+  type now has an appender, and `registries.test.ts` asserts that as a RULE over the empty set** —
+  the `NEVER_APPENDED` excuse list is gone, so a new declared-and-unappended type fails with nowhere
+  to be excused. `EVENT_TYPES.length` is 51 (53 → 52 → 51), the ledger for the moves is in
+  `test/journal/store.test.ts:465-479`, and `test/journal/deleted-event-types-still-fold.test.ts`
+  measures that a journal already on somebody's disk carrying either deleted name still loads through
+  `SqliteStateStore.append`/`store.read` and folds to the same answers.
+  The row's own repro has INVERTED and is kept for that reason:
+  `/usr/bin/grep -anc 'task.skipped' packages/core/test/registries.test.ts` → **7** (was 1). The pin
+  row went and prose about the wiring arrived, so the row now reads MORE pinned than before while the
+  pin it named is gone — rule 1 catching a count that survived its own subject.
+  **ACCEPTED, AND LOUD: a pre-B.2 journal replayed on the new binary reports `match: false`.**
+  `run/replay.ts`'s `compare` frames a task by `state`, so a journal recorded before `a5937fe` whose
+  join absorbed a branch replays as `expected: "failed"` / `actual: "skipped"` — read by `loom
+  replay`'s exit code and by `evolution/gate.ts`'s `identicalToRecording` cases, which re-freeze. The
+  trade was taken deliberately: a divergence that NAMES both states is better than a silent wrong
+  answer, and the alternative was leaving a run reporting **succeeded** whose absorbed branches were
+  all recorded `failed`.
+  `NOT_ABSORBED_AS_SKIP` is its own set, not a borrow of `RUN_FATAL_CODES`: it adds
+  `E_HUMAN_APPROVAL_REQUIRED` (deliberately outside `RUN_FATAL_CODES` so a run continues and the ask
+  can be made elsewhere — relabelling it would rename a branch a person actively REJECTED) and
+  `E_OVERSIGHT_LOOSENED` (`compileMutation`'s GRAPH014 refusal, excluded fail-closed). The auditor
+  cannot import the executor, so that set exists twice and `registries.test.ts` censuses the two
+  copies against each other.
 
 ---
 
@@ -406,11 +565,15 @@ a better view of nothing.
   `capability` as a bare identifier —
   `/usr/bin/grep -aoE '"(gate\.batched|tool\.attempt)"|(^|[^.\w"])capability\s*:' packages/core/src/telemetry/spans.ts`
   → 3, the three that were journaled fields this fold read and discarded and are now set. The other
-  eight each have a stated reason: `node.type` (only on `task.started`, no writer — §B.2);
+  eight each have a stated reason, and TWO OF THEM MOVED at `bc926f8` (§B.2). `node.type` is now
+  UNOBTAINABLE rather than merely unwritten: `task.started` was DELETED, and `task.leased` —
+  which records the same MOMENT and is what §A.29 now points at — carries `attempt` and no node
+  type, so this attribute needs a new field on an existing event or a new event, not a writer for
+  an existing name;
   `budget.cost_usd` (`budget.reserved` carries `remainingUsd` only when a dollar ceiling exists, so
   the ceiling reconstructs on some runs and not others, worse than absent); `reducers`
-  (`channel.written` has no writer, `state.reduced` carries channels); `trigger.kind` (nothing
-  journals a trigger); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never
+  (`channel.written` was DELETED at `c816826`, and `state.reduced` carries channels, not reducers);
+  `trigger.kind` (nothing journals a trigger); `gen_ai.request.max_tokens` (`model.called` journals a `requestDigest`, never
   the request); `tool.source` (the concept is not in the tree); `loom.replayed` on both its spans (a
   replay rewrites `model.called.provider` to the recorded leaf ON PURPOSE, so a replayed journal is
   designed to be indistinguishable); `gate.posture` (a constant reached by an inference). **Closes
@@ -602,10 +765,31 @@ Each traces to a decision in `DESIGN.md`.
   `#effectsFor` keyed off the node, and — **in the same commit** — `isExternal` moved, because its
   docstring trusts an `assertion` evaluator on the ground that the arm binds no `ctx.effects`, which
   stops being true the moment this lands. `kind: "rubric"` gets nothing and should be REFUSED.
-- **G.2 · `Date` in the realm.** It stays absent, and the reason changed: not "no seed could make it
-  reproducible" but "a frozen `Date` that silently never advances is more surprising than an absent
-  one". **Closes by** binding the whole constructor to `ctx.now` — and bind `Temporal` in the same
-  change when it becomes a default global.
+- ~~**G.2 · `Date` in the realm.**~~ CLOSED at `18bd9f4`: `Date` is bound to `ctx.now` in the
+  `function` and `evaluator{assertion}` realm. The row's own reason held to the end — not "no seed
+  could make it reproducible" but "a frozen `Date` that silently never advances is more surprising
+  than an absent one" — and `ctx.now` is the seed that made the first half moot.
+  `RealmOptions.bindDateToNow` builds a `Date` ENTIRELY IN-CONTEXT (never a host closure, which would
+  carry the host `Function` on its prototype chain) whose zero-arg forms — `new Date()`, `Date()`,
+  `Date.now()` — read a per-call cell and throw `E_EFFECT_UNRECORDED` until a call seeds it, closing
+  the same definition-time-IIFE window `DENY_UNSEEDED` already closes for `Math.random`.
+  Explicit-argument forms forward to the real `Date` through `Reflect.construct`, untouched.
+  `resources/functions.ts`'s `ARGUMENT_BRIDGE` seeds the cell from `p.now` in the same place it
+  reseeds `Math.random` from `p.seed`, and is the ONLY caller that opts in
+  (`/usr/bin/grep -arn 'bindDateToNow' packages/core/src` → 16 lines, one of them
+  `functions.ts:470`'s `bindDateToNow: true`). `shadowsHeld` gained a positive identity check against
+  what `DATE_INSTALLER` actually installed, matching the strength the `Math.random` check already had.
+  **RESIDUE, three parts, and none of them was created by this change.**
+  (a) **`Intl` stays shadowed to `undefined`**, and its default-locale/timezone leak is a separate,
+  narrower concern: shadowing the `Intl` binding does not reach the intrinsics behind it, and
+  `Intl.DateTimeFormat.prototype.format` called with NO argument defaults to the wall clock. Written
+  out at `resources/realm.ts:117-140`, where `Date` and `Intl` now differ ON PURPOSE.
+  (b) **Hook bodies get nothing**, because `HookContext` has no `now` to bind to. `hook-loader.ts`
+  is unchanged and a hook realm's `Date` is still `undefined`.
+  (c) **`Temporal` could not be bound because it does not exist on this build.** Repro:
+  `node -e 'console.log(typeof Temporal)'` → `undefined` on `node -v` → `v24.16.0`. The row's
+  instruction to "bind `Temporal` in the same change when it becomes a default global" is therefore
+  still owed, and reopens the day a Node this project builds on ships it.
 - **G.3 · Divergence must be terminal and loud.** The known failure mode of every replay-based runtime
   is a silent stall: the task retries forever without entering a failed state. `E_REPLAY_DIVERGENCE`
   is fatal, so the recorded-effect path is covered. **Closes when** a repeated divergence signature
@@ -676,6 +860,28 @@ Each traces to a decision in `DESIGN.md`.
   by `e8c2fb5`, and the row UNDERCOUNTED its own survivor set — four count-claims in the region now
   name their members instead, pinned by `test/graph/deadline-set-is-named-not-counted.test.ts`, which
   parses the `NodeType` union out of `graph/spec.ts` so a ninth node type fails there.
+- **H.5 · `run/engine.ts`'s `driveToRest` comment names four node types this binary now adjudicates.**
+  KERNEL PROSE, so a `fix:` docstring change is owed and it is a row rather than a drive-by. Repro:
+  `/usr/bin/grep -an 'holder is dead' packages/core/src/run/engine.ts` → `3141`, inside a block
+  (lines 3139-3143) reading *"the four node types with no enforced deadline (`join`, `router`,
+  `human_gate`, `subgraph`) are the ones where 'the holder is dead' is not knowable"*. That was true
+  until `7952c6a`: `openWorkspace` now passes `STRANDED_LEASE_MS`, so under this binary those four ARE
+  adjudicable and `cli.ts:5967` already says so. The claim is still true for an embedder who supplies
+  no `strandedLeaseMs`, which is what the corrected sentence has to say. The lane that made it false
+  named it and left it, because `run/engine.ts` was another lane's file that wave. **Closes when** the
+  comment distinguishes the default scheduler from the one the CLI builds.
+- **H.6 · `loom --help` describes a four-member extension registrar; `README.md` documents ten.**
+  *(F5.)* File: `packages/core/src/cli.ts`, the `--extension-module` help text. Repro, at the source
+  so it needs no built binary — `/usr/bin/grep -an 'models, tools, channels, identity' packages/core/src/cli.ts`
+  → 4 hits, of which `:303` is the HELP TEXT naming four members while `:2839` is the call actually
+  passing ten; and `/usr/bin/grep -an 'FOUR things need no fork' packages/core/src/cli.ts` → `:305`.
+  `loom --help | /usr/bin/grep -a -A2 'extension-module P,P'` shows the same. Meanwhile README's "Extending
+  it, and where that stops" documents `{channels, functions, hooks, identity, jail, models, payloads,
+  resolver, store, tools}` and nine `--extension-module` rows, including `store.register`, which
+  README calls "the sharpest row on the list". A stranger who reads `--help` — the thing in front of
+  them — does not learn that `store`, `resolver`, `functions`, `hooks`, `payloads` or `jail` exist.
+  **Closes when** the help text names the same set the registrar actually passes, with the count
+  derived rather than written.
 
 ---
 
@@ -733,6 +939,10 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.34 | — | rewind requires a human |
 | A.35 | `52da0e8` | rewind plan previews what dispatches |
 | A.36 | `d9a8173` | nine run-id captures now decoded |
+| A.38 | `ba5f8c4` | pin confirmed; it predated the row |
+| A.39 | `ba5f8c4` | one `stripControlChars`, two callers |
+| B.1 | `7952c6a` | `strandedLeaseMs` reclaims all eight node types |
+| B.2 | `a5937fe`, `c816826`, `fa25cc7` | `task.skipped` wired; `channel.written` and `task.started` deleted |
 | C.4 | `96a03bf` | OTLP encoder, endpoint and push |
 | C.5 | `aaa4a9a` | three-arm effect span partition |
 | D.1 | — | per-server `irreversibility` allowed |
@@ -740,6 +950,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | D.4 | `50f7c03` | median gates, undefined pair unbounded |
 | D.6 | `86193e3` | wire refuses on `spec.inputs` |
 | D.14 | `d57c984` | retention tiering deleted — a run's journal is the corpus |
+| G.2 | `18bd9f4` | `Date` bound to `ctx.now` in the function realm |
 | H.1 | — | `verify-binary.mjs` drives the artifact |
 | H.2 | `814e283` | fourteen broken citations repaired |
 | H.3 | `e8c2fb5` | four count-claims name their members |
@@ -764,6 +975,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | answered by REFUSAL | `378e965` `e42c572` | circuit breaker (no fold spans runs), `preAuthorization`, admission control (a ceiling shipped instead) |
 | operator levers | `cc64481` | `deescalate`, in-flight and budget caps |
 | `--extension-module` | `cc320d1` | fork list moved the right way |
+| `port-workflow` | `f24bcb7`, `77da881`, `422a730` | `triage-failures` — one real chore ported with no fork, and the eight-entry friction log it produced |
 
 **The defect class that accounted for nearly every real finding, stated once because it will
 recur:** *a guard answering its undecidable case with the passing value.* Members: `gateCandidate`
