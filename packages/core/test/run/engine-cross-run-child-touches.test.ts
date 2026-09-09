@@ -237,7 +237,12 @@ class BreakableChildStore extends MemoryStateStore {
  */
 let clock = NOW;
 
-function gateRig(store: BreakableChildStore) {
+/**
+ * `chargeThrows` makes the CHILD's own work fail, which is the OTHER meaning the code used to
+ * share — "the child ended failed", read out of a projection the parent DID obtain. It exists so
+ * the two meanings can be measured on ONE graph rather than compared across two files.
+ */
+function gateRig(store: BreakableChildStore, chargeThrows = false) {
   clock = NOW;
   const tools = new ToolRegistry();
   const functions = new FunctionRegistry();
@@ -247,6 +252,7 @@ function gateRig(store: BreakableChildStore) {
     description: "Take money.",
     parameters: { type: "object", properties: { amount: { type: "number" } } },
     execute: (args: Record<string, unknown>) => {
+      if (chargeThrows) throw new Error("the card was declined");
       charges.push(Number(args["amount"]));
       return { content: "charged", writes: { receipt: { ok: true, amount: Number(args["amount"]) } } };
     },
@@ -397,7 +403,7 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
 
   // IT ENDS. A retryable class is not a licence to spin: the deferral budget is spent, the
   // charged retries follow, and the run reaches a terminal state on its own.
-  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the run terminates rather than deferring forever, and says what it could not reach: ${outcome}`);
+  assert.equal(outcome, "failed:E_CHILD_UNREACHABLE", `the run terminates rather than deferring forever, and says what it could not reach: ${outcome}`);
   assert.ok(passes < 60, `it did not need the loop's own ceiling to stop: ${passes} passes`);
 
   // AND IT IS BOUNDED IN VOLUME, one line per refusal — an absolute bound with room, never a
@@ -458,7 +464,7 @@ test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.c
     clock += 60_000;
   }
 
-  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the parent's own verb still answers: ${outcome}`);
+  assert.equal(outcome, "failed:E_CHILD_UNREACHABLE", `the parent's own verb still answers: ${outcome}`);
   const details = p!.error?.details as { cause?: unknown; error?: unknown } | undefined;
   assert.equal(details?.cause, "E_TRACE_INCONSISTENT", `the alarm's own code survives the re-class: ${JSON.stringify(details)}`);
   assert.match(String(details?.error), /inconsistent at seq 4/, "and so does its message");
@@ -638,6 +644,71 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
   const p = (await r.engine.projection(runId))!;
   assert.equal(p.status, "cancelled", `the operator's cancel is what decided this run: ${p.status}`);
   assert.deepEqual(r.charges, [], "and nothing was charged");
+});
+
+test("G · THE TWO MEANINGS ARRIVE UNDER TWO CODES — an unreachable child is not a failed one", async () => {
+  // WHAT THE SPLIT BOUGHT, measured on ONE graph rather than argued across two files. Wrapping the
+  // cross-run touches put four raises meaning "another run's STORAGE is broken" on the code that
+  // already meant "another run's WORK went badly", and `RetryPolicy.onlyIf` and `EdgeSpec.codes`
+  // take codes and nothing else — so while they shared a name, no graph could say "retry a child
+  // I cannot reach, but not one that failed", and no operator filtering a journal could tell them
+  // apart. At `05b495b` both halves below answer `failed:E_SUBGRAPH_FAILED`.
+  //
+  // THE POLL ARM KEEPS ITS NAME, which is the compatibility half of the choice: "has not
+  // finished", "ended failed" and "awaiting a gate it does not have" are all read out of a
+  // projection the parent DID obtain, and the first fires on every healthy busy delegation, so an
+  // existing `onlyIf: ["E_SUBGRAPH_FAILED"]` still matches what it was written for. The other two
+  // of those three arms are pinned in `subgraph.test.ts`; this test pins the one that moved and
+  // the one it is most easily confused with.
+
+  // (a) The child's STORAGE is unreachable, permanently.
+  const unreachable = gateRig(new BreakableChildStore({ now: () => clock }));
+  {
+    const { runId, childRunId } = await parked(unreachable);
+    const childP = (await unreachable.engine.projection(childRunId))!;
+    await unreachable.engine.resolveGate(childRunId, {
+      gateId: openGate(childP)!.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: LEAD, via: "console" },
+      idempotencyKey: "child-own",
+    });
+    unreachable.store.failEveryChildRead = true;
+    let p: RunProjection | undefined;
+    for (let i = 0; i < 60; i++) {
+      p = await unreachable.engine.advance(runId);
+      if (p.status === "succeeded" || p.status === "failed") break;
+      clock += 60_000;
+    }
+    assert.equal(p!.status, "failed");
+    assert.equal(p!.error?.code, CODES.E_CHILD_UNREACHABLE, `a broken foreign store is not a failed delegation: ${p!.error?.code ?? ""}`);
+    assert.equal((p!.error?.details as { childRunId?: unknown } | undefined)?.childRunId, String(childRunId), "and it names which child");
+  }
+
+  // (b) The child's WORK fails, on a store that never breaks. Same graph, same parent, same node.
+  const declined = gateRig(new BreakableChildStore({ now: () => clock }), true);
+  {
+    const { runId } = await parked(declined);
+    const p = await settle(declined.engine, runId);
+    assert.equal(p.status, "failed");
+    assert.equal(p.error?.code, CODES.E_SUBGRAPH_FAILED, `a child that ran and failed keeps the old code: ${p.error?.code ?? ""}`);
+    assert.match(p.error?.message ?? "", /ended failed/, `and still says so: ${p.error?.message ?? ""}`);
+    assert.deepEqual(declined.charges, [], "the card was declined, so nothing was charged");
+  }
+
+  // AND A GRAPH CAN NOW SAY IT. `graph/validate.ts` refuses an `onlyIf` naming a code no error
+  // carries, deriving the closed set from `CODES` itself — so the new member is accepted and a
+  // typo of it is still refused. This is the surface the split exists for.
+  const withOnlyIf = (codes: readonly string[]): GraphSpec =>
+    ({
+      ...gateParent,
+      nodes: [{ ...(gateParent.nodes[0] as unknown as Record<string, unknown>), retry: { maxAttempts: 3, backoff: "fixed", initialMs: 0, jitter: false, onlyIf: codes } }],
+    }) as unknown as GraphSpec;
+  compileOrThrow({ spec: withOnlyIf([CODES.E_CHILD_UNREACHABLE]), resolver: gateResolver, tools: GATE_TOOLS, tenantCapabilities: ["pay"] });
+  assert.throws(
+    () => compileOrThrow({ spec: withOnlyIf(["E_CHILD_UNREACHABEL"]), resolver: gateResolver, tools: GATE_TOOLS, tenantCapabilities: ["pay"] }),
+    /GRAPH003_UNKNOWN_ERROR_CODE/,
+    "a typo of the new code is still refused, so the acceptance above is not a wildcard",
+  );
 });
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {

@@ -376,6 +376,40 @@ export const CODES = {
   E_PROVIDER_OVERLOADED: "E_PROVIDER_OVERLOADED",
   E_PROVIDER_TRANSPORT: "E_PROVIDER_TRANSPORT",
   E_TOOL_SOURCE_UNAVAILABLE: "E_TOOL_SOURCE_UNAVAILABLE",
+  /**
+   * A CHILD RUN'S JOURNAL COULD NOT BE TOUCHED — read, written, or driven — by its parent.
+   *
+   * Not a fact about the child's WORK, which is what `E_SUBGRAPH_FAILED` says: this is a fact
+   * about another run's storage. `run/engine.ts`'s `childUnavailable` is the only raiser, for the
+   * four cross-run touches inside `#runSubgraph` — the start-or-resume probe, the forward's read,
+   * the forward's write to the child's gate, and the nested `advance(childRunId)`.
+   *
+   * IT EXISTS BECAUSE ONE CODE CANNOT ANSWER TWO QUESTIONS. Those four arms used to share
+   * `E_SUBGRAPH_FAILED` with three arms that mean the opposite thing — "the child has not
+   * finished", "the child ended failed", "the child is awaiting a gate it does not have" — all of
+   * which are read out of a projection the parent DID obtain. `RetryPolicy.onlyIf` and
+   * `EdgeSpec.codes` take codes and nothing else, so while the two meanings shared one name a
+   * graph could not say "retry a child I cannot reach, but not one that failed", and an operator
+   * filtering a journal could not tell a broken disk from a rejected delegation.
+   *
+   * THE SPLIT WENT THIS WAY ROUND ON PURPOSE. Moving the POLL arm instead would have carried the
+   * same information and broken the common case: an existing `onlyIf: ["E_SUBGRAPH_FAILED"]` was
+   * written for a child that is still working, which is the arm that fires on every healthy busy
+   * delegation. Those keep their code; the arm that changes is one no graph could have been
+   * keyed on, because it was `E_INTERNAL` until `5fe7614`.
+   *
+   * `unavailable`, so it is RETRYABLE — a transient foreign store costs the delegation a
+   * re-entry, not its life — and it is a member of `DEFERRABLE_CODES` in `run/engine.ts`, so that
+   * re-entry is uncharged inside the deferral budget. Leaving it out of that set would have made
+   * the split a TIGHTENING rather than a rename. It is NOT in `RUN_FATAL_CODES`: an unreachable
+   * child is not a statement that the run can no longer say anything true.
+   *
+   * IT DOES NOT SAY WHY THE TOUCH FAILED, and that is deliberate rather than overlooked.
+   * `childUnavailable` refuses to decide which foreign failures are permanent — a deterministic
+   * `E_TRACE_INCONSISTENT` out of the child's `projection` is deferred like a disk — so the
+   * original code travels in `details.cause` and the child's id in `details.childRunId`.
+   */
+  E_CHILD_UNREACHABLE: "E_CHILD_UNREACHABLE",
 
   // timeout
   E_TOOL_TIMEOUT: "E_TOOL_TIMEOUT",

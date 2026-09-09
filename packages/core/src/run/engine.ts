@@ -415,23 +415,31 @@ const MAX_INTERVENTION_LAPS = 8;
  *      consulted. **A third, retryable arm added at that site would silently join this set** — if
  *      one is ever added, split the code rather than widening this comment.
  *
- *      FOUR MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
- *      for the four cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
- *      forward's read of the child, the forward's WRITE to the child's gate, and the nested
- *      `advance(childRunId)` that drives the child — so "only the poll can reach it" is no longer
- *      true and SEVEN raises share the code, of which five are retryable. They MEET this set's criterion for the case they were written for: a child
- *      journal this node could not read is not this node's failure, and uncharged re-entry inside
- *      `DEFERRAL_BUDGET_MS` is what a transient foreign store wants. What the instruction above
- *      was defending is the word SILENTLY, and that is what this paragraph pays; the split it asks
- *      for needs a new `CODES` member and the argument for taking it anyway is at
- *      `childUnavailable`. What membership costs, stated as a set rather than a headline:
- *      an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
- *      child's disk is broken"; and a DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT`
- *      out of `projection`, which is a real invariant-2 alarm and not a disk — is deferred as if
- *      it were transient. Measured: 19 uncharged re-entries and 20 stderr lines for a failure that
- *      is identical every pass. It is bounded and it is not a loosening (neither code is in
- *      `RUN_FATAL_CODES`, so nothing about routing changes), and the alarm's own code now travels
- *      in `details.cause` so the parent's row still says WHICH failure it was.
+ *      FOUR MORE ARMS WERE ADDED, AND THE INSTRUCTION ABOVE WAS FINALLY TAKEN. `5fe7614` and the
+ *      wrap of the nested `advance(childRunId)` put four cross-run touches on this code —
+ *      the start-or-resume probe, the forward's read, the forward's WRITE to the child's gate,
+ *      and the nested drive — for two rounds, which made "only the poll can reach it" false and
+ *      left one code answering two questions. They are now `E_CHILD_UNREACHABLE`, the member
+ *      below, so THREE raises share `E_SUBGRAPH_FAILED` again and the count above is true as
+ *      written.
+ *
+ *   `E_CHILD_UNREACHABLE` · another run's STORAGE, not another run's work — the four cross-run
+ *      touches above, raised only by `childUnavailable`. It meets this set's criterion for the
+ *      case it was written for: a child journal this node could not touch is not this node's
+ *      failure, and uncharged re-entry inside `DEFERRAL_BUDGET_MS` is what a transient foreign
+ *      store wants. It is `unavailable` at every raise, so unlike the member above this one has
+ *      no non-retryable arm to reason about.
+ *
+ *      MEMBERSHIP IS NOT FREE, and what it costs is stated as a set rather than a headline: a
+ *      DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT` out of `projection`, a real
+ *      invariant-2 alarm and not a disk — is deferred as if it were transient, because
+ *      `childUnavailable` refuses to decide which foreign failures are permanent. Measured: 19
+ *      uncharged re-entries and 20 stderr lines for a failure that is identical every pass. It is
+ *      bounded (the deferral budget, then the charged retries, then the run fails) and it is not
+ *      a loosening — no code here is in `RUN_FATAL_CODES`, so nothing about routing changes — and
+ *      the alarm's own code travels in `details.cause` so the parent's row still says WHICH
+ *      failure it was. The cost the split PAID OFF is the other one this paragraph used to carry:
+ *      an `onlyIf` can now separate "still working" from "the child's disk is broken".
  *
  * Why the poll belongs here at all: measured. With only the rate limit deferring, a 429 in a
  * CHILD asking for two minutes killed the PARENT, because `DEFAULT_SUBGRAPH_RETRY` spends its
@@ -439,7 +447,7 @@ const MAX_INTERVENTION_LAPS = 8;
  * failure table in TODO §A, reproduced exactly by moving the wait into the child. The parent
  * node did not fail either; it asked whether the child was done and the answer was "not yet".
  */
-const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED]);
+const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED, CODES.E_CHILD_UNREACHABLE]);
 
 /**
  * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
@@ -849,26 +857,30 @@ function loomCodeOf(e: unknown): string | undefined {
  * with `DEFAULT_SUBGRAPH_RETRY`. Driven: this file's B fixture with `maxAttempts: 1` still
  * succeeds, on `deferrals 1 / deferredMs 1000`.
  *
- * AND THAT MEMBERSHIP IS DELIBERATE, WHICH `DEFERRABLE_CODES` ASKS TO BE TOLD — read its entry for
- * this code, which says a third retryable arm "would silently join this set" and asks for the code
- * to be SPLIT rather than the comment widened. Three arms are added here and the code is NOT
- * split, so this is a departure from a written instruction and is stated as one:
+ * AND THE SPLIT `DEFERRABLE_CODES` ASKED FOR HAS BEEN TAKEN. That set's entry for
+ * `E_SUBGRAPH_FAILED` says a further retryable arm "would silently join this set" and asks for the
+ * code to be SPLIT rather than the comment widened. Four arms joined it anyway for two rounds, on
+ * the stated reason that a new `CODES` member was outside that lane's authorised file set; this
+ * function now raises `E_CHILD_UNREACHABLE` instead, so the instruction is obeyed rather than
+ * departed from.
  *
- *   WHY MEMBERSHIP IS RIGHT. The set's own criterion is "the failures that are NOT this node's
- *   failure". A child journal this node could not read is exactly that, and uncharged patient
- *   re-entry bounded by `DEFERRAL_BUDGET_MS` is the behaviour a transient foreign store wants.
- *   The vice the instruction guards against is a SILENT join, and silence is what this paragraph
- *   and the one now in `DEFERRABLE_CODES` remove.
+ *   WHY THE NEW CODE IS STILL DEFERRABLE. The set's own criterion is "the failures that are NOT
+ *   this node's failure". A child journal this node could not touch is exactly that, and uncharged
+ *   patient re-entry bounded by `DEFERRAL_BUDGET_MS` is the behaviour a transient foreign store
+ *   wants. Leaving the new member OUT of that set would have made a rename into a tightening: the
+ *   same failure would suddenly spend charged retries.
  *
- *   WHAT IT COSTS, named rather than waved past, and COUNTED rather than carried: the code now
- *   carries FOUR meanings, not three as this paragraph said for a round — `DEFERRABLE_CODES`
- *   enumerates three pre-existing arms ("has not finished", "ended failed", "awaiting a gate it
- *   does not have") and this adds "the child's journal is unreachable". So a graph's
- *   `retry.onlyIf` cannot separate them, and neither can an operator filtering by code.
- *   `details.childRunId`, `details.cause` and the message separate them; a code would separate
- *   them better. The split was not taken because it needs a new member of `CODES` in `errors.ts`,
- *   which is outside this lane's authorised file set — see the lane report, where it is the
- *   recommended follow-up rather than a thing quietly left undone.
+ *   WHY THIS ARM MOVED AND NOT THE POLL. `E_SUBGRAPH_FAILED`'s three remaining arms — "has not
+ *   finished", "ended failed", "awaiting a gate it does not have" — are all read out of a
+ *   projection the parent DID obtain, and the first of them fires on every healthy busy
+ *   delegation. An existing `retry.onlyIf: ["E_SUBGRAPH_FAILED"]` was written for those, so they
+ *   keep the name and keep working; what changed code is an arm that was `E_INTERNAL` until
+ *   `5fe7614` and that no graph can have been keyed on.
+ *
+ *   WHAT IS STILL NOT SEPARATED, named rather than waved past: this code does not say WHY the
+ *   touch failed, because deciding which foreign failures are permanent is the taxonomy every
+ *   wrap here exists to avoid. `details.cause` carries the original code and `details.childRunId`
+ *   the child.
  *
  * THE STORE'S OWN TEXT GOES IN `details.error`, AND THE MESSAGE NAMES THE ACT — which is a choice
  * about what an operator reads first, and NOT the secrets argument this paragraph used to make.
@@ -885,8 +897,8 @@ function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomErro
   const child = describeThrown(childRunId);
   // THE ORIGINAL CODE TRAVELS IN `details.cause`. Re-classing an alarm as `unavailable` is what
   // makes the delegation retryable, and it also throws away WHICH failure it was — a reviewer
-  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent as a
-  // plain `E_SUBGRAPH_FAILED` with its code nowhere. Through `loomCodeOf`, never a bare
+  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent with its
+  // code nowhere. Through `loomCodeOf`, never a bare
   // `isLoomError` — that is an `instanceof`, and asking it about an untrusted value is the
   // trappable operation this file already paid four rounds for.
   const cause = loomCodeOf(e);
@@ -894,7 +906,7 @@ function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomErro
     code: "LOOM_CHILD_UNREACHABLE",
     detail: JSON.stringify({ childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) }),
   });
-  return err.unavailable(CODES.E_SUBGRAPH_FAILED, `${what} for child run ${child}`, {
+  return err.unavailable(CODES.E_CHILD_UNREACHABLE, `${what} for child run ${child}`, {
     details: { childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) },
   });
 }
