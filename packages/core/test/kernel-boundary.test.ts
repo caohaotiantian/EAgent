@@ -260,17 +260,43 @@ test("GREEN + CENSUS: a merge commit's own Kernel-seam trailer is real design ar
   assert.ok(r.output.includes("narrowed the same dispatch predicate"), r.output);
 });
 
+/**
+ * ONE STRING, TWO PLACES — and the pair is the point. The first version of the quoted test used
+ * `Kernel-seam: <argument>`, ten characters and no space, which `MIN_SEAM_CHARS` rejects on its
+ * own: it passed against a mutant of `nonFeatTrailerSeam` that never called
+ * `git interpret-trailers` at all, so it proved nothing about the rule it is named for. The value
+ * below clears the floor, so the ONLY thing left to decide it is whether the line is the message's
+ * own final paragraph — and the control commits the same string as a real trailer to show the
+ * discriminating variable is the position and not the text.
+ *
+ * This history exercises neither case. `2a9eda8`, the commit the guard's docstring once cited
+ * here, touches `TODO.md` and no pinned file, so it never reaches a trailer rule.
+ */
+const QUOTED_SEAM = "Kernel-seam: an argument long enough to clear the forty character floor here.";
+
 test("a Kernel-seam trailer quoted inside PROSE, not the message's own final paragraph, is not counted", () => {
   const f = repo();
   const sha = f.commit(
     "docs(guard): explain the trailer format",
-    "The escape hatch looks like this:\n\nKernel-seam: <argument>\n\nWrite one when a feat touches the kernel.",
+    `The escape hatch looks like this:\n\n${QUOTED_SEAM}\n\nWrite one when a feat touches the kernel.`,
     { [KERNEL_A]: "// example only\nexport const engine = 13;\n" },
   );
   const r = f.run();
   assert.equal(r.status, 0, r.output);
   assert.match(r.output, /\b0 declared seams\b/, r.output);
   assert.ok(!r.output.includes(sha.slice(0, 7)), `must not credit a quoted trailer:\n${r.output}`);
+});
+
+test("CONTROL: the SAME string, as the message's own final paragraph, IS counted", () => {
+  const f = repo();
+  const sha = f.commit("fix(engine): the join folded siblings out of order", QUOTED_SEAM, {
+    [KERNEL_A]: "export const engine = 14;\n",
+  });
+  const r = f.run();
+  assert.equal(r.status, 0, r.output);
+  assert.match(r.output, /1 declared seam\b/, r.output);
+  assert.ok(r.output.includes(sha.slice(0, 7)), `names the commit:\n${r.output}`);
+  assert.ok(r.output.includes("clear the forty character floor"), r.output);
 });
 
 // ── the pin's own failure modes ──────────────────────────────────────────────────

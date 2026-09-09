@@ -113,11 +113,12 @@
  * `Kernel-seam:` trailer naming three journal words in its own final paragraph; this guard was a
  * `feat`-only reader and never looked at it, so a real declaration sat in `git log` and outside
  * every number above. `nonFeatTrailerSeam` reads it exactly the way `%(trailers:key=...)` does —
- * `git interpret-trailers --parse`, final paragraph only — which is also why `2a9eda8` still does
- * NOT count: its body quotes the trailer inside a paragraph followed by more prose, so it is not
- * the message's own trailer block by git's rule either. The REQUIREMENT is untouched — only
+ * `git interpret-trailers --parse`, final paragraph only. The REQUIREMENT is untouched — only
  * `feat` commits must carry one — so this is a census fix, not a new refusal. Measured after: this
- * guard 12, the grep still 13 (still over-counting `2a9eda8`).
+ * guard 12, the grep still 13. The grep's other extra row is `2a9eda8`, which this guard drops
+ * because it touches `TODO.md` and no pinned file — NOT because of the final-paragraph rule; that
+ * rule's own worked case is in `kernel-boundary.test.ts` and not in this history. See
+ * `nonFeatTrailerSeam`.
  *
  * EIGHT RESETS ARE CLOSED FOR THE CENSUS — the `since` advance, the `files` edit, THE TWO IN
  * SEQUENCE, a rename of a pinned FILE, a rename of THE PIN ITSELF, HISTORY SIMPLIFICATION over
@@ -484,12 +485,24 @@ function kernelFilesTouched(sha, set) {
  * design argument the census must not drop.
  *
  * `SEAM` (the regex `judge` uses for `feat` commits) matches any line starting `Kernel-seam:`
- * ANYWHERE in the body, which over-counts exactly the way `git log --grep` over-counts — it would
- * credit `2a9eda8`, a `docs:` commit whose body only QUOTES the trailer as an example inside a
- * larger paragraph of prose, with a "declaration" it never made. `git interpret-trailers --parse`
- * recognizes a trailer only in the message's own FINAL paragraph, which is the same rule the
- * escape hatch already claims to follow ("git's own trailer parser reads only the final
- * paragraph") — so non-feat commits are read through it instead of the regex.
+ * ANYWHERE in the body, which over-counts exactly the way `git log --grep` over-counts: it credits
+ * a body that only QUOTES the trailer as an example inside a larger paragraph of prose with a
+ * declaration it never made. `git interpret-trailers --parse` recognizes a trailer only in the
+ * message's own FINAL paragraph, which is the same rule the escape hatch already claims to follow
+ * ("git's own trailer parser reads only the final paragraph") — so non-feat commits are read
+ * through it instead of the regex.
+ *
+ * STATE THE MECHANISM, NOT AN EXAMPLE THAT DOES NOT DEMONSTRATE IT. This docstring named
+ * `2a9eda8` — one of the two rows `git log --grep` has over this guard — as the commit the
+ * final-paragraph rule excludes, and that was false. `git show --name-only --format= 2a9eda8`
+ * prints `TODO.md` and nothing else, so `kernelFilesTouched` returns empty and it is out before
+ * any trailer rule runs at all; measured, a mutant of this function using the plain `SEAM` regex
+ * and no `git interpret-trailers` produces the byte-identical 12-row census on this repo. The
+ * rule is still the right general mechanism and the wrong one to justify by that example — what
+ * it is FOR is the commit nothing here has yet written: a body quoting the trailer mid-prose
+ * while ALSO touching a pinned file. `kernel-boundary.test.ts` supplies exactly that pair, the
+ * quoted one and the same string as a genuine final paragraph, because on this repo's own history
+ * the discriminating variable is never exercised.
  *
  * Only called for a commit whose body contains the literal fragment at all (a cheap check against
  * the body `commitsIn` already fetched), so the `git show -s --format=%B` + `git interpret-trailers`
