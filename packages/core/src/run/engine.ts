@@ -358,8 +358,11 @@ const RETRY_AFTER_CEILING_MS = 300_000;
  * It is the scheduled time, not measured elapsed time: a decision that read a clock would not be
  * reproducible from the log.
  *
- * IT BOUNDS TWO THINGS AND THE ARGUMENT ABOVE COVERS ONE. `DEFERRABLE_CODES` has two members,
- * so this same 900 s also caps how long a parent will poll an unfinished CHILD. The reading
+ * IT BOUNDS EVERY MEMBER OF `DEFERRABLE_CODES` AND THE ARGUMENT ABOVE COVERS ONE — the rate
+ * limit. The same 900 s also caps how long a parent will poll an unfinished CHILD
+ * (`E_SUBGRAPH_FAILED`) and how long it will wait on a child whose journal it cannot touch
+ * (`E_CHILD_UNREACHABLE`). Named rather than counted, because the count has been wrong once. The
+ * reading
  * transfers — past it, "the child is still working" stops being a wait and starts being a run
  * that will not finish — but it is a second claim and it was not made. A deployment that wants
  * long-running children and short rate-limit patience cannot have both, and the shape of that
@@ -8215,16 +8218,40 @@ export class Engine {
     // `DEFERRABLE_CODES`, then the charged retries, then the run fails, which the
     // permanently-broken-store test measures.
     //
-    // "NOT A LOOSENING" IS A CLAIM ABOUT WHAT THIS RAISES, NOT ABOUT WHAT IT CATCHES, and the
-    // first draft of this line got that backwards ("the code is not in `RUN_FATAL_CODES`, so
-    // nothing about routing changes"). The code this raises is not run-fatal, so the PARENT's own
-    // routing is unchanged; what it catches is anything, so a run-fatal code escaping the child's
-    // drive would be re-classed and deferred rather than ending the parent. A reviewer measured
-    // that by INJECTING `err.policy(E_ROUTE_INVALID)` from the child's store — base parent
-    // `failed/E_ROUTE_INVALID`, here `succeeded` — and then looked for a real raiser and found
-    // none: `E_ROUTE_INVALID` comes only from `steer`, and `E_REPLAY_DIVERGENCE`'s rethrow lands
-    // in the CHILD's `#runWave` and fails the child. So the exposure is stated rather than
-    // claimed away, and it is the same trade every wrap in this file makes.
+    // A RUN-FATAL CODE IS NOT RE-CLASSED, AND THAT ARM IS THE DIFFERENCE BETWEEN A WRAP AND A
+    // LOOSENING. Two drafts of this comment claimed the exposure away — "the code this raises is
+    // not run-fatal, so nothing about routing changes" — which is a claim about what this RAISES
+    // doing duty for a claim about what it CATCHES. A reviewer found the raiser. `advance` is not
+    // one store read: `#advanceSerially` awaits `#rehydrateGraph` with nothing between it and
+    // `advance`, and that method throws `E_REPLAY_DIVERGENCE` when a child's recorded mutation
+    // chain does not reproduce its recorded graph hash. Measured, one-shot at child reads 3..6:
+    //
+    //     d1b42ae    failed:E_REPLAY_DIVERGENCE   run-fatal — no error edge routes around it
+    //     unguarded  succeeded                    deferred, then a rescue arm answered for it
+    //
+    // That second row is exactly the shape `RUN_FATAL_CODES`' own docstring exists to prevent: a
+    // run reporting `succeeded` on a rescue arm's value when what broke was its ability to say
+    // anything true. So codes the kernel ALREADY calls run-fatal travel out unchanged. This is not
+    // the taxonomy the other wraps avoid — it consults a set that already exists and decides
+    // nothing new about which foreign failures are permanent.
+    //
+    // THROUGH `loomCodeOf`, never a bare `isLoomError`, for the reason that helper exists; and it
+    // FAILS CLOSED the useful way round — a value that cannot say its own code is not treated as
+    // run-fatal, so it gets the bounded retryable answer rather than a permanent verdict.
+    //
+    // THE SET THIS ARM COVERS IS ONE SITE, not four. The other three `childUnavailable` calls
+    // reach a single journal read or a single gate write rather than a whole nested run drive, and
+    // no run-fatal raiser has been demonstrated through them; they are unchanged.
+    //
+    // AND THE COSTS THAT STAY ARE NAMED, not left as "a programmer error". Everything `advance`
+    // raises that is DETERMINISTIC and not run-fatal is now deferred for the full budget under a
+    // code that says "storage", and the set is small enough to list: `#rehydrateGraph`'s
+    // `E_OVERSIGHT_LOOSEN_FORBIDDEN` (`policy` — the child recorded a mutation this binary
+    // refuses), and `#assertBound`'s `E_GRAPH_INVALID` (`validation`) and `E_RUN_NOT_FOUND`
+    // (`not_found`). Each costs ~19 uncharged re-entries and the deferral budget before the
+    // parent fails, and each arrives mislabelled. None of them changes ROUTABILITY — all three
+    // were ordinary, routable task failures at base too — so this is latency and a wrong word,
+    // which is the trade, and not a loosening, which the arm above is what prevents.
     //
     // AND NOT BECAUSE OF CANCELS. The argument that wrapping this would "swallow a cancel" was
     // made four times and is dead: `cancel` decides a run's status by journaling `run.cancelled`,
@@ -8235,6 +8262,7 @@ export class Engine {
     try {
       childP = await this.advance(childRunId);
     } catch (e) {
+      if (RUN_FATAL_CODES.has(loomCodeOf(e) ?? "")) throw e;
       throw childUnavailable(childRunId, `subgraph "${describeThrown(sub.ref)}" could not be advanced`, e);
     }
 
@@ -9663,7 +9691,7 @@ export class Engine {
    * conflates "the provider is busy" with "the work failed", and a `maxAttempts: 3` node then
    * dies of somebody else's traffic.
    *
-   * WHAT DEFERS IS A NAMED SET OF TWO — `DEFERRABLE_CODES`, which carries the argument for each
+   * WHAT DEFERS IS A NAMED SET — `DEFERRABLE_CODES`, which carries the argument for each
    * member and for the narrowness. An overload (`E_PROVIDER_OVERLOADED`) is a judgement about
    * capacity that may or may not be about us, and a transport reset says nothing at all: both
    * stay ordinary retries.

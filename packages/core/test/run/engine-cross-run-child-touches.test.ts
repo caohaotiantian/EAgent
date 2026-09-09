@@ -613,17 +613,31 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
   // operator's stop. The pin is the first F test, which is RED at `d1b42ae`.
   let engineRef: Engine | undefined;
   let parentRef: RunId | undefined;
+  // TWO FIXTURE BUGS PAID FOR THIS SHAPE, and both made the test measure something else.
+  //
+  // (a) IT COUNTED THE READS ITSELF. `this.reads++` here PLUS the base class's own increment
+  //     advanced the counter by two per real read, so `failReadAt = 3` fired on read TWO and this
+  //     test silently re-measured site C — the forward's read, which the file already pins. A
+  //     reviewer caught it. There is one counter now, the base class's.
+  // (b) IT CANCELLED BEFORE THE ONE-SHOT CLEARED. `cancel` walks the tree and READS THE CHILD, so
+  //     an injection that fires on `reads + 1` re-arms itself inside its own cancel — measured as
+  //     a hang, not a failure. Letting the base class count, clear and throw FIRST leaves the
+  //     fixture disarmed by the time `cancel` runs.
+  //
+  // What is left is the race the argument was actually about: the child's drive has thrown, the
+  // operator's cancel lands, and the parent's `catch` has not run yet.
   class CancelRacingStore extends BreakableChildStore {
     override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
-      if (isChild(runId)) {
-        this.reads++;
-        if (this.failReadAt === this.reads) {
-          this.failReadAt = undefined;
-          await engineRef!.cancel(parentRef!, "the operator stopped it mid-delegation");
-          throw new Error("sqlite: child disk I/O error");
-        }
+      if (!isChild(runId) || this.failReadAt !== this.reads + 1) {
+        yield* super.read(runId, fromSeq, toSeq);
+        return;
       }
-      yield* super.read(runId, fromSeq, toSeq);
+      try {
+        yield* super.read(runId, fromSeq, toSeq);
+      } catch (thrown) {
+        await engineRef!.cancel(parentRef!, "the operator stopped it mid-delegation");
+        throw thrown;
+      }
     }
   }
   const r = gateRig(new CancelRacingStore({ now: () => clock }));
@@ -641,12 +655,88 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
   r.store.reads = 0;
   r.store.failReadAt = 3;
 
-  const outcome = await outcomeOf(async () => settle(r.engine, runId));
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    outcome = await outcomeOf(async () => settle(r.engine, runId));
+  });
   assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE SITE IS ASSERTED, which this test did not do while its counter was broken — and that is
+  // how it re-measured C for a round without saying so. "could not be advanced" is F's sentence.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused drive, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not be advanced/, `the cancel really did race the NESTED DRIVE: ${mine[0]!.message}`);
+
   assert.notEqual(outcome, "running", `a cancelled run does not keep deferring: ${outcome}`);
   const p = (await r.engine.projection(runId))!;
   assert.equal(p.status, "cancelled", `the operator's cancel is what decided this run: ${p.status}`);
   assert.deepEqual(r.charges, [], "and nothing was charged");
+});
+
+test("F · A RUN-FATAL CODE OUT OF THE CHILD'S DRIVE IS NOT RE-CLASSED — the wrap is not a way around `RUN_FATAL_CODES`", async () => {
+  // THE FINDING THAT MADE THIS WRAP A LOOSENING BEFORE IT WAS GUARDED. `advance` is not one store
+  // read: `#advanceSerially` awaits `#rehydrateGraph` with nothing between it and `advance`, and
+  // that method raises `E_REPLAY_DIVERGENCE` — a RUN_FATAL_CODES member — when a child's recorded
+  // mutation chain does not reproduce its recorded graph hash. Unguarded, the parent re-classed it
+  // as `E_CHILD_UNREACHABLE`: retryable, deferrable, and NOT run-fatal, so an `error` edge could
+  // route around it and the run could report `succeeded` on a rescue arm's value. That is the
+  // exact shape `RUN_FATAL_CODES` exists to prevent.
+  //
+  // The fixture raises the code from the child's store rather than by desynchronising a mutation
+  // chain, because what is under test is the GUARD — "does a run-fatal code survive this catch" —
+  // and the reachability of a real raiser is established at the call site's comment.
+  // ITS OWN ONE-SHOT FIELD, and it counts the read it swallows. Sharing `failReadAt` with the base
+  // class would arm both, and incrementing `reads` before `yield* super.read` would count every
+  // real read twice — the fixture bug the cancel test above documents, which cost a scan of eight
+  // positions to find.
+  class Divergent extends BreakableChildStore {
+    divergeAt: number | undefined;
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (isChild(runId) && this.divergeAt === this.reads + 1) {
+        this.divergeAt = undefined;
+        this.reads++;
+        // A REAL `LoomError`, so `loomCodeOf`'s `isLoomError` proves provenance rather than
+        // shape — the same reason the deterministic-alarm fixture builds one.
+        throw err.internal(CODES.E_REPLAY_DIVERGENCE, "recorded graph sha256:a but replaying its mutations produced sha256:b");
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  // The Divergent instance is held with its own type, because `gateRig` returns the base type and
+  // `divergeAt` is this fixture's field.
+  const store = new Divergent({ now: () => clock });
+  const r = gateRig(store);
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  // READ 3 IS INSIDE THE NESTED DRIVE, the same position the F pin breaks. Scanned rather than
+  // assumed: with a single counter, 3, 4, 5 and 6 all deliver the throw to `#runSubgraph`'s catch
+  // and 1, 2 and 7 do not — which matches the reviewer's own "one-shot at child reads 3-6".
+  store.reads = 0;
+  store.divergeAt = 3;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(store.divergeAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE CODE SURVIVES, and with it the routing decision that hangs off it. Without the guard this
+  // is `succeeded` — measured, and the whole reason the arm exists.
+  assert.equal(settled.status, "failed", `a run-fatal child failure still ends the parent: ${settled.status}`);
+  assert.equal(settled.error?.code, CODES.E_REPLAY_DIVERGENCE, `and keeps its own code rather than becoming a storage complaint: ${settled.error?.code ?? ""}`);
+  assert.deepEqual(r.charges, [], "nothing was charged");
+
+  // AND IT IS NOT WARNED ABOUT AS AN UNREACHABLE CHILD, because it was never re-classed as one.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a run-fatal code does not travel as a deferred delegation: ${JSON.stringify(mine.map((w) => w.message))}`);
 });
 
 test("G · THE TWO MEANINGS ARRIVE UNDER TWO CODES — an unreachable child is not a failed one", async () => {
