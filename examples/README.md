@@ -1,7 +1,8 @@
 # examples
 
 **This directory is a Loom workspace** — a directory with `graphs/` and `resources/` in it. Loom
-reads nothing else; `bench-cases.json` at the root is not a workspace file, it is §5's input.
+reads nothing else; `bench-cases.json` at the root is not a workspace file, it is §5's input, and
+`reports/` is not one either — it is §8's.
 
 ```bash
 npm install && npm run build:binary   # → bin/loom
@@ -9,7 +10,7 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Five graphs, and they do not all run the same way.** Without `--models-file` the only registered
+**Six graphs, and they do not all run the same way.** Without `--models-file` the only registered
 adapter is the offline mock, and `loom run` says so on stderr before it starts.
 
 | graph | § | needs a model? |
@@ -19,11 +20,15 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/two-person-approval.json` | — | **no**, and it does not run to completion: it parks on three human gates and waits for people. **Two-of-three approval lives in `join`, not in `approval`** — three `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k:2}`; `approval.mode: "quorum"` was deleted and is now `GRAPH020_UNKNOWN_FIELD`. A short-circuiting join keeps its remaining branches running, so the third gate stays OPEN — a real gap, recorded in the graph's own `labels`. `packages/core/test/graph/two-person-approval.test.ts` drives it |
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
+| `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
 directory, so a graph added later is covered without editing the test — and RUNS the three that
 need no model, asserting §5's six verdict strings and its `3/6 assertions passed`. Only §6 is
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
+§8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
+file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately
+copies only `graphs/` and `resources/`.
 
 ---
 
@@ -221,3 +226,68 @@ Everything can still refuse: a module that does not resolve, throws while loadin
 default export, throws while registering, or **registers nothing** stops the boot naming the path —
 one that silently did nothing is a deployment you believe is extended and is not. So does a name
 colliding with a `--models-file` adapter row, a built-in tool, or the reserved `mcp__` prefix.
+
+## 8 · `triage-failures` — a chore, ported
+
+A red CI run left you a dozen shards of test-runner output. This graph buckets every failing test
+by ROOT CAUSE, ranks the buckets, and asks you before it writes the report.
+
+```
+  scan ──seq──▶ plan ──fanout(over: shards, as: shard)──▶ read ──seq──▶ classify ──join──▶ gather
+                                                            └──────────join─────────────────┘
+  gather ──seq──▶ collate ──seq──▶ approve (human gate) ──seq──▶ write
+```
+
+```bash
+loom compile graphs/triage-failures.json                                  # ok, exit 0
+loom run     graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}'
+# → "status": "awaiting_gate", and out/triage.md does NOT exist yet.      exit 0
+#   THE HINT IS ON STDOUT, AFTER THE JSON — `| jq` on this path fails on that line:
+#   gate gate_01M… on node approve — loom approve 01M… gate_01M… --as YOUR_ID
+
+loom approve <runId> <gateId> --as u:you                                  # exit 0
+cat out/triage.md          # 8 failing tests, 5 buckets, ranked
+loom replay <runId>        # {"match": true, "hermetic": true}
+loom trace  <runId>        # three `read` branches side by side, then the gate
+```
+
+**Why this one is a `function` body and not an `agent` node.** A failing test's root cause is read
+off its error signature: `ERR_MODULE_NOT_FOUND` is a missing dependency and nothing else,
+`EADDRINUSE` is a port still held and nothing else. §5 runs offline and *means* nothing offline;
+this one runs offline and means what it says, because there was never a model in it.
+
+**Three things this section exists to save you.**
+
+- **A fan-out branch may hold more than one node, and every node in it needs its own `join`
+  edge.** `read` (a `tool`) hands `raw` to `classify` (a `function`) over a `seq` edge, so BOTH
+  are in `join.branches` and BOTH have a `"kind": "join"` edge into `gather`. Collecting only
+  `classify` is `GRAPH021_FANOUT_WITHOUT_JOIN` on the fan-out's own target; adding `read` to
+  `branches` without the edge is then `GRAPH008_BRANCH_NOT_CONNECTED`. Two compiles to find, and
+  the second diagnostic is the one that says what to do.
+- **A channel a fan-out node writes needs a multi-writer-safe reducer even when only its own
+  branch reads it.** `raw` would be `{"type":"string","reduce":"replace"}` if `GRAPH010` could see
+  that no other branch reads it; it cannot, so `raw` is `{"type":"array","reduce":"append_ordered"}`
+  and `triage-classify.js` joins the one element back. Measured: a probe body printing `raw.length`
+  prints `1` in every branch, each holding its own shard.
+- **`loom gates <runId>` shows a `contentDigest`, not the report.** What the approver has to judge
+  is on the control plane — `loom serve`, then `GET /runs/<runId>` → `channels.report`, which is
+  also what the console renders. From the CLI alone, the report first appears in `loom approve`'s
+  own output, after the decision.
+
+`reports/` holds three shards of real-shaped `node --test` TAP output — 8 failing tests over 5
+causes, one of them (`missing-dependency`) spanning two files, which is the case a per-file reading
+of the log hides.
+
+**It refuses at BOTH ends of the shard count, and for one reason.** A pattern matching nothing
+would fan out zero branches and report "0 failing tests" — indistinguishable from a green suite. A
+pattern matching more than the fan-out's `maxWidth` would silently CLAMP: 30 shards at a width of
+24 runs 24 branches and says nothing about the other six, in a document a person is about to
+approve. `triage-plan.js` throws on both, naming the count and the cap. Its `SHARD_CEILING` must
+track `maxWidth` on the `fan` edge; `packages/core/test/examples-triage.test.ts` reads `maxWidth`
+out of the graph and drives one shard past it, so the two cannot drift apart.
+
+**Split your shards on `/\r?\n/`, not on `"\n"`, in any body you write like this one.** Every
+pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without `/m` matches only
+the true end of the string — so the first draft read a CRLF shard as completely clean and the run
+SUCCEEDED. That is a triage tool telling you a red suite is green, and it is the single worst thing
+this example could do.

@@ -1,0 +1,33 @@
+TAP version 13
+# Subtest: billing/invoice.test.ts
+    # Subtest: renders a PDF invoice
+    not ok 1 - renders a PDF invoice
+      ---
+      duration_ms: 0.771
+      location: 'billing/invoice.test.ts:9:1'
+      failureType: 'testCodeFailure'
+      error: |-
+        Cannot find module 'pdf-render' imported from billing/invoice.ts
+
+      code: 'ERR_MODULE_NOT_FOUND'
+      name: 'Error'
+      ...
+    1..1
+not ok 1 - billing/invoice.test.ts
+# Subtest: billing/receipt.test.ts
+    # Subtest: emails a receipt
+    not ok 1 - emails a receipt
+      ---
+      duration_ms: 0.410
+      location: 'billing/receipt.test.ts:14:1'
+      failureType: 'testCodeFailure'
+      error: |-
+        Cannot find module 'pdf-render' imported from billing/receipt.ts
+
+      code: 'ERR_MODULE_NOT_FOUND'
+      name: 'Error'
+      ...
+    1..1
+not ok 2 - billing/receipt.test.ts
+1..2
+# fail 2
