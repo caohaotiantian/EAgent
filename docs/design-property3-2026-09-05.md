@@ -164,7 +164,7 @@ says so. No new field, no kernel touch.
 workflow, and the set of questions they are asked, change only by a human act.* No `promote` path
 and no `loom run` can change either. Same shape as "oversight only tightens".
 
-### 4.5 · What makes a graph an exam (compile-time, `graph/validate.ts` — not kernel)
+### 4.5 · What makes a graph an exam (compile-time, `evolution/exam.ts` — not kernel)
 
 `inputs` non-empty and including `subject`; exactly one output, `verdict`; no `agent`, `tool`,
 `subgraph`, `human_gate` or `evaluator{kind:"rubric"}` node — deterministic bodies only, so the grade

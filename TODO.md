@@ -34,9 +34,9 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 The kernel guard also prints a commits-judged count (581 at `45294b4`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
-**Every wave lane is merged into `loom`.** `CLAUDE.md`'s Layout lists the merge shas and
-`git merge-base --is-ancestor <sha> loom` is the check per lane — a merge that REPORTS merged is not
-evidence the work arrived (§A.14). `docs/handoff-2026-09-09.md` is the current handoff.
+**Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
+per lane — a merge that REPORTS merged is not evidence the work arrived.
+`docs/handoff-2026-09-09.md` is the current handoff.
 
 ## Row census — three commands, run on this file
 

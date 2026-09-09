@@ -177,7 +177,7 @@ a replay whose `match: false` is really about the graph.
 follow [`examples/README.md`](examples/README.md). Its §§1–4 work offline with no key; §§5–6 have
 an `agent` node and want a real model, and that README's table says which is which.
 `packages/core/test/examples-run.test.ts` compiles every graph there on every `npm run check` and
-runs the two that need no model, so an example that stops working stops the build. Inside:
+runs the three that need no model, so an example that stops working stops the build. Inside:
 `graphs/fan-out-join.json` (fan-out → branch-ordered join, with a `loom replay` that comes back
 `{"match": true}`), `resources/function/*.js`, `resources/hook/no-secrets.js` (a `preTool` hook
 blocking a credential before it reaches the disk), `graphs/review-bench.json` (a benchmark whose
@@ -287,7 +287,7 @@ every run folds.
 
 - [`CLAUDE.md`](CLAUDE.md) — the goal, the three properties, and the working rules.
 - [`TODO.md`](TODO.md) — everything unfinished, written to be self-contained.
-- [`examples/README.md`](examples/README.md) — the runnable workspace; every command in it is
+- [`examples/README.md`](examples/README.md) — the runnable workspace; its offline commands are
   executed by the test suite.
 - The commit history is the record of why. There is no separate design corpus: the previous one
   was **deliberately deleted on 2026-08-25**, because its accumulated history was steering the work

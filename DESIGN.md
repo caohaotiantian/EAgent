@@ -48,7 +48,7 @@ ask why not WASM.
 replay, gates and budgets apply to a caller who never learns the graph. **Why:** every
 competitor's default is one line, and a runtime whose hello-world is a graph literal loses the
 first five minutes regardless of what it is better at afterwards.
-*Enforced:* `packages/core/src/agent.ts:261` (`export function agent`).
+*Enforced:* `export function agent` in `packages/core/src/agent.ts`.
 
 ### D2 · Effects are DECLARED, not called
 
@@ -58,9 +58,9 @@ the body a bound, keyed, retryable invoker per declared name. **Why:** an anonym
 declaring a capability and declaring a journaled effect become the same act, which turns "every
 nondeterministic call is journaled" from a rule people must remember into a structural property.
 That matters because the memory-only-state class has been violated **nine** times (the count and
-its members are `CLAUDE.md`'s first non-negotiable; the enumeration is split across
-`packages/core/test/run/oversight-survives-restart.test.ts` and
-`packages/core/test/run/escalation.test.ts` — grep either for `MEMBER`).
+its members are `CLAUDE.md`'s first non-negotiable; the enumeration is the header of
+`packages/core/test/run/oversight-survives-restart.test.ts`, which names all nine and says which
+file pins each).
 *Enforced:* `packages/core/src/resources/functions.ts` — a sandboxed body invoking a declared
 effect throws `E_EFFECT_UNAVAILABLE`. **Still open for `evaluator` bodies and for the sandbox
 (`TODO.md` §G).**
@@ -73,7 +73,7 @@ no lie is replayed) nor an unjournaled one (the hole closes); the timestamp alre
 event we already write, so it needs no seed and no new event kind. Bind `Temporal` the same way
 when it lands as a default global.
 *Enforced:* `Engine`'s lease timestamp in `packages/core/src/run/engine.ts`; a hook body's
-`Math.random` throws (`resources/hook-loader.ts:218`) because a run-scoped hook has no Task to key
+`Math.random` throws (`DENY_RANDOM` in `resources/hook-loader.ts`) because a run-scoped hook has no Task to key
 a draw under.
 
 ### D4 · Information flow — two axes, and NOT scoped to branch coordinates
@@ -93,7 +93,7 @@ provably-exclusive router arms.
 longer defaults to trusted. Confidentiality is still default-trusted — `applySecretFlow` reads the
 declared classification and there is no `effects: []` equivalent for a channel, while marking every
 unclassified channel sensitive is the constant gate that arm's own docstring refuses.
-*Enforced:* `applyControlTaint` / `applySecretFlow` at `run/engine.ts:2475`; tests
+*Enforced:* `applyControlTaint` / `applySecretFlow` in `run/engine.ts`; tests
 `test/run/control-flow-taint.test.ts`, `wave-taint.test.ts`. *Open half:* `TODO.md` §G.4.
 
 ### D5 · The extension surface is versioned mechanically
@@ -109,8 +109,8 @@ Sequence item 8 and "Deliberately not sequenced". The rule the pin must carry wh
 written now so it is not decided under pressure: **a pin may preserve a behavioural DEFAULT and
 never a REFUSAL.** A safety tightening applies to `loom.dev/v1` graphs too, or "oversight only
 tightens" stops holding across versions.
-*Enforced today:* `GRAPH_API_VERSION` (`graph/spec.ts:34`) accepts exactly one value and anything
-else is `GRAPH000_API_VERSION` (`graph/validate.ts:1278`) — which is also why there is nothing to
+*Enforced today:* `GRAPH_API_VERSION` (`graph/spec.ts`) accepts exactly one value and anything
+else is `GRAPH000_API_VERSION` (`graph/validate.ts`) — which is also why there is nothing to
 pin yet.
 
 ### D6 · Self-improvement is text-space optimization behind a frozen gate
@@ -127,7 +127,7 @@ decision.** A candidate owns its graph, so it owned S1 and with it the outcome, 
 ceiling and the ground-truth condition. The answer is an operator-attested exam — a grader outside
 every candidate graph, run by the runtime — designed in `docs/design-property3-2026-09-05.md`,
 merged at `ec2ad88`. The five assumptions it holds under are `CLAUDE.md` §3's, not restated here.
-*Enforced:* `examShape` in `src/cli.ts:8544`; `test/evolution/exam-lane-*.test.ts`;
+*Enforced:* `examShape` in `src/evolution/exam.ts`; `test/evolution/exam-lane-*.test.ts`;
 `examples/exams/review-bench-exam.json` is the shipped workspace exam.
 
 ### D7 · A prompt-only change is NOT a safe change
@@ -143,7 +143,7 @@ on `advance`, `replayRun`'s `refsBound`); `RunGraph.documents` freezes the bytes
 hash is deliberately left out of it**, because `cohortKeyOf` keys on `graphHash` — putting prompt
 text in it would make every prompt edit its own cohort of one, and comparing two runs across a
 prompt edit is exactly the candidate kind D6 defines self-improvement as producing.
-*Enforced:* `graph/compile.ts:442`; `test/run/graph-binding.test.ts`'s "THE SAME SPEC WITH
+*Enforced:* `RunGraph.resolutionManifest` in `graph/compile.ts`; `test/run/graph-binding.test.ts`'s "THE SAME SPEC WITH
 DIFFERENT RESOURCES IS REFUSED" (5/5). *Residue:* a MUTATED run's successor carries no recorded
 manifest — `TODO.md` §G.5(a).
 
@@ -281,8 +281,8 @@ surplus waits" stops being an acceptable answer, which under the framing answer 
 header — one machine, one tenant, the maintainer's own workflows, tens of runs a day, one operator
 — it is not. That is a MEASUREMENT to take, not a mechanism to build.
 
-**Splitting `engine.ts`.** Measured 2026-09-09: `wc -l packages/core/src/run/engine.ts` → **13,159**
-lines, against 3,755 for the next largest pinned file (`run/gates.ts`) and 24,772 for all ten —
+**Splitting `engine.ts`.** Measured 2026-09-09: `wc -l packages/core/src/run/engine.ts` → **13,160**
+lines, against 3,755 for the next largest pinned file (`run/gates.ts`) and 24,773 for all ten —
 **53% of the kernel by line count, in one file, and the share moves under `fix` traffic without
 anyone deciding it should.** Re-measure the SHARE, not the count. Not sequenced: `scripts/kernel.json`'s
 header carries three structural arguments for co-location. What the kernel gate establishes is that
