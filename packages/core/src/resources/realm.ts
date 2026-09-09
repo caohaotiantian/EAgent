@@ -99,17 +99,24 @@ import { CODES, err } from "../errors.ts";
  * `hook-loader.ts`'s `DENY_RANDOM` installs a throwing stub, because a hook has no seed to serve
  * draws from. Either way no body reaches the platform's.
  *
- * `Date` is SHADOWED TO `undefined`, and the reason changed. It used to be "a clock read has no
- * seed that would make it reproducible"; that is no longer true — `ctx.now` is bound to the task's
- * journaled lease timestamp, so a body CAN read a reproducible time. What `Date` would add is a
- * second clock with different semantics: `Date.now()` inside a body would have to be frozen to the
- * same instant to stay replayable, and a frozen `Date` that silently never advances is more
- * surprising than one that is not there. Restoring it means binding the whole constructor to
- * `ctx.now`, which is real work and is recorded in TODO.md rather than half-done here.
+ * `Date` IS SHADOWED TO `undefined` FOR A CALLER THAT DOES NOT OPT IN — `hook-loader.ts`, because
+ * `HookContext` has no `now` to bind it to (a hook fires at 8 points and `onComplete` is
+ * run-scoped, with no Task to lease a clock from — `run/hooks.ts`'s "No clock and no randomness"
+ * is a property, not a gap). The reason USED to be "a clock read has no seed that would make it
+ * reproducible"; that stopped being true once `ctx.now` existed, bound to the task's journaled
+ * lease timestamp — a body CAN read a reproducible time, for callers that have one. So a caller
+ * that DOES have one (`resources/functions.ts`, `RealmOptions.bindDateToNow: true`) gets `Date`
+ * bound to it instead: `new Date()`, `Date()` and `Date.now()` all read `ctx.now`, and every
+ * explicit-argument form (`new Date(x)`, `Date.parse`, `Date.UTC`) works unchanged, because none
+ * of them ever read a clock. See `DATE_INSTALLER`. What made a frozen, always-`undefined` `Date`
+ * more surprising than an absent one — the thing that used to block this — was never "restoring
+ * it is hard", it was "restoring it halfway, to a `Date` that silently never advances, is worse
+ * than not restoring it"; binding the WHOLE constructor to a value that changes with each call
+ * removes that objection rather than confirming it.
  *
- * `Intl` IS SHADOWED FOR THE SAME REASON, and it is the second clock `Date`'s absence was
- * believed to have closed. `Intl.DateTimeFormat.prototype.format` called with NO ARGUMENT
- * defaults to the wall clock, so with `Date` gone a body could still read the time:
+ * `Intl` STAYS SHADOWED EITHER WAY, for the second clock `Date`'s old absence was believed to
+ * have closed. `Intl.DateTimeFormat.prototype.format` called with NO ARGUMENT defaults to the
+ * wall clock, so with `Date` gone a body could still read the time:
  *
  *     new Intl.DateTimeFormat("en-US", {timeZone: "UTC", dateStyle: "full", timeStyle: "full"})
  *       .format()
@@ -123,15 +130,16 @@ import { CODES, err } from "../errors.ts";
  * INTRINSICS behind `String.prototype.localeCompare` and `Number.prototype.toLocaleString` are
  * not reached through this binding and still work.
  *
- * SHADOWED TO `undefined`, NOT STUBBED TO THROW, and that is a compromise rather than a
+ * `Intl` STAYS `undefined`, NOT STUBBED TO THROW, and that is a compromise rather than a
  * preference. `hook-loader.ts`'s `DENY_RANDOM` argues the other way for `Math.random` — a stub
  * that names the capability beats `Cannot read properties of undefined`, which reads like the
  * author's own typo — and the argument is just as good here: what a body actually sees is
- * `Cannot read properties of undefined (reading 'DateTimeFormat')`. What stops it is that
- * `Date`'s treatment is PINNED: `test/resources/functions.test.ts` asserts `typeof Date` is
- * `"undefined"` inside a body. Stubbing `Intl` alone would leave the realm's two clocks refusing
- * in two different shapes, which is worse than either shape consistently. Both or neither, and
- * "both" changes a behaviour a test already holds — so it is written down, not half-done.
+ * `Cannot read properties of undefined (reading 'DateTimeFormat')`. For a HOOK realm this still
+ * matches `Date`'s own treatment — both `undefined`, both refusing the same shape, which is what
+ * `test/resources/realm-has-no-clock.test.ts`'s hook-body test pins. For a FUNCTION realm the two
+ * now differ on purpose: `Date` is bound (this row), `Intl`'s default-locale/timezone leak is a
+ * narrower, separately recorded concern this row does not close — an asymmetry stated here so it
+ * reads as a decision rather than a regression the next reader has to re-discover.
  */
 const SAFE_GLOBAL_NAMES = [
   "JSON",
@@ -162,9 +170,102 @@ function safeGlobals(context: object): Record<string, unknown> {
   const own = READ_INTRINSICS.runInContext(context) as Record<string, unknown>;
   // The two clocks, shadowed together because they ARE one concern — see the docstring. An own
   // data property set to `undefined` beats the context's, so `Date` and `Intl` are genuinely
-  // gone from a body's reach rather than merely discouraged.
+  // gone from a body's reach rather than merely discouraged. `Date` is re-bound to `ctx.now` for
+  // callers that opt in (`RealmOptions.bindDateToNow`) — see `DATE_INSTALLER` — but that happens
+  // AFTER this shadow and AFTER `onlyGovernedCrossed` has already read the namespace, so a caller
+  // that does not opt in (`hook-loader.ts`) sees exactly the `undefined` this always produced.
   return { ...own, Date: undefined, Intl: undefined };
 }
+
+/**
+ * Reads the context's OWN `Date` constructor back out, before anything can shadow it.
+ *
+ * Read at `fresh()` time, in the same breath as `safeGlobals`'s intrinsics — i.e. before
+ * `populate()`'s `Object.assign` overwrites the "Date" binding with `undefined`. This is the
+ * CONTEXT's real `Date`, never the host's: `vm.createContext` hands every intrinsic back bound
+ * already, and this is a plain read of one of them, on the same footing as `own["Math"]`.
+ */
+const READ_DATE = new vm.Script("Date", { filename: "loom:realDate" });
+
+/**
+ * BUILDS A `Date` BOUND TO A PER-CALL "now", ENTIRELY IN-CONTEXT.
+ *
+ * Why not a host closure: a `Date` implementation authored in this (host) TypeScript file would
+ * be a HOST function assigned onto `globalThis.Date`, and a host function's `.constructor` is the
+ * HOST `Function` — `Date.constructor.constructor("return globalThis")()` is exactly the escape
+ * this module's own docstring opens with, one property over. So the whole thing — the wrapper,
+ * its `now` cell, and the setter that seeds it — is JavaScript text run INSIDE the context, and
+ * the only value that crosses realms is the context's own real `Date`, read back by `READ_DATE`
+ * and handed over via a transient own key (`__loomRealDate`) that this script deletes before
+ * `bodyScript` ever runs.
+ *
+ * INSTALLED AFTER `onlyGovernedCrossed`'s CHECK AND BEFORE `bodyScript` RUNS — the same slot
+ * `__loomBody`/`__loomInvoke` already occupy, for the same two reasons: adding an own key here
+ * cannot cost the "only governed names crossed" brand (the check already ran), and running before
+ * the body means a body's own definition-time IIFE — which CAN execute arbitrary code, since a
+ * resource is an EXPRESSION — sees this wrapper, never the real `Date`.
+ *
+ * UNSEEDED, NOT DEFAULTED — mirrors `DENY_UNSEEDED` for `Math.random`. The `now` cell starts
+ * absent, and every zero-argument route (`Date()`, `new Date()`, `Date.now()`) throws
+ * `E_EFFECT_UNRECORDED` until a call sets it. That is what actually closes the window: a body's
+ * own IIFE runs during `populate()`, strictly before any call's `__loomSetNow(p.now)` — the same
+ * ordering that lets a body capture the platform `Math.random` if `seedingRandom` did not splice
+ * `DENY_UNSEEDED` ahead of it. A `Date` that fell back to some default the moment it was absent
+ * would silently read as "it works", which is the shape this project keeps re-finding as a defect.
+ *
+ * EXPLICIT ARGUMENTS NEVER TOUCH THE CELL. `new Date(x)` and `new Date(y, m, d, …)` forward
+ * straight to the real constructor via `Reflect.construct(RealDate, args, new.target)` — genuine
+ * subclassing, so the result carries a real `[[DateValue]]` internal slot and every prototype
+ * method (`getTime`, `toISOString`, …) works. `Date.parse` and `Date.UTC` are pure and forwarded
+ * unchanged. Calling `Date(...)` WITHOUT `new` ignores its arguments and reads the cell — the same
+ * thing the real `Date` does, just against `ctx.now` instead of the wall clock.
+ *
+ * `BoundDate.prototype` IS A NEW OBJECT (`Object.create(RealDate.prototype)`), NOT
+ * `RealDate.prototype` ITSELF, and this is the one thing this file got wrong before it shipped.
+ * Sharing the real prototype means `Reflect.construct(RealDate, args, new.target)` still returns
+ * an object whose prototype chain includes the real `RealDate.prototype`, and that object's
+ * `.constructor` — untouched — resolves to `RealDate`, the real constructor, reachable as
+ * `(new Date()).constructor`. `new (new Date()).constructor()` is then a live wall-clock read one
+ * property away from a value the body was handed to use, which is exactly the class of escape
+ * `refuseGovernedGlobals`'s docstring measures for `globals`. Giving `BoundDate` its own prototype
+ * object and repointing `.constructor` at `BoundDate` closes it without touching `RealDate`'s own
+ * prototype, which stays whatever the context shipped.
+ */
+const DATE_INSTALLER = new vm.Script(
+  `(function () {
+    var RealDate = globalThis.__loomRealDate;
+    delete globalThis.__loomRealDate;
+    var now; // absent until a call's __loomSetNow supplies one
+    var unseeded = function () {
+      throw new Error(
+        "E_EFFECT_UNRECORDED: Date needs ctx.now and this body ran before a call supplied one. " +
+        "The engine sets it from the task's journaled lease timestamp before invoking the body; " +
+        "a caller invoking a compiled body directly must include now in the payload."
+      );
+    };
+    function BoundDate() {
+      if (!new.target) {
+        if (now === undefined) unseeded();
+        return String(new RealDate(now));
+      }
+      var args = arguments.length === 0
+        ? [now === undefined ? unseeded() : now]
+        : Array.prototype.slice.call(arguments);
+      return Reflect.construct(RealDate, args, new.target);
+    }
+    BoundDate.prototype = Object.create(RealDate.prototype);
+    BoundDate.prototype.constructor = BoundDate;
+    BoundDate.now = function () {
+      if (now === undefined) unseeded();
+      return now;
+    };
+    BoundDate.parse = RealDate.parse;
+    BoundDate.UTC = RealDate.UTC;
+    globalThis.Date = BoundDate;
+    globalThis.__loomSetNow = function (v) { now = v; };
+  })();`,
+  { filename: "loom:boundDate" },
+);
 
 /**
  * AN EMBEDDER MAY NOT OVERRIDE A NAME THIS MODULE GOVERNS, and finds out at compile.
@@ -258,8 +359,9 @@ function refuseGovernedGlobals(governed: Record<string, unknown>, globals: Realm
     throw err.internal(
       CODES.E_INTERNAL,
       `globals for "${label}" may not include "${name}": the realm supplies its own — the 16 names in ` +
-        `SAFE_GLOBAL_NAMES come from the context's own intrinsics, and Date and Intl are shadowed so a body ` +
-        `cannot read a clock replay would not reproduce. Yours is a HOST object, and the realm assigns its ` +
+        `SAFE_GLOBAL_NAMES come from the context's own intrinsics, and Intl is shadowed and Date is either ` +
+        `shadowed or bound to ctx.now, so a body cannot read a clock replay would not reproduce. Yours is a ` +
+        `HOST object, and the realm assigns its ` +
         `own over it regardless, so keeping the key would only hide that half your argument was ignored. ` +
         `Remove it. RENAMING IT IS NOT THE FIX and this check cannot make it one: the check reads NAMES, so ` +
         `any object passed under any other name reaches the body whole — a host object carries the host ` +
@@ -305,6 +407,22 @@ export interface RealmOptions {
   readonly globals?: Readonly<Record<string, unknown>> | undefined;
   readonly compileTimeoutMs: number;
   readonly callTimeoutMs: number;
+  /**
+   * Bind `Date` to `ctx.now` instead of shadowing it to `undefined` — see `DATE_INSTALLER`.
+   *
+   * `false`/absent (the default `hook-loader.ts` uses) keeps the ORIGINAL behavior: `Date` stays
+   * `undefined`, because `HookContext` has no `now` to bind it to (a hook fires at 8 points and
+   * `onComplete` is run-scoped, with no Task to lease a clock from — `run/hooks.ts`'s "No clock
+   * and no randomness" is deliberate, not a gap).
+   *
+   * `true` (what `resources/functions.ts` passes) installs the bound constructor: the CALLER is
+   * then responsible for calling `globalThis.__loomSetNow(now)` inside its own bridge, before
+   * invoking the body — exactly where `ARGUMENT_BRIDGE` already reseeds `Math.random` from
+   * `p.seed`. Nothing here calls it; a realm compiled with this flag and never seeded throws
+   * `E_EFFECT_UNRECORDED` on every zero-argument `Date` route, which is the fail-closed answer
+   * for a caller that opted in and then didn't wire the seed.
+   */
+  readonly bindDateToNow?: boolean;
 }
 
 /**
@@ -663,7 +781,22 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   }
 
   /** An empty context and the intrinsics read back out of it, before anything else can be seen. */
-  const fresh = (): { context: vm.Context; governed: Record<string, unknown>; pristineRandom: unknown } => {
+  const fresh = (): {
+    context: vm.Context;
+    governed: Record<string, unknown>;
+    pristineRandom: unknown;
+    pristineDate: unknown;
+    /**
+     * What `DATE_INSTALLER` actually left on `context.Date`, captured by `populate()` right after
+     * it runs — `undefined` until then, and forever `undefined` for a realm that did not ask for
+     * `bindDateToNow`. `shadowsHeld` compares against THIS, not against `pristineDate`: the
+     * question for `Date` is the same positive one `Math`'s check already asks ("is it the exact
+     * value this compile installed"), not the weaker "is it merely not the platform's" — a body
+     * that replaced `Date` with a third, hostile function is neither the platform's `Date` nor
+     * this realm's `BoundDate`, and only a positive check catches that.
+     */
+    installedDate: unknown;
+  } => {
     // Created EMPTY, then given its own intrinsics back plus whatever the embedder injected.
     // Seeding it with host objects is what opened the bridge the first time.
     const context = vm.createContext(Object.create(null));
@@ -676,7 +809,12 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     // against itself. `governed["Math"]` is the context's own `Math`, so this is a plain read of a
     // pristine object and no user code can be behind it.
     const pristineRandom = (governed["Math"] as { random?: unknown } | undefined)?.random;
-    return { context, governed, pristineRandom };
+    // THE CONTEXT'S OWN REAL `Date`, read back before `populate()`'s shadow assignment removes the
+    // only name it was reachable under. Only read when a caller opted into `bindDateToNow` — for
+    // every other caller (`hook-loader.ts`) this is one extra `runInContext` per call for a value
+    // nothing uses, and `safeGlobals`'s own docstring already cares about that cost.
+    const pristineDate = opts.bindDateToNow ? READ_DATE.runInContext(context) : undefined;
+    return { context, governed, pristineRandom, pristineDate, installedDate: undefined };
   };
 
   /**
@@ -694,6 +832,18 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     // the body and the bridge run, and both write their own names onto `globalThis` — so a check
     // placed after them would have to whitelist those names and would grow a hole per bridge.
     const namespaceIsOwn = onlyGovernedCrossed(realm.context, realm.governed);
+    // `Date`, BOUND — AFTER the check above (so the transient `__loomRealDate` key it uses costs
+    // nothing) and BEFORE the body (so a body's own definition-time IIFE sees the bound wrapper,
+    // never the real `Date`). See `DATE_INSTALLER`.
+    if (opts.bindDateToNow) {
+      (realm.context as Record<string, unknown>)["__loomRealDate"] = realm.pristineDate;
+      DATE_INSTALLER.runInContext(realm.context, { timeout: timeoutMs });
+      // CAPTURED HERE, before the body ever runs, so `shadowsHeld` can ask the POSITIVE
+      // question — "is this exactly what got installed" — rather than only "is this not the
+      // platform's own". A body-installed third value is neither, and only the positive form
+      // catches that.
+      realm.installedDate = (realm.context as Record<string, unknown>)["Date"];
+    }
     bodyScript.runInContext(realm.context, { timeout: timeoutMs });
     bridgeScript.runInContext(realm.context, { timeout: timeoutMs });
     return namespaceIsOwn;
@@ -733,7 +883,9 @@ export function compileRealm(opts: RealmOptions): RealmCall {
   // vouches for are named in `onlyGovernedCrossed`'s header: that function decided the second one
   // above, and `shadowsHeld` decides the first and third here. See `REALM_BOUND` for what
   // membership means and `isRealmBounded` for how it is read.
-  const branded = namespaceIsOwn && shadowsHeld(first.context, first.governed, first.pristineRandom);
+  const branded =
+    namespaceIsOwn &&
+    shadowsHeld(first.context, first.governed, first.pristineRandom, first.installedDate, opts.bindDateToNow === true);
 
   const where = `${opts.what} resource "${opts.label}"`;
   const call: RealmCall = (payload) => {
@@ -741,7 +893,10 @@ export function compileRealm(opts: RealmOptions): RealmCall {
     // the compile deadline, as it was at compile; the call itself by the call deadline below.
     const realm = fresh();
     const own = populate(realm, opts.compileTimeoutMs);
-    if (branded && !(own && shadowsHeld(realm.context, realm.governed, realm.pristineRandom))) {
+    if (
+      branded &&
+      !(own && shadowsHeld(realm.context, realm.governed, realm.pristineRandom, realm.installedDate, opts.bindDateToNow === true))
+    ) {
       // The compile-time realm passed and this one did not, so the body's definition-time code
       // did something on this call it did not do then. Refused rather than run: the brand on
       // `call` is what `ReplayReport.hermetic` rests on, and it cannot be revoked per call.
@@ -815,11 +970,16 @@ function didNotEvaluate(opts: RealmOptions, e: unknown): Error {
  * re-executing it produces what it produced before.** Three properties make that true, and each
  * one is measured on the realm rather than assumed from the code path that built it:
  *
- *   1. THE TWO CLOCKS ARE GONE. `Date` and `Intl` are own data properties whose value is
- *      `undefined` — still, at the end of compile, not merely at the moment `safeGlobals` set
- *      them. A body is an EXPRESSION and may run code at definition time, so
+ *   1. NEITHER CLOCK REACHES THE PLATFORM'S. `Intl` is an own data property whose value is
+ *      `undefined` — still, at the end of compile, not merely at the moment `safeGlobals` set it.
+ *      `Date` is the same for a realm that did not ask for `bindDateToNow` (a hook realm); for one
+ *      that did (a function realm), it is present but is NOT the context's own pristine `Date` —
+ *      the same "not the platform's" question property 3 asks of `Math.random`, because `Date` is
+ *      no longer meant to be gone, only meant to never read the wall clock. A body is an
+ *      EXPRESSION and may run code at definition time, so
  *      `(function () { globalThis.Date = hostishThing; return f; })()` is a legal resource that
- *      un-shadows a clock for every later call. `shadowsHeld` reads the slot afterwards.
+ *      un-shadows (or un-binds) a clock for every later call. `shadowsHeld` reads the slot
+ *      afterwards.
  *   2. NOTHING OF THE HOST'S IS IN THE NAMESPACE. Every own key the sandbox object carries when
  *      the assign finishes is a name `safeGlobals` produced, holding the exact value it
  *      produced. `onlyGovernedCrossed` decides it.
@@ -904,12 +1064,35 @@ function onlyGovernedCrossed(context: object, governed: Record<string, unknown>)
  * brand on check 3 unless it replaces the draw with something of its own. Closing it properly
  * means the realm OWNING the seeded PRNG instead of trusting each bridge to install one, which
  * moves a contract and wants its own round.
+ *
+ * `Date`'S CHECK HAS TWO SHAPES NOW, ONE PER `bindDateToNow`. Absent (the hook path): unchanged —
+ * still exactly `undefined`. Bound (the function path): the question is the POSITIVE one — is
+ * `Date` exactly what `DATE_INSTALLER` installed — and not merely "not the platform's", which
+ * `Math.random`'s check settles for. The difference matters here in a way it does not for
+ * `Math.random`: `populate()` builds a NEW `BoundDate` every call (there is no one wrapper
+ * function shared across calls the way there is for `Math`), so "not the platform's" would also
+ * pass for a THIRD value a hostile body substituted in its own definition-time IIFE — neither the
+ * real `Date` nor this call's `BoundDate`, and a negative check cannot tell the difference.
+ * `installedDate` is what `populate()` captured off `context.Date` right after `DATE_INSTALLER`
+ * ran, so the comparison is against the one value this realm actually installed, the same
+ * strength `Math`'s check already has against `governed["Math"]`.
  */
-function shadowsHeld(context: object, governed: Record<string, unknown>, pristineRandom: unknown): boolean {
+function shadowsHeld(
+  context: object,
+  governed: Record<string, unknown>,
+  pristineRandom: unknown,
+  installedDate: unknown,
+  bindDateToNow: boolean,
+): boolean {
   try {
-    for (const name of ["Date", "Intl"]) {
-      const d = Object.getOwnPropertyDescriptor(context, name);
-      if (d === undefined || !("value" in d) || d.value !== undefined) return false;
+    const intl = Object.getOwnPropertyDescriptor(context, "Intl");
+    if (intl === undefined || !("value" in intl) || intl.value !== undefined) return false;
+    const date = Object.getOwnPropertyDescriptor(context, "Date");
+    if (date === undefined || !("value" in date)) return false;
+    if (bindDateToNow) {
+      if (date.value === undefined || !Object.is(date.value, installedDate)) return false;
+    } else if (date.value !== undefined) {
+      return false;
     }
     const math = Object.getOwnPropertyDescriptor(context, "Math");
     if (math === undefined || !("value" in math) || !Object.is(math.value, governed["Math"])) return false;

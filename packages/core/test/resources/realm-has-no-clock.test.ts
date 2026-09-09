@@ -122,12 +122,53 @@ test("A HOOK BODY CANNOT READ THE WALL CLOCK — by any ambient route, `Intl` in
   assert.deepEqual(body({}, CTX), REFUSED_EVERYWHERE);
 });
 
-test("A FUNCTION BODY CANNOT EITHER — same realm, same guarantee, and this is where `ctx.now` lives", () => {
+test("A FUNCTION BODY'S `Date` READS `ctx.now`, NOT THE WALL CLOCK (G.2) — every other route stays refused", () => {
   // `realm.ts` is the shared compile path, so a fix applied to one kind and not the other would
   // be exactly the asymmetry `HOOK_BRIDGE` had for `Math.random`. A function body has a
-  // reproducible clock already — `ctx.now`, the task's journaled lease timestamp — so an ambient
-  // one is not merely non-deterministic, it is a SECOND clock that disagrees with the first.
+  // reproducible clock already — `ctx.now`, the task's journaled lease timestamp — and G.2 binds
+  // `Date` to it instead of leaving a second, always-`undefined` clock beside it.
+  //
+  // `globalThis.__proto__.constructor.constructor` is not a THIRD realm: measured directly during
+  // this row's build, the `Function` it reaches sees `typeof process === "undefined"`, the same
+  // as the context's own ambient one, and its `Date` is THIS realm's — it read `REFUSED` before
+  // only because `Date` was `undefined` here too. Once `Date` is bound, this route reads exactly
+  // what `Date.now()` does, which is the honest answer rather than a new hole: it never crossed a
+  // boundary the direct call didn't.
   const store = storeWith(`function (view, ctx) ${CLOCK_PROBE}`, "function");
+  const body = createFunctionLoader({ store }).load("function/probe@stable")!;
+  const view = { get: () => undefined, require: () => undefined, hash: "h", visible: [] as string[] };
+  const now = 1_700_000_000_000;
+  const out = body(view as never, {
+    taskId: "task_1" as never,
+    signal: new AbortController().signal,
+    now: () => now,
+    seed: 7,
+  } as never);
+  assert.deepEqual(out, {
+    ...REFUSED_EVERYWHERE,
+    Date: String(new Date(now)),
+    "Date.now": String(now),
+    "globalThis.__proto__.constructor.constructor": String(now),
+  });
+});
+
+test("TWO CALLS, ONE ANSWER — a function body's `Date` too, and it is NOT the platform's `Date`", () => {
+  // The property `Math.random` already had to prove for the same reason: a live clock would move
+  // between two calls even at the SAME `ctx.now`, if anything leaked through. It does not.
+  const store = storeWith(`function (view, ctx) ${CLOCK_PROBE}`, "function");
+  const body = createFunctionLoader({ store }).load("function/probe@stable")!;
+  const view = { get: () => undefined, require: () => undefined, hash: "h", visible: [] as string[] };
+  const callCtx = { taskId: "task_1" as never, signal: new AbortController().signal, now: () => 1_700_000_000_000, seed: 7 } as never;
+  const first = JSON.stringify(body(view as never, callCtx));
+  const started = Date.now();
+  while (Date.now() - started < 2) {
+    /* a real gap, so a live clock would have moved */
+  }
+  assert.equal(JSON.stringify(body(view as never, callCtx)), first);
+});
+
+test("`new Date(0)` — AN EXPLICIT ARGUMENT NEVER TOUCHES `ctx.now`", () => {
+  const store = storeWith(`(view, ctx) => ({ writes: { doubled: new Date(0).getTime() } })`, "function");
   const body = createFunctionLoader({ store }).load("function/probe@stable")!;
   const view = { get: () => undefined, require: () => undefined, hash: "h", visible: [] as string[] };
   const out = body(view as never, {
@@ -135,8 +176,19 @@ test("A FUNCTION BODY CANNOT EITHER — same realm, same guarantee, and this is 
     signal: new AbortController().signal,
     now: () => 1_700_000_000_000,
     seed: 7,
-  } as never);
-  assert.deepEqual(out, REFUSED_EVERYWHERE);
+  } as never) as { writes: { doubled: number } };
+  assert.equal(out.writes.doubled, 0, "new Date(0) must answer the epoch, not ctx.now");
+});
+
+test("A BODY'S OWN DEFINITION-TIME CODE CANNOT READ A LIVE CLOCK EITHER — the same window `DENY_UNSEEDED` closes for `Math.random`", () => {
+  // A resource is an EXPRESSION and may run code before any call ever supplies `now` — the IIFE
+  // runs at `populate()` time, strictly before `__loomSetNow` is ever invoked. `Date` must refuse
+  // there, not silently answer with the wall clock or with some frozen default.
+  const store = storeWith(`(function () { var poisoned = String(new Date()); return (view, ctx) => ({ writes: { doubled: poisoned } }); })()`, "function");
+  assert.throws(
+    () => createFunctionLoader({ store }).load("function/probe@stable"),
+    /E_EFFECT_UNRECORDED|Date needs ctx\.now/,
+  );
 });
 
 test("THE CONTROL: shadowing `Intl` costs a body nothing it needs, and `ctx.now` still answers", () => {

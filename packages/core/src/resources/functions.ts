@@ -215,11 +215,16 @@ export interface FunctionLoader {
 /**
  * A loader over a `ResourceStore`.
  *
- * `Date` is bound to `undefined` in the global set on purpose. A `function` node is meant
- * to be a pure fold over channel state, and a body that reads the wall clock makes its
- * own replay non-deterministic — GRAPH013 already refuses clock-dependent expressions, so
- * leaving the constructor reachable here would be an inconsistent seam. A body that needs
- * the time takes it from `ctx.now`, which is injected and recorded.
+ * `Date` IS BOUND TO `ctx.now` (TODO.md G.2), not shadowed to `undefined`. A `function` node is
+ * meant to be a pure fold over channel state, and a body that read the wall clock made its own
+ * replay non-deterministic — that was the whole argument for shadowing it, and it argues equally
+ * for BINDING it, once there is a reproducible clock to bind it to: `ctx.now` already is one, and
+ * a frozen-to-undefined `Date` next to a working one is a second clock that silently disagrees
+ * with the first, which is more surprising than an absent one. `new Date()`, `Date()` and
+ * `Date.now()` all read `ctx.now` through `ARGUMENT_BRIDGE`'s `__loomSetNow`; `new Date(x)` and
+ * every other explicit-argument form are untouched, because they never read a clock. See
+ * `realm.ts`'s `DATE_INSTALLER` for the mechanism and for why a body's own definition-time IIFE
+ * still cannot reach a live value.
  */
 /**
  * THE UNSEEDED REFUSAL, in the one place both the splice-ahead prefix and the bridge read it.
@@ -343,8 +348,8 @@ const ARGUMENT_BRIDGE = `
       };
     } else {
       // NOT a fallback to the real Math.random. An unseeded body is one whose output no
-      // replay can reproduce, and \`Date\` two lines away is already \`undefined\` for exactly
-      // that reason — the asymmetry between them was invariant 4's admitted gap. Both engine
+      // replay can reproduce — the same reason \`Date\` throws until \`__loomSetNow\` runs below,
+      // now that G.2 closed the asymmetry invariant 4 used to admit between them. Both engine
       // callers pass a seed; reaching this means calling a FunctionBody by hand.
       ${DENY_UNSEEDED}
     }
@@ -368,6 +373,13 @@ const ARGUMENT_BRIDGE = `
       now: function () { return p.now; },
       signal: { aborted: p.aborted },
     };
+    // Date reads the same number ctx.now() does, reseeded per call for the reason Math.random
+    // is: bodies are cached per digest, so a body run in an earlier task must not see this
+    // call's now, and a body definition-time IIFE (which runs before any call, at populate
+    // time) must see none at all -- see realm.ts's DATE_INSTALLER for the throw that closes
+    // that window. __loomSetNow only exists when compileRealm was built with bindDateToNow,
+    // which this loader always requests.
+    globalThis.__loomSetNow(p.now);
     // DECLARED EFFECTS DO NOT CROSS THIS BOUNDARY, and the body is TOLD so rather than handed
     // undefined. A resource-loaded body runs synchronously inside vm.runInContext under a
     // per-call timeout -- the same constraint that made the random SEED a seed rather than a
@@ -453,6 +465,9 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
       globals: opts.globals,
       compileTimeoutMs,
       callTimeoutMs,
+      // G.2: `Date` reads `ctx.now`, not the wall clock. `ARGUMENT_BRIDGE` seeds the cell via
+      // `__loomSetNow(p.now)` before it calls the body — see `realm.ts`'s `DATE_INSTALLER`.
+      bindDateToNow: true,
     });
 
     /**

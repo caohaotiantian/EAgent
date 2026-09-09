@@ -199,13 +199,22 @@ test("a body does not see the host's globals", () => {
   assert.equal(out.writes.doubled, "undefined");
 });
 
-test("Date is deliberately unavailable — a body that reads the clock breaks its own replay", () => {
-  // GRAPH013 already refuses clock-dependent expressions. Leaving the constructor
-  // reachable here would be an inconsistent seam; `ctx.now` is the injected, recorded way.
-  const { store } = storeWith(`(view) => ({ writes: { doubled: typeof Date } })`);
+test("Date is bound to ctx.now (G.2) — the zero-arg forms read the injected, recorded clock", () => {
+  // Was "Date is deliberately unavailable". A `function` node reading the wall clock broke its
+  // own replay; the fix that argument always pointed at was binding the constructor to the
+  // reproducible clock the realm already carries, not leaving it absent forever — see
+  // `realm.ts`'s `DATE_INSTALLER`.
+  const { store } = storeWith(`(view, c) => ({ writes: { doubled: typeof Date + "|" + Date.now() + "|" + String(new Date()) } })`);
   const loader = createFunctionLoader({ store });
   const out = loader.load("function/double@stable")!(view({}), ctx()) as { writes: { doubled: string } };
-  assert.equal(out.writes.doubled, "undefined");
+  assert.equal(out.writes.doubled, `function|1|${String(new Date(1))}`, "ctx() in this file supplies now: () => 1");
+});
+
+test("new Date(x) — an explicit argument still works and never reads ctx.now", () => {
+  const { store } = storeWith(`(view) => ({ writes: { doubled: new Date(0).getTime() } })`);
+  const loader = createFunctionLoader({ store });
+  const out = loader.load("function/double@stable")!(view({}), ctx()) as { writes: { doubled: number } };
+  assert.equal(out.writes.doubled, 0);
 });
 
 test("JSON and Math ARE available — a body that cannot parse or round is not useful", () => {
