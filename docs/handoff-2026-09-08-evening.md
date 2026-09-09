@@ -1,8 +1,8 @@
 # Handoff — 2026-09-08 evening, nine branches merged in two rounds
 
-Supersedes `handoff-2026-09-08.md` in full. That document was written at `8d43127`, when four
-wave-2 branches were stopped mid-review and `phase1-taint` was parked; all of that is closed. Read
-it now only for its §3, §7 and §9 — its §§1, 4, 5, 6, 8 and 10 are snapshots this document replaces.
+Supersedes the 2026-09-08 morning handoff in full (deleted 2026-09-09). It was written at `8d43127`, when four
+wave-2 branches were stopped mid-review and `phase1-taint` was parked; all of that is closed.
+Its §§1, 4, 5, 6, 8 and 10 were snapshots this document replaced; its §9 is carried into §7 below.
 
 **`loom` is at `af95630`. `npm run check` exits 0. There are no wave worktrees left and no unmerged
 lane branches.** Every number in §1 is a command I ran on `af95630` today. Every number in §2 is
@@ -322,7 +322,7 @@ with exit 0. What exists is the *freshness* mechanism, not a tracked artifact �
 
 ## 7 · Facts you would otherwise rediscover
 
-Carried from `handoff-2026-09-08.md` §9, each re-checked today unless marked:
+Carried from the deleted 2026-09-08 morning handoff §9, each re-checked that day unless marked:
 
 - **`check-surface.mjs` reads `dist/`.** `scripts/check-surface.mjs:44-47` exits 1 naming
   `npm run build` when `packages/core/dist/index.d.ts` is absent; a STALE `dist/` passes. Verified

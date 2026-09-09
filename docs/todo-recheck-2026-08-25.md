@@ -2,7 +2,7 @@
 
 > **Commit hashes in this file predate a history rewrite and no longer resolve.** On
 > 2026-08-28 the branch was filtered to remove a Stripe-shaped fixture string from
-> `docs/audit-2026-08-25.md` (GitHub push protection rejected it; the string was fake, and the
+> a docs file since deleted (GitHub push protection rejected it; the string was fake, and the
 > reasoning is `TODO.md` §F.16). Filtering rewrote every commit in `86b84c9..HEAD`, so every
 > short hash below points at an object that is gone. **The subjects are unchanged**, so a
 > reference resolves with `git log --grep='<the subject or a phrase from it>'`. The hashes are
