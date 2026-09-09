@@ -53,10 +53,11 @@ cell above: it moves with every commit, this file's own included, and this file'
 to state the invariant rather than the measurement when the claim is about the artifact holding it.
 
 **The kernel row moved 11 → 12 seams for a reason that is not a new declaration.** `706b88a`
-(the `seam-ledger` merge) made the guard's CENSUS read `git interpret-trailers --parse` on any
-subject, so `fbbdac4`'s `Kernel-seam:` trailer — a real declaration on a merge commit, which the
-old feat-only path could not see — is counted. Nothing new was declared this wave; all 35 commits
-are `fix:` or `test:`.
+(the `seam-ledger` merge) gave the guard's CENSUS a second arm — `git interpret-trailers --parse`
+on any NON-`feat:` subject — so `fbbdac4`'s `Kernel-seam:` trailer, a real declaration on a merge
+commit that the feat-only path could not see, is counted. Nothing new was declared this wave: of
+the 35 commits, 26 are `fix:`, 2 are `test:` and 7 are the merges themselves, and none of the
+three carries a trailer.
 
 **Why this table lost its narrative.** It used to carry several paragraphs reconstructing which
 wave moved which number. Every one of those paragraphs was true when written and none was re-run,
@@ -84,9 +85,11 @@ that row was corrected in place.
 **§A0 is the newest and reads first.** What the phase-2-4 merge's three attackers reproduced and
 did not fix, minus what the waves of 2026-09-05 → 09-09 closed (those moved to §Z with their
 shas), plus what those waves found and recorded rather than fixed. Its rows are countable with
-the first grep below using `A0` in place of `[A-Z]`: **17 rows, 9 struck, 8 open** on `dcf54c9`.
-Two of the eight — A0.12 and A0.13 — are what is left of the original fifteen; the other six are
-the 2026-09-08-night wave's own residue.
+the first grep below using `A0` in place of `[A-Z]`: **17 rows, 9 struck, 8 open** as this file
+now stands. (Run it on this file, not on `dcf54c9` — the six rows the 2026-09-08-night wave added
+arrived with the settlement commit, so `git show dcf54c9:TODO.md` gives 11 and 6.) Two of the
+eight — A0.12 and A0.13 — are what is left of the original fifteen; the other six are that wave's
+own residue.
 
 **EVERY OTHER OPEN ROW WAS AUDITED BY RUNNING IT ON 2026-09-02, and the record is
 `docs/backlog-survey-2026-09-02.md`.** Seven agents in parallel, one verdict per row, each
@@ -242,8 +245,11 @@ rather than here, because it is a decision and not a defect. Counted rather than
   wire reply both sides: `inputTokens 0, costUsd 0.00075, cacheReadTokens 2500` before →
   `inputTokens 2187, costUsd 0.007311, cacheReadTokens 2500` after;
   `test/providers/usage-per-rate-floor.test.ts` is the pin, five of its nine tests the ordinary
-  half (a real full cache hit, a real cache write, a real partial hit, the no-cache degenerate
-  case, and an honest over-charge) all byte-identical to before.
+  half — a real full cache hit, a real cache write, a real partial hit and the no-cache degenerate
+  case, all four byte-identical to before, and a FIFTH that is not: `ORDINARY 5 (NOT unchanged,
+  and pinned as such)` charges $0.007875 where an honest split charges $0.007500, the ~5%
+  over-charge this row's last paragraph names. The ordinary half is four clean rows and a
+  disclosed regression, not five clean ones.
   **What remains is ~10×**, the raw cacheRead-to-input rate ratio ($0.30 against $3 per million
   on the row's own price table), and the reason it is open is structural rather than unfinished:
   the adversary's optimum is `cacheCredit` close to `estimated`, and **a wire claiming a full
