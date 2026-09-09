@@ -20,18 +20,18 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-09 on `45294b4`
+## State — one command each, re-run 2026-09-09 on `afa86e1`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,611 pass / 0 fail** | `npm test` |
-| pinned exports | 540 | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 12 declared seams | `node scripts/check-kernel.mjs` |
+| tests on `loom` | **3,643 pass / 0 fail** | `npm test` |
+| pinned exports | 541 | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 13 declared seams | `node scripts/check-kernel.mjs` |
 | zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8, of 463 tracked | read every `git ls-files` path; see CLAUDE.md |
+| NUL census | 5 files, 0 invalid UTF-8, of 456 tracked | read every `git ls-files` path; see CLAUDE.md |
 
-The kernel guard also prints a commits-judged count (581 at `45294b4`). It is deliberately not a
+The kernel guard also prints a commits-judged count (624 at `afa86e1`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
@@ -51,8 +51,8 @@ be wrong without being falsifiable, which is why there are three columns.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
-| §A0 | 17 | 9 | 8 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 36 | 21 | 15 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
+| §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
+| §A | 38 | 21 | 17 | open defects, unguarded behaviour, and two deliberate non-defects recorded so nobody "fixes" them |
 | §B | 2 | 0 | 2 | declared and wired to nothing — down from 13 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 6 | 4 | 2 | decisions still owed, both narrow |
@@ -79,16 +79,18 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   rows; that listing is the disclosed residue and its decision is unmade.
 - ~~**A0.21 · A router's `take` selects a `compensation` edge and walks past a human gate.**~~
   CLOSED at `ff8fdac`.
-- **A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every tick.**
-  Repro: `/usr/bin/grep -anc 'graphsByHash(ws).index' packages/core/src/cli.ts` → 4. `runClockTick`'s
-  `due` predicate counts a `leased` task, so a run whose graph hash no longer resolves, or whose
-  leased node is one of the four types with no enforced deadline (`join`, `router`, `human_gate`,
-  `subgraph`), sweeps the whole workspace on every tick and drives nothing — measured at ~10× per
-  tick over 31 published graphs, scaling with WORKSPACE size rather than with the stranded run.
-  **Closes when** the compiled index is cached with an invalidation rule that keeps a republished
-  graph visible, or an unresolvable hash is memoised with an expiry; restricting the `leased` arm to
-  nodes declaring a `timeoutMs` is not available, because the clock cannot read a node's deadline
-  without the graph it is trying to resolve.
+- ~~**A0.12 · A permanently-undriveable stranded run recompiles the whole workspace on every tick.**~~
+  CLOSED at `b4a7835`: compile memoised per file.
+- ~~**A0.23 · The seventh cross-run child touch is unwrapped, and still answers `E_INTERNAL`.**~~
+  CLOSED at `05b495b`: seventh cross-run touch wrapped.
+- ~~**A0.24 · `gates.ts` keeps its idempotency entry after a non-`E_SEQ_CONFLICT` throw.**~~
+  CLOSED at `5f59559`: idempotency entry deleted on any throw.
+- ~~**A0.25 · `E_SUBGRAPH_FAILED` carries six raises of two different meanings.**~~
+  CLOSED at `0270d84`: E_CHILD_UNREACHABLE splits the code.
+- ~~**A0.26 · The kernel guard's merge coverage is conflict-resolving merges only.**~~
+  CLOSED at `c8aad7d`: census reads merges; trailers unified.
+- ~~**A0.27 · The `mcp__` reservation holds at `register()`, and two things beside it do not.**~~
+  CLOSED at `eee63b9`: overlap refused, fields frozen once.
 - **A0.13 · The usage floor's dollar residual is ~10×, and no function of the two numbers a wire
   reports can close it.** Repro:
   `node --test packages/core/test/providers/usage-per-rate-floor.test.ts` → 9 pass / 0 fail, five
@@ -111,57 +113,6 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   **Closes when** §D.6 is settled, and not before: keying `rule016Subgraphs` on the child's `inputs`
   tightens the delegation, while §D.6's option (f) keys all three doors on `channels` and relaxes the
   plane instead. They are opposite directions and the decision is §D.6's.
-- **A0.23 · The seventh cross-run child touch is unwrapped, and still answers `E_INTERNAL`.** Repro:
-  `/usr/bin/grep -an 'const childP = await this.advance(childRunId)' packages/core/src/run/engine.ts`
-  → one hit, inside `#runSubgraph`. `5fe7614` wrapped five cross-run touches so another run's store
-  failure is never this run's answer; this call is the one it did not, and the lane measured
-  `failAt=3..6 => status=failed err=E_INTERNAL` — not retryable, so one transient read of another
-  run's disk permanently fails the parent's delegation and starts a compensation cascade over the
-  parent's irreversible effects. The honest reason it is open is scope: an earlier draft claimed
-  wrapping it would swallow a cancel, and driving the guard showed that is false. **Closes by**
-  giving this call the same two-way treatment the other five got, with the ordinary half measured.
-- **A0.24 · `gates.ts` keeps its idempotency entry after a non-`E_SEQ_CONFLICT` throw.** Repro:
-  `/usr/bin/grep -an '#idempotency.set\|#idempotency.delete' packages/core/src/run/gates.ts` — the
-  `set` precedes `log.commit` and the catch deletes it again only for `E_SEQ_CONFLICT`; every other
-  throw leaves the entry behind, against the comment two lines above ("NOTHING LANDED, so nothing
-  may be remembered as landed"). Consequence: the cross-run WRITE `#resolveGateAsSystem` retries
-  into a broker answering from the stale entry, so §A0.23's sibling retry is inert for the life of
-  the process. It self-heals on restart, which is why this is a defect and not a member of the
-  journal-authority list. **Closes by** deleting the entry on ANY throw, with a test that a second
-  delivery after a store failure actually commits.
-- **A0.25 · `E_SUBGRAPH_FAILED` carries six raises of two different meanings.** Repro:
-  `/usr/bin/grep -anc 'childUnavailable' packages/core/src/run/engine.ts` → 8, and the set comment
-  above them says so in the file. `childUnavailable` raises the code for the three cross-run touches,
-  so "only the poll can reach it" is no longer true and four of the six raises are retryable. The
-  cost: an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
-  child's disk is broken", and a DETERMINISTIC child-journal alarm (`E_TRACE_INCONSISTENT` out of
-  `projection`) is deferred as if it were a disk. **Closes with** a new `CODES` member for the
-  unreachable-child arm and the `RETRYABLE`/`onlyIf` sets re-derived against it.
-- **A0.26 · The kernel guard's merge coverage is conflict-resolving merges only.** Repro:
-  `git show --name-only --format='' 878001c | wc -l` → 0, while the same command on `fbbdac4` prints
-  seven files. `706b88a` made the CENSUS count a `Kernel-seam:` trailer on any subject via `git
-  interpret-trailers --parse`, which is how `fbbdac4` reached the ledger — but the guard only looks
-  at commits that TOUCH a pinned path, and git prints no paths for a clean merge, so a trailer on a
-  clean merge is still invisible. Two carriers: the REQUIREMENT path still classifies subjects with
-  its own `FEAT` regex rather than with git's parser, so the two paths disagree about what a
-  declaration is; and a sub-`MIN_SEAM_CHARS` trailer on a non-`feat` subject is dropped in silence
-  where the same trailer on a `feat` subject is a violation. **Closes when** the guard reads a
-  merge's effective diff (`git show --name-only -m`, or `--first-parent` against each parent) and
-  the two paths share one definition of a trailer.
-- **A0.27 · The `mcp__` reservation holds at `register()`, and two things beside it do not.** Repro:
-  `/usr/bin/grep -anc 'reservePrefix' packages/core/src/run/registry.ts` → 5. `9cf88b5` moved the
-  reservation into `ToolRegistry.#doRegister`, so a registration made from a timer, a library embedder
-  or any later verb is refused. Two residue items its lane recorded and did not fix.
-  (a) **Overlapping prefixes are not checked** — `reservePrefix` throws only on an EXACT duplicate,
-  so a module that registers one benign tool and then calls `reservePrefix("mcp")` can make the
-  legitimate `mcp__` registration fail with attacker-authored text in an operator-facing
-  `E_CONFIG_INVALID`. Fail-closed denial of service, not an escalation. **Closes by** refusing a
-  `reservePrefix` whose argument is a prefix of, or prefixed by, one already reserved.
-  (b) **Only `name` is snapshotted** — `list()`, `manifests()` and every downstream reader of
-  `.irreversibility` and `.capabilities` re-read the caller's object, so a getter that flips AFTER
-  registration shows the boot banner, the manifest map and the posture computation a different value
-  than the one checked. An `irreversibility` flip is a live oversight-posture bypass. **Closes by**
-  freezing every `ToolDefinition` field at registration, not just the name.
 
 ---
 
@@ -382,6 +333,22 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   CLOSED — deleted. No event ever clears a human ceiling, so the method deleted an in-memory entry
   `PolicyEngine.restore` re-installed at the LOWERED posture; `deescalate(scope, "in", …)` is the
   same tightening, refused for a non-human, and folded.
+- **A.37 · `truncate` (`server/http.ts`) and `clip` (`graph/declared-inputs.ts`) sanitise the same
+  character range via two separate literals.** Repro: `/usr/bin/grep -an 'CONTROL = /\[' packages/core/src/server/http.ts`
+  and `/usr/bin/grep -an 'replace(/\[' packages/core/src/graph/declared-inputs.ts` → two literals
+  covering the identical range, spelled `/[\x00-\x1f\x7f-\x9f]/g` in one file and
+  `/[\u0000-\u001f\u007f-\u009f]/g` in the other. Carrier: `truncate` is now `export`ed from
+  `server/http.ts` so its test can import it, and `index.ts`'s `export * from "./server/http.ts"`
+  puts that generic name in `@loom/core`'s public surface — pinned deliberately at the 2026-09-09
+  merge (`scripts/surface.json`, 540 → 541), not a name anybody outside asked for. **Closes when**
+  `clip` is exported and `truncate` calls it, or both move into one shared module — and that is the
+  moment to decide whether the shared name should be public at all.
+- **A.38 · `truncate`'s control-character sanitisation has no live call path against this plane's own
+  listener.** Repro: a raw socket write of a header value carrying a C0/DEL byte to `ControlPlane`'s
+  server → `400` from Node's parser before application code runs; the same write against
+  `createServer({insecureHTTPParser:true})` reaches the handler with the byte intact. `ControlPlane`
+  never sets `insecureHTTPParser`. **Closes when** a test pins that `ControlPlane` never enables it,
+  or a non-header call site makes the sanitisation live.
 
 ---
 
@@ -739,6 +706,12 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A0.19 | `878001c` | reserved `Object.prototype` node ids |
 | A0.20 | `6b3513b` | child gate forwards to mirror |
 | A0.21 | `ff8fdac` | `TAKEABLE_EDGE_KINDS` shared predicate |
+| A0.12 | `b4a7835` | compile memoised per file |
+| A0.23 | `05b495b` | seventh cross-run touch wrapped |
+| A0.24 | `5f59559` | idempotency entry deleted on any throw |
+| A0.25 | `0270d84` | E_CHILD_UNREACHABLE splits the code |
+| A0.26 | `c8aad7d` | census reads merges; trailers unified |
+| A0.27 | `eee63b9` | overlap refused, fields frozen once |
 | A.1 | `a8d62fb` | quote effect makes refusals replayable |
 | A.2 | `34a7f14` | replay grades the terminal message |
 | A.3 | — | the no-`provider` window named |

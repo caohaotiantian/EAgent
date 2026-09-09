@@ -532,6 +532,7 @@
   "toLoomError",
   "toolNGram",
   "totalTokens",
+  "truncate",
   "ulid",
   "validate",
   "validateGraph",

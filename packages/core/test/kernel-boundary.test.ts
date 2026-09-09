@@ -263,11 +263,12 @@ test("GREEN + CENSUS: a merge commit's own Kernel-seam trailer is real design ar
 /**
  * ONE STRING, TWO PLACES — and the pair is the point. The first version of the quoted test used
  * `Kernel-seam: <argument>`, ten characters and no space, which `MIN_SEAM_CHARS` rejects on its
- * own: it passed against a mutant of `nonFeatTrailerSeam` that never called
- * `git interpret-trailers` at all, so it proved nothing about the rule it is named for. The value
- * below clears the floor, so the ONLY thing left to decide it is whether the line is the message's
- * own final paragraph — and the control commits the same string as a real trailer to show the
- * discriminating variable is the position and not the text.
+ * own: it passed against a mutant that never applied the position rule at all, so it proved
+ * nothing about the rule it is named for. The value below clears the floor, so the ONLY thing left
+ * to decide it is whether the line is in the message's own final paragraph — and the control
+ * commits the same string as a genuine final paragraph to show the discriminating variable is the
+ * position and not the text. `seamTrailer` in `check-kernel.mjs` is the rule; it applies to every
+ * subject, `feat` included.
  *
  * This history exercises neither case. `2a9eda8`, the commit the guard's docstring once cited
  * here, touches `TODO.md` and no pinned file, so it never reaches a trailer rule.

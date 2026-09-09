@@ -31,17 +31,23 @@ an extension must depend on it and cannot replace it*. `scripts/check-kernel.mjs
 `fix` may touch the kernel freely — fixing it is what a kernel is for. That trailer is the escape
 hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs`, nowhere else.**
 
-**The REQUIREMENT and the CENSUS are two rules.** The requirement is `feat:`-only; the census
-(`judge()` in `check-kernel.mjs`) counts a `feat:` subject's trailer matched anywhere in the body,
-plus a trailer `git interpret-trailers --parse` finds in the FINAL PARAGRAPH of any OTHER subject,
-merges included — so `git log --grep='^Kernel-seam:'` and git's own trailer parser each give a
-different number from the guard's, and none of the three is wrong.
+**The REQUIREMENT and the CENSUS are two rules, and they differ in two places.** The requirement is
+`feat:`-only; the census counts every subject, merges included. They share ONE definition of a
+trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
+flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
+five of the thirteen declared seams are written as. Where they still differ is what "touched the
+kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
+empty for a clean merge, the resolution's own changes for an evil one), the census reads its
+effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
+already, while a trailer it carries still reaches the ledger. `git log --grep='^Kernel-seam:'` and
+git's own trailer parser each give a different number from the guard's, and none of the three is
+wrong.
 
 **Watch the ledger in the diff anyway — the guard cannot see** capability landed under `fix:` or
 `refactor:`, a squash-merge collapsing a `feat` into another subject, capability added outside the
-pinned list, a rename git cannot detect, or a CLEAN merge carrying a trailer (`TODO.md` §A0.26).
-`fix:` fires most often, because new journal vocabulary is capability whatever the subject says —
-and `check-surface.mjs` pins the exported NAME SET only, which is the gap `check-kernel.mjs` covers.
+pinned list, or a rename git cannot detect. `fix:` fires most often, because new journal vocabulary
+is capability whatever the subject says — and `check-surface.mjs` pins the exported NAME SET only,
+which is the gap `check-kernel.mjs` covers.
 
 ### 2 · Unlimited extensibility
 
@@ -73,7 +79,10 @@ anywhere but argv, the seam has to move behind a process boundary first.
 **No privileged built-ins remain.** A module is handed `{channels, functions, hooks, identity, jail,
 models, payloads, resolver, store, tools}` carrying the operator's own jail; registering a built-in
 tool name refuses at boot rather than shadowing silently; and `ToolRegistry.reservePrefix` holds
-`mcp__` at the door as a capability. Open: `TODO.md` §A0.27.
+`mcp__` at the door as a capability, refusing a prefix that overlaps one already reserved and
+freezing every `ToolDefinition` field at registration (`eee63b9`, §A0.27). Residue, on no row:
+`reservePrefix("")` as the FIRST call on a fresh registry still claims the whole namespace, and
+`parameters` is shallow-frozen only.
 
 ### 3 · Endless self-improvement
 

@@ -209,8 +209,9 @@ the same frozen jail object the built-ins get, from one derivation (`jailFor`) �
 always, the three allowlists only where the operator passed the matching flag, so a module must not
 assume a fixed shape (`test/cli/mcp-registrar-collision.test.ts`, eight cases). The reservation is
 checked in `ToolRegistry.#doRegister` on EVERY registration rather than by a boot scan, so one made
-from a timer, a library embedder or any later verb is refused too. What it does not cover is
-`TODO.md` §A0.27: an overlapping prefix, and every `ToolDefinition` field but `name` read live.
+from a timer, a library embedder or any later verb is refused too. Since `eee63b9` a reservation
+that OVERLAPS one already held is refused as well, and every `ToolDefinition` field is snapshotted
+at registration rather than read live off the caller (`TODO.md` §A0.27, closed).
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 
