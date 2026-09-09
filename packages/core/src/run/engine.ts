@@ -358,8 +358,11 @@ const RETRY_AFTER_CEILING_MS = 300_000;
  * It is the scheduled time, not measured elapsed time: a decision that read a clock would not be
  * reproducible from the log.
  *
- * IT BOUNDS TWO THINGS AND THE ARGUMENT ABOVE COVERS ONE. `DEFERRABLE_CODES` has two members,
- * so this same 900 s also caps how long a parent will poll an unfinished CHILD. The reading
+ * IT BOUNDS EVERY MEMBER OF `DEFERRABLE_CODES` AND THE ARGUMENT ABOVE COVERS ONE — the rate
+ * limit. The same 900 s also caps how long a parent will poll an unfinished CHILD
+ * (`E_SUBGRAPH_FAILED`) and how long it will wait on a child whose journal it cannot touch
+ * (`E_CHILD_UNREACHABLE`). Named rather than counted, because the count has been wrong once. The
+ * reading
  * transfers — past it, "the child is still working" stops being a wait and starts being a run
  * that will not finish — but it is a second claim and it was not made. A deployment that wants
  * long-running children and short rate-limit patience cannot have both, and the shape of that
@@ -415,23 +418,31 @@ const MAX_INTERVENTION_LAPS = 8;
  *      consulted. **A third, retryable arm added at that site would silently join this set** — if
  *      one is ever added, split the code rather than widening this comment.
  *
- *      THREE MORE ARMS HAVE BEEN ADDED AND THE CODE WAS NOT SPLIT. `childUnavailable` raises it
- *      for the three cross-run touches inside `#runSubgraph` — the start-or-resume probe, the
- *      forward's read of the child, and the forward's WRITE to the child's gate — so "only the
- *      poll can reach it" is no longer true and SIX raises share the code, of which four are
- *      retryable. They MEET this set's criterion for the case they were written for: a child
- *      journal this node could not read is not this node's failure, and uncharged re-entry inside
- *      `DEFERRAL_BUDGET_MS` is what a transient foreign store wants. What the instruction above
- *      was defending is the word SILENTLY, and that is what this paragraph pays; the split it asks
- *      for needs a new `CODES` member and the argument for taking it anyway is at
- *      `childUnavailable`. What membership costs, stated as a set rather than a headline:
- *      an `onlyIf` keyed on `E_SUBGRAPH_FAILED` can no longer separate "still working" from "the
- *      child's disk is broken"; and a DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT`
- *      out of `projection`, which is a real invariant-2 alarm and not a disk — is deferred as if
- *      it were transient. Measured: 19 uncharged re-entries and 20 stderr lines for a failure that
- *      is identical every pass. It is bounded and it is not a loosening (neither code is in
- *      `RUN_FATAL_CODES`, so nothing about routing changes), and the alarm's own code now travels
- *      in `details.cause` so the parent's row still says WHICH failure it was.
+ *      FOUR MORE ARMS WERE ADDED, AND THE INSTRUCTION ABOVE WAS FINALLY TAKEN. `5fe7614` and the
+ *      wrap of the nested `advance(childRunId)` put four cross-run touches on this code —
+ *      the start-or-resume probe, the forward's read, the forward's WRITE to the child's gate,
+ *      and the nested drive — for two rounds, which made "only the poll can reach it" false and
+ *      left one code answering two questions. They are now `E_CHILD_UNREACHABLE`, the member
+ *      below, so THREE raises share `E_SUBGRAPH_FAILED` again and the count above is true as
+ *      written.
+ *
+ *   `E_CHILD_UNREACHABLE` · another run's STORAGE, not another run's work — the four cross-run
+ *      touches above, raised only by `childUnavailable`. It meets this set's criterion for the
+ *      case it was written for: a child journal this node could not touch is not this node's
+ *      failure, and uncharged re-entry inside `DEFERRAL_BUDGET_MS` is what a transient foreign
+ *      store wants. It is `unavailable` at every raise, so unlike the member above this one has
+ *      no non-retryable arm to reason about.
+ *
+ *      MEMBERSHIP IS NOT FREE, and what it costs is stated as a set rather than a headline: a
+ *      DETERMINISTIC child-journal alarm — `E_TRACE_INCONSISTENT` out of `projection`, a real
+ *      invariant-2 alarm and not a disk — is deferred as if it were transient, because
+ *      `childUnavailable` refuses to decide which foreign failures are permanent. Measured: 19
+ *      uncharged re-entries and 20 stderr lines for a failure that is identical every pass. It is
+ *      bounded (the deferral budget, then the charged retries, then the run fails) and it is not
+ *      a loosening — no code here is in `RUN_FATAL_CODES`, so nothing about routing changes — and
+ *      the alarm's own code travels in `details.cause` so the parent's row still says WHICH
+ *      failure it was. The cost the split PAID OFF is the other one this paragraph used to carry:
+ *      an `onlyIf` can now separate "still working" from "the child's disk is broken".
  *
  * Why the poll belongs here at all: measured. With only the rate limit deferring, a 429 in a
  * CHILD asking for two minutes killed the PARENT, because `DEFAULT_SUBGRAPH_RETRY` spends its
@@ -439,7 +450,7 @@ const MAX_INTERVENTION_LAPS = 8;
  * failure table in TODO §A, reproduced exactly by moving the wait into the child. The parent
  * node did not fail either; it asked whether the child was done and the answer was "not yet".
  */
-const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED]);
+const DEFERRABLE_CODES: ReadonlySet<string> = new Set([CODES.E_PROVIDER_RATE_LIMIT, CODES.E_SUBGRAPH_FAILED, CODES.E_CHILD_UNREACHABLE]);
 
 /**
  * THE FAILURES THAT ARE NOT THIS NODE'S FAILURE, and therefore cannot be routed around.
@@ -789,7 +800,7 @@ function loomCodeOf(e: unknown): string | undefined {
  *
  * THE OTHER HALF OF `describeThrown`'S RULE, for the sites where swallowing is not available.
  * `#planRollbackChild` and `#endChildRun` can refuse a child outright, because the parent has
- * already decided what it is doing and reaching into the child is a courtesy. The three touches
+ * already decided what it is doing and reaching into the child is a courtesy. The four touches
  * inside `#runSubgraph` cannot: the task's whole job IS the child, and a swallow there would make
  * the parent proceed on a value it did not read — at the `existing` probe, "the read failed"
  * would look like "there is no child yet", and the parent would SUBMIT A SECOND CHILD RUN over
@@ -809,7 +820,7 @@ function loomCodeOf(e: unknown): string | undefined {
  * id". Driven on the B fixture, dumping every parent event appended on the broken pass:
  *
  *   task.leased          {"attempt":3,"workerId":"worker-0"}
- *   task.retry_scheduled {"afterMs":1000,"attempt":2,"code":"E_SUBGRAPH_FAILED","deferred":true}
+ *   task.retry_scheduled {"afterMs":1000,"attempt":2,"code":"E_CHILD_UNREACHABLE","deferred":true}
  *   task.ready           {"branchPath":"root","edgesIn":[],"nodeId":"delegate"}
  *   task.committed count on that pass: 0        events naming the child or the cause: []
  *
@@ -822,15 +833,24 @@ function loomCodeOf(e: unknown): string | undefined {
  * ever writes the cause down.
  *
  * That is the same argument `#forwardToParentMirrorsQuietly` makes for its own warning — a
- * failure nobody can see is indistinguishable from one that did not happen — so all five
- * cross-run sites now say something out loud, and this one adds NO journal vocabulary to do it.
+ * failure nobody can see is indistinguishable from one that did not happen — so all SIX cross-run
+ * sites (`#planRollbackChild`, `#endChildRun` and the four here) say something out loud, and this
+ * one adds NO journal vocabulary to do it.
  *
  * THE RATE IS ONE PER REFUSAL AND IT IS BOUNDED, measured on a PERMANENTLY broken child store
  * rather than the one-shot the tests use:
  *
- *   outcome=failed/E_SUBGRAPH_FAILED  passes=20  simulatedMs=1140000
+ *   outcome=failed/E_CHILD_UNREACHABLE  passes=20  simulatedMs=1140000
  *   warnings={"LOOM_CHILD_UNREACHABLE":20,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
- *   task attempt=3 deferrals=19 deferredMs=843000
+ *   deferrals=19 deferredMs=843000
+ *
+ * THE NESTED `advance` JOINING THIS FUNCTION DID NOT MOVE THAT COUNT, and the reason is worth the
+ * line: with EVERY child read broken, each pass refuses at the FIRST one — the start-or-resume
+ * probe — so the drive one site later is never reached. The new site changes this table only when
+ * the store is well enough to answer the probe and not the drive, which is the one-shot the F
+ * tests use. A first attempt at this paragraph said the count rose to 21; it had measured its own
+ * earlier section's warning landing in this listener's window, which is the trap this file's
+ * sibling test header documents, and an independent driver measured 20 in isolation.
  *
  * Nineteen uncharged deferrals inside the 900 s budget, then the charged retries, then the run
  * ENDS — which is the fact worth having, because the sibling warning at
@@ -841,34 +861,38 @@ function loomCodeOf(e: unknown): string | undefined {
  *
  * WHAT ACTUALLY RESCUES THE RUN IS THE DEFERRAL ARM, NOT THE GRAPH'S `retry` — measured, because
  * the first version of this docstring said the opposite ("a node with no `retry` policy still
- * fails immediately") and both halves of that were false. `E_SUBGRAPH_FAILED` is in
+ * fails immediately") and both halves of that were false. `E_CHILD_UNREACHABLE` is in
  * `DEFERRABLE_CODES`, and `#retryDecision` takes the deferral BEFORE it consults the policy at
- * all — that ordering is the fix its own comment describes — so these three refusals are
+ * all — that ordering is the fix its own comment describes — so these four refusals are
  * re-entered UNCHARGED on a 1 s curve inside a 900 s budget, and only after that budget do they
  * reach `NodeSpec.retry`. A `subgraph` node cannot have no policy anyway: `compile.ts` floors it
  * with `DEFAULT_SUBGRAPH_RETRY`. Driven: this file's B fixture with `maxAttempts: 1` still
  * succeeds, on `deferrals 1 / deferredMs 1000`.
  *
- * AND THAT MEMBERSHIP IS DELIBERATE, WHICH `DEFERRABLE_CODES` ASKS TO BE TOLD — read its entry for
- * this code, which says a third retryable arm "would silently join this set" and asks for the code
- * to be SPLIT rather than the comment widened. Three arms are added here and the code is NOT
- * split, so this is a departure from a written instruction and is stated as one:
+ * AND THE SPLIT `DEFERRABLE_CODES` ASKED FOR HAS BEEN TAKEN. That set's entry for
+ * `E_SUBGRAPH_FAILED` says a further retryable arm "would silently join this set" and asks for the
+ * code to be SPLIT rather than the comment widened. Four arms joined it anyway for two rounds, on
+ * the stated reason that a new `CODES` member was outside that lane's authorised file set; this
+ * function now raises `E_CHILD_UNREACHABLE` instead, so the instruction is obeyed rather than
+ * departed from.
  *
- *   WHY MEMBERSHIP IS RIGHT. The set's own criterion is "the failures that are NOT this node's
- *   failure". A child journal this node could not read is exactly that, and uncharged patient
- *   re-entry bounded by `DEFERRAL_BUDGET_MS` is the behaviour a transient foreign store wants.
- *   The vice the instruction guards against is a SILENT join, and silence is what this paragraph
- *   and the one now in `DEFERRABLE_CODES` remove.
+ *   WHY THE NEW CODE IS STILL DEFERRABLE. The set's own criterion is "the failures that are NOT
+ *   this node's failure". A child journal this node could not touch is exactly that, and uncharged
+ *   patient re-entry bounded by `DEFERRAL_BUDGET_MS` is the behaviour a transient foreign store
+ *   wants. Leaving the new member OUT of that set would have made a rename into a tightening: the
+ *   same failure would suddenly spend charged retries.
  *
- *   WHAT IT COSTS, named rather than waved past, and COUNTED rather than carried: the code now
- *   carries FOUR meanings, not three as this paragraph said for a round — `DEFERRABLE_CODES`
- *   enumerates three pre-existing arms ("has not finished", "ended failed", "awaiting a gate it
- *   does not have") and this adds "the child's journal is unreachable". So a graph's
- *   `retry.onlyIf` cannot separate them, and neither can an operator filtering by code.
- *   `details.childRunId`, `details.cause` and the message separate them; a code would separate
- *   them better. The split was not taken because it needs a new member of `CODES` in `errors.ts`,
- *   which is outside this lane's authorised file set — see the lane report, where it is the
- *   recommended follow-up rather than a thing quietly left undone.
+ *   WHY THIS ARM MOVED AND NOT THE POLL. `E_SUBGRAPH_FAILED`'s three remaining arms — "has not
+ *   finished", "ended failed", "awaiting a gate it does not have" — are all read out of a
+ *   projection the parent DID obtain, and the first of them fires on every healthy busy
+ *   delegation. An existing `retry.onlyIf: ["E_SUBGRAPH_FAILED"]` was written for those, so they
+ *   keep the name and keep working; what changed code is an arm that was `E_INTERNAL` until
+ *   `5fe7614` and that no graph can have been keyed on.
+ *
+ *   WHAT IS STILL NOT SEPARATED, named rather than waved past: this code does not say WHY the
+ *   touch failed, because deciding which foreign failures are permanent is the taxonomy every
+ *   wrap here exists to avoid. `details.cause` carries the original code and `details.childRunId`
+ *   the child.
  *
  * THE STORE'S OWN TEXT GOES IN `details.error`, AND THE MESSAGE NAMES THE ACT — which is a choice
  * about what an operator reads first, and NOT the secrets argument this paragraph used to make.
@@ -885,8 +909,8 @@ function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomErro
   const child = describeThrown(childRunId);
   // THE ORIGINAL CODE TRAVELS IN `details.cause`. Re-classing an alarm as `unavailable` is what
   // makes the delegation retryable, and it also throws away WHICH failure it was — a reviewer
-  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent as a
-  // plain `E_SUBGRAPH_FAILED` with its code nowhere. Through `loomCodeOf`, never a bare
+  // measured `E_TRACE_INCONSISTENT`, a genuine invariant-2 alarm, arriving at the parent with its
+  // code nowhere. Through `loomCodeOf`, never a bare
   // `isLoomError` — that is an `instanceof`, and asking it about an untrusted value is the
   // trappable operation this file already paid four rounds for.
   const cause = loomCodeOf(e);
@@ -894,7 +918,7 @@ function childUnavailable(childRunId: RunId, what: string, e: unknown): LoomErro
     code: "LOOM_CHILD_UNREACHABLE",
     detail: JSON.stringify({ childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) }),
   });
-  return err.unavailable(CODES.E_SUBGRAPH_FAILED, `${what} for child run ${child}`, {
+  return err.unavailable(CODES.E_CHILD_UNREACHABLE, `${what} for child run ${child}`, {
     details: { childRunId: child, error: why, ...(cause === undefined ? {} : { cause }) },
   });
 }
@@ -8171,7 +8195,86 @@ export class Engine {
       }
     }
 
-    const childP = await this.advance(childRunId);
+    // THE SEVENTH CROSS-RUN TOUCH, AND THE LAST UNWRAPPED ONE. Everything this drive does happens
+    // on ANOTHER RUN's journal, and a throw out of it reached `#runWave`'s catch as
+    // `internal`/`E_INTERNAL` — not retryable, so one transient read of the child's disk was a
+    // permanent verdict on the PARENT and a compensation cascade over the parent's irreversible
+    // effects. Measured at `d1b42ae` on the resume pass, one-shot failure per read:
+    //
+    //     read 1  succeeded   (the `existing` probe, wrapped)     read 5  failed:E_INTERNAL
+    //     read 2  succeeded   (the forward's read, wrapped)       read 6  failed:E_INTERNAL
+    //     read 3  failed:E_INTERNAL                               read 7  succeeded (mirror, wrapped)
+    //     read 4  failed:E_INTERNAL
+    //
+    // REFUSE, NEVER SWALLOW, for the reason `childUnavailable`'s docstring gives: this task's whole
+    // job IS the child, so a swallow would make the parent map outputs out of a projection it did
+    // not read.
+    //
+    // AROUND THE WHOLE DRIVE, not around a store read inside it, and the cost is named rather than
+    // waved past: a programmer error inside the child's own drive is now re-classed retryable and
+    // deferred instead of failing the parent at once. The alternative is a taxonomy of which
+    // foreign failures may fail this run's verb, which is what every wrap in this file exists to
+    // avoid, and `advance` gives its caller nothing to tell them apart with. It is BOUNDED —
+    // `DEFERRABLE_CODES`, then the charged retries, then the run fails, which the
+    // permanently-broken-store test measures.
+    //
+    // A RUN-FATAL CODE IS NOT RE-CLASSED, AND THAT ARM IS THE DIFFERENCE BETWEEN A WRAP AND A
+    // LOOSENING. Two drafts of this comment claimed the exposure away — "the code this raises is
+    // not run-fatal, so nothing about routing changes" — which is a claim about what this RAISES
+    // doing duty for a claim about what it CATCHES. A reviewer found the raiser. `advance` is not
+    // one store read: `#advanceSerially` runs `#assertBound` and then `#rehydrateGraph` before it
+    // reaches the drive loop, and NOTHING between them catches, so a throw from either leaves
+    // `advance` intact. `#rehydrateGraph` throws `E_REPLAY_DIVERGENCE` when a child's recorded
+    // mutation chain does not reproduce its recorded graph hash. Measured, one-shot at child
+    // reads 3..6 (1, 2 and 7 do not reach this catch):
+    //
+    //     d1b42ae    failed:E_REPLAY_DIVERGENCE   run-fatal — no error edge routes around it
+    //     unguarded  succeeded                    deferred, then a rescue arm answered for it
+    //
+    // That second row is exactly the shape `RUN_FATAL_CODES`' own docstring exists to prevent: a
+    // run reporting `succeeded` on a rescue arm's value when what broke was its ability to say
+    // anything true. So codes the kernel ALREADY calls run-fatal travel out unchanged. This is not
+    // the taxonomy the other wraps avoid — it consults a set that already exists and decides
+    // nothing new about which foreign failures are permanent.
+    //
+    // THROUGH `loomCodeOf`, never a bare `isLoomError`, for the reason that helper exists; and it
+    // FAILS CLOSED the useful way round — a value that cannot say its own code is not treated as
+    // run-fatal, so it gets the bounded retryable answer rather than a permanent verdict.
+    //
+    // THE SET THIS ARM COVERS IS TWO SITES, and the first draft of this paragraph said ONE and
+    // was wrong. The test is not "how big is the call" but "does a child DRIVE run inside this
+    // try", and it does at exactly two of the four: here, and the forward's gate WRITE — because
+    // `#resolveGateAsSystem` ends in `this.advance(childRunId)`, which its own message ("answering
+    // gate … failed") hides. A reviewer demonstrated the hole there with this file's fixture and
+    // the guard is now at both. The remaining two, the start-or-resume probe and the forward's
+    // READ, call `projection` — one fold over one journal, no rehydrate and no drive — and are
+    // deliberately unguarded, so a `E_TRACE_INCONSISTENT` from a child's fold still defers.
+    //
+    // AND THE COST THAT STAYS IS A RULE, NOT A LIST, because two attempts at the list were both
+    // incomplete. THE RULE: anything escaping the child's `advance` that is DETERMINISTIC and NOT
+    // run-fatal is deferred for the whole budget and then reported under a code that says
+    // "storage" — ~19 uncharged re-entries and a wrong word. Members found so far, named as
+    // examples and NOT as the closed set: `#rehydrateGraph`'s `E_OVERSIGHT_LOOSEN_FORBIDDEN`
+    // (`policy`); `#assertBound`'s `E_GRAPH_INVALID` (`validation`) and its three
+    // `E_GRAPH_MISMATCH` raises (`conflict` once, `policy` twice); `#project`'s
+    // `E_TRACE_INCONSISTENT`; and `#advanceSerially`'s own `E_RUN_NOT_FOUND` — which comes from
+    // there and NOT from `#assertBound`, whose `not_found` arm this call site disarms with
+    // `requireRecord: false`. None of them changes ROUTABILITY: every one was an ordinary,
+    // routable task failure at base too. That is the trade. The loosening — a run-fatal code
+    // becoming routable — is what the arm above prevents, and it is a different thing.
+    //
+    // AND NOT BECAUSE OF CANCELS. The argument that wrapping this would "swallow a cancel" was
+    // made four times and is dead: `cancel` decides a run's status by journaling `run.cancelled`,
+    // so a task deferred during a cancelled run defers into a run that is already over. Driven at
+    // THIS site, not only at the forward's — a `cancel` landing inside this catch still ends the
+    // run `cancelled` with nothing charged.
+    let childP: RunProjection;
+    try {
+      childP = await this.advance(childRunId);
+    } catch (e) {
+      if (RUN_FATAL_CODES.has(loomCodeOf(e) ?? "")) throw e;
+      throw childUnavailable(childRunId, `subgraph "${describeThrown(sub.ref)}" could not be advanced`, e);
+    }
 
     if (childP.status === "awaiting_gate") {
       // DETERMINISTIC, by the journal's own order rather than by however the projection
@@ -8409,17 +8512,27 @@ export class Engine {
         //   fdeeb1a      → running              7f908a4 → failed:E_CANCELLED
         //
         // The third version was correct and INERT, which is why none of them is here now. With
-        // `if (false) throw e` substituted for it, all fourteen tests in
+        // `if (false) throw e` substituted for it, all fourteen tests then in
         // `engine-cross-run-child-touches.test.ts` — including one written specifically to drive a
         // `cancel` racing this forward — stay green. The reason is structural: `cancel` decides a
         // run's status by journaling `run.cancelled`, so a task outcome re-classed as "come back
         // later" during a cancelled run changes nothing. Nothing runs, because the run is over.
         //
-        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN, and the honest reason
-        // `#runSubgraph`'s own `advance(childRunId)` is left unwrapped is SCOPE — it is not one of
-        // the five sites this lane was authorised for, and wrapping it is a much wider behaviour
-        // change — not "it would swallow a cancel". That argument was overstated three times; a
-        // fourth rewrite of it would be worth less than deleting it.
+        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN. This paragraph used to end by saying
+        // `#runSubgraph`'s own `advance(childRunId)` was left unwrapped on SCOPE rather than on
+        // cancels; it IS wrapped now, at that call, and its own cancel-race test drives the same
+        // argument at that site. The half worth keeping is why no guard stands here.
+        // A RUN-FATAL CODE IS NOT RE-CLASSED HERE EITHER, and this site needs the arm for exactly
+        // the reason the nested drive does: `#resolveGateAsSystem` ENDS IN `this.advance(runId)`
+        // on the child, so this `try` spans a whole child drive — `#rehydrateGraph` included — and
+        // not just the gate write its message names. A reviewer demonstrated it with the same
+        // one-shot `E_REPLAY_DIVERGENCE` fixture the F test uses, armed at this site: the parent
+        // deferred it and ended `succeeded`. The wrap at the drive said this site "reaches a
+        // single gate write" and that was wrong.
+        //
+        // Older than this change — `5fe7614` wrapped this site and `d1b42ae` is its descendant —
+        // so the guard is a fix rather than a scope creep, and it is the same one line.
+        if (RUN_FATAL_CODES.has(loomCodeOf(e) ?? "")) throw e;
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }
@@ -9599,7 +9712,7 @@ export class Engine {
    * conflates "the provider is busy" with "the work failed", and a `maxAttempts: 3` node then
    * dies of somebody else's traffic.
    *
-   * WHAT DEFERS IS A NAMED SET OF TWO — `DEFERRABLE_CODES`, which carries the argument for each
+   * WHAT DEFERS IS A NAMED SET — `DEFERRABLE_CODES`, which carries the argument for each
    * member and for the narrowness. An overload (`E_PROVIDER_OVERLOADED`) is a judgement about
    * capacity that may or may not be about us, and a transport reset says nothing at all: both
    * stay ordinary retries.

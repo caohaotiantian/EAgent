@@ -1,9 +1,10 @@
 /**
- * ANOTHER RUN'S DISK IS NOT AN ANSWER TO A QUESTION ABOUT THIS ONE — the five remaining sites.
+ * ANOTHER RUN'S DISK IS NOT AN ANSWER TO A QUESTION ABOUT THIS ONE — sites A through F.
  *
  * `engine-child-journal-does-not-fail-the-parent.test.ts` pins ONE cross-run child touch,
  * `#answerMirrorsTheChildAlreadyDecided`. Its residue named five more of the same shape, and this
- * file pins those five. At least one test each, and the rest are the costs and the controls that
+ * file pins those five — plus F, the SEVENTH, which the five-site lane named as residue and left
+ * unwrapped on scope. At least one test each, and the rest are the costs and the controls that
  * two review rounds asked to be paid rather than asserted — the guard's own printer on a hostile
  * payload, the method-vs-read decision, the bounded warning rate, a deterministic alarm's code
  * surviving the re-class, and the rewind door. Named rather than claimed total, and these are the
@@ -15,6 +16,10 @@
  *   C  `#forwardGateDecision`   READ   `childP = projection(childRunId)` — which gate to answer
  *   D  `#resolveGateAsSystem`   WRITE  answering that gate, in the CHILD's log
  *   E  `#endChildRun`           READ + WRITE  stopping a child the parent has rejected
+ *   F  `#runSubgraph`           DRIVE  `childP = advance(childRunId)` — the nested drive of the
+ *                                      child's own run, wrapped later than A–E and for the same
+ *                                      reason: a throw out of it was `internal`/`E_INTERNAL` on
+ *                                      the PARENT
  *
  * THE TWO EXPOSURES ARE DIFFERENT, and that is why the fix is not one behaviour.
  *
@@ -31,9 +36,10 @@
  *   irreversible effects.
  *
  * So A and E SWALLOW and warn — in both, the parent has already decided what it is doing and
- * reaching into the child is a courtesy — while B, C and D refuse as
- * `err.unavailable(E_SUBGRAPH_FAILED)`, the class `#runSubgraph` already uses one case earlier for
- * "the child has not finished". They cannot swallow: at B a read that failed would look like "no
+ * reaching into the child is a courtesy — while B, C, D and F refuse as
+ * `err.unavailable(E_CHILD_UNREACHABLE)`. The CLASS is the one `#runSubgraph` already uses one
+ * case earlier for "the child has not finished"; the CODE is no longer shared with it, which is
+ * what test G exists to pin. They cannot swallow: at B a read that failed would look like "no
  * child yet" and the parent would submit a SECOND child run over the first one's effects.
  *
  * THE FIXTURES BREAK THE STORE BY CAUSE WHERE THEY CAN AND BY COUNT WHERE THEY CANNOT, and where
@@ -41,10 +47,11 @@
  * reordering of the reads fails the test loudly instead of quietly measuring a different site.
  * That sentence was a false universal for two rounds — B and C broke the Nth read and then
  * asserted only outcomes any of the five fixes would satisfy, and C's title promised it named its
- * site while its body named nothing. It is true now because each of the three retryable sites
- * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B and C assert theirs: "could not read
- * the journal" is `#runSubgraph`'s probe, "could not be forwarded — reading the journal failed" is
- * `#forwardGateDecision`'s read, "answering gate … failed" is the WRITE. E asserts its own code,
+ * site while its body named nothing. It is true now because each of the FOUR retryable sites
+ * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B, C, D and F all assert theirs:
+ * "could not read the journal" is `#runSubgraph`'s probe, "could not be advanced" is its nested
+ * drive, "could not be forwarded — reading the journal failed" is `#forwardGateDecision`'s read,
+ * and "answering gate … failed" is the WRITE. E asserts its own code,
  * `LOOM_CHILD_STOP_FAILED`, which one method emits.
  *
  * EVERY SUCH FILTER IS BY RUN ID AS WELL AS BY CODE. `process.emitWarning` defers to the next
@@ -58,11 +65,10 @@
  *     read #1  `#runSubgraph`          (B)
  *     read #2  `#forwardGateDecision`  (C)
  *     reads #3..#6  the child's OWN advance, driven by `#runSubgraph`'s `advance(childRunId)` —
- *                   NOT wrapped, and the reason is SCOPE: it is not one of the five sites this
- *                   lane was authorised for, and wrapping a whole nested drive is a much wider
- *                   behaviour change. This paragraph said "because it would swallow a cancel" for
- *                   four rounds; that argument is measured and dead — see the cancel-race test.
- *                   This lane's recorded residue, on the honest reason.
+ *                   site F, NOW WRAPPED. It was residue of the five-site lane on scope, not on
+ *                   cancels: this paragraph said "because it would swallow a cancel" for four
+ *                   rounds, and that argument is measured and dead at D's cancel-race test and
+ *                   again at F's own.
  *     read #7  `#answerMirrorsTheChildAlreadyDecided` — already wrapped; warns and continues.
  *
  *   The pass that carries a REJECTION to a child whose gate was answered at another door:
@@ -123,9 +129,9 @@ async function warningsWhile(body: () => Promise<void>): Promise<{ code?: string
 // Shared with `engine-child-journal-does-not-fail-the-parent.test.ts`.
 //
 // WHAT ACTUALLY RE-ENTERS THE NODE IS THE DEFERRAL, NOT THE `retry` POLICY, and an earlier version
-// of this comment said the opposite. `E_SUBGRAPH_FAILED` is in `DEFERRABLE_CODES`, and
+// of this comment said the opposite. `E_CHILD_UNREACHABLE` is in `DEFERRABLE_CODES`, and
 // `#retryDecision` takes the deferral arm BEFORE it consults `NodeSpec.retry` at all, so the
-// refusal these three sites now raise is re-entered UNCHARGED on a 1 s curve inside a 900 s
+// refusal B, C, D and F now raise is re-entered UNCHARGED on a 1 s curve inside a 900 s
 // budget. Measured by this round's reviewer, who deleted the fixture's retry policy
 // (`maxAttempts: 1`) and got 7/7 anyway, with `deferrals 1 / deferredMs 1000` on the task record.
 // `compile.ts` floors a `subgraph` node with `DEFAULT_SUBGRAPH_RETRY` besides, so "a node with no
@@ -225,15 +231,20 @@ class BreakableChildStore extends MemoryStateStore {
 }
 
 /**
- * A clock the test moves by hand. `E_SUBGRAPH_FAILED` is a DEFERRABLE code, so the refusal these
- * three sites now raise takes the deferral arm of `#retryDecision` — which charges no attempt and
+ * A clock the test moves by hand. `E_CHILD_UNREACHABLE` is a DEFERRABLE code, so the refusal B, C,
+ * D and F now raise takes the deferral arm of `#retryDecision` — which charges no attempt and
  * schedules the task 1 s out. Under a frozen clock that task is never due again and the run sits
  * `running` forever, which measures the fixture, not the fix. Moved in fixed steps, never read
  * from the host clock: no assertion here depends on real time.
  */
 let clock = NOW;
 
-function gateRig(store: BreakableChildStore) {
+/**
+ * `chargeThrows` makes the CHILD's own work fail, which is the OTHER meaning the code used to
+ * share — "the child ended failed", read out of a projection the parent DID obtain. It exists so
+ * the two meanings can be measured on ONE graph rather than compared across two files.
+ */
+function gateRig(store: BreakableChildStore, chargeThrows = false) {
   clock = NOW;
   const tools = new ToolRegistry();
   const functions = new FunctionRegistry();
@@ -243,6 +254,7 @@ function gateRig(store: BreakableChildStore) {
     description: "Take money.",
     parameters: { type: "object", properties: { amount: { type: "number" } } },
     execute: (args: Record<string, unknown>) => {
+      if (chargeThrows) throw new Error("the card was declined");
       charges.push(Number(args["amount"]));
       return { content: "charged", writes: { receipt: { ok: true, amount: Number(args["amount"]) } } };
     },
@@ -342,9 +354,10 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
 
   // THE SITE IS ASSERTED, NOT ASSUMED. Breaking the Nth read is a positional fixture, and every
   // assertion below would also pass if the failure had landed at C, D or E — a reviewer measured
-  // exactly that gap in this test and in C's. Each of the three retryable sites gives
+  // exactly that gap in this test and in C's. Each of the four retryable sites gives
   // `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, so the warning is what says which one refused:
-  // "could not read the journal" is `#runSubgraph`'s and nobody else's.
+  // "could not read the journal" is `#runSubgraph`'s probe and nobody else's — in particular it is
+  // not the nested drive one site later, which says "could not be advanced" (test F).
   const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
   assert.equal(mine.length, 1, `one refused read, one warning: ${JSON.stringify(seen.map((w) => w.message))}`);
   assert.match(mine[0]!.message, /could not read the journal/, `and it is #runSubgraph's own probe: ${mine[0]!.message}`);
@@ -393,7 +406,7 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
 
   // IT ENDS. A retryable class is not a licence to spin: the deferral budget is spent, the
   // charged retries follow, and the run reaches a terminal state on its own.
-  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the run terminates rather than deferring forever, and says what it could not reach: ${outcome}`);
+  assert.equal(outcome, "failed:E_CHILD_UNREACHABLE", `the run terminates rather than deferring forever, and says what it could not reach: ${outcome}`);
   assert.ok(passes < 60, `it did not need the loop's own ceiling to stop: ${passes} passes`);
 
   // AND IT IS BOUNDED IN VOLUME, one line per refusal — an absolute bound with room, never a
@@ -410,7 +423,7 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
 
 test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.cause`", async () => {
   // THE COST OF RE-CLASSING, PAID RATHER THAN HIDDEN. Making the delegation retryable means
-  // answering `E_SUBGRAPH_FAILED` whatever the child's store raised — and `projection` does not
+  // answering `E_CHILD_UNREACHABLE` whatever the child's store raised — and `projection` does not
   // only raise disk errors. It raises `E_TRACE_INCONSISTENT`, a real invariant-2 alarm, which is
   // DETERMINISTIC: deferring it re-reads the same broken journal every pass. A reviewer measured
   // that arriving at the parent with its code nowhere at all, so the code now travels in
@@ -454,7 +467,7 @@ test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.c
     clock += 60_000;
   }
 
-  assert.equal(outcome, "failed:E_SUBGRAPH_FAILED", `the parent's own verb still answers: ${outcome}`);
+  assert.equal(outcome, "failed:E_CHILD_UNREACHABLE", `the parent's own verb still answers: ${outcome}`);
   const details = p!.error?.details as { cause?: unknown; error?: unknown } | undefined;
   assert.equal(details?.cause, "E_TRACE_INCONSISTENT", `the alarm's own code survives the re-class: ${JSON.stringify(details)}`);
   assert.match(String(details?.error), /inconsistent at seq 4/, "and so does its message");
@@ -504,6 +517,352 @@ test("B · A HOSTILE REJECTION does not defeat the guard that catches it — `in
   //   here       (`loomCodeOf`)         running                   — deferred, and it will retry
   assert.notEqual(outcome, "failed:E_INTERNAL", `a hostile rejection must not defeat the guard that catches it: ${outcome}`);
   assert.ok(!outcome.startsWith("threw"), `and it must not escape the verb either: ${outcome}`);
+});
+
+test("F · `#runSubgraph`'s NESTED `advance(childRunId)` refuses retryably — the seventh touch, and the last unwrapped one", async () => {
+  // THE SITE THIS FILE'S HEADER USED TO NAME AS RESIDUE. Reads #3..#6 of the resume pass are the
+  // CHILD's own drive, reached through `#runSubgraph`'s `const childP = await this.advance(...)`.
+  // Measured at `d1b42ae`, one-shot failure at each read of that pass:
+  //
+  //     failReadAt=1  succeeded          (B, already wrapped)
+  //     failReadAt=2  succeeded          (C, already wrapped)
+  //     failReadAt=3  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=4  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=5  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=6  failed:E_INTERNAL/internal   charges=[]
+  //     failReadAt=7  succeeded          (the already-wrapped mirror read)
+  //
+  // `internal` is not retryable, so one transient read of ANOTHER RUN's disk was a permanent
+  // verdict on this one — and on a parent that had already run irreversible work, a compensation
+  // cascade over it.
+  const r = gateRig(new BreakableChildStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+
+  // The human answers in the CHILD's own console, so the parent's next pass really drives the
+  // child rather than parking on the mirror again.
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.reads = 0;
+  r.store.failReadAt = 3;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  const p = settled;
+  assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE SITE IS ASSERTED, NOT ASSUMED, the way B and C had to learn to. Breaking the third read is
+  // positional; the sentence is what says WHICH touch refused — "could not be advanced" is this
+  // call's and nobody else's, and it is not "could not read the journal" (B's probe).
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused drive, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not be advanced/, `the nested drive, not the start-or-resume probe: ${mine[0]!.message}`);
+
+  assert.notEqual(p.status, "failed", `the parent must survive a transient child read: ${p.status}/${p.error?.code ?? ""} ${p.error?.message ?? ""}`);
+  assert.equal(p.status, "succeeded", "and the delegation completes when the store comes back");
+  assert.deepEqual(r.charges, [20], "the child's charge ran exactly once — a re-entry is not a second child run");
+  assert.deepEqual(p.outputs, { result: { ok: true, amount: 20 } });
+});
+
+test("F · THE ORDINARY HALF — a healthy child still completes, and nothing is said out loud", async () => {
+  // THE HALF A BUILDER'S OWN GREEN SUITE SKIPS. A wrap that converted EVERY nested drive into a
+  // refusal would still pass the test above once the store came back; what separates it from a
+  // correct one is that an UNBROKEN store produces no refusal at all.
+  const r = gateRig(new BreakableChildStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(settled.status, "succeeded", `nothing was broken, so nothing is deferred: ${settled.error?.message ?? ""}`);
+  assert.deepEqual(r.charges, [20], "one delegation, one charge");
+  assert.deepEqual(settled.outputs, { result: { ok: true, amount: 20 } });
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a healthy child is not warned about: ${JSON.stringify(mine.map((w) => w.message))}`);
+});
+
+test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the run", async () => {
+  // THE FALSE CLAIM THE ROW NAMES, DRIVEN AT THIS SITE. The argument for leaving this call
+  // unwrapped was "it would swallow a cancel"; `d1b42ae`'s own comment at the D site says that
+  // argument is measured and dead, but it was measured at D, not here. So it is measured here:
+  // `cancel` aborts OUTSIDE the per-run drive lock, so the signal really can flip inside this
+  // catch, and the answer is that the re-class cannot matter — `cancel` decides the run's status
+  // by journaling `run.cancelled`, so a task deferred during a cancelled run defers into a run
+  // that is already over.
+  //
+  // IT IS RED AT `d1b42ae`, and an earlier draft of this paragraph claimed the opposite. That was
+  // true while the test asserted only "the run ends cancelled" — a property the base commit also
+  // has — and stopped being true when the site assertion below was added, because "could not be
+  // advanced" is a sentence the base commit never emits:
+  //
+  //     AssertionError: one refused drive, one warning: []   0 !== 1
+  //
+  // So it is a SECOND pin on the wrap as well as the ordinary half — the control that says the
+  // wrap did not buy its retryability by losing an operator's stop.
+  let engineRef: Engine | undefined;
+  let parentRef: RunId | undefined;
+  // TWO FIXTURE BUGS PAID FOR THIS SHAPE, and both made the test measure something else.
+  //
+  // (a) IT COUNTED THE READS ITSELF. `this.reads++` here PLUS the base class's own increment
+  //     advanced the counter by two per real read, so `failReadAt = 3` fired on read TWO and this
+  //     test silently re-measured site C — the forward's read, which the file already pins. A
+  //     reviewer caught it. There is one counter now, the base class's.
+  // (b) IT CANCELLED BEFORE THE ONE-SHOT CLEARED. `cancel` walks the tree and READS THE CHILD, so
+  //     an injection that fires on `reads + 1` re-arms itself inside its own cancel — measured as
+  //     a hang, not a failure. Letting the base class count, clear and throw FIRST leaves the
+  //     fixture disarmed by the time `cancel` runs.
+  //
+  // What is left is the race the argument was actually about: the child's drive has thrown, the
+  // operator's cancel lands, and the parent's `catch` has not run yet.
+  class CancelRacingStore extends BreakableChildStore {
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (!isChild(runId) || this.failReadAt !== this.reads + 1) {
+        yield* super.read(runId, fromSeq, toSeq);
+        return;
+      }
+      try {
+        yield* super.read(runId, fromSeq, toSeq);
+      } catch (thrown) {
+        await engineRef!.cancel(parentRef!, "the operator stopped it mid-delegation");
+        throw thrown;
+      }
+    }
+  }
+  const r = gateRig(new CancelRacingStore({ now: () => clock }));
+  const { runId, childRunId } = await parked(r);
+  engineRef = r.engine;
+  parentRef = runId;
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  r.store.reads = 0;
+  r.store.failReadAt = 3;
+
+  let outcome = "";
+  const seen = await warningsWhile(async () => {
+    outcome = await outcomeOf(async () => settle(r.engine, runId));
+  });
+  assert.equal(r.store.failReadAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE SITE IS ASSERTED, which this test did not do while its counter was broken — and that is
+  // how it re-measured C for a round without saying so. "could not be advanced" is F's sentence.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.equal(mine.length, 1, `one refused drive, one warning: ${JSON.stringify(mine.map((w) => w.message))}`);
+  assert.match(mine[0]!.message, /could not be advanced/, `the cancel really did race the NESTED DRIVE: ${mine[0]!.message}`);
+
+  assert.notEqual(outcome, "running", `a cancelled run does not keep deferring: ${outcome}`);
+  const p = (await r.engine.projection(runId))!;
+  assert.equal(p.status, "cancelled", `the operator's cancel is what decided this run: ${p.status}`);
+  assert.deepEqual(r.charges, [], "and nothing was charged");
+});
+
+test("F · A RUN-FATAL CODE OUT OF THE CHILD'S DRIVE IS NOT RE-CLASSED — the wrap is not a way around `RUN_FATAL_CODES`", async () => {
+  // THE FINDING THAT MADE THIS WRAP A LOOSENING BEFORE IT WAS GUARDED. `advance` is not one store
+  // read: `#advanceSerially` runs `#assertBound` and `#rehydrateGraph` before the drive loop and
+  // nothing between them catches, and `#rehydrateGraph` raises `E_REPLAY_DIVERGENCE` — a
+  // `RUN_FATAL_CODES` member — when a child's recorded mutation chain does not reproduce its
+  // recorded graph hash. Unguarded, the parent re-classed it as `E_CHILD_UNREACHABLE`: retryable,
+  // deferrable, and NOT run-fatal, so an `error` edge could route around it and the run could
+  // report `succeeded` on a rescue arm's value. That is the exact shape `RUN_FATAL_CODES` exists
+  // to prevent.
+  //
+  // WHAT IS UNDER TEST IS THE GUARD, not the raiser. The fixture throws the code from the child's
+  // store rather than desynchronising a real mutation chain, so this test says "a run-fatal code
+  // survives this catch" and says nothing about how one gets there. That a real raiser exists is
+  // read off `#rehydrateGraph`'s own `throw`, not measured — stated plainly here because the call
+  // site's paragraph cites an injection for it too, and two injections are not a reachability
+  // proof.
+  //
+  // ITS OWN ONE-SHOT FIELD, and it counts the read it swallows. Sharing `failReadAt` with the base
+  // class would arm both, and incrementing `reads` before `yield* super.read` would count every
+  // real read twice — the fixture bug the cancel test above documents, which cost a scan of eight
+  // positions to find.
+  class Divergent extends BreakableChildStore {
+    divergeAt: number | undefined;
+    override async *read(runId: RunId, fromSeq: Seq, toSeq?: Seq): AsyncIterable<JournalEvent> {
+      if (isChild(runId) && this.divergeAt === this.reads + 1) {
+        this.divergeAt = undefined;
+        this.reads++;
+        // A REAL `LoomError`, so `loomCodeOf`'s `isLoomError` proves provenance rather than
+        // shape — the same reason the deterministic-alarm fixture builds one.
+        throw err.internal(CODES.E_REPLAY_DIVERGENCE, "recorded graph sha256:a but replaying its mutations produced sha256:b");
+      }
+      yield* super.read(runId, fromSeq, toSeq);
+    }
+  }
+  // The Divergent instance is held with its own type, because `gateRig` returns the base type and
+  // `divergeAt` is this fixture's field.
+  const store = new Divergent({ now: () => clock });
+  const r = gateRig(store);
+  const { runId, childRunId } = await parked(r);
+  const childP = (await r.engine.projection(childRunId))!;
+  await r.engine.resolveGate(childRunId, {
+    gateId: openGate(childP)!.gateId,
+    decision: { kind: "approve" },
+    actor: { kind: "human", subject: LEAD, via: "console" },
+    idempotencyKey: "child-own",
+  });
+
+  // READ 3 IS INSIDE THE NESTED DRIVE, the same position the F pin breaks. Scanned rather than
+  // assumed: with a single counter, 3, 4, 5 and 6 all deliver the throw to `#runSubgraph`'s catch
+  // and 1, 2 and 7 do not — which matches the reviewer's own "one-shot at child reads 3-6".
+  store.reads = 0;
+  store.divergeAt = 3;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await settle(r.engine, runId);
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(store.divergeAt, undefined, "the fixture's one-shot failure really did fire");
+
+  // THE CODE SURVIVES, and with it the routing decision that hangs off it. Without the guard this
+  // is `succeeded` — measured, and the whole reason the arm exists.
+  assert.equal(settled.status, "failed", `a run-fatal child failure still ends the parent: ${settled.status}`);
+  assert.equal(settled.error?.code, CODES.E_REPLAY_DIVERGENCE, `and keeps its own code rather than becoming a storage complaint: ${settled.error?.code ?? ""}`);
+  assert.deepEqual(r.charges, [], "nothing was charged");
+
+  // AND IT IS NOT WARNED ABOUT AS AN UNREACHABLE CHILD, because it was never re-classed as one.
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a run-fatal code does not travel as a deferred delegation: ${JSON.stringify(mine.map((w) => w.message))}`);
+});
+
+test("D · THE GATE WRITE IS A NESTED DRIVE TOO — a run-fatal code is not re-classed there either", async () => {
+  // THE SITE THE PREVIOUS ROUND ASSERTED WAS SAFE. The guard went in at F with a comment saying
+  // "the other three reach a single journal read or a single gate write rather than a whole nested
+  // run drive". A reviewer measured that false at D: `#resolveGateAsSystem` ENDS IN
+  // `this.advance(childRunId)`, so this `try` spans a child drive — `#rehydrateGraph` included —
+  // and the message "answering gate … failed" hides it. Unguarded, a `RUN_FATAL_CODES` member out
+  // of that drive was deferred and the parent ended `succeeded`.
+  //
+  // The hole is OLDER than this change — `5fe7614` wrapped this site and `d1b42ae` descends from
+  // it — so this test is red at the base commit for a defect the base commit already had. It is
+  // pinned here rather than left as residue because the fix is the same one line as F's.
+  class DivergentOnWrite extends BreakableChildStore {
+    divergeAtAppend: number | undefined;
+    override async append(input: AppendInput): Promise<AppendResult> {
+      if (isChild(input.runId) && this.divergeAtAppend === this.appends + 1) {
+        this.divergeAtAppend = undefined;
+        this.appends++;
+        throw err.internal(CODES.E_REPLAY_DIVERGENCE, "recorded graph sha256:a but replaying its mutations produced sha256:b");
+      }
+      return super.append(input);
+    }
+  }
+  const store = new DivergentOnWrite({ now: () => clock });
+  const r = gateRig(store);
+  const { runId, childRunId } = await parked(r);
+  const mirror = openGate((await r.engine.projection(runId))!)!;
+
+  // The first append to the CHILD during the forwarding pass is `#resolveGateAsSystem`'s, which is
+  // the call that goes on to drive the child — the same position D's own test breaks.
+  store.appends = 0;
+  store.divergeAtAppend = 1;
+
+  let settled: RunProjection | undefined;
+  const seen = await warningsWhile(async () => {
+    settled = await outcomeOf(async () => r.engine.resolveGate(runId, {
+      gateId: mirror.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: LEAD, via: "console" },
+      idempotencyKey: "mirror",
+    })).then(async () => settle(r.engine, runId));
+  });
+  assert.ok(settled !== undefined, "the drive returned a projection");
+  assert.equal(store.divergeAtAppend, undefined, "the fixture's one-shot failure really did fire");
+
+  assert.equal(settled.status, "failed", `a run-fatal failure out of the gate write's drive still ends the parent: ${settled.status}`);
+  assert.equal(settled.error?.code, CODES.E_REPLAY_DIVERGENCE, `and keeps its own code: ${settled.error?.code ?? ""}`);
+  assert.deepEqual(r.charges, [], "nothing was charged");
+  const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
+  assert.deepEqual(mine, [], `a run-fatal code does not travel as a deferred delegation: ${JSON.stringify(mine.map((w) => w.message))}`);
+});
+
+test("G · THE TWO MEANINGS ARRIVE UNDER TWO CODES — an unreachable child is not a failed one", async () => {
+  // WHAT THE SPLIT BOUGHT, measured on ONE graph rather than argued across two files. Wrapping the
+  // cross-run touches put four raises meaning "another run's STORAGE is broken" on the code that
+  // already meant "another run's WORK went badly", and `RetryPolicy.onlyIf` and `EdgeSpec.codes`
+  // take codes and nothing else — so while they shared a name, no graph could say "retry a child
+  // I cannot reach, but not one that failed", and no operator filtering a journal could tell them
+  // apart. At `05b495b` both halves below answer `failed:E_SUBGRAPH_FAILED`.
+  //
+  // THE POLL ARM KEEPS ITS NAME, which is the compatibility half of the choice: "has not
+  // finished", "ended failed" and "awaiting a gate it does not have" are all read out of a
+  // projection the parent DID obtain, and the first fires on every healthy busy delegation, so an
+  // existing `onlyIf: ["E_SUBGRAPH_FAILED"]` still matches what it was written for. The other two
+  // of those three arms are pinned in `subgraph.test.ts`; this test pins the one that moved and
+  // the one it is most easily confused with.
+
+  // (a) The child's STORAGE is unreachable, permanently.
+  const unreachable = gateRig(new BreakableChildStore({ now: () => clock }));
+  {
+    const { runId, childRunId } = await parked(unreachable);
+    const childP = (await unreachable.engine.projection(childRunId))!;
+    await unreachable.engine.resolveGate(childRunId, {
+      gateId: openGate(childP)!.gateId,
+      decision: { kind: "approve" },
+      actor: { kind: "human", subject: LEAD, via: "console" },
+      idempotencyKey: "child-own",
+    });
+    unreachable.store.failEveryChildRead = true;
+    let p: RunProjection | undefined;
+    for (let i = 0; i < 60; i++) {
+      p = await unreachable.engine.advance(runId);
+      if (p.status === "succeeded" || p.status === "failed") break;
+      clock += 60_000;
+    }
+    assert.equal(p!.status, "failed");
+    assert.equal(p!.error?.code, CODES.E_CHILD_UNREACHABLE, `a broken foreign store is not a failed delegation: ${p!.error?.code ?? ""}`);
+    assert.equal((p!.error?.details as { childRunId?: unknown } | undefined)?.childRunId, String(childRunId), "and it names which child");
+  }
+
+  // (b) The child's WORK fails, on a store that never breaks. Same graph, same parent, same node.
+  const declined = gateRig(new BreakableChildStore({ now: () => clock }), true);
+  {
+    const { runId } = await parked(declined);
+    const p = await settle(declined.engine, runId);
+    assert.equal(p.status, "failed");
+    assert.equal(p.error?.code, CODES.E_SUBGRAPH_FAILED, `a child that ran and failed keeps the old code: ${p.error?.code ?? ""}`);
+    assert.match(p.error?.message ?? "", /ended failed/, `and still says so: ${p.error?.message ?? ""}`);
+    assert.deepEqual(declined.charges, [], "the card was declined, so nothing was charged");
+  }
+
+  // AND A GRAPH CAN NOW SAY IT. `graph/validate.ts` refuses an `onlyIf` naming a code no error
+  // carries, deriving the closed set from `CODES` itself — so the new member is accepted and a
+  // typo of it is still refused. This is the surface the split exists for.
+  const withOnlyIf = (codes: readonly string[]): GraphSpec =>
+    ({
+      ...gateParent,
+      nodes: [{ ...(gateParent.nodes[0] as unknown as Record<string, unknown>), retry: { maxAttempts: 3, backoff: "fixed", initialMs: 0, jitter: false, onlyIf: codes } }],
+    }) as unknown as GraphSpec;
+  compileOrThrow({ spec: withOnlyIf([CODES.E_CHILD_UNREACHABLE]), resolver: gateResolver, tools: GATE_TOOLS, tenantCapabilities: ["pay"] });
+  assert.throws(
+    () => compileOrThrow({ spec: withOnlyIf(["E_CHILD_UNREACHABEL"]), resolver: gateResolver, tools: GATE_TOOLS, tenantCapabilities: ["pay"] }),
+    /GRAPH003_UNKNOWN_ERROR_CODE/,
+    "a typo of the new code is still refused, so the acceptance above is not a wildcard",
+  );
 });
 
 test("C · `#forwardGateDecision`'s READ refuses retryably, and names its own site", async () => {
