@@ -7320,8 +7320,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // NO SPEC, NO SCORE — AND THAT IS A REFUSAL, NOT A ZERO. `extractSignals` reads the
         // assertion, rubric and agent nodes out of `spec.nodes`, so a fold with no graph reports
         // `signals: []`, and `signals: []` is precisely what a run that failed every assertion
-        // reports. Driven live on one review-bench run, same run and same command twice
-        // (`docs/evolution-loop-2026-08-27.md` §4): with the graph absent from graphs/,
+        // reports. Driven live against a provider on 2026-08-27, on one review-bench run, same run and
+        // same command twice: with the graph absent from graphs/,
         // `"signals": []`, outcome 0, score 0.111; with it present, `S1 "6/6 assertions passed"`,
         // outcome 1, score 0.700. A CANDIDATE graph is published in candidates/, so it never
         // resolved and every candidate cohort read as worthless until somebody noticed.

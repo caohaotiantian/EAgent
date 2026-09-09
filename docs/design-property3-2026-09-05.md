@@ -233,6 +233,21 @@ workspace size, not cohort size.
   defect itself, and the natural second step. It changes `EvalCase.expect`'s meaning and would make
   `runCase` start runs, which is why it is not here.
 
+
+### 5.1 · Two rules carried over from the 2026-08-27 live loop
+
+Folded here on 2026-09-09 from the deleted 2026-08-27 evolution-loop note; the rest of it is in
+`DESIGN.md` item 5 and in the docstrings of `evolution/score.ts`, `evolution/trajectory.ts` and
+`run/engine.ts`. **Golden counts do not compare across cohorts:** `isGolden` condition 2 is a
+WITHIN-cohort top decile, so roughly a tenth of ANY cohort qualifies and two cohorts reading back
+`golden 4` each is arithmetic, not a tie — compare by mean score and by ground truth instead.
+**And the freeze rule has a mirror:** D6 freezes the exam so it cannot be written for a known
+student; the reverse failure is a student tuned against a known exam. The 2026-08-27 prompt
+candidate was committed before it was ever run and not iterated afterwards, which is the only
+guard there is — the live door refuses to let an operator pick the INPUTS (`--against-cohort` takes
+a cohort, `--runs` says how many and never which), but nothing mechanical stops a human picking the
+CANDIDATE to match the corpus.
+
 ---
 
 ## 6 · Acceptance exam

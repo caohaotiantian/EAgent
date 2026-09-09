@@ -12917,8 +12917,9 @@ function exceededDimension(e: LoomError): { readonly dimension?: "costUsd" | "to
  * this file, while a second constant of the same name in `providers/http.ts` holds 4,096 and is
  * what actually goes in the body. The engine never sets `ModelRequest.maxTokens`, so the `??` arm
  * was the only arm ever taken and the reservation under-described its own request by 4× at the
- * shipped default and by 31× against the 32,000-token row in
- * `docs/evolution-loop-2026-08-27.md`. `budget.tokens` therefore did not bind what it said.
+ * shipped default, and by 31× against the 32,000-token output ceiling of the reasoning model that
+ * drove the 2026-08-27 live `review-bench` corpus. `budget.tokens` therefore did not bind what it
+ * said.
  *
  * THE ADAPTER IS ASKED BECAUSE ONLY THE ADAPTER KNOWS. `defaultMaxTokens` is per-row because
  * endpoints differ, and under the CLI the registered adapter is a `RoutingAdapter` that resolves

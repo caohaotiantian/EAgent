@@ -260,7 +260,7 @@ test("NO SPEC, NO SCORE — an unresolvable graph is REFUSED and journals nothin
     // The third folded-without-its-graph defect in one session, and the shape it shipped in: a
     // run of a graph the workspace cannot resolve folded with no node types, found no evaluator
     // nodes, and reported `signals: []` -> outcome 0 -> a score. Driven live on review-bench,
-    // same run and same command twice (docs/evolution-loop-2026-08-27.md §4): graph absent,
+    // same run and same command twice, against a provider on 2026-08-27: graph absent,
     // score 0.111; graph present, `S1 6/6 assertions passed`, score 0.700. A candidate graph
     // lives in candidates/, so every candidate cohort read as worthless and nothing said why.
     const loose = join(w.dir, "candidate.json");
