@@ -1,0 +1,45 @@
+TAP version 13
+# Subtest: api/server.test.ts
+    # Subtest: serves the health endpoint
+    not ok 1 - serves the health endpoint
+      ---
+      duration_ms: 12.004
+      location: 'api/server.test.ts:22:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        listen EADDRINUSE: address already in use 127.0.0.1:8787
+
+      code: 'EADDRINUSE'
+      name: 'Error'
+      ...
+    # Subtest: rejects an unknown route
+    not ok 2 - rejects an unknown route
+      ---
+      duration_ms: 8.550
+      location: 'api/server.test.ts:35:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        listen EADDRINUSE: address already in use 127.0.0.1:8787
+
+      code: 'EADDRINUSE'
+      name: 'Error'
+      ...
+    1..2
+not ok 1 - api/server.test.ts
+# Subtest: api/session.test.ts
+    # Subtest: refreshes an expiring token
+    not ok 1 - refreshes an expiring token
+      ---
+      duration_ms: 4.201
+      location: 'api/session.test.ts:51:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        TypeError: Cannot read properties of undefined (reading 'expiresAt')
+
+      code: 'ERR_TEST_FAILURE'
+      name: 'TypeError'
+      ...
+    1..1
+not ok 2 - api/session.test.ts
+1..2
+# fail 3

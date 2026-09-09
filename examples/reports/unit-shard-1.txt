@@ -1,0 +1,48 @@
+TAP version 13
+# Subtest: cart/totals.test.ts
+    # Subtest: applies a percentage discount
+    not ok 1 - applies a percentage discount
+      ---
+      duration_ms: 3.114
+      location: 'cart/totals.test.ts:41:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+
+        1710 !== 1700
+
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      operator: 'strictEqual'
+      ...
+    # Subtest: rounds half to even
+    not ok 2 - rounds half to even
+      ---
+      duration_ms: 1.902
+      location: 'cart/totals.test.ts:58:3'
+      failureType: 'testCodeFailure'
+      error: |-
+        Expected values to be strictly equal:
+
+        '2.50' !== '2.5'
+
+      code: 'ERR_ASSERTION'
+      name: 'AssertionError'
+      operator: 'strictEqual'
+      ...
+    1..2
+not ok 1 - cart/totals.test.ts
+# Subtest: cart/coupon.test.ts
+    # Subtest: rejects an expired coupon
+    not ok 1 - rejects an expired coupon
+      ---
+      duration_ms: 60001.442
+      location: 'cart/coupon.test.ts:12:3'
+      failureType: 'testTimeoutFailure'
+      error: 'test timed out after 60000ms'
+      code: 'ERR_TEST_FAILURE'
+      ...
+    1..1
+not ok 2 - cart/coupon.test.ts
+1..2
+# fail 3

@@ -1,0 +1,99 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "triage-failures",
+    "project": "examples",
+    "version": 1,
+    "description": "Triage a directory of failing test-runner output into ranked root-cause buckets, and ask a human before writing the report."
+  },
+  "policy": {
+    "posture": "on",
+    "capabilities": ["fs:read", "fs:write"],
+    "expansion": { "maxNodes": 32, "maxDepth": 1, "maxFanout": 8, "maxLoopIterations": 1 }
+  },
+  "channels": {
+    "pattern": { "type": "string", "reduce": "replace" },
+    "found": { "type": "string", "reduce": "replace" },
+    "shards": { "type": "array", "reduce": "replace" },
+    "shard": { "type": "string", "reduce": "replace" },
+    "raw": { "type": "array", "reduce": "append_ordered" },
+    "failures": { "type": "array", "reduce": "append_ordered" },
+    "report": { "type": "object", "reduce": "replace" },
+    "summary": { "type": "string", "reduce": "replace" },
+    "written": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["pattern"],
+  "outputs": ["report", "written"],
+  "nodes": [
+    {
+      "id": "scan",
+      "type": "tool",
+      "reads": ["pattern"],
+      "writes": ["found"],
+      "tool": { "name": "fs.glob", "version": "1.0", "args": { "pattern": "${pattern}" } }
+    },
+    {
+      "id": "plan",
+      "type": "function",
+      "reads": ["found"],
+      "writes": ["shards"],
+      "function": { "ref": "function/triage-plan@stable" }
+    },
+    {
+      "id": "read",
+      "type": "tool",
+      "reads": ["shard"],
+      "writes": ["raw"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${shard}" } }
+    },
+    {
+      "id": "classify",
+      "type": "function",
+      "reads": ["shard", "raw"],
+      "writes": ["failures"],
+      "function": { "ref": "function/triage-classify@stable" }
+    },
+    {
+      "id": "gather",
+      "type": "join",
+      "reads": ["failures"],
+      "writes": ["failures"],
+      "join": { "branches": ["read", "classify"], "mode": "all", "onBranchError": "fail" }
+    },
+    {
+      "id": "collate",
+      "type": "function",
+      "reads": ["failures"],
+      "writes": ["report", "summary"],
+      "function": { "ref": "function/triage-collate@stable" }
+    },
+    {
+      "id": "approve",
+      "type": "human_gate",
+      "reads": ["report"],
+      "writes": [],
+      "humanGate": {
+        "ref": "oversight/triage@stable",
+        "approval": { "approvers": ["u:you"] }
+      }
+    },
+    {
+      "id": "write",
+      "type": "tool",
+      "reads": ["summary"],
+      "writes": ["written"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/triage.md", "body": "${summary}" } }
+    }
+  ],
+  "edges": [
+    { "id": "listed", "from": "scan", "to": "plan", "kind": "seq" },
+    { "id": "fan", "from": "plan", "to": "read", "kind": "fanout", "over": "shards", "as": "shard", "maxWidth": 8 },
+    { "id": "sort", "from": "read", "to": "classify", "kind": "seq" },
+    { "id": "collect-read", "from": "read", "to": "gather", "kind": "join" },
+    { "id": "collect", "from": "classify", "to": "gather", "kind": "join" },
+    { "id": "fold", "from": "gather", "to": "collate", "kind": "seq" },
+    { "id": "gate", "from": "collate", "to": "approve", "kind": "seq" },
+    { "id": "ship", "from": "approve", "to": "write", "kind": "seq" }
+  ]
+}
