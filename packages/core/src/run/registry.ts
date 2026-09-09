@@ -126,7 +126,20 @@ function show(v: unknown): string {
  * dispatch path with the call in hand. What is checked is exactly `ToolManifestLite`: the fields
  * the COMPILER and the GATES read without ever seeing the implementation.
  */
-function checkManifest(t: ToolDefinition): void {
+/** The shape `snapshotFields` produces — every `ToolDefinition` data field, read once, plus `execute`. */
+interface ToolFieldSnapshot {
+  readonly name: string;
+  readonly version: string;
+  readonly capabilities: unknown;
+  readonly irreversibility: unknown;
+  readonly idempotent: unknown;
+  readonly compensation: unknown;
+  readonly description: string;
+  readonly parameters: JSONSchema;
+  readonly execute: ToolDefinition["execute"];
+}
+
+function checkManifest(t: ToolFieldSnapshot): void {
   const refuse = (why: string): never => {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
@@ -154,6 +167,90 @@ function checkManifest(t: ToolDefinition): void {
       refuse(`compensation must be { tool: <non-empty string> }, got ${show(c)}`);
     }
   }
+}
+
+/**
+ * Read every DATA field of `t` EXACTLY ONCE into a plain, still-mutable copy — `execute` kept by
+ * reference. Every field this registry cares about is read here and nowhere else; `checkManifest`
+ * and `freezeSnapshot` both operate on the RESULT of this function, never on `t` again.
+ *
+ * WHY A SEPARATE READ-ONCE PASS, RATHER THAN VALIDATING `t` AND FREEZING IT AFTERWARD. The first
+ * shape tried read `t.irreversibility` twice — once in `checkManifest`, once while building the
+ * frozen copy — which is the exact TOCTOU this exists to close, one field over: a getter that
+ * answers "read_only" on its first read (what the manifest check sees) and "nuclear" on every
+ * read after would pass validation and still end up snapshotted at "nuclear". The fix already
+ * applied to `name` — read exactly once, bind it, never touch `tool.name` again — generalizes to
+ * every field, not only the one that used to key the stack.
+ *
+ * COMPOUND FIELDS NEED THE SAME DISCIPLINE ONE LEVEL DOWN, and a first version of this function
+ * missed it: copying `capabilities: t.capabilities` carries the CALLER'S OWN ARRAY across —
+ * `checkManifest`'s `.some()` reads each element once to validate it, and building the frozen
+ * copy used to spread that same array again, a second read of every element. Measured: a
+ * `capabilities` array with an index-0 getter answering `"fs:write"` on the first read (what
+ * `checkManifest` sees) and `"fs:nuclear-smuggled"` on the second produced a STORED definition
+ * carrying the value nobody validated. `compensation.tool` has the identical shape. Both are
+ * copied into fresh plain containers HERE, in one pass each, before either `checkManifest` or
+ * `freezeSnapshot` looks at them again — a non-array `capabilities` or a non-object
+ * `compensation` is left exactly as `checkManifest` needs to see it, so an invalid manifest is
+ * still refused with the same message.
+ */
+function snapshotFields(t: ToolDefinition): ToolFieldSnapshot {
+  const capsRaw: unknown = t.capabilities;
+  const capabilities = Array.isArray(capsRaw) ? [...capsRaw] : capsRaw;
+
+  const compRaw: unknown = t.compensation;
+  const compensation =
+    compRaw !== null && typeof compRaw === "object" ? { tool: (compRaw as { tool?: unknown }).tool } : compRaw;
+
+  return {
+    name: t.name,
+    version: t.version,
+    capabilities,
+    irreversibility: t.irreversibility,
+    idempotent: t.idempotent,
+    compensation,
+    description: t.description,
+    parameters: t.parameters,
+    execute: t.execute,
+  };
+}
+
+/**
+ * Freeze a `snapshotFields` result into the `ToolDefinition` this registry hands out from here on.
+ *
+ * NO FIELD IS RE-READ FROM ITS ORIGINAL CONTAINER HERE. `capabilities` and `compensation` are
+ * already fresh, caller-independent containers built by `snapshotFields`'s single pass — this
+ * function only calls `Object.freeze` on what it was handed, never `[...s.capabilities]` or
+ * `compRaw.tool` again, which is precisely the second read that used to defeat the snapshot.
+ *
+ * `parameters` (a `JSONSchema`) is frozen one level deep too, for the same reason `capabilities`
+ * is: a JSON Schema object handed to the compiler is exactly the shape a hostile module could
+ * mutate post-registration to smuggle a different tool contract past a cached decision.
+ * `checkManifest` deliberately does not validate `parameters` (see its docstring), so this is
+ * this field's only read — no TOCTOU to close there, only the freeze. `Object.freeze` is
+ * shallow, so nested objects INSIDE `parameters` (a schema's own `properties`, say) are not
+ * frozen — closing that fully would need a recursive deep-freeze over arbitrary caller-supplied
+ * JSON, which is a larger change than this row asks for.
+ *
+ * Called only AFTER `checkManifest` has passed the same snapshot, so every field here is already
+ * known to be well-typed.
+ */
+function freezeSnapshot(s: ToolFieldSnapshot): ToolDefinition {
+  const capabilities = Object.freeze(s.capabilities as string[]);
+  const compRaw = s.compensation as { tool: string } | undefined;
+  const compensation = compRaw === undefined ? undefined : Object.freeze(compRaw);
+  const parameters = Object.freeze({ ...s.parameters }) as JSONSchema;
+  return Object.freeze({
+    name: s.name,
+    version: s.version,
+    capabilities,
+    irreversibility: s.irreversibility as IrreversibilityClass,
+    idempotent: s.idempotent as boolean,
+    ...(compensation === undefined ? {} : { compensation }),
+    description: s.description,
+    parameters,
+    execute: s.execute,
+  });
 }
 
 /**
@@ -258,6 +355,24 @@ export class ToolRegistry {
     if (this.#reserved.has(prefix)) {
       throw err.policy(CODES.E_NOT_AUTHORIZED, `the prefix "${prefix}" is already reserved on this registry`);
     }
+    // OVERLAP, NOT ONLY EXACT DUPLICATE. `startsWith` in EITHER direction: `prefix` extending an
+    // existing reservation (`"mcp__"` after `"mcp"`) would let names under it slip past the
+    // existing reservation's holder unnoticed, and an existing reservation extending `prefix`
+    // (`"mcp"` after `"mcp__"`) would make the LEGITIMATE `mcp__`-prefixed registrar's own
+    // registrations start failing at `#doRegister` — a fail-closed denial of service the attacker
+    // did not even need to win, only to file. Checked BEFORE the already-registered scan below so
+    // the operator sees "this prefix overlaps a reservation" rather than a name-level complaint
+    // that is really about the same conflict. The message names both prefixes only — never
+    // `claim.reservedFor`, which is attacker-controlled text belonging to whichever caller reserved
+    // first.
+    for (const existing of this.#reserved.keys()) {
+      if (existing.startsWith(prefix) || prefix.startsWith(existing)) {
+        throw err.policy(
+          CODES.E_NOT_AUTHORIZED,
+          `cannot reserve the prefix "${prefix}": it overlaps the already-reserved prefix "${existing}" on this registry`,
+        );
+      }
+    }
     for (const name of this.#stacks.keys()) {
       if (name.startsWith(prefix)) {
         throw err.policy(
@@ -272,21 +387,25 @@ export class ToolRegistry {
   }
 
   #doRegister(tool: ToolDefinition, owner: symbol | undefined): LoomDisposable {
+    // READ EVERY DATA FIELD EXACTLY ONCE, BEFORE ANYTHING ELSE, AND NEVER TOUCH `tool` AGAIN.
+    // `tool` is an ordinary object supplied by the caller, and nothing stops any of its fields
+    // from being a GETTER that answers differently on each read — measured, for `name` alone: a
+    // getter returning an innocuous name on odd reads and `mcp__docs__search` on the even read
+    // that used to key the stack registered the impersonation under a name the reservation loop,
+    // reading `tool.name` a THIRD time, never saw. The same TOCTOU generalizes to every other
+    // field — a getter answering "read_only" to `checkManifest` and "nuclear" to whatever built
+    // the stored definition would pass validation and still end up snapshotted at "nuclear". One
+    // read-once pass closes both: everything from here on — the manifest check, the reservation
+    // check, the stack key, the `dispose` closure's key, and the stored definition — reads
+    // `fields` and nothing else touches `tool` again.
+    const fields = snapshotFields(tool);
     // THE MANIFEST IS CHECKED BEFORE THE SEAL IS, because the two refusals answer different
     // questions and the author fixing one should not be told about the other first: "this
     // manifest is malformed" is true whatever the seal says, and it is the one they can act
     // on. Both throw, and neither mutates the stack — a refused registration leaves whatever
     // was already there as the live definition.
-    checkManifest(tool);
-    // READ EXACTLY ONCE, AFTER THE MANIFEST CHECK, AND USED FOR EVERYTHING BELOW. `tool.name` is
-    // an ordinary property of a caller-supplied object, and nothing stops a caller from making it
-    // a GETTER that returns one string to a check and a different one to whatever acts on the
-    // result — measured: a getter returning an innocuous name on odd reads and `mcp__docs__search`
-    // on the even read that used to key the stack registered the impersonation under a name the
-    // reservation loop, reading `tool.name` a THIRD time, never saw. Every decision this method
-    // makes from here on — the reservation check, the stack key, and the `dispose` closure's key —
-    // reads this one binding and nothing else touches `tool.name` again.
-    const name: string = tool.name;
+    checkManifest(fields);
+    const name: string = fields.name;
     // THE RESERVATION IS CHECKED AT THE DOOR ITSELF, not by a scan run once elsewhere — see the
     // class docstring's "RESERVED PREFIXES" paragraph for why a one-shot scan cannot catch a
     // registration made later, from a timer or any other path a caller controls.
@@ -312,8 +431,18 @@ export class ToolRegistry {
           `during a run.`,
       );
     }
+    // FREEZE THE SNAPSHOT TAKEN ABOVE — not `tool`, which is never read again past this point.
+    // `list()`, `manifests()` and every downstream reader of `.irreversibility` / `.capabilities`
+    // used to re-read the CALLER'S OWN object on every access, which is what let a getter answer
+    // one class at `checkManifest` time and a different one afterward. The definition this
+    // registry hands out from now on is a plain frozen object nothing outside this method holds a
+    // reference to, so nothing can mutate it after the fact. `execute` is kept BY REFERENCE — it
+    // must stay callable, and freezing a function does not touch what it closes over or does when
+    // called; freezing is only ever a defence against the DATA fields being reread with a
+    // different answer.
+    const frozen = freezeSnapshot(fields);
     const stack = this.#stacks.get(name) ?? [];
-    stack.push(tool);
+    stack.push(frozen);
     this.#stacks.set(name, stack);
     let disposed = false;
     return {
@@ -322,7 +451,10 @@ export class ToolRegistry {
         disposed = true;
         const s = this.#stacks.get(name);
         if (s === undefined) return;
-        const i = s.lastIndexOf(tool);
+        // BY IDENTITY OF THE FROZEN SNAPSHOT, not the caller's original object — that is what
+        // the stack actually holds now, for the same "restore exactly what this handle
+        // registered" reason `ModelRegistry.dispose` matches by adapter identity below.
+        const i = s.lastIndexOf(frozen);
         if (i >= 0) s.splice(i, 1);
         if (s.length === 0) this.#stacks.delete(name);
       },
