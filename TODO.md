@@ -62,7 +62,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | §H | 5 | 4 | 1 | housekeeping |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
-`docs/audit-2026-09-02.md` and the per-row survey is `docs/backlog-survey-2026-09-02.md`.
+`docs/audit-2026-09-02.md`.
 
 ---
 
@@ -766,6 +766,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | D.2 | `aaa4a9a` | no ninth span name |
 | D.4 | `50f7c03` | median gates, undefined pair unbounded |
 | D.6 | `86193e3` | wire refuses on `spec.inputs` |
+| D.14 | `d57c984` | retention tiering deleted — a run's journal is the corpus |
 | H.1 | — | `verify-binary.mjs` drives the artifact |
 | H.2 | `814e283` | fourteen broken citations repaired |
 | H.3 | `e8c2fb5` | four count-claims name their members |
