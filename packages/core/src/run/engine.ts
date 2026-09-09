@@ -817,7 +817,7 @@ function loomCodeOf(e: unknown): string | undefined {
  * id". Driven on the B fixture, dumping every parent event appended on the broken pass:
  *
  *   task.leased          {"attempt":3,"workerId":"worker-0"}
- *   task.retry_scheduled {"afterMs":1000,"attempt":2,"code":"E_SUBGRAPH_FAILED","deferred":true}
+ *   task.retry_scheduled {"afterMs":1000,"attempt":2,"code":"E_CHILD_UNREACHABLE","deferred":true}
  *   task.ready           {"branchPath":"root","edgesIn":[],"nodeId":"delegate"}
  *   task.committed count on that pass: 0        events naming the child or the cause: []
  *
@@ -830,15 +830,19 @@ function loomCodeOf(e: unknown): string | undefined {
  * ever writes the cause down.
  *
  * That is the same argument `#forwardToParentMirrorsQuietly` makes for its own warning — a
- * failure nobody can see is indistinguishable from one that did not happen — so all five
- * cross-run sites now say something out loud, and this one adds NO journal vocabulary to do it.
+ * failure nobody can see is indistinguishable from one that did not happen — so all SIX cross-run
+ * sites (`#planRollbackChild`, `#endChildRun` and the four here) say something out loud, and this
+ * one adds NO journal vocabulary to do it.
  *
  * THE RATE IS ONE PER REFUSAL AND IT IS BOUNDED, measured on a PERMANENTLY broken child store
  * rather than the one-shot the tests use:
  *
- *   outcome=failed/E_SUBGRAPH_FAILED  passes=20  simulatedMs=1140000
- *   warnings={"LOOM_CHILD_UNREACHABLE":20,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
- *   task attempt=3 deferrals=19 deferredMs=843000
+ *   outcome=failed/E_CHILD_UNREACHABLE  passes=20  simulatedMs=1140000
+ *   warnings={"LOOM_CHILD_UNREACHABLE":21,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
+ *   deferrals=19 deferredMs=843000
+ *
+ * Re-measured after the nested `advance(childRunId)` joined this function: twenty warnings became
+ * twenty-one, because a pass that gets past the probe now refuses at the drive instead of dying.
  *
  * Nineteen uncharged deferrals inside the 900 s budget, then the charged retries, then the run
  * ENDS — which is the fact worth having, because the sibling warning at
@@ -849,9 +853,9 @@ function loomCodeOf(e: unknown): string | undefined {
  *
  * WHAT ACTUALLY RESCUES THE RUN IS THE DEFERRAL ARM, NOT THE GRAPH'S `retry` — measured, because
  * the first version of this docstring said the opposite ("a node with no `retry` policy still
- * fails immediately") and both halves of that were false. `E_SUBGRAPH_FAILED` is in
+ * fails immediately") and both halves of that were false. `E_CHILD_UNREACHABLE` is in
  * `DEFERRABLE_CODES`, and `#retryDecision` takes the deferral BEFORE it consults the policy at
- * all — that ordering is the fix its own comment describes — so these three refusals are
+ * all — that ordering is the fix its own comment describes — so these four refusals are
  * re-entered UNCHARGED on a 1 s curve inside a 900 s budget, and only after that budget do they
  * reach `NodeSpec.retry`. A `subgraph` node cannot have no policy anyway: `compile.ts` floors it
  * with `DEFAULT_SUBGRAPH_RETRY`. Driven: this file's B fixture with `maxAttempts: 1` still
