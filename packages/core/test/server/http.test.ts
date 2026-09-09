@@ -4003,6 +4003,16 @@ test("truncate neutralises control characters, and leaves the visible length of 
   assert.equal(cleaned.includes("\r\n"), false, "no raw CRLF survives — cannot forge a second header line");
   assert.equal(cleaned.includes("RED"), true, "the surrounding text is untouched, only the control bytes are");
 
+  // SAME RANGE AS `graph/declared-inputs.ts`'s `clip` — which exists (a prior pass here wrongly
+  // said it did not: `git log -S'const clip'` and the file itself both settle it). `clip`'s own
+  // doc comment sanitises C0, DEL AND C1 (`\x7f`-`\x9f`) because "a terminal reads those too",
+  // and this function borrowed only its length bound until now — the same gap `clip` closed on
+  // its own side, left open on this one. The C1 range is exercised on its own so a fix that only
+  // widened the doc comment, and not the regex, would still be caught here.
+  const c1 = "a\x9bb"; // U+009B, CSI — the C1-range twin of the ESC+'[' pair above
+  assert.equal(/[\x00-\x1f\x7f-\x9f]/.test(truncate(c1)), false, "the C1 control range is sanitised too, matching clip");
+  assert.equal(truncate(c1), "a�b");
+
   // One replacement character per control byte, and the bound is applied AFTER sanitising, on
   // the sanitised string — so a hostile string that is already short by raw length is not
   // silently grown past 120 by the fix.

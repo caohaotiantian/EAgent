@@ -4801,27 +4801,37 @@ function header(req: IncomingMessage, name: string): string | undefined {
 }
 
 /**
- * A caller-supplied string on its way into a message. Bounded, because a header is not — AND
+ * A caller-supplied string on its way into a message. Bounded, because a header is not -- AND
  * SANITISED, because every call site here lands the result in a 4xx JSON body an operator's own
  * tooling may print to a terminal, and a control byte in that body can forge or hide what gets
- * shown there: `\x1b[` forges color and cursor movement, `\r`/`\n` forges a second log line, a
- * raw NUL truncates whatever reads it next.
+ * shown there: an ESC-bracket sequence forges color and cursor movement, CR/LF forges a second
+ * log line, a raw NUL truncates whatever reads it next.
+ *
+ * SAME RANGE AS `graph/declared-inputs.ts`'s `clip` -- which this function's own history once
+ * wrongly said did not exist. `clip`'s own doc comment already says this function's 120 is the
+ * bound it borrowed, and that borrowing only the length half (as this function did, until now)
+ * left two gaps where `clip` closed one of them. The DEL-through-C1 range is in the sweep for
+ * the same reason `clip` gives: a terminal reads that range too, not only C0. The two are kept
+ * as separate literals rather than one shared import because this file owns nothing in
+ * `graph/`; if `clip` is ever exported, this should call it instead of re-deriving its range.
  *
  * MEASURED, NOT ASSUMED: today's callers are all header values, and Node's default HTTP parser
- * refuses any header carrying a C0 control or DEL — `X-Test: a\x1bb` closes the connection with a
- * plain 400, before this function or anything upstream of it ever runs. That is why the sanitiser
- * is exercised directly here rather than through a live request: no request carrying the bytes
- * this guards against can reach it while the parser stays strict. It stops being true the moment
- * a deployment sets `insecureHTTPParser: true` — Node then hands those same bytes straight
- * through — or the moment a call site reads something other than a header value, so this is
- * defence for that day rather than for one that has already been ruled out.
+ * refuses any header carrying a C0 control or DEL -- a header value with a raw ESC byte in it
+ * closes the connection with a plain 400, before this function or anything upstream of it ever
+ * runs. That is why the sanitiser is exercised directly in the test rather than through a live
+ * request: no request carrying the bytes this guards against can reach it while the parser
+ * stays strict. It stops being true the moment a deployment sets `insecureHTTPParser: true` --
+ * Node then hands those same bytes straight through -- or the moment a call site reads
+ * something other than a header value, so this is defence for that day rather than for one
+ * that has already been ruled out.
  *
  * One replacement character per control byte, so the 120-character bound this function has
  * always kept is unchanged for the plain strings that are the overwhelming common case.
  */
 export function truncate(v: string): string {
-  // eslint-disable-next-line no-control-regex -- the C0 range plus DEL IS the thing being matched
-  const safe = /[\x00-\x1f\x7f]/.test(v) ? v.replace(/[\x00-\x1f\x7f]/g, "�") : v;
+  // eslint-disable-next-line no-control-regex -- the C0 range, DEL and the C1 range ARE the thing being matched
+  const CONTROL = /[\x00-\x1f\x7f-\x9f]/g;
+  const safe = CONTROL.test(v) ? v.replace(CONTROL, "\ufffd") : v;
   return safe.length <= 120 ? safe : `${safe.slice(0, 120)}…`;
 }
 
