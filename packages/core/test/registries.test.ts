@@ -179,7 +179,7 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
  * a promise instead of zero. Six to five was a DELETION and five to three is a BUILD; the row
  * count falls the same way for both and they are opposite facts, so the list says which.
  *
- * AND NOW THERE ARE TWO. `task.skipped` was the third row decided `wire`, and it is wired:
+ * AND NOW THERE IS ONE. `task.skipped` was the third row decided `wire`, and it is wired:
  * `Engine.#skippedByJoin` appends it from BOTH of `#commit`'s terminal-failure exits whenever a
  * downstream join declares `onBranchError: "skip"` and the failure is not one a join may absorb
  * (`NOT_ABSORBED_AS_SKIP`). Its four `blockedOn` paths were all four real: `run/engine.ts` gained
@@ -191,9 +191,10 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
  * `task.skipped-follows-a-failed-commit` in the same change, because the `todo` ratchet next door
  * was at its cap and would not let the rule be deferred.
  *
- * The two left cannot be settled from this package's registry files alone — each needs
- * `run/projection.ts` (kernel), `src/server/http.ts` or a suite owned elsewhere — so each carries
- * what it is waiting for, by path.
+ * `channel.written` then left by the OTHER door — deletion — and took its `run/projection.ts` arm
+ * and two `src/server/http.ts` docstring mentions with it. The one left cannot be settled from
+ * this package's registry files alone either: it is blocked on two SUITES, so it carries what it
+ * is waiting for, by path.
  *
  * `blockedOn` IS THE EXPIRY, and it works in the direction that actually decays. An excuse
  * dies when its own reason does: the moment the last file listed stops mentioning the type,
@@ -213,15 +214,6 @@ const NEVER_APPENDED: readonly {
   /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
   readonly blockedOn: readonly string[];
 }[] = [
-  {
-    type: "channel.written",
-    decision: "delete",
-    why:
-      "its only reader is a fold arm whose whole body is `Nothing to fold` — the authoritative value rides on " +
-      "`task.committed.writes`, and a per-channel audit row that nothing writes audits nothing. Deleting it means dropping that " +
-      "arm and two `server/http.ts` docstring mentions in the same change",
-    blockedOn: ["src/run/projection.ts", "src/server/http.ts"],
-  },
   {
     type: "task.started",
     decision: "delete",
@@ -504,8 +496,8 @@ test("NO EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () =>
   // a commit message rather than a string. `audit-coverage.test.ts` holds the same ratchet
   // over its `todo` excuses for the same reason.
   assert.ok(
-    NEVER_APPENDED.length <= 2,
-    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX, then FIVE, then THREE, and is TWO — ` +
+    NEVER_APPENDED.length <= 1,
+    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX, then FIVE, then THREE, then TWO, and is ONE — ` +
       `journal/events.ts is kernel, and a closed vocabulary that only ever grows is not one`,
   );
   assert.equal(

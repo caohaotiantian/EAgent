@@ -1058,11 +1058,6 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   }
 
   // ── state ─────────────────────────────────────────────────────────────────
-  if (isEvent(e, "channel.written")) {
-    // The authoritative value rides on task.committed's `writes`; this event is the
-    // per-channel audit trail. Nothing to fold.
-    return;
-  }
   if (isEvent(e, "state.reduced")) {
     p.channels = { ...p.channels, ...withHandles(e.payload.values, e.payload.external) };
     // The map tracks the CURRENT value of each channel, so a later inline write to a channel

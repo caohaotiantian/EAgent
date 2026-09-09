@@ -20,8 +20,8 @@
  * permanently inert. So the test for a row here is a WRITER, not a design — and a row that
  * loses its last writer is removed by the change that removed it, not excused.
  *
- * `config.reloaded` was removed under that rule (see the operator section). TWO members have
- * no appender and are pinned, decided, and blocked in `test/registries.test.ts`. It was five:
+ * `config.reloaded` was removed under that rule (see the operator section). ONE member has
+ * no appender and is pinned, decided, and blocked in `test/registries.test.ts`. It was five:
  * `budget.reserved` and `budget.settled` were the two decided WIRE, and they were wired — the
  * reservation `PolicyEngine` held in memory is now a durable fact, which is the non-negotiable
  * this union exists to serve. `task.skipped` was the third, and it is wired too:
@@ -30,8 +30,14 @@
  * `evolution/trajectory.ts` and `telemetry/spans.ts` all already read can finally be SET. Precisely
  * that, and not more: `#foldJoin`'s `skipped` disjunct is reachable now only where a node carries
  * BOTH a `skip` join edge and a `fail` one, so an ordinary `onBranchError: "fail"` join still
- * counts `failed` branches and nothing else. The two left are `channel.written` and `task.started`,
- * both decided DELETE; read the decisions there, not here, because that file is the one a test
+ * counts `failed` branches and nothing else.
+ *
+ * `channel.written` WAS THE FIRST OF THE TWO DELETIONS, and it is the shape this docstring's rule
+ * exists for. Its authoritative value always rode `task.committed.writes`; the per-channel row was
+ * a designed audit trail nobody ever wrote, and its cost was precisely the one named above — a
+ * fold arm in `run/projection.ts` whose whole body was `Nothing to fold`, which reads to anyone
+ * opening that file like proof something writes it. One left: `task.started`, also decided DELETE;
+ * read the decision in `test/registries.test.ts`, not here, because that file is the one a test
  * keeps honest.
  */
 
@@ -432,7 +438,6 @@ export interface EventPayloads {
      */
     readonly external?: Readonly<Record<string, PayloadRef>>;
   };
-  "channel.written": { readonly channel: string; readonly reducer: string; readonly valueDigest: string };
 
   // ── effects ──────────────────────────────────────────────────────────────
   /**
@@ -1193,7 +1198,7 @@ export const EVENT_TYPES = [
   "run.completed", "run.failed", "run.cancelled",
   "task.ready", "task.leased", "task.started", "task.progress", "task.committed",
   "task.failed", "task.skipped", "task.cancelled", "task.retry_scheduled", "action.pending", "fanout.planned",
-  "state.reduced", "channel.written",
+  "state.reduced",
   "effect.started", "effect.completed", "effect.failed", "model.called", "tool.called",
   "compensation.recorded",
   "gate.raised", "gate.delivered", "gate.delivery_failed", "gate.callback_rejected",

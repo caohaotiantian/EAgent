@@ -7,7 +7,7 @@
  * pins those types in a never-appended registry. Nothing connected the two.
  *
  * This is that connection, and it is the half that makes the rule set stick. The vocabulary MOVES
- * — 53 types today, and it has moved in both directions — and without a gate the rules silently
+ * — 52 types today, and it has moved in both directions — and without a gate the rules silently
  * cover a smaller and smaller fraction of it while the report keeps saying `ok`. That is the same
  * decay `check-surface.mjs` exists to stop for the public API, and it made this repo pay the same
  * bill once already.
@@ -53,25 +53,28 @@ type Excuse =
 const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: string }>> = {
   // ── nothing writes these ────────────────────────────────────────────────────
   //
-  // Each of these two now carries a DECISION and what it is blocked on, in
-  // `registries.test.ts`, and both are `delete`. THE THIRD LEFT BY BEING BUILT: `task.skipped`
-  // was the row decided `wire`, `Engine.#skippedByJoin` appends it from both of `#commit`'s
-  // terminal-failure exits, and `task.skipped-follows-a-failed-commit` is in `AUDIT_RULES` — so
-  // `constrainedTypes()` finds it and an excuse for it would now fail the "excused AND
-  // constrained" assertion below. The `todo` ratchet is why that rule exists rather than a
-  // fourth excuse: it was AT its cap of five, so there was no way to defer. There
-  // were five, and the two that left before it are the reason this comment is worth re-reading:
-  // `budget.reserved` and `budget.settled` were excused here as never-appended, gained
-  // appenders in `run/engine.ts`, and left BY BEING CONSTRAINED — `budget.reservation-is-settled`
-  // is back in `AUDIT_RULES`, so `constrainedTypes()` finds them and an excuse would now fail
-  // the "excused AND constrained" assertion below. That is this file working as designed: the
-  // `todo` ratchet is capped at 5 and was AT 5, so there was no way to defer the rule, which is
-  // exactly what the ratchet is for. The sixth, `config.reloaded`, was excused here and is
-  // gone: nothing in the tree referred to it and no work item planned a reload path, so the row
-  // was a promise the log could not keep. An excuse that a rule set can hold forever is what
-  // this file exists to make uncomfortable; an excuse that names the file blocking it is one
-  // that can end.
-  "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
+  // ONE LEFT, and it carries a DECISION and what it is blocked on in `registries.test.ts`:
+  // `delete`. THE PEAK WAS SEVEN — counted, not remembered: at `d113c2a` this list held
+  // `budget.reserved`, `budget.settled`, `channel.written`, `config.reloaded`, `task.cancelled`,
+  // `task.skipped` and `task.started`. Six have left, and they left by exactly TWO doors, which is
+  // the whole lesson: an excuse ends when the member gains a WRITER, or when the member goes.
+  //
+  //   - GAINED A WRITER, AND SO GAINED A RULE — `task.cancelled` (E6), `budget.reserved` and
+  //     `budget.settled` (the reservation wiring), `task.skipped` (`Engine.#skippedByJoin`, which
+  //     appends it from both of `#commit`'s terminal-failure exits). Each left BY BEING
+  //     CONSTRAINED: `constrainedTypes()` finds it, so an excuse would now fail the "excused AND
+  //     constrained" assertion below. Each also cost a rule —
+  //     `task.cancelled-not-after-commit`, `budget.reservation-is-settled`,
+  //     `task.skipped-follows-a-failed-commit` — because the `todo` ratchet was AT its cap of five
+  //     every time and would not let one be deferred. Three rules rather than three excuses; that
+  //     is what the ratchet is for.
+  //   - DELETED — `config.reloaded` and `channel.written`. Nothing in the tree referred to the
+  //     first and no work item planned a reload path; the second's authoritative value always rode
+  //     `task.committed.writes`. Both were rows in a closed vocabulary promising a fact nobody
+  //     records, and `journal/events.ts` says a row's test is a WRITER, not a design.
+  //
+  // An excuse that a rule set can hold forever is what this file exists to make uncomfortable; an
+  // excuse that names the file blocking it is one that can end.
   "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
 
   // ── read, but not through a branch of its own ───────────────────────────────
