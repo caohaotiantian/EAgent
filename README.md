@@ -87,28 +87,51 @@ tarball installs and works: `npm pack packages/core`, install the tgz, and
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
 | **Gates** | `npm run check` — 2,300+ tests, offline, no API key; three guards: zero-dep, public surface (the exported NAME SET, in `scripts/surface.json`) and the kernel file list (`scripts/kernel.json`) |
 | **Compensation edges** | Compile-time rollback proof, and a rollback that RUNS — on run failure and on rewind, reverse order, with three journaled outcomes (compensated / failed / never attempted). A rewind's undos run APPROVED, because `rewind` takes a human actor and refuses a plan hash that no longer matches what it would dispatch; a run's own failure does not, because no automated path may approve itself |
-| **Tracing out** | Three doors, one encoder: `loom trace <runId>` renders the span tree, `--otlp <endpoint>` POSTs it to a collector, and `GET /runs/:id/trace` on a `loom serve` plane answers the same fold as JSON (or OTLP with `?format=otlp`). Hand-rolled, so the zero-dependency rule still holds. **The push takes its endpoint from argv and its credentials from `OTEL_EXPORTER_OTLP_HEADERS`**, never the reverse: no environment variable can make `loom trace` send, and a key passed as a flag is readable out of `ps`. A trace that follows subgraphs sends one request per run, each under its own `traceId`, which is what `SpanLink.traceId` is for |
+| **Tracing out** | Three doors, one encoder: `loom trace <runId>` renders the span tree, `loom trace <runId> --otlp <endpoint>` POSTs it to a collector, and `GET /runs/:id/trace` on a `loom serve` plane answers the same fold as JSON — or, with `?format=otlp`, as an OTLP/HTTP JSON `ExportTraceServiceRequest` a collector ingests directly. Hand-rolled, so the zero-dependency rule still holds. **The push takes its endpoint from argv and its credentials from `OTEL_EXPORTER_OTLP_HEADERS`**, never the reverse: no environment variable can make `loom trace` send, and a key passed as a flag is readable out of `ps`. A trace that follows subgraphs sends one request per run, each under its own `traceId`, which is what `SpanLink.traceId` is for |
 
-## What does not work yet — stated because overstating costs its user a day
+## What does not work yet
 
 | | |
 |---|---|
 | **`retry` on a function or evaluator node** | **Works**, through the RETURN rather than a throw: a body returns `{ retry: { reason } }` and the engine raises `E_FUNCTION_UNAVAILABLE` on its behalf, which is retryable by class. A *throw* still cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest object can never satisfy it, so every throw out of the `vm` is `E_INTERNAL` |
 | **Reading the clock in a body** | **Reproducible.** `ctx.now()` is the task's journaled lease timestamp, so replay computes the same number with nothing new written, and time does not advance during a task. `Date` is still absent from the sandbox: a frozen `Date` that silently never advances is more surprising than one that is not there |
-| **A barrier deadline** | **There is none, and declaring one is a compile ERROR** — `JoinNode.timeoutMs` was deleted, so `timeoutMs` inside a `join:` block is `GRAPH020_UNKNOWN_FIELD`. A barrier deadline's undecidable case has no journaled answer: a join sees only that a sibling has not committed, so it cannot tell a stranded branch from one correctly waiting on a human gate. Every branch already has a bound at its own locus — `NodeSpec.timeoutMs` for a node, `slaMs` + `onTimeout` for a gate. Still open: a node declaring NO `timeoutMs` hangs its task forever, so a join over such a branch waits forever |
+| **Hooks** | **Built.** Publish `resources/hook/<name>.js`, name it under `hooks:` in the graph, and it runs in the same hardened `vm` realm a `function` body does. A declared hook the workspace does not publish is a compile error, not a silent skip |
+| **A barrier deadline** | **There is none, and declaring one is now a compile ERROR** — `JoinNode.timeoutMs` was deleted, so `timeoutMs` inside a `join:` block is `GRAPH020_UNKNOWN_FIELD`. A barrier deadline's undecidable case has no journaled answer: a join sees only that a sibling has not committed, so it cannot tell a stranded branch from one correctly waiting on a human gate. Every branch already has a bound at its own locus — `NodeSpec.timeoutMs` for a node, `slaMs` + `onTimeout` for a gate. Still open: a node declaring NO `timeoutMs` hangs its task forever, so a join over such a branch waits forever |
 | **Crash mid-effect** | The journal survives, the run clock picks a backed-off run up again, and a restarted process re-arms the SLA clock of every gate it re-attaches — but a Task killed mid-effect stays leased with no automatic reclaim. The path back is TWO requests on a `loom serve` plane: `GET /runs/:id/rewind-plan?atSeq=N` returns what the rewind would undo plus a `planHash`, and `POST /runs/:id/commands {"kind":"rewind","atSeq":N,"planHash":"…"}` performs it and re-arms the leases it undoes. **Sending the second without a `planHash` is a 400** — an operator authorizes a LIST, not a verb. **Both routes require a HUMAN caller**, so the plane needs `--identity-file` (or an `--extension-module` identity source): a rewind dispatches real-world undos and may suppress a `gate.decided` a person spent their judgement on. **`cancel` is NOT the substitute** — it stops the run without touching what it already did. **There is no `loom rewind` CLI verb**; `rewind` and `advance` are control-plane commands only, while `cancel` and `approve` are both |
 | **Approval modes** | **There are none, and `approval` declares two fields: `approvers` and `separationOfDuties`.** `mode`, `k` and `delegation` were deleted — writing any of them is `GRAPH020_UNKNOWN_FIELD`. **k-of-n approval needs no new vocabulary:** N `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k}` — see `examples/graphs/two-person-approval.json`. `tiered` was not implementable from its own declaration, because no field anywhere defines a tier; delegation presupposes a group vocabulary this system does not have. Residue: a short-circuiting quorum join leaves the unneeded gates OPEN |
 | **Removing a run from the journal** | **There is no way to, and that is the decision rather than an omission.** Nothing in the tree deletes a journal row or a payload file — no `loom prune`, no `StateStore.delete`, no retention sweep — so `rm -rf .loom` is the only eraser. A terminal run's journal is the corpus `loom score` and `loom cohort` measure over, and a prune's real question is "will anyone replay or score this run?", which no journaled fact answers. Measured cost: one real 8-node run is 62 events and 94,834 payload bytes, so tens of runs a day is single-digit MB/day. `TODO.md` §Z (D.14) records what to build and what NOT to |
 | **`onBudgetExhausted: "gate"` / `"degrade"`** | Compile errors, deliberately. `gate` used to compile and then fail exactly as `"fail"` does, having promised a human; building it needs a way to raise a budget mid-run, and there is none |
 | **`loom compile` against a missing resource** | **Refuses**, naming the file to write (`GRAPH015`). Two kinds are exempt and say so: `agent_profile` is a routing key the `--models-file` table maps, and `oversight` is a policy label — neither is resolved to a document by anything |
+| **Replay of a run a human de-escalated** | **Reproduces.** A de-escalation is a human input, served from the record like a gate decision and re-keyed onto the shadow run. Replay's verdict also weighs GATES now — it used to score `match: true` for a replay that asked a human a different number of times, or none |
 
 ## Try it — and the part that is the point
 
-A gate is a row in the journal, not a promise in memory, so the process that asks is not the
-process that answers.
-
 ```bash
 mkdir demo && cd demo && mkdir graphs
+cat > graphs/copy.json <<'EOF'
+{"apiVersion":"loom.dev/v1","kind":"GraphSpec",
+ "metadata":{"name":"copy-file","project":"demo","version":1},
+ "policy":{"posture":"out","capabilities":["fs:read","fs:write"]},
+ "channels":{"source":{"type":"string","reduce":"replace"},
+             "body":{"type":"string","reduce":"replace"},
+             "written":{"type":"object","reduce":"replace"}},
+ "inputs":["source"],"outputs":["written"],
+ "nodes":[{"id":"read","type":"tool","reads":["source"],"writes":["body"],
+           "tool":{"name":"fs.read","version":"1.0","args":{"path":"${source}"}}},
+          {"id":"write","type":"tool","reads":["body"],"writes":["written"],"unhandled":true,
+           "tool":{"name":"fs.write","version":"1.0","args":{"path":"out/copy.txt","body":"${body}"}}}],
+ "edges":[{"id":"e1","from":"read","to":"write","kind":"seq"}]}
+EOF
+echo hello > input.txt
+
+loom compile graphs/copy.json                  # `ok`
+loom run     graphs/copy.json --input '{"source":"input.txt"}'
+```
+
+**And the part that is the point.** A gate is a row in the journal, not a promise in memory, so
+the process that asks is not the process that answers.
+
+```bash
 cat > graphs/gated.json <<'EOF'
 {"apiVersion":"loom.dev/v1","kind":"GraphSpec",
  "metadata":{"name":"gated","project":"demo","version":1},
