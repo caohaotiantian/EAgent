@@ -838,11 +838,16 @@ function loomCodeOf(e: unknown): string | undefined {
  * rather than the one-shot the tests use:
  *
  *   outcome=failed/E_CHILD_UNREACHABLE  passes=20  simulatedMs=1140000
- *   warnings={"LOOM_CHILD_UNREACHABLE":21,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
+ *   warnings={"LOOM_CHILD_UNREACHABLE":20,"LOOM_ROLLBACK_CHILD_UNREADABLE":1}
  *   deferrals=19 deferredMs=843000
  *
- * Re-measured after the nested `advance(childRunId)` joined this function: twenty warnings became
- * twenty-one, because a pass that gets past the probe now refuses at the drive instead of dying.
+ * THE NESTED `advance` JOINING THIS FUNCTION DID NOT MOVE THAT COUNT, and the reason is worth the
+ * line: with EVERY child read broken, each pass refuses at the FIRST one — the start-or-resume
+ * probe — so the drive one site later is never reached. The new site changes this table only when
+ * the store is well enough to answer the probe and not the drive, which is the one-shot the F
+ * tests use. A first attempt at this paragraph said the count rose to 21; it had measured its own
+ * earlier section's warning landing in this listener's window, which is the trap this file's
+ * sibling test header documents, and an independent driver measured 20 in isolation.
  *
  * Nineteen uncharged deferrals inside the 900 s budget, then the charged retries, then the run
  * ENDS — which is the fact worth having, because the sibling warning at

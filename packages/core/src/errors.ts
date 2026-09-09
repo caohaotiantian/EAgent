@@ -380,9 +380,10 @@ export const CODES = {
    * A CHILD RUN'S JOURNAL COULD NOT BE TOUCHED — read, written, or driven — by its parent.
    *
    * Not a fact about the child's WORK, which is what `E_SUBGRAPH_FAILED` says: this is a fact
-   * about another run's storage. `run/engine.ts`'s `childUnavailable` is the only raiser, for the
-   * four cross-run touches inside `#runSubgraph` — the start-or-resume probe, the forward's read,
-   * the forward's write to the child's gate, and the nested `advance(childRunId)`.
+   * about another run's storage. `run/engine.ts`'s `childUnavailable` is the only raiser, at four
+   * sites on the delegation path — `#runSubgraph`'s start-or-resume probe and its nested
+   * `advance(childRunId)`, and, in the `#forwardGateDecision` it calls, that method's read of the
+   * child and its WRITE to the child's gate.
    *
    * IT EXISTS BECAUSE ONE CODE CANNOT ANSWER TWO QUESTIONS. Those four arms used to share
    * `E_SUBGRAPH_FAILED` with three arms that mean the opposite thing — "the child has not
