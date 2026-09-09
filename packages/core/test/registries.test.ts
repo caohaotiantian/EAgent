@@ -178,10 +178,22 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
  * `PolicyEngine` held in memory is now reconstructible by folding and `GET /runs/:id` reports
  * a promise instead of zero. Six to five was a DELETION and five to three is a BUILD; the row
  * count falls the same way for both and they are opposite facts, so the list says which.
- * The three left cannot be settled from this package's registry files alone — every one needs
- * `run/projection.ts` (kernel), `run/engine.ts`, `evolution/trajectory.ts`,
- * `telemetry/spans.ts` or a suite owned elsewhere — so each carries what it is waiting for,
- * by path.
+ *
+ * AND NOW THERE ARE TWO. `task.skipped` was the third row decided `wire`, and it is wired:
+ * `Engine.#skippedByJoin` appends it from BOTH of `#commit`'s terminal-failure exits whenever a
+ * downstream join declares `onBranchError: "skip"` and the failure is not one a join may absorb
+ * (`NOT_ABSORBED_AS_SKIP`). Its four `blockedOn` paths were all four real: `run/engine.ts` gained
+ * the appender, `run/projection.ts`'s arm now fires, `evolution/trajectory.ts`'s does too, and
+ * `telemetry/spans.ts` needed a FIX rather than nothing — its arm was unreachable, because
+ * `task.skipped` rides the batch that already closed the task span and `close` is
+ * first-close-wins. That is what a `blockedOn` list is for: the fourth path was the one carrying
+ * a defect, and nobody would have looked at it without the row. `journal/audit.ts` gained
+ * `task.skipped-follows-a-failed-commit` in the same change, because the `todo` ratchet next door
+ * was at its cap and would not let the rule be deferred.
+ *
+ * The two left cannot be settled from this package's registry files alone — each needs
+ * `run/projection.ts` (kernel), `src/server/http.ts` or a suite owned elsewhere — so each carries
+ * what it is waiting for, by path.
  *
  * `blockedOn` IS THE EXPIRY, and it works in the direction that actually decays. An excuse
  * dies when its own reason does: the moment the last file listed stops mentioning the type,
@@ -201,15 +213,6 @@ const NEVER_APPENDED: readonly {
   /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
   readonly blockedOn: readonly string[];
 }[] = [
-  {
-    type: "task.skipped",
-    decision: "wire",
-    why:
-      "the skipped STATE is read three times — the join's branch-error accounting in `engine.ts`, `trajectory.ts` and `spans.ts` — " +
-      "and cannot be set, so `onBranchError: \"fail\"` counts a population that cannot exist. The appender belongs where " +
-      "`#absorbedByJoin` contains a failed branch: that is the moment a Task is skipped rather than failed",
-    blockedOn: ["src/run/engine.ts", "src/run/projection.ts", "src/evolution/trajectory.ts", "src/telemetry/spans.ts"],
-  },
   {
     type: "channel.written",
     decision: "delete",
@@ -271,6 +274,44 @@ test("EVERY EXCUSE IS STILL BLOCKED — the moment it is not, the decision must 
     }
   }
   assert.deepEqual(stale, [], "an excuse outlived its reason");
+});
+
+/**
+ * THE SIXTH VOCABULARY, AND IT IS A SET OF CODES WITH TWO HOMES ON PURPOSE.
+ *
+ * `run/engine.ts` decides whether to WRITE `task.skipped`; `journal/audit.ts` decides whether a
+ * written one was legitimate. The auditor cannot import the executor — `scripts/kernel.json` keeps
+ * `journal/audit.ts` outside the kernel precisely because it is a backend that reads journals, and
+ * a journal is all it should need — so the membership exists twice, which is the exact shape this
+ * file's own header says will drift. This is the census that stops it.
+ *
+ * IT MATTERS IN BOTH DIRECTIONS. A code in the engine's set but not the auditor's is a forgery the
+ * auditor waves through: `task.skipped` appended after a well-formed `task.committed{failed}`
+ * carrying that code moves the Task to `skipped`, both of the engine's `fatal` filters key on
+ * `state === "failed"` and miss it, and a run that must fail completes with the audit reporting
+ * `ok`. A code in the auditor's and not the engine's cries wolf on a journal the engine writes.
+ */
+test("THE TWO COPIES OF `NOT_ABSORBED_AS_SKIP` AGREE — one writes the row, the other judges it", () => {
+  const setBody = (file: string, decl: string): string => {
+    const text = CODE_TEXT.get(join(SRC_DIR, file));
+    assert.ok(text !== undefined, `${file} is not in the scanned source set`);
+    const i = text.indexOf(decl);
+    assert.ok(i >= 0, `${file}: \`${decl}\` is gone — this census would compare nothing`);
+    const j = text.indexOf("]);", i);
+    assert.ok(j > i, `${file}: \`${decl}\` has no terminator`);
+    return text.slice(i, j);
+  };
+  const codesIn = (body: string): string[] => [...new Set(matches(body, /CODES\.(E_[A-Z_]+)/g))].sort();
+
+  // The engine spreads `RUN_FATAL_CODES` into its set, so the literal names only what it ADDS.
+  const engine = codesIn(
+    setBody("run/engine.ts", "const RUN_FATAL_CODES") + setBody("run/engine.ts", "const NOT_ABSORBED_AS_SKIP"),
+  );
+  const audit = codesIn(setBody("journal/audit.ts", "const NOT_ABSORBED_AS_SKIP"));
+
+  // Not a vacuous pass: an empty parse on both sides would compare [] to [] and report green.
+  assert.ok(engine.length >= 7, `the engine-side parse found ${engine.length} codes — the reader broke, not the set`);
+  assert.deepEqual(audit, engine, "the executor and the auditor disagree about which failures a join may absorb");
 });
 
 // ── effect kinds ─────────────────────────────────────────────────────────────
@@ -463,8 +504,8 @@ test("NO EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () =>
   // a commit message rather than a string. `audit-coverage.test.ts` holds the same ratchet
   // over its `todo` excuses for the same reason.
   assert.ok(
-    NEVER_APPENDED.length <= 5,
-    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX and is FIVE — ` +
+    NEVER_APPENDED.length <= 2,
+    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX, then FIVE, then THREE, and is TWO — ` +
       `journal/events.ts is kernel, and a closed vocabulary that only ever grows is not one`,
   );
   assert.equal(

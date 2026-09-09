@@ -165,9 +165,23 @@ test("A WRITE THAT REDUCES TO SOMETHING UNRECORDABLE FAILS ITS OWN TASK, rather 
   const p = await run(staticSpec(), { seed: "s" }, HUGE);
 
   // The first arm applies cleanly; the second and third are the ones whose `sum` overflows.
-  const failed = Object.entries(p.tasks).filter(([, t]) => t.state === "failed");
-  assert.equal(failed.length, 2, `two arms overflow the sum: ${JSON.stringify(Object.fromEntries(Object.entries(p.tasks).map(([k, t]) => [k, t.state])))}`);
-  for (const [id, t] of failed) {
+  //
+  // SELECTED BY THE ERROR, NOT BY THE STATE, and that is not a relaxation — it is what keeps this
+  // test asking its own question. `gather` declares `onBranchError: "skip"`, so once
+  // `Engine.#skippedByJoin` existed the two refused arms became `skipped` rather than `failed`
+  // (B.2: a branch a join absorbs is skipped). `state === "failed"` then selected ZERO arms and
+  // this assertion would have compared 0 to 2. The claim was never about the word: it is that the
+  // refusal is TYPED, JOURNALLED and attached to the arm that caused it, and `upsertTask` merges,
+  // so `t.error` is exactly as present as it was. The state is asserted separately below, so both
+  // facts are pinned and neither can drift silently.
+  const refused = Object.entries(p.tasks).filter(([, t]) => t.error?.code === "E_RESOURCE_INVALID");
+  assert.equal(refused.length, 2, `two arms overflow the sum: ${JSON.stringify(Object.fromEntries(Object.entries(p.tasks).map(([k, t]) => [k, `${t.state}/${t.error?.code ?? "-"}`])))}`);
+  assert.deepEqual(
+    [...new Set(refused.map(([, t]) => t.state))],
+    ["skipped"],
+    "and the join absorbed them, which is what `onBranchError: \"skip\"` asked for",
+  );
+  for (const [id, t] of refused) {
     assert.equal(t.error?.code, "E_RESOURCE_INVALID", `${id} carries a typed, journalled refusal`);
     assert.match(t.error!.message, /reduce/, `${id}: the message names what could not be recorded — ${t.error!.message}`);
   }

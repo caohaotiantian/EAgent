@@ -530,6 +530,53 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Failures a join may absorb but must NOT relabel `skipped`.
+ *
+ * `task.skipped` says "this branch contributed nothing, and that is what the graph asked for".
+ * `#skippedByJoin` writes it wherever `#finish` would ignore the failure anyway, so the word
+ * has to be as narrow as that silence is — and it is NOT `RUN_FATAL_CODES`, which is a set about
+ * the RUN's ability to say something true. Two reasons this is its own set:
+ *
+ *   - THE FATAL HALF, because the two `fatal` filters (`#advance`'s and `#finish`'s) both key on
+ *     `state === "failed"`. Flipping such a Task to `skipped` makes both miss it and a run that
+ *     must fail completes. Measured: a `human_gate` with `separationOfDuties` on a run carrying no
+ *     human principal raises `E_GATE_REQUIRED` under `onBranchError: "skip"`, and the run reports
+ *     `failed E_GATE_REQUIRED` — which is the answer this set preserves.
+ *
+ *   - TWO REFUSALS ABOUT OVERSIGHT, which is what `RUN_FATAL_CODES` does not cover and this set
+ *     exists for. `E_HUMAN_APPROVAL_REQUIRED` is how `#applyGateDecision` records a human
+ *     REJECTING a gate, and it is deliberately OUT of `RUN_FATAL_CODES` so the run continues and
+ *     the ask can be made elsewhere. `E_OVERSIGHT_LOOSENED` is `compileMutation`'s refusal of a
+ *     proposed graph that would weaken oversight (`graph/compile.ts`, GRAPH014), and it reaches
+ *     the refused-mutation exit as `applied.error.code`. Both are the opposite of "nothing
+ *     happened here": somebody, or something, was told no ON THE SUBJECT OF SUPERVISION.
+ *     `server/layout.ts`'s `STATE_PRIORITY` is `failed, awaiting_gate, leased, ready, cancelled,
+ *     skipped, succeeded` — `failed` first, `skipped` SIXTH — so relabelling either would drop it
+ *     below five other states in the one view whose job is to show a person the worst thing in a
+ *     collapsed fan-out. Oversight only tightens.
+ *
+ *     `E_OVERSIGHT_LOOSENED` is here FAIL-CLOSED rather than on a measurement: the path from
+ *     `#applyMutation` to this predicate is real by reading, but a mutation that actually trips
+ *     GRAPH014 was not constructed — mutations only add, and posture is computed per node. A
+ *     guard that cannot decide whether its case is reachable refuses; the cost of being wrong in
+ *     this direction is a branch that says `failed`, which is what it says today.
+ *
+ * WHAT IS DELIBERATELY ABSORBABLE, since a named set needs its boundary: `E_CAP_DENIED`,
+ * `E_TOOL_NOT_FOUND`, `E_TOOL_SOURCE_UNAVAILABLE`, `E_PROVIDER_BAD_REQUEST`, `E_SUBGRAPH_FAILED`,
+ * `E_RESOURCE_INVALID`, `E_QUORUM_UNREACHABLE` and whatever `#runWave`'s catch wraps as
+ * `E_INTERNAL` — "this node's work did not work" is an ordinary branch failure, which is exactly
+ * the population `skip` exists for. NOT, note, because "a rescue arm is an answer to it", which is
+ * how `RUN_FATAL_CODES` argues its own boundary one screen up: this predicate fires ONLY when
+ * `take.length === 0`, i.e. precisely when no rescue arm was taken, so that argument cannot be
+ * borrowed here even though it reaches the same members.
+ */
+const NOT_ABSORBED_AS_SKIP: ReadonlySet<string> = new Set([
+  ...RUN_FATAL_CODES,
+  CODES.E_HUMAN_APPROVAL_REQUIRED,
+  CODES.E_OVERSIGHT_LOOSENED,
+]);
+
+/**
  * How far down a run tree the two journal-walking descents will go.
  *
  * A BACKSTOP, NOT A POLICY. `expansion.maxDepth` already bounds nesting at compile time, so
@@ -9513,6 +9560,9 @@ export class Engine {
               actor: SYSTEM_ACTOR("executor"),
               taskId: w.task.taskId,
             },
+            // AFTER the commit, so the fold's LAST write of `TaskRecord.state` is `skipped`.
+            // `take` is `[]` on this exit by construction, one field up.
+            ...this.#skippedByJoin(ctx, w, applied.error.code, []),
           ],
           this.#fence(ctx, w),
         ));
@@ -9622,6 +9672,14 @@ export class Engine {
       actor: SYSTEM_ACTOR("executor"),
       taskId: w.task.taskId,
     });
+
+    // A BRANCH A JOIN ABSORBS IS SKIPPED, NOT FAILED — and this is the second of the two exits
+    // that say so. AFTER the commit above, because the fold applies these in order and `skipped`
+    // has to be the last word on this Task's state; `#foldJoin` and `#maybeFireJoin` both already
+    // treat `skipped` exactly as they treat `failed`, so nothing the join counts moves.
+    if (outcome.status === "failed") {
+      events.push(...this.#skippedByJoin(ctx, w, outcome.error?.code ?? CODES.E_INTERNAL, take));
+    }
 
     if (reduce !== undefined) {
       const applied = await this.#externalise(ctx, reduce.values);
@@ -10412,6 +10470,53 @@ export class Engine {
       if (fired !== undefined) events.push(fired);
     }
     return events;
+  }
+
+  /**
+   * The `task.skipped` row a terminal failure earns, or `undefined` when it earns none.
+   *
+   * THE STATE WAS READ THREE TIMES AND COULD NOT BE SET. `#foldJoin` counts `skipped` toward a
+   * join's `lost` set, `evolution/trajectory.ts` and `telemetry/spans.ts` both have arms for it,
+   * and `TaskState` has carried the member since the fold was written — but nothing appended the
+   * event, so `onBranchError: "fail"` counted a population that could not exist and every absorbed
+   * branch stayed `failed` in a run that reported **succeeded**. That is the shape B.2 named.
+   *
+   * THE CONDITION IS `#finish`'s OWN SILENCE, deliberately and not by coincidence. That method
+   * ends a run `failed` for any Task with `state === "failed"`, `take.length === 0` and no
+   * absorbing join; a Task this returns an event for is exactly one it would pass over. So this
+   * writes down a decision the engine was already making in memory and never journaled — it does
+   * not make a new one, and the run's outcome is unchanged by construction.
+   *
+   * A HELPER RATHER THAN TWO CALL SITES, for the reason `#fence` gives further down this class: a
+   * rule applied at each exit is a rule the fourth exit forgets. `#commit` has TWO
+   * terminal-failure exits — the refused-mutation return and the ordinary path — and they reach
+   * the journal through different arrays. The retry exit is not a third: it commits
+   * `task.retry_scheduled` and returns without a terminal commit, so a Task that will run again is
+   * never called skipped.
+   *
+   * `code` is passed rather than read off an outcome, because the refused-mutation exit fails on
+   * `applied.error` while its `outcome` may still say `succeeded` — reading `outcome.status` there
+   * would have made this silently inert on one of the two paths it exists to cover. The CALLER
+   * establishes that the Task is terminally failed; this decides only whether a join absorbs it.
+   *
+   * Returns rows rather than an optional, so both call sites spread it and neither needs a branch.
+   */
+  #skippedByJoin(ctx: RunContext, w: Wave, code: string, take: readonly EdgeId[]): readonly NewEvent[] {
+    // A failure that took an `error` edge is being HANDLED by the node behind it, not skipped.
+    // Live population, measured across the suite: two `E_PROVIDER_BAD_REQUEST` branches that route
+    // down an error edge under a `skip` join. Pinned by `A FAILURE THAT TOOK AN ERROR EDGE …`.
+    if (take.length > 0) return [];
+    if (NOT_ABSORBED_AS_SKIP.has(code)) return [];
+    if (!this.#absorbedByJoin(ctx, w.node.id)) return [];
+    return [
+      {
+        type: "task.skipped",
+        // DERIVED FROM THE CODE AND NOTHING ELSE, so two replays of one journal write one string.
+        payload: { reason: `branch failed (${code}) and a downstream join declares onBranchError: "skip"` },
+        actor: SYSTEM_ACTOR("executor"),
+        taskId: w.task.taskId,
+      },
+    ];
   }
 
   /**

@@ -412,6 +412,43 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     if (o !== undefined) Object.assign(o.attributes, patch);
   };
   /**
+   * Re-state the verdict on a span THIS FOLD ALREADY CLOSED, for the one event that arrives after
+   * its own Task's commit.
+   *
+   * `close` is first-close-wins by design (`open.get(id) === undefined` returns), which is what
+   * keeps a duplicated terminal row from emitting two spans. `task.skipped` is the one row that
+   * legitimately lands after `task.committed`: the engine writes both in ONE batch, in that order,
+   * because the projection needs `skipped` to be the last word on `TaskRecord.state`. Without this
+   * the `task.skipped` arm below was a no-op for every Task a run actually produced, and the span
+   * exported `status: "error"`, `task.status: "failed"` — the single attribute a reader opens the
+   * trace to check, reporting the state this event exists to correct.
+   *
+   * NOT A SECOND CLOSE. Start time, end time, parentage, name, kind, links and events all stand;
+   * only `status` and the attributes handed here are rewritten, and they go through
+   * `redactAttributes` on the same terms `close` applies — everything that leaves this process is
+   * redacted, whichever door it left by. `spansFrom` stays a pure fold over one journal: revising
+   * its own accumulator is what a fold does.
+   *
+   * Searches from the end because the span it wants is the one most recently closed.
+   */
+  /** One attribute of an already-closed span, so a caller can tell WHY it was closed. */
+  const doneAttr = (id: string, key: string): unknown => {
+    for (let i = done.length - 1; i >= 0; i--) if (done[i]!.spanId === id) return done[i]!.attributes[key];
+    return undefined;
+  };
+  const amend = (id: string, status: SpanStatus, extra: Record<string, unknown>): void => {
+    for (let i = done.length - 1; i >= 0; i--) {
+      const s = done[i]!;
+      if (s.spanId !== id) continue;
+      done[i] = {
+        ...s,
+        status,
+        attributes: { ...s.attributes, ...redactAttributes(extra, ATTRIBUTE_CLASSES, runId) },
+      };
+      return;
+    }
+  };
+  /**
    * A CHILD THE PARENT NEVER HEARD FINISH IS NOT A CHILD STILL WORKING.
    *
    * Every non-success exit of `#runSubgraph` returns BEFORE the batch that writes
@@ -435,7 +472,20 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
    */
   const closeUnreportedSubgraphs = (taskId: string, ts: number, status: SpanStatus): void => {
     for (const id of subgraphSpansOfTask.get(taskId) ?? []) {
+      // `open.has` ALONE WAS DOING TWO JOBS, and only one of them survives `task.skipped`.
+      //
+      // A span still open here has no verdict yet — close it `unreported`. A span already
+      // CLOSED is one of two very different things, and the first draft of this line conflated
+      // them: `subgraph.completed` closes it carrying the CHILD'S REAL VERDICT, which must never
+      // be overwritten (measured: amending unconditionally turned a `succeeded` child into
+      // `unreported` and `subgraph-trace-driven.test.ts` caught it) — while `task.committed` one
+      // row earlier in the SAME BATCH closes it `unreported`, and `task.skipped` refining that
+      // from `error` to `unset` is exactly the amendment this arm exists to make.
+      //
+      // So the discriminator is the attribute, not the map: only a span this helper itself
+      // already marked `unreported` may be re-settled.
       if (open.has(id)) close(id, ts, status, { "subgraph.status": "unreported" });
+      else if (doneAttr(id, "subgraph.status") === "unreported") amend(id, status, {});
     }
   };
   const note = (id: string, name: string, ts: number, attributes?: Record<string, unknown>): void => {
@@ -1151,7 +1201,12 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     }
     if (isEvent(e, "task.skipped")) {
       closeUnreportedSubgraphs(tid, ts, "unset");
-      close(taskSpan, ts, "unset", { "task.status": "skipped" });
+      // OPEN ONLY WHEN NOTHING COMMITTED FIRST. The engine's batch is `task.failed` →
+      // `task.committed{status:"failed"}` → `task.skipped`, so on every run this fold will see in
+      // the field the span is already closed and `amend` is the live path; `close` covers a
+      // journal that carries the skip without a commit, which is still a legal shape to fold.
+      if (open.has(taskSpan)) close(taskSpan, ts, "unset", { "task.status": "skipped" });
+      else amend(taskSpan, "unset", { "task.status": "skipped" });
       continue;
     }
     if (isEvent(e, "checkpoint.created")) {

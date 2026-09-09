@@ -39,9 +39,40 @@
  * condition down rather than deleting the rule and moving on.
  */
 
+import { CODES } from "../errors.ts";
 import { suppressedRanges } from "../run/projection.ts";
 import { POSTURES, isPosture } from "../vocab.ts";
 import type { JournalEvent } from "./events.ts";
+
+/**
+ * Codes a join is NEVER entitled to absorb — this module's copy of `Engine`'s
+ * `NOT_ABSORBED_AS_SKIP`, and the reason `task.skipped-follows-a-failed-commit` can catch the
+ * forgery that actually costs something.
+ *
+ * A SECOND REPRESENTATION, WHICH IS THE THING THIS REPO SAYS WILL DRIFT — so it is written the way
+ * every other vocabulary here is: declared through `CODES` so a rename cannot compile, and pinned
+ * against the engine's own set by a census in `test/registries.test.ts` that parses the source.
+ * The alternative, importing from `run/engine.ts`, would make the auditor depend on the executor;
+ * `scripts/kernel.json` puts `journal/audit.ts` outside the kernel precisely because it is a
+ * backend that reads journals, and a journal is all it should need.
+ *
+ * WHY THE RULE NEEDS IT. "A skip follows a failed commit" is true of the forgery that matters and
+ * therefore does not catch it: append `task.skipped` after a perfectly well-formed
+ * `task.committed{status:"failed"}` whose error is `E_GATE_REQUIRED`, and the fold moves the Task
+ * to `skipped`, both of the engine's `fatal` filters — which key on `state === "failed"` — miss it,
+ * and a run that must fail completes while the auditor reports `ok`. Measured on that journal
+ * before this set existed: `violations: []`, rule `checked: true`.
+ */
+const NOT_ABSORBED_AS_SKIP: ReadonlySet<string> = new Set<string>([
+  CODES.E_BUDGET_EXHAUSTED,
+  CODES.E_REPLAY_DIVERGENCE,
+  CODES.E_GATE_REQUIRED,
+  CODES.E_PAYLOAD_UNRESOLVED,
+  CODES.E_EFFECT_UNRECORDED,
+  CODES.E_ROUTE_INVALID,
+  CODES.E_HUMAN_APPROVAL_REQUIRED,
+  CODES.E_OVERSIGHT_LOOSENED,
+]);
 
 /** Stable ids: they get cited in journal entries and in the exhaustiveness gate that follows. */
 export const AUDIT_RULES = [
@@ -56,6 +87,7 @@ export const AUDIT_RULES = [
   "task.leased-precedes-commit",
   "task.leased-is-resolved",
   "task.leased-once",
+  "task.skipped-follows-a-failed-commit",
   "budget.reservation-is-settled",
   "run.submitted-is-first-and-once",
   "run.terminal-is-last-and-once",
@@ -157,6 +189,11 @@ const ADVANCES_A_RUN: ReadonlySet<string> = new Set([
   "task.committed",
   "task.failed",
   "task.cancelled",
+  // ADDED WHEN IT GAINED A WRITER. This set's criterion is "an event that moves a run", and
+  // `task.skipped` now moves `TaskRecord.state`. The omission was harmless while nothing appended
+  // the row — measured before the fix: the same journal with `task.skipped` after `run.completed`
+  // reported NO violation while `task.cancelled` in its place reported two.
+  "task.skipped",
   "state.reduced",
   "effect.started",
   "effect.completed",
@@ -272,6 +309,10 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
   const openGates = new Map<string, number>();
   const raisedGates = new Set<string>();
   const commits = new Map<string, number>();
+  /** taskId → seq of a `task.committed{status:"failed"}`. See `task.skipped-follows-a-failed-commit`. */
+  const failedCommits = new Map<string, number>();
+  /** taskId → the code on its most recent `task.failed`, which is what says whether a join may absorb it. */
+  const failureCode = new Map<string, string>();
   const leased = new Set<string>();
   const openLeases = new Map<string, number>();
   const decidedTasks = new Set<string>();
@@ -360,6 +401,16 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     if (e.type !== "tool.called" && e.type !== "effect.completed" && e.type !== "effect.failed") return false;
     return key !== undefined && compensationKeys.has(key);
   };
+
+  /**
+   * Does this journal begin at the beginning?
+   *
+   * The same question `fromStart` asks after the loop, hoisted because one rule needs it DURING
+   * the walk: `task.skipped-follows-a-failed-commit` reads a fact established by an earlier row,
+   * so a caller slicing the journal between the two would be told of a violation that is not
+   * there. Fail-closed the other way — a windowed journal reports the rule skipped, never clean.
+   */
+  const startsAtOne = live.length > 0 && Number(live[0]!.seq) === 1;
 
   for (const e of live) {
     const seq = Number(e.seq);
@@ -647,9 +698,15 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         }
         break;
       }
-      case "task.failed":
-        if (e.taskId !== undefined) openLeases.delete(String(e.taskId));
+      case "task.failed": {
+        if (e.taskId === undefined) break;
+        openLeases.delete(String(e.taskId));
+        // WHAT THE FAILURE WAS, which is the half `task.skipped-follows-a-failed-commit` needs and
+        // `task.committed` does not carry: its payload has a status, never a code.
+        const code = str((obj(p["error"]) ?? {})["code"]);
+        if (code !== undefined) failureCode.set(String(e.taskId), code);
         break;
+      }
       case "run.submitted":
         submissions.push(seq);
         break;
@@ -817,6 +874,63 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
         }
         break;
       }
+      case "task.skipped": {
+        // A SKIP IS A VERDICT ON A FAILURE, NOT AN OUTCOME OF ITS OWN.
+        //
+        // `Engine.#skippedByJoin` writes this row only in the batch that already carries
+        // `task.failed` + `task.committed{status:"failed"}` for the same Task, and only when a
+        // downstream join declares `onBranchError: "skip"`. So a `task.skipped` with no failed
+        // commit behind it is a journal claiming a branch was absorbed that never failed — which
+        // is the one way this word could be used to make a run look cleaner than it was.
+        //
+        // The rule exists because the EVENT is new. `task.skipped` sat in the never-appended
+        // registry with decision `wire`; the moment it gained an appender the coverage guard asked
+        // for a rule and the `todo` ratchet, already at its cap of five, refused to let it be
+        // deferred. That is the THIRD time that ratchet has produced a rule rather than an
+        // excuse: `task.cancelled-not-after-commit` (`5b5c496`) and `budget.reservation-is-settled`
+        // (`b28c343`, whose body says "the list was AT five, so the two newly-appended types could
+        // not be deferred") came the same way.
+        //
+        // TWO CLAUSES, AND THE FIRST ONE ALONE WAS THE PASSING ANSWER TO THE CASE THAT COSTS
+        // SOMETHING. "A skip follows a failed commit" is TRUE of the forgery that matters, so a
+        // rule that stopped there reported `ok` on it: append `task.skipped` after a well-formed
+        // `task.committed{status:"failed"}` whose error is `E_GATE_REQUIRED`, and the fold moves
+        // the Task to `skipped`, both of the engine's `fatal` filters key on `state === "failed"`
+        // and miss it, and a run that must fail completes. Measured on that journal with only the
+        // first clause: `violations: []`, this rule `checked: true` — a guard answering its
+        // undecidable case with the passing value, which is this repo's own first defect lens.
+        //
+        // The second clause needs no graph: `task.failed` carries `error.code`, and
+        // `NOT_ABSORBED_AS_SKIP` above says which codes no join may absorb.
+        //
+        // ONLY FROM THE START OF A RUN, because `auditRun` takes any window and a caller slicing
+        // between the commit and the skip would otherwise be told of a violation that is not
+        // there. That was written as an acknowledged hole and is now closed the way
+        // `run.submitted-is-first-and-once` closes its own: `fromStart` is computed below from
+        // `live[0].seq`, and a windowed journal reports this rule SKIPPED rather than violated.
+        // A rewind cannot produce the window either — `suppressedRanges` cuts strictly BETWEEN
+        // `checkpoint.restored` boundaries and these two rows are one contiguous batch.
+        const tid = e.taskId === undefined ? undefined : String(e.taskId);
+        if (tid === undefined) break;
+        if (!startsAtOne) break;
+        saw.add("task.skipped-follows-a-failed-commit");
+        const code = failureCode.get(tid);
+        if (!failedCommits.has(tid)) {
+          add(
+            "task.skipped-follows-a-failed-commit",
+            seq,
+            `task "${tid}" was skipped with no prior task.committed{status:"failed"} — a join absorbs a FAILURE, and none is recorded`,
+          );
+        } else if (code !== undefined && NOT_ABSORBED_AS_SKIP.has(code)) {
+          add(
+            "task.skipped-follows-a-failed-commit",
+            seq,
+            `task "${tid}" failed ${code} and was then skipped — no join may absorb that code, and calling it skipped ` +
+              `hides it from the filters that end a run on it`,
+          );
+        }
+        break;
+      }
       case "task.committed": {
         const tid = e.taskId === undefined ? undefined : String(e.taskId);
         const take = Array.isArray(p["take"]) ? (p["take"] as unknown[]) : [];
@@ -839,6 +953,9 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
           add("task.committed-once", seq, `task "${tid}" committed at seq ${String(before)} and again here`);
         }
         commits.set(tid, seq);
+        // The half `task.skipped-follows-a-failed-commit` reads. Recorded here rather than
+        // derived later because `status` is on THIS event and nowhere else.
+        if (str(p["status"]) === "failed") failedCommits.set(tid, seq);
         openLeases.delete(tid);
         // A ROOT-BRANCH task reduces its writes immediately; one inside a fan-out holds them
         // until its join, which is why this asks only about `root`.
@@ -898,6 +1015,10 @@ export function auditRun(events: readonly JournalEvent[], opts: AuditOptions = {
     }
   } else {
     unrunnable.set("run.submitted-is-first-and-once", "this journal does not begin at seq 1, so the submission is legitimately absent from it");
+    unrunnable.set(
+      "task.skipped-follows-a-failed-commit",
+      "this journal does not begin at seq 1, so the commit a skip refers to may legitimately be outside the window",
+    );
   }
 
   for (const [tid, w] of rootWriters) {

@@ -6,10 +6,11 @@
  * information that would have caught that at birth was already in this repo: `docs-drift.test.ts`
  * pins those types in a never-appended registry. Nothing connected the two.
  *
- * This is that connection, and it is the half that makes the rule set stick. The vocabulary grows
- * — 52 types today — and without a gate the rules silently cover a smaller and smaller fraction of
- * it while the report keeps saying `ok`. That is the same decay `check-surface.mjs` exists to stop
- * for the public API, and it made this repo pay the same bill once already.
+ * This is that connection, and it is the half that makes the rule set stick. The vocabulary MOVES
+ * — 53 types today, and it has moved in both directions — and without a gate the rules silently
+ * cover a smaller and smaller fraction of it while the report keeps saying `ok`. That is the same
+ * decay `check-surface.mjs` exists to stop for the public API, and it made this repo pay the same
+ * bill once already.
  *
  * The excuse list is deliberately uncomfortable to write. An entry saying "todo" is a promise
  * somebody has to keep; an entry saying "no relation" is a claim that can be argued with. Both
@@ -52,9 +53,14 @@ type Excuse =
 const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: string }>> = {
   // ── nothing writes these ────────────────────────────────────────────────────
   //
-  // Each of these three now carries a DECISION and what it is blocked on, in
-  // `registries.test.ts` — two are `delete`, one is `wire` behind the join accounting. There
-  // were five, and the two that left are the reason this comment is worth re-reading:
+  // Each of these two now carries a DECISION and what it is blocked on, in
+  // `registries.test.ts`, and both are `delete`. THE THIRD LEFT BY BEING BUILT: `task.skipped`
+  // was the row decided `wire`, `Engine.#skippedByJoin` appends it from both of `#commit`'s
+  // terminal-failure exits, and `task.skipped-follows-a-failed-commit` is in `AUDIT_RULES` — so
+  // `constrainedTypes()` finds it and an excuse for it would now fail the "excused AND
+  // constrained" assertion below. The `todo` ratchet is why that rule exists rather than a
+  // fourth excuse: it was AT its cap of five, so there was no way to defer. There
+  // were five, and the two that left before it are the reason this comment is worth re-reading:
   // `budget.reserved` and `budget.settled` were excused here as never-appended, gained
   // appenders in `run/engine.ts`, and left BY BEING CONSTRAINED — `budget.reservation-is-settled`
   // is back in `AUDIT_RULES`, so `constrainedTypes()` finds them and an excuse would now fail
@@ -66,7 +72,6 @@ const EXCUSED: Readonly<Record<string, { readonly kind: Excuse; readonly why: st
   // this file exists to make uncomfortable; an excuse that names the file blocking it is one
   // that can end.
   "channel.written": { kind: "never-appended", why: "writes ride on task.committed.writes; the per-channel event has no appender" },
-  "task.skipped": { kind: "never-appended", why: "no appender; the skip arm resolves the task without its own event" },
   "task.started": { kind: "never-appended", why: "no appender; task.leased is the observable start" },
 
   // ── read, but not through a branch of its own ───────────────────────────────

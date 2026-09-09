@@ -20,13 +20,19 @@
  * permanently inert. So the test for a row here is a WRITER, not a design — and a row that
  * loses its last writer is removed by the change that removed it, not excused.
  *
- * `config.reloaded` was removed under that rule (see the operator section). THREE members have
+ * `config.reloaded` was removed under that rule (see the operator section). TWO members have
  * no appender and are pinned, decided, and blocked in `test/registries.test.ts`. It was five:
  * `budget.reserved` and `budget.settled` were the two decided WIRE, and they were wired — the
  * reservation `PolicyEngine` held in memory is now a durable fact, which is the non-negotiable
- * this union exists to serve. The three left are `task.skipped` (wire, behind the join's
- * branch-error accounting), `channel.written` and `task.started` (both delete); read the
- * decisions there, not here, because that file is the one a test keeps honest.
+ * this union exists to serve. `task.skipped` was the third, and it is wired too:
+ * `Engine.#skippedByJoin` appends it from both of `#commit`'s terminal-failure exits when a
+ * downstream join declares `onBranchError: "skip"`, so the `skipped` state that `run/projection.ts`,
+ * `evolution/trajectory.ts` and `telemetry/spans.ts` all already read can finally be SET. Precisely
+ * that, and not more: `#foldJoin`'s `skipped` disjunct is reachable now only where a node carries
+ * BOTH a `skip` join edge and a `fail` one, so an ordinary `onBranchError: "fail"` join still
+ * counts `failed` branches and nothing else. The two left are `channel.written` and `task.started`,
+ * both decided DELETE; read the decisions there, not here, because that file is the one a test
+ * keeps honest.
  */
 
 import type { LoomError } from "../errors.ts";
