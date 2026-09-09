@@ -172,7 +172,7 @@ function checkManifest(t: ToolFieldSnapshot): void {
 /**
  * Read every DATA field of `t` EXACTLY ONCE into a plain, still-mutable copy — `execute` kept by
  * reference. Every field this registry cares about is read here and nowhere else; `checkManifest`
- * and `#doRegister` both operate on the RESULT of this function, never on `t` again.
+ * and `freezeSnapshot` both operate on the RESULT of this function, never on `t` again.
  *
  * WHY A SEPARATE READ-ONCE PASS, RATHER THAN VALIDATING `t` AND FREEZING IT AFTERWARD. The first
  * shape tried read `t.irreversibility` twice — once in `checkManifest`, once while building the
@@ -181,15 +181,34 @@ function checkManifest(t: ToolFieldSnapshot): void {
  * read after would pass validation and still end up snapshotted at "nuclear". The fix already
  * applied to `name` — read exactly once, bind it, never touch `tool.name` again — generalizes to
  * every field, not only the one that used to key the stack.
+ *
+ * COMPOUND FIELDS NEED THE SAME DISCIPLINE ONE LEVEL DOWN, and a first version of this function
+ * missed it: copying `capabilities: t.capabilities` carries the CALLER'S OWN ARRAY across —
+ * `checkManifest`'s `.some()` reads each element once to validate it, and building the frozen
+ * copy used to spread that same array again, a second read of every element. Measured: a
+ * `capabilities` array with an index-0 getter answering `"fs:write"` on the first read (what
+ * `checkManifest` sees) and `"fs:nuclear-smuggled"` on the second produced a STORED definition
+ * carrying the value nobody validated. `compensation.tool` has the identical shape. Both are
+ * copied into fresh plain containers HERE, in one pass each, before either `checkManifest` or
+ * `freezeSnapshot` looks at them again — a non-array `capabilities` or a non-object
+ * `compensation` is left exactly as `checkManifest` needs to see it, so an invalid manifest is
+ * still refused with the same message.
  */
 function snapshotFields(t: ToolDefinition): ToolFieldSnapshot {
+  const capsRaw: unknown = t.capabilities;
+  const capabilities = Array.isArray(capsRaw) ? [...capsRaw] : capsRaw;
+
+  const compRaw: unknown = t.compensation;
+  const compensation =
+    compRaw !== null && typeof compRaw === "object" ? { tool: (compRaw as { tool?: unknown }).tool } : compRaw;
+
   return {
     name: t.name,
     version: t.version,
-    capabilities: t.capabilities,
+    capabilities,
     irreversibility: t.irreversibility,
     idempotent: t.idempotent,
-    compensation: t.compensation,
+    compensation,
     description: t.description,
     parameters: t.parameters,
     execute: t.execute,
@@ -199,22 +218,27 @@ function snapshotFields(t: ToolDefinition): ToolFieldSnapshot {
 /**
  * Freeze a `snapshotFields` result into the `ToolDefinition` this registry hands out from here on.
  *
- * `parameters` (a `JSONSchema`) and `compensation` are frozen one level deep too — the same
- * hazard `capabilities` has: a JSON Schema object handed to the compiler is exactly the shape a
- * hostile module could mutate post-registration to smuggle a different tool contract past a
- * cached decision. `Object.freeze` is shallow, so nested objects INSIDE `parameters` (a schema's
- * own `properties`, say) are not frozen — closing that fully would need a recursive deep-freeze
- * over arbitrary caller-supplied JSON, which is a larger change than this row asks for; the fields
- * frozen here are exactly the ones `checkManifest` already validates plus the two `ToolDefinition`
- * adds (`description`, `parameters`).
+ * NO FIELD IS RE-READ FROM ITS ORIGINAL CONTAINER HERE. `capabilities` and `compensation` are
+ * already fresh, caller-independent containers built by `snapshotFields`'s single pass — this
+ * function only calls `Object.freeze` on what it was handed, never `[...s.capabilities]` or
+ * `compRaw.tool` again, which is precisely the second read that used to defeat the snapshot.
+ *
+ * `parameters` (a `JSONSchema`) is frozen one level deep too, for the same reason `capabilities`
+ * is: a JSON Schema object handed to the compiler is exactly the shape a hostile module could
+ * mutate post-registration to smuggle a different tool contract past a cached decision.
+ * `checkManifest` deliberately does not validate `parameters` (see its docstring), so this is
+ * this field's only read — no TOCTOU to close there, only the freeze. `Object.freeze` is
+ * shallow, so nested objects INSIDE `parameters` (a schema's own `properties`, say) are not
+ * frozen — closing that fully would need a recursive deep-freeze over arbitrary caller-supplied
+ * JSON, which is a larger change than this row asks for.
  *
  * Called only AFTER `checkManifest` has passed the same snapshot, so every field here is already
  * known to be well-typed.
  */
 function freezeSnapshot(s: ToolFieldSnapshot): ToolDefinition {
-  const capabilities = Object.freeze([...(s.capabilities as readonly string[])]);
-  const compRaw = s.compensation as { readonly tool: string } | undefined;
-  const compensation = compRaw === undefined ? undefined : Object.freeze({ tool: compRaw.tool });
+  const capabilities = Object.freeze(s.capabilities as string[]);
+  const compRaw = s.compensation as { tool: string } | undefined;
+  const compensation = compRaw === undefined ? undefined : Object.freeze(compRaw);
   const parameters = Object.freeze({ ...s.parameters }) as JSONSchema;
   return Object.freeze({
     name: s.name,
