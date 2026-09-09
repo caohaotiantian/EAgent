@@ -18,8 +18,9 @@
  * MEASURED AT THE BASE SHA, with the census test below: 8 graphs × 4 ticks = 32 compiles.
  * After the memo: 8, and the 8 are the first tick's.
  *
- * AND THE ORDINARY HALF, which is the whole risk of a cache — the three tests after the census.
- * A graph published AFTER the memo filled is compiled and its run driven on the next tick. A
+ * AND THE ORDINARY HALF, which is the whole risk of a cache — the four tests after the census.
+ * A tool REGISTERED after the memo filled is seen, and the graph it now refuses is refused. A
+ * graph published AFTER the memo filled is compiled and its run driven on the next tick. A
  * graph REPUBLISHED IN PLACE, same filename, new bytes, is visible on the next tick with no
  * restart. A restart, whose memo is empty by construction, still drives.
  */
@@ -142,6 +143,77 @@ test("A STRANDED RUN COSTS ONE COMPILE PER GRAPH FILE, NOT ONE PER GRAPH PER TIC
           `(the defect measured ${N * K})`,
       );
       assert.equal((await w.engine.projection(stranded))?.status, "running", "and the stranded run is still stranded, undriven");
+    } finally {
+      w.close();
+    }
+  } finally {
+    d.dispose();
+  }
+});
+
+/**
+ * THE MEMO'S OTHER INPUT, AND THE ONE DIRECTION IT MUST NOT DRIFT.
+ *
+ * A file's bytes are not the whole of what `compile()` reads. The TOOL REGISTRY is the other
+ * half, it is NOT fixed for a plane's lifetime — `TODO.md` §A0.27 and the fix at `a688ec2` are
+ * about a `setTimeout` inside an `--extension-module` registering a tool under a live
+ * `loom serve`, which is why the `mcp__` reservation lives inside `register()` — and the
+ * direction it moves a compile is the wrong one for a cache:
+ *
+ *     tools={}               → ok=true  diagnostics=[]
+ *     tools={"late.tool": …} → ok=false [warning:GRAPH011_UNHANDLED_IRREVERSIBLE,
+ *                                        error:GRAPH017_CAPABILITY_NOT_DECLARED]
+ *
+ * An UNREGISTERED tool has no manifest, so there are no capabilities to refuse on and the graph
+ * passes. Registering it is what supplies them. A memo blind to the registry would therefore go
+ * on serving a graph that a fresh compile REFUSES — a guard loosening itself over time.
+ */
+test("A TOOL REGISTERED AFTER THE MEMO FILLED IS SEEN, AND THE GRAPH IT NOW REFUSES IS REFUSED", async () => {
+  const d = deployment();
+  try {
+    // A run that is due at every tick and driveable at none, so the index is built every tick.
+    const strandedFile = publishGraph(d, "stranded", oneTool("stranded", 1, false));
+    const stranded = await donorRun(d, strandedFile, T0 + 1);
+    unlinkSync(strandedFile);
+
+    // Declares NO capabilities and names a tool nothing has registered — which compiles clean,
+    // because a name with no manifest behind it has no capabilities to check.
+    publishGraph(d, "probe", {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "probe", project: "deployment", version: 1 },
+      policy: { posture: "on", capabilities: [], expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+      channels: { note: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+      inputs: ["note"],
+      outputs: ["out"],
+      nodes: [{ id: "apply", type: "tool", reads: ["note"], writes: ["out"], tool: { name: "late.tool", version: "1.0", args: {} } }],
+      edges: [],
+    });
+
+    const w = d.open();
+    try {
+      assert.equal((await w.engine.projection(stranded))?.status, "running", "the precondition: something keeps the index being built");
+      const before = await quiet(() => runClockTick(w, LIMIT, 0, LAP));
+      assert.equal(before.err.includes("GRAPH017"), false, `probe.json compiles clean while the tool is unregistered: ${before.err}`);
+
+      // THE REGISTRATION AN EXTENSION MODULE CAN MAKE AT ANY TIME. Nothing on disk changed.
+      w.engine.tools.register({
+        name: "late.tool",
+        version: "1.0",
+        description: "registered after the plane booted",
+        parameters: { type: "object", properties: {} },
+        capabilities: ["net:http"],
+        irreversibility: "read_only",
+        idempotent: true,
+        execute: () => ({ content: "" }),
+      });
+
+      const after = await quiet(() => runClockTick(w, LIMIT, LAP, LAP));
+      assert.equal(
+        after.err.includes("GRAPH017_CAPABILITY_NOT_DECLARED"),
+        true,
+        `the same bytes must be recompiled against the new registry, and refused: ${after.err}`,
+      );
     } finally {
       w.close();
     }

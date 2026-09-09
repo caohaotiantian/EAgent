@@ -5032,14 +5032,16 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
  *
  * PER `Workspace`, in a `WeakMap`, and that is what makes the restart question answerable.
  * `compile()` reads three things beyond the file — `ws.resolver`, `ws.engine.tools.manifests()`
- * and `ws.granted` — and all three are fixed for a `Workspace` object's lifetime: the resolver
- * closes over a `ResourceStore` seeded once from `readResources(root)` at `openWorkspace`, and
- * every `tools.register` call site in this file runs inside `openWorkspace` before it returns
- * (`startMcp` is awaited BEFORE it). So a memo cannot outlive the context that justified it, a
- * second plane over the same directory keeps its own, and a restart — `close()` plus a fresh
- * `openWorkspace` — gets an empty one by construction. Empty costs a compile and can never cost
- * a wrong answer, which is why this is not a member of the class
- * `oversight-survives-restart.test.ts` enumerates.
+ * and `ws.granted` — and the `Workspace` is what pins two of them: `granted` is `readonly` with
+ * one assignment site, and the built-in resolver closes over a `ResourceStore` seeded once from
+ * `readResources(root)` at `openWorkspace`, which nothing in `src/` publishes to afterwards. The
+ * THIRD is not pinned by anything and is the second half of the key — see `toolsToken`, which is
+ * also where the measurement is, and where the one thing neither covers is named.
+ *
+ * So a memo cannot outlive the context that justified it, a second plane over the same directory
+ * keeps its own, and a restart — `close()` plus a fresh `openWorkspace` — gets an empty one by
+ * construction. Empty costs a compile and can never cost a wrong answer, which is why this is
+ * not a member of the class `oversight-survives-restart.test.ts` enumerates.
  *
  * FAILURES ARE MEMOISED TOO, under the same key. A file that does not compile is the other half
  * of §A0.12's cost — the graph whose hook was deleted, in this function's own docstring — and
@@ -5058,15 +5060,68 @@ interface CompiledFile {
   readonly error?: unknown;
 }
 
-const compileMemos = new WeakMap<Workspace, Map<string, CompiledFile>>();
+const compileMemos = new WeakMap<Workspace, { token: Digest; files: Map<string, CompiledFile> }>();
+
+/**
+ * THE MEMO'S OTHER HALF OF THE KEY: THE TOOLS THE COMPILER CAN SEE.
+ *
+ * The first draft of this memo argued that `compile()`'s three non-file inputs are fixed for a
+ * `Workspace`'s lifetime, and named `tools.register`'s call sites as the evidence. That is false
+ * for tools, and this repository proved it false the same week: `TODO.md` §A0.27 and the fix at
+ * `a688ec2` are about a registration made from a `setTimeout` inside an `--extension-module`,
+ * which holds the same `ToolRegistry` object and may call `register()` at any time — which is
+ * exactly why the `mcp__` reservation was moved INTO `register()` rather than left as a boot scan.
+ *
+ * AND IT CHANGES COMPILES, MEASURED — the same bytes, the same resolver, the same grant:
+ *
+ *     tools={}                    → ok=true  diagnostics=[]
+ *     tools={"late.tool": …}      → ok=false [warning:GRAPH011_UNHANDLED_IRREVERSIBLE,
+ *                                             error:GRAPH017_CAPABILITY_NOT_DECLARED]
+ *
+ * The direction is what makes it a defect rather than a staleness note. An UNREGISTERED tool has
+ * no manifest, so `rule017`'s `ctx.tools[name]?.capabilities ?? []` iterates nothing and the
+ * graph passes; registering it is what supplies the capabilities to refuse on. So a memo blind
+ * to the registry would keep serving a graph that a fresh compile REFUSES — a guard loosening
+ * itself over time, which is the one direction CLAUDE.md does not allow. The whole map is thrown
+ * away when the token moves, because a registration is not per-file.
+ *
+ * IT COSTS 0.022 ms PER SWEEP over 24 tools, measured — against the 0.474 ms of reads it sits
+ * beside and the 2.0-2.3 ms of compiles the memo removes. Cheap enough that there is no case for
+ * a narrower key than "everything the compiler can see".
+ *
+ * THE PROJECTION IS `ToolManifestLite`'S SIX FIELDS AND THAT SET IS CLOSED BY THE TYPE:
+ * `compile` takes `Readonly<Record<string, ToolManifestLite>>`, so those six are the whole of
+ * what it can read off a manifest. The values themselves cannot be digested — `manifests()`
+ * hands back the live `ToolDefinition`s, `execute` included.
+ *
+ * WHAT THIS TOKEN DOES NOT COVER, named rather than implied: a module-supplied `ResourceResolver`
+ * that answers the same ref differently over time. The built-in one cannot — it closes over a
+ * `ResourceStore` seeded once from `readResources(root)` at `openWorkspace`, and nothing in
+ * `src/` calls `publish` after — but a module's own object is its own object, and a resolver
+ * carries no version to key on. That is the residue; `ws.granted` is `readonly` on the
+ * `Workspace` with one assignment site, so it is not part of it.
+ */
+function toolsToken(ws: Workspace): Digest {
+  return digest(
+    Object.values((ws.engine.tools as ToolRegistry).manifests()).map((m) => [
+      m.name,
+      m.version,
+      [...m.capabilities],
+      m.irreversibility,
+      m.idempotent,
+      m.compensation?.tool ?? null,
+    ]),
+  );
+}
 
 function compileMemo(ws: Workspace): Map<string, CompiledFile> {
-  let memo = compileMemos.get(ws);
-  if (memo === undefined) {
-    memo = new Map<string, CompiledFile>();
-    compileMemos.set(ws, memo);
+  const token = toolsToken(ws);
+  let held = compileMemos.get(ws);
+  if (held === undefined || held.token !== token) {
+    held = { token, files: new Map<string, CompiledFile>() };
+    compileMemos.set(ws, held);
   }
-  return memo;
+  return held.files;
 }
 
 function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string): RunGraph {
