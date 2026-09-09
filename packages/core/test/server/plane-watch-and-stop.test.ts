@@ -865,8 +865,19 @@ function openConsole(base: string, token: string, answer: () => string): Page {
   const elements = new Map<string, Record<string, unknown>>();
   const element = (): Record<string, unknown> => {
     const children: Record<string, unknown>[] = [];
-    return {
-      innerHTML: "",
+    // `innerHTML` is a real setter here, not a plain field. Four render functions clear it to
+    // `""` and then re-populate via `appendChild`/`append` — `drawControls`, the non-empty
+    // branch of `drawGates`, `loadRuns`, and `loadMine` — exactly what a browser's
+    // `innerHTML = ""` does by removing every child node first.
+    // Without this, a SECOND render of the same cached element (this mock reuses one object
+    // per id — see `getElementById` below) appends onto whatever the first render already
+    // left in `children`, instead of replacing it. That is what produced
+    // `pause,advance,cancel,pause,advance,cancel`: `command()`'s own coalescing timer
+    // (`invalidate()`, 60 ms) can fire a stray extra `draw()` after the last `command()` call
+    // and before the test's own explicit render, and the mock's un-cleared `children` array
+    // accumulated it. See `.agent/flake/plan.md` for the full trace.
+    let html = "";
+    const el: Record<string, unknown> = {
       textContent: "",
       title: "",
       className: "",
@@ -876,7 +887,22 @@ function openConsole(base: string, token: string, answer: () => string): Page {
       onchange: null,
       children,
       appendChild: (c: Record<string, unknown>) => void children.push(c),
+      // `drawGates` calls `actions.append(yes, no)` (plural, `Element.append`), not
+      // `appendChild` — a real DOM element has both, and this mock previously had neither
+      // defined for `append`, which threw `TypeError: actions.append is not a function` the
+      // moment a leftover `draw()` (the same coalescing-timer race above) landed while a gate
+      // was open. That is a SECOND, independent way the same test could fail under load;
+      // confirmed reachable by forcing a run to `awaiting_gate` before issuing any command and
+      // calling `draw()` directly, which threw exactly that error before this line existed.
+      append: (...cs: Record<string, unknown>[]) => void children.push(...cs),
     };
+    Object.defineProperty(el, "innerHTML", {
+      get: () => html,
+      set: (v: string) => { html = String(v); children.length = 0; },
+      enumerable: true,
+      configurable: true,
+    });
+    return el;
   };
   const store = new Map<string, string>([["loom.token", token]]);
   const ctx = vm.createContext({
@@ -946,6 +972,114 @@ test("THE CONSOLE'S OWN command() STOPS A RUN — the page's script, not a reque
     assert.deepEqual(page.alerts, [], "the page must have reported no failure to the operator");
     assert.deepEqual(page.errors, [], "…and nothing must have thrown out of a repaint");
   } finally {
+    await r.close();
+  }
+});
+
+/**
+ * A0.18 · TODO.md — pinned deterministically, not by looping the suite.
+ *
+ * "THE CONSOLE'S OWN command() STOPS A RUN" once collected
+ * `'pause,advance,cancel,pause,advance,cancel'` instead of `'pause,advance,cancel'`, one failure
+ * in six full-suite runs and none in isolation — a flake, not a deterministic defect on its own.
+ * `.agent/flake/plan.md` traces the cause: `command()`'s coalescing timer (`invalidate()`, a
+ * real 60 ms `setTimeout` in this harness) can fire a stray extra `draw()` after the last
+ * `command()` call and before the test's own explicit render, under load, and the harness's DOM
+ * mock never cleared an element's `children` on `innerHTML = ""` the way a real browser does —
+ * so that second, otherwise-benign render ACCUMULATED into the collection instead of replacing
+ * it. A second, independent way the same stray `draw()` could fail this test is also fixed
+ * alongside it: `drawGates`'s `actions.append(yes, no)` had no mock counterpart at all (only
+ * `appendChild` existed), which threw the moment that stray render landed while a gate was
+ * open — reachable in the ordinary run this file submits, since it reaches its `approve` gate
+ * well within this test's own timeline. See `openConsole`'s `element()` for both.
+ *
+ * This test forces the first failure mode on demand, with no timing dependency at all, so the
+ * defect is red at base by ASSERTION rather than by repetition: two direct `drawControls()`
+ * calls on one selection must still collect exactly one set of controls, because that is what
+ * a real DOM shows after any number of renders of the same state.
+ */
+test("THE CONTROLS COLLECT FROM ONE RENDER EVEN WHEN drawControls() RUNS TWICE — A0.18, forced deterministically", async () => {
+  const r = await rig({ identity: people() });
+  const page = openConsole(r.base, "alice-token", () => "");
+  try {
+    const { runId } = await submit(r, { authorization: "Bearer alice-token" });
+    const select = `selected = ${JSON.stringify(String(runId))};`;
+    await page.run(`(() => { ${select} current.status = "running"; current.paused = false; })()`);
+
+    const collected = await page.run(
+      `(() => { drawControls(); drawControls(); return $("controls").children.map((b) => b.textContent).join(","); })()`,
+    );
+    assert.equal(
+      collected,
+      "pause,advance,cancel",
+      "a second render of the same state must REPLACE the controls, not append to them",
+    );
+    assert.deepEqual(page.alerts, [], "the page must have reported no failure to the operator");
+    assert.deepEqual(page.errors, [], "…and nothing must have thrown out of a repaint");
+  } finally {
+    // `openConsole` fires the page's own boot sequence (`/health`, `whoami()`, `loadRuns()`,
+    // `loadGraphs()`) the instant its script runs — the same as a browser loading the page —
+    // and this test does none of the extra round trips the command-driving test above does to
+    // let them land first. This has to run BEFORE `r.close()`, in the `finally` rather than
+    // after the assertions: a failing assertion above must still drain these, or `r.close()`
+    // races an in-flight `fetch` into an unhandled rejection that reports as a second, unrelated
+    // failure. Polling all three writes — not just `whoami()`'s — is what makes the wait a
+    // guarantee rather than a coincidence of response ordering. `$("runs")` is checked by BOTH
+    // `innerHTML` (the empty-run-list and error branches set markup directly) and
+    // `children.length` (the populated branch clears `innerHTML` to `""` and appends rows,
+    // which the mock's `innerHTML` getter does not reconstruct) — checking only the former
+    // means a non-empty run list never satisfies the condition and burns the full budget below.
+    for (
+      let i = 0;
+      i < 200 &&
+      ((await page.run(`$("who").textContent`)) === "" ||
+        (await page.run(`$("runs").innerHTML === "" && $("runs").children.length === 0`)) === true ||
+        (await page.run(`$("conn").textContent`)) === "connecting");
+      i++
+    ) {
+      await new Promise((x) => setTimeout(x, 5));
+    }
+    await r.close();
+  }
+});
+
+/**
+ * A0.18, review round 2 — pins the `append` fix above deterministically.
+ *
+ * Round 1 added `append` to the mock element because `drawGates` calls
+ * `actions.append(yes, no)`, which threw `TypeError: actions.append is not a function` when a
+ * leftover `draw()` landed while a gate was open. Nothing in the suite failed if that line were
+ * removed again — the test above never populates `current.gates`, and the sibling
+ * command-driving test only reaches the non-empty branch of `drawGates` if the same
+ * nondeterministic timer race lands on a `draw()` call while a gate happens to be open. This
+ * forces that branch directly, with no rig, no timer, and no race at all.
+ */
+test("drawGates() RENDERS AN OPEN GATE WITHOUT THROWING — pins the append fix, no timer or race needed", async () => {
+  // A REAL rig, exactly like the sibling tests — not because drawGates() needs a server, but
+  // because the page's own boot sequence (`/health`, `whoami()`, `loadRuns()`, `loadGraphs()`)
+  // fires the instant its script runs, and an unreachable base would turn those into unhandled
+  // rejections at test-end instead of a clean pass.
+  const r = await rig({ identity: people() });
+  const page = openConsole(r.base, "alice-token", () => "");
+  try {
+    await page.run(
+      `(() => { current.gates = [{ gateId: "g1", nodeId: "approve", state: "open", approvers: ["u:alice"] }]; })()`,
+    );
+    const result = await page.run(`(() => { try { drawGates(); return "ok"; } catch (e) { return String(e); } })()`);
+    assert.equal(result, "ok", "drawGates() must not throw when it renders an open gate's actions");
+    assert.equal(await page.run(`$("gates").children.length`), 1, "the one open gate must have rendered a row");
+    assert.deepEqual(page.errors, [], "…and nothing must have been caught out of a repaint either");
+  } finally {
+    for (
+      let i = 0;
+      i < 200 &&
+      ((await page.run(`$("who").textContent`)) === "" ||
+        (await page.run(`$("runs").innerHTML === "" && $("runs").children.length === 0`)) === true ||
+        (await page.run(`$("conn").textContent`)) === "connecting");
+      i++
+    ) {
+      await new Promise((x) => setTimeout(x, 5));
+    }
     await r.close();
   }
 });
