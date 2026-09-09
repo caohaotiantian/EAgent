@@ -8,8 +8,9 @@
  * `ModelRequest.maxTokens` — the request literal in `#runAgent` carries model, system, messages
  * and tools and nothing else — so `estimateTurnTokens` always took the `?? 1024` arm while the
  * adapter always sent `defaultMaxTokens ?? 4096`. The reservation under-described its own request
- * by 4× at the shipped default, and by 31× against the 32,000-token row that produced
- * `docs/evolution-loop-2026-08-27.md`.
+ * by 4× at the shipped default, and by 31× against the 32,000-token output ceiling of the reasoning
+ * model that drove the 2026-08-27 live `review-bench` corpus — one run of it spent all 32,001 output
+ * tokens reasoning and returned zero content characters.
  *
  * THIS IS THE BRIEF'S NAMED FAILURE MODE — a guard answering its undecidable case with the
  * passing value — and it had no defence, because the answer was four lines away: the DOLLAR

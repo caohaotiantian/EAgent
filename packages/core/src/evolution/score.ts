@@ -113,7 +113,7 @@
  * self-report on node types, and node types come from `spec.nodes`. A trajectory folded without
  * its graph therefore arrives here with `assertions: []` and scores exactly what a run that
  * failed every assertion scores. Driven live on one `review-bench` run, same run and same
- * command twice (`docs/evolution-loop-2026-08-27.md` §4): graph absent from `<ws>/graphs/` →
+ * command twice, driven against a live provider on 2026-08-27: graph absent from `<ws>/graphs/` →
  * `signals []`, outcome 0, **score 0.111**; graph present → `S1 "6/6 assertions passed"`,
  * outcome 1, **score 0.700**. A candidate graph is published in `candidates/`, so every
  * candidate cohort read as worthless and nothing on the page said why.

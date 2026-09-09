@@ -6,7 +6,7 @@
  * at all. So from the second source edit onward, `bin/loom` answers for code it does not contain
  * and says nothing about it. That is not hypothetical — on 2026-08-25 an auditor measured
  * behaviour through a `bin/loom` 109 seconds behind `packages/core/src` and wrote down the older
- * code's answers (`docs/todo-recheck-2026-08-25.md`:1858); on 2026-08-28 the same checked-out
+ * code's answers (binary mtime 13:52:23, `telemetry/spans.ts` 13:54:12); on 2026-08-28 the same checked-out
  * binary was three days and 40 source files behind and still printed `--help` with exit 0.
  *
  * A gate in `npm run check` would not have caught either one: both people were running the

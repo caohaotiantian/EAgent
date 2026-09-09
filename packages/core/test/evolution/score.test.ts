@@ -358,7 +358,7 @@ test("a cohort of nothing but failures measures nothing, and n = 0 blocks golden
 test("AN UNMEASURED RUN IS TOLD APART FROM A RUN THAT FAILED EVERY ASSERTION", () => {
   // The two verdicts the product could not distinguish, side by side. Both read `outcome 0`;
   // only one of them is a statement about the run. Driven live before this existed, same run
-  // and same command twice (docs/evolution-loop-2026-08-27.md §4): the graph absent from
+  // and same command twice, against a live provider on 2026-08-27: the graph absent from
   // graphs/ gave `"signals": []`, outcome 0, score 0.111; the graph present gave
   // `S1 "6/6 assertions passed"`, outcome 1, score 0.700 — so every candidate cohort, whose
   // graph lives in candidates/, read as worthless.

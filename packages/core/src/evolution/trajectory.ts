@@ -216,7 +216,7 @@ export interface Trajectory {
    * gets. Nothing in the record told the two apart.
    *
    * DRIVEN on one live run of `examples/graphs/review-bench.json`
-   * (`docs/evolution-loop-2026-08-27.md` §4), same run and same command twice:
+   * against a live provider on 2026-08-27, same run and same command twice:
    *
    * ```
    * graph absent from <ws>/graphs/   signals []                          outcome 0  score 0.111
