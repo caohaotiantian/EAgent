@@ -5906,8 +5906,12 @@ export async function runClockTick(
  *
  * HOW THE SET WAS CLOSED, because "every" is a claim that has to be checkable. Two passes: a
  * census of every module-level binding (`^(export )?(const|let|var|class)`), of which exactly
- * one — `workspaceOrdinal` — is mutable and the other thirty-six are frozen primitives or
- * literal tables; and every container construction (`new Map(`, `new Set(`, a mutable array
+ * TWO hold something mutable — `workspaceOrdinal` and `compileMemos`, members 1 and 11 — and
+ * the rest are frozen primitives or literal tables. (This line said "one, and the other
+ * thirty-six" until member 11 arrived. The 36 is not restored, because the regex it names
+ * matches 57 lines in this file today and 56 at the sha before member 11, so it never
+ * reproduced; the CLAIM the census rests on is the mutable set, which is named.) And every
+ * container construction (`new Map(`, `new Set(`, a mutable array
  * or object literal) checked for whether it outlives the call that built it. Everything else
  * is per-call and cannot survive anything. The question asked of each survivor is the one the
  * first non-negotiable asks: WHAT READS IT, and what does a decision do when a restart hands
@@ -5952,7 +5956,10 @@ export async function runClockTick(
  *       graph by hash. It is a `WeakMap` keyed by the `Workspace`, so a restart cannot hand it
  *       back at all — the second plane's map is a different object, and empty. Empty costs one
  *       compile per file and can never cost a wrong answer, which is the direction this whole
- *       list asks about. MEMO, and see `compiledFile` for why the key is the file's CONTENT.
+ *       list asks about. MEMO. Its key has TWO halves and both invalidate: the file's CONTENT
+ *       per entry (`compiledFile`), and a digest of the live tool registry for the map as a
+ *       whole (`toolsToken`) — that second one is not an optimisation, it is what stops a
+ *       compile-time guard going stale in the loosening direction.
  *
  * SO: eleven producers, ten of which lose only work, and one of which loses a bounded wait. The
  * `Workspace`'s own fields are deliberately not on this list — they are read-only after
