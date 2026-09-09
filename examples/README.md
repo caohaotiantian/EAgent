@@ -276,6 +276,18 @@ this one runs offline and means what it says, because there was never a model in
 
 `reports/` holds three shards of real-shaped `node --test` TAP output — 8 failing tests over 5
 causes, one of them (`missing-dependency`) spanning two files, which is the case a per-file reading
-of the log hides. A pattern that matches nothing FAILS the run rather than reporting a clean suite:
-`triage-plan.js` throws, because "0 failures" and "you pointed me at the wrong directory" must not
-look the same.
+of the log hides.
+
+**It refuses at BOTH ends of the shard count, and for one reason.** A pattern matching nothing
+would fan out zero branches and report "0 failing tests" — indistinguishable from a green suite. A
+pattern matching more than the fan-out's `maxWidth` would silently CLAMP: 30 shards at a width of
+24 runs 24 branches and says nothing about the other six, in a document a person is about to
+approve. `triage-plan.js` throws on both, naming the count and the cap. Its `SHARD_CEILING` must
+track `maxWidth` on the `fan` edge; `packages/core/test/examples-triage.test.ts` reads `maxWidth`
+out of the graph and drives one shard past it, so the two cannot drift apart.
+
+**Split your shards on `/\r?\n/`, not on `"\n"`, in any body you write like this one.** Every
+pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without `/m` matches only
+the true end of the string — so the first draft read a CRLF shard as completely clean and the run
+SUCCEEDED. That is a triage tool telling you a red suite is green, and it is the single worst thing
+this example could do.

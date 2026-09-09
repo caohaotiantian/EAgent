@@ -20,7 +20,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,12 +160,13 @@ test("the approval writes the ranked report, and the ranking is stable across th
     ]);
 
     const written = readFileSync(join(ws.dir, "out", "triage.md"), "utf8");
-    // The receipt names the RELATIVE path the graph asked for, and a byte count that is the
-    // file's — asserted against the file rather than against a literal, so editing a remedy
-    // string in the classifier does not turn this red for no reason.
+    // The receipt names the RELATIVE path the graph asked for, and `bytes` is
+    // `String(body).length` — a UTF-16 CODE-UNIT count, not a byte count, so it agrees with
+    // `wc -c` only while the report is ASCII and this one is not. Asserted against the string
+    // read back rather than against a literal, so editing a remedy line does not turn it red.
     assert.deepEqual(outputs["written"], { bytes: written.length, path: "out/triage.md" });
     assert.match(written, /^# Test failure triage$/m);
-    assert.match(written, /^8 failing test\(s\) across 3 report file\(s\), in 5 root-cause bucket\(s\)\.$/m);
+    assert.match(written, /^8 failing test\(s\) across 3 report file\(s\) \(3 with failures\), in 5 root-cause bucket\(s\)\.$/m);
     assert.match(written, /^\| 1 \| `assertion` \| 2 \|$/m);
     // The evidence line carries the two VALUES, not just node:test's "Expected values…" header —
     // a triage report naming neither side of a failed comparison is one you still have to open
@@ -183,6 +184,11 @@ test("a subject the gate does not name cannot answer it", async () => {
     const { runId, gate } = await runToGate(ws.dir);
     const r = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:someone-else"]);
     assert.notEqual(r.code, 0, `an unnamed approver must be refused:\n${r.out}${r.err}`);
+    // THE CODE, not just the exit status. A bad `runId` or a typo'd `gateId` also exits 1 — as
+    // `E_GATE_NOT_FOUND` — so a test asserting only `code !== 0` would keep passing if the
+    // approver check were removed entirely.
+    assert.match(r.err, /E_GATE_NOT_AUTHORIZED/, r.err);
+    assert.match(r.err, /does not name "u:someone-else" as an approver/, r.err);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false, "and the write still has not happened");
   } finally {
     ws.dispose();
@@ -236,6 +242,159 @@ test("a pattern matching nothing FAILS the run rather than reporting a clean sui
     assert.equal(s["status"], "failed");
     assert.match(String((s["error"] as Record<string, unknown>)["message"]), /no test-output files matched/);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
+  } finally {
+    ws.dispose();
+  }
+});
+
+// ── the four a fresh review found, three of which REPORTED A GREEN SUITE ──────
+
+test("a CRLF shard is triaged identically to an LF one", async () => {
+  // THE WORST FAILURE THIS WORKFLOW CAN HAVE, and it shipped in the first draft. Every pattern in
+  // `triage-classify.js` is anchored; in JavaScript `.` excludes `\r` and a `$` without `/m`
+  // matches only the true end of the string — so a file split on `"\n"` alone matched NOTHING and
+  // the run SUCCEEDED with "0 failing test(s) across 0 report file(s)". CI output written on
+  // Windows, or checked out under `core.autocrlf=true`, is the ordinary case, not an exotic one.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    mkdirSync(join(ws.dir, "reports"));
+    for (const f of readdirSync(join(EXAMPLES, "reports"))) {
+      const lf = readFileSync(join(EXAMPLES, "reports", f), "utf8");
+      assert.equal(lf.includes("\r"), false, `${f} is the LF fixture; this test supplies the CRLF half`);
+      writeFileSync(join(ws.dir, "reports", f), lf.replace(/\n/g, "\r\n"));
+    }
+
+    const { runId, gate } = await runToGate(ws.dir);
+    const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const report = (summary(approved)["outputs"] as Record<string, Record<string, unknown>>)["report"]!;
+
+    assert.equal(report["totalFailures"], 8, "a CRLF shard must not read as a clean one");
+    assert.deepEqual(report["ranking"], [
+      { bucket: "assertion", count: 2 },
+      { bucket: "missing-dependency", count: 2 },
+      { bucket: "port-in-use", count: 2 },
+      { bucket: "timeout", count: 1 },
+      { bucket: "uncaught-type-error", count: 1 },
+    ]);
+    // …and the evidence is clean too, rather than carrying a stray `\r` into the report.
+    assert.match(readFileSync(join(ws.dir, "out", "triage.md"), "utf8"), /Expected values to be strictly equal: 1710 !== 1700\n/);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("more shards than the fan-out can carry REFUSES, instead of dropping the surplus", async () => {
+  // `maxWidth` CLAMPS in silence: at a width of 8, twelve shards ran eight branches and the report
+  // said "8 failing test(s) across 8 report file(s)" with no warning on either stream — a third of
+  // the evidence missing from a document a person is being asked to approve.
+  //
+  // THE CEILING IS READ OUT OF THE GRAPH, never written here: the refusal lives in
+  // `triage-plan.js` as a duplicated constant (a body is handed channels, not its own node), and
+  // this is what stops the two drifting apart.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const spec = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: number }[] };
+    const width = spec.edges.find((e) => e.id === "fan")!.maxWidth!;
+    assert.equal(typeof width, "number");
+
+    mkdirSync(join(ws.dir, "reports"));
+    const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
+    const name = (i: number): string => `shard-${String(i).padStart(3, "0")}.txt`;
+    for (let i = 0; i <= width; i += 1) writeFileSync(join(ws.dir, "reports", name(i)), one);
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `${String(width + 1)} shards over a width of ${String(width)} must refuse:\n${r.out}${r.err}`);
+    const s = summary(r);
+    assert.equal(s["status"], "failed");
+    assert.match(
+      String((s["error"] as Record<string, unknown>)["message"]),
+      new RegExp(`matched ${String(width + 1)} test-output files but this graph fans out at most ${String(width)}`),
+    );
+    assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
+
+    // …and EXACTLY at the ceiling it still runs, so this is a ceiling and not an off-by-one.
+    rmSync(join(ws.dir, "reports", name(width)));
+    assert.equal((await runToGate(ws.dir)).gate.nodeId, "approve");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a shard with no failures is still COUNTED as a file that was read", async () => {
+  // `report.shards` used to be derived from the failures, so a clean shard was invisible: three
+  // all-green files reported "0 failing test(s) across 0 report file(s)". "I read three files and
+  // found nothing" and "I read nothing" are different sentences, and a triage report that cannot
+  // tell them apart is one you cannot act on.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    mkdirSync(join(ws.dir, "reports"));
+    const green = "TAP version 13\n# Subtest: cart/ok.test.ts\n    ok 1 - adds up\n    1..1\nok 1 - cart/ok.test.ts\n1..1\n# pass 1\n";
+    writeFileSync(join(ws.dir, "reports", "green-1.txt"), green);
+    writeFileSync(join(ws.dir, "reports", "green-2.txt"), green);
+    writeFileSync(join(ws.dir, "reports", "red.txt"), readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8"));
+
+    const { runId, gate } = await runToGate(ws.dir);
+    const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const report = (summary(approved)["outputs"] as Record<string, Record<string, unknown>>)["report"]!;
+
+    assert.deepEqual(report["shards"], ["reports/green-1.txt", "reports/green-2.txt", "reports/red.txt"], "every file READ");
+    assert.deepEqual(report["shardsWithFailures"], ["reports/red.txt"], "…and, separately, the ones that failed");
+    assert.equal(report["totalFailures"], 2);
+    assert.match(
+      readFileSync(join(ws.dir, "out", "triage.md"), "utf8"),
+      /^2 failing test\(s\) across 3 report file\(s\) \(1 with failures\), in 1 root-cause bucket\(s\)\.$/m,
+    );
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a failure with no YAML block does not swallow the next one", async () => {
+  // The block scan ran forward to the next `...` and then advanced PAST it, so a `not ok` with no
+  // block ate the FOLLOWING failure and wore its evidence: one row reading "alpha/one.test.ts —
+  // no yaml at all / Cannot find module 'zzz' imported from beta/two.ts", with `beta/two.test.ts`
+  // gone entirely. Two failures collapsed into one is this workflow's own error, inverted.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    mkdirSync(join(ws.dir, "reports"));
+    writeFileSync(
+      join(ws.dir, "reports", "ragged.txt"),
+      [
+        "TAP version 13",
+        "# Subtest: alpha/one.test.ts",
+        "    not ok 1 - no yaml at all",
+        "# Subtest: beta/two.test.ts",
+        "    not ok 1 - a real failure that should be its own bucket",
+        "      ---",
+        "      error: |-",
+        "        Cannot find module 'zzz' imported from beta/two.ts",
+        "      code: 'ERR_MODULE_NOT_FOUND'",
+        "      ...",
+        "1..2",
+        "",
+      ].join("\n"),
+    );
+
+    const { runId, gate } = await runToGate(ws.dir);
+    const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const report = (summary(approved)["outputs"] as Record<string, Record<string, unknown>>)["report"]!;
+
+    assert.equal(report["totalFailures"], 2, "both failures survive");
+    const cases = (report["buckets"] as { id: string; cases: { file: string; test: string; evidence: string }[] }[])
+      .flatMap((b) => b.cases.map((c) => ({ bucket: b.id, file: c.file, test: c.test, evidence: c.evidence })))
+      .sort((a, b) => (a.file < b.file ? -1 : 1));
+    assert.deepEqual(cases, [
+      { bucket: "unclassified", file: "alpha/one.test.ts", test: "no yaml at all", evidence: "(no error line)" },
+      {
+        bucket: "missing-dependency",
+        file: "beta/two.test.ts",
+        test: "a real failure that should be its own bucket",
+        evidence: "Cannot find module 'zzz' imported from beta/two.ts",
+      },
+    ]);
   } finally {
     ws.dispose();
   }

@@ -77,14 +77,29 @@ graph deliberately does not pretend to do it.
 
 ## 2 · The exact commands a stranger runs
 
-From a fresh clone of the repository, in order. Nothing below needs an API key, a network
-connection, or an editor.
+**Read this paragraph before you start.** Every block below is copy-pasteable in order, top to
+bottom, in ONE shell. Two things make that true and are easy to get wrong if you skim:
+
+- **Run ids are captured into `$RUN` and `$GATE` by the commands themselves.** They are different
+  on every run, so nothing here hard-codes one.
+- **The gate is answered ONCE.** Approving and cancelling are two different answers to the same
+  question, so this walkthrough starts a FRESH run for each — three runs in total. A second verb on
+  an already-answered gate is `E_GATE_ALREADY_RESOLVED`, exit 1, which is correct behaviour and not
+  what any of these steps is demonstrating.
+
+Nothing below needs an API key, a network connection, or an editor.
 
 ```bash
 npm install && npm run build:binary      # → bin/loom, one file, 0 third-party modules
-export PATH="$PWD/bin:$PATH"
-cd examples
+export REPO="$PWD"                       # the repo root; the test block at the end needs it back
+export PATH="$REPO/bin:$PATH"
+cd "$REPO/examples"
+rm -rf out .loom                         # running the examples in place leaves both behind
 ```
+
+That last line matters: `out/` and `.loom/` are gitignored, so a checkout somebody has already
+experimented in can carry a `triage.md` and a journal from an earlier run — and the first thing
+this walkthrough asserts is that `out/triage.md` does not exist yet.
 
 **Compile it.**
 
@@ -101,90 +116,167 @@ ok
   deadline collate (default): timeoutMs=600000
   deadline write (default): timeoutMs=600000
 ```
-exit 0.
+exit 0. Six deadlines, not eight: `gather` is a join and `approve` is a gate, and neither runs a
+body that could time out.
 
 **Run it.** It stops at the gate, and nothing has been written.
 
 ```bash
 loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}'
-ls out                                   # ls: out: No such file or directory
+ls out                                   # ls: out: No such file or directory   exit 1
 ```
 
+stdout (the run id line goes to **stderr**, and is shown here in place so you can see both):
+
 ```
-run 01M22PYR3TYZF0K54TYSXV3XBD — inspect it with: loom trace 01M22PYR3TYZF0K54TYSXV3XBD   ← stderr
+run 01M22R66E9GPA00RQXPFA3P8K9 — inspect it with: loom trace 01M22R66E9GPA00RQXPFA3P8K9   ← stderr
 {
-  "runId": "01M22PYR3TYZF0K54TYSXV3XBD",
+  "runId": "01M22R66E9GPA00RQXPFA3P8K9",
   "status": "awaiting_gate",
   "outputs": {},
-  "usage": { "inputTokens": 0, "outputTokens": 0, "costUsd": 0, "wallMs": 0 }
+  "usage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "costUsd": 0,
+    "wallMs": 0
+  }
 }
-gate gate_01M22PYR4PCBPBAN1YHJTGKKVH on node approve — loom approve 01M22PYR3TYZF0K54TYSXV3XBD gate_01M22PYR4PCBPBAN1YHJTGKKVH --as YOUR_ID
+gate gate_01M22R66F8N0ZANT0QSMWX6M0H on node approve — loom approve 01M22R66E9GPA00RQXPFA3P8K9 gate_01M22R66F8N0ZANT0QSMWX6M0H --as YOUR_ID
 ```
-exit 0. **Your ids will differ; copy them from your own output.** Below, `$RUN` and `$GATE`.
+exit 0. **That last line is on stdout, after the JSON** — see friction **F4**; it is why the block
+below extracts the ids with `grep` rather than `jq`.
 
-**Watch it.** The span tree shows the three `read` branches side by side and the run parked on the
-gate:
+Capture the two coordinates the rest of the walkthrough needs:
 
 ```bash
-loom trace $RUN
+RUN=$(loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null \
+      | sed -n 's/^  "runId": "\(.*\)",$/\1/p')
+GATE=$(loom gates "$RUN" | sed -n 's/^    "gateId": "\(.*\)",$/\1/p')
+echo "$RUN $GATE"
+```
+
+(That starts run #2 — run #1 above was the one you read the output of. Both are parked on their own
+gate; runs are independent and neither is in anybody's way.)
+
+**Watch it.** The span tree shows the three `read` branches side by side and the run parked on the
+gate. This is the real output, abridged only where marked:
+
+```bash
+loom trace "$RUN"
 ```
 
 ```
-loom.run [unset] 26ms
-  loom.task scan root [ok] 9ms
-  loom.task plan root [ok] 2ms
-  loom.task read root/fan[0] [ok] 5ms
-  loom.task read root/fan[1] [ok] 5ms
-  loom.task read root/fan[2] [ok] 6ms
-  loom.task classify root/fan[0] [ok] 4ms
-  …
+trace: graph triage-failures v1 (sha256:b8d474ca…) — the hash run 01M22R66… recorded, from graphs/triage-failures.json
+loom.run [unset] 31ms
+  loom.task scan root [ok] 10ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 4ms
+    loom.state.reduce [ok] 0ms
+  loom.task plan root [ok] 3ms
+    loom.policy [ok] 0ms
+    loom.effect (random) [ok] 0ms
+    loom.state.reduce [ok] 0ms
+  loom.task read root/fan[0] [ok] 8ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 3ms
+  …read root/fan[1], read root/fan[2], then classify root/fan[0..2], gather, collate, each with
+   its own loom.policy child…
   loom.task approve root [unset] 2ms
+    loom.policy [ok] 0ms
     loom.gate approve [unset] 0ms
 
 conformance: ok
 ```
 
+The `loom.effect (random)` under every `function` task is the seeded PRNG draw the engine journals
+for the body whether or not the body calls `Math.random()`; it is what makes the replay below
+reproduce.
+
 **See what you are being asked to approve.** `loom gates` gives you the gate's coordinates but not
-its content (see friction **F3**); the control plane gives you the content:
+its content — friction **F3**:
 
 ```bash
-loom gates $RUN                                  # gateId, nodeId "approve", approvers ["u:you"]
-loom serve --port 8791 &                         # console at http://127.0.0.1:8791
-curl -s http://127.0.0.1:8791/runs/$RUN | python3 -c \
-  'import json,sys; print(json.dumps(json.load(sys.stdin)["channels"]["report"]["ranking"], indent=2))'
-kill %1
+loom gates "$RUN"
 ```
 
 ```json
 [
-  {"bucket": "assertion", "count": 2},
-  {"bucket": "missing-dependency", "count": 2},
-  {"bucket": "port-in-use", "count": 2},
-  {"bucket": "timeout", "count": 1},
-  {"bucket": "uncaught-type-error", "count": 1}
+  {
+    "gateId": "gate_01M22R66F8N0ZANT0QSMWX6M0H",
+    "taskId": "approve@root#0",
+    "nodeId": "approve",
+    "policyRef": "oversight/triage@stable",
+    "contentDigest": "sha256:fd8fb1b7765349b8f8ecabed5e0e53568e494ed748f57ca73e2ec76192393ac4",
+    "raisedAtSeq": 74,
+    "raisedAtTs": 1788946356712,
+    "state": "open",
+    "tier": 0,
+    "approvers": [
+      "u:you"
+    ],
+    "allowEdit": [],
+    "runId": "01M22R66E9GPA00RQXPFA3P8K9",
+    "onTimeout": "fail"
+  }
 ]
 ```
 
-**Stop it, if that is your answer.** A cancelled run writes nothing and leaves no open gate:
+The content is on the control plane. **Start `loom serve` from `examples/`** — `--workspace`
+defaults to the current directory, and from the repo root it would find no `graphs/`:
 
 ```bash
-loom cancel $RUN --as u:you --reason "triaged by hand instead"
-# → {"runId": "…", "status": "cancelled"}                      exit 0
-loom gates $RUN            # → []
-ls out                     # → still no such file
+loom serve --port 8791 >/tmp/loom-serve.log 2>&1 &
+SERVE=$!                                          # by PID: `kill %1` needs job control,
+                                                  # which a non-interactive shell does not have
+until curl -sf "http://127.0.0.1:8791/runs" >/dev/null 2>&1 || ! kill -0 "$SERVE" 2>/dev/null
+do sleep 0.2; done                                # the curl below would otherwise race the boot
+
+curl -s "http://127.0.0.1:8791/runs/$RUN" \
+  | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["channels"]["report"]["ranking"], indent=2))'
+
+kill "$SERVE"
 ```
 
-**Or approve it, which is the path that produces the deliverable:**
+```json
+[
+  {
+    "bucket": "assertion",
+    "count": 2
+  },
+  {
+    "bucket": "missing-dependency",
+    "count": 2
+  },
+  {
+    "bucket": "port-in-use",
+    "count": 2
+  },
+  {
+    "bucket": "timeout",
+    "count": 1
+  },
+  {
+    "bucket": "uncaught-type-error",
+    "count": 1
+  }
+]
+```
+
+**Approve it — this is the path that produces the deliverable.**
 
 ```bash
-loom approve $RUN $GATE --as u:you
+loom approve "$RUN" "$GATE" --as u:you
 cat out/triage.md
 ```
+
+`loom approve` is not silent: it prints the finished run as JSON, roughly ninety lines, ending in
+`"written": {"bytes": 1802, "path": "out/triage.md"}`. (`bytes` is a UTF-16 code-unit count, so
+`wc -c` on the file says 1838 — the report has multibyte dashes in it.) The file:
 
 ```markdown
 # Test failure triage
 
-8 failing test(s) across 3 report file(s), in 5 root-cause bucket(s).
+8 failing test(s) across 3 report file(s) (3 with failures), in 5 root-cause bucket(s).
 
 | rank | root cause | failures |
 |---|---|---|
@@ -200,7 +292,9 @@ the code and the expectation disagree — decide which of the two is wrong befor
 
 - `cart/totals.test.ts` — applies a percentage discount
   Expected values to be strictly equal: 1710 !== 1700
-…
+- `cart/totals.test.ts` — rounds half to even
+  Expected values to be strictly equal: '2.50' !== '2.5'
+
 ## missing-dependency — 2 failure(s)
 
 the import names a module this checkout does not have — restore or install it, then re-run
@@ -217,44 +311,83 @@ different files are **one** missing package, and a per-file reading of the log h
 **Trust what it did.**
 
 ```bash
-loom replay $RUN      # → {"match": true, "hermetic": true}          exit 0
-loom audit  $RUN      # → ok — 16 rule(s) checked, 11 skipped        exit 0
+loom replay "$RUN"      # exit 0
+loom audit  "$RUN"      # exit 0
 ```
+
+`replay` prints a `replay: graph triage-failures v1 (sha256:…)` header on stderr and then
+`{"match": true, "hermetic": true}`. `audit` prints eleven `· not checked — …` lines for rules this
+journal has no events for, then `ok — 16 rule(s) checked, 11 skipped`.
 
 `hermetic: true` is the load-bearing word: the three `fs.read` calls, the `fs.write`, and the
 human's decision at the gate were all served from the journal rather than re-executed.
 
-**Two refusals worth trying**, because each is a promise:
+**Stop one instead of approving it.** A cancelled run writes nothing and leaves no open gate — on a
+FRESH run, because the one above has already answered its gate:
 
 ```bash
-loom approve $RUN $GATE --as u:someone-else      # refused — the gate names who may answer it
+RUN2=$(loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null \
+       | sed -n 's/^  "runId": "\(.*\)",$/\1/p')
+loom cancel "$RUN2" --as u:you --reason "triaged by hand instead"
+# → {"runId": "…", "status": "cancelled"}                        exit 0
+loom gates "$RUN2"      # → []
+```
+
+**Two refusals worth trying**, because each is a promise. The first needs a run still parked at an
+OPEN gate — on a resolved one you get `E_GATE_ALREADY_RESOLVED` instead, which proves nothing about
+approvers:
+
+```bash
+RUN3=$(loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null \
+       | sed -n 's/^  "runId": "\(.*\)",$/\1/p')
+GATE3=$(loom gates "$RUN3" | sed -n 's/^    "gateId": "\(.*\)",$/\1/p')
+loom approve "$RUN3" "$GATE3" --as u:someone-else
+# → E_GATE_NOT_AUTHORIZED: gate "gate_01M…" does not name "u:someone-else" as an approver   exit 1
+
 loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
-# → "status": "failed" … no test-output files matched — check the --input pattern       exit 1
+# → "status": "failed" … no test-output files matched — check the --input pattern           exit 1
 ```
 
 The second is deliberate. A fan-out over an empty array produces no branches and the join folds
 nothing, so the run would otherwise **succeed with a report saying zero failures** — which reads as
-"your suite is green" when what happened is that you typed the wrong path.
+"your suite is green" when what happened is that you typed the wrong path. The same body refuses
+the other end too: more shards than the fan-out's `maxWidth` would silently drop the surplus, so it
+names the count and the cap instead.
 
-### The test that stops it rotting
+### The tests that stop it rotting
+
+**From the repository root, not from `examples/`** — `cd` back first:
 
 ```bash
-node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 6 pass, 0 fail
+cd "$REPO"
+node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 10 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-Six tests: parks-with-nothing-written, the approval and the exact ranking, the refused approver,
-cancel, replay, and the empty-pattern refusal. `examples-run.test.ts` picks the new graph up
-without being edited — its set is the directory — so the compile and resource-reachability halves
-were already covered.
+Ten tests: parks-with-nothing-written, the approval and the exact ranking, the refused approver
+(pinned to `E_GATE_NOT_AUTHORIZED`, not merely to a non-zero exit), cancel, replay, the
+empty-pattern refusal, and the four a fresh review added — a CRLF shard, a shard count over the
+fan-out ceiling, a shard with no failures still being counted as read, and a failure with no YAML
+block not swallowing the next one. `examples-run.test.ts` picks the new graph up without being
+edited — its set is the directory — so the compile and resource-reachability halves were already
+covered.
+
+**Tidy up.** The walkthrough leaves three runs in a journal and one report on disk:
+
+```bash
+rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
+```
 
 ---
 
 ## 3 · Friction log
 
 Every entry is a place the shipped product cost more than it should have. Each carries the exact
-command, what happened, and what was expected. **Seven found: three fixed, four logged** with the
+command, what happened, and what was expected. **Eight found: three fixed, five logged** with the
 file that would have to change.
+
+Everything in this section was re-run by a fresh reviewer who was told to refute it; F1–F5 and F7
+reproduced exactly, and F8 is one that reviewer added.
 
 ### F1 · A fan-out branch may hold two nodes, but nothing says so, and it takes two compiles
 
@@ -268,15 +401,18 @@ branch's LAST node — is refused:
 $ loom compile graphs/triage-failures.json      # join.branches: ["classify"]
 ✗ triage-failures.json: GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" but no downstream join waits on it
    fix: add a join node downstream of "read" with branches: [read]
+E_GRAPH_INVALID: graph has 1 error(s): GRAPH021_FANOUT_WITHOUT_JOIN
 ```
-
-Following that `fix:` literally — `branches: ["read"]` — is then refused too:
+exit 1. Following that `fix:` literally — `branches: ["read"]` — is then refused too:
 
 ```bash
 $ loom compile graphs/triage-failures.json      # join.branches: ["read"]
+! triage-failures.json: GRAPH008_JOIN_WRITES_UNPRODUCED: …
 ✗ triage-failures.json: GRAPH008_BRANCH_NOT_CONNECTED: join "gather" waits on "read", but no edge runs from "read" to "gather"
    fix: add an edge read -> gather with kind: join
+E_GRAPH_INVALID: graph has 1 error(s): GRAPH008_BRANCH_NOT_CONNECTED
 ```
+exit 1.
 
 **Expected**: one diagnostic naming the actual rule — *every node in a fan-out branch needs its own
 entry in `join.branches` and its own `"kind": "join"` edge into the join*. **Got**: two, in
@@ -417,11 +553,43 @@ this workflow writes `out/triage.md`. Only `notes/` was ignored, so following th
 
 *Status: logged for the docs lane — this lane must not edit `README.md`.*
 
-`README.md:180` reads *"runs the three that need no model"*, and `README.md:177` splits the examples
-as *"§§1–4 work offline with no key; §§5–6 have an `agent` node and want a real model"*. With
-`triage-failures` added there are **four** run offline by the suite, and the new one is §8. Both
-lines want a pass. `examples/README.md`'s own "Five graphs" line had the same problem and **was
-fixed** here, since that file is this lane's to edit.
+`README.md:177` splits the examples as *"§§1–4 work offline with no key; §§5–6 have an `agent` node
+and want a real model"*, which now omits §8 as it already omitted §7. `README.md:180` reads *"runs
+the three that need no model"*.
+
+**Narrowed after review, because the first draft of this entry overstated it.** `:180` credits the
+running to `examples-run.test.ts`, and that file still runs exactly three graphs — §8 is run by
+`packages/core/test/examples-triage.test.ts`, a separate file — so `:180` is still literally TRUE
+and only reads as incomplete. `:177` is the line that is now wrong. `examples/README.md`'s own
+"Five graphs" line was wrong in the same way and **was fixed** here, since that file is this lane's
+to edit.
+
+### F8 · The workflow's own designed refusals surface as `E_INTERNAL`
+
+*Status: logged.* *File: `packages/core/src/run/engine.ts` (kernel) — so this one cannot be fixed
+from an extension at all, which is the point of recording it.*
+
+Both of `triage-plan.js`'s refusals are deliberate guards with a written message, and both arrive
+looking like a crash:
+
+```bash
+$ loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
+  "error": {
+    "class": "internal",
+    "code": "E_INTERNAL",
+    "message": "Error: no test-output files matched — check the --input pattern, …"
+  }
+```
+
+**Expected**: something a caller can branch on — a class that says "this graph refused", distinct
+from "this body threw by accident". **Got**: `E_INTERNAL`, the same code a genuine bug in the body
+produces. `README.md`'s "What does not work yet" already names the mechanism: *"a throw still
+cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest
+object can never satisfy it, so every throw out of the `vm` is `E_INTERNAL`"*. A body's `return`
+channel already carries one structured verdict (`{retry: {reason}}`); a refusal has no equivalent,
+so an author who wants to fail on purpose can only throw, and every purposeful failure is reported
+as an internal error. Related to the row README calls *`retry` on a function or evaluator node*,
+but not the same one — that row is about retryability, this is about a REFUSAL.
 
 ### Fixed vs. logged
 
@@ -433,13 +601,37 @@ fixed** here, since that file is this lane's to edit.
 | F4 | gate hint on stdout after the JSON | logged | `packages/core/src/cli.ts` |
 | F5 | `--extension-module` help names 4 of 10 registrar members | logged | `packages/core/src/cli.ts` |
 | F6 | `examples/.gitignore` missed `out/` | **fixed** | `examples/.gitignore` |
-| F7 | `README.md:177,180` counts are stale | logged | `README.md` (docs lane) |
+| F7 | `README.md:177` omits §8 (and already omitted §7) | logged | `README.md` (docs lane) |
+| F8 | a body's deliberate refusal is reported as `E_INTERNAL` | logged | `packages/core/src/run/engine.ts` (kernel) |
 
-Also **fixed** while porting, and worth naming because they are the kind of defect an example
-carries silently: the classifier's evidence line originally stopped at node:test's
-`"Expected values to be strictly equal:"` header and named neither value, so the entire `assertion`
+### What the review found in the WORKFLOW, not in the runtime
+
+The friction log is about the product. This paragraph is about the port, and it belongs here
+because `CLAUDE.md` is explicit that *a builder's own green suite is not evidence*. Two fresh
+agents were run against this change: one adversarial reviewer on the diff, and one "stranger" given
+only this document and told to follow it literally. **Between them they found six defects, and
+three of them made the workflow report a GREEN SUITE for input that was full of failures** — the
+exact failure mode §2 claims the empty-pattern refusal exists to prevent.
+
+| found | what happened | now |
+|---|---|---|
+| **CRLF input read as clean** | every pattern in `triage-classify.js` is anchored; `.` excludes `\r` and `$` without `/m` needs true end-of-string, so a shard split on `"\n"` matched NOTHING and the run SUCCEEDED with `0 failing test(s)`. Windows CI output, or `core.autocrlf=true`, is the ordinary case | split on `/\r?\n/`; pinned by *"a CRLF shard is triaged identically to an LF one"*, which fails if the fix is reverted |
+| **shards past `maxWidth` dropped in silence** | the fan-out CLAMPS: twelve shards at a width of eight ran eight branches, and the report said `8 failing test(s) across 8 report file(s)` with no warning on either stream — while this document's own first sentence says "a dozen shards" | width raised to 24, and `triage-plan.js` now REFUSES above it, naming the count and the cap. Pinned by a test that reads `maxWidth` out of the graph, so the constant and the graph cannot drift |
+| **a clean shard was not counted as read** | `report.shards` was derived from the failures, so three all-green files reported `0 failing test(s) across 0 report file(s)` | `collate` reads the `shards` channel; the report carries `shards` (read) and `shardsWithFailures` (failed) separately |
+| **a failure with no YAML block ate the next one** | the block scan ran to the next `...` and advanced past it, so one row appeared under the wrong file wearing the next failure's evidence, and that next failure vanished | the scan stops at `...`, at the next `not ok`, at `1..N` and at `# Subtest:` |
+| **the approver test proved nothing** | it asserted only `code !== 0`, which a bad `runId` also satisfies | pinned to `E_GATE_NOT_AUTHORIZED` and to the message naming the subject |
+| **§2 could not be run top-to-bottom** | the approve and cancel blocks were alternatives on ONE run but both said `$RUN`; `$RUN`/`$GATE` were never assigned; the `node --test` paths did not resolve after `cd examples`; `loom serve &` had no readiness wait and `kill %1` needs job control | §2 is now three explicit runs, ids captured by the commands themselves, `cd "$REPO"` before the tests, a readiness loop and a PID-based kill |
+
+Also fixed while porting: the classifier's evidence line originally stopped at node:test's
+`"Expected values to be strictly equal:"` header and named neither value, so the whole `assertion`
 bucket read identically for every case; and the first draft of `triage-plan.js` returned `[]` for a
-pattern that matched nothing, which would have reported a clean suite for a mistyped path.
+pattern that matched nothing.
+
+**The lesson, stated plainly.** Every one of the three green-suite defects is the same shape
+`CLAUDE.md` names as the first of its two lenses — *a guard answering its undecidable case with the
+passing value*. The workflow's headline promise is that "0 failures" and "you pointed me at the
+wrong thing" must not look the same; three separate mechanisms inside it made them look the same
+anyway, and the builder's own six passing tests said nothing about any of them.
 
 ### What did NOT cause friction, and is worth saying
 
@@ -467,3 +659,14 @@ better than the documentation implies.
 - **`loom score` was not driven against this graph.** It has no evaluator node, so `S1` is
   undefined for it; making it scoreable means deciding what "a good triage" is, which is an exam
   the operator writes, not something this port should invent.
+- **`SHARD_CEILING` is duplicated**, in `triage-plan.js` and as `maxWidth` on the `fan` edge. A
+  `function` body is handed channel values and nothing about the node that called it — no
+  `ctx.node`, no `ctx.graph` — so a body cannot read its own fan-out's width. The test pins the two
+  together, which is a patch on a seam rather than the seam: the real fix is for a body's `ctx` to
+  carry the node's declared shape, and that is a kernel change this lane did not make.
+- **The classifier's bucket list is fixed in the body**, so adding a signature means editing the
+  file. That is correct for an example and wrong for a product: the natural next step is the bucket
+  table as a `resources/` document the body reads, which needs no new mechanism.
+- **Nothing here exercises a `subgraph`, a `router`, a bounded loop, a compensation edge or a
+  retry.** `packages/core/src/workflows/incident-triage.ts` reaches those and is not runnable from
+  the CLI; a port that joins the two would be the next honest one.

@@ -14,6 +14,13 @@
  * PER-FAILURE array into `failures`, whose reducer is `append_ordered`, so the branches fold
  * back in branch order rather than in whichever order the reads finished.
  *
+ * SPLIT ON `/\r?\n/`, NEVER ON `"\n"`. Every pattern below is anchored with `^`/`$`, and in
+ * JavaScript `.` excludes `\r` and a `$` without `/m` matches only the true end of the string — so
+ * a shard written on Windows, or checked out under `core.autocrlf=true`, matched NOTHING and the
+ * whole file read as clean. That is the worst failure this workflow has: a successful run whose
+ * report says the suite is green. The `.trim()` calls below cannot save it, because they run on a
+ * match that never happened.
+ *
  * `raw` ARRIVES AS A ONE-ELEMENT ARRAY, and that is a workaround, not a shape anybody wants.
  * A channel a fan-out node writes must have a multi-writer-safe reducer — GRAPH010 counts
  * `read`'s parallel width and refuses `replace` — even though nothing outside this branch ever
@@ -24,7 +31,7 @@
 function (view) {
   const shard = String(view.require("shard"));
   const contributed = view.require("raw");
-  const lines = (Array.isArray(contributed) ? contributed.join("\n") : String(contributed)).split("\n");
+  const lines = (Array.isArray(contributed) ? contributed.join("\n") : String(contributed)).split(/\r?\n/);
 
   // ORDER MATTERS: the first match wins, so the specific signatures come before the general
   // ones. A timed-out test also carries ERR_TEST_FAILURE, and an uncaught TypeError carries
@@ -100,9 +107,21 @@ function (view) {
       i += 1;
       continue;
     }
+    // THE SCAN IS BOUNDED BY FOUR THINGS, not one. It used to run to the next `...` alone, which
+    // is correct only while every failure carries a YAML block. A `not ok` line WITHOUT one — a
+    // runner that omits it, a truncated log — ran the scan into the NEXT failure's terminator,
+    // and `i` then advanced PAST that failure: a silently dropped row in a report whose whole job
+    // is to be counted. Stopping at the next `not ok`, at a `1..N` plan line and at a `# Subtest:`
+    // heading keeps every failure its own.
     const block = [];
     let j = i + 1;
-    while (j < lines.length && !/^\s*\.\.\.\s*$/.test(lines[j])) {
+    let closed = false;
+    while (j < lines.length) {
+      if (/^\s*\.\.\.\s*$/.test(lines[j])) {
+        closed = true;
+        break;
+      }
+      if (/not ok \d+ - /.test(lines[j]) || /^\s*1\.\.\d+\s*$/.test(lines[j]) || /^# Subtest: /.test(lines[j])) break;
       block.push(lines[j]);
       j += 1;
     }
@@ -116,7 +135,9 @@ function (view) {
       remedy: bucket.remedy,
       evidence: evidenceOf(block),
     });
-    i = j + 1;
+    // Past the `...` when there was one; ONTO the line that stopped us when there was not, so the
+    // next iteration reads it as its own heading or its own failure.
+    i = closed ? j + 1 : j;
   }
 
   return { writes: { failures: failures } };
