@@ -8213,8 +8213,18 @@ export class Engine {
     // foreign failures may fail this run's verb, which is what every wrap in this file exists to
     // avoid, and `advance` gives its caller nothing to tell them apart with. It is BOUNDED —
     // `DEFERRABLE_CODES`, then the charged retries, then the run fails, which the
-    // permanently-broken-store test measures — and it is not a loosening: the code is not in
-    // `RUN_FATAL_CODES`, so nothing about routing or oversight changes.
+    // permanently-broken-store test measures.
+    //
+    // "NOT A LOOSENING" IS A CLAIM ABOUT WHAT THIS RAISES, NOT ABOUT WHAT IT CATCHES, and the
+    // first draft of this line got that backwards ("the code is not in `RUN_FATAL_CODES`, so
+    // nothing about routing changes"). The code this raises is not run-fatal, so the PARENT's own
+    // routing is unchanged; what it catches is anything, so a run-fatal code escaping the child's
+    // drive would be re-classed and deferred rather than ending the parent. A reviewer measured
+    // that by INJECTING `err.policy(E_ROUTE_INVALID)` from the child's store — base parent
+    // `failed/E_ROUTE_INVALID`, here `succeeded` — and then looked for a real raiser and found
+    // none: `E_ROUTE_INVALID` comes only from `steer`, and `E_REPLAY_DIVERGENCE`'s rethrow lands
+    // in the CHILD's `#runWave` and fails the child. So the exposure is stated rather than
+    // claimed away, and it is the same trade every wrap in this file makes.
     //
     // AND NOT BECAUSE OF CANCELS. The argument that wrapping this would "swallow a cancel" was
     // made four times and is dead: `cancel` decides a run's status by journaling `run.cancelled`,
@@ -8464,17 +8474,16 @@ export class Engine {
         //   fdeeb1a      → running              7f908a4 → failed:E_CANCELLED
         //
         // The third version was correct and INERT, which is why none of them is here now. With
-        // `if (false) throw e` substituted for it, all fourteen tests in
+        // `if (false) throw e` substituted for it, all fourteen tests then in
         // `engine-cross-run-child-touches.test.ts` — including one written specifically to drive a
         // `cancel` racing this forward — stay green. The reason is structural: `cancel` decides a
         // run's status by journaling `run.cancelled`, so a task outcome re-classed as "come back
         // later" during a cancelled run changes nothing. Nothing runs, because the run is over.
         //
-        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN, and the honest reason
-        // `#runSubgraph`'s own `advance(childRunId)` is left unwrapped is SCOPE — it is not one of
-        // the five sites this lane was authorised for, and wrapping it is a much wider behaviour
-        // change — not "it would swallow a cancel". That argument was overstated three times; a
-        // fourth rewrite of it would be worth less than deleting it.
+        // SO THE LOOSENING IT GUARDED AGAINST CANNOT HAPPEN. This paragraph used to end by saying
+        // `#runSubgraph`'s own `advance(childRunId)` was left unwrapped on SCOPE rather than on
+        // cancels; it IS wrapped now, at that call, and its own cancel-race test drives the same
+        // argument at that site. The half worth keeping is why no guard stands here.
         throw childUnavailable(childRunId, `the parent's decision on task ${describeThrown(w.task.taskId)} could not be forwarded — answering gate ${describeThrown(target.gateId)} failed`, e);
       }
     }

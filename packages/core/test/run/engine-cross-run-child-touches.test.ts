@@ -1,5 +1,5 @@
 /**
- * ANOTHER RUN'S DISK IS NOT AN ANSWER TO A QUESTION ABOUT THIS ONE — the five remaining sites.
+ * ANOTHER RUN'S DISK IS NOT AN ANSWER TO A QUESTION ABOUT THIS ONE — sites A through F.
  *
  * `engine-child-journal-does-not-fail-the-parent.test.ts` pins ONE cross-run child touch,
  * `#answerMirrorsTheChildAlreadyDecided`. Its residue named five more of the same shape, and this
@@ -36,9 +36,10 @@
  *   irreversible effects.
  *
  * So A and E SWALLOW and warn — in both, the parent has already decided what it is doing and
- * reaching into the child is a courtesy — while B, C and D refuse as
- * `err.unavailable(E_SUBGRAPH_FAILED)`, the class `#runSubgraph` already uses one case earlier for
- * "the child has not finished". They cannot swallow: at B a read that failed would look like "no
+ * reaching into the child is a courtesy — while B, C, D and F refuse as
+ * `err.unavailable(E_CHILD_UNREACHABLE)`. The CLASS is the one `#runSubgraph` already uses one
+ * case earlier for "the child has not finished"; the CODE is no longer shared with it, which is
+ * what test G exists to pin. They cannot swallow: at B a read that failed would look like "no
  * child yet" and the parent would submit a SECOND child run over the first one's effects.
  *
  * THE FIXTURES BREAK THE STORE BY CAUSE WHERE THEY CAN AND BY COUNT WHERE THEY CANNOT, and where
@@ -46,10 +47,11 @@
  * reordering of the reads fails the test loudly instead of quietly measuring a different site.
  * That sentence was a false universal for two rounds — B and C broke the Nth read and then
  * asserted only outcomes any of the five fixes would satisfy, and C's title promised it named its
- * site while its body named nothing. It is true now because each of the three retryable sites
- * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B and C assert theirs: "could not read
- * the journal" is `#runSubgraph`'s probe, "could not be forwarded — reading the journal failed" is
- * `#forwardGateDecision`'s read, "answering gate … failed" is the WRITE. E asserts its own code,
+ * site while its body named nothing. It is true now because each of the FOUR retryable sites
+ * gives `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, and B, C and F assert theirs: "could not
+ * read the journal" is `#runSubgraph`'s probe, "could not be advanced" is its nested drive, "could
+ * not be forwarded — reading the journal failed" is `#forwardGateDecision`'s read, and "answering
+ * gate … failed" is the WRITE. E asserts its own code,
  * `LOOM_CHILD_STOP_FAILED`, which one method emits.
  *
  * EVERY SUCH FILTER IS BY RUN ID AS WELL AS BY CODE. `process.emitWarning` defers to the next
@@ -127,9 +129,9 @@ async function warningsWhile(body: () => Promise<void>): Promise<{ code?: string
 // Shared with `engine-child-journal-does-not-fail-the-parent.test.ts`.
 //
 // WHAT ACTUALLY RE-ENTERS THE NODE IS THE DEFERRAL, NOT THE `retry` POLICY, and an earlier version
-// of this comment said the opposite. `E_SUBGRAPH_FAILED` is in `DEFERRABLE_CODES`, and
+// of this comment said the opposite. `E_CHILD_UNREACHABLE` is in `DEFERRABLE_CODES`, and
 // `#retryDecision` takes the deferral arm BEFORE it consults `NodeSpec.retry` at all, so the
-// refusal these three sites now raise is re-entered UNCHARGED on a 1 s curve inside a 900 s
+// refusal B, C, D and F now raise is re-entered UNCHARGED on a 1 s curve inside a 900 s
 // budget. Measured by this round's reviewer, who deleted the fixture's retry policy
 // (`maxAttempts: 1`) and got 7/7 anyway, with `deferrals 1 / deferredMs 1000` on the task record.
 // `compile.ts` floors a `subgraph` node with `DEFAULT_SUBGRAPH_RETRY` besides, so "a node with no
@@ -229,8 +231,8 @@ class BreakableChildStore extends MemoryStateStore {
 }
 
 /**
- * A clock the test moves by hand. `E_SUBGRAPH_FAILED` is a DEFERRABLE code, so the refusal these
- * three sites now raise takes the deferral arm of `#retryDecision` — which charges no attempt and
+ * A clock the test moves by hand. `E_CHILD_UNREACHABLE` is a DEFERRABLE code, so the refusal B, C,
+ * D and F now raise takes the deferral arm of `#retryDecision` — which charges no attempt and
  * schedules the task 1 s out. Under a frozen clock that task is never due again and the run sits
  * `running` forever, which measures the fixture, not the fix. Moved in fixed steps, never read
  * from the host clock: no assertion here depends on real time.
@@ -352,9 +354,10 @@ test("B · `#runSubgraph`'s START-OR-RESUME READ refuses retryably — a child s
 
   // THE SITE IS ASSERTED, NOT ASSUMED. Breaking the Nth read is a positional fixture, and every
   // assertion below would also pass if the failure had landed at C, D or E — a reviewer measured
-  // exactly that gap in this test and in C's. Each of the three retryable sites gives
+  // exactly that gap in this test and in C's. Each of the four retryable sites gives
   // `LOOM_CHILD_UNREACHABLE` a DIFFERENT sentence, so the warning is what says which one refused:
-  // "could not read the journal" is `#runSubgraph`'s and nobody else's.
+  // "could not read the journal" is `#runSubgraph`'s probe and nobody else's — in particular it is
+  // not the nested drive one site later, which says "could not be advanced" (test F).
   const mine = seen.filter((w) => w.code === "LOOM_CHILD_UNREACHABLE" && w.message.includes(String(childRunId)));
   assert.equal(mine.length, 1, `one refused read, one warning: ${JSON.stringify(seen.map((w) => w.message))}`);
   assert.match(mine[0]!.message, /could not read the journal/, `and it is #runSubgraph's own probe: ${mine[0]!.message}`);
@@ -420,7 +423,7 @@ test("B · A PERMANENTLY broken child store ENDS the run, and the warning rate i
 
 test("B · A DETERMINISTIC child-journal ALARM keeps its own code, in `details.cause`", async () => {
   // THE COST OF RE-CLASSING, PAID RATHER THAN HIDDEN. Making the delegation retryable means
-  // answering `E_SUBGRAPH_FAILED` whatever the child's store raised — and `projection` does not
+  // answering `E_CHILD_UNREACHABLE` whatever the child's store raised — and `projection` does not
   // only raise disk errors. It raises `E_TRACE_INCONSISTENT`, a real invariant-2 alarm, which is
   // DETERMINISTIC: deferring it re-reads the same broken journal every pass. A reviewer measured
   // that arriving at the parent with its code nowhere at all, so the code now travels in
@@ -607,7 +610,7 @@ test("F · THE ORDINARY HALF — a CANCEL racing the nested drive still ends the
   // IT IS GREEN AT `d1b42ae` TOO, and that is said here rather than left for the next reader to
   // discover: it pins no behaviour this change altered, and it is not the defect pin. It is the
   // ORDINARY half — the control that says the wrap did not buy its retryability by losing an
-  // operator's stop. The pin is the test three above, which is RED at `d1b42ae`.
+  // operator's stop. The pin is the first F test, which is RED at `d1b42ae`.
   let engineRef: Engine | undefined;
   let parentRef: RunId | undefined;
   class CancelRacingStore extends BreakableChildStore {
