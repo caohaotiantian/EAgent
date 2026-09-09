@@ -555,7 +555,9 @@ test("EVERY ROW OF THE WORKS TABLE IS PROBED — all of them, not most of them",
  * gitignored, no hook rebuilds it, and CI never builds it — so from the second source edit
  * onward the file on disk is a photograph of an older tree. On 2026-08-25 that bit: an auditor
  * measured behaviour through a `bin/loom` 109 seconds behind `packages/core/src` and wrote down
- * the older code's answers (`docs/todo-recheck-2026-08-25.md`:1858). Re-measured on 2026-08-28
+ * the older code's answers: the binary's mtime was 13:52:23 and `telemetry/spans.ts` 13:54:12, with
+ * `bin/loom` gitignored (`.gitignore:5:bin/`) and no non-`.sample` hook in `.git/hooks/`.
+ * Re-measured on 2026-08-28
  * the same checked-out binary was three days and 40 source files behind and still printed
  * `--help` with exit 0.
  *
