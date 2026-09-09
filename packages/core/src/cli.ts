@@ -41,6 +41,7 @@ import {
   type WebhookChannelOptions,
 } from "./run/delivery.ts";
 import { HumanGateBroker } from "./run/gates.ts";
+import { InProcessScheduler } from "./run/scheduler.ts";
 import {
   FunctionRegistry,
   ModelRegistry,
@@ -1081,9 +1082,10 @@ function refuseRepeated(args: Args, name: string, consequence: string, remedy?: 
  *
  * WHAT THIS BUYS TODAY, AND WHAT IT DOES NOT. The exclusion arm above is in
  * `LeasedScheduler.select`, and `new LeasedScheduler` appears ZERO times in `src/`:
- * `Engine` takes `opts.scheduler ?? new InProcessScheduler()` and `openWorkspace` passes no
- * scheduler, so nothing on the product path reaches that line. Naming the plane does not
- * switch cross-process exclusion on; it makes the identity CORRECT for the day something
+ * `openWorkspace` passes an `InProcessScheduler` (see `STRANDED_LEASE_MS`), which decides "my own
+ * lease" by object identity and never reads a `workerId` at all, so nothing on the product path
+ * reaches that line. Naming the plane does not switch cross-process exclusion on; it makes the
+ * identity CORRECT for the day something
  * wires the leased scheduler, and — the part that pays now — it puts a real name in
  * `task.leased.workerId`, so a journal written by two planes says WHICH plane did what
  * instead of attributing everything to one `worker-0`. `test/deployment/two-planes.test.ts`
@@ -1121,6 +1123,74 @@ function planeWorkerId(): string {
   workspaceOrdinal += 1;
   return `${hostname()}:${String(process.pid)}:${String(workspaceOrdinal)}`;
 }
+
+/**
+ * HOW LONG THIS DEPLOYMENT WAITS BEFORE IT DECIDES A LEASE'S HOLDER IS DEAD, for a node the
+ * compiler gave no deadline of its own.
+ *
+ * WHAT IT BUYS, WHICH IS TODO.md §B.1. `InProcessScheduler` already reclaims a task stranded past
+ * `NodePlan.timeoutMs`, and `compile.ts`'s `effectiveTimeout` gives that field to `agent`, `tool`,
+ * `evaluator` and `function` and to nothing else. So `loom serve` survived its own death on four
+ * node types and not on the other four. Measured on a two-node graph whose ENTRY node is a
+ * `router`, driven to `succeeded` by `loom run` and its journal then truncated one event past
+ * `task.leased` — the exact prefix a `kill -9` between the lease and the commit leaves — folded by
+ * a fresh plane and driven by one run-clock tick. The "without" row is this tree with the
+ * `scheduler:` line below DELETED, which is `ef7df7d`'s behaviour on this path: with no fallback
+ * passed, `deadlineExpired`'s new argument is `undefined` and the predicate is the old one.
+ *
+ *     without this line:  status=running    pick@root#0=leased      driven=true
+ *     with it:            status=succeeded  pick@root#0=succeeded
+ *
+ * `driven=true` in BOTH rows is the load-bearing half: the run clock offered the run either way,
+ * so what this line changed is the scheduler's answer and not the clock's predicate.
+ *
+ * `test/deployment/lease-deadline-survives-restart.test.ts` is that measurement, with its two
+ * controls.
+ *
+ * WHY IT IS NOT A FLAG. An operator has no basis on which to pick a different number — the
+ * question this bounds is "has a process died", not "how long may work take" — and a flag would
+ * be a second, unlinked spelling of a figure the graph layer already chose for exactly one reason.
+ *
+ * WHY 600 s, AND WHY IT IS COPIED RATHER THAN IMPORTED. It is `compile.ts`'s
+ * `DEFAULT_NODE_TIMEOUT_MS`, which is deliberately not exported ("what a caller needs is the
+ * effective number, and that is on `NodePlan.timeoutMs`"). Copying it is right rather than
+ * merely necessary: that constant is an ENFORCEMENT bound derived from the Anthropic and OpenAI
+ * SDKs' own 10-minute request timeouts, and this is a RECOVERY bound. They agree today because a
+ * plane that has held a lease for ten minutes without appending anything has either died or is
+ * inside a child run, and both of those are cases where offering the task again is the recovery;
+ * if one of them ever needs to move, it must be able to move without dragging the other.
+ *
+ * WHAT IT LOOSENS, NAMED. Past this bound, a task leased by a LIVE PEER PLANE over the same
+ * workspace — `planeWorkerId` above names that shape, "a `loom run` beside a `loom serve`" — is
+ * offered to this one. That is the loosening `run/scheduler.ts`'s `deadlineExpired` already made
+ * and priced for the four adjudicable node types; what is new is that it now also covers the four
+ * whose bodies are synchronous or delegate to a child run. Three of those four cost a re-execution
+ * of a body that returns without I/O, and the parent chain's compare-and-swap on `expectedSeq`
+ * refuses whichever plane commits second.
+ *
+ * THE FOURTH, `subgraph`, IS THE ONE THAT IS NOT FREE, and the CAS sentence above is not the
+ * argument for it. Re-entering `Engine.#runSubgraph` resolves a DERIVED child run id
+ * (`${runId}~${taskId}`) and takes its `existing !== undefined` arm — an attach and a resume, not
+ * a second child, and `#servedEffect` short-circuits a child that already succeeded. But the body
+ * it then runs is `await advance(childRunId)`, whose appends are on the CHILD's chain: the
+ * parent's fencing token refuses the loser's PARENT-side commit and guards nothing inside the
+ * child. What bounds the child is the conjunction rather than this number — a peer reaches a LIVE
+ * child only when the parent's lease is past this bound AND the child's own current task is past
+ * its OWN compiled deadline, because the peer's scheduler applies the same rules one level down.
+ * Two independent bounds both lapsed is the shape where the holder is most likely dead. The bound
+ * that would remove the case entirely is the child's own journal progress, which `SelectInput`
+ * cannot carry — see `run/scheduler.ts`, which states the same trade at the predicate.
+ *
+ * THE ALTERNATIVE CONSIDERED AND REFUSED was excluding `subgraph` from the fallback. It costs more
+ * than it saves: a plane is likeliest to die DURING a long child run, and that is exactly the case
+ * where the parent task strands with nobody to map the child's outputs back — the widest window
+ * §B.1 names, given up to close the narrowest.
+ *
+ * A LEASE THIS PROCESS HANDED OUT IS NEVER REACHED BY THIS NUMBER AT ALL, at any age. That is
+ * `deadlineExpired`'s `held` set, and it is why a single-plane deployment — which is what D.2 says
+ * `loom` is — pays nothing for this at runtime and gets the recovery at boot.
+ */
+const STRANDED_LEASE_MS = 600_000;
 
 interface Workspace {
   readonly root: string;
@@ -1741,6 +1811,22 @@ export function openWorkspace(
     // A NAME OF ITS OWN, so a live lease held by another plane is another plane's. See
     // `planeWorkerId` for the measurement that says why the default could not stay.
     workerId: planeWorkerId(),
+    // AND A DEADLINE FOR THE LEASES THE GRAPH GIVES NONE, which is what makes THIS binary survive
+    // its own death rather than only the four node types the compiler adjudicates. It is passed
+    // here and not in the `serve` arm because `loom resume` and `loom run` fold the same journals
+    // `loom serve` does: a run the clock recovers but `loom resume` does not would be two answers
+    // to one question.
+    //
+    // `loom replay` DOES NOT GET IT, and the reason is worth stating exactly, because it is not
+    // "replayRun builds its own Engine". It does build one, but it SPREADS the caller's `engine`
+    // options into it (`replay.ts`, which deliberately deletes only `gates`), so a `scheduler` in
+    // them would be inherited object and all. It is absent because every caller passes a
+    // hand-built literal instead. THE THREE, named because the guarantee is their conjunction and
+    // not one refusal: `case "replay"` below (`tools, functions, models, hooks, policy,
+    // payloads`), `agent.ts`'s `engineOptions`, and `evolution/gate.ts`'s `replayRun`, which
+    // forwards whatever ITS caller gave — for the CLI, the literal built in `case "promote"`.
+    // A fourth that spread `ws.engine`'s own options would hand a replay this scheduler.
+    scheduler: new InProcessScheduler({ strandedLeaseMs: STRANDED_LEASE_MS }),
     resolver,
     tools,
     functions,
@@ -5019,8 +5105,10 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
  *
  * `indexGraphs` compiled every graph file in the workspace on every call, and `runClockTick`
  * calls it on every tick that has a run which is DUE — including a run that is due at every tick
- * and driveable at none, which is what a hash that resolves to no file, or a lease on one of the
- * four node types the scheduler will not adjudicate, produces. TODO.md §A0.12 measured the
+ * and driveable at none, which is what a hash that resolves to no file produces. (A lease on a
+ * `join`, `router`, `human_gate` or `subgraph` was the second such shape and is no longer one
+ * under this binary: `STRANDED_LEASE_MS` makes those four adjudicable, so such a run is driven and
+ * finished rather than re-offered forever. The hash shape stands.) TODO.md §A0.12 measured the
  * result at 2.0-2.3 ms per tick against 0.1-0.4 ms over 31 published graphs, forever, scaling
  * with the WORKSPACE and not with the stranded run. `test/deployment/stranded-run-tick-cost.test.ts`
  * reproduces it as a COUNT rather than a duration: 8 graphs × 4 ticks = 32 compiles, now 8.
@@ -5857,7 +5945,9 @@ export async function runClockTick(
     //
     // WIDENING IT DOES FIX IT NOW, AND DID NOT BEFORE — the comment that stood here said the
     // opposite, correctly, for as long as it was true. `InProcessScheduler` gained a reclaim
-    // arm that takes back a lease past the NODE'S OWN declared deadline, and `#advanceSerially`
+    // arm that takes back a lease past the NODE'S OWN declared deadline (and, since
+    // `openWorkspace` passes `STRANDED_LEASE_MS`, past a flat one where the node declares none,
+    // which is what extends this from four node types to all eight), and `#advanceSerially`
     // now asks `select` BEFORE deciding a run is over, so driving such a run reaches it. The
     // engine also no longer FINISHES a run that still holds a lease, which is what makes this
     // predicate safe to widen: a tick that drives a run whose lease is live — held by this
@@ -5872,9 +5962,12 @@ export async function runClockTick(
     // fold" this comment first claimed. A run that is due and cannot progress reaches
     // `graphsByHash` below every time — measured on 31 published graphs, 2.0-2.3 ms per tick
     // against 0.1-0.4 ms before, forever, and it scaled with the WORKSPACE rather than with the
-    // stranded run. It bites two shapes: a run whose graph hash no longer resolves, and one
-    // whose leased node is a `join`, `router`, `human_gate` or `subgraph`, the four the
-    // scheduler will not adjudicate. TODO.md §A0.12 has the measurement and why narrowing THIS
+    // stranded run. It bit two shapes: a run whose graph hash no longer resolves, and one whose
+    // leased node is a `join`, `router`, `human_gate` or `subgraph`. The SECOND IS NO LONGER A
+    // PERMANENT COST under this binary — `STRANDED_LEASE_MS` makes those four adjudicable too, so
+    // such a run is driven, reclaimed and finished instead of walking the workspace forever; what
+    // is left of it is the ticks before the flat deadline lapses. The first stands.
+    // TODO.md §A0.12 has the measurement and why narrowing THIS
     // predicate was not available as the fix: the clock cannot read a node's declared deadline
     // without the graph it is failing to resolve. So the cost was moved instead of the
     // predicate — `compiledFile` memoises each file's compile on its CONTENT, and what is left
@@ -5961,7 +6054,36 @@ export async function runClockTick(
  *       whole (`toolsToken`) — that second one is not an optimisation, it is what stops a
  *       compile-time guard going stale in the loosening direction.
  *
- * SO: eleven producers, ten of which lose only work, and one of which loses a bounded wait. The
+ *  12 · `openWorkspace`'s `new InProcessScheduler({ strandedLeaseMs })` and its `#handedOut` —
+ *       the newest member, and the one this list's question has the most interesting answer for.
+ *       The map records which task ids THIS scheduler object handed out, and the reclaim arm in
+ *       `run/scheduler.ts` refuses to take back a lease that is in it. A restart hands it back
+ *       EMPTY, and empty is the PERMISSIVE direction: every lease in the journal then looks like
+ *       a predecessor's — which is exactly what it is. So this is a member whose empty-restart
+ *       behaviour is the FEATURE (the recovery §B.1 asked for) rather than a guard failing open,
+ *       and the distinction is that the decision it feeds does not rest on the map: the deadline
+ *       is still `task.lease.at + timeoutMs`, and `lease.at` is folded out of the `task.leased`
+ *       row's `ts` by `projection.ts`. The memory only ever ADDS refusals to a journal-derived
+ *       answer. Losing it costs one re-execution, whose PARENT-chain commit the fencing token
+ *       refuses — and for a `subgraph` task that is not the whole cost, because the body it
+ *       re-enters writes on the CHILD's chain; `STRANDED_LEASE_MS` states what does bound that.
+ *       Constructing it here rather than letting `Engine` default it changes no lifetime — the
+ *       Engine held one already — only who chooses the fallback deadline.
+ *
+ *       IT IS ALSO THE FIRST MEMBER THE CLOSURE METHOD ABOVE COULD NOT HAVE FOUND, and that is
+ *       worth more than the entry. The method searches module-level bindings and container
+ *       CONSTRUCTIONS (`new Map(`, `new Set(`, a literal); this is a constructed OBJECT from
+ *       another module whose long-lived state is private to it, so the census's stated procedure
+ *       walks straight past it and the "EVERY" in the heading is only as good as whoever notices.
+ *       The same widened criterion admits three siblings `openWorkspace` builds — `new Engine`,
+ *       `new HumanGateBroker`, `new InProcessEventBus` — and they are on no row for the reason
+ *       the paragraph below excludes the `Workspace`'s own fields: each is rebuilt at every boot
+ *       from the workspace DIRECTORY and argv, the same inputs the dead plane read, and each
+ *       rebuilds its per-run state by folding. What a future sweep should search for is a
+ *       CONSTRUCTOR CALL whose object outlives the call, not a container literal.
+ *
+ * SO: twelve producers. Ten lose only work, one (1) loses a bounded wait, and one (12) is empty
+ * at every boot on purpose, because empty is the answer. The
  * `Workspace`'s own fields are deliberately not on this list — they are read-only after
  * `openWorkspace` and are rebuilt from the workspace DIRECTORY, which is the same input the
  * pre-restart plane read, so a restart cannot hand any of them back different.
@@ -5993,8 +6115,10 @@ export async function runClockTick(
  * THE SET THAT LAST SENTENCE COVERS, since it used to read as total. It covers runs this
  * object WITHHELD: never dispatched, so their task never left `ready`, so the clock re-offers
  * them. It does NOT cover a run whose `advance` was in flight when the process died — that
- * task is `leased` in the journal and no fold makes it `ready` again. Measured, and the reason
- * it is a §B.1 cost rather than a defect of this object, at `runClockTick`'s `due` predicate.
+ * task is `leased` in the journal and no fold makes it `ready` again. That is not this object's
+ * to repair and never was: the clock offers such a run (its `due` predicate counts a `leased`
+ * task) and the scheduler decides whether the lease is adjudicable, against the node's own
+ * deadline or against `STRANDED_LEASE_MS` where it has none. §B.1, measured there.
  *
  * WHAT IT DOES WHEN IT CANNOT DECIDE: it does not dispatch. The undecidable case is "I cannot
  * tell whether that slot released" — an `advance` whose promise never settles — and the slot

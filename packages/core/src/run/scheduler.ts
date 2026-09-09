@@ -33,8 +33,10 @@
  * left the shipped scheduler stranding runs. One worker still has a PREDECESSOR: a plane killed
  * between `task.leased` and `task.committed` leaves a Task in a state only its holder advances,
  * and the next process is not that holder. `InProcessScheduler` therefore reclaims too, expired
- * against the node's own compiled deadline rather than an operator-chosen lease — see
- * `deadlineExpired`.
+ * against the node's own compiled deadline — or, where the node has none and the deployment
+ * supplied a fallback, against that. See `deadlineExpired`; `cli.ts`'s `STRANDED_LEASE_MS` is the
+ * only fallback anything in this tree passes, and it is what makes `loom serve` survive its own
+ * death on a `join`, `router`, `human_gate` or `subgraph` task rather than on half the node types.
  *
  * (2) took three goes. The first version filtered `eligible`, and `eligible` returns only
  * `ready` Tasks — which is exactly right for one worker and silently empty for the case
@@ -204,25 +206,65 @@ function reclaimable(input: SelectInput, leaseMs: number): Runnable[] {
  *     fencing token refuses the loser's commit if it is not. Two live planes sharing one journal
  *     under one id is also a deployment `cli.ts` cannot produce.
  *
- *   - NO DEADLINE, NO RECLAIM. `compile.ts`'s `effectiveTimeout` gives an enforced deadline to
- *     `agent`, `tool`, `evaluator` and `function` and to nothing else, so a `join`, `router`,
- *     `human_gate` or `subgraph` task is left alone: with no bound there is nothing to reason
- *     from, and "I do not know" is not "the holder is dead". Those four are also the four whose
- *     bodies return synchronously or delegate to a child run, so the window a crash can land in
- *     is a tick rather than a node's whole duration. A deployment that wants them reclaimed too
- *     asks for a flat lease by passing `Engine`'s `opts.scheduler` a `LeasedScheduler` — that is
- *     the seam, and it is on the pinned public surface.
+ *   - NO DEADLINE, NO RECLAIM — UNLESS THE DEPLOYMENT SUPPLIED ONE, which is `fallbackMs` and is
+ *     the second half of this argument rather than an exception to it. `compile.ts`'s
+ *     `effectiveTimeout` gives an ENFORCED deadline to `agent`, `tool`, `evaluator` and
+ *     `function` and to nothing else, and its docstring gives a separate reason per node type why
+ *     `router`, `join`, `human_gate` and `subgraph` must not have one. Named, not counted:
+ *     `router` and `join` are INERTNESS — their bodies return synchronously, so the wrapper the
+ *     deadline arms would bound nothing; `human_gate` is that same inertness plus the stronger
+ *     point that a gate expiring because nobody wrote a number is oversight failing OPEN, its
+ *     clock being `slaMs` and `onTimeout`; and `subgraph` is that a per-NODE constant would bound
+ *     a whole child RUN, whose own nodes each carry the default already.
+ *
+ *     THREE OF THOSE REASONS ARE ABOUT ENFORCEMENT, AND THIS IS NOT ENFORCEMENT. Nothing here
+ *     aborts a running body; `select` decides which tasks a worker OFFERS to run. So the
+ *     inertness of `router` and `join` and the oversight argument for `human_gate` say nothing
+ *     about a recovery bound: the question it asks is "is this lease's holder gone?", and for
+ *     those three the honest answer at the compile deadline was "I cannot tell" — so they were
+ *     left alone, and `loom serve` could not survive its own death on half the node types
+ *     (TODO.md §B.1). What makes it answerable is `held`: this scheduler object knows which
+ *     leases IT handed out, and a fresh object at boot has handed out none. So a lease not in
+ *     `held` past `fallbackMs` was taken by a process that is not this one — a dead predecessor,
+ *     or a peer plane, and the peer case is the loosening the paragraph above already priced.
+ *
+ *     `subgraph`'S REASON IS THE FOURTH AND IT DOES CARRY OVER, WHICH IS THE PRICE THIS PAYS AND
+ *     NOT AN OVERSIGHT. `#runSubgraph`'s body is `await this.advance(childRunId)`, so the parent's
+ *     task is `leased` for a whole child RUN — and "a per-node constant standing in for a child
+ *     run's duration" is an objection to the SHAPE of the number, which a recovery bound inherits
+ *     whole. What bounds it is not the number but the conjunction: reaching a live peer's child
+ *     needs the PARENT's lease past `fallbackMs` AND the child's own current task past ITS
+ *     compiled deadline, since the peer's scheduler reclaims inside the child by exactly the
+ *     rules it uses outside it. Two independent 600 s bounds both lapsed is the shape where the
+ *     holder is most likely dead, which is why this is a price and not a defect. The bound that
+ *     would REMOVE it is the child's own journal progress — a cross-run question `SelectInput`
+ *     cannot be asked, since it carries one `projection` and one `graph` by construction.
+ *
+ *     AND THE PARENT'S FENCING TOKEN DOES NOT COVER THE CHILD. `journal/store.ts`'s
+ *     compare-and-swap is per chain and `engine.ts` says a child run's appends are on the CHILD's
+ *     chain, so what it refuses is the loser's parent-side commit. Inside the child, protection is
+ *     the child's own CAS per append plus `#servedEffect` — and, as
+ *     `LeasedSchedulerOptions.leaseMs` puts it for the general case, detection is not prevention.
+ *
+ *     `fallbackMs` IS THE DEPLOYMENT'S NUMBER AND NOT THIS FILE'S. Undefined is the default and
+ *     is exactly today's behaviour, so no embedder's live `subgraph` becomes reclaimable because
+ *     of a constant somebody chose here. `cli.ts`'s `openWorkspace` is the one caller that passes
+ *     one, because a `loom` workspace is a single plane over a single journal — see
+ *     `STRANDED_LEASE_MS` there for the figure and the argument for it.
  *
  * The boundary is `leaseLive`'s, inclusive: a deadline landing exactly on `now` is still live,
  * for the reason stated there.
  */
-function deadlineExpired(input: SelectInput, held: ReadonlySet<string>): Runnable[] {
+function deadlineExpired(input: SelectInput, held: ReadonlySet<string>, fallbackMs: number | undefined): Runnable[] {
   const out: Runnable[] = [];
   for (const task of Object.values(input.projection.tasks)) {
     if (task.state !== "leased") continue;
     if (task.lease === undefined) continue;
     if (held.has(String(task.taskId))) continue;
-    const timeoutMs = input.graph.plans[task.nodeId]?.timeoutMs;
+    // THE NODE'S OWN DEADLINE WINS. `fallbackMs` is what a node with no compiled bound falls back
+    // to, never a second bound applied beside one — a node that declares 30 s must not become
+    // reclaimable at a deployment's 600 s instead.
+    const timeoutMs = input.graph.plans[task.nodeId]?.timeoutMs ?? fallbackMs;
     if (timeoutMs === undefined) continue;
     if (leaseLive(task.lease.at, input.now, timeoutMs)) continue;
     if (task.retryAfter !== undefined && task.retryAfter > input.now) continue;
@@ -263,6 +305,24 @@ export class InProcessScheduler implements Scheduler {
   readonly kind = "in-process";
   /** runId → the TaskIds this scheduler object has handed out and that are still `leased`. */
   readonly #handedOut = new Map<string, Set<string>>();
+  /** See `deadlineExpired`. `undefined` — the default — is the behaviour before it existed. */
+  readonly #strandedLeaseMs: number | undefined;
+
+  /**
+   * `strandedLeaseMs`: how long a lease on a node with NO compiled deadline is honoured before
+   * this scheduler will offer the task again, in ms.
+   *
+   * OPTIONAL, AND UNSET IS NOT A MISSING FEATURE. `LeasedSchedulerOptions.leaseMs` states that
+   * there is no safe default for a lease deadline, and that is right for the scheduler it is
+   * written on: `LeasedScheduler` cannot tell its own live lease from a predecessor's, so a
+   * default there would let a number nobody chose steal work in flight. This one can — see
+   * `deadlineExpired`'s `held` — so the number reaches only leases another process took, and
+   * whether that risk is worth taking is the DEPLOYMENT's call, not this file's. `Engine`'s own
+   * `opts.scheduler ?? new InProcessScheduler()` therefore keeps the old behaviour exactly.
+   */
+  constructor(opts?: { readonly strandedLeaseMs?: number }) {
+    this.#strandedLeaseMs = opts?.strandedLeaseMs;
+  }
 
   select(input: SelectInput): readonly Runnable[] {
     const runId = String(input.projection.runId);
@@ -274,7 +334,7 @@ export class InProcessScheduler implements Scheduler {
       if (input.projection.tasks[id as keyof typeof input.projection.tasks]?.state !== "leased") held.delete(id);
     }
 
-    const candidates = [...eligible(input), ...deadlineExpired(input, held)];
+    const candidates = [...eligible(input), ...deadlineExpired(input, held, this.#strandedLeaseMs)];
     const wave = orderByCriticalPath(candidates, input.graph).slice(0, input.maxParallelism);
 
     // RECORDED ON SELECTION, not on the lease, because this object never sees the lease. That

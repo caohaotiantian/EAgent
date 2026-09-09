@@ -1,8 +1,10 @@
 /**
  * THE SHIPPED SCHEDULER STRANDED A RUN A CRASH LEFT MID-TASK, PERMANENTLY.
  *
- * `Engine` takes `opts.scheduler ?? new InProcessScheduler()` and `openWorkspace` passes none, so
- * `InProcessScheduler` is the only scheduler on the product path. Its `select` was
+ * `Engine` takes `opts.scheduler ?? new InProcessScheduler()`, and `openWorkspace` passes an
+ * `InProcessScheduler` of its own (it supplies `strandedLeaseMs` — see the last test in this file
+ * and `cli.ts`'s `STRANDED_LEASE_MS`), so this class is the only scheduler on the product path
+ * either way. Its `select` was
  * `eligible(input)` alone, and `eligible` returns `ready` tasks only — but a worker SIGKILLed
  * between `task.leased` and `task.committed` folds to `leased`, which `eligible` excludes by
  * construction. No later `advance`, in that process or after a restart, ever selected it again:
@@ -184,7 +186,7 @@ test("...and never takes back a lease THIS scheduler object handed out", async (
   );
 });
 
-test("a node with no enforced deadline is NOT reclaimed — the scheduler fails closed", async () => {
+test("a node with no enforced deadline is NOT reclaimed BY DEFAULT — the scheduler fails closed", async () => {
   // `join`, `router`, `human_gate` and `subgraph` get no effective timeout (compile.ts's
   // `effectiveTimeout` says why for each), so there is no bound to prove the holder is gone.
   const w = await strandedRun(JOIN, JOIN_TASK, "host:111:1");
@@ -196,6 +198,55 @@ test("a node with no enforced deadline is NOT reclaimed — the scheduler fails 
     [JOIN_TASK],
     "LeasedScheduler's flat lease covers what the graph's own deadlines cannot",
   );
+});
+
+/**
+ * THE COUNTER-CONTROL FOR TODO.md §B.1, AND IT IS ONE CONSTRUCTOR ARGUMENT WIDE.
+ *
+ * The test above is the whole reason `loom serve` could not survive its own death on four of the
+ * eight node types: a crash on a `join`, `router`, `human_gate` or `subgraph` task left it
+ * `leased`, `eligible` excludes `leased`, and the reclaim arm had no bound to reason from. The
+ * answer was "ask for a `LeasedScheduler`" — a seam an EMBEDDER can reach and the binary did not.
+ *
+ * `strandedLeaseMs` is that bound, supplied by the deployment rather than by the graph, and this
+ * asks the SAME folded journal at the SAME instant with only that argument different. It belongs
+ * beside the refusal because the two sentences are one decision: with no number, no reclaim; with
+ * a number, the number.
+ *
+ * IT DOES NOT WEAKEN `held`, WHICH IS THE ONLY THING KEEPING IT SAFE — the third and fourth
+ * assertions are that half. A lease this scheduler object handed out is never taken back at any
+ * age, and a fresh object (what a restart builds) reclaims it. Same map, same rule, wider
+ * deadline. The fifth and sixth are the other bound: a node that declared its OWN deadline keeps
+ * it, so a fallback can only ever add a bound where there was none.
+ */
+test("...and IS reclaimed when the deployment supplies a fallback lease deadline", async () => {
+  const w = await strandedRun(JOIN, JOIN_TASK, "host:111:1");
+  const s = new InProcessScheduler({ strandedLeaseMs: 30_000 });
+  assert.deepEqual(ask(s, w, LEASED_AT + 30_000, "host:222:1"), [], "the boundary is live, as it is everywhere else here");
+  assert.deepEqual(ask(s, w, LEASED_AT + 30_001, "host:222:1"), [JOIN_TASK], "past the deployment's bound, the predecessor's task is offered");
+
+  // AND `held` STILL BOUNDS IT. `s` has now offered JOIN_TASK once, so it owns whatever happened
+  // next; the same projection at ten million ms is no longer its to take back. A FRESH object —
+  // which is what a restart builds, and the only thing that ever sees this state — still does.
+  //
+  // (Asked before the AGENT fixture below, deliberately: `strandedRun` reuses one run id, and
+  // `select`'s prune drops any held id the projection it is handed no longer shows as `leased`.
+  // Asking `s` about a DIFFERENT projection of the same run would empty the map and make the
+  // assertion above pass for the wrong reason.)
+  assert.deepEqual(ask(s, w, LEASED_AT + 10_000_000, "host:222:1"), [], "a lease this object handed out is never re-offered, at any age");
+  assert.deepEqual(
+    ask(new InProcessScheduler({ strandedLeaseMs: 30_000 }), w, LEASED_AT + 30_001, "host:222:1"),
+    [JOIN_TASK],
+    "the restarted plane's own scheduler has handed out nothing, so the predecessor's lease is a stranger's",
+  );
+
+  // THE NODE'S OWN DEADLINE STILL WINS where it has one. `summarize` declares 60 s, so a 30 s
+  // fallback must not make it reclaimable at 30 s — a fallback is what a node with no bound falls
+  // back TO, never a second bound applied beside one.
+  const a = await strandedRun(AGENT, AGENT_TASK, "host:111:1");
+  const s2 = new InProcessScheduler({ strandedLeaseMs: 30_000 });
+  assert.deepEqual(ask(s2, a, LEASED_AT + 30_001, "host:222:1"), [], "the 60 s the node declared is the one that applies");
+  assert.deepEqual(ask(s2, a, LEASED_AT + 60_001, "host:222:1"), [AGENT_TASK], "and it applies unchanged");
 });
 
 test("the ORDINARY selection is unchanged — ready tasks, critical path first", async () => {
