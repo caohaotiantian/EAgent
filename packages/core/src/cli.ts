@@ -5010,7 +5010,12 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
 }
 
 /**
- * ONE COMPILE PER DISTINCT FILE CONTENT, INSTEAD OF ONE PER LOOKUP.
+ * ONE COMPILE PER (PATH, CONTENT) PAIR, INSTEAD OF ONE PER LOOKUP.
+ *
+ * The map is keyed by PATH and the digest is that entry's staleness check, so two files holding
+ * identical bytes are compiled once each and not deduplicated. That is deliberate: `indexGraphs`
+ * attributes every failure and every hash to the FILE it came from, and a shared entry would
+ * have to invent which of the two names to report.
  *
  * `indexGraphs` compiled every graph file in the workspace on every call, and `runClockTick`
  * calls it on every tick that has a run which is DUE — including a run that is due at every tick
@@ -5052,7 +5057,15 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
  * hit is silent where a compile is not. Every one-shot verb runs in a fresh process and is
  * therefore byte-for-byte unchanged; inside `loom serve` the same warnings about the same
  * unchanged bytes stop repeating at the sweep rate, which is the outcome this function's own
- * docstring already argues for ("which is how an operator learns to stop reading it").
+ * docstring already argues for ("which is how an operator learns to stop reading it"). Driven
+ * through the binary — `loom serve --sweep-ms 300`, 8 graphs of which 6 warn, ~5 s, ~16 sweeps —
+ * the count is 6, where it would have been 6 per sweep.
+ *
+ * NOT ONE LINE PER FILE PER BOOT, THOUGH, and the difference is `discoverGraphs`: it compiles
+ * `graphs/` through `loadGraph` DIRECTLY, at boot, with `introducing` true, because it is the
+ * only pass that must refuse a missing hook or function body. So an operator sees each warning
+ * once from that pass and at most once more when this memo first fills. Twice, ever — not per
+ * sweep, which is the property that was worth buying.
  */
 interface CompiledFile {
   readonly digest: Digest;
