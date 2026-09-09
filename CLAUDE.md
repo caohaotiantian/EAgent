@@ -98,10 +98,10 @@ ordinary `GraphSpec` that `loom exam attest <exam.json> --cohort <id> --as <who>
 
 - **One operator.** `--as` is an argv string written into a row with `actor.kind: "human"` by
   construction. Whoever runs the binary owns the exam, and also writes `graphs/` and `resources/`.
-- **An exam that reads the run's answer — enforced by NAME only.** `examShape` refuses an exam that
-  reads no baseline output, and one that declares an input and names it nowhere; but it checks
-  NAMES, so an exam naming the channel in `reads` and ignoring it still attests. Closing that is a
-  dataflow analysis from each declared input to the terminal node, not a sixth rule.
+- **An exam that reads the run's answer — enforced by NAME only.** `attestationProblems` refuses an
+  exam reading no baseline output, and `examShape`'s fifth rule one that declares an input and
+  names it nowhere; both check NAMES, so an exam naming the channel in `reads` and ignoring it
+  still attests. Closing that is a dataflow analysis from each declared input to the terminal node.
 - **The exam-gated doors are `promote --against-cohort` and `suite freeze`.** `promote --suite`
   still decides on the frozen suite and `12-grader-unchanged`, not on the exam.
 - **No `subgraph` child grader.** `evaluatorsOf` walks the parent spec's nodes, so an evaluator

@@ -81,7 +81,7 @@ tarball installs and works: `npm pack packages/core`, install the tgz, and
 | **Declared effects** | A `function` body invokes only the tools its node declared, through one dispatch path, each keyed by position in the call sequence |
 | **Durability** | Append-only journal on `node:sqlite`. A run SUSPENDED on a human gate survives `kill -9` and resumes in another process |
 | **Human oversight** | Three postures by configuration alone; gates are rows, so a suspended run holds zero worker slots. An approval binds the graph it was shown |
-| **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects |
+| **Replay** | Re-executes with every effect served from the journal — zero model calls, zero side effects. Its verdict weighs GATES too, including a human's de-escalation, which is served from the record and re-keyed onto the shadow run: it used to score `match: true` for a replay that asked a human a different number of times, or none |
 | **Determinism** | Seeded `Math.random`, a clock bound to the task's journaled lease timestamp. Two reads of the time inside one body return the same instant |
 | **Providers** | Anthropic + OpenAI over `fetch`+SSE, normalized error taxonomy, declarative fallback chains |
 | **Console** | Ships inside the binary. Graph canvas, live SSE, approve/reject queue |
@@ -184,10 +184,10 @@ registrar whether a server is configured or not, because spelling one is imperso
 oversight (a real MCP tool is `irreversible` and carries `mcp:<server>`); and a module is handed
 the same frozen jail object the built-ins get, from one derivation (`jailFor`) — `root` and `deny`
 always, the three allowlists only where the operator passed the matching flag, so a module must not
-assume a fixed shape (`test/cli/mcp-registrar-collision.test.ts`, eight cases). What reserving does
-NOT buy is dispatch-time protection: it is a BOOT check, and `ToolRegistry` permits registration
-after `seal()` unless the embedder opts out (`registerAfterSeal: "deny"`), so a module registering
-from a timer is invisible to it and still shadows.
+assume a fixed shape (`test/cli/mcp-registrar-collision.test.ts`, eight cases). The reservation is
+checked in `ToolRegistry.#doRegister` on EVERY registration rather than by a boot scan, so one made
+from a timer, a library embedder or any later verb is refused too. What it does not cover is
+`TODO.md` §A0.27: an overlapping prefix, and every `ToolDefinition` field but `name` read live.
 
 **No fork. You are a workspace author or an operator, and every one of these is a file you write:**
 
