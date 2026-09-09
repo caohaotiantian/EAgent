@@ -21,9 +21,9 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
-directory, so a graph added later is covered without editing the test — and RUNS the two that need
-no model. §§5–6 are compiled and not run there: a run of either against the mock asserts nothing
-about a reviewer.
+directory, so a graph added later is covered without editing the test — and RUNS the three that
+need no model, asserting §5's six verdict strings and its `3/6 assertions passed`. Only §6 is
+compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 
 ---
 
@@ -120,7 +120,8 @@ either back.
 Six small diffs, three carrying a defect this codebase actually had and three clean;
 `bench-cases.json` holds the ground truth, so the run is graded mechanically with no human and no
 rubric — which is what makes it an `S1` signal. It fans one `agent` review per case, joins, and
-hands each case to its own **`assertion` evaluator** (`resources/function/bench-check.js`).
+hands each case to its own **`assertion` evaluator** —
+`resources/function/bench-check-0.js` … `bench-check-5.js`, one per case.
 
 ```bash
 loom run graphs/review-bench.json --input "$(cat bench-cases.json)"
@@ -147,7 +148,9 @@ SHAPE — and a candidate is judged against a frozen exam drawn from them:
 
 ```bash
 for i in $(seq 1 30); do loom run graphs/review-bench.json --input "$(cat bench-cases.json)"; done
-loom score <lastRunId>     # → "cohort": {"n": 30, …}, "golden": …, "goldenBlockers": []
+loom score <lastRunId>     # → "cohort": {"n": 30, …}. OFFLINE, "golden" is false and
+#   "goldenBlockers" names why — outcome 0.500 needs ≥ 0.8, and a cohort the ladder cannot
+#   separate is UNRANKABLE. That is the mock scoring 0.5 on every run, not a defect.
 loom cohort <lastRunId>    # → every run judged under the same key and weights
 loom promote candidates/review-bench-v2.json --baseline graphs/review-bench.json --suite suite.json
 ```

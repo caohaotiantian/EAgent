@@ -157,6 +157,10 @@ manifest — `TODO.md` §G.5(a).
 - **A verifier that pronounces code safe.** eBPF is the best-resourced instance of that idea and is
   still producing soundness CVEs in 2026. A model may *narrow* what policy already permitted; it
   may never widen. Its verdict is a model call, so it is journaled like any other.
+- **A code-execution tool on an `agent` node by default.** Reaching tools through generated code is
+  the shape that cut one vendor's example workflow from ~150k context tokens to ~2k, and it has a
+  cost this project must state: the reachable-tool set becomes a static-analysis problem rather than
+  a graph-edge one.
 - **Keyed log compaction.** It deletes the history replay depends on. Payload externalisation above
   a byte threshold (`journal/payloads.ts`) and bounded-iteration rollover instead.
 - **Removing a run from the journal.** Nothing in the tree deletes a journal row or a payload file;
@@ -192,7 +196,8 @@ sha, not carried forward.
 Two things learned here that outlive the items: **a count of a thing that grows is a claim with no
 fixed point** (item 2's test count was stale within the week — state the invariant, not the
 measurement), and **a number written beside a command is evidence only if somebody ran the
-command** (item 13's `store.test.ts # 88 pass`, which prints 76).
+command** — item 13 carried two counts one line apart, one of them run and one of them not, and the
+unrun one looked exactly as authoritative.
 
 ### Items 9–14 — closed 2026-09-02
 
@@ -239,7 +244,7 @@ admitting it turns the rule into a counterexample generator.
 | 25 | D.1 | **done** — `readMcpServers` silently dropped every key it did not know, so a per-server `irreversibility` vanished. `TODO.md` §D.1 |
 | 26 | H.4 | **done `96a03bf`** — three flags accepted and ignored on a verb reading none of them |
 | 27 | H.3 | **done `e8c2fb5`** |
-| 28 | H.1 | **closed** — not the way the row asked. Under D.2's framing a manual rebuild is a documented operating condition, not open work. `TODO.md` §H.1 |
+| 28 | H.1 | **closed** — not the way the row asked. under the one-machine/one-operator framing in `TODO.md` §D's header, a manual rebuild is a documented operating condition, not open work. `TODO.md` §H.1 |
 
 **What the waves added rather than took off.** `TODO.md` §A.37 and the delivery half of A.36, both
 found by a verifier rather than a builder, and both the same shape — a fix that is right in itself
@@ -268,12 +273,13 @@ is not the maintainer asking to run this. The old condition ("revisit when item 
 and the answer did not change, which means it was the wrong condition: porting a workflow is
 evidence about the runtime, not about who else wants it.
 
-**Admission control's successor.** `D.4` refused the door permanently — under one tenant the right
-answer to "too much work" is to make it wait, never to say no — and built ceilings instead:
+**Admission control's successor.** The door was refused PERMANENTLY — under one tenant the right
+answer to "too much work" is to make it wait, never to say no — and ceilings were built instead:
 `--max-runs-in-flight` (default 4), `--max-parallelism`, deployment `--budget-usd`/`-tokens`/
-`-wall-ms`. *What would sequence it:* a run rate at which "the surplus waits" stops being an
-acceptable answer, which under D.2's tens-of-runs-a-day it is not. That is a MEASUREMENT to take,
-not a mechanism to build.
+`-wall-ms`. `TODO.md` §Z carries the refusal. *What would sequence it:* a run rate at which "the
+surplus waits" stops being an acceptable answer, which under the framing answer in `TODO.md` §D's
+header — one machine, one tenant, the maintainer's own workflows, tens of runs a day, one operator
+— it is not. That is a MEASUREMENT to take, not a mechanism to build.
 
 **Splitting `engine.ts`.** Measured 2026-09-09: `wc -l packages/core/src/run/engine.ts` → **13,159**
 lines, against 3,755 for the next largest pinned file (`run/gates.ts`) and 24,772 for all ten —
