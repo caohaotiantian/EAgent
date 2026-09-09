@@ -34,21 +34,25 @@
  * sixteen members — ten codes, six event types — every one of them with a sentence beside it that
  * no event could ever make false. A pin like that does its job in one direction only: it catches
  * the member that CHANGES, and protects the member that never does. Ten of the sixteen were
- * deleted for that reason and are named where they were declared; the six that stand carry a
- * CONDITION as well as a reason, and each condition is a claim about the tree that the work
- * landing will break:
+ * deleted for that reason and are named where they were declared. NONE OF THE SIXTEEN STANDS NOW,
+ * and all three lists ended the same way — as a RULE over the empty set rather than a list with
+ * rows to hide in, which is strictly tighter, because a new member fails with nowhere to be
+ * excused:
  *
- *   - no error code stands at all: the last one, `E_JOIN_TIMEOUT`, went with `JoinNode.timeoutMs`,
- *     the field it was reserved for, and the list went with it. The census below now asserts the
- *     EMPTY SET, which is a rule rather than a list and is strictly tighter than the pin it
- *     replaces — a new declared-and-unraised code fails it with nowhere to be excused.
- *   - each unappended event type stands while the files blocking its decision still name it.
- *   - no effect kind stands at all: `EFFECT_KINDS` is empty, which is the steady state a closed
- *     vocabulary should be in, and it is a pinned set rather than a floor so a new member with no
- *     writer has to be argued into it.
+ *   - no error code stands: the last, `E_JOIN_TIMEOUT`, went with `JoinNode.timeoutMs`, the field
+ *     it was reserved for, and the list went with it.
+ *   - no event type stands: the last, `task.started`, was DELETED — leasing is the start — after
+ *     `task.skipped` left the list by gaining a writer. Three of the six were wired and three
+ *     deleted, which is the whole shape of the mechanism: an excuse ends when the member gains a
+ *     writer, or when the member goes.
+ *   - no effect kind stands: `EFFECT_KINDS` is empty, which is the steady state a closed
+ *     vocabulary should be in.
  *
- * A blocked decision is not the same thing as an excuse. It says what should happen, who has to
- * do it, and what will make this test demand it.
+ * The `blockedOn` machinery those event-type rows carried is worth remembering rather than
+ * mourning: each row named the files that had to change first, and for `task.skipped` the fourth
+ * path on that list — `telemetry/spans.ts` — turned out to hold a defect nobody would otherwise
+ * have opened the file to find. A blocked decision is not an excuse. It says what should happen,
+ * who has to do it, and what will make a test demand it.
  */
 
 import test from "node:test";
@@ -167,65 +171,38 @@ test("THE OTHER DIRECTION: EVERY CODE src/ USES IS A CODE errors.ts DECLARES", (
 // ── event types ──────────────────────────────────────────────────────────────
 
 /**
- * THE TYPES NOTHING APPENDS — each with a DECISION, and each decision with a condition that
- * ends the row.
+ * THE TYPES NOTHING APPENDS. There are none, and that is asserted as a RULE rather than listed.
  *
- * There were six, each excused indefinitely. `config.reloaded` is gone: nothing in the tree
- * referred to it, no reload path exists, and no work item plans one, so it was a row in a
- * closed vocabulary promising a fact nobody records. THEN THERE WERE THREE: `budget.reserved`
- * and `budget.settled` were the two rows decided `wire`, and the decision was executed — the
- * engine appends both at its `ctx.policy.reserve`/`settle` call sites, so the reservation
- * `PolicyEngine` held in memory is now reconstructible by folding and `GET /runs/:id` reports
- * a promise instead of zero. Six to five was a DELETION and five to three is a BUILD; the row
- * count falls the same way for both and they are opposite facts, so the list says which.
+ * THERE WERE SIX, each excused indefinitely, and every one is now gone — by the only two doors an
+ * excuse has. THREE GAINED WRITERS: `budget.reserved` and `budget.settled` at the engine's
+ * `ctx.policy.reserve`/`settle` call sites, so the reservation `PolicyEngine` held in memory became
+ * reconstructible by folding; and `task.skipped` at `Engine.#skippedByJoin`, from BOTH of
+ * `#commit`'s terminal-failure exits, whenever a downstream join declares `onBranchError: "skip"`
+ * and the failure is not one a join may absorb. THREE WERE DELETED: `config.reloaded` (nothing in
+ * the tree referred to it and no reload path was planned), `channel.written` (its authoritative
+ * value always rode `task.committed.writes`), and `task.started` (leasing IS the start, and no code
+ * distinguishes them).
  *
- * AND NOW THERE IS ONE. `task.skipped` was the third row decided `wire`, and it is wired:
- * `Engine.#skippedByJoin` appends it from BOTH of `#commit`'s terminal-failure exits whenever a
- * downstream join declares `onBranchError: "skip"` and the failure is not one a join may absorb
- * (`NOT_ABSORBED_AS_SKIP`). Its four `blockedOn` paths were all four real: `run/engine.ts` gained
- * the appender, `run/projection.ts`'s arm now fires, `evolution/trajectory.ts`'s does too, and
- * `telemetry/spans.ts` needed a FIX rather than nothing — its arm was unreachable, because
- * `task.skipped` rides the batch that already closed the task span and `close` is
- * first-close-wins. That is what a `blockedOn` list is for: the fourth path was the one carrying
- * a defect, and nobody would have looked at it without the row. `journal/audit.ts` gained
- * `task.skipped-follows-a-failed-commit` in the same change, because the `todo` ratchet next door
- * was at its cap and would not let the rule be deferred.
+ * WHAT THE `blockedOn` MACHINERY BOUGHT, recorded because it is the argument for building the next
+ * one. Each row named the files that had to change before its decision could be executed, and for
+ * `task.skipped` all four were real: `run/engine.ts` gained the appender, `run/projection.ts`'s arm
+ * began to fire, `evolution/trajectory.ts`'s did too — and `telemetry/spans.ts` needed a FIX rather
+ * than nothing, because its arm was unreachable (`task.skipped` rides the batch that already closed
+ * the task span, and `close` is first-close-wins). The fourth path was the one carrying a defect,
+ * and nobody would have opened that file without the row. `task.started`'s list was SHORT BY ONE:
+ * `test/journal/perf-lane-journal-shape.test.ts` spelled the name behind an `as never`, where
+ * neither the compiler nor the pin could see it.
  *
- * `channel.written` then left by the OTHER door — deletion — and took its `run/projection.ts` arm
- * and two `src/server/http.ts` docstring mentions with it. The one left cannot be settled from
- * this package's registry files alone either: it is blocked on two SUITES, so it carries what it
- * is waiting for, by path.
- *
- * `blockedOn` IS THE EXPIRY, and it works in the direction that actually decays. An excuse
- * dies when its own reason does: the moment the last file listed stops mentioning the type,
- * the decision below is no longer blocked and this test fails until somebody executes it.
- * That is the failure mode this list has already had once — `journal/audit.ts` carried two
- * rules over never-appended types, reported them `checked` on every terminal run, and nothing
- * connected the excuse to the rule. One of those two, `budget.reservation-is-settled`, is
- * back in `AUDIT_RULES` now, because the wiring above is what un-blocked it.
- *
- * `type: "…"` spelling is load-bearing: `journal/audit-coverage.test.ts` parses this block for
- * it, so the two registries cannot drift into disagreeing about who is unappended.
+ * WHAT REPLACES THE LIST IS A RULE, and it is the same move the error-code census above made for
+ * the same reason. An excuse list does its job in one direction only: it catches the member that
+ * CHANGES and protects the member that never does — which is how six of these stood for as long as
+ * they did. With the set empty, the assertion below is `deepEqual(unappended, [])`, so a new
+ * declared-and-unappended type fails it with nowhere to be excused. Strictly tighter than the pin
+ * it replaces, and the reason the two tests that only ITERATED the list went with it rather than
+ * staying on as empty loops reporting green.
  */
-const NEVER_APPENDED: readonly {
-  readonly type: string;
-  readonly decision: "wire" | "delete";
-  readonly why: string;
-  /** Paths, relative to `packages/core/`, that must change before the decision can be executed. */
-  readonly blockedOn: readonly string[];
-}[] = [
-  {
-    type: "task.started",
-    decision: "delete",
-    why:
-      "leasing IS the start and no code distinguishes them. It has already cost a silent false negative: " +
-      "`test/run/advance-reentrancy.test.ts` filters the journal for this type, so its headline assertion — every Task starts " +
-      "once — compares 0 to 0 on a run that leases 7 times. Fixing that test to read `task.leased` unblocks the deletion",
-    blockedOn: ["test/run/advance-reentrancy.test.ts", "test/scale.test.ts"],
-  },
-];
 
-test("EVERY DECLARED EVENT TYPE HAS AN APPENDER, except the ones pinned here", () => {
+test("EVERY DECLARED EVENT TYPE HAS AN APPENDER — no exceptions, and no list to be excused in", () => {
   // A declared-and-folded event with no appender is a designed transition that was never wired,
   // and it is invisible from any single file — the fold reads like proof that something writes it.
   const appended = new Set<string>();
@@ -234,38 +211,15 @@ test("EVERY DECLARED EVENT TYPE HAS AN APPENDER, except the ones pinned here", (
     for (const m of text.matchAll(/type:\s*"([a-z_]+\.[a-z_]+)"/g)) appended.add(m[1]!);
   }
   const unappended = EVENT_TYPES.filter((t) => !appended.has(t)).sort();
+  // Not vacuous: the scan must have found real appenders, or every type would look unappended
+  // and this would be comparing the whole vocabulary to nothing.
+  assert.ok(appended.size >= 20, `the append-site scan found only ${appended.size} types — the regex broke, not the code`);
   assert.deepEqual(
     unappended,
-    NEVER_APPENDED.map((e) => e.type).sort(),
-    "an event type gained (or lost) its only appender — wire it, or pin it here with a reason",
+    [],
+    "an event type lost its only appender — wire it or delete it; there is no excuse list any more, " +
+      "and re-adding one is the thing to argue in a commit message",
   );
-});
-
-test("every unappended event type is one this file can name a reason for", () => {
-  reasonsAreReal(NEVER_APPENDED, "NEVER_APPENDED");
-  const known = new Set<string>(EVENT_TYPES);
-  const unknown = NEVER_APPENDED.map((e) => e.type).filter((t) => !known.has(t));
-  assert.deepEqual(unknown, [], "pinned as never-appended but not a declared event type at all");
-});
-
-test("EVERY EXCUSE IS STILL BLOCKED — the moment it is not, the decision must be executed", () => {
-  // The condition, not a date. Each row says what it is waiting for; when the last file
-  // listed stops mentioning the type, nothing is holding the decision up any more and this
-  // goes red. An excuse must not outlive its own reason — that is how six of these came to
-  // stand for as long as they did.
-  const stale: string[] = [];
-  for (const row of NEVER_APPENDED) {
-    assert.ok(row.blockedOn.length > 0, `${row.type}: a decision with nothing blocking it is a decision to execute now`);
-    const holding = row.blockedOn.filter((rel) => {
-      const full = join(PKG_DIR, rel);
-      assert.ok(existsSync(full), `${row.type} is blocked on ${rel}, which is not in the tree`);
-      return readFileSync(full, "utf8").includes(row.type);
-    });
-    if (holding.length === 0) {
-      stale.push(`${row.type}: nothing in ${row.blockedOn.join(", ")} mentions it any more — ${row.decision} it`);
-    }
-  }
-  assert.deepEqual(stale, [], "an excuse outlived its reason");
 });
 
 /**
@@ -495,11 +449,10 @@ test("NO EXCUSE LIST MAY GROW — a well-argued zombie is still a zombie", () =>
   // shrinking these lists must not cost a test edit. Growing them must, and must be argued in
   // a commit message rather than a string. `audit-coverage.test.ts` holds the same ratchet
   // over its `todo` excuses for the same reason.
-  assert.ok(
-    NEVER_APPENDED.length <= 1,
-    `${NEVER_APPENDED.length} event types are declared with no appender; it was SIX, then FIVE, then THREE, then TWO, and is ONE — ` +
-      `journal/events.ts is kernel, and a closed vocabulary that only ever grows is not one`,
-  );
+  // The event-type ratchet went with its list. It read `NEVER_APPENDED.length <= N`, and N walked
+  // SIX → FIVE → THREE → TWO → ONE → 0; at zero the floor and the census assert the same thing,
+  // and the census says it better, because it names the offending type instead of a count.
+  // `journal/events.ts` is kernel, and a closed vocabulary that only ever grows is not one.
   assert.equal(
     EFFECT_KINDS.length,
     0,

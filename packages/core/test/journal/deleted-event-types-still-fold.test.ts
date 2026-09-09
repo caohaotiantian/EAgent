@@ -1,23 +1,24 @@
 /**
  * A JOURNAL AN OLDER BINARY WROTE STILL FOLDS, INCLUDING ROWS THIS ONE NO LONGER DECLARES.
  *
- * `channel.written` was removed from `EventPayloads` under `TODO.md` §B.2, because a member of a
- * closed vocabulary that nothing appends is not a durable fact — it is a plan for one, and it costs
- * a fold arm that reads like proof something writes it. Removing a row from that union is the same
- * reviewable act as adding one, and it has one consumer the addition does not: **a journal already
- * on somebody's disk that contains the name.**
+ * `channel.written` and `task.started` were removed from `EventPayloads` under `TODO.md` §B.2,
+ * because a member of a closed vocabulary that nothing appends is not a durable fact — it is a
+ * plan for one, and it costs a fold arm that reads like proof something writes it. Removing a row
+ * from that union is the same reviewable act as adding one, and it has one consumer the addition
+ * does not: **a journal already on somebody's disk that contains the name.**
  *
  * WHAT THIS FILE IS, SAID PLAINLY, BECAUSE HALF OF IT CANNOT GO RED FOR THE CHANGE IT SHIPS WITH.
- * `run/projection.ts`'s `channel.written` arm was `// Nothing to fold`, so the fold ignored the row
- * BEFORE the deletion and ignores it after; the equality assertions below would have passed at
- * `ef7df7d` too. They are a REGRESSION PIN, not evidence about that diff — they go red the day
- * somebody replaces an `isEvent` chain with an exhaustive `switch`, or teaches the store to
+ * `run/projection.ts`'s `channel.written` arm was `// Nothing to fold` and `task.started` never
+ * had an arm at all, so the fold ignored both rows BEFORE the deletions and ignores them after;
+ * the equality assertions below would have passed at `ef7df7d` too. They are a REGRESSION PIN, not
+ * evidence about that diff — they go red the day somebody replaces an `isEvent` chain with an
+ * exhaustive `switch`, or teaches the store to
  * validate `type` on the read path, either of which turns every pre-B.2 journal into an unreadable
  * one. The argument that the deletion is safe TODAY is the reader census in the commit body.
  *
  * The half that IS red before the deletion is `THE NAME IS GONE FROM THE VOCABULARY`, which is why
- * that assertion is here rather than only in `store.test.ts`'s count: a count moving 53 → 52 says a
- * member left, never which one.
+ * that assertion is here rather than only in `store.test.ts`'s count: a count moving 53 → 51 says
+ * members left, never which ones.
  *
  * THE ROWS GO THROUGH THE REAL DURABLE PATH, not a hand-built array. `journal/store.ts`'s `prepare`
  * writes `type` into a text column without consulting any vocabulary, and that is precisely the
@@ -41,7 +42,7 @@ import type { RunId, Seq, TaskId } from "../../src/ids.ts";
 import { foldRun } from "../../src/run/projection.ts";
 
 /** Names an older binary could write and this one no longer declares. */
-const DELETED = ["channel.written"] as const;
+const DELETED = ["channel.written", "task.started"] as const;
 
 const RUN = "run_old" as RunId;
 const TASK = "n@root#0" as TaskId;
@@ -57,6 +58,8 @@ function oldJournal(): { readonly type: string; readonly payload: unknown; reado
     { type: "run.started", payload: { posture: "out" } },
     { type: "task.ready", payload: { nodeId: "n", branchPath: "root", edgesIn: [] }, taskId: TASK },
     { type: "task.leased", payload: { workerId: "w", attempt: 1 }, taskId: TASK },
+    // ← the second deleted name, in the slot the binary that declared it used
+    { type: "task.started", payload: { nodeType: "function", attempt: 1 }, taskId: TASK },
     { type: "task.committed", payload: { status: "succeeded", writes: { out: 1 }, take: [], usage: ZERO, attempt: 1 }, taskId: TASK },
     // ← the deleted name, where the binary that declared it would have written it
     { type: "channel.written", payload: { channel: "out", reducer: "replace", valueDigest: "sha256:d" }, taskId: TASK },
@@ -152,10 +155,18 @@ test("THE DURABLE PATH ACCEPTS AND RETURNS A NAME THIS BINARY DOES NOT DECLARE",
   // comparison is a compile error — which is itself the deletion working. The row is still on the
   // disk and still comes back; it is only the TYPE that stopped admitting it.
   const rows: readonly { readonly type: string; readonly payload: unknown; readonly taskId?: string }[] = read;
-  const written = rows.find((e) => e.type === "channel.written");
-  assert.ok(written, "including the one whose name left the union");
-  assert.deepEqual(written.payload, { channel: "out", reducer: "replace", valueDigest: "sha256:d" }, "with its payload intact");
-  assert.equal(written.taskId, TASK, "and its task_id column");
+  // BOTH deleted names, at the same standard: the array has two members, so checking one would
+  // let the other be covered by a type-list comparison alone.
+  const expected: Readonly<Record<string, unknown>> = {
+    "channel.written": { channel: "out", reducer: "replace", valueDigest: "sha256:d" },
+    "task.started": { nodeType: "function", attempt: 1 },
+  };
+  for (const name of DELETED) {
+    const written = rows.find((e) => e.type === name);
+    assert.ok(written, `${name}: the row whose name left the union came back`);
+    assert.deepEqual(written.payload, expected[name], `${name}: with its payload intact`);
+    assert.equal(written.taskId, TASK, `${name}: and its task_id column`);
+  }
 });
 
 test("AND THE FOLD REACHES THE SAME ANSWER IT WOULD WITHOUT THOSE ROWS", async () => {

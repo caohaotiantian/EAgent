@@ -371,7 +371,13 @@ test("folding a 10,000-event journal is linear and fast", () => {
     const task = `s0_${i}@root#0`;
     push("task.ready", { nodeId: `s0_${i}`, branchPath: "root", edgesIn: [] }, task);
     push("task.leased", { workerId: "w", attempt: 1, fencingToken: i }, task);
-    push("task.started", { nodeType: "function", attempt: 1 }, task);
+    // `task.progress`, not `task.started`: the latter was deleted from the vocabulary (B.2) and
+    // this was one of the two sites that put the name into a journal. The substitution is exact
+    // for what this benchmark measures — like the name it replaces, `task.progress` has NO arm in
+    // `run/projection.ts`, so the fold walks past it through the whole `isEvent` chain, which is
+    // the per-event cost being timed. The payload changes with the name: `push` casts, so
+    // `{nodeType, attempt}` would have compiled and been a lie about what this journal contains.
+    push("task.progress", { chunk: "…" }, task);
     push("task.committed", { status: "succeeded", writes: {}, take: [], usage: ZERO, attempt: 1 }, task);
   }
 

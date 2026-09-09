@@ -236,7 +236,7 @@ admitting it turns the rule into a counterexample generator.
 | 17 | A.2 | **done `34a7f14`** — `compare()` graded `status` alone, so a refusal whose error RECORD varied by path scored `match: true` |
 | 18 | G.5(a) | **open** — after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs. `TODO.md` §G.5 residue (a) |
 | 19 | A.23 | **done `276e05c`** — a ceiling lowered 15× replayed clean with zero reasons |
-| 20 | B.2 | **partly done** — `budget.reserved`/`budget.settled` are wired (`test/run/budget-reservation-is-durable.test.ts`); `task.skipped`, `channel.written`, `task.started` are the remainder. `TODO.md` §B.2 |
+| 20 | B.2 | **done** — every declared event type now has an appender, asserted as a rule over the EMPTY SET (`registries.test.ts`), so a new unappended member fails with nowhere to be excused. `budget.reserved`/`budget.settled` and `task.skipped` were wired (the last at `Engine.#skippedByJoin`, from both of `#commit`'s terminal-failure exits); `channel.written` and `task.started` were deleted from the vocabulary, 53 → 51 |
 | 21 | A.36 | **done `d9a8173`** — a child run was LISTED by `GET /runs` and 404'd on every by-id route; a child id always contains a `#` |
 | 22 | B.1 | **reclassified, not work** — `TODO.md` §B.1: `LeasedScheduler` is a pinned public type a library embedder already reaches, so "wire it or delete it" is a false dichotomy |
 | 23 | A.13 | **done `96a03bf`** — `loom run` counted its own laps instead of the run's progress |

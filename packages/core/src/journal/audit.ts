@@ -29,9 +29,11 @@
  *
  * **A rule for an event nothing writes is not a rule.** `budget.reservation-is-settled` and
  * `task.no-commit-after-cancel` were deleted, not disabled: `budget.reserved`, `budget.settled`
- * and `task.cancelled` were all pinned in the never-appended registry that now lives in
- * `test/registries.test.ts` (the reservation lived in `PolicyEngine`'s memory; `cancel()`
- * appended `run.cancelled` only). "They come back when the events do" — and BOTH HAVE.
+ * and `task.cancelled` were all pinned in the never-appended registry `test/registries.test.ts`
+ * USED TO CARRY (the reservation lived in `PolicyEngine`'s memory; `cancel()` appended
+ * `run.cancelled` only). That registry is gone, because it emptied: every declared type now has an
+ * appender and that file asserts it as a rule over the empty set, so a new unappended member fails
+ * with nowhere to be excused. "They come back when the events do" — and BOTH HAVE.
  * `task.cancelled` gained its appender with the E6 fix and `task.cancelled-not-after-commit`
  * came back with it; `budget.reserved`/`budget.settled` gained theirs at the engine's
  * `ctx.policy.reserve`/`settle` call sites, and `budget.reservation-is-settled` is back below.
