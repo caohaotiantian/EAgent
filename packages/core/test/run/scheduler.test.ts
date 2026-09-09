@@ -243,9 +243,15 @@ test("LeasedScheduler will not reclaim a `leased` Task with NO recorded lease", 
   assert.deepEqual(s.select(input({ projection: p, now: 1e9, workerId: "w1" })), []);
 });
 
-test("InProcessScheduler never reclaims, because a `leased` Task is its OWN work in flight", () => {
+test("InProcessScheduler reclaims NOTHING it has no deadline for, however old the lease", () => {
   // The reclaim path must not leak into the single-worker default: there, a stale-looking
   // lease is this process's current wave, and re-selecting it double-runs it.
+  //
+  // THE SET THIS COVERS, since two things have since made "never reclaims" too strong a name for
+  // it: node `a` is not in the skeleton graph at all, so `plans["a"].timeoutMs` is undefined, and
+  // this scheduler was built with no `strandedLeaseMs`. Both halves of `deadlineExpired`'s bound
+  // are therefore absent, which is the case this asserts. The two arms that DO reclaim have their
+  // own file — `inprocess-reclaims-a-dead-lease.test.ts`.
   const p = projectionWith([{ nodeId: "a", state: "leased", lease: { workerId: "w1", at: 0, fencingToken: 1 } }]);
   assert.deepEqual(new InProcessScheduler().select(input({ projection: p, now: 1e9 })), []);
 });
@@ -257,7 +263,10 @@ test("LeasedScheduler takes back its OWN lease without waiting", () => {
   assert.equal(out.length, 1);
 });
 
-test("InProcessScheduler ignores leases entirely, because there is only one worker", () => {
+test("InProcessScheduler ignores a lease on a READY Task, because there is only one worker", () => {
+  // Whose name is on the lease decides nothing here — `LeasedScheduler` is the one that asks.
+  // (It is not that `InProcessScheduler` ignores leases; a `leased` Task's `lease.at` is exactly
+  // what its reclaim arm reads. It is that a Task the fold already returned to `ready` is free.)
   const p = projectionWith([{ nodeId: "a", state: "ready", lease: { workerId: "w2", at: 0, fencingToken: 1 } }]);
   assert.equal(new InProcessScheduler().select(input({ projection: p })).length, 1);
 });
