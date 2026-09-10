@@ -2591,11 +2591,20 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
       (n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false) && atBarrierLevel(n),
     );
 
-    // THE FIX DICTATES A LIST ONLY WHEN ONE IS DETERMINED, and that is exactly the case of a
-    // single candidate at the right level. Everything else — none, or a choice between two —
-    // gets the rule and the branch's contents, because the author picks where the barrier goes
-    // and the compiler cannot. Three of the four defects above were the message asserting an
-    // edit it did not have the information to assert; the fourth was this list.
+    // THE FIX IS ADDITIVE AND NEVER A WHOLE-LIST REPLACEMENT, and that is the fifth and last
+    // lesson this message cost. Every earlier cut phrased it as `must declare branches: [X]`,
+    // and four reviewers found four graphs where applying that literally DELETED something:
+    // one join is often the barrier for more than one fan-out, so a list built from THIS
+    // fan-out's branch drops the entries that belong to the other one. On a join collecting a
+    // nested fan-out and a sibling fan-out it did not even converge — it oscillated between two
+    // fixes, each re-breaking what the other repaired — and two GRAPH021s on one join printed
+    // contradictory lists in a single run.
+    //
+    // Narrowing WHEN to dictate was tried three times and failed three times, each on a shape
+    // the previous cut had not imagined. What is dictated is the thing to change: an entry per
+    // branch member, added to whatever the join already declares, composes across fan-outs and
+    // across diagnostics, and cannot delete. The compiler knows the branch; it does not know the
+    // author's whole intent for a join, and it no longer pretends to.
     const named = candidates.length === 1 ? candidates[0]! : undefined;
 
     // …and what a NAMED barrier waits for is the branch members upstream of IT. A branch node
@@ -2604,16 +2613,18 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     const waitsFor =
       named === undefined ? branch : branch.filter((id) => idx.ancestors.get(named.id)?.has(id) ?? false);
 
+    const each = waitsFor.join(", ");
     const fix =
       named !== undefined
-        ? `join "${named.id}" must declare branches: [${waitsFor.join(", ")}] and take a \`kind: join\` edge from ` +
-          `each of ${waitsFor.length > 1 ? "them" : `"${e.to}"`} — every node inside a fan-out branch needs both`
+        ? `give join "${named.id}" an entry in its \`branches\` for each of ${each}, and a \`kind: join\` edge from ` +
+          `each of them into "${named.id}" — every node inside a fan-out branch needs both. ADD to whatever ` +
+          `"${named.id}" already declares: one join can be the barrier for more than one fan-out`
         : candidates.length > 1
-          ? `one join downstream of "${e.to}" must declare branches: covering every node you leave inside the branch ` +
-            `— as drawn that is [${branchList}] — and take a \`kind: join\` edge from each of them`
-          : `add a join node downstream of "${e.to}", with a \`kind: join\` edge from every node you leave inside the ` +
-            `branch and each of them named in its branches: — as drawn that is [${branchList}], and a join placed ` +
-            `earlier shortens the list`;
+          ? `pick one join downstream of "${e.to}" and give it an entry in its \`branches\` for each of ${each}, ` +
+            `plus a \`kind: join\` edge from each of them into it — added to whatever it already declares`
+          : `add a join node downstream of "${e.to}", with an entry in its \`branches\` for every node you leave ` +
+            `inside the branch and a \`kind: join\` edge from each — as drawn that is ${each}, and a join placed ` +
+            `earlier shortens it`;
 
     d.push({
       severity: "error",

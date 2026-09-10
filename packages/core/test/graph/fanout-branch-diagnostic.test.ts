@@ -316,6 +316,62 @@ test("THE `holds N nodes` COUNT DESCRIBES THE BRANCH, not whichever join got nam
   assert.equal(after.includes("holds 2 nodes (read, classify)"), true, `the branch did not move; got: ${after}`);
 });
 
+test("ONE JOIN, TWO FAN-OUTS: the fix ADDS and never replaces, so two of them compose", () => {
+  // The fifth defect and the last lesson. Every earlier cut said `must declare branches: [X]`,
+  // where X was built from THIS fan-out's branch alone — so on a join that is the barrier for
+  // two fan-outs, applying it literally DELETED the other one's entries. On a join collecting
+  // a nested fan-out and a sibling fan-out it did not even converge: it oscillated between two
+  // fixes, each re-breaking what the other repaired. And with both arms missing, one compile
+  // printed two GRAPH021s about the same join with contradictory lists — no literal reading
+  // satisfied both.
+  //
+  // Narrowing WHEN to dictate was tried three times and failed three times. What is dictated
+  // is the thing that had to change: an entry per branch member, ADDED to what the join
+  // already declares. That composes across fan-outs and across diagnostics, and cannot delete.
+  const s = shipped();
+  // `raw` to `append_ordered`: a SECOND fan-out into one join is one of the conditions that
+  // switches GRAPH010's branch-local exemption off (§A.48's W6), and that is a different rule.
+  // This test is about GRAPH021's fix line, so the fixture gives GRAPH010 nothing to say.
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  // A second, independent fan-out off `plan` into `other`, collected by the SAME `gather`.
+  (s.channels as Record<string, unknown>)["others"] = { type: "array", reduce: "replace" };
+  (s.channels as Record<string, unknown>)["other"] = { type: "string", reduce: "replace" };
+  (s.nodes as NodeSpec[])[s.nodes.findIndex((x) => x.id === n("plan"))] = {
+    ...s.nodes[s.nodes.findIndex((x) => x.id === n("plan"))]!,
+    writes: ["shards", "others"],
+  } as NodeSpec;
+  (s.nodes as NodeSpec[]).push({
+    id: n("otherNode"),
+    type: "function",
+    reads: ["other"],
+    writes: ["failures"],
+    function: { ref: "function/other@stable" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("fan2"), from: n("plan"), to: n("otherNode"), kind: "fanout", over: "others", as: "other", maxWidth: 4 } as EdgeSpec,
+    { id: e("collect-other"), from: n("otherNode"), to: n("gather"), kind: "join" } as EdgeSpec,
+  );
+  // `gather` still declares only the FIRST fan-out's arms, so only `fan2` is unjoined.
+  const d = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.equal(d.length, 1, d.map((x) => x.message).join(" | "));
+  const said = d[0]!.fix ?? "";
+
+  // THE DEFECT: this used to read `must declare branches: [otherNode]`, and typing it dropped
+  // `read` and `classify` — turning one error into two on a graph that was one edit from ok.
+  assert.doesNotMatch(said, /must declare branches:/, "a whole-list replacement can only delete");
+  assert.match(said, /entry in its `branches` for each of otherNode/);
+  assert.match(said, /ADD to whatever "gather" already declares/, "the non-destructive instruction is the fix");
+  assert.doesNotMatch(said, /\bread\b/, "and it names only what is missing, not the whole final list");
+
+  // Applied ADDITIVELY — the only reading the sentence allows — the graph compiles.
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = {
+    ...s.nodes[g]!,
+    join: { branches: [n("read"), n("classify"), n("otherNode")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  assert.deepEqual(errorsOf(s).map((x) => x.code), [], "one step, and the first fan-out's arms survive");
+});
+
 test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", () => {
   // Two fan-outs off one node. If the list were 'everything downstream' the message would tell
   // the author to join the other fan's nodes into this one's join, which is worse than saying
