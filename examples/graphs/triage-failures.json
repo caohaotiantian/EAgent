@@ -17,7 +17,7 @@
     "found": { "type": "string", "reduce": "replace" },
     "shards": { "type": "array", "reduce": "replace" },
     "shard": { "type": "string", "reduce": "replace" },
-    "raw": { "type": "array", "reduce": "append_ordered" },
+    "raw": { "type": "string", "reduce": "replace" },
     "failures": { "type": "array", "reduce": "append_ordered" },
     "report": { "type": "object", "reduce": "replace" },
     "summary": { "type": "string", "reduce": "replace" },

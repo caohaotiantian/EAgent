@@ -21,17 +21,14 @@
  * report says the suite is green. The `.trim()` calls below cannot save it, because they run on a
  * match that never happened.
  *
- * `raw` ARRIVES AS A ONE-ELEMENT ARRAY, and that is a workaround, not a shape anybody wants.
- * A channel a fan-out node writes must have a multi-writer-safe reducer — GRAPH010 counts
- * `read`'s parallel width and refuses `replace` — even though nothing outside this branch ever
- * reads it, and a branch really does see only its own contribution (`raw.length === 1` here,
- * measured). `join("\n")` rather than `[0]` so a doubled contribution degrades to duplicated
- * text instead of a silently dropped shard.
+ * `raw` IS THIS BRANCH'S SHARD, AS A STRING. It is declared `{"type": "string", "reduce":
+ * "replace"}` — the natural thing — because GRAPH010 exempts a channel written by a fan-out's own
+ * target and read by nothing outside that branch. It used to be `append_ordered` and this body
+ * carried a `join("\n")` to undo it.
  */
 function (view) {
   const shard = String(view.require("shard"));
-  const contributed = view.require("raw");
-  const lines = (Array.isArray(contributed) ? contributed.join("\n") : String(contributed)).split(/\r?\n/);
+  const lines = String(view.require("raw")).split(/\r?\n/);
 
   // ORDER MATTERS: the first match wins, so the specific signatures come before the general
   // ones. A timed-out test also carries ERR_TEST_FAILURE, and an uncaught TypeError carries

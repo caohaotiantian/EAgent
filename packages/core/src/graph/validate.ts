@@ -292,6 +292,20 @@ export interface GraphIndex {
    * joins and their arms and tolerates everywhere else.
    */
   readonly fanoutDepth: ReadonlyMap<NodeId, number>;
+  /**
+   * The same stack, spelled in EDGE IDS rather than in widths — which fan-outs enclose this
+   * node, innermost last.
+   *
+   * `parallelWidth` answers "how many at once" and `fanoutDepth` answers "how many coordinate
+   * segments"; neither answers "IS THIS THE SAME FAN-OUT". GRAPH010's branch-local exemption has
+   * to ask exactly that: a channel is branch-local only when its reader sits under the SAME fan
+   * edge as its writer, and two sibling fan-outs of equal width are indistinguishable by number.
+   *
+   * Computed by the same traversal, with the same `undefined` = AMBIGUOUS convention, so the two
+   * cannot drift. It is the STRICTER of the two: an edge id determines its width, so any pair of
+   * inbound paths that agree on edges agrees on widths, while the converse is false.
+   */
+  readonly fanoutEdgeStack: ReadonlyMap<NodeId, readonly EdgeId[] | undefined>;
   /** Every `join` node, so the runtime can notify barriers without scanning the spec. */
   readonly joinNodes: readonly NodeId[];
   /**
@@ -385,7 +399,7 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     for (const e of outbound.get(id) ?? []) stack.push(e.to);
   }
 
-  const { stacks, widths: parallelWidth } = computeFanoutStacks(spec, topoOrder, inbound);
+  const { stacks, widths: parallelWidth, edgeStacks: fanoutEdgeStack } = computeFanoutStacks(spec, topoOrder, inbound);
   const fanoutDepth = new Map<NodeId, number>();
   for (const [id, s] of stacks) if (s !== undefined) fanoutDepth.set(id, s.length);
   const joinNodes = spec.nodes.filter((n) => n.type === "join").map((n) => n.id);
@@ -394,6 +408,7 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
 
   return {
     fanoutDepth,
+    fanoutEdgeStack,
     joinNodes,
     byId,
     edgeById,
@@ -477,12 +492,21 @@ function computeFanoutStacks(
   spec: GraphSpec,
   topoOrder: readonly NodeId[],
   inbound: ReadonlyMap<NodeId, readonly EdgeSpec[]>,
-): { stacks: Map<NodeId, readonly number[] | undefined>; widths: Map<NodeId, number> } {
+): {
+  stacks: Map<NodeId, readonly number[] | undefined>;
+  widths: Map<NodeId, number>;
+  edgeStacks: Map<NodeId, readonly EdgeId[] | undefined>;
+} {
   const stacks = new Map<NodeId, readonly number[] | undefined>();
   const widths = new Map<NodeId, number>();
+  // The same stack in edge ids — see `GraphIndex.fanoutEdgeStack`. Folded into this traversal
+  // rather than written as a second one, because a second walk with the same push/pop/agree
+  // rules is a second thing to keep in step with this one.
+  const edgeStacks = new Map<NodeId, readonly EdgeId[] | undefined>();
   for (const n of spec.nodes) {
     stacks.set(n.id, []);
     widths.set(n.id, 1);
+    edgeStacks.set(n.id, []);
   }
 
   const product = (s: readonly number[]): number => s.reduce((a, b) => a * b, 1);
@@ -505,6 +529,20 @@ function computeFanoutStacks(
       known.every((c) => c.length === known[0]!.length && c.every((w, i) => w === known[0]![i]));
     stacks.set(id, agreed ? known[0]! : undefined);
 
+    // Same push, same pop, same agreement test, over edge ids.
+    const edgeCandidates: (readonly EdgeId[] | undefined)[] = ins.map((e) => {
+      const parent = edgeStacks.get(e.from);
+      if (parent === undefined) return undefined;
+      if (e.kind === "fanout") return [...parent, e.id];
+      if (e.kind === "join") return parent.slice(0, -1);
+      return parent;
+    });
+    const knownEdges = edgeCandidates.filter((c): c is readonly EdgeId[] => c !== undefined);
+    const edgesAgreed =
+      knownEdges.length === edgeCandidates.length &&
+      knownEdges.every((c) => c.length === knownEdges[0]!.length && c.every((x, i) => x === knownEdges[0]![i]));
+    edgeStacks.set(id, edgesAgreed ? knownEdges[0]! : undefined);
+
     // WIDTH IS COMPUTED SEPARATELY, AND NEVER FROM `known` ALONE.
     //
     // Ambiguity propagates: one undefined stack makes every descendant's stack undefined
@@ -526,7 +564,7 @@ function computeFanoutStacks(
     };
     widths.set(id, Math.max(1, ...ins.map(edgeWidth)));
   }
-  return { stacks, widths };
+  return { stacks, widths, edgeStacks };
 }
 
 /**
@@ -2317,7 +2355,9 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
     for (const w of writers) {
       // parallelWidth, NOT multiplicity: loop iterations are sequential and do not race.
       const instances = idx.parallelWidth.get(w) ?? 1;
-      if (instances > 1) {
+      // …UNLESS THE CHANNEL NEVER LEAVES THE BRANCH, in which case there is one writer per
+      // branch and no fold across them that anybody reads. See `branchLocalChannel`.
+      if (instances > 1 && !branchLocalChannel(spec, idx, channel, w)) {
         d.push({
           severity: "error",
           code: "GRAPH010_CONCURRENT_WRITE",
@@ -2359,6 +2399,325 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
       }
     }
   }
+}
+
+
+/**
+ * Does anything OTHER than these sites name `channel` anywhere in the spec?
+ *
+ * THE CENSUS IS INVERTED, AND THAT IS THE WHOLE DESIGN. `branchLocalChannel` has to prove a
+ * NEGATIVE — that nothing outside one fan-out branch can read this channel — and an enumeration
+ * of the places a channel name may appear proves nothing the moment the schema grows a place
+ * nobody added to the list. The first version of this was that enumeration, keyed off
+ * `NODE_FIELDS`/`EDGE_FIELDS`/`SPEC_FIELDS`/`ALLOWED_FIELDS`, and a reviewer found the hole it
+ * was built to prevent: `NESTED_FIELDS` exists precisely because those four lists walk straight
+ * past four more scopes, and a channel-naming key inside any of them would have left the
+ * exemption ON with an uncovered site.
+ *
+ * So instead: remove the sites that ARE allowed, serialise everything else, and look for the
+ * name. Total over any field the schema ever grows, by construction. Its failure mode is
+ * over-reporting — a node id, a description, a resource ref or an unrelated string spelled like
+ * the channel counts as a mention — and over-reporting REFUSES, which is the direction a
+ * loosening guard is allowed to be wrong in.
+ *
+ * `channels` is deleted rather than searched: a channel's own DECLARATION is not a read of it,
+ * and no `ChannelSpec` field names another channel (`identityKey` and `contextProjection.fields`
+ * are field names inside the value).
+ *
+ * THE ONE WAY A NAME CAN HIDE, named rather than hand-waved: `JSON.stringify` honours `toJSON`,
+ * so an object that serialises to something other than its own fields would not show them here.
+ * Every spec the product loads is `JSON.parse` output — from a file, from HTTP, from the journal
+ * — and a spec built in code that lied this way would already hash (`digest(spec)`) as something
+ * other than what it presents. A channel NAME cannot hide: `SAFE_ID` is `[A-Za-z0-9._-]`, which
+ * `JSON.stringify` emits verbatim, so there is no escaping to slip through.
+ */
+function namedElsewhere(spec: GraphSpec, channel: string, writer: NodeId, readers: ReadonlySet<NodeId>): boolean {
+  const rest = {
+    ...spec,
+    channels: {},
+    nodes: spec.nodes.map((n) => {
+      if (n.id === writer) return { ...n, writes: (n.writes ?? []).filter((c) => c !== channel) };
+      if (readers.has(n.id)) return { ...n, reads: (n.reads ?? []).filter((c) => c !== channel) };
+      return n;
+    }),
+  };
+  let text: string;
+  try {
+    text = JSON.stringify(rest) ?? "";
+  } catch {
+    return true; // a spec this cannot serialise is a spec it cannot census.
+  }
+  return new RegExp(`(?<![A-Za-z0-9_$])${channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_$])`).test(text);
+}
+
+/**
+ * Is `channel` written and read entirely inside ONE fan-out branch, so that `replace` never folds
+ * across branches for anything that reads it?
+ *
+ * THIS FUNCTION LOOSENS A GUARD, so every answer it cannot prove is `false`. What it proves, and
+ * what the runtime gives it — measured, and pinned by `test/run/branch-local-replace.test.ts`:
+ *
+ *   - `Engine.#withBranchWrites` folds only the tasks at EXACTLY the asking task's branch path,
+ *     with the same reducer the join uses. A reader at the writer's own coordinate, reached only
+ *     through the writer, therefore sees the writer's own `replace` value and no sibling's.
+ *   - It deliberately does NOT fold an ANCESTOR's held write. A reader one fan-out deeper reads
+ *     `null`, so "inside the subtree" is not enough — the fan-out stack must be EQUAL.
+ *   - `#foldJoin` folds every channel a member wrote, not only the join's declared `writes`, so
+ *     the channel DOES reach shared state at the join — as the last branch in branch-coordinate
+ *     order. Deterministic, and meaningless. Nothing may read it after the join.
+ *
+ * NOT CLAIMED, and it is a real reader of this channel: a node reached by an `error` edge from
+ * the writer runs precisely when the writer FAILED, and `#withBranchWrites` folds only tasks in
+ * state `succeeded` — so it reads whatever ROOT state holds. It is accepted rather than refused
+ * because W6 constrains the covering join's whole INBOUND EDGE LIST — one `join` edge per branch
+ * member and nothing else — which is the set every entrance to that barrier is derived from.
+ * THIS SENTENCE USED TO SAY "the barrier cannot fire while such a reader is pending" as though
+ * that followed from `mode: "all"`, and it did not: four reviewers found four different ways to
+ * fire it early, three of them after this docstring first claimed otherwise. What makes the
+ * claim safe is the closure at W6, not the mode; each of the four has its pasted reproduction
+ * there. It is still not "sees the writer's own value".
+ *
+ * The two-writer arm of GRAPH010 is NOT relaxed and must not be: two writers inside one branch
+ * fold by `compareContribution`'s `nodeId` tiebreak, which is arbitrary for `replace` in exactly
+ * the way the rule exists to refuse. A second writer anywhere refuses here too.
+ */
+function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, writer: NodeId): boolean {
+  if (spec.channels[channel] === undefined) return false;
+
+  // W1 — exactly one enclosing fan-out, unambiguously.
+  const stack = idx.fanoutEdgeStack.get(writer);
+  if (stack === undefined || stack.length !== 1) return false;
+  const fanId = stack[0]!;
+  const fan = idx.edgeById.get(fanId);
+  //
+  // W2 — THE WRITER IS THE FAN-OUT'S OWN TARGET, and this is the clause that carries the
+  // ordering argument. `idx.ancestors` answers "there EXISTS a path w → r", not "EVERY path to r
+  // goes through w" — and a node with a second inbound edge that skips the writer is readied by
+  // whichever arm arrives first (`#activate` emits `task.ready` per inbound edge and `upsertTask`
+  // merges into the existing record), so it can run BEFORE the writer and read a stale value.
+  // With `w === fan.to`, that cannot happen: every node whose fan-out stack is `[fanId]` either
+  // IS the fan-out's target or inherited that stack from a node that is, and an inbound edge from
+  // outside the branch would make the two candidate stacks disagree and the node ambiguous. So
+  // reachable-from-w and dominated-by-w coincide, and `ancestors` is enough.
+  //
+  // A writer partway down the branch is therefore refused for want of a DOMINANCE computation,
+  // not because such a graph is unsafe. Widening this to "w dominates every reader within the
+  // subtree" is the obvious next step and is left undone deliberately.
+  if (fan === undefined || fan.kind !== "fanout" || fan.to !== writer) return false;
+
+  // The subtree: every node this fan-out encloses, at any depth.
+  const subtree = new Set<NodeId>();
+  for (const n of spec.nodes) {
+    const s = idx.fanoutEdgeStack.get(n.id);
+    if (s !== undefined && s.length >= 1 && s[0] === fanId) subtree.add(n.id);
+  }
+  if (!subtree.has(writer)) return false;
+
+  for (const id of subtree) {
+    const n = idx.byId.get(id);
+    if (n === undefined) return false;
+    // W3 — a `join` inside the branch pops a level and its fold leaves the branch; a `router`
+    // turns one static subtree into a set of possible ones; a `subgraph` resolves its `inputs`
+    // against the WHOLE scope and its child is a spec this walk cannot see.
+    if (n.type === "join" || n.type === "router" || n.type === "subgraph") return false;
+    // W4 — `retry` is refused for a weaker reason than the loop below, and it is written down
+    // rather than dressed up: a retry re-uses the Task's own id (`task.retry_scheduled` carries
+    // `w.task.taskId`), so the projection holds one record and one contribution, and the shape is
+    // very likely safe. It is refused because this analysis does not track which attempt commits,
+    // and a loosening does not get the benefit of "very likely".
+    //
+    // THIS WALKS `S`, WHICH LEAVES THE JOIN AND THE FAN-OUT PLANNER OUT — by construction, not by
+    // oversight, and both are safe for the same one-line reason. `#retryDecision`'s exit `return`s
+    // BEFORE `#activate`, so a retried planner never plans the fan a second time, and a retried
+    // join re-runs `#foldJoin` only after its barrier has already fired — after every reader in
+    // this branch has run.
+    //
+    // AND THE DEFAULTED POLICY COUNTS, not only the declared one. `compile.ts`'s `effectiveRetry`
+    // gives a node that declared none `DEFAULT_PROVIDER_RETRY` when it reaches a provider and
+    // `DEFAULT_SUBGRAPH_RETRY` when it re-enters a child — so reading `n.retry` alone refused an
+    // author who wrote `maxAttempts: 2` while accepting an `agent` node that retries three times.
+    // The types are named here rather than `reachesProvider` re-implemented: this is a SUPERSET
+    // of it (`agent`, and `evaluator` of any kind rather than `rubric` only), so it cannot drift
+    // into being narrower than the thing it stands in for. `subgraph` is refused above.
+    if (n.retry !== undefined || n.type === "agent" || n.type === "evaluator") return false;
+  }
+  // W3, second half — a nested fan-out under this one. Measured: its nodes read `null`.
+  for (const e of spec.edges) if (e.kind === "fanout" && subtree.has(e.from)) return false;
+
+  // W4, THE LOOP CLAUSE, AND IT ASKS THE REACHABILITY QUESTION DIRECTLY.
+  //
+  // It used to delegate to `multiplicity !== parallelWidth`, and that was the wrong set.
+  // `applyLoopFactors` calls a node "in the cycle" only when it is `loop.to`, `loop.from`, or
+  // both a descendant of the one and an ancestor of the other — so a fan-out hanging off a node
+  // inside the loop body but NOT on the path back to `loop.from` gets no factor at all. Measured
+  // on `top --fanout--> A --> m1 --> B`, joined, with `top --> tick --loop--> top` beside it:
+  // `multiplicity(A) === parallelWidth(A) === 4`, the graph compiled with zero diagnostics, and
+  // `B` read another pass's `mid` — pass 1's reader saw pass 2's write, and WHICH pass depended
+  // on how many nodes the branch had. `childBranch` carries no iteration, so every pass re-fires
+  // the fan onto the SAME coordinates and `#withBranchWrites` folds them all.
+  //
+  // So: refuse if any node of the branch is reachable from any loop edge's target. That also
+  // subsumes a `loop` edge INTO the writer, which `ins` filters out of the stack computation and
+  // which `maxIterations: 1` would have hidden from the multiplicity test.
+  //
+  // WHAT `ancestors` DOES NOT WALK, said exactly, because it was once written down loosely as
+  // "this covers compensation and error edges". It walks `dagEdges`, which excludes `loop` AND
+  // `compensation` (see `indexGraph`). Error edges ARE in it, so an error-path node reachable
+  // from a `loop.to` is caught. Compensation is not, and needs no clause: nothing traverses a
+  // compensation edge — `Engine.#edgesToTake` has `case "compensation": break;` — so a node
+  // reached only that way never runs, and cannot re-enter this branch. That is a fact about the
+  // executor, not a gap this predicate is tolerating.
+  for (const loop of idx.loopEdges) {
+    for (const id of subtree) {
+      if (id === loop.to || (idx.ancestors.get(id)?.has(loop.to) ?? false)) return false;
+    }
+  }
+
+  // W6 — THE COVERING JOIN'S INBOUND EDGE LIST IS EXACTLY ONE `join` EDGE PER BRANCH MEMBER,
+  // AND ITS `mode` IS `"all"`.
+  //
+  // READ THIS CLAUSE'S HISTORY BEFORE CHANGING IT. Four reviewers in a row each found a
+  // DIFFERENT way to fire the barrier early, and the first three fixes each closed one entrance
+  // by name — `mode`, then `branches` membership, then `Engine.#fireEmptyJoin`. That was the
+  // wrong shape of fix three times over, because it keyed a compile-time guard on an enumeration
+  // of ENGINE METHODS: a list the validator cannot see, that nothing keeps in step with the
+  // engine, and that is not closed. The fourth entrance was `#activate`'s ordinary arm.
+  //
+  // THE ENTRANCE SET IS THE JOIN NODE'S INBOUND EDGE LIST, not a list of engine methods, and
+  // THAT the validator can see. So constraining the inbound list closes the set by construction,
+  // and the earlier clauses fall out of it rather than needing their own patch.
+  //
+  // THE CLAIM, STATED AT THE WIDTH IT HOLDS: every entrance that can CREATE a join Task is
+  // derived from an edge whose `to` is that join. NOT "every `task.ready`" — three of the seven
+  // sites below are not edge-derived at all, and an earlier draft of this sentence said
+  // otherwise. Two of those three can only re-ready a Task that already exists, and the third
+  // cannot reach a join this clause covers.
+  //
+  // NAMED RATHER THAN ASSERTED, because "this is total" is the claim that failed four times.
+  // `run/engine.ts` emits `type: "task.ready"` at exactly SEVEN sites, and here is each one
+  // against a covering join:
+  //
+  //   `#activate`, generic arm       one per INBOUND edge of any kind — the fourth entrance,
+  //                                  and the reason this clause is keyed where it is
+  //   `#activate`, join arm          reached only through an OUTBOUND `join` edge, into
+  //                                  `#maybeFireJoin`
+  //   `#maybeFireJoin`               same, and the only one that tests quiescence
+  //   `#fireEmptyJoin`               walks the empty fan-out target's OUTBOUND `join` edges
+  //   `#branchReady`                 `e.to` of a `fanout` edge — refused here as an inbound
+  //                                  edge that is not `kind: "join"`, and by W3 besides
+  //   `submit`                       `graph.entryNodes`, `edgesIn: []` — NOT edge-derived. It
+  //                                  cannot reach a covering join, and the reason is THIS
+  //                                  clause: `inbound.length === subtree.size` and `subtree`
+  //                                  always holds the writer, so the join has at least one
+  //                                  non-loop inbound edge, and `hasNonLoopIn` excludes exactly
+  //                                  those from `entryNodes`
+  //   `rewind`                       NOT edge-derived: re-arms stranded tasks under their own
+  //                                  `task.taskId` and `edgesIn`, so it re-runs a Task that
+  //                                  already existed and cannot create one
+  //   `retry`                        NOT edge-derived, and the same argument — `w.task.taskId`
+  //                                  again. It also `return`s before `#activate`, so a retried
+  //                                  fan-out planner does not re-plan the fan
+  //
+  // Four are edge-derived and constrained here; `#branchReady` is edge-derived and refused; two
+  // re-arm an existing Task and one cannot reach this join. If an eighth site appears, or one of
+  // these learns to CREATE a join Task with no edge, this clause is false again and the
+  // exemption has to go back to refusing.
+  //
+  // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm mints, for a `seq` or
+  // `conditional` edge into the join node at the ROOT coordinate, the SAME TaskId
+  // `#maybeFireJoin` would — with no quiescence, membership or mode test — and `#maybeFireJoin`
+  // then stands down because `p.tasks[joinTaskId] !== undefined`. Nothing refused a
+  // non-`join`-kind edge into a join node: `GRAPH008_BRANCH_NOT_CONNECTED` matches on `e.from`
+  // only and a `seq` edge satisfies it. Measured, on this file's own accept-case graph plus one
+  // node (`seed -seq-> d0`, `d0 -seq-> gather`) and one extra hop in the branch:
+  //
+  //     COMPILE: ok, ZERO diagnostics
+  //     run status : succeeded
+  //     readers saw: [{"myShard":"a","rawItSees":"raw-a"},{"myShard":"b","rawItSees":"raw-d"},…]
+  //
+  // Branch `b` read branch `d`'s value, and whether it did depended on the hop count — the same
+  // tell the membership entrance had. The SHIPPED `examples/graphs/triage-failures.json` plus
+  // `plan -seq-> note -seq-> gather` stayed exempt, and with a `human_gate` in the branch the
+  // window is a person's response time rather than milliseconds.
+  //
+  // THE OTHER THREE, kept because each is a distinct pasted reproduction and the inbound rule
+  // subsumes rather than replaces them:
+  //
+  //   MODE. Under `any`, `quorum` or `firstSuccess` the barrier fires on evidence already in
+  //   hand and applies its CROSS-BRANCH fold to root state while siblings still run — a
+  //   short-circuiting join cancels nothing. Measured: `mode: "any"`, writer throwing on item 1,
+  //   an error-path reader in branch 1 read branch 0's value.
+  //
+  //   MEMBERSHIP. Quiescence under `mode: "all"` is computed ENTIRELY from `join.branches` —
+  //   `#maybeFireJoin` builds `members` from it and both `stillLive` and `continuesInBranch` ask
+  //   `reachesMember` — so a branch node the join does not declare never holds the barrier.
+  //   Measured on `read --error--> h0 --> h1 --> handler`: branch `b`'s handler read branch
+  //   `c`'s value. This is now the "one edge per member" half: an undeclared branch node's edge
+  //   into the join has a `from` that is not a member, and a member with no edge is
+  //   `GRAPH008_BRANCH_NOT_CONNECTED`.
+  //
+  //   A SECOND FAN-OUT INTO THE SAME JOIN. `#fireEmptyJoin` has no quiescence test at all: for a
+  //   fan-out that materialised no branches it readies every join naming that fan-out's target.
+  //   Measured, only the sibling's input changing: `others = ["x"] → failures: [...4 entries]`
+  //   versus `others = [] → failures: undefined` — the join folded before any member committed
+  //   and the run said `succeeded`. This is now the "`from` is a member of THIS branch" half.
+  //
+  // WHY ALL OF IT MATTERS: `#withBranchWrites` returns the projection UNTOUCHED when the asking
+  // branch has held nothing — a writer that failed, that returned `{writes:{}}`, or that a
+  // `preNode` hook skipped — so its reader falls through to ROOT channel state. That is safe
+  // only while root state still holds the pre-fan-out value, which is the same for every branch.
+  //
+  // A `human_gate` IN THE BRANCH is accepted and is the shape that most tests this clause: it is
+  // in `CAN_SUSPEND`, so it holds its branch open for as long as a person takes. W6 is the only
+  // thing that makes an unbounded human pause safe rather than merely slow.
+  //
+  // The join is invisible to every clause above: a `join` edge pops a level, so a join is never
+  // in `subtree`. It has to be found through its own declaration.
+  let covered = false;
+  for (const n of spec.nodes) {
+    if (n.type !== "join") continue;
+    const branches = n.join?.branches;
+    if (!Array.isArray(branches) || !branches.some((b) => subtree.has(b))) continue;
+    if (n.join?.mode !== "all") return false;
+
+    // `branches` is EXACTLY this branch — nothing else may be waited on here.
+    const declared = new Set<NodeId>(branches);
+    if (declared.size !== subtree.size) return false;
+    for (const id of subtree) if (!declared.has(id)) return false;
+
+    // AND THE ENTRANCE SET: one `join` edge per member, and nothing else at all.
+    const inbound = idx.inbound.get(n.id) ?? [];
+    if (inbound.length !== subtree.size) return false;
+    const seen = new Set<NodeId>();
+    for (const e of inbound) {
+      if (e.kind !== "join") return false;
+      if (!subtree.has(e.from)) return false;
+      if (seen.has(e.from)) return false;
+      seen.add(e.from);
+    }
+    covered = true;
+  }
+  // No join declares this branch at all: `GRAPH021_FANOUT_WITHOUT_JOIN` refuses such a graph, and
+  // this refuses the exemption rather than relying on another rule having run.
+  if (!covered) return false;
+
+  const atThisFan = (id: NodeId): boolean => {
+    const s = idx.fanoutEdgeStack.get(id);
+    return s !== undefined && s.length === 1 && s[0] === fanId;
+  };
+
+  // W5 — this writer is the only writer, every declared reader is in the branch and downstream of
+  // it, and nothing else in the whole spec names the channel at all.
+  const readers = new Set<NodeId>();
+  for (const n of spec.nodes) {
+    if ((n.writes ?? []).includes(channel) && n.id !== writer) return false;
+    if (!(n.reads ?? []).includes(channel)) continue;
+    if (!atThisFan(n.id)) return false;
+    if (!(idx.ancestors.get(n.id)?.has(writer) ?? false)) return false;
+    readers.add(n.id);
+  }
+  // LAST, because it serialises the spec: everything above is cheap and refuses most graphs.
+  return !namedElsewhere(spec, channel, writer, readers);
 }
 
 /** Nodes reachable from `from` over forward edges. */

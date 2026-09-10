@@ -17,6 +17,28 @@
  * order the author never intended to be meaningful. The compiler rejects it for
  * concurrent writers (GRAPH010) rather than making it silently arbitrary.
  *
+ * WITH ONE EXEMPTION, and it does not weaken the sentence above — it narrows what
+ * "concurrent writers" means. A channel written by a fan-out's own target and read by
+ * nothing outside that branch has ONE writer per branch, and `Engine.#withBranchWrites`
+ * folds only the tasks at a reader's own branch coordinate. GRAPH010 accepts `replace`
+ * there (`branchLocalChannel` in `graph/validate.ts`), and refuses it the moment anything
+ * else in the spec names the channel — including the join node itself. The cross-branch
+ * fold still HAPPENS, and is still the arbitrary value this paragraph describes; the rule
+ * is that nothing may read it.
+ *
+ * "NOTHING MAY READ IT" TAKES A CLAUSE ABOUT THE JOIN TO BE TRUE, because a reader whose
+ * own branch held nothing — its writer failed, or returned no write — falls through to
+ * root state, and a barrier that fires early has already published the cross-branch fold
+ * there. This paragraph twice listed the ways that can happen and was twice wrong, so it
+ * no longer lists them: the exemption constrains the covering join's whole INBOUND EDGE
+ * LIST — one `join` edge per branch member and nothing else — because every entrance that
+ * can CREATE a join Task is derived from an edge whose `to` is that join (three of the
+ * seven `task.ready` sites are not edge-derived; two only re-arm an existing Task and the
+ * third cannot reach such a join — `branchLocalChannel` names all seven). `mode: "all"`
+ * is required as well, and is not on its own sufficient. Four different early-fire routes
+ * were each measured handing a reader a sibling branch's value; `branchLocalChannel` in
+ * `graph/validate.ts` carries all four reproductions.
+ *
  */
 
 import { canonicalize, digest, type Digest } from "../canonical.ts";
