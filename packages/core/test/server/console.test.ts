@@ -402,8 +402,68 @@ test("A.45 — task.skipped and task.cancelled fold to the SAME state GET /runs/
   }
 });
 
-test("THE FOLD ARMS THEMSELVES — a regression pin independent of any race the integration test above cannot fully control", () => {
-  // Deterministic backstop: whatever the timing of the test above, these three lines existing
+/**
+ * A SECOND GAP OF THE SAME SHAPE, found by a fresh reviewer of the diff above: `gate.decided`
+ * does not only close the gate. `run/projection.ts`'s arm also returns the RAISING TASK to
+ * `ready` (`upsertTask(p, g.taskId, { state: "ready" })`), because the decision rides on the
+ * gate record and the scheduler re-leases the task rather than re-raising the gate. The console
+ * had no line for that half — only the gate-list trim — so an approved or rejected task kept
+ * showing `awaiting_gate` on screen after the projection already said `ready`, for as long as it
+ * took the next `task.leased`/`task.ready` frame to arrive.
+ *
+ * A live SSE race is the wrong tool to pin this: with a synchronous mock model and tool
+ * execution, the window between `gate.decided` and the NEXT frame that would independently move
+ * the task off `awaiting_gate` (`task.ready`/`task.leased` for the following node) can be a
+ * single tick, so polling `current.status` live could pass even with the fix reverted. Instead
+ * this drives the page's own real `applyEvent` directly against a `gate.decided` event CAPTURED
+ * from a real run's journal — deterministic, and still the shipped function and the shipped
+ * event shape, not a copy of either.
+ */
+test("A.45, gap 2 — gate.decided returns the gate's task to `ready`, the way projection.ts does", async () => {
+  const r = await rig();
+  try {
+    const at = await drive(r);
+    const decided = await fetch(`${r.base}/runs/${at.runId}/gates/${at.gateId}`, {
+      method: "POST",
+      headers: asLead,
+      body: JSON.stringify({ decision: { kind: "approve" } }),
+    });
+    assert.equal(decided.status, 200, await decided.text());
+
+    const log = [];
+    for await (const ev of r.h.store.read(at.runId as RunId, 1)) log.push(ev);
+    const gateDecided = log.find((ev) => ev.type === "gate.decided");
+    assert.ok(gateDecided, "the approval must have journalled gate.decided");
+    assert.ok(gateDecided.taskId, "gates.ts's decidedEvent carries the gate's own taskId on the envelope");
+
+    const page = openConsole(r.base, "lead-token", () => "");
+    // Seeded to the state the task was ACTUALLY in the instant before this event, rather than
+    // relying on a live stream to have put it there — isolating the one arm under test.
+    await page.run(
+      `current.tasks.set(${JSON.stringify(gateDecided.taskId)}, ` +
+        `{ taskId: ${JSON.stringify(gateDecided.taskId)}, nodeId: "approve", state: "awaiting_gate", take: [] })`,
+    );
+    await page.run(`applyEvent(${JSON.stringify(gateDecided)})`);
+    const state = await page.run(`current.tasks.get(${JSON.stringify(gateDecided.taskId)})?.state`);
+    assert.equal(state, "ready", "the console must not still say `awaiting_gate` once the gate is decided");
+    assert.deepEqual(page.errors, [], "no uncaught exception folding a real gate.decided event");
+
+    // `openConsole` starts several fire-and-forget requests the instant its script loads
+    // (`api("/health").then(...)`, `whoami()`, `loadRuns()`, `loadGraphs()`) that this test never
+    // awaits, because none of them are what it is testing. This test's own work is two
+    // synchronous `page.run` calls with no network round trip, so — unlike the slower tests in
+    // this file, whose several awaited requests give those a full loopback round trip's head
+    // start — it can reach `r.close()` while one is still in flight, and closing the plane out
+    // from under an in-flight fetch is what turns `unhandled promise rejection` into a failure
+    // this test did not otherwise have. A bounded pause, not a race with anything asserted above.
+    await new Promise((res) => setTimeout(res, 50));
+  } finally {
+    await r.close();
+  }
+});
+
+test("THE FOLD ARMS THEMSELVES — a regression pin independent of any race the integration tests above cannot fully control", () => {
+  // Deterministic backstop: whatever the timing of the tests above, these five lines existing
   // in `applyEvent` is what the fix actually is. Matches the same style as the other `assert.match`
   // pins in this file (e.g. "the page must handle run.suspended").
   assert.match(CONSOLE_HTML, /ev\.type === "task\.skipped" && ev\.taskId/, "applyEvent must handle task.skipped");
@@ -413,6 +473,11 @@ test("THE FOLD ARMS THEMSELVES — a regression pin independent of any race the 
     CONSOLE_HTML,
     /if \(ev\.taskId\) \{ const t = current\.tasks\.get\(ev\.taskId\); if \(t\) t\.state = "awaiting_gate"; \}/,
     "gate.raised must also update the raising TASK's own state, the way projection.ts's arm does",
+  );
+  assert.match(
+    CONSOLE_HTML,
+    /if \(ev\.taskId\) \{ const t = current\.tasks\.get\(ev\.taskId\); if \(t\) t\.state = "ready"; \}/,
+    "gate.decided must return the gate's own task to ready, the way projection.ts's arm does",
   );
 });
 

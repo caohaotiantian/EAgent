@@ -477,6 +477,15 @@ function applyEvent(ev) {
     if (ev.taskId) { const t = current.tasks.get(ev.taskId); if (t) t.state = "awaiting_gate"; }
   } else if (ev.type === "gate.decided") {
     current.gates = current.gates.filter((g) => g.gateId !== p.gateId);
+    // A.45, the gap the first fresh review found: projection.ts's gate.decided arm also
+    // returns the GATE'S OWN TASK to ready (upsertTask(p, g.taskId, { state: "ready" })) so
+    // the scheduler can re-lease it — the decision rides on the gate record, not on a
+    // re-raised task. gates.ts's decidedEvent (the one builder of this event, "wherever the
+    // decision came from") carries the same taskId on the event envelope, so this reads
+    // ev.taskId exactly the way every other arm here does. Without this line an approved or
+    // rejected task kept showing awaiting_gate on screen after the projection already said
+    // ready, for as long as it took the next task.leased/task.ready frame to arrive.
+    if (ev.taskId) { const t = current.tasks.get(ev.taskId); if (t) t.state = "ready"; }
   } else if (ev.type === "run.suspended") {
     // What foldRun() does with this event, in this page's vocabulary; the terminal guard at the
     // top of this function is the rest of it. Without these a pause taken from the CLI, or from
