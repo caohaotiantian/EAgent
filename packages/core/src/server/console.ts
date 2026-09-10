@@ -507,6 +507,33 @@ function applyEvent(ev) {
   } else if (ev.type === "run.completed") { current.status = "succeeded"; }
   else if (ev.type === "run.failed") { current.status = "failed"; }
   else if (ev.type === "run.cancelled") { current.status = "cancelled"; }
+  else if (ev.type === "checkpoint.restored" && p.mode === "rewind") {
+    // A.46: a rewind is append-only — it never edits history, it appends this marker to
+    // SUPPRESS a range of already-folded events (run/projection.ts's suppressedRanges),
+    // which retroactively changes what earlier events meant. There is no per-task delta this
+    // event carries — only "some of what you already folded is wrong" — so, unlike every arm
+    // above, incremental folding cannot answer it. The server's own RunFolder hits the same
+    // wall and pays one full re-fold (RunFolder.push -> stale -> restart); this page's only
+    // equivalent move is re-fetching the snapshot. mode: "fork" is deliberately not handled
+    // here — it spins off a NEW run and suppresses nothing in this one.
+    void resync(selected, epoch);
+  }
+}
+
+/**
+ * A.46's other half: what checkpoint.restored{mode:"rewind"} actually does to this page.
+ * runId/mine are read at the call site rather than from the closure at the moment this
+ * settles, so a navigation away and back in between is the same guard loadGates already
+ * uses — a stale reply must not repaint a run the operator is no longer looking at.
+ */
+async function resync(runId, mine) {
+  try {
+    const run = await api(path("runs", runId));
+    if (selected !== runId || epoch !== mine) return;
+    applySnapshot(run);
+    invalidate();
+    await loadGates(selected, epoch);
+  } catch (e) { /* the pre-rewind state stands until the next frame corrects it */ }
 }
 
 async function ensureGraph(hash) {
