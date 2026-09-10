@@ -483,23 +483,128 @@ test("THE HEALTH CHECK NO LONGER LEAVES AN UNCAUGHT PROMISE — a second reviewe
   assert.match(CONSOLE_HTML, /api\("\/health"\)\.then\(\(h\) => \{[\s\S]*?\}\)\.catch\(/, "the health check's promise chain must end in a .catch");
 });
 
+// ── A.46: a rewind must reach the live console, not just the next reload ────────────────────
+
+test("A.46, deterministic backstop — applyEvent has an arm for checkpoint.restored{mode:\"rewind\"} that re-fetches the snapshot", () => {
+  // Same style as A.45's "THE FOLD ARMS THEMSELVES": whatever the timing of the live test
+  // below, this is what the fix actually is — a rewind carries no per-task delta to fold
+  // incrementally, so the arm's whole job is to trigger a re-fetch rather than patch `current`
+  // in place.
+  assert.match(
+    CONSOLE_HTML,
+    /ev\.type === "checkpoint\.restored" && p\.mode === "rewind"/,
+    "applyEvent must have an arm for checkpoint.restored{mode:\"rewind\"}",
+  );
+  assert.match(CONSOLE_HTML, /async function resync\(runId, mine\)/, "the re-fetch must exist as a named function");
+  assert.match(CONSOLE_HTML, /applySnapshot\(run\);/, "and it must replace `current` wholesale, not patch it");
+});
+
+/**
+ * A.46 — the live fold, over a real rewind.
+ *
+ * `console.ts`'s `applyEvent` had SEVEN `task.*` arms plus `gate.raised`/`gate.decided`/
+ * `state.reduced`/`run.suspended`/`run.resumed`, and none for `checkpoint.restored`. A rewind
+ * never edits history — it appends `checkpoint.restored{mode:"rewind"}`, which SUPPRESSES a
+ * range of already-folded events (`run/projection.ts`'s `suppressedRanges`), so what those
+ * events meant changes retroactively. Server-side `RunFolder` notices and pays a full re-fold;
+ * the console's incremental fold had no equivalent move, so the page kept showing whatever the
+ * rewind undid until something reloaded it — and nothing did.
+ *
+ * This drives the page's own script (`openConsole`) against a REAL run and a REAL rewind
+ * command, confirmed by a throwaway repro (`node --test`, not checked in) to return
+ * synchronously — `POST /runs/:id/commands{kind:"rewind"}` answers 200 with the post-rewind
+ * projection already computed (`status:"queued", tasks:[], gates:[]`), and the run does not
+ * auto-redispatch afterward (journal unchanged 200ms later), so this is not racing a scheduler.
+ *
+ * Issued over a RAW fetch, never through the page (same technique as A.45's cancel) — the
+ * console must learn this only from its own SSE stream, or the test would pass on a page that
+ * never folds the event at all.
+ */
+test("A.46 — a rewind reaches the live console: undone tasks and the closed gate disappear without a reload", async () => {
+  const r = await rig();
+  let page: ReturnType<typeof openConsole> | undefined;
+  try {
+    const at = await drive(r); // drives to awaiting_gate: start, 5x summarize, collect, merge, approve's gate
+
+    page = openConsole(r.base, "lead-token", () => "");
+    await page.run(`select(${JSON.stringify(at.runId)})`);
+    for (let i = 0; i < 400 && (await page.run("current.status")) !== "awaiting_gate"; i++) {
+      await new Promise((res) => setTimeout(res, 10));
+    }
+    assert.equal(await page.run("current.status"), "awaiting_gate", "the console must fold up to the gate first");
+    assert.equal(await page.run("current.gates.length"), 1, "…with the open gate on screen");
+    assert.equal(await page.run("current.tasks.size"), 9, "start + 5 summarize + collect + merge + approve");
+
+    // THE HANDSHAKE: a rewind command requires the plan's hash, from the preview route.
+    const preview = await fetch(`${r.base}/runs/${at.runId}/rewind-plan?atSeq=2`, { headers: asLead });
+    const previewText = await preview.text();
+    assert.equal(preview.status, 200, previewText);
+    const plan = JSON.parse(previewText) as { planHash: string };
+
+    const rewound = await fetch(`${r.base}/runs/${at.runId}/commands`, {
+      method: "POST",
+      headers: asLead,
+      body: JSON.stringify({ kind: "rewind", atSeq: 2, reason: "A.46 fixture", planHash: plan.planHash }),
+    });
+    const rewoundText = await rewound.text();
+    assert.equal(rewound.status, 200, rewoundText);
+    const rewoundBody = JSON.parse(rewoundText) as { status: string; tasks: unknown[]; gates: unknown[] };
+    assert.equal(rewoundBody.status, "queued", "the server's own answer: every task after atSeq=2 is undone");
+    assert.deepEqual(rewoundBody.tasks, []);
+    assert.deepEqual(rewoundBody.gates, []);
+
+    // THE CONSOLE MUST LEARN THIS FROM ITS OWN STREAM — polling only current.*, never re-issuing
+    // the rewind or calling resync() directly.
+    for (let i = 0; i < 400 && (await page.run("current.status")) !== "queued"; i++) {
+      await new Promise((res) => setTimeout(res, 10));
+    }
+    assert.equal(await page.run("current.status"), "queued", "the page must not still say awaiting_gate after the rewind");
+    assert.equal(await page.run("current.gates.length"), 0, "the closed gate must disappear, not linger on screen");
+    assert.equal(await page.run("current.tasks.size"), 0, "every task the rewind undid must disappear, not keep its old state");
+
+    // AND IT MATCHES THE SERVER'S OWN ANSWER at the same instant, not just "something changed".
+    const fresh = (await (await fetch(`${r.base}/runs/${at.runId}`, { headers: asLead })).json()) as { status: string; tasks: unknown[]; gates: unknown[] };
+    assert.equal(await page.run("current.status"), fresh.status);
+    assert.equal(await page.run("current.tasks.size"), fresh.tasks.length);
+    assert.equal(await page.run("current.gates.length"), fresh.gates.length);
+
+    assert.deepEqual(page.errors, [], "no uncaught exception folding a real checkpoint.restored event");
+  } finally {
+    if (page !== undefined) await page.run("(() => { epoch++; selected = null; if (stream) stream.abort(); })()");
+    await r.close();
+  }
+});
+
 test("THE CONSOLE'S FAN-OUT PRIORITY ORDER AGREES WITH server/layout.ts'S STATE_PRIORITY — one copy, watched", () => {
   // `dominant()`'s priority list is a hand-copy of `server/layout.ts`'s `STATE_PRIORITY` — it
   // cannot be a shared import, because this text ships to a browser and that array is not
   // exported (adding a new export would move the pinned surface count in `scripts/surface.json`
   // off 541 for no functional reason). Per CLAUDE.md's rule for an unavoidable copy, this census
   // pins the two textual representations together — `registries.test.ts`'s pattern, applied here.
+  //
+  // A.52: `STATE_PRIORITY` is now DERIVED from `STATE_RANK`, a `Record<TaskState, number>`
+  // written so a tenth `TaskState` fails to compile until it is ranked — a plain array's
+  // length cannot enforce that. THE CENSUS SORTS BY THE NUMBERS, not by the order the keys
+  // happen to be written in: a fresh review of this file's first draft found that reading key
+  // order alone is blind to a VALUE-only edit (e.g. swapping two ranks' numbers without moving
+  // their lines), which is exactly the kind of drift this test exists to catch — verified by
+  // mutation, swapping two ranks' numbers in layout.ts left every test green until this line
+  // sorted by value instead of by source position.
   const layoutSrc = readFileSync(new URL("../../src/server/layout.ts", import.meta.url), "utf8");
-  const layoutMatch = /const STATE_PRIORITY: readonly TaskState\[\] = \[([\s\S]*?)\];/.exec(layoutSrc);
-  assert.ok(layoutMatch, "server/layout.ts no longer declares STATE_PRIORITY in a shape this test can read");
-  const layoutOrder = [...layoutMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+  const layoutMatch = /const STATE_RANK: Record<TaskState, number> = \{([\s\S]*?)\};/.exec(layoutSrc);
+  assert.ok(layoutMatch, "server/layout.ts no longer declares STATE_RANK in a shape this test can read");
+  const ranked = [...layoutMatch![1]!.matchAll(/(\w+):\s*(\d+)/g)].map((m) => ({ state: m[1]!, rank: Number(m[2]) }));
+  const layoutOrder = [...ranked].sort((a, b) => a.rank - b.rank).map((r) => r.state);
 
   const consoleMatch = /function dominant\(states\) \{\s*for \(const s of \[([\s\S]*?)\]\)/.exec(CONSOLE_HTML);
   assert.ok(consoleMatch, "console.ts's dominant() changed shape — update this census alongside it");
   const consoleOrder = [...consoleMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
 
   // Not vacuous: an empty parse on both sides would compare [] to [] and report green.
-  assert.ok(layoutOrder.length >= 5, `the priority scan found only ${layoutOrder.length} members — the regex broke, not the list`);
+  assert.equal(layoutOrder.length, 9, `the priority scan found ${layoutOrder.length} members, not the nine TaskState has — the regex broke, or the list did`);
+  // Ranks must be distinct — a tie would make "sort by value" ambiguous, and the real
+  // `Object.keys(STATE_RANK).sort(...)` in layout.ts would then be free to answer either way.
+  assert.equal(new Set(ranked.map((r) => r.rank)).size, ranked.length, "STATE_RANK must have no two states sharing a rank");
   assert.deepEqual(consoleOrder, layoutOrder, "the console's fan-out priority order has drifted from the server's STATE_PRIORITY");
 });
 

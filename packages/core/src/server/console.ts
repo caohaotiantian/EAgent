@@ -92,6 +92,10 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
   .node.leased rect, .node.ready rect { stroke:var(--accent); }
   .node.awaiting_gate rect { stroke:var(--gate); fill:color-mix(in srgb, var(--gate) 14%, var(--panel)); }
   .node.skipped rect, .node.cancelled rect { stroke-dasharray:4 3; opacity:.6; }
+  /* A.52: retrying means an attempt just failed and is backing off — distinct from both
+     "failed" (solid err stroke) and the neutral fill an un-started node gets, so it does not
+     read as nothing having happened. "pending" gets no rule on purpose: it IS "not started". */
+  .node.retrying rect { stroke:var(--err); stroke-dasharray:2 2; fill:color-mix(in srgb, var(--err) 6%, var(--panel)); }
   .edge { stroke:var(--line); stroke-width:1.5; fill:none; marker-end:url(#a); }
   .edge.taken { stroke:var(--accent); }
   .badge { font:700 10px ui-monospace,Menlo,monospace; fill:#fff; }
@@ -503,6 +507,33 @@ function applyEvent(ev) {
   } else if (ev.type === "run.completed") { current.status = "succeeded"; }
   else if (ev.type === "run.failed") { current.status = "failed"; }
   else if (ev.type === "run.cancelled") { current.status = "cancelled"; }
+  else if (ev.type === "checkpoint.restored" && p.mode === "rewind") {
+    // A.46: a rewind is append-only — it never edits history, it appends this marker to
+    // SUPPRESS a range of already-folded events (run/projection.ts's suppressedRanges),
+    // which retroactively changes what earlier events meant. There is no per-task delta this
+    // event carries — only "some of what you already folded is wrong" — so, unlike every arm
+    // above, incremental folding cannot answer it. The server's own RunFolder hits the same
+    // wall and pays one full re-fold (RunFolder.push -> stale -> restart); this page's only
+    // equivalent move is re-fetching the snapshot. mode: "fork" is deliberately not handled
+    // here — it spins off a NEW run and suppresses nothing in this one.
+    void resync(selected, epoch);
+  }
+}
+
+/**
+ * A.46's other half: what checkpoint.restored{mode:"rewind"} actually does to this page.
+ * runId/mine are read at the call site rather than from the closure at the moment this
+ * settles, so a navigation away and back in between is the same guard loadGates already
+ * uses — a stale reply must not repaint a run the operator is no longer looking at.
+ */
+async function resync(runId, mine) {
+  try {
+    const run = await api(path("runs", runId));
+    if (selected !== runId || epoch !== mine) return;
+    applySnapshot(run);
+    invalidate();
+    await loadGates(selected, epoch);
+  } catch (e) { /* the pre-rewind state stands until the next frame corrects it */ }
 }
 
 async function ensureGraph(hash) {
@@ -636,9 +667,14 @@ function drawGraph() {
   el.innerHTML = parts.join("");
 }
 
-/** One shape, many branches: show the most interesting state, not an average. */
+/**
+ * One shape, many branches: show the most interesting state, not an average.
+ *
+ * A.52: a hand-copy of server/layout.ts's STATE_PRIORITY, all nine TaskState members —
+ * console.test.ts's own census test reads both source texts and fails if they drift.
+ */
 function dominant(states) {
-  for (const s of ["failed", "awaiting_gate", "leased", "ready", "cancelled", "skipped", "succeeded"]) {
+  for (const s of ["failed", "awaiting_gate", "retrying", "leased", "ready", "pending", "cancelled", "skipped", "succeeded"]) {
     if (states.includes(s)) return s;
   }
   return states[0] || "";

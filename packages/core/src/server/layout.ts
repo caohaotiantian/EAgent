@@ -82,16 +82,43 @@ export interface TaskSummary {
  * Twenty-five branches, one shape: the state a person needs to see is the worst one, not
  * the commonest. A fan-out where 24 branches succeeded and one is awaiting a gate is a
  * fan-out waiting on a human, and rendering it green would be a lie of omission.
+ *
+ * A.52: this used to rank only seven of `TaskState`'s NINE members — `pending` and
+ * `retrying` fell through to `states[0] ?? ""`, so a fan-out with 23 succeeded branches and
+ * one still `retrying` rendered `succeeded` whenever `retrying` was not `states[0]`. Written
+ * as a RANK MAP rather than a plain array so that gains a tenth `TaskState` stops this file
+ * from compiling until it is ranked too — `Record<TaskState, number>` requires a value for
+ * every union member and rejects an unknown one, which a plain array's length cannot enforce.
+ *
+ * The order: `failed` and `awaiting_gate` are unchanged (worst outcome; needs a human).
+ * `retrying` ranks next — an attempt just failed and is backing off, the strongest "trouble"
+ * signal left among the unfinished states, but below `awaiting_gate` because it is
+ * self-healing rather than blocked on a person. `leased`/`ready` are unchanged (ordinary
+ * in-flight work). `pending` ranks after `ready`: not yet started is still unfinished, but
+ * the least urgent flavor of it — below every state that has actually done something.
+ * `cancelled`/`skipped`/`succeeded` are unchanged.
+ *
+ * THE BROWSER HAS ITS OWN COPY — `console.ts`'s inline `dominant()` — because that text ships
+ * to a client and cannot import this module (see the note there). `console.test.ts`'s
+ * "THE CONSOLE'S FAN-OUT PRIORITY ORDER AGREES..." test reads both source texts and asserts
+ * the same nine names in the same order, so a change here that is not mirrored there fails a
+ * test rather than shipping a silent drift.
  */
-const STATE_PRIORITY: readonly TaskState[] = [
-  "failed",
-  "awaiting_gate",
-  "leased",
-  "ready",
-  "cancelled",
-  "skipped",
-  "succeeded",
-];
+const STATE_RANK: Record<TaskState, number> = {
+  failed: 0,
+  awaiting_gate: 1,
+  retrying: 2,
+  leased: 3,
+  ready: 4,
+  pending: 5,
+  cancelled: 6,
+  skipped: 7,
+  succeeded: 8,
+};
+
+const STATE_PRIORITY: readonly TaskState[] = (Object.keys(STATE_RANK) as TaskState[]).sort(
+  (a, b) => STATE_RANK[a] - STATE_RANK[b],
+);
 
 export function dominantState(states: readonly TaskState[]): TaskState | "" {
   for (const s of STATE_PRIORITY) if (states.includes(s)) return s;
