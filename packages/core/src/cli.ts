@@ -225,11 +225,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            the channels cut: read that, not
                                                            the value's shape, since a channel
                                                            can hold that shape itself. N is
-                                                           written in decimal digits.
+                                                           written in decimal digits;
+                                                           --max-bytes 0 caps nothing.
                                                            readsMayBeStale names channels the
                                                            gate's own branch already wrote,
                                                            which this door cannot overlay
-                                                           --max-bytes 0 caps nothing
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
@@ -5196,13 +5196,22 @@ function subgraphDirs(): readonly string[] {
  *       calling `observedChannels` and NOT `node.reads` "because it is the call `#gatePayload`
  *       makes and the two must not drift". Exposing the overlay from the engine is a change to
  *       its read surface: a seam to design, not a field to add, and not this door's file. But
- *       the UNDECIDABLE half is only the VALUE. Whether a held write exists on a printed
- *       channel is decidable from `p.tasks` alone, and `heldOnThisBranch` decides it: every
- *       such gate now carries `readsMayBeStale` naming those channels and raises the `! MAY BE
- *       STALE` notice below. So the door no longer renders a stale value in silence — which is
- *       what it did — even though it still cannot render the right one. THAT is the residue
- *       that stays open, and it is a value this command cannot compute rather than a warning
- *       it forgot to print.
+ *       the UNDECIDABLE half is only the VALUE. Whether a held write exists on a channel the
+ *       gate READS is decidable from `p.tasks` alone, and `heldOnThisBranch` decides it: every
+ *       such gate carries `readsMayBeStale` naming those channels and raises the `! MAY BE
+ *       STALE` notice below.
+ *
+ *       **AND "A CHANNEL THE GATE READS" IS NOT "A CHANNEL THE ROW PRINTS" — the first draft
+ *       used the second and had a hole the size of the first defect.** It filtered against
+ *       `view.visible`, which holds only channels that HAVE a value, so a branch write that was
+ *       the FIRST value a channel ever had appeared in neither `reads` nor the warning:
+ *       `reads: {}`, `readsMayBeStale: []`, silence, and an approval on the held value. A blank
+ *       where the subject of the approval should be, unannounced. It filters `observedChannels`
+ *       now, and the notice distinguishes a channel printed STALE from one not printed AT ALL.
+ *
+ *       So the door no longer renders a stale value in silence — which is what it did — even
+ *       though it still cannot render the right one. THAT is the residue that stays open, and
+ *       it is a value this command cannot compute rather than a warning it forgot to print.
  *   (4) THE SIZE BOUND — the `--max-bytes` cap below is this door's alone, and at the default
  *       it bites hardest on exactly the large document (1) exists to show.
  *
@@ -5351,6 +5360,12 @@ async function gatesWithReads(
   const unresolved: string[] = [];
   const truncated: string[] = [];
   const staleBranch: string[] = [];
+  // ONE PASS OVER `p.tasks`, SHARED BY EVERY GATE. `heldOnThisBranch` asks "which tasks sit at
+  // exactly this branch path", and asking it per gate re-encoded every branch in the run once
+  // per gate. `run/engine.ts` measured that same scan at 21.7% of a 3,200-branch fan-out's CPU
+  // and answered it with a memoised index; this is that index, built once because a run with
+  // many open gates is exactly the wide fan-out where it costs the most.
+  const heldByBranch = heldWritesByBranch(p);
   const spec = graph.spec;
   // A `for` AND NOT A `.map`, because resolving a handle is I/O. Sequential rather than
   // `Promise.all`: the payload store is a filesystem and the gates on one run share channels,
@@ -5380,7 +5395,8 @@ async function gatesWithReads(
       continue;
     }
     const resolved = await resolveHandles(ws, p, node, task, unresolved);
-    const view = viewFor(resolved, spec.channels, task.branch, observedChannels(node));
+    const observed = observedChannels(node);
+    const view = viewFor(resolved, spec.channels, task.branch, observed);
     // WHICH OF THIS GATE'S VALUES THIS DOOR CUT, authored on the ROW rather than sniffed off the
     // value. See `boundGateRead`: a channel value can be any JSON, so no key inside it is
     // unspellable — but a channel value lives under `reads[c]` and cannot reach the row.
@@ -5405,11 +5421,25 @@ async function gatesWithReads(
     for (const [c, f] of Object.entries(cut)) {
       truncated.push(`\`${c}\` is ${String(f.bytes)} bytes, showing ${String(f.shown)}`);
     }
-    // AND WHICH OF THEM THE GATE'S OWN BRANCH HAS ALREADY OVERWRITTEN. Without this the row
-    // above says `readsTruncated: {}` — "nothing here was cut" — over a value that is not the
-    // one being approved at all, which is a stronger claim than this door can make.
-    const stale = heldOnThisBranch(p, task, view.visible);
-    if (stale.length > 0) staleBranch.push(`${g.gateId} (${stale.map((c) => `\`${c}\``).join(", ")})`);
+    // AND WHICH OF THEM THE GATE'S OWN BRANCH HAS ALREADY WRITTEN. Without this the row above
+    // says `readsTruncated: {}` — "nothing here was cut" — over a value that is not the one
+    // being approved at all, which is a stronger claim than this door can make.
+    //
+    // OVER `observed` AND NOT `view.visible`, WHICH IS THE WHOLE OF §A.58's SECOND DEFECT.
+    // `visible` holds only the channels that HAVE a value, so when the branch's own write is the
+    // FIRST value a channel ever had, the channel was in neither `reads` nor this list: the row
+    // printed `reads: {}` with `readsMayBeStale: []` and stderr said nothing, while the approval
+    // ran on the held value. The gate READS the channel either way, which is what `observed`
+    // says and what makes it the right set; a channel the gate does not read is still not named,
+    // because it is not in `observed` either.
+    const stale = heldOnThisBranch(heldByBranch, task, observed);
+    // THE TWO CASES READ DIFFERENTLY TO A HUMAN and are separated for the notice. A channel in
+    // `view.visible` printed a value that is merely OLD; one outside it printed NOTHING, and its
+    // only value is the held one — a blank where the whole subject of the approval should be.
+    const printedButStale = stale.filter((c) => view.visible.includes(c));
+    const notPrintedAtAll = stale.filter((c) => !view.visible.includes(c));
+    if (printedButStale.length > 0) staleBranch.push(`${g.gateId} prints an OLDER value for ${fence(printedButStale)}`);
+    if (notPrintedAtAll.length > 0) staleBranch.push(`${g.gateId} prints NOTHING for ${fence(notPrintedAtAll)}, whose only value is held`);
     rows.push({ ...g, reads, readsTruncated: cut, readsMayBeStale: stale });
   }
   if (unexplained.length > 0) {
@@ -5449,12 +5479,12 @@ async function gatesWithReads(
     // ran to `succeeded` with `mid` = the value `bump` wrote — an operator answering for a value
     // this door never put in front of them.
     process.stderr.write(
-      `! MAY BE STALE — ${staleBranch.join("; ")}: an earlier node on the gate's OWN branch has already\n` +
-        `  written those channels, and a fan-out holds a branch's writes until its join folds them. The\n` +
-        `  engine OVERLAYS them when it builds the gate payload and \`contentDigest\`; this door reads the\n` +
-        `  stored projection and cannot, so what is printed above is the value from BEFORE the branch\n` +
-        `  wrote. \`contentDigest\` binds to the overlaid value, not to this one — an approval executes on\n` +
-        `  the overlaid value. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.58(4).\n`,
+      `! MAY BE STALE — ${staleBranch.join("; ")}.\n` +
+        `  An earlier node on each gate's OWN branch has already written those channels, and a fan-out\n` +
+        `  holds a branch's writes until its join folds them. The engine OVERLAYS them when it builds\n` +
+        `  the gate payload and \`contentDigest\`; this door reads the stored projection and cannot. So\n` +
+        `  \`contentDigest\` may not describe the values printed above, and an approval executes on the\n` +
+        `  overlaid ones. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.58(4).\n`,
     );
   }
   return rows;
@@ -5589,19 +5619,69 @@ function utf8Head(text: string, n: number): string {
   return buf.subarray(0, end).toString("utf8");
 }
 
+/** Channel names as they appear in a notice: `` `a`, `b` ``. */
+function fence(channels: readonly string[]): string {
+  return channels.map((c) => `\`${c}\``).join(", ");
+}
+
 /**
- * WHICH OF A GATE'S PRINTED CHANNELS ITS OWN BRANCH HAS ALREADY OVERWRITTEN — `TODO.md` §A.58(4).
+ * THE RUN'S HELD WRITES, INDEXED BY BRANCH PATH — built ONCE per `loom gates`.
+ *
+ * The lookup below asks "which tasks sit at exactly this branch path", which is the question
+ * `run/engine.ts` measured at 21.7% of a 3,200-branch fan-out's CPU when it was asked per task
+ * with an `encodeBranch` per visit, and answered with a memoised index. Asking it per GATE has
+ * the same shape and the same worst case: a run with many open gates IS a wide fan-out, so the
+ * naive form is quadratic exactly where it hurts. One pass, and every gate reads its own group.
+ */
+function heldWritesByBranch(p: RunProjection): Map<string, Map<string, Set<string>>> {
+  const byPath = new Map<string, Map<string, Set<string>>>();
+  for (const t of Object.values(p.tasks) as TaskRecord[]) {
+    // Root tasks apply their writes at commit, so nothing they wrote is ever held. Skipping them
+    // here keeps the index to the branches that can actually have a held write.
+    if (t.branch.segments.length === 0) continue;
+    // The same filter `#withBranchWrites` applies before reducing: succeeded, and with writes.
+    if (t.state !== "succeeded" || Object.keys(t.writes).length === 0) continue;
+    const path = encodeBranch(t.branch);
+    let tasks = byPath.get(path);
+    if (tasks === undefined) byPath.set(path, (tasks = new Map()));
+    // Keyed by the WRITER'S taskId, so a gate can exclude itself without a second pass.
+    tasks.set(t.taskId, new Set(Object.keys(t.writes)));
+  }
+  return byPath;
+}
+
+/**
+ * WHICH OF A GATE'S OBSERVED CHANNELS ITS OWN BRANCH HAS ALREADY WRITTEN — `TODO.md` §A.58(4).
+ *
+ * Built in two halves: `heldWritesByBranch` indexes the run's held writes ONCE per command, and
+ * this looks one gate up in it. Splitting them is not tidiness — see that function.
  *
  * THIS DOES NOT FOLD ANYTHING, AND THAT IS THE POINT. `#withBranchWrites` runs `reduceState`
  * over the branch's held writes, which for a `replace` channel REPLACES the value; reproducing
  * that here would put a second copy of the engine's reducer in this file, which is the drift
  * `gatesWithReads` already refuses by calling `observedChannels` and not `node.reads`. So this
- * answers the DECIDABLE half — *is there a held write on a channel this row prints* — and says
+ * answers the DECIDABLE half — *is there a held write on a channel this gate READS* — and says
  * so, instead of computing a value it has no business computing.
  *
- * IT OVER-REPORTS BY CONSTRUCTION, in the refusing direction. A held write whose value happens
- * to equal the base is still reported, because deciding otherwise means running the reducer.
- * A guard that cannot decide says so rather than answering with the passing value.
+ * **`observed`, NOT `view.visible`, AND THE DIFFERENCE WAS A DEFECT OF ITS OWN.** `visible`
+ * holds the channels that HAVE a value. When the branch's own write is the FIRST value a channel
+ * ever had — not an input, and nothing at root wrote it — the channel is in neither, so the
+ * first draft of this reported nothing at all. Measured on a fan-out whose `bump` writes `mid`
+ * where `mid` is not an input:
+ *
+ *     reads = {}   readsMayBeStale = []   stderr = ""
+ *     loom approve …  →  succeeded, outputs = {"mid":"BUMPED"}
+ *
+ * — the door printed a BLANK where the whole subject of the approval was, and said nothing,
+ * which is worse than the stale value that opened this row. `observed` is what the gate READS,
+ * so a held write on it is worth naming whether or not a base value exists. It is also still
+ * the bound in the other direction: a channel the gate does NOT read is absent from `observed`
+ * and is never named, however many branch writes it has.
+ *
+ * IT OVER-REPORTS BY CONSTRUCTION, in the refusing direction, on the channels it names. A held
+ * write whose value happens to equal the base is still named, because deciding otherwise means
+ * running the reducer. A guard that cannot decide says so rather than answering with the passing
+ * value — which is why the row's field and the notice both say MAY.
  *
  * THE TWO PREDICATES ARE THE ENGINE'S OWN, inlined rather than imported because both are one
  * line and neither is the reducer. `writesHeldForJoin` is `branch.segments.length > 0` — a task
@@ -5611,21 +5691,19 @@ function utf8Head(text: string, n: number): string {
  * branch `#1`"*), so this compares encoded paths for equality and not for prefix: what is
  * missing from a gate's `reads` is its OWN branch's earlier nodes, never a sibling's.
  */
-function heldOnThisBranch(p: RunProjection, task: TaskRecord, visible: readonly string[]): string[] {
+function heldOnThisBranch(byPath: Map<string, Map<string, Set<string>>>, task: TaskRecord, observed: readonly string[]): string[] {
   if (task.branch.segments.length === 0) return [];
-  const path = encodeBranch(task.branch);
+  const tasks = byPath.get(encodeBranch(task.branch));
+  if (tasks === undefined) return [];
   const held = new Set<string>();
-  for (const t of Object.values(p.tasks) as TaskRecord[]) {
+  for (const [taskId, channels] of tasks) {
     // The gate's own task holds no write of its own to miss — a `human_gate` commits none — and
     // excluding it keeps this about what the gate cannot see rather than what it did.
-    if (t.taskId === task.taskId) continue;
-    // The same filter `#withBranchWrites` applies before reducing: succeeded, and with writes.
-    if (t.state !== "succeeded" || Object.keys(t.writes).length === 0) continue;
-    if (encodeBranch(t.branch) !== path) continue;
-    for (const c of Object.keys(t.writes)) held.add(c);
+    if (taskId === task.taskId) continue;
+    for (const c of channels) held.add(c);
   }
-  // In the order they are PRINTED, so the notice reads in the same order as the row.
-  return visible.filter((c) => held.has(c));
+  // In the gate's own declared order, so the notice reads in the same order as the row.
+  return observed.filter((c) => held.has(c));
 }
 
 /**

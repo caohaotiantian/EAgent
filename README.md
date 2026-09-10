@@ -218,11 +218,13 @@ not the value's shape**, because a channel can hold that shape itself: alongside
 carries `readsTruncated`, naming exactly the channels this door truncated and empty when it
 truncated none (§A.58; `journal/payloads.ts` refuses shape-recognition for `$payload` for the same
 reason — note that `$payload` itself is still recognised by shape here, so a node-written
-`{"$payload":…}` still reads like an unresolved handle). Both fields are absent, rather than empty,
-on the rows that print no `reads` at all — each of those says why on stderr. A second row field,
-`readsMayBeStale`, names channels the gate's **own fan-out branch** has already written: the engine
-overlays those when it builds the gate payload and `contentDigest`, and this door cannot, so it
-says so instead of printing a pre-branch value in silence (§A.58(4), still open). The
+`{"$payload":…}` still reads like an unresolved handle). A second row field, `readsMayBeStale`,
+names channels **the gate reads** that its own fan-out branch has already written — whether or not
+a value for them is printed, since a branch write can be the first value a channel ever had, in
+which case `reads` shows nothing for it at all. The engine overlays those writes when it builds the
+gate payload and `contentDigest`, and this door cannot, so it says so on stderr instead of printing
+a pre-branch value, or a blank, in silence (§A.58(4), still open). All three fields are absent,
+rather than empty, on the rows that print no `reads` at all — each of those says why on stderr. The
 `contentDigest` stays
 beside it, because it is the BINDING `loom approve` later checks the graph against and never was a
 summary anybody could recognise.
