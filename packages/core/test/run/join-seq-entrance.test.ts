@@ -30,14 +30,15 @@
  * the fan-out) is in the sweep: at `par=16` the barrier fired before any branch had committed
  * and the join's channel was never written, and the run still reported success.
  *
- * The file is arranged as a sweep plus two controls, because the two failure directions are
- * opposite and a fix can trade one for the other. The BASELINE control is the same graph with
- * no `seq` edge into the join at all: the sweep asserts equality against it rather than against
- * a written-down number, so a "fix" that suppressed the barrier everywhere would fail the
- * baseline too. The EMPTY-FAN control is the trap named in the row — `#fireEmptyJoin` must NOT
- * be routed through `#maybeFireJoin`, because the planner's own `take` still holds the `fanout`
- * edge whose `to` is a declared member, so `handingOff` is true and `quiescent` never becomes
- * true; routed, a fan of width zero strands instead of releasing.
+ * The file is arranged as a sweep, a NESTED case (which fails differently — see its own note,
+ * where the pre-fix run DIES rather than lying), and two controls. Two controls because the two
+ * failure directions are opposite and a fix can trade one for the other. The BASELINE control is
+ * the same graph with no `seq` edge into the join at all: the sweep asserts equality against it
+ * rather than against a written-down number, so a "fix" that suppressed the barrier everywhere
+ * would fail the baseline too. The EMPTY-FAN control is the trap named in the row —
+ * `#fireEmptyJoin` must NOT be routed through `#maybeFireJoin`, because the planner's own `take`
+ * still holds the `fanout` edge whose `to` is a declared member, so `handingOff` is true and
+ * `quiescent` never becomes true; routed, a fan of width zero strands instead of releasing.
  */
 
 import assert from "node:assert/strict";
@@ -292,6 +293,140 @@ test("THE ORDINARY GRAPH IS UNCHANGED — a fan-out and its join, with no second
     assert.equal(r.hops, 8, `par=${maxParallelism}`);
     assert.equal(r.joinCommitted, 1, `par=${maxParallelism}`);
     assert.equal(r.doneCommitted, 1, `par=${maxParallelism}`);
+  }
+});
+
+/**
+ * `start -fanout-> outer -fanout-> inner -join-> innerJoin`, both joins folding `findings`, with
+ * `outer -seq-> note -seq-> innerJoin` beside the inner fan-out. `note` sits at depth 1, which is
+ * the inner barrier's OWN parent coordinate, so the ids collide exactly as they do at the root.
+ *
+ * The nested shape is here because it fails DIFFERENTLY, and neither the row nor the flat sweep
+ * above catches it. Pre-fix, at `maxParallelism: 4` only:
+ *
+ *     variant=A par=1  status=succeeded findings=["A0","A1","B0","B1"] finish=1
+ *     variant=A par=4  status=failed    findings=undefined             finish=0
+ *     variant=A par=16 status=succeeded findings=["A0","A1","B0","B1"] finish=1
+ *
+ * A run that DIES is the friendly version of this defect; the flat sweep's rows all reported
+ * `succeeded` with the wrong number in the channel. One parallelism in three, and the two either
+ * side of it are clean — which is why the assertion below sweeps rather than picking one.
+ */
+function nestedSpec(withSecondPath: boolean): GraphSpec {
+  const nodes: unknown[] = [
+    { id: n("start"), type: "function", reads: ["outerSeed"], function: { ref: "function/seed@stable" } },
+    { id: n("outer"), type: "function", reads: ["outerItem"], function: { ref: "function/note@stable" } },
+    {
+      id: n("inner"),
+      type: "function",
+      reads: ["innerItem", "outerItem"],
+      writes: ["findings"],
+      function: { ref: "function/inner@stable" },
+    },
+    {
+      id: n("innerJoin"),
+      type: "join",
+      reads: ["findings"],
+      writes: ["findings"],
+      join: { branches: [n("inner")], mode: "all", onBranchError: "skip" },
+    },
+    {
+      id: n("outerJoin"),
+      type: "join",
+      reads: ["findings"],
+      writes: ["findings"],
+      // GRAPH021 forces the fan-out TARGET (`outer`) to be named here.
+      join: { branches: [n("outer"), n("innerJoin")], mode: "all", onBranchError: "skip" },
+    },
+    { id: n("finish"), type: "function", reads: ["findings"], writes: ["out"], function: { ref: "function/report@stable" } },
+  ];
+  const edges: unknown[] = [
+    { id: e("fo"), from: n("start"), to: n("outer"), kind: "fanout", over: "outerSeed", as: "outerItem", maxWidth: 8 },
+    { id: e("fi"), from: n("outer"), to: n("inner"), kind: "fanout", over: "innerSeed", as: "innerItem", maxWidth: 8 },
+    { id: e("ji"), from: n("inner"), to: n("innerJoin"), kind: "join", branches: [n("inner")] },
+    { id: e("jo1"), from: n("outer"), to: n("outerJoin"), kind: "join", branches: [n("outer")] },
+    { id: e("jo2"), from: n("innerJoin"), to: n("outerJoin"), kind: "join", branches: [n("innerJoin")] },
+    { id: e("fin"), from: n("outerJoin"), to: n("finish"), kind: "seq" },
+  ];
+  if (withSecondPath) {
+    nodes.push({ id: n("note"), type: "function", reads: ["outerItem"], function: { ref: "function/note@stable" } });
+    edges.push({ id: e("na"), from: n("outer"), to: n("note"), kind: "seq" });
+    edges.push({ id: e("nb"), from: n("note"), to: n("innerJoin"), kind: "seq" });
+  }
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "join-seq-entrance-nested", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 128, maxDepth: 2, maxFanout: 8, maxLoopIterations: 1 } },
+    channels: {
+      ...CHANNELS,
+      outerSeed: { type: "array", reduce: "replace" },
+      innerSeed: { type: "array", reduce: "replace" },
+      outerItem: { type: "object", reduce: "replace" },
+      innerItem: { type: "object", reduce: "replace" },
+      findings: { type: "array", reduce: "append_ordered" },
+    },
+    inputs: ["outerSeed", "innerSeed"],
+    outputs: ["out"],
+    nodes,
+    edges,
+  } as unknown as GraphSpec;
+}
+
+async function runNested(spec: GraphSpec, maxParallelism: number): Promise<{ status: string; findings: unknown; finish: number }> {
+  const store = new MemoryStateStore({ now: () => NOW });
+  const functions = new FunctionRegistry();
+  functions.register("function/seed@stable", () => ({}));
+  functions.register("function/note@stable", () => ({}));
+  functions.register("function/inner@stable", (view) => {
+    const o = (view.get<{ o: string }>("outerItem") ?? { o: "?" }).o;
+    const i = (view.get<{ i: number }>("innerItem") ?? { i: -1 }).i;
+    return { writes: { findings: [`${o}${i}`] } };
+  });
+  functions.register("function/report@stable", (view) => ({
+    writes: { out: { findings: view.get<unknown[]>("findings") ?? [] } },
+  }));
+
+  const models = new ModelRegistry();
+  models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models,
+    now: () => NOW,
+    maxParallelism,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+
+  const graph = compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { outerSeed: [{ o: "A" }, { o: "B" }], innerSeed: [{ i: 0 }, { i: 1 }] } });
+  const p = await engine.advance(runId);
+  const log: JournalEvent[] = [];
+  for await (const ev of store.read(runId, 1)) log.push(ev);
+  return {
+    status: p.status,
+    findings: p.channels["findings"],
+    finish: log.filter((ev) => ev.type === "task.committed" && String(ev.taskId).startsWith("finish@")).length,
+  };
+}
+
+test("A NESTED FAN-OUT'S INNER BARRIER IS THE SAME ENTRANCE — and pre-fix it KILLED the run", async () => {
+  for (const maxParallelism of [1, 2, 4, 8, 16]) {
+    const base = await runNested(nestedSpec(false), maxParallelism);
+    const r = await runNested(nestedSpec(true), maxParallelism);
+    const at = `par=${maxParallelism}`;
+
+    assert.equal(base.status, "succeeded", `${at}: baseline`);
+    assert.deepEqual(base.findings, ["A0", "A1", "B0", "B1"], `${at}: baseline`);
+
+    // Pre-fix this was `status: "failed"` with `findings: undefined` at par=4, and clean at
+    // par=1 and par=16 — so a test that picked one parallelism would have missed it.
+    assert.equal(r.status, "succeeded", `${at}: the second path must not kill the run`);
+    assert.deepEqual(r.findings, base.findings, `${at}: the inner fold matches the baseline`);
+    assert.equal(r.finish, 1, `${at}: and the node behind the outer join runs once`);
   }
 });
 
