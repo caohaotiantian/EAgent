@@ -226,11 +226,12 @@ import type { RunGraph } from "../graph/spec.ts";
 import { stripControlChars, undeclaredInputsMessage } from "../graph/declared-inputs.ts";
 import type { CommandActor, Engine } from "../run/engine.ts";
 import { GateCallbackRouter, type CallbackEngine, type GateDispatcher } from "../run/delivery.ts";
-import { gateDecisionOf, isSyntheticSubject, maxClassification, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
+import { gateDecisionOf, isSyntheticSubject, POSTURES, type Classification, type GateDecision, type Posture } from "../vocab.ts";
 import type { GateSummary } from "../run/gates.ts";
 import { gateOf, type GateRecord, type RunProjection } from "../run/projection.ts";
 import { RunLog } from "../run/log.ts";
 import { redactPayload } from "../security/redact.ts";
+import { redactChannelMap } from "../security/redact-channels.ts";
 import { OTLP_RUN_ID_ATTR, OTLP_TRUNCATED_ATTR, spansFrom } from "../telemetry/spans.ts";
 import { otlpTraceRequest } from "../telemetry/otlp.ts";
 import { layoutGraph } from "./layout.ts";
@@ -5406,47 +5407,21 @@ function redactGatePayload(payload: unknown, graph: RunGraph | undefined): unkno
 /**
  * One channel map, each value redacted under the classification its own spec declared.
  *
- * ABSENT IS `secret_ref`, WHICH IS THE FAIL-CLOSED HALF AND THE ONLY ANSWER AVAILABLE. A
- * plane that does not hold the graph a run compiled — a run submitted by another process,
- * every run after a restart of a differently-configured plane — cannot know which of these
- * names is a credential. "Refusing is always allowed; loosening never is": the alternative,
- * falling back to `internal`, IS the leak being fixed. What it costs is bounded and visible —
- * the gate, its approvers and its deadline all still arrive; only the values are withheld.
+ * THE RULE ITSELF NOW LIVES IN `security/redact-channels.ts`, and this wrapper is all that is
+ * left of it here. It was spelled twice — once here and once as `redactGateRead` in `cli.ts`,
+ * whose own docstring called that "A SEAM, NOT A DECISION" — and two spellings of a redaction
+ * rule fail one way: a classification added later is handled by one door and not the other,
+ * silently, on the one axis where the non-negotiable says loosening never is. `TODO.md` §H.8.
+ * The three arms — a `secret_ref` floor for an undeclared name, the `internal` default for a
+ * declared-unclassified one, and `vocab.ts`'s membership test through `maxClassification` for
+ * everything else — are unchanged, and the argument for each is documented there.
  *
- * A DECLARED channel with no `classification` is `internal`, the documented default, so an
- * ordinary unclassified channel reaches the approver unchanged. Only an UNDECLARED name falls
- * closed, because a name no spec accounts for is a name nothing has classified.
+ * THE NAME IS KEPT because five call sites in this file and three comments reach for it, and
+ * because "which function does this route redact through" is a question a reader of this file
+ * should be able to answer without leaving it.
  */
 function redactChannels(value: unknown, channels: Readonly<Record<string, { readonly classification?: Classification }>> | undefined): unknown {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return redactPayload(value, "internal");
-  const one = ([name, v]: readonly [string, unknown]): [string, unknown] => {
-    const declared = channels === undefined ? undefined : own(channels, name);
-    // A name no spec declares is a name nothing has classified.
-    if (declared === undefined || declared === null) return [name, redactPayload(v, "secret_ref")];
-    const c = declared.classification;
-    if (c === undefined) return [name, redactPayload(v, "internal")];
-    // THE MEMBERSHIP TEST IS `vocab.ts`'s, AND IT IS NOT SPELLED AGAIN HERE.
-    //
-    // `maxClassification` OVER ONE ARGUMENT IS EXACTLY THAT TEST: identity for each of the
-    // four, `secret_ref` for anything else, stated in its own docstring as "a classification
-    // this vocabulary cannot read is the most sensitive one there is". This line used to read
-    // `own(CLASSIFICATION_POSTURE_FLOOR, c) === undefined ? "secret_ref" : c` — a membership
-    // test written against a POSTURE-FLOOR table, which is a third spelling of a question
-    // `vocab.ts` already answers, in a tree that has just standardised on `isPosture` for the
-    // posture half. `vocab.ts` exports no `isClassification`; this is its equivalent.
-    //
-    // AND THE UNKNOWN WORD IS STILL REACHABLE, though the compiler now refuses it. `validate.ts`
-    // gained `GRAPH003_UNKNOWN_CLASSIFICATION` this same round, and it covers a resolved CHILD
-    // spec too — measured, a parent whose child declares `classification: "confidential"` no
-    // longer compiles. What it does not cover is the graph objects THIS class is handed:
-    // `ControlPlaneOptions.graphs` takes already-compiled `RunGraph`s and re-validates nothing,
-    // so a graph compiled by a build older than that check reaches this line with a word the
-    // vocabulary has never heard. Such a value reads as `internal` everywhere it is compared
-    // with `===`, which is `redact.ts`'s own fail-open; measured over real HTTP on exactly that
-    // shape, an unknown classification served its channel in the clear.
-    return [name, redactPayload(v, maxClassification(c))];
-  };
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(one));
+  return redactChannelMap(value, channels);
 }
 
 /**
