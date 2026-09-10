@@ -292,9 +292,12 @@ this one runs offline and means what it says, because there was never a model in
 - **A fan-out branch may hold more than one node, and every node in it needs its own `join`
   edge.** `read` (a `tool`) hands `raw` to `classify` (a `function`) over a `seq` edge, so BOTH
   are in `join.branches` and BOTH have a `"kind": "join"` edge into `gather`. Collecting only
-  `classify` is `GRAPH021_FANOUT_WITHOUT_JOIN` on the fan-out's own target; adding `read` to
-  `branches` without the edge is then `GRAPH008_BRANCH_NOT_CONNECTED`. Two compiles to find, and
-  the second diagnostic is the one that says what to do.
+  `classify` is `GRAPH021_FANOUT_WITHOUT_JOIN` on the fan-out's own target, and **that one
+  diagnostic now says the whole rule** — it names the nodes the branch holds and asks for both an
+  entry in `branches` AND a `kind: join` edge for each one the join must wait on. Following it
+  literally compiles clean. It used to take two compiles, the second (`GRAPH008_BRANCH_NOT_CONNECTED`)
+  supplying the half the first omitted; that was F1 of the 2026-09-09 port and it closed at
+  `51f4a5f`.
 - **A channel a fan-out node writes may be `replace` when NOTHING outside its branch touches it.**
   `raw` is `{"type":"string","reduce":"replace"}` and compiles, because `GRAPH010` exempts a
   channel written by the fan-out's own target and read only by nodes behind it in the same branch

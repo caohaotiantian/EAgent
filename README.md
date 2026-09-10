@@ -210,13 +210,16 @@ Two things that walkthrough used to do to you no longer do. The `gate … — lo
 on **stderr** now (§A.41, `175cdb3`), so `loom run … 2>/dev/null | jq .status` parses on the gate
 path as well as the completing one; and `loom gates` carries a `reads` field — the gate node's
 declared channels that have a value, recomputed from the graph the journal's hash names, with
-anything the graph classified blanked to `[secret]` (§A.43, `da86076`). The `contentDigest` stays
+anything the graph classified blanked to `[secret]` (§A.43, `da86076`). A payload handle is
+resolved to the text the console shows, and each value is capped at 64 KiB with a
+`{"$truncated":{bytes,shown,head}}` marker stating the full size — `--max-bytes N` raises the cap
+and `--max-bytes 0` removes it (§A.51, `5d2053b`). The `contentDigest` stays
 beside it, because it is the BINDING `loom approve` later checks the graph against and never was a
 summary anybody could recognise.
 [`docs/workflow-port-2026-09-09.md`](docs/workflow-port-2026-09-09.md) is the full transcript and the
-eight-entry friction log. Its **§3 intro** is the one that says seven of the eight are closed and
-that F1 is not; its §0 "Closed since" head is the ledger for the six that closed after the doc was
-written, F6 having been fixed in the port lane itself.
+eight-entry friction log. **All eight are now closed** — its §0 "Closed since" head is the ledger
+and names a commit for each of the seven that closed after the doc was written, F6 having been
+fixed in the port lane itself.
 
 Two rules that fail a first attempt. A `resources/function/*.js` or `resources/hook/*.js` file is a
 BARE FUNCTION EXPRESSION — the loader evaluates `(<the file>)`, so `module.exports = function (…)

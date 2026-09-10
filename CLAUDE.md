@@ -21,15 +21,17 @@ and an input directory, run end to end against the shipped binary with no fork, 
 `422a730`); `docs/workflow-port-2026-09-09.md` is the commands a stranger runs and the eight things
 the product cost them.
 
-**Running it needed no source change; making it NATURAL needed seven, and THAT is the number worth
-carrying.** The port logged eight friction entries and seven are now closed — F6 in the port lane
-itself, then F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave. **F1 is the one still open.** More
-than the count: the workflow now CONSUMES what those closures built rather than merely no longer
+**Running it needed no source change; making it NATURAL needed eight, and THAT is the number worth
+carrying.** The port logged eight friction entries and **all eight are now closed** — F6 in the port
+lane itself, F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave, and F1 last, at `51f4a5f`, where
+GRAPH021 learned to state the whole fan-out branch rule in one diagnostic instead of two. More than
+the count: the workflow now CONSUMES what those closures built rather than merely no longer
 suffering it — `triage-classify.js` reads `raw` as a plain `replace` string (F2, `77c245a`),
 `triage-plan.js` reads its fan-out width off `ctx.node` and refuses on purpose through `{refuse}`
 (`c2360be`, `f7f74d5`, `b181b55`), and its suite parses the whole of stdout and reads the approver's
 report out of `loom gates` (F4, F3). **The port is what pulled on them**, which is the argument for
-porting one at all: an invariant nobody exercises names no seam.
+porting one at all: an invariant nobody exercises names no seam. **The next one is worth as much
+again**, and nothing has replaced it.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -193,11 +195,11 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-10.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-10-b.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-10 wave is merged into `loom`; the handoff says what each lane
+Every branch through the 2026-09-10-b wave is merged into `loom`; the handoff says what each lane
 did and left open.
 
 ## Commands

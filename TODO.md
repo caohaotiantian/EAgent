@@ -20,24 +20,24 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-10 on `26985b2`
+## State — one command each, re-run 2026-09-10 on `fb9ee0e`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,750 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0) | `npm test` |
-| pinned exports | 542 (541 → 542, `c2360be` exported `FunctionNodeShape`) | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams (14 → 16, `f7f74d5` and `c2360be`) | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **3,817 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0) | `npm test` |
+| pinned exports | 542, unchanged by this wave — `security/redact-channels.ts` (H.8) is deliberately not re-exported | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the one kernel edit this wave (`84338b3`, A.47) is a `fix:` and owes no trailer | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files (66 → 67, `security/redact-channels.ts`) | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved this wave | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
 
-The kernel guard also prints a commits-judged count (674 at `26985b2`). It is deliberately not a
+The kernel guard also prints a commits-judged count (703 at `fb9ee0e`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-10.md` is the current handoff.
+`docs/handoff-2026-09-10-b.md` is the current handoff; `docs/handoff-2026-09-10.md` is the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -53,14 +53,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 53 | 29 | 24 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all five now closed), and nine opened by the 2026-09-10 wave |
+| §A | 58 | 37 | 21 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six now closed, F1 with them), and five opened by the 2026-09-10-b settlement |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 7 | 4 | 3 | decisions still owed; two narrow, plus whether `CODES` belongs on README's fork list |
+| §D | 8 | 4 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join` |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 10 | 6 | 4 | housekeeping; the two the 2026-09-09-b wave made false are closed, three more arrived with this wave's own commits and its settlement |
+| §H | 10 | 9 | 1 | housekeeping; §H.0 alone is open, and it is a decision the maintainer already made rather than work outstanding |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -393,14 +393,14 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
 
 `examples/graphs/triage-failures.json` is one real chore ported against the public surface: a graph,
 three `function` bodies and an input directory, no fork and no source change. Eight friction points
-came out of it (`docs/workflow-port-2026-09-09.md` §3, F1–F8). **Seven are now closed** — F6 in the
-port lane itself, then F2 (§A.40), F3 (§A.43), F4 (§A.41), F8 (§A.42), F5 (§H.6) and F7 (`2309d3a`,
-one README sentence) in the 2026-09-10 wave. **Two heads carry two different counts and both are
-right**: that doc's §0 "Closed since" is the ledger for the SIX that closed after it was written and
-names a commit for each; its §3 intro is the one that says seven, because F6 was fixed inside the
-port lane and never had a "since".
-**F1 is the one still open** and is now §A.53. §A.44 below is on no friction entry: it is the thing
-the port ASKED FOR rather than something it tripped over. Every repro here was run from `examples/`
+came out of it (`docs/workflow-port-2026-09-09.md` §3, F1–F8). **All eight are now closed** — F6 in
+the port lane itself, then F2 (§A.40), F3 (§A.43), F4 (§A.41), F8 (§A.42), F5 (§H.6) and F7
+(`2309d3a`, one README sentence) in the 2026-09-10 wave, and **F1 (§A.53, `51f4a5f`) in the
+2026-09-10-b settlement**. That doc's §0 "Closed since" is the ledger and names a commit for each of
+the seven that closed after it was written; its §3 intro says seven because F6 was fixed inside the
+port lane and never had a "since". **What the count does not say is the thing worth carrying**:
+running the workflow needed no source change, and making it natural needed eight. §A.44 below is on
+no friction entry: it is the thing the port ASKED FOR rather than something it tripped over. Every repro here was run from `examples/`
 with `bin/loom` on `PATH`.
 
 - ~~**A.40 · `GRAPH010` refuses a channel that is provably branch-local, and the workaround leaks
@@ -545,8 +545,8 @@ with `bin/loom` on `PATH`.
 Each row below was found while building or reviewing that wave and is NOT a regression it
 introduced unless the row says so. Repros run from the repository root unless they say `examples/`.
 
-- **A.46 · A rewind reaches the live console as an ordinary event with no arm, so the console keeps
-  showing the states the rewind suppressed.** File: `packages/core/src/server/console.ts`. Repro:
+- ~~**A.46 · A rewind reaches the live console as an ordinary event with no arm, so the console keeps
+  showing the states the rewind suppressed.**~~ File: `packages/core/src/server/console.ts`. Repro:
   `/usr/bin/grep -anc checkpoint packages/core/src/server/console.ts` → **0**. A rewind never edits
   history — it appends `checkpoint.restored{mode:"rewind"}`, and that marker SUPPRESSES a range of
   already-folded events, so what earlier events mean changes retroactively (`run/projection.ts:483`).
@@ -564,9 +564,18 @@ introduced unless the row says so. Repros run from the repository root unless th
   honest answer is probably to discard the incremental state and re-request the snapshot, since the
   marker's whole meaning is "what you folded is wrong" — with a test that rewinds a run and compares
   the console's state to `GET /runs/:id`'s, the way §A.45's does for a skip.
+  **CLOSED at `74c930c`.** `applyEvent` gained the arm the server already had: on
+  `checkpoint.restored` with `mode: "rewind"` it does not try to un-fold anything — it discards the
+  incremental state and calls `resync()`, a `GET /runs/:id` whose answer goes through
+  `applySnapshot`, which is the same move `RunFolder` makes when it goes `stale`. Repro now:
+  `/usr/bin/grep -anc checkpoint packages/core/src/server/console.ts` → **2** (`:510` is the arm,
+  `:524` the paragraph saying what it does). `mode: "fork"` is DELIBERATELY not handled and `:517`
+  says so: a fork suppresses nothing in the run being watched. **`server/http.ts` needed no change**
+  — its live tail already forwards every event, so the special-casing the row named was never the
+  gap. Pinned in `test/server/console.test.ts`.
 
-- **A.47 · A `seq` edge into a `join` node mints the barrier's task with no quiescence test, and the
-  join then commits TWICE.** File: `packages/core/src/run/engine.ts`, **KERNEL**. `#maybeFireJoin`
+- ~~**A.47 · A `seq` edge into a `join` node mints the barrier's task with no quiescence test, and the
+  join then commits TWICE.**~~ File: `packages/core/src/run/engine.ts`, **KERNEL**. `#maybeFireJoin`
   is the only one of the three paths to a join task that tests anything: it refuses when
   `p.tasks[joinTaskId] !== undefined` and computes `quiescent = !handingOff && !stillLive`.
   `#activate`'s generic arm (`:10611-10620`) mints `task.ready` for `e.to` from the edge alone — no
@@ -615,6 +624,22 @@ introduced unless the row says so. Repros run from the repository root unless th
   it because the engine now routes correctly would re-key a compile-time guard on WHICH ENGINE
   METHODS TEST QUIESCENCE — the enumeration shape that was tried and defeated three times, and that
   `ac693d0` deliberately replaced. Fix the engine; keep W6.
+  **CLOSED at `84338b3`** (the fix — a `fix:` on a kernel file, which owes no seam trailer),
+  `52d6c99` and `3d8dabb` (the prose), `5464801` and `cc964f7` (the pins). `#activate`'s generic arm
+  now routes an edge whose target is a `join` node through `#maybeFireJoin` instead of minting
+  `task.ready` from the edge alone, so every entrance to the barrier that is not a back-edge goes
+  through the one method that tests quiescence. **`loop` is excluded on purpose** and
+  `run/engine.ts:10668` says why, in its own words: `loop` "mints at `iteration + 1`, which is a
+  Task the barrier never owns, so folding it into `#maybeFireJoin` would turn a back-edge into a
+  SILENT NO-OP rather than closing a hole" — routing it would have deleted the loop's second pass
+  outright. **The trap the row named held**: `#fireEmptyJoin` is
+  NOT routed the same way (`:10679-10685`), for exactly the reason the row predicted — the planner's
+  `take` still holds the `fanout` edge, so `handingOff` stays true and `quiescent` never becomes
+  true. Repro now: `node --test packages/core/test/run/join-seq-entrance.test.ts` → **8 pass / 0
+  fail**; six of the eight fail against `c98a108`. `pushJoin` (`:10587`) is the
+  one-mint-per-barrier-per-wave dedupe and `cc964f7` pins it, correcting the shape its comment named.
+  W6 was kept, as the row said it must be. Whether the COMPILER should also refuse a non-`join`
+  inbound edge on a join node is now §D.8 — a tightening, not this defect.
 
 - **A.48 · What §A.40's exemption does NOT cover, in one row so the next author does not rediscover
   it.** File: `packages/core/src/graph/validate.ts`, `branchLocalChannel`. The predicate is an
@@ -674,7 +699,7 @@ introduced unless the row says so. Repros run from the repository root unless th
   and the mutation half of (d) are worth re-asking, and (c)'s cost moves with whatever replaces the
   census. (e) closes never on purpose.
 
-- **A.49 · `retry.onlyIf: ["E_FUNCTION_REFUSED"]` compiles clean and can never fire.** Files:
+- ~~**A.49 · `retry.onlyIf: ["E_FUNCTION_REFUSED"]` compiles clean and can never fire.**~~ Files:
   `packages/core/src/graph/validate.ts` (`checkCodes`, `:1202`) and `packages/core/src/run/engine.ts`
   (`#retryDecision`). Repro, by reading the two in order:
   ```
@@ -717,9 +742,31 @@ introduced unless the row says so. Repros run from the repository root unless th
   **Closes when** `checkCodes` refuses a `retry.onlyIf` member whose class is outside `RETRYABLE` —
   a compile-time check with the same closed set behind it, and one that must NOT be extended to
   `EdgeSpec.codes`, where a non-retryable code is exactly what an error edge is for.
+  **CLOSED at `d9dc26c`, with three `RAISED_CLASS` entries corrected by `cbfdeb5`. THE ROW'S
+  PREMISE WAS PARTLY FALSE and the fix is better for it.** The row assumed `class` is a function of
+  `code`; it is not — class is chosen at the RAISE SITE, and a scan of every `err.<class>(CODE)`,
+  `new LoomError("<class>", CODE)` and `{class, code}` record literal under `packages/core/src`
+  finds codes raised under more than one class, and five whose `errors.ts` section comment
+  disagrees with its raise sites about retryability itself. **The table now records NINE
+  multi-class codes** — `E_CONFIG_INVALID`, `E_HUMAN_APPROVAL_REQUIRED`, `E_GATE_DELIVERY_FAILED`,
+  `E_RESOURCE_NOT_FOUND`, `E_TOOL_NOT_FOUND`, `E_RESTORE_ILLEGAL`, `E_GRAPH_MISMATCH`,
+  `E_INTERNAL`, `E_SUBGRAPH_FAILED` — counted off `RAISED_CLASS` itself; the test file's own header
+  still says TEN, from the raise-site scan that produced the table, and the two have not been
+  reconciled. Carry the table's number: it is the one the rule reads. So the refusal is keyed on
+  `RAISED_CLASS` (`graph/validate.ts:1158`), a table of OBSERVED raise classes, not on the section
+  headings: it fires only where a code's class set is non-empty and holds no retryable member, and
+  an EMPTY set ACCEPTS — refusing on a class nothing pins would be the same false refusal the
+  section-comment table is rejected for. The new diagnostic is `GRAPH003_UNRETRYABLE_ONLY_IF`
+  (`:1397`). Its drift guard is `tsc`, not a grep: `RAISED_CLASS` is `Record<Code, readonly
+  ErrorClass[]>`, so a code added to `errors.ts` is a type error until somebody classifies it.
+  Census on the merged tree — compile one graph per declared code and count the refusals:
+  **45 of the 60 declared codes are now refused, 15 accepted.** (The lane reported 43; `cbfdeb5`
+  rewrote three entries after that measurement, which is why this file counts rather than copies.)
+  Repro: `node --test packages/core/test/graph/retry-onlyif-retryable.test.ts` → **9 pass / 0
+  fail**. `EdgeSpec.codes` is untouched, as the row required. Residue is §A.59.
 
-- **A.50 · A fan-out `maxWidth` that is a JSON STRING compiles clean, and a non-numeric one switches
-  `GRAPH010` off and drops every branch in silence.** File:
+- ~~**A.50 · A fan-out `maxWidth` that is a JSON STRING compiles clean, and a non-numeric one switches
+  `GRAPH010` off and drops every branch in silence.**~~ File:
   `packages/core/src/graph/validate.ts`, `rule007Fanout`. Repro, from `examples/` with `bin/loom` on
   `PATH` (probe graphs written into the gitignored `out/`):
   ```
@@ -749,9 +796,27 @@ introduced unless the row says so. Repros run from the repository root unless th
   **Closes when** `rule007Fanout` refuses a `maxWidth` that is not a positive integer, in the same
   arm that refuses a missing one. `maxIterations` on a `loop` edge takes the same shape and should be
   checked with it.
+  **CLOSED at `a58550d`** (the rule), `ab18b14` (hostile values) and `4864df9` (the other operand).
+  `rule007Fanout` refuses a `maxWidth` that is not a positive integer with
+  `GRAPH007_BAD_MAX_WIDTH` (`validate.ts:2288`), whose `fix:` names the spelling — *"a whole number
+  between 1 and N (unquoted: 24, not \"24\")"*. The sibling was done with it, as the row asked:
+  `maxIterations` on a `loop` edge is `GRAPH006_BAD_MAX_ITERATIONS` (`:2158`). **And a reviewer
+  found the other operand**: `expansion.maxFanout` is the OTHER side of the very comparison being
+  fixed, and `"maxFanout": "banana"` switched its own ceiling off — now typed too (`4864df9`,
+  disclosed at `:635-642`). `ab18b14` is the hostile half: a bigint, a symbol, a circular object
+  and a value whose `toJSON` throws are REFUSED rather than crashing the compiler, which is what
+  they did before. Repro: `node --test packages/core/test/graph/fanout-width-type.test.ts` → **12
+  pass / 0 fail**. One knock-on, recorded because it changed sides:
+  `test/examples-triage.test.ts:495` was *"a fan-out width that is not a NUMBER is unreadable, not
+  skipped"* and is now *"…is refused BY THE COMPILER, before any body runs"* — the case never
+  reaches the userland body, which is where the row said the guard does not belong. **The test was
+  RENAMED by the fix**, so the old string finds nothing. **Residue is §A.59**, and the load-bearing member of it is that the
+  runtime path is still reachable: `Engine.submit`/`attach` take a `RunGraph` directly and
+  `#assertBound` does not re-check widths, so an embedder who builds one without compiling keeps
+  the old `slice(0, NaN)`.
 
-- **A.51 · `loom gates`'s new `reads` field shows a payload HANDLE where the console shows text, and
-  bounds nothing.** File: `packages/core/src/cli.ts`. Both halves are DISCLOSED in the source that
+- ~~**A.51 · `loom gates`'s new `reads` field shows a payload HANDLE where the console shows text, and
+  bounds nothing.**~~ File: `packages/core/src/cli.ts`. Both halves are DISCLOSED in the source that
   shipped them (`da86076`), and are here because a disclosure in a docstring is not a row anybody
   works.
   (a) **Handle, not text.** `:5265` builds `reads` from `view.get(c)` over the raw `RunProjection`,
@@ -771,9 +836,25 @@ introduced unless the row says so. Repros run from the repository root unless th
   **Closes when** the CLI resolves a handle the way the gate payload does — which is the half that
   makes the two doors agree — and states a bound for the inline case that is not "whatever the
   channel holds". The two are separable; (a) is the one that costs an operator their judgement.
+  **CLOSED at `5d2053b`, with `ccf2a32` and `b96d887` fixing seven reviewer findings on it — two of
+  them defects the lane itself shipped.** (a) is resolved: `loom gates` resolves handles the way the
+  gate payload does, so the two doors show an operator the same thing. (b) was a DECISION rather
+  than a lookup, and it is recorded here because nobody was asked: **a per-value cap, defaulting to
+  `EXTERNALISE_ABOVE_BYTES`** (`GATE_READ_MAX_BYTES`, `cli.ts:5433`) — deliberately the same 64 KiB
+  the journal already uses rather than a second number nobody chose. Over the cap the value is
+  replaced in place by `{"$truncated":{bytes,shown,head}}`, which states the full size so the
+  omission is actionable, and `head` is a whole-UTF-8 prefix (`utf8Head`) so a marker is never
+  itself corrupt. `--max-bytes N` raises it, `--max-bytes 0` lifts it entirely, and
+  `GATE_READ_MAX_CAP = 1 GiB` (`:5477`) is the ceiling, because `Number.isInteger(1e30)` is `true`
+  and a mistyped exponent would print everything while truncating nothing and so saying nothing.
+  `gateReadBound` (`:5570`) refuses a bare `--max-bytes` (`Number(true)` is 1) and an empty one
+  (`Number("")` is 0, which here would mean "no cap") — both are the flag disregarded in the
+  direction that DISCLOSES. Repro: `node --test packages/core/test/cli/gates-reads-resolved.test.ts`
+  → **7 pass / 0 fail**. **Residue is §A.58**, including the third layer this door still cannot
+  apply.
 
-- **A.52 · `dominantState` ranks seven of the nine task states, and a fan-out with one branch still
-  retrying renders green.** File: `packages/core/src/server/layout.ts:85-99`.
+- ~~**A.52 · `dominantState` ranks seven of the nine task states, and a fan-out with one branch still
+  retrying renders green.**~~ File: `packages/core/src/server/layout.ts:85-99`.
   `STATE_PRIORITY` is `["failed","awaiting_gate","leased","ready","cancelled","skipped","succeeded"]`
   while `run/projection.ts:58-67`'s `TaskState` union has **nine** members — `pending` and `retrying`
   are on neither list. Repro:
@@ -794,8 +875,19 @@ introduced unless the row says so. Repros run from the repository root unless th
   **Closes when** both copies rank all nine — `retrying` and `pending` above `succeeded`, since both
   mean "not finished" — with a test that asserts the priority list and the `TaskState` union have the
   same members, so a tenth state fails there rather than rendering as nothing.
+  **CLOSED at `cabd61e`.** The ranking is now ONE table rather than a list — `STATE_RANK:
+  Record<TaskState, number>` (`server/layout.ts:107`), so a tenth `TaskState` is a `tsc` error
+  rather than a silent omission, and `STATE_PRIORITY` is derived from it by sorting on the rank
+  value. All nine are ranked, `retrying` (2) and `pending` (5) both above `succeeded` (8), which is
+  what the row asked for. **The browser copy is mirrored** (`server/console.ts:677`, the same nine
+  names in the same order) and `console.test.ts`'s *"THE CONSOLE'S FAN-OUT PRIORITY ORDER
+  AGREES…"* reads BOTH source texts, so a change to one that is not mirrored fails a test. The
+  rendering half went with it: `console.ts:98` gives `retrying` its own rule (dashed error stroke);
+  `pending` gets none on purpose, because it IS "not started". Repro:
+  `node --test packages/core/test/server/dominant-state.test.ts` → **7 pass / 0 fail**; the census
+  test sorts by rank value rather than asserting a literal list.
 
-- **A.53 · A fan-out branch may hold two nodes, and finding that out takes two compiles.** *(F1, the
+- ~~**A.53 · A fan-out branch may hold two nodes, and finding that out takes two compiles.**~~ *(F1, the
   one friction entry from the 2026-09-09 port still open.)* File:
   `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin` and `rule008`. Repro is in
   `docs/workflow-port-2026-09-09.md` §3 F1, pasted in full there: with `join.branches: ["classify"]`
@@ -810,8 +902,42 @@ introduced unless the row says so. Repros run from the repository root unless th
   **Closes when** one diagnostic names the whole rule — most cheaply by `rule021` looking at what
   the branch actually contains before it suggests a `branches:` list, so the first message is the
   right one rather than the first of two.
+  **CLOSED at `51f4a5f`, over four fix rounds (`d7e8ee5`, `cbfdeb5`, `2d40f5e`, `ebd8446`,
+  `51f4a5f`) and one send-back — and HOW it closed is worth more than that it did.** GRAPH021 now
+  states the whole rule in one diagnostic. Repro, the port's own, from `examples/` with
+  `join.branches: ["classify"]`:
+  ```
+  GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" but no downstream join waits on it;
+    the branch it opens holds 2 nodes (read, classify), and a join must wait on every one of them
+     fix: give join "gather" an entry in its `branches` for each of read, classify, and a
+          `kind: join` edge from each of them into "gather" — every node inside a fan-out branch
+          needs both. ADD to whatever "gather" already declares: one join can be the barrier for
+          more than one fan-out
+  ```
+  Following that line literally compiles clean — **one step, where it used to be two.**
+  (The probe graph also prints `GRAPH010_CONCURRENT_WRITE` while `gather` is not waiting on
+  `read`: the branch-local exemption is keyed on the join's inbound edges, so removing `read` from
+  `branches` removes the exemption too. It goes away with the same fix. Your terminal will show
+  both lines; the quoted block is the one this row is about.)
+  **THE METHOD IS THE RECORD.** The first three rounds each reopened one edge over: a membership
+  test that dictated graphs which then broke, a barrier picked by reachability so the message named
+  a join it could not know, and a `fix:` that REPLACED a join's existing `branches` instead of
+  adding to them. That accretion of special cases in one predicate is the "fix rounds reopening one
+  edge over" tell, and the remedy was to stop narrowing: the final form is ADDITIVE — it names the
+  joins it OFFERS, and the multi-candidate arm filters `waitsFor` to the ancestors of every
+  candidate in BOTH arms rather than only one. Test assertions parse the name sets out of the
+  message (`namesIn`, `offeredJoins`) and **THROW on a sentence they do not recognise**, so a
+  reworded diagnostic fails loudly rather than passing vacuously. **Reviewer evidence, all of it
+  differential against `c98a108`**: an 8,000-graph sweep loosened **0**; of 31,442 graphs that
+  reproduce F1, 26,827 with a `seq`-wired inner join, all converge in ONE step over 65,126 choice
+  combinations; and 29,748 reachable joins that are NOT offered were each checked to break the
+  graph if dictated. Repro:
+  `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **14 pass / 0 fail**.
+  **This closes F1, the last of the 2026-09-09 port's eight friction entries.** Two residues, each
+  its own row: the sibling rule `GRAPH008_HELD_JOIN_UNCOLLECTED` still takes three compiles
+  (§A.56), and the count and the dictated list answer different questions (§A.57).
 
-- **A.54 · The CLI exits before stdout drains, so any output over 64 KiB is truncated on a pipe.**
+- ~~**A.54 · The CLI exits before stdout drains, so any output over 64 KiB is truncated on a pipe.**~~
   File: `packages/core/src/cli.ts:11134`, `.then((code) => process.exit(code))`. On a pipe stdout is
   ASYNCHRONOUS, so `process.exit` discards whatever is still buffered; to a file or a TTY the writes
   are synchronous and nothing is lost. Repro, from `examples/`, on a gate whose `reads` is large
@@ -842,6 +968,154 @@ introduced unless the row says so. Repros run from the repository root unless th
   `process.exit` with writes outstanding (set `process.exitCode` and let the loop drain, or await a
   `write` callback), with a test that pipes more than 64 KiB through a verb and compares the byte
   count to the same command redirected to a file.
+  **CLOSED at `a31279b`.** The exit path drains stdout before `process.exit`. **`process.exitCode`
+  alone was tried and REJECTED**, and the reason is the row's mirror image: a handle nobody tore
+  down turns a clean exit into a hang, which is a worse failure than the one being fixed and a
+  quieter one (`cli.ts:11432`). So `process.exit` stays and the write is awaited first — the
+  process ends one `await` away from it, which is also why a late EPIPE cannot be lost silently
+  (`:11455-11461`). Repro: `node --test packages/core/test/cli/stdout-drain.test.ts` → **5 pass / 0
+  fail**; it spawns the CLI on a REAL pipe rather than mocking the stream, because a mock would not
+  have the 64 KiB the defect is made of.
+
+### Opened by the 2026-09-10-b settlement
+
+Found while building or reviewing the second wave. None is a regression it introduced unless the
+row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work beside them.
+
+- **A.55 · A join in mode `any` or `firstSuccess` whose members all FAIL never releases, and the run
+  reports `succeeded`.** File: `packages/core/src/run/engine.ts:11134`. The predicate is
+  `case "firstSuccess": return succeeded >= 1;` and `any` shares it. When every member of the
+  barrier terminates without succeeding, `succeeded` is 0 for ever: the barrier never fires, the
+  join's task is never minted, everything downstream of it never runs — and `#finish` still calls
+  the run **`succeeded`**, because no task is left in a live state. `onBranchError: "skip"` does not
+  help; it is what makes the branches terminal in the first place. **PRE-EXISTING at `c98a108`**, and this is the row's
+  contested point, so the evidence is the CONTROL and not the fix. Run the same probe against
+  `c98a108` (extracted with `git archive`, no checkout): the graph with NO second path into the
+  join — `seq=N`, which never touches the arm §A.47 changed — ALREADY reads `Jready=0 done=0`
+  under `any` and `firstSuccess`. The `seq=Y` graph read `Jready=1 done=1` there, but only because
+  the A.47 double-mint fired the barrier without a quiescence test; closing A.47 removed that
+  spurious mint and made `seq=Y` agree with a baseline that was already broken. **A reader
+  comparing only `seq=Y` across the fix concludes A.47 introduced this, and that is the misreading
+  the control refutes.** Repro on the merged tree — a fan-out of two over a body that always
+  throws, into
+  `J {branches:["b0"], mode, onBranchError:"skip"}`, then `J --seq--> done`. **The graph declares
+  `outputs: []`** and that is load-bearing, not incidental: declare an output nothing writes and the
+  run dies `E_OUTPUT_MISSING` and reports `failed`, so the "says it worked" half only shows where
+  every declared output IS written, or none is declared.
+  ```
+  mode=any          par= 1 | seq=N status=succeeded note=undefined     Jready=0 done=0
+  mode=firstSuccess par=16 | seq=N status=succeeded note=undefined     Jready=0 done=0
+  mode=all          par= 1 | seq=N status=succeeded note=["done-ran"]  Jready=1 done=1
+  mode=quorum       par=16 | seq=N status=succeeded note=["done-ran"]  Jready=1 done=1
+  ```
+  `all` and `quorum` release; `any` and `firstSuccess` do not. The harness is
+  `test/run/join-seq-entrance.test.ts`'s — an `Engine` over a `MemoryStateStore`, a
+  `function/boom@stable` that throws, and a count of `task.ready` rows whose `taskId` starts `J@`.
+  **It is not fail-safe**: a barrier that cannot release is a run that silently does nothing and
+  says it worked, which is the "guard answering its undecidable case with the passing value" shape
+  one layer down — here the undecidable case is "every member is done and none succeeded".
+  **Closes when** `any`/`firstSuccess` distinguish "not yet" from "never": once every member is
+  terminal and none succeeded, the barrier must resolve — as a failure, or by releasing with an
+  empty fold — rather than waiting on an event that cannot arrive. Whichever is chosen,
+  `#finish` must not call the result `succeeded`. With a test asserting the run's status on a
+  fan-out whose every branch throws, in all four modes.
+
+- **A.56 · `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` names the `branches` entry and omits the
+  `kind: join` edge, so following it lands on a SECOND `GRAPH008` — the F1 defect, still open in
+  the sibling rule.** File:
+  `packages/core/src/graph/validate.ts`. §A.53 fixed GRAPH021 and left its sibling alone. Repro, on
+  a graph with an inner fan-out (`read --fanout--> sub`) whose inner join `subJoin` is held inside
+  the outer fan-out branch:
+  ```
+  $ loom compile p4-held.json
+  ✗ GRAPH008_HELD_JOIN_UNCOLLECTED: join "subJoin" is inside a fan-out, so it HOLDS its fold for an
+    enclosing join to collect — but no join declares "subJoin" among its branches …
+     fix: add "subJoin" to the enclosing join's `branches`, or move "subJoin" outside the fan-out
+  ```
+  Following that `fix:` literally — `gather.branches: ["classify","subJoin"]` — then says:
+  ```
+  ✗ GRAPH008_BRANCH_NOT_CONNECTED: join "gather" waits on "subJoin", but no edge runs from
+    "subJoin" to "gather"
+     fix: add an edge subJoin -> gather with kind: join
+  ```
+  The second message tells you the half the first omitted: **the exact shape §A.53 closed, in the
+  rule next to it.** (Both compiles also print `GRAPH021` alongside; the blocks above quote only
+  the `GRAPH008` line each time, so your terminal shows more than the page does.) **Followed to convergence it is FOUR compiles**, measured — (1)
+  `GRAPH008_HELD_JOIN_UNCOLLECTED`, (2) `GRAPH008_BRANCH_NOT_CONNECTED`, (3) `GRAPH021`, which now
+  names `subJoin` too because it is in `gather.branches`, (4) clean. Only step (1)→(2) is this
+  row; (2)→(3) is the interleaving with GRAPH021 and is a consequence, not a second defect.
+  The graph is `examples/graphs/triage-failures.json` with an inner
+  `read --fanout(subs)--> sub --join--> subJoin` added; the reviewer's copy is
+  `.agent/refute-a53/p4-held.json` in the validate lane's worktree.
+  **Closes when** `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` names both halves the way GRAPH021's
+  now does — the `branches` entry AND the `kind: join` edge — with a test that follows the single
+  line and asserts the next compile is clean.
+
+- **A.57 · GRAPH021's node COUNT and its dictated LIST answer different questions, and the message
+  does not say so.** File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`. On the
+  §A.56 graph the one diagnostic says the branch *"holds 3 nodes (read, subJoin, classify)"* and
+  then dictates entries for *"each of read, classify"*. Both are correct and they are not the same
+  set: the count is every node the branch CONTAINS, the list is every node the join must WAIT ON,
+  and a held inner join is in the first and not the second. A reader has no way to tell that the
+  missing name is deliberate rather than a bug in the message. It is pinned as behaviour by the
+  two-candidate case in `test/graph/fanout-branch-diagnostic.test.ts`, so the divergence is known
+  and tested — it is the PROSE that does not disclose it.
+  **Closes when** the sentence distinguishes the two sets, e.g. by saying which of the counted
+  nodes are collected by an inner join instead of by this one. Costs one message edit and the test
+  assertions that parse it (`namesIn`, `offeredJoins`), which throw on a sentence they do not
+  recognise — so this cannot be done as a drive-by.
+
+- **A.58 · Residue on §A.51: four things `loom gates`'s bound does not do.** File:
+  `packages/core/src/cli.ts`. Each is disclosed in the source that shipped it, which is why they are
+  one row and not four.
+  (1) **The `$truncated` marker is recognised by SHAPE**, and `payloadHandle` explicitly refuses to
+  be — `journal/payloads.ts:66` returns `{$payload: {...}}` as a value the reader identifies
+  structurally, and `cli.ts:5508` states the collision out loud: a channel value that IS a
+  `$truncated` wrapper, under the cap, is indistinguishable from a marker this door wrote.
+  (2) **The bound is per VALUE, not per output.** `--max-bytes 65536` caps each channel value; a
+  wide fan-out parked on a gate over many channels still prints the sum of them, which is the worst
+  case §A.51(b) named and this cap narrows rather than removes.
+  (3) **`gateReadBound` accepts `Number()`'s exotic literals.** `Number("0x10")` is 16,
+  `Number("1e3")` is 1000, `Number("0b11")` is 3 and `Number(" 24 ")` is 24 — all
+  `Number.isInteger`, so all accepted. Nothing here is a disclosure risk (they are all smaller caps
+  than intended, i.e. they fail in the withholding direction), but `--max-bytes 1e9` reading as
+  1,000,000,000 while `--max-bytes 1e30` is refused is a boundary nobody chose.
+  (4) **`#withBranchWrites` is a third layer this door cannot apply** — item (3) of the enumeration
+  in `gatesWithReads` (`cli.ts:5155`, and again at `:5372`). The engine composes
+  `#withBranchWrites(ctx, await #resolveReads(…), branch)`; `withBranchWrites` is private to the
+  engine and the writes are not in the stored projection until a join folds them, so a gate inside
+  a fan-out branch shows this operator slightly less than the console. It predates §A.51.
+  **Closes when** each is either fixed or moved to a decision with an argument. (1) is the only one
+  that can mislead an operator and is the one to take first — most cheaply by a marker key a
+  channel value cannot spell.
+
+- **A.59 · Residue on §A.50: four things the width refusal does not reach.** File:
+  `packages/core/src/graph/validate.ts` and `packages/core/src/run/engine.ts`.
+  (1) **The runtime path is still reachable.** `Engine.submit` and `Engine.attach` take a `RunGraph`
+  directly and `#assertBound` does not re-check widths, so an embedder who builds one without going
+  through `compile` keeps `slice(0, NaN)` — zero branches, no diagnostic. The CLI cannot reach it;
+  an embedder can.
+  (2) **`EDGE_FIELDS` (`graph/spec.ts`) remains a NAME allowlist**, so the parse still type-checks
+  nothing; `rule007Fanout` and `rule006` now check two fields of it by hand, which is the general
+  problem solved twice.
+  (3) **THREE codes have an EMPTY `RAISED_CLASS` set** — `E_ROUTE_NOT_FOUND`,
+  `E_EFFECT_UNAVAILABLE`, `E_REQUEST_TIMEOUT` — so §A.49's refusal ACCEPTS them by design, and
+  they can be written into an `onlyIf` that can never fire. Repro:
+  `/usr/bin/grep -acE '^  E_[A-Z0-9_]+: \[\],' packages/core/src/graph/validate.ts` → **3**.
+  **"Empty set" and "bare `{code, message}` record" are NOT the same set and the difference is the
+  point**: at least five codes are emitted as bare records, but `cbfdeb5` read the class off two of
+  them (`E_GATE_EXPIRED: ["timeout"]`, `E_OUTPUT_MISSING: ["internal"]`) plus `E_OVERSIGHT_LOOSENED`,
+  which is why they are no longer empty. Of those three, only **two** flipped to refusals —
+  `E_GATE_EXPIRED`'s `timeout` IS retryable, so it stays accepted — and that is the whole of the
+  43 → 45 move (measured at `4864df9`: 43/17; at HEAD: 45/15).
+  (4) **An `--extension-module` raising a pinned code under a class `RAISED_CLASS` does not list is
+  OVER-refused.** The escape is to drop `onlyIf` entirely, which retries on every retryable error
+  and loses nothing the filter could have expressed; it is written down at the head of
+  `test/graph/retry-onlyif-retryable.test.ts`.
+  **Closes when** (1) is decided — either `#assertBound` re-checks the widths a compile would have,
+  or the row is answered by stating that an embedder who skips `compile` is out of scope, which is
+  a real position and is the one the single-operator framing suggests. (2)-(4) close with it or
+  become their own rows.
 
 ---
 
@@ -1046,6 +1320,35 @@ a decision's argument is the thing a future reader needs.
   and record that argument beside the list so the next reader does not re-ask.
   **Closes when** the maintainer picks one. Until then the ledger reads 3 and the reason it does is
   here rather than nowhere.
+
+- **D.8 · Whether an inbound edge on a `join` node must be `kind: "join"` at compile time.**
+  Recommended by the engine lane's reviewer once §A.47 landed, and it is a TIGHTENING DECISION, not
+  a defect: the engine now handles such an edge correctly, so nothing is broken either way. The
+  case for it is that the rule already exists in two places under another name — `GRAPH008` is
+  keyed on a join's inbound edge list, and §A.48's W6 keys the branch-local exemption on exactly
+  that list, so an ordinary edge into a barrier is already the thing two guards read around.
+  Making it explicit at compile time would mean neither has to reason about an edge kind the
+  author did not intend.
+  **The measured cost is zero.** Scan every committed `GraphSpec` for an inbound non-`join` edge on
+  a `join` node:
+  ```bash
+  node -e 'const{execSync}=require("child_process"),fs=require("fs");
+    let n=0,h=0;for(const f of execSync("git ls-files \x27*.json\x27").toString().trim().split("\n")){
+    let s;try{s=JSON.parse(fs.readFileSync(f,"utf8"))}catch{continue}
+    if(s?.kind!=="GraphSpec"||!Array.isArray(s.nodes)||!Array.isArray(s.edges))continue;n++;
+    const j=new Set(s.nodes.filter(x=>x.type==="join").map(x=>x.id));
+    for(const e of s.edges)if(j.has(e.to)&&e.kind!=="join")h++;}
+    console.log(n,"GraphSpec files,",h,"such edges");'
+  # → 9 GraphSpec files, 0 such edges
+  ```
+  **The case against** is the one §A.47's closing paragraph makes about W6: a compile-time guard
+  must not be re-keyed on which engine methods test quiescence, and a reader could take this rule
+  as saying the engine cannot handle the other case — which is no longer true. So the refusal, if
+  it lands, has to be justified as authoring hygiene and say in its own message that the runtime is
+  fine either way.
+  **Closes when** the maintainer picks: refuse it (`GRAPH0nn`, a new code, with the message saying
+  the runtime handles it and this is about intent), warn on it, or record the decision not to and
+  say why beside W6.
 
 ---
 
@@ -1308,8 +1611,8 @@ Each traces to a decision in `DESIGN.md`.
   **Closes when** the help text names the same set the registrar actually passes, with the count
   derived rather than written.
 
-- **H.7 · TWO stranded docstrings in `run/engine.ts`, and the second is why the first is hard to
-  see.** Repro:
+- ~~**H.7 · TWO stranded docstrings in `run/engine.ts`, and the second is why the first is hard to
+  see.**~~ Repro:
   ```
   $ /usr/bin/grep -an 'A refused SoD gate\|A RETURN NOBODY READS' packages/core/src/run/engine.ts
   1110: * A refused SoD gate, as a failed OUTCOME rather than a throw.
@@ -1329,9 +1632,21 @@ Each traces to a decision in `DESIGN.md`.
   is the next declaration" is NOT the check — `:1121` names no function, and a file that interleaves
   constants between a docstring and its subject can satisfy it while still being wrong. The check is
   a reader's: open the file at each line and see what is under it.
+  **CLOSED at `52d6c99`, a pure move — no prose rewritten.** Repro now:
+  ```
+  $ /usr/bin/grep -an 'A refused SoD gate\|A RETURN NOBODY READS' packages/core/src/run/engine.ts
+  1197: * A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT.
+  1369: * A refused SoD gate, as a failed OUTCOME rather than a throw.
+  $ /usr/bin/grep -an '^function requireOutcome\|^function sodOn' packages/core/src/run/engine.ts
+  1219:function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
+  1379:function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
+  ```
+  Each paragraph now ends at the declaration it describes — nothing but its own body between them
+  (269 lines became 10; 109 became 22, all of it the docstring). The check the row specified is a
+  reader's and was done by one.
 
-- **H.8 · `redactGateRead` in `cli.ts` is a second spelling of `server/http.ts`'s private
-  `redactChannels`.** Repro:
+- ~~**H.8 · `redactGateRead` in `cli.ts` is a second spelling of `server/http.ts`'s private
+  `redactChannels`.**~~ Repro:
   ```
   $ /usr/bin/grep -an 'function redactGateRead' packages/core/src/cli.ts
   5298:function redactGateRead(
@@ -1347,8 +1662,17 @@ Each traces to a decision in `DESIGN.md`.
   **Closes when** one function serves both, with the shared one living where neither file has to
   import the other's private surface, and a test that adds a classification and asserts BOTH doors
   blank it.
+  **CLOSED at `ac6a293`, a `refactor:`.** One rule, in `packages/core/src/security/redact-channels.ts`,
+  serving both doors: `cli.ts:78` imports `redactChannelValue` and `server/http.ts:234` imports
+  `redactChannelMap`, so neither file reaches into the other's private surface. Repro now:
+  `/usr/bin/grep -anc 'function redactGateRead' packages/core/src/cli.ts` → **0**. **It is
+  deliberately NOT re-exported from `index.ts`** — the surface guard still reports 542 exports,
+  unchanged — because a redaction rule two in-tree callers share is not a thing a stranger needs to
+  import, and exporting it would pin it. Repro:
+  `node --test packages/core/test/cli/redaction-two-doors.test.ts` → **3 pass / 0 fail**; it adds a
+  classification and asserts BOTH doors blank it, which is the test the row asked for.
 
-- **H.9 · README's test-count FLOOR cannot be raised without editing the guard that checks it.**
+- ~~**H.9 · README's test-count FLOOR cannot be raised without editing the guard that checks it.**~~
   Repro:
   ```
   $ /usr/bin/grep -an '2,300' packages/core/test/readme-gaps.test.ts
@@ -1369,6 +1693,19 @@ Each traces to a decision in `DESIGN.md`.
   floor moving — anchoring on `+ tests` or on the row name rather than on the digits — after which
   the floor itself can be raised in the same commit. Costs one test edit and one README edit, which
   is why it is a row and not something a docs pass may do on its own.
+  **CLOSED at `e345951`.** The Gates entry's `claims` is now `"+ tests, offline, no API key"` —
+  anchored on the phrase that survives the digits moving, which is the property the pin meant to
+  bind. Repro:
+  ```
+  $ /usr/bin/grep -an 'claims: "+ tests' packages/core/test/readme-gaps.test.ts
+  477:    claims: "+ tests, offline, no API key",
+  $ /usr/bin/grep -an '+ tests' README.md
+  88:| **Gates** | `npm run check` — 3,500+ tests, offline, no API key; three guards: …
+  ```
+  **The floor is 3,500+ and the number it was chosen against is the PROBE's, not `npm test`'s** —
+  the probe counts top-level `test(` calls in the test files (3,586 on the merged tree, across 342
+  files), while `npm test` reports 3,817 because it counts subtests too. The floor is below both,
+  and it is a floor, so growth costs no doc edit — which was the whole point of the row.
 
 ---
 
@@ -1450,6 +1787,17 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | H.4 | `96a03bf` | verb→flag applicability table |
 | H.5 | `2b6bc06` | `driveToRest` splits the graph's half from the deployment's |
 | H.6 | `52d4b43` | help text derived from the registrar object |
+| A.46 | `74c930c` | a rewind's suppression reaches the live console, by resync |
+| A.47 | `84338b3`, `52d6c99`, `3d8dabb`, `5464801`, `cc964f7` | an ordinary edge into a join node is the barrier's entrance, not a second mint |
+| A.49 | `d9dc26c`, `cbfdeb5` | `GRAPH003_UNRETRYABLE_ONLY_IF`, from a table of OBSERVED raise classes |
+| A.50 | `a58550d`, `ab18b14`, `4864df9` | a fan-out width that is not a positive integer is refused, and so is a hostile one |
+| A.51 | `5d2053b`, `ccf2a32`, `b96d887` | `loom gates` resolves handles and caps each value, saying so in place |
+| A.52 | `cabd61e` | `STATE_RANK` ranks all nine, and the browser copy is pinned to it |
+| A.53 | `d7e8ee5`, `cbfdeb5`, `2d40f5e`, `ebd8446`, `51f4a5f` | GRAPH021 states the whole fan-out branch rule in one diagnostic — **F1, the last of the port's eight** |
+| A.54 | `a31279b` | stdout drains before `process.exit`, so a pipe keeps everything |
+| H.7 | `52d6c99` | two stranded paragraphs moved to their declarations |
+| H.8 | `ac6a293` | one channel-redaction rule, `security/redact-channels.ts`, for both doors |
+| H.9 | `e345951` | the Gates floor's claims string unpinned from its digits |
 | — | — | — |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
 | `mcp-seal` | `9cf88b5` | prefix reservation at every registration |

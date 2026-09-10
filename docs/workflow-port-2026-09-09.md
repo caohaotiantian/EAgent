@@ -9,15 +9,18 @@ Written for somebody who has not read the code.
 
 ---
 
-## 0 · Closed since — 2026-09-10
+## 0 · Closed since — 2026-09-10, extended 2026-09-10-b
 
 **This is a dated record and the narrative below is left as it was measured.** What follows is the
-part of it that is no longer true, each with the commit that closed it. Six of the eight friction
-entries are gone — F2, F3, F4, F5, F7, F8 — and the workflow itself now CONSUMES four of them; the
-port is the thing that pulls on them, which was the argument for writing it down.
+part of it that is no longer true, each with the commit that closed it. **Seven of the eight
+friction entries are gone from this head — F1, F2, F3, F4, F5, F7, F8 — and with F6, which was
+fixed inside the port lane and so never had a "since", the log is EMPTY**: every friction point the
+port produced has been closed. The workflow itself now CONSUMES four of them; the port is the thing
+that pulls on them, which was the argument for writing it down.
 
 | # | closed by | what happens now |
 |---|---|---|
+| **F1** | `51f4a5f` (over `d7e8ee5`, `cbfdeb5`, `2d40f5e`, `ebd8446`) | `GRAPH021_FANOUT_WITHOUT_JOIN` states the whole rule in ONE diagnostic: it counts the nodes the branch holds and dictates, for each node the join must wait on, both an entry in `branches` AND a `kind: join` edge — and says to ADD to whatever the join already declares. Following that line literally compiles clean, where it used to produce `GRAPH008_BRANCH_NOT_CONNECTED` and a second round trip. §TODO A.53 |
 | **F2** | `77c245a` (+ `468984b` in the example) | `GRAPH010` exempts a channel that never leaves one fan-out branch, so `raw` is `{"type":"string","reduce":"replace"}` and `triage-classify.js` reads a string. The `join("\n")` and the comment explaining a one-element array are deleted |
 | **F3** | `da86076` | `loom gates <runId>` carries a `reads` field — the gate node's declared channels THAT HAVE A VALUE (it is built from `view.visible`, so an unwritten one is not a key), recomputed from the graph the journal's hash names, with a channel the graph classified blanked to `[secret]`. The digest stays beside it as the binding it always was |
 | **F4** | `175cdb3` | the gate hint is on **stderr**, beside the run-id hint, so `loom run … 2>/dev/null \| jq .status` parses on the gate path too. `examples-triage.test.ts`'s `summary()` no longer slices stdout — it parses the whole of it, which is now the assertion that nothing else is printed there |
@@ -35,8 +38,7 @@ function "function/triage-plan@stable" on node "plan" refused: matched 25 test-o
 this graph fans out at most 12 — the rest would be dropped without a word. …
 ```
 
-Still open: **F1** (two compiles to discover a two-node fan-out branch), and every bullet of §4 that
-this section does not name.
+Still open: nothing from F1–F8 — and every bullet of §4 that this section does not name.
 
 ---
 
@@ -458,7 +460,7 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom" /tmp/loom-serve.log
 Every entry is a place the shipped product cost more than it should have. Each carries the exact
 command, what happened, and what was expected. **Eight found**, each logged with the file that would
 have to change; one (F6) was fixed here, inside the lane's own files. **Six more have closed since
-— F2, F3, F4, F5, F7 and F8 — and §0 names the commit for each**; F1 alone is still open. Each entry
+— F1, F2, F3, F4, F5, F7 and F8 — and §0 names the commit for each**; with F6 that is all eight. Each entry
 below is left as it was measured, with a one-line closure note under its status.
 
 Everything in this section was re-run by a fresh reviewer who was told to refute it; F1–F5 and F7
@@ -466,7 +468,8 @@ reproduced exactly, and F8 is one that reviewer added.
 
 ### F1 · A fan-out branch may hold two nodes, but nothing says so, and it takes two compiles
 
-*Status: logged (documented here and in `examples/README.md` §8; the message itself is unchanged).*
+*Status: **closed 2026-09-10-b** by `51f4a5f`, over four fix rounds; see §0. Everything below is
+what was measured before it, and the "Expected" paragraph is now what the compiler prints.*
 *File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`.*
 
 The branch is `read` (a `tool`) → `classify` (a `function`). The obvious spelling — collect the
@@ -701,7 +704,7 @@ Status is as of **2026-09-10**; "closed" rows carry the commit, and §0 says wha
 
 | # | what | status | file that changed, or would |
 |---|---|---|---|
-| F1 | two-node fan-out branch takes two compiles to discover | documented | `packages/core/src/graph/validate.ts` |
+| F1 | two-node fan-out branch takes two compiles to discover | **closed `51f4a5f`** | `packages/core/src/graph/validate.ts` |
 | F2 | `GRAPH010` refuses a provably branch-local channel | **closed** `77c245a` | `packages/core/src/graph/validate.ts` |
 | F3 | `loom gates` shows a digest, not the content | **closed** `da86076` | `packages/core/src/cli.ts` |
 | F4 | gate hint on stdout after the JSON | **closed** `175cdb3` | `packages/core/src/cli.ts` |
