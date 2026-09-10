@@ -1,0 +1,192 @@
+/**
+ * A TWO-NODE FAN-OUT BRANCH TOOK TWO COMPILES TO DISCOVER, AND NEITHER MESSAGE STATED THE RULE.
+ *
+ * F1 of `docs/workflow-port-2026-09-09.md` — the one friction entry from the 2026-09-09 port
+ * still open. The branch is `read` (a fan-out's target) -> `classify`, both joining at `gather`.
+ * The obvious spelling, collecting the branch's LAST node, was refused twice in sequence:
+ *
+ *     join.branches: ["classify"]        GRAPH021_FANOUT_WITHOUT_JOIN
+ *                                          fix: add a join node downstream of "read"
+ *                                               with branches: [read]
+ *     join.branches: ["read","classify"] GRAPH008_BRANCH_NOT_CONNECTED
+ *                                          fix: add an edge read -> gather with kind: join
+ *
+ * Each message is individually correct, which is why the port lane logged it rather than
+ * rewording one. The rule NEITHER states is the union of the two `fix:` lines: *every node in a
+ * fan-out branch needs its own entry in `join.branches` AND its own `kind: join` edge into the
+ * join*. A reader with two error messages and no rule has no reason to believe a two-node branch
+ * is even legal — `README.md`, `examples/README.md` and the compiler all describe a one-node one.
+ *
+ * It has since acquired a second reader: §A.48's W6 clause keys GRAPH010's branch-local exemption
+ * on exactly that inbound edge list, so the invariant a stranger cannot discover is also the one a
+ * validator relies on. That is why the shipped example loses GRAPH010's exemption in step 1 below
+ * and gets it back when the rule is followed — one edit, both diagnostics.
+ *
+ * WHAT DOES NOT CHANGE IS WHAT IS ACCEPTED. `rule021FanoutHasJoin` refuses exactly the graphs it
+ * refused before; it now looks at what the branch CONTAINS before it suggests a `branches:` list,
+ * so the first message is the right one rather than the first of two.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import type { EdgeSpec, GraphSpec, NodeSpec } from "../../src/graph/spec.ts";
+import { validateGraph, type Diagnostic } from "../../src/graph/validate.ts";
+import type { EdgeId, NodeId } from "../../src/ids.ts";
+import { TENANT_CAPABILITIES, TOOLS, stubResolver } from "./fixtures.ts";
+
+const n = (id: string): NodeId => id as NodeId;
+const e = (id: string): EdgeId => id as EdgeId;
+
+const diagnose = (s: GraphSpec): readonly Diagnostic[] =>
+  validateGraph({
+    spec: s,
+    resolver: stubResolver(),
+    tools: TOOLS,
+    tenantCapabilities: TENANT_CAPABILITIES,
+    depth: 0,
+    expanding: [],
+  });
+
+const errorsOf = (s: GraphSpec): readonly Diagnostic[] => diagnose(s).filter((d) => d.severity === "error");
+
+/** `examples/graphs/triage-failures.json` in miniature: a fan-out branch two nodes long. */
+function shipped(): GraphSpec {
+  return JSON.parse(
+    JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "f1", project: "test", version: 1 },
+      policy: { posture: "out", expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+      channels: {
+        items: { type: "array", reduce: "replace" },
+        shards: { type: "array", reduce: "replace" },
+        shard: { type: "string", reduce: "replace" },
+        raw: { type: "string", reduce: "replace" },
+        failures: { type: "array", reduce: "append_ordered" },
+        report: { type: "object", reduce: "replace" },
+      },
+      inputs: ["items"],
+      outputs: ["report"],
+      nodes: [
+        { id: "plan", type: "function", reads: ["items"], writes: ["shards"], function: { ref: "function/plan@stable" } },
+        { id: "read", type: "function", reads: ["shard"], writes: ["raw"], function: { ref: "function/read@stable" } },
+        { id: "classify", type: "function", reads: ["shard", "raw"], writes: ["failures"], function: { ref: "function/classify@stable" } },
+        {
+          id: "gather",
+          type: "join",
+          reads: ["failures"],
+          writes: ["failures"],
+          join: { branches: ["read", "classify"], mode: "all", onBranchError: "fail" },
+        },
+        { id: "collate", type: "function", reads: ["failures"], writes: ["report"], function: { ref: "function/collate@stable" } },
+      ],
+      edges: [
+        { id: "fan", from: "plan", to: "read", kind: "fanout", over: "shards", as: "shard", maxWidth: 4 },
+        { id: "sort", from: "read", to: "classify", kind: "seq" },
+        { id: "collect-read", from: "read", to: "gather", kind: "join" },
+        { id: "collect", from: "classify", to: "gather", kind: "join" },
+        { id: "fold", from: "gather", to: "collate", kind: "seq" },
+      ],
+    }),
+  ) as GraphSpec;
+}
+
+/** F1 step 1: the obvious spelling — collect the branch's LAST node, and only that one. */
+function f1Step1(): GraphSpec {
+  const s = shipped();
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = {
+    ...s.nodes[g]!,
+    join: { branches: [n("classify")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(
+    s.edges.findIndex((x) => x.id === e("collect-read")),
+    1,
+  );
+  return s;
+}
+
+test("the shipped shape compiles clean, so every refusal below is the mutation", () => {
+  assert.deepEqual(errorsOf(shipped()).map((d) => d.code), []);
+});
+
+test("ONE DIAGNOSTIC NAMES THE WHOLE RULE: both branch members and the kind: join edges", () => {
+  const d = errorsOf(f1Step1());
+  const [g21] = d.filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(g21 !== undefined, `expected GRAPH021; got ${d.map((x) => x.code).join(", ") || "no errors"}`);
+
+  const said = `${g21.message}\n${g21.fix ?? ""}`;
+  // THE DEFECT: the fix said `branches: [read]` — the fan-out's target and nothing else — so
+  // typing it produced a SECOND error about the missing edge.
+  assert.match(said, /\bread\b/, "the fan-out's own target");
+  assert.match(said, /\bclassify\b/, "and the node behind it in the SAME branch — this is the half that was missing");
+  assert.match(said, /kind: join/, "the edges, which the old message left to GRAPH008 to say later");
+  assert.match(said, /gather/, "and the join that already exists, rather than 'add a join node'");
+});
+
+test("FOLLOWING THAT FIX LITERALLY COMPILES — one step, not two", () => {
+  // This is the acceptance test for the whole row: the author reads one message, does what it
+  // says, and is finished. Before, doing what the first message said produced the second.
+  const fixed = f1Step1();
+  const g = fixed.nodes.findIndex((x) => x.id === n("gather"));
+  (fixed.nodes as NodeSpec[])[g] = {
+    ...fixed.nodes[g]!,
+    join: { branches: [n("read"), n("classify")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  (fixed.edges as EdgeSpec[]).push({ id: e("collect-read"), from: n("read"), to: n("gather"), kind: "join" } as EdgeSpec);
+
+  assert.deepEqual(errorsOf(fixed).map((d) => d.code), [], "the message's own instructions must produce a graph that compiles");
+});
+
+test("what is ACCEPTED does not move: a one-node branch is still fine and still says nothing", () => {
+  // The cheapest way to get this wrong is to start demanding that every branch node be listed.
+  // A branch of one is the common case and the compiler must stay silent on it.
+  const s = shipped();
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("sort")), 1);
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect")), 1);
+  (s.nodes as NodeSpec[]).splice(s.nodes.findIndex((x) => x.id === n("classify")), 1);
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = {
+    ...s.nodes[g]!,
+    reads: ["raw"],
+    writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  const codes = errorsOf(s).map((d) => d.code);
+  assert.equal(codes.includes("GRAPH021_FANOUT_WITHOUT_JOIN"), false, codes.join(", "));
+});
+
+test("a fan-out with NO join anywhere still refuses, and names every node it fanned over", () => {
+  // No `gather` at all: the branch runs to the end of the graph. The rule is the same rule, so
+  // the list is every node the fan-out encloses — and the message cannot name a join that is
+  // not there, so it asks for one.
+  const s = shipped();
+  (s.nodes as NodeSpec[]).splice(s.nodes.findIndex((x) => x.id === n("gather")), 1);
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect")), 1);
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("fold")), 1);
+  (s.edges as EdgeSpec[]).push({ id: e("on"), from: n("classify"), to: n("collate"), kind: "seq" } as EdgeSpec);
+
+  const [g21] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(g21 !== undefined);
+  const said = `${g21.message}\n${g21.fix ?? ""}`;
+  assert.match(said, /\bread\b/);
+  assert.match(said, /\bclassify\b/);
+  assert.match(said, /add a join node/, "there is none to name, so it must ask for one");
+});
+
+test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", () => {
+  // Two fan-outs off one node. If the list were 'everything downstream' the message would tell
+  // the author to join the other fan's nodes into this one's join, which is worse than saying
+  // too little.
+  const s = shipped();
+  (s.nodes as NodeSpec[]).push({ id: n("other"), type: "function", reads: ["shard"], writes: ["raw"], function: { ref: "function/other@stable" } } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("fan2"), from: n("plan"), to: n("other"), kind: "fanout", over: "shards", as: "shard", maxWidth: 4 } as EdgeSpec);
+
+  const [g21] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(g21 !== undefined, "the new fan-out has no join, so it must be refused");
+  const said = `${g21.message}\n${g21.fix ?? ""}`;
+  assert.match(said, /\bother\b/);
+  assert.doesNotMatch(said, /\bclassify\b/, "classify is under `fan`, not under `fan2`");
+});

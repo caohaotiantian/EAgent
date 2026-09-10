@@ -2274,6 +2274,24 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * applied in arrival order, which is exactly the nondeterminism the branch-coordinate
  * fold exists to remove. Requiring the join makes "when do these merge?" a question
  * the author answers rather than one the scheduler answers by accident.
+ *
+ * THE RULE IS ABOUT THE BRANCH, NOT ABOUT THE FAN-OUT'S TARGET, and saying otherwise cost the
+ * 2026-09-09 port a compile (F1 of `docs/workflow-port-2026-09-09.md`). This message used to
+ * suggest `branches: [<the fan-out's target>]`; typing that on a branch two nodes long then
+ * produced `GRAPH008_BRANCH_NOT_CONNECTED` about the edge, and the actual rule — *every node in
+ * a fan-out branch needs its own entry in `join.branches` AND its own `kind: join` edge into the
+ * join* — was the union of two `fix:` lines that neither stated. So the branch's contents are
+ * read here, off `fanoutEdgeStack`, BEFORE a `branches:` list is suggested.
+ *
+ * `fanoutEdgeStack` and not `ancestors`: two sibling fan-outs off one node are indistinguishable
+ * by reachability, and telling an author to fold the other fan's nodes into this one's join is
+ * worse than telling them too little. Its `undefined` = AMBIGUOUS convention means an ambiguous
+ * node is left off the list, so `e.to` is always included by hand — the one member the rule
+ * cannot be wrong about.
+ *
+ * WHAT IS ACCEPTED DOES NOT MOVE: the refusal condition is unchanged, and a branch of one still
+ * produces the sentence it always did. With two or more joins downstream the fix names none of
+ * them, because picking one for the author is a guess the rule cannot make.
  */
 function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   for (const e of spec.edges) {
@@ -2284,15 +2302,36 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
         n.join.branches.includes(e.to) &&
         (idx.ancestors.get(n.id)?.has(e.to) ?? false),
     );
-    if (!joined) {
-      d.push({
-        severity: "error",
-        code: "GRAPH021_FANOUT_WITHOUT_JOIN",
-        message: `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it`,
-        at: { edgeId: e.id },
-        fix: `add a join node downstream of "${e.to}" with branches: [${e.to}]`,
-      });
-    }
+    if (joined) continue;
+
+    const branch = spec.nodes
+      .filter((n) => n.id === e.to || idx.fanoutEdgeStack.get(n.id)?.includes(e.id) === true)
+      .map((n) => n.id);
+    const list = branch.join(", ");
+
+    // A join already downstream is named, so the author edits the one they drew rather than
+    // reading "add a join node" next to the join they can see.
+    const downstream = spec.nodes.filter((n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false));
+    const target =
+      downstream.length === 1
+        ? `join "${downstream[0]!.id}" must declare branches: [${list}]`
+        : downstream.length > 1
+          ? `a join downstream of "${e.to}" must declare branches: [${list}]`
+          : `add a join node downstream of "${e.to}" with branches: [${list}]`;
+
+    d.push({
+      severity: "error",
+      code: "GRAPH021_FANOUT_WITHOUT_JOIN",
+      message:
+        `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it` +
+        (branch.length > 1
+          ? `; the branch it opens holds ${branch.length} nodes (${list}), and a join must wait on every one of them`
+          : ""),
+      at: { edgeId: e.id },
+      fix:
+        `${target}, and take a \`kind: join\` edge from each of ${branch.length > 1 ? "them" : `"${e.to}"`} — ` +
+        `every node inside a fan-out branch needs both`,
+    });
   }
 }
 
