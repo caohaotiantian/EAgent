@@ -2526,6 +2526,12 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     // very likely safe. It is refused because this analysis does not track which attempt commits,
     // and a loosening does not get the benefit of "very likely".
     //
+    // THIS WALKS `S`, WHICH LEAVES THE JOIN AND THE FAN-OUT PLANNER OUT — by construction, not by
+    // oversight, and both are safe for the same one-line reason. `#retryDecision`'s exit `return`s
+    // BEFORE `#activate`, so a retried planner never plans the fan a second time, and a retried
+    // join re-runs `#foldJoin` only after its barrier has already fired — after every reader in
+    // this branch has run.
+    //
     // AND THE DEFAULTED POLICY COUNTS, not only the declared one. `compile.ts`'s `effectiveRetry`
     // gives a node that declared none `DEFAULT_PROVIDER_RETRY` when it reaches a provider and
     // `DEFAULT_SUBGRAPH_RETRY` when it re-enters a child — so reading `n.retry` alone refused an
@@ -2581,6 +2587,12 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   // THAT the validator can see. So constraining the inbound list closes the set by construction,
   // and the earlier clauses fall out of it rather than needing their own patch.
   //
+  // THE CLAIM, STATED AT THE WIDTH IT HOLDS: every entrance that can CREATE a join Task is
+  // derived from an edge whose `to` is that join. NOT "every `task.ready`" — three of the seven
+  // sites below are not edge-derived at all, and an earlier draft of this sentence said
+  // otherwise. Two of those three can only re-ready a Task that already exists, and the third
+  // cannot reach a join this clause covers.
+  //
   // NAMED RATHER THAN ASSERTED, because "this is total" is the claim that failed four times.
   // `run/engine.ts` emits `type: "task.ready"` at exactly SEVEN sites, and here is each one
   // against a covering join:
@@ -2593,18 +2605,23 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   //   `#fireEmptyJoin`               walks the empty fan-out target's OUTBOUND `join` edges
   //   `#branchReady`                 `e.to` of a `fanout` edge — refused here as an inbound
   //                                  edge that is not `kind: "join"`, and by W3 besides
-  //   `submit`                       `graph.entryNodes` only. A covering join has at least one
-  //                                  inbound edge (this clause requires |inbound| = |branch|),
-  //                                  so it is never an entry node
-  //   `rewind`                       re-arms STRANDED tasks under their own `task.taskId` and
-  //                                  their own `edgesIn`. That re-runs a Task that already
-  //                                  existed, so it is not a new entrance — and neither is
-  //                                  `retry`, which re-readies `w.task.taskId` for the same
-  //                                  reason
+  //   `submit`                       `graph.entryNodes`, `edgesIn: []` — NOT edge-derived. It
+  //                                  cannot reach a covering join, and the reason is THIS
+  //                                  clause: `inbound.length === subtree.size` and `subtree`
+  //                                  always holds the writer, so the join has at least one
+  //                                  non-loop inbound edge, and `hasNonLoopIn` excludes exactly
+  //                                  those from `entryNodes`
+  //   `rewind`                       NOT edge-derived: re-arms stranded tasks under their own
+  //                                  `task.taskId` and `edgesIn`, so it re-runs a Task that
+  //                                  already existed and cannot create one
+  //   `retry`                        NOT edge-derived, and the same argument — `w.task.taskId`
+  //                                  again. It also `return`s before `#activate`, so a retried
+  //                                  fan-out planner does not re-plan the fan
   //
-  // Five are edge-derived and constrained here; two re-arm or start something that is not this
-  // join. If an eighth site appears, or one of these learns to ready a join with no edge, this
-  // clause is false again and the exemption has to go back to refusing.
+  // Four are edge-derived and constrained here; `#branchReady` is edge-derived and refused; two
+  // re-arm an existing Task and one cannot reach this join. If an eighth site appears, or one of
+  // these learns to CREATE a join Task with no edge, this clause is false again and the
+  // exemption has to go back to refusing.
   //
   // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm mints, for a `seq` or
   // `conditional` edge into the join node at the ROOT coordinate, the SAME TaskId

@@ -31,8 +31,10 @@
  * root state, and a barrier that fires early has already published the cross-branch fold
  * there. This paragraph twice listed the ways that can happen and was twice wrong, so it
  * no longer lists them: the exemption constrains the covering join's whole INBOUND EDGE
- * LIST — one `join` edge per branch member and nothing else — because every entrance the
- * engine has to a join Task is derived from an edge whose `to` is that join. `mode: "all"`
+ * LIST — one `join` edge per branch member and nothing else — because every entrance that
+ * can CREATE a join Task is derived from an edge whose `to` is that join (three of the
+ * seven `task.ready` sites are not edge-derived; two only re-arm an existing Task and the
+ * third cannot reach such a join — `branchLocalChannel` names all seven). `mode: "all"`
  * is required as well, and is not on its own sufficient. Four different early-fire routes
  * were each measured handing a reader a sibling branch's value; `branchLocalChannel` in
  * `graph/validate.ts` carries all four reproductions.
