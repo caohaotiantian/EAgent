@@ -2535,9 +2535,19 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * node is left off the list, so `e.to` is always included by hand — the one member the rule
  * cannot be wrong about.
  *
- * WHAT IS ACCEPTED DOES NOT MOVE: the refusal condition is unchanged, and a branch of one still
- * produces the sentence it always did. With two or more joins downstream the fix names none of
- * them, because picking one for the author is a guess the rule cannot make.
+ * WHAT IS ACCEPTED DOES NOT MOVE — the refusal condition is byte-identical to the one this rule
+ * shipped with, so no graph that compiled before fails now on account of it. What DID move is
+ * every `fix:` line, including a branch of one's: an earlier version of this paragraph claimed
+ * that case "still produces the sentence it always did", which was true of the MESSAGE and
+ * false of the `fix:`, and a reviewer had to run both compilers side by side to find that out.
+ * The message tail is the only part that varies with branch size: one member gets no
+ * `; the branch it opens holds N nodes (…)` clause.
+ *
+ * With two or more candidate joins the fix NAMES them and asks the author to choose. It used to
+ * say "a join downstream of X" and leave the set implicit, which let a reader pick a join that
+ * was itself in the list of things to wait for — a `kind: join` edge from that node to itself,
+ * i.e. `GRAPH006_UNMARKED_CYCLE`. Naming the candidates is what makes the sentence unambiguous;
+ * the clause about what they are not is for the reader who sees only the message.
  */
 function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   for (const e of spec.edges) {
@@ -2607,11 +2617,25 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // author's whole intent for a join, and it no longer pretends to.
     const named = candidates.length === 1 ? candidates[0]! : undefined;
 
-    // …and what a NAMED barrier waits for is the branch members upstream of IT. A branch node
-    // with no path to the barrier (a second arm, an `error` handler) cannot take a `kind: join`
-    // edge into it without changing the graph's shape, so it is not dictated.
+    // WHAT A BARRIER WAITS FOR IS THE BRANCH MEMBERS UPSTREAM OF IT — of EVERY candidate, so
+    // that the list is true whichever one the author picks. A branch node with no path to the
+    // barrier (a second arm, an `error` handler) cannot take a `kind: join` edge into it
+    // without changing the graph's shape, and a candidate join is not its own ancestor, so this
+    // one predicate also keeps a join out of the list it is being offered as the barrier for.
+    //
+    // ONE PREDICATE FOR BOTH ARMS, and that is the point. The ancestor filter used to live only
+    // in the single-candidate arm, so the multi-candidate sentence handed back the UNFILTERED
+    // branch — and on a graph with a join sitting inside the branch, "pick one join downstream
+    // of X" plus a list containing that join reproduced `GRAPH006_UNMARKED_CYCLE` exactly as
+    // before. A filter that has to be remembered in two places is a filter that will be
+    // remembered in one.
+    //
+    // It can never empty the list: every candidate is downstream of `e.to` by construction, so
+    // `e.to` is an ancestor of all of them and always survives.
     const waitsFor =
-      named === undefined ? branch : branch.filter((id) => idx.ancestors.get(named.id)?.has(id) ?? false);
+      candidates.length === 0
+        ? branch
+        : branch.filter((id) => candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false));
 
     const each = waitsFor.join(", ");
     const fix =
@@ -2620,8 +2644,9 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           `each of them into "${named.id}" — every node inside a fan-out branch needs both. ADD to whatever ` +
           `"${named.id}" already declares: one join can be the barrier for more than one fan-out`
         : candidates.length > 1
-          ? `pick one join downstream of "${e.to}" and give it an entry in its \`branches\` for each of ${each}, ` +
-            `plus a \`kind: join\` edge from each of them into it — added to whatever it already declares`
+          ? `pick one of the joins ${candidates.map((c) => `"${c.id}"`).join(" or ")} — not one of the nodes below, ` +
+            `which are what it waits FOR — and give it an entry in its \`branches\` for each of ${each}, plus a ` +
+            `\`kind: join\` edge from each of them into it, added to whatever it already declares`
           : `add a join node downstream of "${e.to}", with an entry in its \`branches\` for every node you leave ` +
             `inside the branch and a \`kind: join\` edge from each — as drawn that is ${each}, and a join placed ` +
             `earlier shortens it`;
