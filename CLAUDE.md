@@ -21,6 +21,16 @@ and an input directory, run end to end against the shipped binary with no fork, 
 `422a730`); `docs/workflow-port-2026-09-09.md` is the commands a stranger runs and the eight things
 the product cost them.
 
+**Running it needed no source change; making it NATURAL needed seven, and THAT is the number worth
+carrying.** The port logged eight friction entries and seven are now closed — F6 in the port lane
+itself, then F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave. **F1 is the one still open.** More
+than the count: the workflow now CONSUMES what those closures built rather than merely no longer
+suffering it — `triage-classify.js` reads `raw` as a plain `replace` string (F2, `77c245a`),
+`triage-plan.js` reads its fan-out width off `ctx.node` and refuses on purpose through `{refuse}`
+(`c2360be`, `f7f74d5`, `b181b55`), and its suite parses the whole of stdout and reads the approver's
+report out of `loom gates` (F4, F3). **The port is what pulled on them**, which is the argument for
+porting one at all: an invariant nobody exercises names no seam.
+
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
 ### 1 · Kernel stability
@@ -40,7 +50,7 @@ hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs
 `feat:`-only; the census counts every subject, merges included. They share ONE definition of a
 trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
 flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
-five of the fourteen declared seams are written as. Where they still differ is what "touched the
+five of the sixteen declared seams are written as. Where they still differ is what "touched the
 kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
 empty for a clean merge, the resolution's own changes for an evil one), the census reads its
 effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
@@ -183,11 +193,11 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-09-b.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-10.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-09-b wave is merged into `loom`; the handoff says what each lane
+Every branch through the 2026-09-10 wave is merged into `loom`; the handoff says what each lane
 did and left open.
 
 ## Commands

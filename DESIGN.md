@@ -89,6 +89,25 @@ on exclusive router arms — is refused as `GRAPH010_CONCURRENT_WRITE`. Complexi
 boundary with no observable gain is a bad trade. *What would reopen it:* relaxing `GRAPH010` for
 provably-exclusive router arms.
 
+**THE TRIGGER ABOVE HAS ALREADY FIRED, and nobody acted on it — say that rather than leave a
+reader looking for it.** *"Relaxing `GRAPH010` for provably-exclusive router arms"* is
+`routerExclusive` (`graph/validate.ts:2774`, live inside `rule010ConcurrentWriters` at `:2389`),
+which landed at `ce025c1` on 2026-08-05, three weeks BEFORE this note was written at `f74d863`. So
+the condition was true the day it was set. It was not acted on, and the reason is worth stating:
+`routerExclusive` proves exclusivity for a NAMED PAIR of writers on one channel; it does not give
+the run a per-branch coordinate, which is what the reverted work was. **A trigger nothing checks is
+not a trigger.** Whoever next owns this note should either restate it as a condition that has not
+happened, or delete it and record that the reopening was declined on the evidence.
+
+**And `GRAPH010` now has a SECOND relaxation, which does not bear on this at all.**
+`branchLocalChannel` (`graph/validate.ts:2484`, `77c245a`, §A.40) exempts a channel every reader of
+which is inside the same fan-out branch as its writer, because there is one writer per branch and no
+fold across them. It is the OPPOSITE argument to the router one: `routerExclusive` says two DIFFERENT
+nodes never both run, which is the shape where siblings could diverge; `branchLocalChannel` says ONE
+node's parallel instances never observe each other, so the siblings stay identical and there is still
+nothing for a branch coordinate to isolate. See §A.48 for what it refuses for want of a dominance
+computation.
+
 **One axis fails closed, one fails open.** Integrity landed 2026-09-01 (`5bff93b`): `isExternal` no
 longer defaults to trusted. Confidentiality is still default-trusted — `applySecretFlow` reads the
 declared classification and there is no `effects: []` equivalent for a channel, while marking every

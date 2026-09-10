@@ -20,24 +20,24 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-09 on `bc926f8`
+## State — one command each, re-run 2026-09-10 on `26985b2`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,672 pass / 0 fail** | `npm test` |
-| pinned exports | 541 | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 14 declared seams | `node scripts/check-kernel.mjs` |
+| tests on `loom` | **3,750 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0) | `npm test` |
+| pinned exports | 542 (541 → 542, `c2360be` exported `FunctionNodeShape`) | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams (14 → 16, `f7f74d5` and `c2360be`) | `node scripts/check-kernel.mjs` |
 | zero runtime deps | ok, 66 files | `node scripts/check-zero-dep.mjs` |
-| NUL census | 5 files, 0 invalid UTF-8, of 469 tracked | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
+| journal vocabulary | 51 event types, unmoved this wave | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
 
-The kernel guard also prints a commits-judged count (640 at `bc926f8`). It is deliberately not a
+The kernel guard also prints a commits-judged count (674 at `26985b2`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-09-b.md` is the current handoff.
+`docs/handoff-2026-09-10.md` is the current handoff.
 
 ## Row census — three commands, run on this file
 
@@ -53,14 +53,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 44 | 23 | 21 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, and five things a stranger's port ran into |
+| §A | 53 | 29 | 24 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all five now closed), and nine opened by the 2026-09-10 wave |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 6 | 4 | 2 | decisions still owed, both narrow |
+| §D | 7 | 4 | 3 | decisions still owed; two narrow, plus whether `CODES` belongs on README's fork list |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 7 | 4 | 3 | housekeeping, two of it prose the 2026-09-09-b wave made false |
+| §H | 10 | 6 | 4 | housekeeping; the two the 2026-09-09-b wave made false are closed, three more arrived with this wave's own commits and its settlement |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -208,19 +208,19 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   `test/deployment/boot-banner.test.ts`.
 - **A.20 (superseded) · the four-sighting record.** No separate work: superseded by the struck A.20
   above, and kept only because the id is cited. Repro and closing condition are that row's.
-- **A.45 · The live SSE console says `failed` where `GET /runs/:id` says `skipped`.** File:
-  `packages/core/src/server/console.ts`. Repro:
-  `/usr/bin/grep -an 'task\.\(committed\|failed\|skipped\|cancelled\|leased\)' packages/core/src/server/console.ts`
-  → 3 arms (`task.leased`, `task.committed`, `task.failed`) and NO arm for `task.skipped` or
-  `task.cancelled`. So a branch a join absorbed, which `a5937fe` now journals as `skipped` (§B.2),
-  reaches the console's fold as the `task.failed` it was preceded by and stays `failed` there, while
-  the control plane's own projection reports `skipped` — two views of one run disagreeing about a
-  word. **It is FAIL-SAFE and that is why it is a row and not a fix**: `server/layout.ts`'s
-  `STATE_PRIORITY` ranks `failed` first and `skipped` sixth, so the console over-reports severity in
-  the one view whose job is to show a person the worst thing in a collapsed fan-out. `task.cancelled`
-  has been missing an arm for longer and for the same reason nobody noticed. **Closes when** the
-  console's fold covers both terminal words, with a test that drives a skip join through SSE and
-  compares the console's state to `GET /runs/:id`'s.
+- ~~**A.45 · The live SSE console says `failed` where `GET /runs/:id` says `skipped`.**~~ CLOSED by
+  `7ba3b99`, `25cd252` and `88b3bad`. The row asked for two arms and the answer was to stop counting
+  arms and census the SOURCE instead: `run/projection.ts` has **nine** `upsertTask` sites that set a
+  `state` (`/usr/bin/grep -an 'upsertTask(' packages/core/src/run/projection.ts` → 11 hits, of which
+  `:704` is the definition and `:802` sets `usage`), and every one now has a console counterpart —
+  `task.skipped`, `task.cancelled` and `task.retry_scheduled` arms plus `gate.raised`, and
+  `25cd252` for the ninth, which two builder reviews missed: `projection.ts`'s `gate.decided` arm
+  returns the RAISING task to `ready`, and the console left it `awaiting_gate` until the next frame
+  arrived. Repro now: `/usr/bin/grep -anc 'ev.type === .task\.' packages/core/src/server/console.ts`
+  → **7** (`task.ready`, `leased`, `committed`, `failed`, `skipped`, `cancelled`,
+  `retry_scheduled`), plus `gate.raised` and `gate.decided` — seven and two is the nine. `88b3bad` rode with it: `/health`'s
+  promise chain had an unhandled rejection. Pinned in `test/server/console.test.ts` against the new
+  shared harness `test/server/console-page.ts`.
 
 ### Guards over states nobody has constructed
 
@@ -289,6 +289,9 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   always did: `#runWaveInner` appends it immediately before the bodies run, carrying `attempt`, with
   its own seq as the fencing token — so what is missing is not a journal EVENT but a projection that
   keys channel state by it. DESIGN item 20 is the second customer for that fact.
+  **Re-checked on `26985b2` and unmoved**: `git diff 2309d3a..26985b2 -- packages/core/src/journal/events.ts
+  packages/core/src/run/projection.ts` is EMPTY, so the 2026-09-10 wave touched neither the
+  vocabulary nor the fold, and the repro still reads 3 prose hits.
 
 ### Compensation — what runs, and the gaps that do not
 
@@ -390,12 +393,49 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
 
 `examples/graphs/triage-failures.json` is one real chore ported against the public surface: a graph,
 three `function` bodies and an input directory, no fork and no source change. Eight friction points
-came out of it (`docs/workflow-port-2026-09-09.md` §3, F1–F8); three were fixed in that lane, F1 was
-documented rather than changed, and the four below are the ones with a file that has to move. Every
-repro here was run from `examples/` with `bin/loom` on `PATH`.
+came out of it (`docs/workflow-port-2026-09-09.md` §3, F1–F8). **Seven are now closed** — F6 in the
+port lane itself, then F2 (§A.40), F3 (§A.43), F4 (§A.41), F8 (§A.42), F5 (§H.6) and F7 (`2309d3a`,
+one README sentence) in the 2026-09-10 wave. **Two heads carry two different counts and both are
+right**: that doc's §0 "Closed since" is the ledger for the SIX that closed after it was written and
+names a commit for each; its §3 intro is the one that says seven, because F6 was fixed inside the
+port lane and never had a "since".
+**F1 is the one still open** and is now §A.53. §A.44 below is on no friction entry: it is the thing
+the port ASKED FOR rather than something it tripped over. Every repro here was run from `examples/`
+with `bin/loom` on `PATH`.
 
-- **A.40 · `GRAPH010` refuses a channel that is provably branch-local, and the workaround leaks into
-  the body.** *(F2 — the lane's judgement is that this is the one worth building.)* File:
+- ~~**A.40 · `GRAPH010` refuses a channel that is provably branch-local, and the workaround leaks
+  into the body.**~~ CLOSED at `77c245a` (the predicate), `468984b` (the example), `f94d812`,
+  `bf59862`, `4e297f4` and `ac693d0` (four review rounds, one per entrance to the join barrier).
+  `rule010ConcurrentWriters` exempts a channel that never leaves one fan-out branch, proved by
+  `branchLocalChannel` — an unlabelled precondition plus **W1-W6**, documented at the function.
+  `validate.ts` is `notKernel`, so no seam was owed.
+  **THE ROW'S OWN REPRO NO LONGER REPRODUCES.** Re-run on `26985b2` from `examples/` against a
+  freshly built binary: `loom compile graphs/triage-failures.json` → `ok`, six deadlines, exit 0,
+  with `raw` declared the natural way as `{"type": "string", "reduce": "replace"}` and
+  `triage-classify.js` reading a string. Precisely: the `join("\n")` that undid the array is gone and
+  its comment was REWRITTEN IN PLACE to explain the new state (`:23-27`, *"It used to be
+  `append_ordered` and this body carried a `join("\n")` to undo it"*); the file still contains three
+  `join("` calls for unrelated reasons, so grepping for the string is not the check — reading the
+  channel declaration is.
+  **HOW IT WAS ACTUALLY GOT RIGHT, because the method is the transferable part.** Three builder-side
+  review rounds each found one more entrance to the barrier and each patched it; a FRESH AGENT TOLD
+  TO REFUTE broke `4e297f4` with a running repro the three had missed — a plain `seq` edge into the
+  join node mints the join task through `#activate` with no quiescence test, and on the shipped
+  example's own shape branch b read branch d's value. `ac693d0` then stopped enumerating engine
+  methods and re-keyed W6 on the join's INBOUND EDGE LIST — exactly one `kind:"join"` edge per
+  declared member and nothing else — which is a property of the GRAPH the validator can see, rather
+  than a property of the ENGINE it cannot. A fifth reviewer then FAILED to break it — `dc73059`'s
+  body: **2,188 driven perturbations across two sweeps, 660 of them exempted-and-run, 273 on the
+  fall-through path every leak so far has used, and zero cross-branch reads**, plus a human-gate
+  pause and a full restart against the same store with root state holding the pre-fan-out value
+  throughout. What it DID find was three places where the prose claimed more than the code does, and
+  `dc73059` is those three corrections. Tests: `test/graph/branch-local-channel.test.ts` (3 accepts,
+  25 refusals, 2 controls) and `test/run/branch-local-replace.test.ts`.
+  **What it does NOT cover is §A.48, and the `seq`-edge entrance it exposed is §A.47** — a real,
+  pre-existing engine defect that W6 refuses to compile the `replace` subset of and leaves running
+  everywhere else.
+  THE ROW AS IT STOOD: *(F2 — the lane's judgement is that this is the one worth
+  building.)* File:
   `packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`. Repro, with `raw` declared the
   natural way as `{"type": "string", "reduce": "replace"}`:
   ```
@@ -415,8 +455,13 @@ repro here was run from `examples/` with `bin/loom` on `PATH`.
   exempts a channel whose every reader is inside the same fan-out subtree as its writer. That is a
   real dataflow analysis and not a message, and *"refusing is always allowed; loosening never is"*
   means it needs its own adversarial review rather than a drive-by.
-- **A.41 · `loom run` prints the human gate hint on STDOUT, after the JSON, so `| jq` breaks on
-  exactly the gate path.** *(F4.)* File: `packages/core/src/cli.ts`. Repro:
+- ~~**A.41 · `loom run` prints the human gate hint on STDOUT, after the JSON, so `| jq` breaks on
+  exactly the gate path.**~~ CLOSED at `175cdb3`: the gate hint goes to **stderr**, beside the run-id
+  hint that already did, so `loom run … 2>/dev/null | jq .status` parses on the gate path too.
+  `examples-triage.test.ts`'s `summary()` no longer slices stdout — it parses the whole of it, which
+  makes the helper an assertion that nothing else is printed there;
+  `test/cli/gate-hint-stream.test.ts` pins the stream.
+  THE ROW AS IT STOOD: *(F4.)* File: `packages/core/src/cli.ts`. Repro:
   ```
   $ loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null | tail -3
     }
@@ -429,8 +474,18 @@ repro here was run from `examples/` with `bin/loom` on `PATH`.
   branch on. `packages/core/test/examples-triage.test.ts` carries a `summary()` helper whose only job
   is to cut that line off. **Closes when** the gate hint moves to stderr, with a test that pins stdout
   as parseable JSON on the `awaiting_gate` path.
-- **A.42 · A function body's DELIBERATE refusal is reported as `E_INTERNAL`, the same code a genuine
-  bug in the body produces.** *(F8 — `packages/core/src/run/engine.ts`, KERNEL, so this one cannot be
+- ~~**A.42 · A function body's DELIBERATE refusal is reported as `E_INTERNAL`, the same code a
+  genuine bug in the body produces.**~~ CLOSED at `f7f74d5`, with a `Kernel-seam:` trailer. A body
+  returns `{refuse: {reason}}` and the ENGINE raises `validation`/`E_FUNCTION_REFUSED` on its
+  behalf — never retried, whatever the node's `retry` policy says, because `validation` is not in
+  `RETRYABLE` and `#retryDecision` returns at `engine.ts:9982` before it reads a policy. A REFUSAL
+  IS A RETURN AND NOT A THROW for the reason `{retry}` already was: `isLoomError` is an `instanceof`
+  and a guest object can never satisfy it, so the raise has to happen host-side. A throw stays
+  `E_INTERNAL`, which is now the code for a BUG rather than the code for both.
+  `OUTCOME_KEYS = ["writes","take","retry","refuse"]` (`engine.ts:1195`) is the whole vocabulary,
+  and both callers are covered — `#runFunction` and `#runEvaluator`'s assertion arm.
+  `test/run/function-refusal.test.ts`.
+  THE ROW AS IT STOOD: *(F8 — `packages/core/src/run/engine.ts`, KERNEL, so this one cannot be
   fixed from an extension at all, which is the point of recording it.)* Repro:
   ```
   $ loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
@@ -444,8 +499,17 @@ repro here was run from `examples/` with `bin/loom` on `PATH`.
   but not the same one — that is about retryability, this is about a refusal. **Closes when** a body
   can return a structured refusal that reaches a caller as its own class, which is a kernel change
   and a `Kernel-seam:` trailer.
-- **A.43 · `loom gates` shows a `contentDigest`, not the thing being approved.** *(F3.)* File:
-  `packages/core/src/cli.ts`, the `gates` verb. Repro: `loom gates <runId>` prints
+- ~~**A.43 · `loom gates` shows a `contentDigest`, not the thing being approved.**~~ CLOSED at
+  `da86076`: `loom gates <runId>` carries a `reads` field — the gate node's declared channels THAT
+  HAVE A VALUE (built from `view.visible`, so an unwritten one is not a key), recomputed from the
+  graph the journal's hash names. **Swept by the graph's own classification, which a reviewer had to
+  force:** the first version printed the channels in the clear on the argument that `loom run` and
+  `loom approve` already print `p.outputs` — but `outputs` is an author-chosen PUBLISHED subset while
+  this is `observedChannels`, which includes INPUTS, so it would have been the first CLI path to
+  print a channel a graph declared `secret_ref`, in the one place a classification exists to prevent
+  it. History was rebuilt, so no commit on `loom` ever printed one. The digest stays beside it as the
+  BINDING `loom approve` checks the graph against. `test/cli/gates-show-content.test.ts`.
+  THE ROW AS IT STOOD: *(F3.)* File: `packages/core/src/cli.ts`, the `gates` verb. Repro: `loom gates <runId>` prints
   `{gateId, nodeId, policyRef, contentDigest, approvers, …}` and no channel value, while the gate
   node declares `reads: ["report"]` and the run has computed it. `loom trace` shows the span tree
   without channel values and `loom approve` prints the report only AFTER the decision, so on the
@@ -456,9 +520,18 @@ repro here was run from `examples/` with `bin/loom` on `PATH`.
   `contentDigest` values, so it is a BINDING (what the approver was shown, which `loom approve` later
   checks the graph against) rather than a summary anybody could recognise. **Closes when** `loom
   gates` prints the channels the gate node reads.
-- **A.44 · A `function` body cannot read its own node's declared shape, so a bound is spelled twice.**
-  Repro: `SHARD_CEILING` in `examples/resources/function/triage-plan.js` and `maxWidth` on the `fan`
-  edge in `examples/graphs/triage-failures.json` are the same number, and
+- ~~**A.44 · A `function` body cannot read its own node's declared shape, so a bound is spelled
+  twice.**~~ CLOSED at `c2360be` (the mechanism, with a `Kernel-seam:` trailer) and `b181b55` (the
+  example consuming it). `ctx.node` is the node as the graph declared it, frozen:
+  `{id, type, reads, writes, out: [{id, kind, over?, as?, maxWidth?, maxIterations?}]}`. **`timeoutMs`
+  is deliberately NOT a member** — it is not the bound a body runs under, since `REBIND_DEADLINE`
+  recompiles the realm at another number, so publishing it would have handed a body a figure it
+  could not act on. Exported as `FunctionNodeShape` (surface 541 → 542). The duplication the row was
+  named for is gone rather than pinned: `/usr/bin/grep -ac SHARD_CEILING
+  examples/resources/function/triage-plan.js` → **0**, and the body takes the TIGHTEST `maxWidth`
+  over all matching fan-outs on its node. `test/run/function-node-shape.test.ts`.
+  THE ROW AS IT STOOD, repro: `SHARD_CEILING` in `examples/resources/function/triage-plan.js` and
+  `maxWidth` on the `fan` edge in `examples/graphs/triage-failures.json` are the same number, and
   `packages/core/test/examples-triage.test.ts` pins them together by reading `maxWidth` out of the
   graph — a patch on a seam rather than the seam. A body is handed channel values and nothing about
   the node that called it: no `ctx.node`, no `ctx.graph`. It matters because a fan-out CLAMPS
@@ -466,6 +539,309 @@ repro here was run from `examples/` with `bin/loom` on `PATH`.
   is the defect the port shipped and fixed) has to hard-code the number the graph already declares.
   **Closes when** a body's `ctx` carries its node's declared shape — a kernel change, and one that has
   to decide what a body may see without letting it decide anything.
+
+### Opened by the 2026-09-10 wave
+
+Each row below was found while building or reviewing that wave and is NOT a regression it
+introduced unless the row says so. Repros run from the repository root unless they say `examples/`.
+
+- **A.46 · A rewind reaches the live console as an ordinary event with no arm, so the console keeps
+  showing the states the rewind suppressed.** File: `packages/core/src/server/console.ts`. Repro:
+  `/usr/bin/grep -anc checkpoint packages/core/src/server/console.ts` → **0**. A rewind never edits
+  history — it appends `checkpoint.restored{mode:"rewind"}`, and that marker SUPPRESSES a range of
+  already-folded events, so what earlier events mean changes retroactively (`run/projection.ts:483`).
+  Server-side that is handled: `RunFolder` detects the marker, goes `stale`, and pays one full
+  re-fold. The console's `applyEvent` is a second, independent incremental fold in the page, and it
+  has arms for SEVEN `task.*` events, `gate.raised`, `gate.decided`, `state.reduced`,
+  `run.suspended` and `run.resumed` — and none for `checkpoint.restored`. So the tasks a rewind undid keep whatever
+  state they had, and the channel values it rolled back stay in `current.channels`, until something
+  reloads the page. Nothing forces that reload: `console.ts:401` re-fetches only on `snapshot`,
+  `gate.raised` and `gate.decided`, and `server/http.ts`'s live tail special-cases only
+  `run.completed`, `run.failed` and `run.cancelled` (`:3063`, `:4782`). This is the SAME SHAPE as
+  §A.45 one layer up — two folds of one journal, one of which does not know a word — and it is NOT
+  fail-safe: a rewind exists to undo something, and the screen goes on showing it done.
+  **Closes when** the console's fold answers `checkpoint.restored` the way the server's does — the
+  honest answer is probably to discard the incremental state and re-request the snapshot, since the
+  marker's whole meaning is "what you folded is wrong" — with a test that rewinds a run and compares
+  the console's state to `GET /runs/:id`'s, the way §A.45's does for a skip.
+
+- **A.47 · A `seq` edge into a `join` node mints the barrier's task with no quiescence test, and the
+  join then commits TWICE.** File: `packages/core/src/run/engine.ts`, **KERNEL**. `#maybeFireJoin`
+  is the only one of the three paths to a join task that tests anything: it refuses when
+  `p.tasks[joinTaskId] !== undefined` and computes `quiescent = !handingOff && !stillLive`.
+  `#activate`'s generic arm (`:10611-10620`) mints `task.ready` for `e.to` from the edge alone — no
+  node type, no `p.tasks` lookup, no barrier state — and for a root-coordinate task the id it
+  computes is byte-identical to `#maybeFireJoin`'s. `#fireEmptyJoin` (`:10789-10805`) checks
+  membership and duplicates WITHIN ITS OWN event array, and nothing else.
+  **Reproduced**, on a graph with only commutative channels, so `branchLocalChannel` and GRAPH010 are
+  never consulted: `start --fanout(4)--> A --join--> J --seq--> done`, plus a `seq` chain
+  `start → note0 → … → noteN → J`.
+  ```
+  bh=1 nh=0 par=16 status=succeeded hops=5 seenLen=4  seen=[a,b,c,d]
+  bh=1 nh=3 par=16 status=succeeded hops=6 seenLen=8  seen=[a,b,c,d,a,b,c,d]
+  ```
+  (`bh` = nodes in the branch, `nh` = hops on the `seq` path into `J`.) The join Task ran two full
+  `task.ready/leased/policy.decided/committed/state.reduced` cycles and `#foldJoin` folded the same
+  four contributions each time — four branches, eight entries — and `done` ran twice. **The run
+  reports `succeeded`.** The compile is clean in every row.
+  **IT ALSO FIRES EARLY AND LOSES WORK, which is the worse half.** Same sweep, same graph shape:
+  `bh=2 nh=1 par=16` → `seenLen=4` against a baseline of 8, so half the run's contributions were
+  discarded; `bh=3 nh=1 par=16` → 4 against 12; `bh=1 nh=1 par=2` → 3 against 4. Every one reports
+  `succeeded`. Which of double-fold, exact and truncated you get depends on `maxParallelism` and on
+  the hop counts of the two paths. **The worst row is the shortest graph**: a DIRECT
+  `start --seq--> J` beside the fan-out, at `par=16`, fires the barrier before any branch has
+  committed and the channel is never written at all — and the run still reports `succeeded`. A
+  second reviewer reproduced that row independently on the same harness.
+  **THE ENGINE'S OWN VALIDATOR ALREADY WRITES THIS DOWN**, which is why the row is about the engine
+  and not about the discovery: `graph/validate.ts:2600-2637` enumerates all seven paths to a join
+  Task, labels `#activate`'s generic arm *"the fourth entrance, and the reason this clause is keyed
+  where it is"*, and names `#maybeFireJoin` as *"the only one that tests quiescence"*. W6 exists
+  because of this defect. What has no row until now is the defect itself.
+  **PRE-EXISTING and independent of §A.40.** `git show 77c245a --stat` touches `validate.ts` and one
+  test and no engine file, and the same harness run against `2309d3a` (extracted with `git archive`,
+  no checkout) prints the identical `seenLen=8` row.
+  **Closes when** the generic arm of `#activate` routes a non-`join` edge whose target is a `join`
+  node through `#maybeFireJoin`. That half was patched in a scratch copy and every row of the sweep
+  then equalled the no-`seq`-edge baseline at every parallelism and hop count. **`#fireEmptyJoin`
+  must NOT be routed the same way and that is the trap**: patched, the empty fan-out strands
+  (`fired=false`, `status=failed`, zero hops) because the planner's own `take` still holds the
+  `fanout` edge whose `to` is a declared member, so `handingOff` is true and `quiescent` never
+  becomes true. An empty fan needs `#maybeFireJoin` to be told the fan planned zero branches; it is
+  not a call-site swap.
+  **AND W6's inbound-edge clause does NOT become redundant** — the tempting corollary, and it is
+  wrong. W6 uniquely covers two entrances (a non-`join` inbound edge, and a second fan-out's `join`
+  edge from a non-member); the other two entrances it is credited with are closed by SEPARATE lines
+  (`mode !== "all"` at `validate.ts:2681`, membership at `:2684-2686`). More to the point, deleting
+  it because the engine now routes correctly would re-key a compile-time guard on WHICH ENGINE
+  METHODS TEST QUIESCENCE — the enumeration shape that was tried and defeated three times, and that
+  `ac693d0` deliberately replaced. Fix the engine; keep W6.
+
+- **A.48 · What §A.40's exemption does NOT cover, in one row so the next author does not rediscover
+  it.** File: `packages/core/src/graph/validate.ts`, `branchLocalChannel`. The predicate is an
+  unlabelled precondition plus **W1-W6** (there is no W0:
+  `/usr/bin/grep -an 'W0' packages/core/src/graph/validate.ts` → no hits). Five separate residues,
+  every one CONFIRMED by running the validator, and all of them REFUSALS — this row is about what is
+  refused for want of an analysis, not about anything that is wrongly accepted:
+  (a) **The exemption covers only the fan-out's OWN target.** `:2506`
+  `if (fan === undefined || fan.kind !== "fanout" || fan.to !== writer) return false;`, and the code
+  says why in its own words at `:2503-2505`: *"A writer partway down the branch is therefore refused
+  for want of a DOMINANCE computation, not because such a graph is unsafe."* `idx.ancestors` answers
+  "there EXISTS a path", not "EVERY path", and `fan.to === writer` is the stand-in that makes the two
+  coincide. Widening it to real dominance is the row.
+  (b) **A read-modify-write is refused**, by W5: the writer that also declares a read is not skipped
+  at `:2714`, then fails `idx.ancestors.get(n.id)?.has(writer)` because a node is not its own
+  ancestor. Driven: the accepted baseline plus `read.reads` gaining `"raw"` and nothing else →
+  `GRAPH010_CONCURRENT_WRITE`.
+  (c) **`namedElsewhere` re-serialises the spec per pair.** `:2434-2452` rebuilds the spec object,
+  `JSON.stringify`s it and constructs a fresh `RegExp`, once per `(non-commutative channel, parallel
+  writer)` pair. It is deliberately LAST (`:2719`), so only near-accepted pairs pay. Measured on ONE
+  machine and MACHINE-DEPENDENT — carry the SHAPE, not the milliseconds — K exempt channels against
+  PAD unrelated nodes: `K=100 PAD=200` 10.2 ms vs `K=1` 3.4 ms; `K=100 PAD=1600` 125.6 ms vs
+  78.3 ms. The shape is what matters and it is stable across all three pairs: the added cost is
+  **linear in spec bytes × exempted pairs**, at roughly 0.2 ms per pair per 100 KB here. `compileMutation` re-runs the whole rule set, so the mutation path pays it
+  too.
+  (d) **A runtime `graph:mutate` adding a node behind the writer refuses with advice the model
+  cannot take.** Driven: a mutation adding one node `hop` behind `classify` — inside the branch,
+  proposer-dominated, a legal shape — makes `subtree` three while `gather.branches` still declares
+  two, so W6's membership clause `declared.size !== subtree.size` fails and the merged spec is
+  refused `GRAPH010_CONCURRENT_WRITE … fix: change channel "raw" to reduce: append_ordered`. A
+  mutation's whole surface is `addNodes`/`addEdges`/`reason` and `graph/mutate.ts` is **additive
+  only** — *"It may not change or remove an existing node, edge, channel, or policy field"* — so the
+  fix names the one edit the verb cannot perform. Amending the join's `branches` instead is refused
+  by MUT001, which forbids redefining an existing node. Already recorded as residue in `dc73059`'s
+  own body; this row is where it becomes something somebody works.
+  (e) **`namedElsewhere` is fragile to a `description` mentioning the channel** — and that is
+  DELIBERATE and already pinned, not latent: `test/graph/branch-local-channel.test.ts:164`, *"ACCEPT
+  is fragile on purpose: the DESCRIPTION mentioning the channel refuses"*. Its docstring
+  (`:2415-2418`) names the failure mode as over-reporting, which refuses, *"which is the direction a
+  loosening guard is allowed to be wrong in"*. It costs an author an inexplicable refusal and can
+  never buy a wrong accept.
+  (f) **Any node in the branch that carries `retry`, or is an `agent` or an `evaluator`, refuses the
+  whole exemption** — W4, `:2542` `if (n.retry !== undefined || n.type === "agent" || n.type ===
+  "evaluator") return false;`, whose own comment says it is refused *"because this analysis does not
+  track which attempt commits"*: refused for want of an analysis, the same category as (a). Driven,
+  and it is how somebody will actually meet it: adding a `retry` policy to `classify` in the SHIPPED
+  graph flips `loom compile` from `ok` to `GRAPH010_CONCURRENT_WRITE` on node `read` — a diagnostic
+  about a different node, a different channel and a reducer, with nothing in it about `retry`. Pinned
+  (`branch-local-channel.test.ts`, *"REFUSE: a `retry` on a node in the branch"*).
+  **A correction to how this residue was first written down.** The shape
+  `fan → a; a → x(writes); a → r; x → r` was offered as W2 over-refusing. W2 does refuse it — but
+  the refusal is CORRECT there, because `r` has a second inbound edge from `a` that skips `x` and
+  `#activate` emits one `task.ready` per inbound edge, so the read really can precede the write. The
+  honest statement of the over-refusal is (a) alone: the safe DEEPER-WRITER shapes are refused along
+  with the unsafe ones, because reachability cannot tell them apart.
+  **Closes when** (a) is replaced by a dominance computation over the subtree — at which point (b)
+  and the mutation half of (d) are worth re-asking, and (c)'s cost moves with whatever replaces the
+  census. (e) closes never on purpose.
+
+- **A.49 · `retry.onlyIf: ["E_FUNCTION_REFUSED"]` compiles clean and can never fire.** Files:
+  `packages/core/src/graph/validate.ts` (`checkCodes`, `:1202`) and `packages/core/src/run/engine.ts`
+  (`#retryDecision`). Repro, by reading the two in order:
+  ```
+  $ /usr/bin/grep -an 'if (!error.retryable) return undefined;' packages/core/src/run/engine.ts
+  9982:    if (!error.retryable) return undefined;
+  $ /usr/bin/grep -an 'policy.onlyIf' packages/core/src/run/engine.ts
+  10023:    if (policy.onlyIf !== undefined && !policy.onlyIf.includes(error.code)) return undefined;
+  $ /usr/bin/grep -an 'const RETRYABLE' packages/core/src/errors.ts
+  38:const RETRYABLE: ReadonlySet<ErrorClass> = new Set<ErrorClass>(["exhausted", "unavailable", "timeout"]);
+  ```
+  `E_FUNCTION_REFUSED` is class `validation` (`engine.ts:1336`, `err.validation(...)`), so
+  `error.retryable` is false and `#retryDecision` returns 41 lines before `onlyIf` is read.
+  **And it is a RUN, not only a reading.** The shipped graph with
+  `retry: {maxAttempts: 2, onlyIf: ["E_FUNCTION_REFUSED"]}` added to `collate` — a node OUTSIDE the
+  fan-out branch, because putting it on `classify` trips §A.48's W4 instead, which is its own finding:
+  ```
+  $ loom compile out/zz-onlyif.json
+  ok
+    retry collate (declared): maxAttempts=2 backoff=exponential initialMs=500 maxMs=30000 onlyIf=E_FUNCTION_REFUSED
+  exit 0
+  ```
+  The compiler ECHOES the dead filter back at the author, which is a sharper statement of the harm
+  than the greps are. The control proves `checkCodes` is membership-only and nothing more:
+  ```
+  $ loom compile out/zz-onlyif-bad.json     # onlyIf: ["E_NOT_A_CODE"]
+  ✗ GRAPH003_UNKNOWN_ERROR_CODE: node "collate".retry.onlyIf names error code "E_NOT_A_CODE",
+    which no error in this system carries — it would never match
+     fix: did you mean one of: E_NOT_AUTHORIZED
+  exit 1
+  ```
+  `checkCodes` validates `retry.onlyIf` members against `CODES` and nothing else, so every
+  non-retryable code is accepted into a filter that can never match. **NAMING THE SET**: `ErrorClass`
+  has nine members (`errors.ts:21-36`) and `RETRYABLE` holds three (`exhausted`, `unavailable`,
+  `timeout`), so the six that can never fire an `onlyIf` are `validation`, `policy`, `not_found`,
+  `conflict`, `cancelled` and `internal`. **There is no `permission` class** — the one that means
+  "denied by policy" is `policy`, and an earlier draft of this row invented the other name. It is FAIL-CLOSED (the effect is "no retry", which
+  is what a refusal wants) and that is why it is a row and not a fix; what it costs is an author who
+  writes it, sees it compile, and concludes the runtime honours it. It is the mirror of the trap
+  `#errorEdges` already documents at `engine.ts:10530`, where `codes` was declared and unread.
+  **Closes when** `checkCodes` refuses a `retry.onlyIf` member whose class is outside `RETRYABLE` —
+  a compile-time check with the same closed set behind it, and one that must NOT be extended to
+  `EdgeSpec.codes`, where a non-retryable code is exactly what an error edge is for.
+
+- **A.50 · A fan-out `maxWidth` that is a JSON STRING compiles clean, and a non-numeric one switches
+  `GRAPH010` off and drops every branch in silence.** File:
+  `packages/core/src/graph/validate.ts`, `rule007Fanout`. Repro, from `examples/` with `bin/loom` on
+  `PATH` (probe graphs written into the gitignored `out/`):
+  ```
+  $ sed 's/"maxWidth": 24/"maxWidth": "24"/'     graphs/triage-failures.json > out/zz-str.json
+  $ sed 's/"maxWidth": 24/"maxWidth": "banana"/' graphs/triage-failures.json > out/zz-fan.json
+  $ loom compile out/zz-str.json   → ok, exit 0
+  $ loom compile out/zz-fan.json   → ok, exit 0
+  ```
+  `:1992` `if (e.maxWidth === undefined)` is a PRESENCE test, and `"banana"` is not `undefined`.
+  `:2002` `if (e.maxWidth > expansion.maxFanout)` is a bare `>` on unvalidated data: `"24" > 24` is
+  `false` by coercion and `"banana" > 24` is `false` by `NaN`. Neither refuses. `graph/spec.ts:929`'s
+  `EDGE_FIELDS` is a NAME allowlist, so nothing type-checks the parse either.
+  **The second half is the serious one.** `:521` `[...parent, e.maxWidth ?? 1]` and `:561`
+  `parentWidth * (e.maxWidth ?? 1)` feed the concurrency analysis, so a `NaN` width turns GRAPH010
+  OFF. On three graphs identical but for that field: `24` → `GRAPH010_CONCURRENT_WRITE` on node
+  `read`; `"24"` → the same message, coerced; `"banana"` → **ok**. And at run time
+  `run/engine.ts:10573` is `items.slice(0, e.maxWidth ?? 0)`: `slice(0, "24")` coerces to 24
+  (accidentally right), `slice(0, "banana")` is `slice(0, NaN)` → **zero branches, no diagnostic** —
+  a run that ends `E_OUTPUT_MISSING` having dropped every shard without a word. On the SHIPPED
+  example the damage is masked by `examples/resources/function/triage-plan.js`, which refuses
+  `E_FUNCTION_REFUSED: … 0 state a numeric maxWidth` — a guard in a userland body, not in the
+  kernel, which is exactly the wrong place for it. **The examples lane already knew the first half
+  and pinned the workaround** (`test/examples-triage.test.ts:495`, *"a fan-out width that is not a
+  NUMBER is unreadable, not skipped"*, whose own comment says `GRAPH007` asks whether the field is
+  there and not what type it is); what is new here is that a NaN width also turns GRAPH010 off and
+  drops every branch on a graph with no such body in it.
+  **Closes when** `rule007Fanout` refuses a `maxWidth` that is not a positive integer, in the same
+  arm that refuses a missing one. `maxIterations` on a `loop` edge takes the same shape and should be
+  checked with it.
+
+- **A.51 · `loom gates`'s new `reads` field shows a payload HANDLE where the console shows text, and
+  bounds nothing.** File: `packages/core/src/cli.ts`. Both halves are DISCLOSED in the source that
+  shipped them (`da86076`), and are here because a disclosure in a docstring is not a row anybody
+  works.
+  (a) **Handle, not text.** `:5265` builds `reads` from `view.get(c)` over the raw `RunProjection`,
+  where `run/projection.ts:1362`'s `withHandles()` has already substituted `payloadHandle(ref)`. The
+  console's copy resolves first — `run/engine.ts:6048`, *"HERE, AND ONLY HERE, is where a handle
+  becomes a value … the gate payload a human reads"*. `cli.ts:5136-5141` states the divergence
+  itself: *"Over `EXTERNALISE_ABOVE_BYTES` the console operator sees text and this operator sees a
+  handle."* `EXTERNALISE_ABOVE_BYTES = 64 * 1024` (`journal/payloads.ts:86`). Driven: a 108,000-byte
+  `fs.read` into an eligible `replace` channel read by a `human_gate` prints
+  `reads.big -> {'$payload': {'digest': 'sha256:03bd38dc…', 'bytes': 108002}}`. So the CLI door
+  regains, in a different currency, exactly what §A.43 was opened to remove: an operator approving a
+  hash.
+  (b) **No size bound.** The same value declared as an OUTPUT — hence ineligible for externalisation,
+  so it stays inline — prints all 108,000 characters. `cli.ts:5174-5180` names the worst case rather
+  than capping it: *"`reads` repeats per gate, so a wide fan-out parked on a gate over a large
+  channel prints that channel once per branch."*
+  **Closes when** the CLI resolves a handle the way the gate payload does — which is the half that
+  makes the two doors agree — and states a bound for the inline case that is not "whatever the
+  channel holds". The two are separable; (a) is the one that costs an operator their judgement.
+
+- **A.52 · `dominantState` ranks seven of the nine task states, and a fan-out with one branch still
+  retrying renders green.** File: `packages/core/src/server/layout.ts:85-99`.
+  `STATE_PRIORITY` is `["failed","awaiting_gate","leased","ready","cancelled","skipped","succeeded"]`
+  while `run/projection.ts:58-67`'s `TaskState` union has **nine** members — `pending` and `retrying`
+  are on neither list. Repro:
+  ```
+  only retrying             -> "retrying"     (the states[0] ?? "" fallback catches it)
+  23 succeeded + 1 retrying -> "succeeded"    ← the defect
+  pending + succeeded       -> "succeeded"
+  ```
+  **The "returns empty string" reading is REFUTED** — `states[0] ?? ""` saves the homogeneous case.
+  The bug is PRIORITY, not absence, and it is the exact lie the function's own docstring forbids:
+  *"A fan-out where 24 branches succeeded and one is awaiting a gate is a fan-out waiting on a human,
+  and rendering it green would be a lie of omission."* It is also order-dependent whenever every
+  input is unlisted. **And the browser has its own copy** — `server/console.ts:640-645` carries the
+  identical seven-element inline array, so a fix that lands in one and not the other is the live
+  risk. Rendering: `console.ts:625` emits `class="node <state>"` and `:90-94` defines rules for the
+  seven only, so a `retrying` or `pending` node falls through to the neutral fill and is
+  indistinguishable from one that has not started; the label text does say `· retrying`.
+  **Closes when** both copies rank all nine — `retrying` and `pending` above `succeeded`, since both
+  mean "not finished" — with a test that asserts the priority list and the `TaskState` union have the
+  same members, so a tenth state fails there rather than rendering as nothing.
+
+- **A.53 · A fan-out branch may hold two nodes, and finding that out takes two compiles.** *(F1, the
+  one friction entry from the 2026-09-09 port still open.)* File:
+  `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin` and `rule008`. Repro is in
+  `docs/workflow-port-2026-09-09.md` §3 F1, pasted in full there: with `join.branches: ["classify"]`
+  the compile says `GRAPH021_FANOUT_WITHOUT_JOIN … fix: add a join node downstream of "read" with
+  branches: [read]`; following that `fix:` literally then says `GRAPH008_BRANCH_NOT_CONNECTED …
+  fix: add an edge read -> gather with kind: join`. Both exit 1. The rule neither states is *every
+  node in a fan-out branch needs its own entry in `join.branches` AND its own `"kind": "join"` edge
+  into the join*; the answer is the union of two `fix:` lines. Each message is individually correct,
+  which is why the port lane logged it rather than reworded one. It has since acquired a second
+  reader: §A.48's W6 clause keys the branch-local exemption on exactly that inbound edge list, so the
+  invariant a stranger cannot discover is now also the one a validator relies on.
+  **Closes when** one diagnostic names the whole rule — most cheaply by `rule021` looking at what
+  the branch actually contains before it suggests a `branches:` list, so the first message is the
+  right one rather than the first of two.
+
+- **A.54 · The CLI exits before stdout drains, so any output over 64 KiB is truncated on a pipe.**
+  File: `packages/core/src/cli.ts:11134`, `.then((code) => process.exit(code))`. On a pipe stdout is
+  ASYNCHRONOUS, so `process.exit` discards whatever is still buffered; to a file or a TTY the writes
+  are synchronous and nothing is lost. Repro, from `examples/`, on a gate whose `reads` is large
+  (360 synthetic failures under the gitignored `out/big/`):
+  ```
+  $ loom gates $RUN > out/gates-file.json ; wc -c < out/gates-file.json
+    126967
+  $ loom gates $RUN | wc -c
+     65536
+  $ loom gates $RUN | jq -r '.[0].gateId'
+  jq: parse error: Unfinished JSON term at EOF at line 1141, column 5
+  $ loom gates $RUN | cat > /dev/null ; echo ${pipestatus[1]}
+  0
+  ```
+  Exactly one pipe buffer, and **exit 0** either way. It is not silent for `jq`, which fails to
+  parse — but it is silent for anything that does not validate.
+  **THE 64 KiB IS THE OS PIPE CAPACITY AND NOT `EXTERNALISE_ABOVE_BYTES`**, which happens to be the
+  same number; nothing on this path reads that constant, and a bare Node script reproduces it with no
+  Loom in it — `node -e 'process.stdout.write("x".repeat(200000)); process.exit(0)' | wc -c` → 65536,
+  and the same at 40,000 → 40000. **The two interact the OPPOSITE way to the tempting reading**: a
+  channel big enough to fill the pipe is normally ELIGIBLE for externalisation and prints as a
+  ~116-byte handle (§A.51(a)), so it took an OUTPUT channel — the one case §A.51(b) exempts from
+  externalisation — to get 108 KB onto stdout at all. The `126,967` above therefore depends on a
+  synthetic input; **the reproducible parts are the 65,536 and the exit 0**, and any verb printing
+  more than a pipe buffer will show them. Found while verifying §A.51 and NOT introduced by this
+  wave — `process.exit` at the end of `main` predates it.
+  **Closes when** the exit path waits for stdout to flush rather than calling
+  `process.exit` with writes outstanding (set `process.exitCode` and let the loop drain, or await a
+  `write` callback), with a test that pipes more than 64 KiB through a verb and compares the byte
+  count to the same command redirected to a file.
 
 ---
 
@@ -640,6 +1016,36 @@ a decision's argument is the thing a future reader needs.
   one coordinate — `operator.command` on the first case's run. The question is whether that is one new
   event type or a second keyspace, and either answer is a kernel change with a `Kernel-seam:` trailer.
   **Closes when** the maintainer answers.
+- **D.7 · Whether `CODES` belongs on README's "Fork required" list, which names three closed sets and
+  is the property-2 alarm.** Repro:
+  ```
+  $ sed -n '/^## Extending it, and where that stops$/,/^## Why this exists$/p' README.md \
+      | /usr/bin/grep -a -c '^- \*\*'
+  3
+  $ node -e "import('./packages/core/src/errors.ts').then(m=>console.log(Object.keys(m.CODES).length))"
+  60      # 59 at 2309d3a — `E_FUNCTION_REFUSED` (f7f74d5)
+  ```
+  The three listed are a node type, a reducer and a ninth hook point, and README's argument for all
+  three is REPLAY: *"a fold can only reproduce a decision whose vocabulary the folding binary
+  knows."* `CODES` is closed for that identical reason and says so in `f7f74d5`'s own seam trailer —
+  `graph/validate.ts` must check `EdgeSpec.codes` and `retry.onlyIf` against a closed `CODES`, and
+  `run/projection.ts` must fold the failure. So a stranger who needs a code of their own must fork,
+  and README does not say it.
+  **What makes it a DECISION rather than a defect**, and why the 2026-09-10 docs pass did not just
+  add a fourth bullet: the list is written as *"each is a CLOSED SET whose refusal NAMES ITS
+  MEMBERS — quoted, because a row nobody can reproduce by running the thing does not belong on this
+  list"*, and `GRAPH003_UNKNOWN_ERROR_CODE` does NOT name its members — it prints
+  `did you mean one of: E_NOT_AUTHORIZED`, a prefix-matched suggestion over 60 codes
+  (`validate.ts`'s `nearest()`). So adding it either weakens the list's own quoting rule or needs the
+  refusal changed first. And CLAUDE.md §2 says the list *"moving the other way is the alarm"*, so
+  growing it from three to four is a claim about the product that a settlement pass may not make on
+  its own. **The options are: (a)** add a fourth bullet and raise CLAUDE.md §2's expected count to 4,
+  disclosing that the list grew by DISCOVERY and not by regression; **(b)** make
+  `GRAPH003_UNKNOWN_ERROR_CODE` enumerate, then add it under the existing rule; **(c)** argue that a
+  code differs from the other three because a graph can only NAME one, never define behaviour on it,
+  and record that argument beside the list so the next reader does not re-ask.
+  **Closes when** the maintainer picks one. Until then the ledger reads 3 and the reason it does is
+  here rather than nowhere.
 
 ---
 
@@ -860,8 +1266,16 @@ Each traces to a decision in `DESIGN.md`.
   by `e8c2fb5`, and the row UNDERCOUNTED its own survivor set — four count-claims in the region now
   name their members instead, pinned by `test/graph/deadline-set-is-named-not-counted.test.ts`, which
   parses the `NodeType` union out of `graph/spec.ts` so a ninth node type fails there.
-- **H.5 · `run/engine.ts`'s `driveToRest` comment names four node types this binary now adjudicates.**
-  KERNEL PROSE, so a `fix:` docstring change is owed and it is a row rather than a drive-by. Repro:
+- ~~**H.5 · `run/engine.ts`'s `driveToRest` comment names four node types this binary now
+  adjudicates.**~~ CLOSED at `2b6bc06`, a `fix:` on kernel prose. The comment now splits the two
+  questions the old one ran together: the four types are the ones where "the holder is dead" is not
+  knowable FROM THE GRAPH, and whether it is knowable AT ALL is the DEPLOYMENT's answer — an embedder
+  taking the default `new InProcessScheduler()` still parks such a run `running` for ever, while
+  under this binary `openWorkspace` passes `STRANDED_LEASE_MS` and those four ARE adjudicable.
+  Repro now: `/usr/bin/grep -an 'holder is dead' packages/core/src/run/engine.ts` → `3276`, and the
+  paragraph around it names both cases.
+  THE ROW AS IT STOOD: KERNEL PROSE, so a `fix:` docstring change is owed and it is a row rather
+  than a drive-by. Repro:
   `/usr/bin/grep -an 'holder is dead' packages/core/src/run/engine.ts` → `3141`, inside a block
   (lines 3139-3143) reading *"the four node types with no enforced deadline (`join`, `router`,
   `human_gate`, `subgraph`) are the ones where 'the holder is dead' is not knowable"*. That was true
@@ -870,8 +1284,19 @@ Each traces to a decision in `DESIGN.md`.
   no `strandedLeaseMs`, which is what the corrected sentence has to say. The lane that made it false
   named it and left it, because `run/engine.ts` was another lane's file that wave. **Closes when** the
   comment distinguishes the default scheduler from the one the CLI builds.
-- **H.6 · `loom --help` describes a four-member extension registrar; `README.md` documents ten.**
-  *(F5.)* File: `packages/core/src/cli.ts`, the `--extension-module` help text. Repro, at the source
+- ~~**H.6 · `loom --help` describes a four-member extension registrar; `README.md` documents
+  ten.**~~ CLOSED at `52d4b43`, and the count is DERIVED rather than typed: `EXTENSION_REGISTRAR_OPENS`
+  (`cli.ts:133`, its docstring from `:119`) is one row per thing the flag opens, `USAGE` interpolates
+  `Object.keys(EXTENSION_REGISTRAR_OPENS).length`, and
+  `test/cli/extension-registrar-help.test.ts` loads a module that reports `Object.keys` of what its
+  factory was actually handed and asserts `--help` names every one — so a member added to the call
+  and not to the table fails a test instead of quietly making `--help` false again. **Ten are passed
+  and nine are rows**: `jail` is the exception, because it is not something an operator registers
+  against but the operator's own jail handed through. Repro now:
+  `/usr/bin/grep -an 'FOUR things need no fork' packages/core/src/cli.ts` → no hits; `:364` reads
+  `${Object.keys(EXTENSION_REGISTRAR_OPENS).length} things need no fork`.
+  THE ROW AS IT STOOD: *(F5.)* File: `packages/core/src/cli.ts`, the `--extension-module` help
+  text. Repro, at the source
   so it needs no built binary — `/usr/bin/grep -an 'models, tools, channels, identity' packages/core/src/cli.ts`
   → 4 hits, of which `:303` is the HELP TEXT naming four members while `:2839` is the call actually
   passing ten; and `/usr/bin/grep -an 'FOUR things need no fork' packages/core/src/cli.ts` → `:305`.
@@ -883,9 +1308,71 @@ Each traces to a decision in `DESIGN.md`.
   **Closes when** the help text names the same set the registrar actually passes, with the count
   derived rather than written.
 
+- **H.7 · TWO stranded docstrings in `run/engine.ts`, and the second is why the first is hard to
+  see.** Repro:
+  ```
+  $ /usr/bin/grep -an 'A refused SoD gate\|A RETURN NOBODY READS' packages/core/src/run/engine.ts
+  1110: * A refused SoD gate, as a failed OUTCOME rather than a throw.
+  1121: * A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT.
+  $ /usr/bin/grep -an '^function requireOutcome\|^function sodOn' packages/core/src/run/engine.ts
+  1230:function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
+  1379:function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
+  ```
+  The SoD paragraph at `:1110` describes `sodOn`, **269 lines below it**, and the next declaration
+  after it is not `requireOutcome` either: between `:1121` and `:1230` sit `seedFromKey` and its
+  docstring, `REBIND_DEADLINE`, `Rebindable`, `OUTCOME_KEYS`, `VERDICT_KEYS`, `WHY_EXCLUSIVE` and
+  `WHY_ONE_VERDICT`. The paragraph at `:1121` DOES belong to `requireOutcome` and is stranded a
+  hundred lines above it. KERNEL PROSE, so a row rather than a drive-by, and the same class as §H.5
+  and §H.3 — prose that was true where it was written and was left behind by insertions above it.
+  It is PRE-EXISTING: at `2309d3a` the same three offsets are 1103 / 1190 / 1249.
+  **Closes when** each paragraph is adjacent to the declaration it describes. "The function it names
+  is the next declaration" is NOT the check — `:1121` names no function, and a file that interleaves
+  constants between a docstring and its subject can satisfy it while still being wrong. The check is
+  a reader's: open the file at each line and see what is under it.
+
+- **H.8 · `redactGateRead` in `cli.ts` is a second spelling of `server/http.ts`'s private
+  `redactChannels`.** Repro:
+  ```
+  $ /usr/bin/grep -an 'function redactGateRead' packages/core/src/cli.ts
+  5298:function redactGateRead(
+  $ /usr/bin/grep -anc 'redactChannels' packages/core/src/server/http.ts
+  8
+  ```
+  It arrived with §A.43 (`da86076`) and its own docstring DISCLOSES the duplication rather than
+  hiding it: *"IT IS A SECOND SPELLING AND THAT IS A SEAM, NOT A DECISION. `redactChannels` is
+  private to `server/http.ts`; the honest fix is one shared function, and it belongs to whoever owns
+  that file next."* It is recorded here so it is a known duplicate rather than a discovered one: the
+  failure mode of two spellings of a redaction rule is that a future classification is handled by one
+  and not the other, and this is the axis where the non-negotiable says loosening never is.
+  **Closes when** one function serves both, with the shared one living where neither file has to
+  import the other's private surface, and a test that adds a classification and asserts BOTH doors
+  blank it.
+
+- **H.9 · README's test-count FLOOR cannot be raised without editing the guard that checks it.**
+  Repro:
+  ```
+  $ /usr/bin/grep -an '2,300' packages/core/test/readme-gaps.test.ts
+  477:    claims: "2,300+ tests",
+  $ npm test   # suite total
+  ℹ pass 3750
+  ```
+  `readme-gaps.test.ts`'s Gates probe is well designed in one direction: it parses `(\d[\d,]*)\+
+  tests` out of the Gates ROW and asserts the stated floor is at or below what the suite actually
+  holds, counted from the test files — *"A FLOOR in the prose, so growth costs no doc edit."* But the
+  same entry ALSO carries `claims: "2,300+ tests"`, and the two table-wide tests assert that exact
+  substring is present and that it appears in the Gates row. So raising the floor to `3,700+`, which
+  the parse would accept and which is what the prose is for, fails the containment assertion. The
+  README's floor is frozen at 2,300 while the suite is at 3,750 — still TRUE, and 38% below the
+  truth, in the one row whose job is to tell a stranger how much is checked.
+  It is the general shape of a claims-string pin: it binds the DOC to a spelling when what it meant
+  to bind was a property. **Closes when** the Gates entry's `claims` is a spelling that survives the
+  floor moving — anchoring on `+ tests` or on the row name rather than on the digits — after which
+  the floor itself can be raised in the same commit. Costs one test edit and one README edit, which
+  is why it is a row and not something a docs pass may do on its own.
+
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-09 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-10 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -941,6 +1428,12 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.36 | `d9a8173` | nine run-id captures now decoded |
 | A.38 | `ba5f8c4` | pin confirmed; it predated the row |
 | A.39 | `ba5f8c4` | one `stripControlChars`, two callers |
+| A.40 | `77c245a`, `468984b`, `f94d812`, `bf59862`, `4e297f4`, `ac693d0` | `GRAPH010` exempts a provably branch-local channel — W1-W6, four review rounds and a refutation |
+| A.41 | `175cdb3` | gate hint on stderr, so stdout is JSON on the gate path |
+| A.42 | `f7f74d5` | `{refuse}` → `validation`/`E_FUNCTION_REFUSED`, never retried |
+| A.43 | `da86076` | `loom gates` shows the reads, swept by declared classification |
+| A.44 | `c2360be`, `b181b55` | `ctx.node` — a body reads its own declared shape |
+| A.45 | `7ba3b99`, `25cd252`, `88b3bad` | nine projection state sites, nine console arms |
 | B.1 | `7952c6a` | `strandedLeaseMs` reclaims all eight node types |
 | B.2 | `a5937fe`, `c816826`, `fa25cc7` | `task.skipped` wired; `channel.written` and `task.started` deleted |
 | C.4 | `96a03bf` | OTLP encoder, endpoint and push |
@@ -955,6 +1448,8 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | H.2 | `814e283` | fourteen broken citations repaired |
 | H.3 | `e8c2fb5` | four count-claims name their members |
 | H.4 | `96a03bf` | verb→flag applicability table |
+| H.5 | `2b6bc06` | `driveToRest` splits the graph's half from the deployment's |
+| H.6 | `52d4b43` | help text derived from the registrar object |
 | — | — | — |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
 | `mcp-seal` | `9cf88b5` | prefix reservation at every registration |
@@ -976,6 +1471,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | operator levers | `cc64481` | `deescalate`, in-flight and budget caps |
 | `--extension-module` | `cc320d1` | fork list moved the right way |
 | `port-workflow` | `f24bcb7`, `77da881`, `422a730` | `triage-failures` — one real chore ported with no fork, and the eight-entry friction log it produced |
+| `examples-consume` | `b181b55`, `0b3719a`, `f71cd1a`, `aaf4b65`, `76216df` | the ported workflow CONSUMES four of the things this wave built, rather than only no longer suffering them; `docs/workflow-port-2026-09-09.md` §0 is the "Closed since" head |
 
 **The defect class that accounted for nearly every real finding, stated once because it will
 recur:** *a guard answering its undecidable case with the passing value.* Members: `gateCandidate`
