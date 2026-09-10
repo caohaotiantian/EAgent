@@ -294,8 +294,10 @@ async function corpus(): Promise<{ dir: string; runIds: RunId[] }> {
     const runId = /"runId": "(\w+)"/.exec(r.out)?.[1];
     assert.ok(runId, r.out);
     assert.match(r.out, /"status": "awaiting_gate"/, r.out);
-    const gateId = /gate (\S+) on node approve/.exec(r.out)?.[1];
-    assert.ok(gateId, r.out);
+    // FROM STDERR: the hint moved there so `loom run … | jq` parses on this exact path — see
+    // TODO A.41 and `gate-hint-stream.test.ts`. Stdout is the JSON object and nothing else.
+    const gateId = /gate (\S+) on node approve/.exec(r.err)?.[1];
+    assert.ok(gateId, `${r.out}\n${r.err}`);
 
     const a = await cli(["approve", runId, gateId, "--workspace", dir, "--as", "u:release-manager"]);
     assert.equal(a.code, 0, `${a.out}\n${a.err}`);

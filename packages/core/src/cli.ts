@@ -7110,7 +7110,15 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // verbatim failed `E_GATE_NOT_AUTHORIZED` on any gate with approvers — the subject
             // defaults to "cli", which no approvers list names. It also used to need `--graph`,
             // which the workspace lookup now supplies.
-            process.stdout.write(
+            //
+            // STDERR, BECAUSE STDOUT IS THE JSON AND NOTHING ELSE. This line used to follow the
+            // object on stdout, so `loom run … | jq .status` parsed for a run that SUCCEEDED and
+            // failed for one that parked on a gate — precisely the case a script needs to branch
+            // on, and the one status this command exits 0 for without the work being done. The
+            // product already knew the rule one hint up: `announceRun`'s `run … — inspect it
+            // with:` is on stderr. A caller that grepped stdout for this line reads it with
+            // `2>&1`; a caller that piped stdout to a parser could not use this path at all.
+            process.stderr.write(
               `gate ${g.gateId} on node ${g.nodeId} — loom approve ${runId} ${g.gateId} --as YOUR_ID\n`,
             );
           }

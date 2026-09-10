@@ -254,12 +254,13 @@ test("BOTH DOORS ONTO THE GATE QUEUE AGREE — `loom run`'s hint and `loom gates
 
     const r = await run(["run", graphFile, "--workspace", d.dir, "--input", JSON.stringify({ plan: "ship it" })]);
     assert.equal(r.code, 0, r.err);
-    // The command prints the run summary and then one hint line per gate; the summary is
-    // everything before the first hint.
-    const parsed = JSON.parse(r.out.split("\ngate ")[0]!) as { runId: string; status: string };
+    // The command prints the run summary on STDOUT and one hint line per gate on STDERR, so
+    // the summary is the whole of stdout — see `gate-hint-stream.test.ts` and TODO A.41 for
+    // why the two streams are split that way.
+    const parsed = JSON.parse(r.out) as { runId: string; status: string };
     assert.equal(parsed.status, "awaiting_gate");
 
-    const hinted = [...r.out.matchAll(/gate \S+ on node (\S+)/g)].map((m) => m[1]);
+    const hinted = [...r.err.matchAll(/gate \S+ on node (\S+)/g)].map((m) => m[1]);
     assert.deepEqual(hinted, ["urgent", "slow"], "most urgent first — the hint is the ranked queue");
 
     // The other door, a fresh process over the same journal.
