@@ -60,7 +60,9 @@ edge names the array and the per-branch channel
 an arm into the join must be `"kind": "join"`** — a `seq` edge leaves `gather` inside the fan-out
 (`GRAPH008_HELD_JOIN_UNCOLLECTED`), no edge at all is `GRAPH008_BRANCH_NOT_CONNECTED`. A channel
 written by parallel branches needs a reducer that survives concurrent writers: `counts` is
-`append_ordered`, and `replace` is refused as `GRAPH010_CONCURRENT_WRITE`.
+`append_ordered`, and `replace` is refused as `GRAPH010_CONCURRENT_WRITE` — here because `gather`
+and `summarise` both read it AFTER the join. A channel nothing outside the branch touches is
+exempt and may be `replace`; §8's `raw` is one, and names the exact conditions.
 
 ## 2 · A `function` body — `resources/function/*.js`
 
@@ -264,11 +266,15 @@ this one runs offline and means what it says, because there was never a model in
   `classify` is `GRAPH021_FANOUT_WITHOUT_JOIN` on the fan-out's own target; adding `read` to
   `branches` without the edge is then `GRAPH008_BRANCH_NOT_CONNECTED`. Two compiles to find, and
   the second diagnostic is the one that says what to do.
-- **A channel a fan-out node writes needs a multi-writer-safe reducer even when only its own
-  branch reads it.** `raw` would be `{"type":"string","reduce":"replace"}` if `GRAPH010` could see
-  that no other branch reads it; it cannot, so `raw` is `{"type":"array","reduce":"append_ordered"}`
-  and `triage-classify.js` joins the one element back. Measured: a probe body printing `raw.length`
-  prints `1` in every branch, each holding its own shard.
+- **A channel a fan-out node writes may be `replace` when NOTHING outside its branch touches it.**
+  `raw` is `{"type":"string","reduce":"replace"}` and compiles, because `GRAPH010` exempts a
+  channel written by the fan-out's own target and read only by nodes behind it in the same branch
+  — a branch really does see only its own contribution. The exemption is narrow and everything it
+  cannot prove is refused: move `raw` into `collate`'s `reads` (past the join), name it in a
+  `${…}` tool argument, let a second node write it, put a `router`, a `subgraph`, a nested
+  fan-out, a `retry` or a loop in the branch, or give `gather` any `mode` but `"all"`, and the
+  compiler goes back to `GRAPH010_CONCURRENT_WRITE`. `counts` in §1 is one of those: `gather` and
+  `summarise` both read it after the join, so it needs `append_ordered`.
 - **`loom gates <runId>` shows a `contentDigest`, not the report.** What the approver has to judge
   is on the control plane — `loom serve`, then `GET /runs/<runId>` → `channels.report`, which is
   also what the console renders. From the CLI alone, the report first appears in `loom approve`'s
