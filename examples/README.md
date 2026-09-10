@@ -321,6 +321,15 @@ this one runs offline and means what it says, because there was never a model in
   started produces), and a gate MIRRORING one in a delegated child run — where the question is
   about the child's channels, so printing the parent's would label the wrong values as the content.
   Absence is not "this gate reads nothing".
+  **Two things beside absence, both answered on the ROW rather than by the value's shape.** A value
+  over 64 KiB is cut and marked `{"$truncated":{bytes,shown,head}}`, and `readsTruncated` names
+  exactly which channels this door cut (`--max-bytes` is the dial). And for a gate INSIDE a fan-out
+  branch, `readsMayBeStale` names the channels an earlier node on the gate's own branch has already
+  written: a fan-out holds a branch's writes until its join folds them, so what prints here is a
+  pre-branch value — or nothing at all, where the held write was the channel's first — while the
+  `contentDigest` beside it, and the approval itself, are over the OVERLAID value. `approve` in
+  this graph sits after the join, so neither applies to it; both do to any gate you put in a
+  branch. (`TODO.md` §A.58, §A.60.)
   `loom serve`, then `GET /runs/<runId>` → `channels.report`, is still the fuller view and is what
   the console renders.
 

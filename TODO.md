@@ -20,24 +20,25 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-10 on `fb9ee0e`
+## State — one command each, re-run 2026-09-11 on `6e3d0598`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,817 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0) | `npm test` |
-| pinned exports | 542, unchanged by this wave — `security/redact-channels.ts` (H.8) is deliberately not re-exported | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the one kernel edit this wave (`84338b3`, A.47) is a `fix:` and owes no trailer | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files (66 → 67, `security/redact-channels.ts`) | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **3,835 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,817 → 3,835) | `npm test` |
+| pinned exports | 542, **unmoved** — the 2026-09-10-c wave added no exported name: `readableFanoutWidth`, `describeWidth`, `heldOnThisBranch` and `heldWritesByBranch` are all module-private | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the one kernel edit in the 2026-09-10-c wave (`run/engine.ts`, by `3a27a98d` and `0dd0a524`) is a `fix:` and owes no trailer | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files, unmoved — the 2026-09-10-c wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types, unmoved this wave | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| error vocabulary | 60 codes, unmoved — `0dd0a524` refuses under `E_GRAPH_INVALID`, which the door beside it already raised | `Object.keys(CODES).length` |
 
-The kernel guard also prints a commits-judged count (703 at `fb9ee0e`). It is deliberately not a
+The kernel guard also prints a commits-judged count (714 at `6e3d0598`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-10-b.md` is the current handoff; `docs/handoff-2026-09-10.md` is the one before it.
+`docs/handoff-2026-09-10-c.md` is the current handoff; `docs/handoff-2026-09-10-b.md` is the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -53,14 +54,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 58 | 37 | 21 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six now closed, F1 with them), and five opened by the 2026-09-10-b settlement |
+| §A | 63 | 41 | 22 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and five opened by the 2026-09-10-c settlement (§A.60-§A.64) |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 8 | 4 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join` |
+| §D | 9 | 4 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, whether a join's inbound edge must be `kind: join`, and whether an empty fold may report `succeeded` |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 10 | 9 | 1 | housekeeping; §H.0 alone is open, and it is a decision the maintainer already made rather than work outstanding |
+| §H | 11 | 9 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and §H.10 is litter `npm test` writes into the repo |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -932,10 +933,12 @@ introduced unless the row says so. Repros run from the repository root unless th
   reproduce F1, 26,827 with a `seq`-wired inner join, all converge in ONE step over 65,126 choice
   combinations; and 29,748 reachable joins that are NOT offered were each checked to break the
   graph if dictated. Repro:
-  `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **14 pass / 0 fail**.
+  `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **20 pass / 0 fail**
+  (14 when this row closed; the 2026-09-10-c wave added six).
   **This closes F1, the last of the 2026-09-09 port's eight friction entries.** Two residues, each
-  its own row: the sibling rule `GRAPH008_HELD_JOIN_UNCOLLECTED` still takes three compiles
-  (§A.56), and the count and the dictated list answer different questions (§A.57).
+  its own row and **both since closed at `d770a07f`**: the sibling rule
+  `GRAPH008_HELD_JOIN_UNCOLLECTED` took three compiles and now takes two (§A.56), and the count
+  and the dictated list answer different questions and now say so (§A.57).
 
 - ~~**A.54 · The CLI exits before stdout drains, so any output over 64 KiB is truncated on a pipe.**~~
   File: `packages/core/src/cli.ts:11134`, `.then((code) => process.exit(code))`. On a pipe stdout is
@@ -982,50 +985,45 @@ introduced unless the row says so. Repros run from the repository root unless th
 Found while building or reviewing the second wave. None is a regression it introduced unless the
 row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work beside them.
 
-- **A.55 · A join in mode `any` or `firstSuccess` whose members all FAIL never releases, and the run
-  reports `succeeded`.** File: `packages/core/src/run/engine.ts:11134`. The predicate is
-  `case "firstSuccess": return succeeded >= 1;` and `any` shares it. When every member of the
-  barrier terminates without succeeding, `succeeded` is 0 for ever: the barrier never fires, the
-  join's task is never minted, everything downstream of it never runs — and `#finish` still calls
-  the run **`succeeded`**, because no task is left in a live state. `onBranchError: "skip"` does not
-  help; it is what makes the branches terminal in the first place. **PRE-EXISTING at `c98a108`**, and this is the row's
-  contested point, so the evidence is the CONTROL and not the fix. Run the same probe against
-  `c98a108` (extracted with `git archive`, no checkout): the graph with NO second path into the
-  join — `seq=N`, which never touches the arm §A.47 changed — ALREADY reads `Jready=0 done=0`
-  under `any` and `firstSuccess`. The `seq=Y` graph read `Jready=1 done=1` there, but only because
-  the A.47 double-mint fired the barrier without a quiescence test; closing A.47 removed that
-  spurious mint and made `seq=Y` agree with a baseline that was already broken. **A reader
-  comparing only `seq=Y` across the fix concludes A.47 introduced this, and that is the misreading
-  the control refutes.** Repro on the merged tree — a fan-out of two over a body that always
-  throws, into
-  `J {branches:["b0"], mode, onBranchError:"skip"}`, then `J --seq--> done`. **The graph declares
-  `outputs: []`** and that is load-bearing, not incidental: declare an output nothing writes and the
-  run dies `E_OUTPUT_MISSING` and reports `failed`, so the "says it worked" half only shows where
-  every declared output IS written, or none is declared.
+- **A.55 · A join releases a fold with ZERO contributions and the run reports `succeeded`.** File:
+  `packages/core/src/run/engine.ts`, `#foldJoin`. **This row's FIRST half is closed and its second
+  is not, and the split is the row.** Closed at `3a27a98d` (§Z): a join in mode `any` or
+  `firstSuccess` whose members all FAIL used to wait for an arrival that cannot come —
+  `fire = succeeded >= 1` is permanently false once every member is terminal — and now releases,
+  in **all four modes**, with and without a second entrance, at every parallelism, and across a
+  restart. `#maybeFireJoin`'s shared `noMoreArrivals` clause is the mechanism; `all` and `quorum`
+  already released and are unchanged. Measured on `start -fanout(2)-> b0 -join-> J -seq-> done`
+  over a body that always throws, `outputs: []`:
   ```
-  mode=any          par= 1 | seq=N status=succeeded note=undefined     Jready=0 done=0
-  mode=firstSuccess par=16 | seq=N status=succeeded note=undefined     Jready=0 done=0
-  mode=all          par= 1 | seq=N status=succeeded note=["done-ran"]  Jready=1 done=1
-  mode=quorum       par=16 | seq=N status=succeeded note=["done-ran"]  Jready=1 done=1
+  mode=any           status=succeeded Jready=0 done=0  ->  Jready=1 done=1
+  mode=firstSuccess  status=succeeded Jready=0 done=0  ->  Jready=1 done=1
+  mode=all           status=succeeded Jready=1 done=1  ->  unchanged
+  mode=quorum        status=succeeded Jready=1 done=1  ->  unchanged
   ```
-  `all` and `quorum` release; `any` and `firstSuccess` do not. The harness is
-  `test/run/join-seq-entrance.test.ts`'s — an `Engine` over a `MemoryStateStore`, a
-  `function/boom@stable` that throws, and a count of `task.ready` rows whose `taskId` starts `J@`.
-  **It is not fail-safe**: a barrier that cannot release is a run that silently does nothing and
-  says it worked, which is the "guard answering its undecidable case with the passing value" shape
-  one layer down — here the undecidable case is "every member is done and none succeeded".
-  **Closes when** `any`/`firstSuccess` distinguish "not yet" from "never": once every member is
-  terminal and none succeeded, the barrier must resolve — as a failure, or by releasing with an
-  empty fold — rather than waiting on an event that cannot arrive. Whichever is chosen,
-  `#finish` must not call the result `succeeded`. With a test asserting the run's status on a
-  fan-out whose every branch throws, in all four modes.
+  **WHAT IS STILL OPEN is the other thing the row asked for: that `#finish` not call the result
+  `succeeded`.** It was deliberately left to a maintainer decision (§D.9) rather than answered by
+  the lane, and **it binds `all` and `quorum` exactly as much as `any`** — all four release the
+  same zero-contribution fold today and always have, so it is not a property of the arm `3a27a98d`
+  touched. The sharpest repro is a GATE REJECT, because there the emptiness is a human's decision
+  and not a crash: a `human_gate` inside each fanned-out branch, both humans REJECT, a fresh
+  `Engine` over the parked SQLite journal resolves them — and the node behind the join runs
+  (`note=["done-ran"]`) and the run reports **`succeeded`**, in all four modes. Repro:
+  `node --test packages/core/test/run/join-all-branches-fail.test.ts` → **3 pass / 0 fail**; the
+  two lines that pin it are marked `TODAY` in *THE BARRIER RELEASES FROM THE JOURNAL ALONE — a
+  fresh Engine, two rejected gates*, so whoever settles §D.9 has a FAILING TEST TO FLIP rather
+  than a behaviour to discover.
+  **`outputs: []` is load-bearing** in every probe above and not incidental: declare an output
+  nothing writes and the run dies `E_OUTPUT_MISSING` and reports `failed`, which hides the "says
+  it worked" half.
+  **Closes when** §D.9 is answered and the answer is built — the candidate rule is `#foldJoin`
+  refusing `branchCount === 0 && expected > 0`, which changes `all` and `quorum` too — with the
+  two `TODAY` assertions flipped.
 
-- **A.56 · `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` names the `branches` entry and omits the
+- ~~**A.56 · `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` names the `branches` entry and omits the
   `kind: join` edge, so following it lands on a SECOND `GRAPH008` — the F1 defect, still open in
-  the sibling rule.** File:
-  `packages/core/src/graph/validate.ts`. §A.53 fixed GRAPH021 and left its sibling alone. Repro, on
-  a graph with an inner fan-out (`read --fanout--> sub`) whose inner join `subJoin` is held inside
-  the outer fan-out branch:
+  the sibling rule.**~~ File: `packages/core/src/graph/validate.ts`. §A.53 fixed GRAPH021 and left
+  its sibling alone. Repro, on a graph with an inner fan-out (`read --fanout--> sub`) whose inner
+  join `subJoin` is held inside the outer fan-out branch:
   ```
   $ loom compile p4-held.json
   ✗ GRAPH008_HELD_JOIN_UNCOLLECTED: join "subJoin" is inside a fan-out, so it HOLDS its fold for an
@@ -1039,83 +1037,263 @@ row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work be
      fix: add an edge subJoin -> gather with kind: join
   ```
   The second message tells you the half the first omitted: **the exact shape §A.53 closed, in the
-  rule next to it.** (Both compiles also print `GRAPH021` alongside; the blocks above quote only
-  the `GRAPH008` line each time, so your terminal shows more than the page does.) **Followed to convergence it is FOUR compiles**, measured — (1)
-  `GRAPH008_HELD_JOIN_UNCOLLECTED`, (2) `GRAPH008_BRANCH_NOT_CONNECTED`, (3) `GRAPH021`, which now
-  names `subJoin` too because it is in `gather.branches`, (4) clean. Only step (1)→(2) is this
-  row; (2)→(3) is the interleaving with GRAPH021 and is a consequence, not a second defect.
-  The graph is `examples/graphs/triage-failures.json` with an inner
-  `read --fanout(subs)--> sub --join--> subJoin` added; the reviewer's copy is
-  `.agent/refute-a53/p4-held.json` in the validate lane's worktree.
-  **Closes when** `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` names both halves the way GRAPH021's
-  now does — the `branches` entry AND the `kind: join` edge — with a test that follows the single
-  line and asserts the next compile is clean.
+  rule next to it.**
+  **THE ROW'S "FOUR COMPILES" WAS MEASURED ON A GRAPH WITH A SECOND FAULT IN IT, and the settlement
+  re-measured both.** Against `27f7d56` (`git archive`, no checkout), following one `fix:` per
+  compile: the PLAIN graph — `examples/graphs/triage-failures.json` in miniature, its outer join
+  `gather` already correct, plus the inner `read --fanout(subs)--> sub --join--> subJoin` — takes
+  **THREE**: (1) `GRAPH008_HELD_JOIN_UNCOLLECTED`, (2) `GRAPH008_BRANCH_NOT_CONNECTED`, (3) clean.
+  **FOUR** needs the outer join broken as well (drop `read` from `gather.branches` and its join
+  edge), which interleaves `GRAPH021` and gives (1) both codes, (2) both, (3) `GRAPH021` alone,
+  (4) clean. Only step (1)→(2) was ever this row; the GRAPH021 steps are §A.53's rule, already
+  closed, doing its job on a second fault.
+  **CLOSED at `d770a07f`.** The line now names the entry AND the `kind: join` edge, in §A.53's
+  words — ADDED to whatever the join already declares, never a replacement — and it says WHICH
+  join it means: *the barrier of the INNERMOST fan-out the held join is inside, adding one if that
+  fan-out has none*. Both graphs above drop by one compile, measured on the merged tree: plain
+  **3 → 2**, outer-join-broken **4 → 3**.
+  ```
+  fix: give the enclosing join — the barrier of the INNERMOST fan-out "subJoin" is inside, adding
+       one if that fan-out has none — an entry in its `branches` for "subJoin", and a `kind: join`
+       edge from "subJoin" into that join: a held join needs both, and the entry is ADDED to
+       whatever the join already declares. Or move "subJoin" outside the fan-out, so it applies
+       its own fold
+  ```
+  **INNERMOST is load-bearing, not decoration:** under double nesting "the fan-out X is inside"
+  names two fan-outs and only one works — a join two fan-outs deep collected by the OUTER barrier
+  makes that barrier reachable at two depths and fails closed on `GRAPH008_JOIN_DEPTH`, while the
+  inner one compiles. `heldFixEdits` parses the adjective, so dropping it breaks the test file
+  rather than the next reader's compile. **What the line does NOT claim is that the author's
+  choice is checked downstream** — it is not, and that gap is now §A.64.
+  Repro: `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **20 pass / 0
+  fail**. Nothing moved in what is REFUSED: over 183 graphs and 906 diagnostics the (file, code,
+  at) key set and every severity are identical to `27f7d56`, and GRAPH021's `fix:` is byte-
+  identical.
 
-- **A.57 · GRAPH021's node COUNT and its dictated LIST answer different questions, and the message
-  does not say so.** File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`. On the
-  §A.56 graph the one diagnostic says the branch *"holds 3 nodes (read, subJoin, classify)"* and
-  then dictates entries for *"each of read, classify"*. Both are correct and they are not the same
+- ~~**A.57 · GRAPH021's node COUNT and its dictated LIST answer different questions, and the message
+  does not say so.**~~ File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`. On the
+  §A.56 graph the one diagnostic said the branch *"holds 3 nodes (read, classify, subJoin)"* and
+  then dictated entries for *"each of read, classify"*. Both are correct and they are not the same
   set: the count is every node the branch CONTAINS, the list is every node the join must WAIT ON,
-  and a held inner join is in the first and not the second. A reader has no way to tell that the
-  missing name is deliberate rather than a bug in the message. It is pinned as behaviour by the
-  two-candidate case in `test/graph/fanout-branch-diagnostic.test.ts`, so the divergence is known
-  and tested — it is the PROSE that does not disclose it.
-  **Closes when** the sentence distinguishes the two sets, e.g. by saying which of the counted
-  nodes are collected by an inner join instead of by this one. Costs one message edit and the test
-  assertions that parse it (`namesIn`, `offeredJoins`), which throw on a sentence they do not
-  recognise — so this cannot be done as a drive-by.
+  and a held inner join is in the first and not the second. A reader had no way to tell that the
+  missing name was deliberate rather than a bug in the message. It was pinned as behaviour by the
+  two-candidate case in `test/graph/fanout-branch-diagnostic.test.ts`, so the divergence was known
+  and tested — it was the PROSE that did not disclose it.
+  **CLOSED at `d770a07f`.** The message now names the difference when there is one, and is
+  byte-identical when the two sets coincide:
+  ```
+  ✗ GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" but no downstream join waits on
+    it; the branch it opens holds 3 nodes (read, classify, subJoin), and the `fix:` line dictates
+    the ones that run into every join it offers — "subJoin" does not, so it is in this count and
+    not in that list
+  ```
+  **"every join it OFFERS", not "a join it offers"**: with two candidates a node may run into one
+  and not the other, and the dictated list has to be true whichever the author picks.
+  **AND THE CLAUSE PROMISES NO REFUSAL.** Its first draft said a join *must* wait on every counted
+  node "directly, or through another branch node that folds it"; nothing refuses a branch node
+  left unfolded, so that would have been a guarantee the compiler does not make. It reports what
+  the `fix:` line dictates and stops. It also may not say the difference is "already collected by
+  something": on the graph that motivated it nothing collects `subJoin` — GRAPH008 is refusing it
+  in the same run — so that wording would have swapped a silent omission for a false claim.
+  Repro: `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **20 pass / 0
+  fail**; `countedIn` reads the count off the message and THROWS on a shape it does not recognise,
+  the same contract as `namesIn`, so this cannot be reworded as a drive-by.
 
-- **A.58 · Residue on §A.51: four things `loom gates`'s bound does not do.** File:
-  `packages/core/src/cli.ts`. Each is disclosed in the source that shipped it, which is why they are
-  one row and not four.
-  (1) **The `$truncated` marker is recognised by SHAPE**, and `payloadHandle` explicitly refuses to
-  be — `journal/payloads.ts:66` returns `{$payload: {...}}` as a value the reader identifies
-  structurally, and `cli.ts:5508` states the collision out loud: a channel value that IS a
-  `$truncated` wrapper, under the cap, is indistinguishable from a marker this door wrote.
-  (2) **The bound is per VALUE, not per output.** `--max-bytes 65536` caps each channel value; a
-  wide fan-out parked on a gate over many channels still prints the sum of them, which is the worst
-  case §A.51(b) named and this cap narrows rather than removes.
-  (3) **`gateReadBound` accepts `Number()`'s exotic literals.** `Number("0x10")` is 16,
-  `Number("1e3")` is 1000, `Number("0b11")` is 3 and `Number(" 24 ")` is 24 — all
-  `Number.isInteger`, so all accepted. Nothing here is a disclosure risk (they are all smaller caps
-  than intended, i.e. they fail in the withholding direction), but `--max-bytes 1e9` reading as
-  1,000,000,000 while `--max-bytes 1e30` is refused is a boundary nobody chose.
-  (4) **`#withBranchWrites` is a third layer this door cannot apply** — item (3) of the enumeration
-  in `gatesWithReads` (`cli.ts:5155`, and again at `:5372`). The engine composes
-  `#withBranchWrites(ctx, await #resolveReads(…), branch)`; `withBranchWrites` is private to the
-  engine and the writes are not in the stored projection until a join folds them, so a gate inside
-  a fan-out branch shows this operator slightly less than the console. It predates §A.51.
-  **Closes when** each is either fixed or moved to a decision with an argument. (1) is the only one
-  that can mislead an operator and is the one to take first — most cheaply by a marker key a
-  channel value cannot spell.
+- ~~**A.58 · Residue on §A.51: four things `loom gates`'s bound does not do.**~~ File:
+  `packages/core/src/cli.ts`. Each was disclosed in the source that shipped it, which is why they
+  were one row and not four. **CLOSED at `f8bacd2d`, `fb59d63d`, `bb0e203e` — two fixed, one
+  recorded as a decision, one SPLIT.** Where the citations in `cli.ts`, `README.md` and
+  `test/cli/gates-branch-stale.test.ts` say **§A.58(4)**, the half still open is **§A.60**.
+  (1) **The `$truncated` marker was recognised by SHAPE**, and `payloadHandle` explicitly refuses
+  to be. **FIXED at `f8bacd2d`**: no key inside a value could have done it — JSON keys are
+  arbitrary strings, so every name a marker might use is one a node can write — and what a channel
+  value cannot do is add a key to the ROW that carries it. The gate row now carries
+  `readsTruncated`, a map from channel name to `{bytes, shown}` naming exactly what this door cut;
+  the `$truncated` wrapper stays in place, which is the same division `external` draws for
+  handles. Present whenever `reads` is, `{}` when nothing was cut. Measured: a channel whose value
+  IS a `$truncated` object renders as a value and is absent from `readsTruncated`, while the value
+  that was cut is named there with its full size.
+  (2) **The bound is per VALUE, not per output.** **DECISION: keep per-value**, argued at
+  `gatesWithReads` in `cli.ts`. A per-output budget makes what an operator sees depend on how many
+  OTHER gates are parked and in what order channels are visited — the first gate in a fan-out
+  prints whole and the last prints nothing, and the same gate shows different content as its
+  neighbours resolve. This door's subject is one human deciding on one gate. Accepted with it: a
+  worst case bounded by `gates × channels × maxBytes`, every cut of which is named on stderr and
+  in the row's own `readsTruncated`. The answer to "too many gates in one document" is selecting
+  or paging gates — a different feature, not a budget that silently decides which approver reads.
+  (3) **`gateReadBound` accepted `Number()`'s exotic literals** — `0x10`, `1e3`, `0b11`, `" 24 "`,
+  all `Number.isInteger` and all accepted. **FIXED at `f8bacd2d`**: `/^\d+$/` is now the whole
+  grammar, which is also what refuses `-5`, so the `n < 0` arm went with it. The refusal text was
+  corrected in the same wave (`fb59d63d`) — it said "a whole number of bytes" while the rule is
+  decimal digits only, so refusing `1e3` contradicted the message.
+  (4) **`#withBranchWrites` is a third layer this door cannot apply.** **SPLIT.** The recorded
+  argument was FALSE in both halves and had been promoted into `cli.ts`: it was not "a SIBLING's
+  committed write" (`#withBranchWrites` folds at EXACTLY the branch path — branch `#0` never sees
+  branch `#1`; what is missing is the gate's OWN branch's earlier nodes), and it did not "show
+  less and never more" (`reduceState` REPLACES a `replace` channel, so what this door printed was
+  a DIFFERENT, OLDER value). **The SILENCE half is closed** at `fb59d63d` and `bb0e203e`: whether
+  a held write EXISTS on a printed channel is decidable from `p.tasks` alone and needs no engine
+  seam, so every affected gate now carries `readsMayBeStale` and raises a `! MAY BE STALE` notice
+  on stderr, in both forms — *"prints an OLDER value for `mid`"* and *"prints NOTHING for `mid`,
+  whose only value is held"*, the second being the worse case the first round missed (the set is
+  `observedChannels(node)`, what the gate READS, not `view.visible`, which holds only channels
+  that already have a value). It over-reports on purpose: a held write whose value equals the base
+  is still named, because deciding otherwise means running the reducer. **The VALUE half is
+  §A.60.**
+  Repro: `node --test packages/core/test/cli/gates-reads-resolved.test.ts` → **9 pass / 0 fail**;
+  `node --test packages/core/test/cli/gates-branch-stale.test.ts` → **5 pass / 0 fail**.
 
-- **A.59 · Residue on §A.50: four things the width refusal does not reach.** File:
+- ~~**A.59 · Residue on §A.50: four things the width refusal does not reach.**~~ File:
   `packages/core/src/graph/validate.ts` and `packages/core/src/run/engine.ts`.
-  (1) **The runtime path is still reachable.** `Engine.submit` and `Engine.attach` take a `RunGraph`
-  directly and `#assertBound` does not re-check widths, so an embedder who builds one without going
-  through `compile` keeps `slice(0, NaN)` — zero branches, no diagnostic. The CLI cannot reach it;
-  an embedder can.
-  (2) **`EDGE_FIELDS` (`graph/spec.ts`) remains a NAME allowlist**, so the parse still type-checks
-  nothing; `rule007Fanout` and `rule006` now check two fields of it by hand, which is the general
-  problem solved twice.
-  (3) **THREE codes have an EMPTY `RAISED_CLASS` set** — `E_ROUTE_NOT_FOUND`,
-  `E_EFFECT_UNAVAILABLE`, `E_REQUEST_TIMEOUT` — so §A.49's refusal ACCEPTS them by design, and
-  they can be written into an `onlyIf` that can never fire. Repro:
+  (1) **The runtime path was still reachable.** `Engine.submit` and `Engine.attach` take a
+  `RunGraph` directly and `#assertBound` re-checked no widths, so an embedder who builds one
+  without going through `compile` kept `slice(0, NaN)` — zero branches, no diagnostic — and the
+  `NaN` propagated through `parallelWidth` so GRAPH010's concurrent-writer refusal silently
+  stopped firing. **CLOSED at `0dd0a524`**, and re-checked rather than declared out of scope
+  because the method already made that decision once, three lines earlier and on the identical
+  argument: an edge `kind` this build cannot read is closed at compile by
+  `GRAPH003_UNKNOWN_EDGE_KIND` and closed again at the door "because `attach` is public and
+  `RunGraph` is exported". Answering the other way would refuse a run for a mistyped `kind` and
+  accept one for a mistyped `maxWidth`, three lines apart. `E_GRAPH_INVALID` / class `validation`,
+  no new code and no new exported name. Repro:
+  `node --test packages/core/test/run/engine-assert-bound-width.test.ts` → **2 pass / 0 fail**,
+  thirteen unreadable values driven end to end through `submit` + `advance`.
+  **DECISION, taken by the lane and recorded here: READABILITY AND NOT THE CEILING.**
+  `rule007Fanout` also refuses a width over `expansion.maxFanout`; `#assertBound` does not, and
+  the test pins an over-ceiling width as ACCEPTED so the gap is a decision rather than an
+  oversight. The ceiling is a policy number the compiler produces by merging graph policy over
+  defaults, so re-deriving it in the kernel would be a second implementation of a budget, and any
+  drift would refuse graphs the compiler accepted — including runs already in flight, since
+  `#assertBound` runs on every `advance`. An unreadable width is a correctness hole; a width over
+  budget is the compiler's business.
+  (2) **`EDGE_FIELDS` remains a NAME allowlist** — carried forward as **§A.62**, now with a third
+  hand-written type test to point at.
+  (3) and (4) **CLOSE WITH (1)**, because the row already answers them and neither is work. (3):
+  three codes have an EMPTY `RAISED_CLASS` set — `E_ROUTE_NOT_FOUND`, `E_EFFECT_UNAVAILABLE`,
+  `E_REQUEST_TIMEOUT` — so §A.49's refusal ACCEPTS them BY DESIGN, refusing on a class nothing
+  pins being the same false refusal the comment table was rejected for. Repro:
   `/usr/bin/grep -acE '^  E_[A-Z0-9_]+: \[\],' packages/core/src/graph/validate.ts` → **3**.
-  **"Empty set" and "bare `{code, message}` record" are NOT the same set and the difference is the
-  point**: at least five codes are emitted as bare records, but `cbfdeb5` read the class off two of
-  them (`E_GATE_EXPIRED: ["timeout"]`, `E_OUTPUT_MISSING: ["internal"]`) plus `E_OVERSIGHT_LOOSENED`,
-  which is why they are no longer empty. Of those three, only **two** flipped to refusals —
-  `E_GATE_EXPIRED`'s `timeout` IS retryable, so it stays accepted — and that is the whole of the
-  43 → 45 move (measured at `4864df9`: 43/17; at HEAD: 45/15).
-  (4) **An `--extension-module` raising a pinned code under a class `RAISED_CLASS` does not list is
-  OVER-refused.** The escape is to drop `onlyIf` entirely, which retries on every retryable error
-  and loses nothing the filter could have expressed; it is written down at the head of
-  `test/graph/retry-onlyif-retryable.test.ts`.
-  **Closes when** (1) is decided — either `#assertBound` re-checks the widths a compile would have,
-  or the row is answered by stating that an embedder who skips `compile` is out of scope, which is
-  a real position and is the one the single-operator framing suggests. (2)-(4) close with it or
-  become their own rows.
+  "Empty set" and "bare `{code, message}` record" are NOT the same set: at least five codes are
+  emitted as bare records, `cbfdeb5` read the class off three of them, two of those flipped to
+  refusals, and that is the whole of the 43 → 45 move. (4): an `--extension-module` raising a
+  pinned code under a class `RAISED_CLASS` does not list is OVER-refused; the escape is to drop
+  `onlyIf` entirely, which retries on every retryable error and loses nothing the filter could
+  have expressed, and it is written down at the head of `test/graph/retry-onlyif-retryable.test.ts`.
+  One residue of (1)'s own is **§A.63**.
+
+- **A.60 · `loom gates` prints a pre-branch value for a gate inside a fan-out, and cannot print the
+  right one without an engine read-surface seam.** *(The VALUE half of §A.58(4); the SILENCE half
+  closed at `fb59d63d`/`bb0e203e`. Every `§A.58(4)` citation in `cli.ts`, `README.md` and
+  `test/cli/gates-branch-stale.test.ts` means this row.)* File: `packages/core/src/cli.ts`,
+  `gatesWithReads`. `#executeTask` composes `#withBranchWrites(ctx, await #resolveReads(…),
+  branch)`; a fan-out HOLDS a branch's writes until its join folds them, so the stored projection
+  a fresh `loom gates` reads does not carry them. `#withBranchWrites` is private to the engine and
+  the overlay needs `reduceState`, which for a `replace` channel REPLACES — so what this door
+  prints is not a subset of the truth, it is a DIFFERENT, OLDER value, or a blank where the
+  channel's only value is held. Repro, on `seed --fanout--> bump --seq--> approve` where `bump`
+  writes `mid` and the gate reads it:
+  ```
+  loom gates    ->  reads = {"mid":"BASE-VALUE-BEFORE-THE-BRANCH-WROTE"}
+                    readsMayBeStale = ["mid"]   ! MAY BE STALE on stderr
+  loom approve  ->  exit 0, succeeded, outputs = {"mid":"BUMPED-VALUE-THE-CONSOLE-SEES"}
+  ```
+  `#approvalStillCovers` does not fire, because nothing changed between raise and dispatch — the
+  disagreement is between two RENDERINGS, not across time. **`contentDigest` on that same row
+  binds the OVERLAID value** (`digest(#gateBinding)` over the projection composed in
+  `#executeTask`), so the binding does not describe the `reads` beside it, and **`loom approve`
+  executes on the overlaid value.** Pinned by
+  `node --test packages/core/test/cli/gates-branch-stale.test.ts` → **5 pass / 0 fail**, whose
+  first test asserts the printed value is still the STALE one — so the day the overlay closes,
+  that assertion fails and points here.
+  **Closes when** the engine exposes branch-held writes as a read surface a second door may use —
+  a seam to design, not a field to add — and `loom gates` renders through it. Reimplementing
+  `reduceState` in `cli.ts` is explicitly NOT the answer: that is a second copy of the engine's
+  rule in a second file, the drift `gatesWithReads` already refuses by calling `observedChannels`
+  and not `node.reads`. With a test asserting the printed value equals what `loom approve` then
+  executes on, for a gate inside a fan-out branch.
+
+- **A.61 · A node-written `{"$payload":{digest,bytes}}` prints in `loom gates` exactly like a
+  handle this door could not read back.** File: `packages/core/src/cli.ts`, `resolveHandles`, and
+  `packages/core/src/journal/payloads.ts`. This is §A.58(1)'s collision one field over, and it is
+  the one `readsTruncated` could not fix. The MECHANISM is right: `resolveHandles` decides what is
+  a handle from `p.external`, the fold's authoritative map, exactly as `payloadHandle`'s docstring
+  demands — *"NOTHING DECIDES 'IS THIS A HANDLE' BY LOOKING AT IT … sniffing the shape would hand
+  any node that can write a channel the ability to name a payload it never produced"*. The
+  READER's side is what has no authority: a channel whose value a node wrote as
+  `{"$payload":{digest,bytes}}` is not in `p.external`, is never resolved, and lands in `reads`
+  looking identical to an externalised channel whose `payloads.get` threw. Repro (by reading,
+  which is the whole complaint — there is nothing on the row to run against):
+  `/usr/bin/grep -an 'p.external\[c\]' packages/core/src/cli.ts` → the `need` filter, and no field
+  anywhere on the gate row names which channels were handles. The only difference between the two
+  cases is a `! CONTENT NOT SHOWN` line on **stderr**, which `jq` never sees — the same argument
+  that made §A.58(1) a defect. `README.md` already scopes the truncation claim and names this one
+  as open, so the README is not the thing to fix.
+  **Closes when** the gate row carries the door's own answer the way `readsTruncated` does — the
+  channels this door resolved and the channels it could not — so a reader never has to look at a
+  value's shape to know what it is. With a test driving a node-written `{"$payload":…}` beside a
+  genuinely unresolvable handle and asserting the row tells them apart.
+
+- **A.62 · `EDGE_FIELDS` is a NAME allowlist, so the edge parse type-checks nothing — and three
+  places now check a field of it by hand.** *(Carried from §A.59(2).)* File:
+  `packages/core/src/graph/spec.ts:921`, and the readers in `packages/core/src/graph/validate.ts`
+  and `packages/core/src/run/engine.ts`. `EDGE_FIELDS` says which KEYS an edge may carry and
+  nothing about their types, so `maxWidth: "24"` parses. The general problem is now solved three
+  times, by hand, in two files: `rule006Cycles` on `maxIterations` and `rule007Fanout` on
+  `maxWidth`, both via `isPositiveInt` (`validate.ts:2225`), and — since `0dd0a524` — the
+  executor's own copy, `readableFanoutWidth` in `engine.ts`, deliberately a third copy because
+  "the compiler is the earlier answer and the executor must not depend on having been the caller
+  of it". Repro:
+  `/usr/bin/grep -acE 'isPositiveInt|readableFanoutWidth' packages/core/src/graph/validate.ts packages/core/src/run/engine.ts`.
+  The third hand-written test is what turned this from a note into a row: one more field with a
+  type and it is four.
+  **Closes when** `EDGE_FIELDS` carries a type per field and the parse checks it, with the
+  hand-written predicates in `validate.ts` deleted in the same change — or with a decision that
+  the executor's copy must stay hand-written for the reason `EDGE_KINDS` is, in which case the row
+  states that and closes at two.
+
+- **A.63 · A refusal raised from `advance` leaves the run `running` with nothing journaled about
+  why.** File: `packages/core/src/run/engine.ts`, `#assertBound`. **Pre-existing and SHARED**: the
+  fan-out-width check (`0dd0a524`) and the edge-kind check three lines above it both `throw` out
+  of `#assertBound` before anything is appended, so the caller gets `E_GRAPH_INVALID` and the
+  journal — the only authoritative state — records that the run started and nothing else. A second
+  process attaching later sees a `running` run with no reason and no terminal row. Repro, measured
+  on the merged tree (a hand-built `RunGraph` with `maxWidth: "24"`, `submit` then `advance`):
+  ```
+  advance threw: E_GRAPH_INVALID / validation
+  status after refusal: running
+  journal event types: run.submitted, run.compiled, run.started, task.ready
+  any event naming the width? false
+  ```
+  It is the "journal is the only authoritative state" invariant in its ordinary form: a decision
+  was taken and the fold cannot reconstruct it. It is NOT one of the nine enumerated in
+  `test/run/oversight-survives-restart.test.ts` — no guard is switched off, and the refusal fails
+  CLOSED on every subsequent `advance`, which is why it is a row of its own rather than a tenth
+  member.
+  **Closes when** a refusal at this door either fails the run (a `run.failed` row carrying the
+  code) or is journaled as a refusal a fold can serve — and the decision covers BOTH checks, since
+  answering one and not the other reintroduces the three-lines-apart asymmetry `0dd0a524` closed.
+
+- **A.64 · `GRAPH008_JOIN_DEPTH` compares `fanoutDepth` NUMBERS and never `fanoutEdgeStack`, so a
+  held join collected by a SIBLING fan-out's barrier compiles clean.** File:
+  `packages/core/src/graph/validate.ts:2392`, the `armDepth !== joinDepth && armDepth !== joinDepth + 1`
+  arm. Two fan-outs off one node are two different instance spaces at the same DEPTH, so an arm
+  one level up in the wrong fan satisfies `armDepth === joinDepth + 1` and is accepted. This is
+  disclosed at the `GRAPH008_HELD_JOIN_UNCOLLECTED` fix line (`d770a07f`), which is why that line
+  names its referent and does not claim the author's choice is validated later. Repro — `plan`
+  fans out twice (`fanA -> a0`, `fanB -> b0`); inside fan A, `a0 --fanInner--> a1 --join--> aJoin`,
+  so `aJoin` is held; collect it with fan B's barrier `bJoin` — the entry AND the `kind: join`
+  edge, exactly the shape the `fix:` line dictates, but into the wrong fan:
+  ```
+  without the cross edge   errors: 1   GRAPH008_HELD_JOIN_UNCOLLECTED: join "aJoin" is inside a
+                                       fan-out … no join declares "aJoin" among its branches
+  with it                  errors: 0   warnings: (none)
+  ```
+  `bJoin.branches: ["b0","a0","aJoin"]` plus `aJoin --join--> bJoin`. Nothing refuses it: `aJoin`
+  is at depth 1 and `bJoin` at depth 0, and both are unambiguous, so every existing arm passes.
+  **Closes when** the arm compares STACK IDENTITY and not only depth — an arm at
+  `joinDepth + 1` must be opened by a fan-out edge on the join's own `fanoutEdgeStack` — with a
+  test on the two-sibling-fan shape above and a two-sided control that a legitimate one-level-up
+  arm in the SAME fan still compiles.
 
 ---
 
@@ -1349,6 +1527,40 @@ a decision's argument is the thing a future reader needs.
   **Closes when** the maintainer picks: refuse it (`GRAPH0nn`, a new code, with the message saying
   the runtime handles it and this is about intent), warn on it, or record the decision not to and
   say why beside W6.
+
+- **D.9 · Whether a join may release a fold with ZERO contributions and the run report
+  `succeeded`.** *(The open half of §A.55, and the reason that row is PARTIAL.)* All four modes
+  release the same zero-contribution fold today — `all` and `quorum` always have — so this is not
+  a question about the arm `3a27a98d` touched, and any answer binds all four. The shape that makes
+  it a decision rather than a defect is the GATE REJECT: a `human_gate` inside each fanned-out
+  branch, both humans reject, the barrier releases, the node behind the join runs and the run
+  reports `succeeded`. Two people said no and the graph carried on. Repro and the two `TODAY`
+  assertions that flip: `node --test packages/core/test/run/join-all-branches-fail.test.ts` →
+  **3 pass / 0 fail**.
+  **The options, with what each costs.**
+  - **(a) `#foldJoin` refuses `branchCount === 0 && expected > 0`.** One predicate, in the place
+    that already owns what a release MEANS (it holds the `onBranchError === "fail" && skipped > 0`
+    → `E_QUORUM_UNREACHABLE` arm). It changes `all` and `quorum` too, which is the point and also
+    the risk: a graph that today folds an empty fan and carries on would start failing, and an
+    empty fan-out is a legitimate shape — §A.47's `#fireEmptyJoin` exists for it. So (a) needs a
+    way to tell "the fan planned zero branches" from "every branch it planned contributed
+    nothing", and `expected > 0` is exactly that test.
+  - **(b) A `join.minBranches` knob.** The author declares how many contributions make a fold
+    meaningful, defaulting to 0 so nothing changes silently. Costs a `JoinSpec` field, a compile
+    rule, and a fold arm — and a field is a thing every future reader has to learn.
+  - **(c) Accept it as semantics and document it.** A join folds what arrived, an operator who
+    wants "no contributions is a failure" writes `onBranchError: "fail"`, and the row becomes a
+    sentence at `#foldJoin` plus a paragraph in `examples/README.md`.
+  **Recommendation: (a).** The failure it prevents is silent and unrecoverable — a run that did
+  nothing and said it worked, on evidence a human explicitly refused — and this project's own lens
+  names that shape: *a guard answering its undecidable case with the passing value*. (b) prices a
+  correctness question as a configuration one and lets the unsafe default stand; (c) leaves the
+  gate-reject case looking exactly like success in the journal, which is what an operator, an
+  audit rule and the exam grader all read. (a)'s risk is bounded and testable: `expected > 0`
+  excludes the empty fan, and the flip is visible in one test file.
+  **Closes when** the maintainer picks one. If (a), the two `TODAY` assertions in
+  `join-all-branches-fail.test.ts` flip, the empty-fan control from §A.47 is added beside them,
+  and §A.55 closes with it.
 
 ---
 
@@ -1707,9 +1919,30 @@ Each traces to a decision in `DESIGN.md`.
   files), while `npm test` reports 3,817 because it counts subtests too. The floor is below both,
   and it is a floor, so growth costs no doc edit — which was the whole point of the row.
 
+- **H.10 · `npm test` writes a journal database into the repo tree, on every run.** File:
+  `packages/core/test/cli/known-flags.test.ts` and `packages/core/src/cli.ts:1488`. The suite
+  drives every member of `KNOWN_FLAGS` with the literal value `"x"` — which is the right test, and
+  it is `--data-dir` that makes it write: `resolve(pathFlag(args, "data-dir") ?? …)` resolves a
+  relative path against `process.cwd()`, so `--data-dir x` means `<repo>/x`, and `mkdirSync` plus
+  `new SqliteStateStore` put `x/journal.db` there. **Pre-existing**, back to `96a03bf8`. Repro:
+  ```
+  $ rm -rf x && node --test packages/core/test/cli/known-flags.test.ts && ls x
+  journal.db
+  ```
+  **`git status` stays clean, which is why nobody noticed**: `.gitignore` line 10 is `*.db`, so the
+  file is ignored and a directory holding only ignored files is not reported. `x/` itself is not
+  ignored, so the directory survives every run and any non-`.db` artifact a future flag writes
+  there WOULD show up — as an untracked `x/` a reader has no name for. It is also a real, if
+  small, instance of the thing `cli.ts:1480`'s own comment is about: a flag whose wrong value
+  WORKS, and moves the journal somewhere nobody looks.
+  **Closes when** the suite drives its flags in a temp directory — a `mkdtempSync` workspace and
+  `--workspace`/`--data-dir` pointed into it — so nothing is written under the repo, with the
+  repro above finding no `x/` afterwards. Adding `x/` to `.gitignore` is the wrong fix: it makes
+  the litter invisible instead of absent.
+
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-10 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-11 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -1798,7 +2031,12 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | H.7 | `52d6c99` | two stranded paragraphs moved to their declarations |
 | H.8 | `ac6a293` | one channel-redaction rule, `security/redact-channels.ts`, for both doors |
 | H.9 | `e345951` | the Gates floor's claims string unpinned from its digits |
+| A.56 | `d770a07f` | a held join's `fix:` names the `branches` entry AND the `kind: join` edge, and says which join — the INNERMOST fan-out's barrier |
+| A.57 | `d770a07f` | GRAPH021 names which of the nodes it counts are not in the list it dictates |
+| A.58 | `f8bacd2d`, `fb59d63d`, `bb0e203e` | `readsTruncated` on the gate ROW, `--max-bytes` in decimal digits, per-value cap kept by decision, and `readsMayBeStale` for a branch-held read — the VALUE half split out as §A.60 |
+| A.59 | `0dd0a524` | `#assertBound` re-checks a fan-out width's READABILITY at the executor's door, and deliberately not the compiler's ceiling |
 | — | — | — |
+| §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. The row stays OPEN on its second half (§D.9) |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
 | `mcp-seal` | `9cf88b5` | prefix reservation at every registration |
 | `mcp-registrar` | `010510e` | three registrars refuse name collisions |

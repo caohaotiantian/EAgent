@@ -217,13 +217,17 @@ and `--max-bytes 0` removes it (§A.51, `5d2053b`). **To learn WHICH values were
 not the value's shape**, because a channel can hold that shape itself: alongside `reads`, the row
 carries `readsTruncated`, naming exactly the channels this door truncated and empty when it
 truncated none (§A.58; `journal/payloads.ts` refuses shape-recognition for `$payload` for the same
-reason — note that `$payload` itself is still recognised by shape here, so a node-written
-`{"$payload":…}` still reads like an unresolved handle). A second row field, `readsMayBeStale`,
+reason, and this door follows it — a handle is resolved off the fold's authoritative `external`
+map, never off the value's shape. What has no row-level answer YET is the reader's side of that:
+a node-written `{"$payload":…}` is an ordinary value, is never resolved, and prints identically to
+an externalised channel this door could not read back, the two told apart only by a stderr line
+— §A.61). A second row field, `readsMayBeStale`,
 names channels **the gate reads** that its own fan-out branch has already written — whether or not
 a value for them is printed, since a branch write can be the first value a channel ever had, in
 which case `reads` shows nothing for it at all. The engine overlays those writes when it builds the
 gate payload and `contentDigest`, and this door cannot, so it says so on stderr instead of printing
-a pre-branch value, or a blank, in silence (§A.58(4), still open). All three fields are absent,
+a pre-branch value, or a blank, in silence (the VALUE half is still open: §A.60, cited as
+§A.58(4) in the source that shipped it). All three fields are absent,
 rather than empty, on the rows that print no `reads` at all — each of those says why on stderr. The
 `contentDigest` stays
 beside it, because it is the BINDING `loom approve` later checks the graph against and never was a
