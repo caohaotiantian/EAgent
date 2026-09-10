@@ -751,7 +751,11 @@ api("/health").then((h) => {
   // On the input rather than the identity pill, which whoami owns — two writers on one
   // element is a race whose loser is whichever request was slower.
   if (!h.identity) $("tok").placeholder = "no identity source";
-});
+}).catch(() => { /* every other startup fetch on this page (whoami, loadRuns, loadGraphs) already
+  swallows its own failure the same way — this was the one bare .then with no .catch, so a health
+  check failing after the page loaded (a transient blip, the plane restarting) was an unhandled
+  promise rejection in the browser and, in a test harness, in the process. Nothing here needs the
+  health payload; the pill it would have set is a nicety, not load-bearing. */ });
 whoami();
 loadRuns();
 loadGraphs();

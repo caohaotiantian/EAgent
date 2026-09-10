@@ -447,16 +447,6 @@ test("A.45, gap 2 — gate.decided returns the gate's task to `ready`, the way p
     const state = await page.run(`current.tasks.get(${JSON.stringify(gateDecided.taskId)})?.state`);
     assert.equal(state, "ready", "the console must not still say `awaiting_gate` once the gate is decided");
     assert.deepEqual(page.errors, [], "no uncaught exception folding a real gate.decided event");
-
-    // `openConsole` starts several fire-and-forget requests the instant its script loads
-    // (`api("/health").then(...)`, `whoami()`, `loadRuns()`, `loadGraphs()`) that this test never
-    // awaits, because none of them are what it is testing. This test's own work is two
-    // synchronous `page.run` calls with no network round trip, so — unlike the slower tests in
-    // this file, whose several awaited requests give those a full loopback round trip's head
-    // start — it can reach `r.close()` while one is still in flight, and closing the plane out
-    // from under an in-flight fetch is what turns `unhandled promise rejection` into a failure
-    // this test did not otherwise have. A bounded pause, not a race with anything asserted above.
-    await new Promise((res) => setTimeout(res, 50));
   } finally {
     await r.close();
   }
@@ -479,6 +469,18 @@ test("THE FOLD ARMS THEMSELVES — a regression pin independent of any race the 
     /if \(ev\.taskId\) \{ const t = current\.tasks\.get\(ev\.taskId\); if \(t\) t\.state = "ready"; \}/,
     "gate.decided must return the gate's own task to ready, the way projection.ts's arm does",
   );
+});
+
+test("THE HEALTH CHECK NO LONGER LEAVES AN UNCAUGHT PROMISE — a second reviewer found the actual cause of a flake this file's own tests had papered over", () => {
+  // Every OTHER startup fetch on this page (`whoami`, `loadRuns`, `loadGraphs`) already wraps its
+  // `await api(...)` in its own try/catch; `api("/health").then(...)` was the one bare `.then`
+  // with no `.catch`, called unconditionally the instant the script loads. A test that closes the
+  // plane before this settles — the A.45 "gap 2" test above did, at ~10ms, well inside a loopback
+  // round trip — turned that into an unhandled rejection. The first fix for that was a bounded
+  // `setTimeout` before `r.close()`; a second reviewer correctly called that a probabilistic
+  // work-around rather than a structural fix (it narrows the race, it does not close it), so the
+  // actual bare `.then` is fixed here instead and the timer was deleted.
+  assert.match(CONSOLE_HTML, /api\("\/health"\)\.then\(\(h\) => \{[\s\S]*?\}\)\.catch\(/, "the health check's promise chain must end in a .catch");
 });
 
 test("THE CONSOLE'S FAN-OUT PRIORITY ORDER AGREES WITH server/layout.ts'S STATE_PRIORITY — one copy, watched", () => {
