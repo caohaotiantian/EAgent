@@ -77,23 +77,24 @@ async function loom(dir: string, argv: readonly string[]): Promise<Result> {
 }
 
 /**
- * The JSON object `loom run` prints — and ONLY it.
+ * The JSON object `loom run` prints — which is the WHOLE of stdout, and asserted as such.
  *
- * `examples-run.test.ts` can do `JSON.parse(r.out)` because its runs succeed. A run that parks on
- * a gate prints the JSON and then, ON THE SAME STREAM, the command to answer it:
+ * This used to slice stdout to the first line that was exactly `}`, because a run parking on a
+ * gate printed the JSON and then, on the same stream, the command to answer it — so stdout was
+ * unparseable in exactly the case a script most needs to branch on (friction F4 of
+ * `docs/workflow-port-2026-09-09.md`). `175cdb3` moved that hint to stderr, where the run-id hint
+ * already was, so the slice is gone and `JSON.parse` over the whole capture takes its place.
  *
- *     }
- *     gate gate_01M… on node approve — loom approve 01M… gate_01M… --as YOUR_ID
- *
- * so stdout is not parseable in exactly the case a script most needs to branch on. Recorded as
- * friction against `cli.ts` in `docs/workflow-port-2026-09-09.md`; here it is just something to
- * cut off. The closing brace of the printed object is the first line that is exactly `}`.
+ * PARSING THE WHOLE THING IS THE POINT, not a tidy-up: it is the assertion that nothing else is
+ * on stdout. The next line printed on the wrong stream breaks `| jq` for the same caller in the
+ * same way, and a slice would have absorbed it in silence.
  */
 function summary(r: Result): Record<string, unknown> {
-  const lines = r.out.split("\n");
-  const end = lines.indexOf("}");
-  assert.notEqual(end, -1, `no JSON object on stdout:\n${r.out}${r.err}`);
-  return JSON.parse(lines.slice(0, end + 1).join("\n")) as Record<string, unknown>;
+  try {
+    return JSON.parse(r.out) as Record<string, unknown>;
+  } catch (e) {
+    assert.fail(`stdout is not one JSON object (${String(e)}):\n${r.out}${r.err}`);
+  }
 }
 
 interface Gate {
@@ -101,6 +102,8 @@ interface Gate {
   readonly nodeId: string;
   readonly state: string;
   readonly approvers: readonly string[];
+  /** The gate node's declared channels and their values (`da86076`); absent when it cannot be recomputed. */
+  readonly reads?: Record<string, unknown>;
 }
 
 /** Run to the gate, and hand back the two coordinates every later verb needs. */
@@ -109,6 +112,10 @@ async function runToGate(dir: string): Promise<{ runId: string; gate: Gate }> {
   assert.equal(r.code, 0, `${r.out}${r.err}`);
   const s = summary(r);
   assert.equal(s["status"], "awaiting_gate", `${r.out}${r.err}`);
+  // …and the line telling a human how to answer it is on STDERR. `summary()` above is the half
+  // that says stdout is pure JSON; deleting the hint would pass that half and take away the one
+  // line an operator needs, so both are asserted.
+  assert.match(r.err, /^gate gate_\S+ on node approve — loom approve \S+ gate_\S+ --as YOUR_ID$/m, r.err);
   const runId = String(s["runId"]);
   const listed = await loom(dir, ["gates", runId]);
   assert.equal(listed.code, 0, `${listed.out}${listed.err}`);
@@ -124,6 +131,17 @@ test("triage-failures parks on the gate, and the report is NOT on disk yet", asy
     assert.equal(gate.nodeId, "approve");
     assert.equal(gate.state, "open");
     assert.deepEqual([...gate.approvers], ["u:you"]);
+
+    // WHAT THE APPROVER IS BEING ASKED ABOUT, on the CLI path and not only through `loom serve`.
+    // The gate node declares `reads: ["report"]`, so `loom gates` carries the report itself beside
+    // the digest — which is a binding to what was shown, not something a person can read. Asserted
+    // down to the ranking because "the field exists" would pass for an empty object, and this run
+    // is the one whose eight failures the next test counts.
+    const reads = gate.reads ?? {};
+    assert.deepEqual(Object.keys(reads), ["report"], JSON.stringify(reads));
+    const shown = reads["report"] as Record<string, unknown>;
+    assert.equal(shown["totalFailures"], 8);
+    assert.equal(shown["bucketCount"], 5);
     // THE WHOLE POINT OF THE GATE. `write` is downstream of `approve` over a `seq` edge, so a
     // run that stopped here has dispatched no `fs.write` — not "wrote it and will roll back".
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false, "nothing is written before a human answers");
@@ -233,14 +251,23 @@ test("a pattern matching nothing FAILS the run rather than reporting a clean sui
   // The undecidable-looking case answered the refusing way. A fan-out over an empty array
   // produces no branches, the join folds nothing, and the run would succeed with a report saying
   // "0 failing tests" — which reads as "your suite is green" when what happened is that the
-  // pattern was wrong. `triage-plan.js` throws instead, and names the pattern back.
+  // pattern was wrong. `triage-plan.js` refuses instead, and names the pattern back.
   const ws = workspace(["graphs", "resources"]);
   try {
     const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
     assert.notEqual(r.code, 0, `${r.out}${r.err}`);
     const s = summary(r);
     assert.equal(s["status"], "failed");
-    assert.match(String((s["error"] as Record<string, unknown>)["message"]), /no test-output files matched/);
+    const error = s["error"] as Record<string, unknown>;
+    assert.match(String(error["message"]), /no test-output files matched/);
+    // A.42's repro, and the reason the message alone is not the assertion. This arrives as
+    // `internal`/`E_INTERNAL` — the code a genuine BUG in the body produces — for as long as the
+    // body's only way to fail on purpose is `throw`. `{refuse: {reason}}` is what makes a caller
+    // able to tell a graph that declined from a body that crashed, and `validation` is what stops
+    // a `retry` policy ever granting it a second attempt.
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.equal(error["class"], "validation", r.out);
+    assert.equal(error["retryable"], false, r.out);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
   } finally {
     ws.dispose();
@@ -289,14 +316,25 @@ test("more shards than the fan-out can carry REFUSES, instead of dropping the su
   // said "8 failing test(s) across 8 report file(s)" with no warning on either stream — a third of
   // the evidence missing from a document a person is being asked to approve.
   //
-  // THE CEILING IS READ OUT OF THE GRAPH, never written here: the refusal lives in
-  // `triage-plan.js` as a duplicated constant (a body is handed channels, not its own node), and
-  // this is what stops the two drifting apart.
+  // THE CEILING HAS ONE HOME, and it is the graph. `triage-plan.js` used to carry a
+  // `SHARD_CEILING = 24` beside the `fan` edge's `maxWidth: 24`, and this test pinned the two
+  // together by reading the graph — a patch on a seam rather than the seam. Since `c2360be` a body
+  // reads `ctx.node.out`, so the constant is GONE and the assertion below is that it stays gone:
+  // a body that hard-codes the number again passes the drive but fails the read.
   const ws = workspace(["graphs", "resources"]);
   try {
     const spec = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: number }[] };
     const width = spec.edges.find((e) => e.id === "fan")!.maxWidth!;
     assert.equal(typeof width, "number");
+
+    // The body names `maxWidth` (it reads the edge) and never the NUMBER. Docstring and comments
+    // are stripped first, so prose that mentions a width — "30 shards with a width of 24" — is not
+    // what this catches; a literal in the code is.
+    const body = readFileSync(join(ws.dir, "resources", "function", "triage-plan.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    assert.equal(new RegExp(`\\b${String(width)}\\b`).test(body), false, `triage-plan.js hard-codes the ceiling:\n${body}`);
+    assert.match(body, /ctx\.node/, "…and the number it does not carry is read off the node instead");
 
     mkdirSync(join(ws.dir, "reports"));
     const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
@@ -307,10 +345,14 @@ test("more shards than the fan-out can carry REFUSES, instead of dropping the su
     assert.notEqual(r.code, 0, `${String(width + 1)} shards over a width of ${String(width)} must refuse:\n${r.out}${r.err}`);
     const s = summary(r);
     assert.equal(s["status"], "failed");
+    const error = s["error"] as Record<string, unknown>;
     assert.match(
-      String((s["error"] as Record<string, unknown>)["message"]),
+      String(error["message"]),
       new RegExp(`matched ${String(width + 1)} test-output files but this graph fans out at most ${String(width)}`),
     );
+    // The cap in that sentence came off the graph, so this also says the read WORKED: a body that
+    // could not find its fan-out edge refuses with the other reason and this regex fails.
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
 
     // …and EXACTLY at the ceiling it still runs, so this is a ceiling and not an off-by-one.
