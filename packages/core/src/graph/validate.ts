@@ -2414,6 +2414,35 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     // Task nobody reads and the run reports success having silently dropped every result
     // the inner barrier collected. It is invisible from the journal, because the inner join
     // really did succeed and really did write.
+    //
+    // THE `fix:` NAMES BOTH HALVES, and that is the F1 defect living in the rule next door.
+    // It used to say only "add it to the enclosing join's `branches`". Typing exactly that
+    // then produced `GRAPH008_BRANCH_NOT_CONNECTED` from the loop below — "no edge runs from X
+    // to the join" — because a branch entry and a `kind: join` edge are two edits and the line
+    // named one. Measured on `examples/graphs/triage-failures.json` plus an inner
+    // `read --fanout(subs)--> sub --join--> subJoin`: three compiles to converge, and four when
+    // the outer join is also incomplete so GRAPH021 is refusing in the same run. Both drop by
+    // one here. This is the same shape §A.53 closed in GRAPH021, so it closes in its words: the
+    // entry AND the edge, both, ADDED to whatever the join already declares.
+    //
+    // INNERMOST, because under double nesting "the fan-out X is inside" names two of them and only
+    // one is right. A join two fan-outs deep collected by the OUTER barrier fails closed on
+    // `GRAPH008_JOIN_DEPTH` — that barrier becomes reachable at two depths — while collecting it
+    // with the inner one compiles. The adjective is the whole difference between a line that
+    // converges and a line that costs another compile.
+    //
+    // THE ENCLOSING JOIN IS REFERRED TO AND NOT NAMED, and NOTHING DOWNSTREAM CHECKS THE CHOICE.
+    // Naming a candidate is what cost GRAPH021 four review rounds, so this line does not try —
+    // but do not read that as "the author's pick is validated later", which an earlier draft of
+    // this comment claimed and a reviewer refuted by running it. What the two sibling rules
+    // catch is narrower: `BRANCH_NOT_CONNECTED` below catches a `branches` entry with no edge,
+    // and `GRAPH008_JOIN_DEPTH` above catches an arm at the wrong DEPTH — it compares
+    // `fanoutDepth` numbers and never `fanoutEdgeStack`, so a join one level up in a DIFFERENT
+    // fan-out satisfies `armDepth === joinDepth + 1` and is accepted. Edits of the SHAPE this line
+    // dictates — the entry and the `kind: join` edge — but made into a sibling fan's barrier
+    // compile clean. The line names its referent and so does not ASK for that graph; nothing
+    // refuses it either. That acceptance is a real gap and it is not this row's; what belongs
+    // here is not overstating the safety net.
     if (joinDepth !== undefined && joinDepth > 0) {
       const collectedBy = spec.nodes.filter((o) => o.join?.branches.includes(n.id) === true);
       if (collectedBy.length === 0) {
@@ -2422,7 +2451,11 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
           code: "GRAPH008_HELD_JOIN_UNCOLLECTED",
           message: `join "${n.id}" is inside a fan-out, so it HOLDS its fold for an enclosing join to collect — but no join declares "${n.id}" among its branches, so that fold is written to a task nobody reads`,
           at: { nodeId: n.id },
-          fix: `add "${n.id}" to the enclosing join's \`branches\`, or move "${n.id}" outside the fan-out so it applies its own fold`,
+          fix:
+            `give the enclosing join — the barrier of the INNERMOST fan-out "${n.id}" is inside, adding one ` +
+            `if that fan-out has none — an entry in its \`branches\` for "${n.id}", and a \`kind: join\` edge from ` +
+            `"${n.id}" into that join: a held join needs both, and the entry is ADDED to whatever the join ` +
+            `already declares. Or move "${n.id}" outside the fan-out, so it applies its own fold`,
         });
       }
     }
@@ -2541,7 +2574,30 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * that case "still produces the sentence it always did", which was true of the MESSAGE and
  * false of the `fix:`, and a reviewer had to run both compilers side by side to find that out.
  * The message tail is the only part that varies with branch size: one member gets no
- * `; the branch it opens holds N nodes (…)` clause.
+ * `; the branch it opens holds N nodes (…)` clause. That tail has two forms, chosen by whether the
+ * count and the dictated list AGREE — the count is what the branch contains and the list is what a
+ * barrier can be told to wait on, so a branch node that does not run into EVERY candidate join is
+ * in the first and not the second. "every", not "some": with two candidates a node feeding only
+ * one of them is dropped from the list precisely because the list has to be true whichever the
+ * author picks. It was always so and the sentence never said so.
+ *
+ * THE DISAGREEING FORM PROMISES NO REFUSAL, which cost two review rounds. It first read "a join
+ * must wait on every one of them — directly, or through another branch node that folds it", and
+ * the load-bearing objection is that NOTHING REFUSES A BRANCH NODE LEFT UNFOLDED: an `error` arm
+ * named in the clause compiles clean once the dictated names are wired. The removal stands on that
+ * alone.
+ *
+ * The escape it offered was also incoherent, but only in the SINGLE-candidate arm, and the first
+ * correction overstated that. With one candidate ancestry is transitive, so a node folded through
+ * a branch member that reaches the candidate reaches the candidate itself and is in `waitsFor`
+ * already — the escape cannot exist for exactly the nodes the clause names. With TWO it can:
+ * `waitsFor` filters on reaching EVERY candidate, so a held node may reach one offered join
+ * through a branch node and not the other, which makes the promise not false but UNCHECKABLE —
+ * true or not depending on which join the author picks. Both readings argue for the same removal.
+ *
+ * So the form that names nodes states what the `fix:` line dictates and stops. The agreeing form
+ * keeps the pre-existing sentence byte-identical; its "must" is older than this clause and is not
+ * this rule's claim to make bigger.
  *
  * With two or more candidate joins the fix NAMES them and asks the author to choose. It used to
  * say "a join downstream of X" and leave the set implicit, which let a reader pick a join that
@@ -2637,6 +2693,24 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
         ? branch
         : branch.filter((id) => candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false));
 
+    // THE COUNT AND THE LIST ANSWER DIFFERENT QUESTIONS, so the message says which nodes the two
+    // disagree about. `branch` is what the branch CONTAINS; `waitsFor` is what a barrier can be
+    // told to wait ON, and the filter above drops any member that does not run into every
+    // candidate. Both numbers were already correct and the sentence disclosed neither: on a graph
+    // with a held inner join it read "holds 3 nodes (read, classify, subJoin)" and then dictated
+    // "each of read, classify", leaving a reader no way to tell the omission from a bug.
+    //
+    // WHAT THE CLAUSE MAY NOT CLAIM, twice over. Not that the difference is collected by
+    // something: on the graph that motivated this, NOTHING collects `subJoin` —
+    // `GRAPH008_HELD_JOIN_UNCOLLECTED` is refusing it in the same run — so "already folded by an
+    // inner join" would swap a silent omission for a false statement. And not that leaving one
+    // unfolded is refused: it is not. An `error` arm sitting in `held` compiles clean once the
+    // dictated names are wired, so a clause naming it and saying a join "must" wait on it
+    // promises a refusal this rule does not make. It reports which names the `fix:` line
+    // dictates and which it does not, and asserts nothing about either cause or consequence.
+    const held = branch.filter((id) => !waitsFor.includes(id));
+    const heldList = held.map((id) => `"${id}"`).join(", ");
+
     const each = waitsFor.join(", ");
     const fix =
       named !== undefined
@@ -2659,7 +2733,11 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
         // The count describes the BRANCH, never the dictated list — reporting the filtered list
         // here made "holds N nodes" change when an unrelated join was added elsewhere.
         (branch.length > 1
-          ? `; the branch it opens holds ${branch.length} nodes (${branchList}), and a join must wait on every one of them`
+          ? held.length > 0
+            ? `; the branch it opens holds ${branch.length} nodes (${branchList}), and the \`fix:\` line dictates ` +
+              `the ones that run into every join it offers — ${heldList} ${held.length > 1 ? "do" : "does"} not, ` +
+              `so ${held.length > 1 ? "they are" : "it is"} in this count and not in that list`
+            : `; the branch it opens holds ${branch.length} nodes (${branchList}), and a join must wait on every one of them`
           : ""),
       at: { edgeId: e.id },
       fix,
