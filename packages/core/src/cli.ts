@@ -85,6 +85,7 @@ import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph, type Span } from "./telemetry/spans.ts";
 import { OtlpHttpExporter } from "./telemetry/otlp.ts";
+import { encodeBranch } from "./ids.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, digestOf, sameContent, shapeOf, type Digest } from "./canonical.ts";
@@ -219,8 +220,16 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            marker would be BIGGER than the
                                                            value, in which case the value is
                                                            left whole and nothing is said,
-                                                           because nothing was withheld.
-                                                           --max-bytes 0 caps nothing
+                                                           because nothing was withheld. The
+                                                           row's readsTruncated names exactly
+                                                           the channels cut: read that, not
+                                                           the value's shape, since a channel
+                                                           can hold that shape itself. N is
+                                                           written in decimal digits;
+                                                           --max-bytes 0 caps nothing.
+                                                           readsMayBeStale names channels the
+                                                           gate's own branch already wrote,
+                                                           which this door cannot overlay
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
@@ -5152,15 +5161,57 @@ function subgraphDirs(): readonly string[] {
  *       (`TODO.md` §A.51a). `resolveHandles` below now makes the same call.
  *   (2) A CLASSIFIED CHANNEL — the sweep below blanks what `#gatePayload` does not. Deliberate,
  *       argued at length further down, and the one difference that TIGHTENS.
- *   (3) **A BRANCH-LOCAL WRITE — OPEN, AND NOT CLOSED BY (1).** `engine.ts:6060` is
- *       `#withBranchWrites(ctx, await #resolveReads(…), branch)`, a THIRD layer this door does
- *       not apply: a sibling's committed write is held until its join folds it, so
- *       `#gatePayload` sees it and `viewFor` over the stored projection does not. Measured on
- *       a gate inside an open fan-out whose sibling had already committed `mid`:
- *       `loom gates` prints `{"chunk":"a","mid":[]}` where the engine's payload holds the
- *       write. It predates §A.51a, `withBranchWrites` is private to the engine, and closing it
- *       is a row of its own — but a list that omitted it while claiming agreement would be the
- *       same false claim in a third draft.
+ *   (3) **A BRANCH-LOCAL WRITE — OPEN, AND THE MOST SERIOUS ENTRY ON THIS LIST.**
+ *       `engine.ts:6060` is `#withBranchWrites(ctx, await #resolveReads(…), branch)`, a THIRD
+ *       layer this door does not apply: inside a fan-out a task's writes are held until a join
+ *       folds them, and `#withBranchWrites` overlays them for the reader anyway, so
+ *       `#gatePayload` sees them and `viewFor` over the stored projection does not.
+ *
+ *       **WHOSE WRITE, AND WHICH DIRECTION — TWO CLAIMS THAT WERE BOTH WRONG HERE.** This
+ *       entry used to say "a sibling's committed write" and, in a later draft, that the door
+ *       "shows LESS than the console and never more, so it can only under-disclose". Neither
+ *       survives the code. `#withBranchWrites` folds tasks at EXACTLY this branch path — its
+ *       own docstring: *"Only tasks at EXACTLY this branch path are folded, so branch `#0`
+ *       never sees branch `#1`"* — so the writes a gate is missing are its OWN BRANCH'S
+ *       EARLIER NODES, not a sibling's. And it folds them with `reduceState`, which for a
+ *       `replace` channel REPLACES: what this door prints is then not a subset of the truth
+ *       but a DIFFERENT, OLDER value.
+ *
+ *       MEASURED, on `seed --fanout--> bump --seq--> approve` where `bump` writes `mid` and the
+ *       gate reads it:
+ *
+ *           loom gates  →  reads = {"mid":"BASE-VALUE-BEFORE-THE-BRANCH-WROTE"}
+ *           loom approve …  →  succeeded, outputs = {"mid":"BUMPED-VALUE-THE-CONSOLE-SEES"}
+ *
+ *       The operator answered for a value this door never showed them, and
+ *       `#approvalStillCovers` does not fire because nothing changed between raise and
+ *       dispatch — the disagreement is between the two RENDERINGS, not across time. On the
+ *       same row, `contentDigest` is `digest(#gateBinding(…))` over the OVERLAID `p`
+ *       (`engine.ts:6216` passes the same projection `:6060` composed), so the binding on the
+ *       row does not describe the `reads` beside it.
+ *
+ *       **WHAT THIS DOOR CAN DO ABOUT IT, AND DOES.** Computing the overlaid value needs
+ *       `reduceState` over the branch's held writes, which would put a second copy of the
+ *       engine's reducer in this file — the drift this function refuses one paragraph down by
+ *       calling `observedChannels` and NOT `node.reads` "because it is the call `#gatePayload`
+ *       makes and the two must not drift". Exposing the overlay from the engine is a change to
+ *       its read surface: a seam to design, not a field to add, and not this door's file. But
+ *       the UNDECIDABLE half is only the VALUE. Whether a held write exists on a channel the
+ *       gate READS is decidable from `p.tasks` alone, and `heldOnThisBranch` decides it: every
+ *       such gate carries `readsMayBeStale` naming those channels and raises the `! MAY BE
+ *       STALE` notice below.
+ *
+ *       **AND "A CHANNEL THE GATE READS" IS NOT "A CHANNEL THE ROW PRINTS" — the first draft
+ *       used the second and had a hole the size of the first defect.** It filtered against
+ *       `view.visible`, which holds only channels that HAVE a value, so a branch write that was
+ *       the FIRST value a channel ever had appeared in neither `reads` nor the warning:
+ *       `reads: {}`, `readsMayBeStale: []`, silence, and an approval on the held value. A blank
+ *       where the subject of the approval should be, unannounced. It filters `observedChannels`
+ *       now, and the notice distinguishes a channel printed STALE from one not printed AT ALL.
+ *
+ *       So the door no longer renders a stale value in silence — which is what it did — even
+ *       though it still cannot render the right one. THAT is the residue that stays open, and
+ *       it is a value this command cannot compute rather than a warning it forgot to print.
  *   (4) THE SIZE BOUND — the `--max-bytes` cap below is this door's alone, and at the default
  *       it bites hardest on exactly the large document (1) exists to show.
  *
@@ -5219,6 +5270,21 @@ function subgraphDirs(): readonly string[] {
  * second one nobody chose. `--max-bytes` raises it and `--max-bytes 0` removes it, because a
  * bound with no way past it does not bound an approver's output, it withholds it: an operator
  * asked to approve a 200 KB document must be able to read the 200 KB document.
+ *
+ * **PER VALUE, AND DELIBERATELY NOT PER OUTPUT** (`TODO.md` §A.58(2)). The cap NARROWS §A.51b's
+ * worst case rather than removing it: `reads` repeats per gate, so a wide fan-out parked on
+ * gates over many channels still prints the sum, bounded by `gates × channels × maxBytes`
+ * instead of by `maxBytes`. A per-OUTPUT budget was the alternative and is rejected on what it
+ * does to the person reading. A budget spent across the document makes what an operator sees
+ * depend on how many OTHER gates happen to be parked and on the order channels are visited: the
+ * first gate in a fan-out prints whole and the last prints nothing, and the same gate shows
+ * different content as its neighbours resolve. This door's subject is ONE human deciding on ONE
+ * gate, and an approver must be able to read the gate they were asked about however many
+ * siblings are open — which the per-value cap gives, identically for every gate and predictable
+ * from the flag alone. What is accepted with it: a large total, every cut of which is named on
+ * stderr and listed in the row's own `readsTruncated`, with `--max-bytes` as the dial. The
+ * answer to "too many gates in one document" is selecting or paging gates — a different feature
+ * with a different flag, not a budget that silently decides which approver gets to read.
  *
  * ORDER IS RESOLVE, THEN REDACT, THEN BOUND, and each step depends on the one before.
  * REDACTING FIRST sweeps the HANDLE and not the value, and what that costs depends on the
@@ -5293,6 +5359,13 @@ async function gatesWithReads(
   const mirrors: string[] = [];
   const unresolved: string[] = [];
   const truncated: string[] = [];
+  const staleBranch: string[] = [];
+  // ONE PASS OVER `p.tasks`, SHARED BY EVERY GATE. `heldOnThisBranch` asks "which tasks sit at
+  // exactly this branch path", and asking it per gate re-encoded every branch in the run once
+  // per gate. `run/engine.ts` measured that same scan at 21.7% of a 3,200-branch fan-out's CPU
+  // and answered it with a memoised index; this is that index, built once because a run with
+  // many open gates is exactly the wide fan-out where it costs the most.
+  const heldByBranch = heldWritesByBranch(p);
   const spec = graph.spec;
   // A `for` AND NOT A `.map`, because resolving a handle is I/O. Sequential rather than
   // `Promise.all`: the payload store is a filesystem and the gates on one run share channels,
@@ -5322,17 +5395,52 @@ async function gatesWithReads(
       continue;
     }
     const resolved = await resolveHandles(ws, p, node, task, unresolved);
-    const view = viewFor(resolved, spec.channels, task.branch, observedChannels(node));
-    rows.push({
-      ...g,
-      reads: Object.fromEntries(
-        view.visible.map((c) => [
-          c,
-          // THE SWEEP COVERS THE WHOLE VALUE HERE, and that argument is `GATE_READ_SWEEP`'s.
-          boundGateRead(redactChannelValue(spec.channels, c, view.get(c), GATE_READ_SWEEP), maxBytes, c, truncated),
-        ]),
-      ),
-    });
+    const observed = observedChannels(node);
+    const view = viewFor(resolved, spec.channels, task.branch, observed);
+    // WHICH OF THIS GATE'S VALUES THIS DOOR CUT, authored on the ROW rather than sniffed off the
+    // value. See `boundGateRead`: a channel value can be any JSON, so no key inside it is
+    // unspellable — but a channel value lives under `reads[c]` and cannot reach the row.
+    //
+    // THE SET IT APPEARS ON IS EXACTLY THE SET `reads` APPEARS ON — the rows built below this
+    // line — and it is absent from the three ways a gate reaches the output unchanged: the early
+    // `return gates` when the graph could not be resolved, and the two `continue` arms above (a
+    // MIRROR, and a node or task neither the graph nor this journal carries). `{}` is a statement
+    // — "nothing printed here was CUT" — and there is nothing for it to say about a row that
+    // prints no values; each of those three already says on stderr why it prints none.
+    //
+    // AND IT IS A CLAIM ABOUT TRUNCATION ONLY. It says nothing about whether the value is the
+    // one the gate is about; that is `readsMayBeStale`'s question, and they are two axes.
+    const cut: Record<string, GateReadCut> = {};
+    const reads = Object.fromEntries(
+      view.visible.map((c) => [
+        c,
+        // THE SWEEP COVERS THE WHOLE VALUE HERE, and that argument is `GATE_READ_SWEEP`'s.
+        boundGateRead(redactChannelValue(spec.channels, c, view.get(c), GATE_READ_SWEEP), maxBytes, c, cut),
+      ]),
+    );
+    for (const [c, f] of Object.entries(cut)) {
+      truncated.push(`\`${c}\` is ${String(f.bytes)} bytes, showing ${String(f.shown)}`);
+    }
+    // AND WHICH OF THEM THE GATE'S OWN BRANCH HAS ALREADY WRITTEN. Without this the row above
+    // says `readsTruncated: {}` — "nothing here was cut" — over a value that is not the one
+    // being approved at all, which is a stronger claim than this door can make.
+    //
+    // OVER `observed` AND NOT `view.visible`, WHICH IS THE WHOLE OF §A.58's SECOND DEFECT.
+    // `visible` holds only the channels that HAVE a value, so when the branch's own write is the
+    // FIRST value a channel ever had, the channel was in neither `reads` nor this list: the row
+    // printed `reads: {}` with `readsMayBeStale: []` and stderr said nothing, while the approval
+    // ran on the held value. The gate READS the channel either way, which is what `observed`
+    // says and what makes it the right set; a channel the gate does not read is still not named,
+    // because it is not in `observed` either.
+    const stale = heldOnThisBranch(heldByBranch, task, observed);
+    // THE TWO CASES READ DIFFERENTLY TO A HUMAN and are separated for the notice. A channel in
+    // `view.visible` printed a value that is merely OLD; one outside it printed NOTHING, and its
+    // only value is the held one — a blank where the whole subject of the approval should be.
+    const printedButStale = stale.filter((c) => view.visible.includes(c));
+    const notPrintedAtAll = stale.filter((c) => !view.visible.includes(c));
+    if (printedButStale.length > 0) staleBranch.push(`${g.gateId} prints an OLDER value for ${fence(printedButStale)}`);
+    if (notPrintedAtAll.length > 0) staleBranch.push(`${g.gateId} prints NOTHING for ${fence(notPrintedAtAll)}, whose only value is held`);
+    rows.push({ ...g, reads, readsTruncated: cut, readsMayBeStale: stale });
   }
   if (unexplained.length > 0) {
     process.stderr.write(
@@ -5357,8 +5465,26 @@ async function gatesWithReads(
   if (truncated.length > 0) {
     process.stderr.write(
       `! TRUNCATED — ${truncated.join("; ")}.\n` +
-        `  Each is marked in place with \`$truncated\`, which states the full size. Raise the cap with\n` +
-        `  \`--max-bytes <n>\`, or remove it entirely with \`--max-bytes 0\`.\n`,
+        `  Each is marked in place with \`$truncated\`, and the gate row's \`readsTruncated\` names exactly the\n` +
+        `  channels this door cut — read that, not the value's shape. Raise the cap with \`--max-bytes <n>\`,\n` +
+        `  or remove it entirely with \`--max-bytes 0\`.\n`,
+    );
+  }
+  if (staleBranch.length > 0) {
+    // NOT "CONTENT NOT SHOWN", because content WAS shown and that is the problem. The other
+    // three arms print no `reads` and say why; this one prints a `reads` that is OLDER than
+    // what the gate is about, which is the one failure a silent door cannot be trusted through.
+    // Measured on `seed --fanout--> bump --seq--> approve`, where `bump` writes `mid`:
+    // `loom gates` printed `{"mid":"BASE-VALUE-BEFORE-THE-BRANCH-WROTE"}` and the approval then
+    // ran to `succeeded` with `mid` = the value `bump` wrote — an operator answering for a value
+    // this door never put in front of them.
+    process.stderr.write(
+      `! MAY BE STALE — ${staleBranch.join("; ")}.\n` +
+        `  An earlier node on each gate's OWN branch has already written those channels, and a fan-out\n` +
+        `  holds a branch's writes until its join folds them. The engine OVERLAYS them when it builds\n` +
+        `  the gate payload and \`contentDigest\`; this door reads the stored projection and cannot. So\n` +
+        `  \`contentDigest\` may not describe the values printed above, and an approval executes on the\n` +
+        `  overlaid ones. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.58(4).\n`,
     );
   }
   return rows;
@@ -5370,10 +5496,12 @@ async function gatesWithReads(
  *
  * `#executeTask` applies THREE layers and this reproduces ONE of them:
  * `#withBranchWrites(ctx, await #resolveReads(ctx, leased, w), w.task.branch)`. The outer call
- * is a fan-out's held sibling writes, which this door does not have and cannot get —
- * `withBranchWrites` is private to the engine and the writes are not in the stored projection
- * until a join folds them. See item (3) of the enumeration in `gatesWithReads`, which is where
- * every remaining difference is listed; this function closes item (1) only.
+ * overlays the writes the gate's OWN BRANCH has already committed — NOT a sibling's, which is
+ * what this said until the code was read: `#withBranchWrites` folds tasks at exactly the branch
+ * path it is given. This door does not have them and cannot get them; `withBranchWrites` is
+ * private to the engine and the writes are not in the stored projection until a join folds them.
+ * See item (3) of the enumeration in `gatesWithReads`, which is where every remaining difference
+ * is listed and where the measured cost of this one is; this function closes item (1) only.
  *
  * `run/engine.ts` states the rule this borrows: *"HERE, AND ONLY HERE, is where a handle
  * becomes a value … the gate payload a human reads"*. That line is inside `#executeTask`, and a
@@ -5491,6 +5619,111 @@ function utf8Head(text: string, n: number): string {
   return buf.subarray(0, end).toString("utf8");
 }
 
+/** Channel names as they appear in a notice: `` `a`, `b` ``. */
+function fence(channels: readonly string[]): string {
+  return channels.map((c) => `\`${c}\``).join(", ");
+}
+
+/**
+ * THE RUN'S HELD WRITES, INDEXED BY BRANCH PATH — built ONCE per `loom gates`.
+ *
+ * The lookup below asks "which tasks sit at exactly this branch path", which is the question
+ * `run/engine.ts` measured at 21.7% of a 3,200-branch fan-out's CPU when it was asked per task
+ * with an `encodeBranch` per visit, and answered with a memoised index. Asking it per GATE has
+ * the same shape and the same worst case: a run with many open gates IS a wide fan-out, so the
+ * naive form is quadratic exactly where it hurts. One pass, and every gate reads its own group.
+ */
+function heldWritesByBranch(p: RunProjection): Map<string, Map<string, Set<string>>> {
+  const byPath = new Map<string, Map<string, Set<string>>>();
+  for (const t of Object.values(p.tasks) as TaskRecord[]) {
+    // Root tasks apply their writes at commit, so nothing they wrote is ever held. Skipping them
+    // here keeps the index to the branches that can actually have a held write.
+    if (t.branch.segments.length === 0) continue;
+    // The same filter `#withBranchWrites` applies before reducing: succeeded, and with writes.
+    if (t.state !== "succeeded" || Object.keys(t.writes).length === 0) continue;
+    const path = encodeBranch(t.branch);
+    let tasks = byPath.get(path);
+    if (tasks === undefined) byPath.set(path, (tasks = new Map()));
+    // Keyed by the WRITER'S taskId, so a gate can exclude itself without a second pass.
+    tasks.set(t.taskId, new Set(Object.keys(t.writes)));
+  }
+  return byPath;
+}
+
+/**
+ * WHICH OF A GATE'S OBSERVED CHANNELS ITS OWN BRANCH HAS ALREADY WRITTEN — `TODO.md` §A.58(4).
+ *
+ * Built in two halves: `heldWritesByBranch` indexes the run's held writes ONCE per command, and
+ * this looks one gate up in it. Splitting them is not tidiness — see that function.
+ *
+ * THIS DOES NOT FOLD ANYTHING, AND THAT IS THE POINT. `#withBranchWrites` runs `reduceState`
+ * over the branch's held writes, which for a `replace` channel REPLACES the value; reproducing
+ * that here would put a second copy of the engine's reducer in this file, which is the drift
+ * `gatesWithReads` already refuses by calling `observedChannels` and not `node.reads`. So this
+ * answers the DECIDABLE half — *is there a held write on a channel this gate READS* — and says
+ * so, instead of computing a value it has no business computing.
+ *
+ * **`observed`, NOT `view.visible`, AND THE DIFFERENCE WAS A DEFECT OF ITS OWN.** `visible`
+ * holds the channels that HAVE a value. When the branch's own write is the FIRST value a channel
+ * ever had — not an input, and nothing at root wrote it — the channel is in neither, so the
+ * first draft of this reported nothing at all. Measured on a fan-out whose `bump` writes `mid`
+ * where `mid` is not an input:
+ *
+ *     reads = {}   readsMayBeStale = []   stderr = ""
+ *     loom approve …  →  succeeded, outputs = {"mid":"BUMPED"}
+ *
+ * — the door printed a BLANK where the whole subject of the approval was, and said nothing,
+ * which is worse than the stale value that opened this row. `observed` is what the gate READS,
+ * so a held write on it is worth naming whether or not a base value exists. It is also still
+ * the bound in the other direction: a channel the gate does NOT read is absent from `observed`
+ * and is never named, however many branch writes it has.
+ *
+ * IT OVER-REPORTS BY CONSTRUCTION, in the refusing direction, on the channels it names. A held
+ * write whose value happens to equal the base is still named, because deciding otherwise means
+ * running the reducer. A guard that cannot decide says so rather than answering with the passing
+ * value — which is why the row's field and the notice both say MAY.
+ *
+ * THE TWO PREDICATES ARE THE ENGINE'S OWN, inlined rather than imported because both are one
+ * line and neither is the reducer. `writesHeldForJoin` is `branch.segments.length > 0` — a task
+ * at the ROOT coordinate applies its writes at commit, so nothing is ever held for it and this
+ * returns empty. And `#withBranchWrites` folds tasks at EXACTLY this branch path (its own
+ * docstring: *"Only tasks at EXACTLY this branch path are folded, so branch `#0` never sees
+ * branch `#1`"*), so this compares encoded paths for equality and not for prefix: what is
+ * missing from a gate's `reads` is its OWN branch's earlier nodes, never a sibling's.
+ */
+function heldOnThisBranch(byPath: Map<string, Map<string, Set<string>>>, task: TaskRecord, observed: readonly string[]): string[] {
+  if (task.branch.segments.length === 0) return [];
+  const tasks = byPath.get(encodeBranch(task.branch));
+  if (tasks === undefined) return [];
+  const held = new Set<string>();
+  for (const [taskId, channels] of tasks) {
+    // The gate's own task holds no write of its own to miss — a `human_gate` commits none — and
+    // excluding it keeps this about what the gate cannot see rather than what it did.
+    if (taskId === task.taskId) continue;
+    for (const c of channels) held.add(c);
+  }
+  // In the gate's own declared order, so the notice reads in the same order as the row.
+  return observed.filter((c) => held.has(c));
+}
+
+/**
+ * ONE ENTRY OF A GATE ROW'S `readsTruncated` — the door's own answer to "was this value cut?".
+ *
+ * THE TWO NUMBERS AND NOT THE HEAD. `head` is CONTENT and belongs where the value was, so a
+ * console that renders `reads` and nothing else still shows it; `bytes` and `shown` are the
+ * FACTS about the cut, and they are what a reader needs before deciding whether to raise the
+ * cap. They duplicate the marker's own fields exactly as `payloadHandle` duplicates
+ * `PayloadRef`'s — one place produces both, so there is nothing for them to drift from.
+ *
+ * NOT EXPORTED, and it must not be: `loom gates` prints a JSON document, and the shape a
+ * stranger consumes is that document. Exporting a type for it would pin a row shape this file
+ * builds inline (`{...g, reads, readsTruncated}`) and that `GateSummary` does not own.
+ */
+interface GateReadCut {
+  readonly bytes: number;
+  readonly shown: number;
+}
+
 /**
  * ONE REDACTED CHANNEL VALUE, CAPPED, AND SAYING SO.
  *
@@ -5500,15 +5733,29 @@ function utf8Head(text: string, n: number): string {
  * how much of it is here. `head` is the prefix rather than the tail because a document's first
  * bytes are what identify it.
  *
- * **AND IT IS RECOGNISED BY SHAPE, WHICH `payloadHandle` REFUSES TO BE.** `journal/payloads.ts`
- * says of `$payload`: *"NOTHING DECIDES 'IS THIS A HANDLE' BY LOOKING AT IT … sniffing the
- * shape would hand any node that can write a channel the ability to name a payload it never
- * produced"* — and answers it with the fold's authoritative `external` map. There is no
- * equivalent side channel for a rendering decision made at print time, so a channel whose real
- * value IS a `$truncated` wrapper, under the cap, is indistinguishable from a marker. Stated
- * rather than implied by the parallel: the direction of the confusion is a fabricated OMISSION
- * and never a disclosure, and the stderr notice names every channel actually cut. Closing it
- * properly means a field on the row rather than a wrapper on the value.
+ * **AND IT IS NO LONGER RECOGNISED BY SHAPE, WHICH `payloadHandle` REFUSES TO BE** (`TODO.md`
+ * §A.58(1)). `journal/payloads.ts` says of `$payload`: *"NOTHING DECIDES 'IS THIS A HANDLE' BY
+ * LOOKING AT IT … sniffing the shape would hand any node that can write a channel the ability
+ * to name a payload it never produced"* — and answers it with the fold's authoritative
+ * `external` map. This door now answers the same way, with `readsTruncated` on the gate ROW.
+ *
+ * NO KEY INSIDE THE VALUE COULD HAVE DONE IT. JSON object keys are arbitrary strings and
+ * channel values come from a JSON journal, so every key a marker could use is one a node can
+ * write; "a marker key a channel value cannot spell" is unreachable in-place. What a channel
+ * value CANNOT do is add a key to the row that carries it — `reads[c]` is as far up as it
+ * reaches — so the marker moved one level out instead of being renamed. Measured before:
+ * a channel whose input was `{"$truncated":{bytes:999999,shown:11,head:"…"}}` printed
+ * identically to a 200,002-byte value this door had cut, and only stderr — which `jq` never
+ * sees — said which was which.
+ *
+ * THE WRAPPER STAYS IN PLACE, and that is the same division `external` draws: the handle is
+ * left in `channels` and the authority is the map beside it. Dropping the value instead and
+ * moving `head` to the row would be this file's own "absence is not zero" trap one field over —
+ * `reads.body` missing reads as "this gate does not read `body`" — and would take the head away
+ * from every console that renders `reads` and nothing else.
+ *
+ * THE DIRECTION OF THE OLD CONFUSION, kept here because it is why this was residue rather than
+ * a defect: it fabricated an OMISSION and never a disclosure.
  *
  * MEASURED ON THE JSON FORM, which is the thing that actually reaches the terminal: this row
  * is printed through `JSON.stringify`, so a 100,000-character string is ~100,002 bytes on the
@@ -5531,7 +5778,7 @@ function utf8Head(text: string, n: number): string {
  * JSON journal; the `catch` is here so a future value shape fails at the printer that owns the
  * whole row rather than at a truncation helper that owns one field.
  */
-function boundGateRead(value: unknown, maxBytes: number, channel: string, truncated: string[]): unknown {
+function boundGateRead(value: unknown, maxBytes: number, channel: string, cut: Record<string, GateReadCut>): unknown {
   if (maxBytes === 0) return value;
   let text: string;
   try {
@@ -5551,7 +5798,7 @@ function boundGateRead(value: unknown, maxBytes: number, channel: string, trunca
   // saying nothing. Measured on the marker itself rather than on a constant, so the keys and
   // the numbers' own widths are counted.
   if (Buffer.byteLength(JSON.stringify(marker), "utf8") >= bytes) return value;
-  truncated.push(`\`${channel}\` is ${String(bytes)} bytes, showing ${String(shown)}`);
+  cut[channel] = { bytes, shown };
   return marker;
 }
 
@@ -5566,15 +5813,29 @@ function boundGateRead(value: unknown, maxBytes: number, channel: string, trunca
  * byte that nobody typed; `--max-bytes=` with an unset variable is `""` and `Number("")` is 0,
  * which here would silently mean "no cap at all" — the flag disregarded in the direction that
  * discloses. Both are refused.
+ *
+ * **DIGITS, NOT `Number()`'s LITERAL GRAMMAR** (`TODO.md` §A.58(3)). `Number` reads far more
+ * than a count and every extra form is `Number.isInteger`, so the range check below let all of
+ * these through, silently, as caps nobody typed — measured: `--max-bytes=0x10` → 16,
+ * `--max-bytes=1e3` → 1000, `--max-bytes=0b11` → 3, `--max-bytes=" 24 "` → 24. None of them is
+ * a disclosure (they are all SMALLER caps than the digits suggest, so they fail in the
+ * withholding direction), which is why this was residue rather than a defect — but
+ * `--max-bytes 1e9` meaning a billion while `--max-bytes 1e30` is refused by
+ * `GATE_READ_MAX_CAP` is a boundary with no author, and a byte count is a run of digits. So
+ * `/^\d+$/` is the whole grammar.
+ *
+ * THAT REGEX IS ALSO WHAT REFUSES A NEGATIVE, which is why there is no `n < 0` arm: `"-5"` does
+ * not match, becomes `NaN`, and fails `Number.isInteger`. The message still names 0 as the
+ * floor because that is the range it accepts, not because a second check enforces it.
  */
 function gateReadBound(args: Args): number {
   const raw = args.flags["max-bytes"];
   if (raw === undefined) return GATE_READ_MAX_BYTES;
-  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
-  if (!Number.isInteger(n) || n < 0 || n > GATE_READ_MAX_CAP) {
+  const n = typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n > GATE_READ_MAX_CAP) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
-      `--max-bytes must be a whole number of bytes from 0 to ${String(GATE_READ_MAX_CAP)}, where 0 means no limit — not ${
+      `--max-bytes must be a whole number of bytes written in decimal digits, from 0 to ${String(GATE_READ_MAX_CAP)}, where 0 means no limit — not ${
         raw === true ? "a bare flag with no value" : `"${raw}"`
       }. It caps each channel value \`loom gates\` prints; omit it for the default of ${String(GATE_READ_MAX_BYTES)}.`,
     );

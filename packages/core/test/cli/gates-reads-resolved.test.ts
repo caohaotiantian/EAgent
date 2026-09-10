@@ -67,6 +67,18 @@ const SMALL = "ship the release notes for 4.2";
 const SECRET = `sk-live-${"y".repeat(EXTERNALISE_ABOVE_BYTES * 2)}`;
 
 /**
+ * A CHANNEL VALUE THAT IS ITSELF A `$truncated` WRAPPER — `TODO.md` §A.58(1).
+ *
+ * Comfortably UNDER every cap in this file, so this door never cuts it and every byte of it is
+ * something a node wrote. `journal/payloads.ts` refuses shape-recognition for `$payload` —
+ * *"NOTHING DECIDES 'IS THIS A HANDLE' BY LOOKING AT IT"* — and this is the value that says
+ * whether `loom gates` still decides by looking. `bytes` is deliberately larger than anything
+ * in this fixture, so a reader who trusts the shape reports a 999,999-byte omission that never
+ * happened.
+ */
+const MIMIC = { $truncated: { bytes: 999_999, shown: 11, head: "I AM A REAL CHANNEL VALUE" } };
+
+/**
  * `body` and `credential` are both eligible for externalisation and `note` is not big enough
  * to be — `externalisableChannels` takes every `replace` channel that is not an output, not a
  * fan-out's `over`/`as` and not named by an expression, which all three are.
@@ -88,9 +100,11 @@ const GRAPH = {
     // UNCLASSIFIED and over the externalisation threshold — the exact shape the sweep window
     // has to cover, and the one an author never declared anything about.
     haystack: { type: "string", reduce: "replace" },
+    // THE COLLISION. An ordinary object channel whose value is the marker's own shape.
+    mimic: { type: "object", reduce: "replace" },
     written: { type: "object", reduce: "replace" },
   },
-  inputs: ["source", "credential", "note", "haystack"],
+  inputs: ["source", "credential", "note", "haystack", "mimic"],
   outputs: ["written"],
   nodes: [
     {
@@ -103,7 +117,7 @@ const GRAPH = {
     {
       id: "approve",
       type: "human_gate",
-      reads: ["body", "credential", "note", "haystack"],
+      reads: ["body", "credential", "note", "haystack", "mimic"],
       writes: ["credential"],
       humanGate: { ref: "oversight/publish@stable" },
     },
@@ -169,6 +183,8 @@ interface GateRow {
   nodeId: string;
   contentDigest: string;
   reads?: Record<string, unknown>;
+  /** The door's own answer to "which of these did I cut" — §A.58(1). Present whenever `reads` is. */
+  readsTruncated?: Record<string, { bytes: number; shown: number }>;
 }
 
 async function park(w: { dir: string; graphFile: string }): Promise<string> {
@@ -178,7 +194,7 @@ async function park(w: { dir: string; graphFile: string }): Promise<string> {
     "--workspace",
     w.dir,
     "--input",
-    JSON.stringify({ source: "input.txt", credential: SECRET, note: SMALL, haystack: LATE }),
+    JSON.stringify({ source: "input.txt", credential: SECRET, note: SMALL, haystack: LATE, mimic: MIMIC }),
   ]);
   assert.equal(started.code, 0, started.err);
   const p = JSON.parse(started.out) as Record<string, unknown>;
@@ -191,9 +207,20 @@ function handleOf(v: unknown): Record<string, unknown> | undefined {
   return typeof v === "object" && v !== null && Object.hasOwn(v, "$payload") ? (v as Record<string, unknown>) : undefined;
 }
 
+/**
+ * THE SHAPE, AND IT IS NOT THE AUTHORITY — that is `cutOf` below.
+ *
+ * Kept because the wrapper is still what carries `head`, so once the ROW has said a channel was
+ * cut this is how the content is read back. Using it to ASK the question is what §A.58(1) was.
+ */
 function truncationOf(v: unknown): { bytes: number; shown: number; head: string } | undefined {
   if (typeof v !== "object" || v === null || !Object.hasOwn(v, "$truncated")) return undefined;
   return (v as { $truncated: { bytes: number; shown: number; head: string } }).$truncated;
+}
+
+/** WAS THIS CHANNEL CUT — asked of the row, which no channel value can write to. */
+function cutOf(row: GateRow, channel: string): { bytes: number; shown: number } | undefined {
+  return row.readsTruncated?.[channel];
 }
 
 test("AN EXTERNALISED CHANNEL PRINTS ITS VALUE, NEVER ITS HANDLE — `--max-bytes 0`", async () => {
@@ -283,6 +310,89 @@ test("AND IT IS BOUNDED — over the cap the value is marked, and the marker say
   }
 });
 
+test("A CHANNEL WHOSE VALUE IS A `$truncated` OBJECT IS A VALUE, AND THE ROW IS WHAT SAYS SO", async () => {
+  // `TODO.md` §A.58(1). `journal/payloads.ts` refuses to recognise `$payload` by shape —
+  // *"sniffing the shape would hand any node that can write a channel the ability to name a
+  // payload it never produced"* — and answers with the fold's `external` map. This door used to
+  // do exactly what that refuses. Measured before the fix, on this fixture's own two channels:
+  //
+  //     reads.mimic = {"$truncated":{"bytes":999999,"head":"I AM A REAL CHANNEL VALUE","shown":11}}
+  //     reads.big   = {"$truncated":{"bytes":200002,"shown":65536,"head":"\"yyyy…
+  //     row keys: …,approvers,reads          ← nothing on the row separating them
+  //
+  // One is a value a node wrote and one is an omission this door made, they are the same shape
+  // in the same document, and the only thing that told them apart was a stderr line `jq` never
+  // sees. NO KEY INSIDE THE VALUE COULD FIX IT: JSON keys are arbitrary strings, so every name a
+  // marker might use is one a node can write. `readsTruncated` sits on the ROW, which is the one
+  // place a channel value cannot reach.
+  const w = workspace();
+  try {
+    const runId = await park(w);
+    const listed = await cli(["gates", runId, "--workspace", w.dir]);
+    assert.equal(listed.code, 0, listed.err);
+    const row = (JSON.parse(listed.out) as GateRow[])[0]!;
+    const reads = row.reads!;
+
+    // THE MIMIC IS RENDERED AS A VALUE — byte for byte what the run was given, not a rewrite.
+    assert.deepEqual(reads["mimic"], MIMIC, JSON.stringify(reads["mimic"]));
+    // …AND THE SHAPE SAYS "TRUNCATED" ABOUT IT, which is the whole point: the shape is not the
+    // question. If this assertion ever fails the fixture has stopped reproducing the collision.
+    assert.ok(truncationOf(reads["mimic"]) !== undefined, "the fixture must still LOOK like a marker");
+
+    // THE ROW GIVES DIFFERENT ANSWERS FOR THE TWO, which is what "distinguishable" means here.
+    assert.equal(cutOf(row, "mimic"), undefined, `a value this door never cut must not be listed: ${JSON.stringify(row.readsTruncated)}`);
+    const cut = cutOf(row, "body");
+    assert.ok(cut !== undefined, `the value that WAS cut must be listed: ${JSON.stringify(row.readsTruncated)}`);
+    // AND IT IS STILL RECOGNISABLE WITH ITS FULL SIZE STATED — from the row, without reading
+    // inside the value at all.
+    assert.equal(cut.bytes, Buffer.byteLength(JSON.stringify(BIG), "utf8"));
+    assert.equal(cut.shown, EXTERNALISE_ABOVE_BYTES);
+    // The two places agree, because one call produces both.
+    assert.deepEqual({ bytes: truncationOf(reads["body"])!.bytes, shown: truncationOf(reads["body"])!.shown }, cut);
+    // THE WHOLE SET, so "list everything" cannot pass this either. `haystack` is 84 KB and over
+    // the default cap too; `note` (32 bytes), `credential` (blanked to `[secret]` upstream) and
+    // `mimic` are not. Named rather than counted — a count of 2 would pass on the wrong two.
+    assert.deepEqual(Object.keys(row.readsTruncated!), ["body", "haystack"], JSON.stringify(row.readsTruncated));
+
+    // AND STDERR NAMES THE SAME ONE. A notice that named `mimic` would be a fabricated omission
+    // announced out loud.
+    assert.ok(!/`mimic`/.test(listed.err), `nothing was withheld from \`mimic\`: ${listed.err}`);
+
+    // REDACTION IS UPSTREAM OF ALL OF THIS, and the new field must not become a second door.
+    // `credential` is `secret_ref`, so it is blanked to `[secret]` BEFORE the cap sees it — a
+    // 131 KB secret that reached `boundGateRead` intact would be listed here with its real size
+    // and would have printed 64 KiB of itself under a marker.
+    assert.equal(reads["credential"], "[secret]");
+    assert.equal(cutOf(row, "credential"), undefined, "a redacted value is small, so nothing about it is reported");
+    assert.ok(!listed.out.includes(SECRET.slice(0, 64)), "a secret_ref value must not reach stdout by any field");
+  } finally {
+    w.dispose();
+  }
+});
+
+test("`readsTruncated` IS PRESENT AND EMPTY WHEN NOTHING WAS CUT — absence is not zero", async () => {
+  // `RunProjection.external` is "Empty for every run that externalised nothing", and this is that
+  // property one door over. An OMITTED field would only mean "this binary has no such field" and
+  // would send the reader straight back to sniffing the value's shape, which is the thing being
+  // closed. `--max-bytes 0` is the case where the door cuts nothing at all and the fixture still
+  // holds a value that looks exactly like a marker.
+  const w = workspace();
+  try {
+    const runId = await park(w);
+    const listed = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes", "0"]);
+    assert.equal(listed.code, 0, listed.err);
+    const row = (JSON.parse(listed.out) as GateRow[])[0]!;
+
+    assert.ok(Object.hasOwn(row, "readsTruncated"), `the field is the authority, so it is always there: ${Object.keys(row).join(",")}`);
+    assert.deepEqual(row.readsTruncated, {}, "no cap, so nothing was cut");
+    // …while the value that LOOKS cut is still sitting there, uncut.
+    assert.deepEqual(row.reads!["mimic"], MIMIC);
+    assert.ok(!/TRUNCATED/.test(listed.err), `nothing was withheld, so nothing is announced: ${listed.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("`--max-bytes N` is the dial, and it caps the JSON form", async () => {
   const w = workspace();
   try {
@@ -330,10 +440,29 @@ test("A MALFORMED `--max-bytes` IS REFUSED, in both directions that would otherw
     // is `true`, so a mistyped exponent used to print every channel whole AND — because
     // nothing was truncated — print no `! TRUNCATED` line saying so: the flag disregarded in
     // the direction that discloses, which is precisely what the other two refusals exist for.
-    for (const bad of ["--max-bytes=", "--max-bytes=abc", "--max-bytes=-5", "--max-bytes=1.5", "--max-bytes=1e30"]) {
-      const refused = await cli(["gates", runId, "--workspace", w.dir, bad]);
-      assert.notEqual(refused.code, 0, `\`${bad}\` must be refused, not accepted: ${refused.out.slice(0, 200)}`);
-      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes from 0 to \d+, where 0 means no limit/, refused.err);
+    // `0x10`, `1e3`, `0b11` AND `" 24 "` ARE `Number()`'s GRAMMAR AND NOT A BYTE COUNT —
+    // §A.58(3). All four are `Number.isInteger` and all four were ACCEPTED, silently, as caps
+    // nobody typed. Measured before the fix, on a 200,002-byte channel at each flag:
+    //
+    //     --max-bytes="0x10"  -> exit 0, cap 16      --max-bytes="0b11" -> exit 0, cap 3
+    //     --max-bytes="1e3"   -> exit 0, cap 1000    --max-bytes=" 24 " -> exit 0, cap 24
+    //
+    // None discloses — every one is a SMALLER cap than its digits suggest, so they fail in the
+    // withholding direction, which is why this was residue and not a defect. What made it worth
+    // closing is that `1e9` meant a billion while `1e30` was refused: a boundary with no author.
+    // `-5` is in the same loop and is now refused by the same `/^\d+$/` rather than by a range
+    // check, which is the assertion that the range arm could go.
+    const bad = ["--max-bytes=", "--max-bytes=abc", "--max-bytes=-5", "--max-bytes=1.5", "--max-bytes=1e30"];
+    for (const b of [...bad, "--max-bytes=0x10", "--max-bytes=1e3", "--max-bytes=0b11", "--max-bytes= 24 "]) {
+      const refused = await cli(["gates", runId, "--workspace", w.dir, b]);
+      assert.notEqual(refused.code, 0, `\`${b}\` must be refused, not accepted: ${refused.out.slice(0, 200)}`);
+      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes written in decimal digits, from 0 to \d+, where 0 means no limit/, refused.err);
+    }
+    // AND PLAIN DIGITS STILL WORK, so "refuse everything" cannot pass this test. `0` is the
+    // spelling the refusal itself names, and it is the one value `boundedCount` would reject.
+    for (const good of ["0", "128", String(1024 * 1024 * 1024)]) {
+      const ok = await cli(["gates", runId, "--workspace", w.dir, `--max-bytes=${good}`]);
+      assert.equal(ok.code, 0, `\`${good}\` is a whole number of bytes and must be accepted: ${ok.err}`);
     }
     // The bare form, which `parseArgs` turns into `true` rather than a string.
     const bare = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes"]);
