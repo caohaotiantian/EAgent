@@ -76,7 +76,7 @@ import {
   type Posture,
 } from "./vocab.ts";
 import { redactChannelValue } from "./security/redact-channels.ts";
-import { foldRun, viewFor, type RunProjection, type TaskRecord } from "./run/projection.ts";
+import { foldRun, viewFor, withResolved, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
 import { HookRegistry } from "./run/hooks.ts";
@@ -210,7 +210,12 @@ const USAGE = `loom — graph-native multi-agent orchestration
   graphs/ sits beside resources/ and holds the graphs a run can be re-attached from.
   loom run     <graph.json|yaml> [--input JSON] [--as ID]  run to completion or to a gate
                [--budget USD]                              a ceiling for THIS run
-  loom gates   <runId>                                     list open gates
+  loom gates   <runId> [--max-bytes N]                     list open gates, with what each
+                                                           one reads. N caps EACH channel
+                                                           value (default 65536); over it
+                                                           the value is replaced by
+                                                           {"$truncated":{bytes,shown,head}}.
+                                                           --max-bytes 0 prints it whole
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
@@ -611,6 +616,7 @@ const KNOWN_FLAGS: readonly string[] = [
   "host",
   "identity-file",
   "input",
+  "max-bytes",
   "max-parallelism",
   "max-runs-in-flight",
   "mcp-file",
@@ -766,7 +772,7 @@ const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   compile: [],
   serve: ["host", "identity-file", "max-runs-in-flight", "port", "sweep-ms", "token"],
   run: ["as", "budget", "input"],
-  gates: [],
+  gates: ["max-bytes"],
   approve: ["as", "graph", "reject"],
   cancel: ["as", "reason"],
   pause: ["as", "reason"],
@@ -5131,12 +5137,13 @@ function subgraphDirs(): readonly string[] {
  * layer down. Naming it because printing values with no marker is otherwise exactly the shape
  * of a guard answering its undecidable case with the passing value.
  *
- * TWO PLACES THE TWO DO NOT AGREE EVEN AT REST, and the first draft of this comment claimed
- * they always did. (1) An EXTERNALISED channel: `#executeTask` calls `#resolveReads` before
- * building the payload, so `#gatePayload` sees the fetched bytes while this reads the raw fold,
- * where `withHandles` has already substituted `payloadHandle(ref)`. Over
- * `EXTERNALISE_ABOVE_BYTES` the console operator sees text and this operator sees a handle.
- * (2) A classified channel: the sweep below blanks what `#gatePayload` does not.
+ * ONE PLACE THE TWO DO NOT AGREE, and there used to be two. (1) An EXTERNALISED channel USED
+ * to differ: `#executeTask` calls `#resolveReads` before building the payload, so `#gatePayload`
+ * saw fetched bytes while this read the raw fold, where `withHandles` has already substituted
+ * `payloadHandle(ref)` — over `EXTERNALISE_ABOVE_BYTES` the console operator saw text and this
+ * operator saw a handle (`TODO.md` §A.51a). `resolveHandles` below now makes the same two calls
+ * `#resolveReads` makes, so the two doors agree. (2) A classified channel: the sweep below
+ * blanks what `#gatePayload` does not, and that difference is deliberate — see below.
  *
  * BEST EFFORT, AND ABSENT RATHER THAN GUESSED. The set comes from the compiled graph, which is
  * not journaled; the workspace's `graphs/` is searched for the hash the journal records, exactly
@@ -5170,18 +5177,34 @@ function subgraphDirs(): readonly string[] {
  * the set the graph said must never be rendered — and losing it puts this door in agreement
  * with the console, the delivery payload and the plane, instead of being the one that discloses.
  *
- * NOT TRUNCATED, though, and that half of the old argument stands: cli.ts bounds no channel
- * value anywhere, and truncating the thing a human is about to approve is A.43 one step
- * smaller. The 8 KiB detector bound `redactPayload` applies by default is a CPU bound on the
- * sweep, not a bound on the output. WORST CASE, named rather than capped: `reads` repeats per
- * gate, so a wide fan-out parked on a gate over a large channel prints that channel once per
- * branch. A value the journal externalised already reads as a payload handle, which is the only
- * size bound the state itself draws.
+ * AND IT IS BOUNDED, WHICH IT WAS NOT — `TODO.md` §A.51b. This used to say "cli.ts bounds no
+ * channel value anywhere", name the worst case (`reads` repeats per gate, so a wide fan-out
+ * parked on a gate over a large channel prints that channel once per branch) and cap nothing;
+ * the 8 KiB `redactPayload` applies is a CPU bound on the detector sweep, not a bound on the
+ * output. Resolving handles made that worse rather than better: a 108,000-byte externalised
+ * value was at least bounded by its ~110-byte handle before, and would now print whole.
+ *
+ * So `boundGateRead` caps each value at `GATE_READ_MAX_BYTES` and says what it cut. The
+ * DEFAULT is `EXTERNALISE_ABOVE_BYTES`, deliberately the same 64 KiB the journal already uses
+ * for "this is big enough to treat differently" — one number in this package rather than a
+ * second one nobody chose. `--max-bytes` raises it and `--max-bytes 0` removes it, because a
+ * bound with no way past it does not bound an approver's output, it withholds it: an operator
+ * asked to approve a 200 KB document must be able to read the 200 KB document.
+ *
+ * ORDER IS RESOLVE, THEN REDACT, THEN BOUND, and each step depends on the one before.
+ * REDACTING FIRST sweeps the HANDLE and not the value, and what that costs depends on the
+ * classification — measured: `redactPayload({$payload:{digest,bytes}}, "internal")` returns the
+ * handle untouched, so an ordinary channel would still print a digest, which is the whole of
+ * §A.51a. (At `secret_ref` it blanks either way, so a classified channel would not reveal the
+ * mistake — which is why the test that pins this order does it on an UNCLASSIFIED channel.)
+ * BOUNDING FIRST hands the detector sweep a value cut in half, which is how a credential
+ * straddling the cut survives one.
  */
 async function gatesWithReads(
   ws: Workspace,
   p: RunProjection,
   gates: readonly GateSummary[],
+  maxBytes: number,
 ): Promise<readonly unknown[]> {
   if (gates.length === 0) return gates;
   // The index compiles every graph in the workspace, so it is built ONCE and only when there
@@ -5237,8 +5260,15 @@ async function gatesWithReads(
   // so a gate on an appended node is in the journal and in no file.
   const unexplained: string[] = [];
   const mirrors: string[] = [];
+  const unresolved: string[] = [];
+  const truncated: string[] = [];
   const spec = graph.spec;
-  const rows = gates.map((g) => {
+  // A `for` AND NOT A `.map`, because resolving a handle is I/O. Sequential rather than
+  // `Promise.all`: the payload store is a filesystem and the gates on one run share channels,
+  // so the concurrency would buy nothing and the notices below would come out in a race-
+  // dependent order — this command's output is read by people and by `jq`.
+  const rows: unknown[] = [];
+  for (const g of gates) {
     // A MIRROR IS A COPY OF SOMEBODY ELSE'S QUESTION, and this is the one case where the node
     // IS found and the answer would still be wrong. `#runSubgraph` raises the mirror on the
     // PARENT run with `nodeId` set to the SUBGRAPH node, so `observedChannels` of that node
@@ -5250,20 +5280,25 @@ async function gatesWithReads(
     // `loom approve <parent> <gate>`'s job, and it reads the child run.
     if (g.mirrorOf !== undefined) {
       mirrors.push(g.gateId);
-      return g;
+      rows.push(g);
+      continue;
     }
     const node = spec.nodes.find((n) => n.id === g.nodeId);
     const task: TaskRecord | undefined = p.tasks[g.taskId];
     if (node === undefined || task === undefined) {
       unexplained.push(g.gateId);
-      return g;
+      rows.push(g);
+      continue;
     }
-    const view = viewFor(p, spec.channels, task.branch, observedChannels(node));
-    return {
+    const resolved = await resolveHandles(ws, p, node, task, unresolved);
+    const view = viewFor(resolved, spec.channels, task.branch, observedChannels(node));
+    rows.push({
       ...g,
-      reads: Object.fromEntries(view.visible.map((c) => [c, redactChannelValue(spec.channels, c, view.get(c))])),
-    };
-  });
+      reads: Object.fromEntries(
+        view.visible.map((c) => [c, boundGateRead(redactChannelValue(spec.channels, c, view.get(c)), maxBytes, c, truncated)]),
+      ),
+    });
+  }
   if (unexplained.length > 0) {
     process.stderr.write(
       `! CONTENT NOT SHOWN — ${unexplained.join(", ")} print no \`reads\`: the graph this run compiled carries no\n` +
@@ -5277,7 +5312,163 @@ async function gatesWithReads(
         `  shows them; answering here still answers the original.\n`,
     );
   }
+  if (unresolved.length > 0) {
+    process.stderr.write(
+      `! CONTENT NOT SHOWN — ${unresolved.join("; ")}\n` +
+        `  Those channels print the payload HANDLE the journal recorded, which is a digest and not the value.\n` +
+        `  \`contentDigest\` binds either way; \`loom serve\` reads the same store and will fail the same way.\n`,
+    );
+  }
+  if (truncated.length > 0) {
+    process.stderr.write(
+      `! TRUNCATED — ${truncated.join("; ")}.\n` +
+        `  Each is marked in place with \`$truncated\`, which states the full size. Raise the cap with\n` +
+        `  \`--max-bytes <n>\`, or remove it entirely with \`--max-bytes 0\`.\n`,
+    );
+  }
   return rows;
+}
+
+/**
+ * THE SAME TWO CALLS `Engine.#resolveReads` MAKES, so the CLI door and the console cannot
+ * disagree about what a gate is over.
+ *
+ * `run/engine.ts` states the rule this borrows: *"HERE, AND ONLY HERE, is where a handle
+ * becomes a value … the gate payload a human reads"*. That line is inside `#executeTask`, and a
+ * fresh `loom gates` never reaches it — it folds the journal and reads `RunProjection`, where
+ * `withHandles` has already put `payloadHandle(ref)` back in every externalised channel. So
+ * over `EXTERNALISE_ABOVE_BYTES` the console operator read the document and this operator read
+ * `{'$payload': {'digest': 'sha256:03bd38dc…', 'bytes': 108002}}` — which is §A.43's "an
+ * operator approving a hash", regained in a different currency (`TODO.md` §A.51a).
+ *
+ * `observedChannels`, NOT `node.reads`, and `withResolved` rather than a merge of my own: both
+ * are what `#resolveReads` does, and the second one matters. `withResolved` overlays at the
+ * TASK'S OWN BRANCH, which is the last layer `stateAtBranch` applies, so a resolved value wins
+ * over the shared channel and over every binding on the path. Writing it into `channels`
+ * instead would leave a fan-out's binding shadowing the resolved value and hand this door the
+ * handle after all.
+ *
+ * **A FAILED `get` IS NOT A REFUSAL HERE, AND THAT IS THE ONE PLACE THIS DEPARTS FROM THE
+ * ENGINE.** `#resolveReads` throws `E_PAYLOAD_UNRESOLVED` and fails the run, correctly: a node
+ * handed a handle would succeed on the wrong value. Nothing executes on what this prints, and
+ * this function's own docstring promises that a command answering "is anything waiting on me"
+ * does not start refusing because the content half is unavailable — the same promise the
+ * missing-graph and unreadable-`graphs/` arms already keep. So the channel keeps its handle and
+ * the reason goes to stderr. DROPPING the channel instead would be this file's own "absence is
+ * not zero" trap: `undefined` under `reads.big` is indistinguishable from "this gate reads
+ * nothing", which is the trap the missing-`reads` notice exists for one field over.
+ */
+async function resolveHandles(
+  ws: Workspace,
+  p: RunProjection,
+  node: GraphSpec["nodes"][number],
+  task: TaskRecord,
+  unresolved: string[],
+): Promise<RunProjection> {
+  const need = observedChannels(node).filter((c) => p.external[c] !== undefined);
+  if (need.length === 0) return p;
+  const fetched: Record<string, unknown> = {};
+  for (const c of need) {
+    try {
+      fetched[c] = await ws.payloads.get(p.runId, p.external[c]!);
+    } catch (e) {
+      unresolved.push(`\`${c}\` on node "${node.id}" could not be read back: ${(e as Error).message}`);
+    }
+  }
+  return Object.keys(fetched).length === 0 ? p : withResolved(p, task.branch, fetched);
+}
+
+/**
+ * The default cap on ONE channel value in `loom gates`, in bytes of its JSON form.
+ *
+ * `EXTERNALISE_ABOVE_BYTES` ON PURPOSE, not a second number. 64 KiB is already this package's
+ * answer to "how big is big enough to treat differently" — `journal/payloads.ts` picked it and
+ * wrote down why — and a gate read is the same question asked by a different reader. Reusing
+ * it also means the cap and the externalisation threshold cannot drift apart, which is what
+ * would make "the value that left the journal" and "the value this command truncates" two
+ * different sets for no reason anybody chose.
+ */
+const GATE_READ_MAX_BYTES = EXTERNALISE_ABOVE_BYTES;
+
+/**
+ * The largest whole-UTF-8 prefix of `text` that fits in `n` bytes.
+ *
+ * `Buffer.subarray(0, n).toString()` would cut mid-sequence and emit U+FFFD, so this backs off
+ * over continuation bytes (`0b10xxxxxx`) until the cut is on a code-point boundary. A marker
+ * that says "here is what I could show you" must not itself be corrupt.
+ */
+function utf8Head(text: string, n: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= n) return text;
+  let end = n;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString("utf8");
+}
+
+/**
+ * ONE REDACTED CHANNEL VALUE, CAPPED, AND SAYING SO.
+ *
+ * WHY A MARKER AND NOT A SHORTER STRING. A value silently cut is a value an operator reads as
+ * complete, and this door's whole subject is a human deciding on what it shows. `$truncated`
+ * parallels `$payload` — a wrapper nothing can mistake for content — and it carries the two
+ * numbers that make the omission actionable: how big the value really is, and how much of it
+ * is here. `head` is the prefix rather than the tail because a document's first bytes are what
+ * identify it.
+ *
+ * MEASURED ON THE JSON FORM, which is the thing that actually reaches the terminal: this row
+ * is printed through `JSON.stringify`, so a 100,000-character string is ~100,002 bytes on the
+ * wire and an object's braces and keys count too. Measuring the raw string instead would let
+ * a deeply-nested object of small strings past a cap it visibly exceeds.
+ *
+ * `maxBytes === 0` IS "NO CAP", spelled by the operator and not defaulted to. See
+ * `gateReadBound` for why the escape hatch exists at all.
+ *
+ * A VALUE `JSON.stringify` CANNOT RENDER — `undefined`, or a bigint, which throws — IS PASSED
+ * THROUGH UNTOUCHED. There is nothing to measure and nothing to cut, and refusing here would
+ * turn an unprintable channel into a failed command.
+ */
+function boundGateRead(value: unknown, maxBytes: number, channel: string, truncated: string[]): unknown {
+  if (maxBytes === 0) return value;
+  let text: string;
+  try {
+    const rendered = JSON.stringify(value);
+    if (rendered === undefined) return value;
+    text = rendered;
+  } catch {
+    return value;
+  }
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes <= maxBytes) return value;
+  const head = utf8Head(text, maxBytes);
+  truncated.push(`\`${channel}\` is ${String(bytes)} bytes, showing ${String(Buffer.byteLength(head, "utf8"))}`);
+  return { $truncated: { bytes, shown: Buffer.byteLength(head, "utf8"), head } };
+}
+
+/**
+ * `--max-bytes` — the per-channel cap `loom gates` applies to what it prints.
+ *
+ * NOT `boundedCount`, and the difference is the whole reason this exists: that helper refuses
+ * `n <= 0`, and **0 is the value that means something here** — "print the value whatever its
+ * size", which is the escape hatch that keeps the default cap from being a withholding. The
+ * rest of its discipline is kept verbatim, because the failure it names is this flag's too:
+ * `--max-bytes` with no value is `true` from `parseArgs` and `Number(true)` is 1, a cap of one
+ * byte that nobody typed; `--max-bytes=` with an unset variable is `""` and `Number("")` is 0,
+ * which here would silently mean "no cap at all" — the flag disregarded in the direction that
+ * discloses. Both are refused.
+ */
+function gateReadBound(args: Args): number {
+  const raw = args.flags["max-bytes"];
+  if (raw === undefined) return GATE_READ_MAX_BYTES;
+  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `--max-bytes must be a whole number of bytes, or 0 for no limit — not ${
+        raw === true ? "a bare flag with no value" : `"${raw}"`
+      }. It caps each channel value \`loom gates\` prints; omit it for the default of ${String(GATE_READ_MAX_BYTES)}.`,
+    );
+  }
+  return n;
 }
 
 interface GraphIndex {
@@ -7411,7 +7602,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // The projection above stays: it is what answers E_RUN_NOT_FOUND, and it is the SET.
         // This is only the ORDER.
         process.stdout.write(
-          `${JSON.stringify(await gatesWithReads(ws, p, await ws.engine.openGates(runId)), null, 2)}\n`,
+          `${JSON.stringify(await gatesWithReads(ws, p, await ws.engine.openGates(runId), gateReadBound(args)), null, 2)}\n`,
         );
         return 0;
       }
