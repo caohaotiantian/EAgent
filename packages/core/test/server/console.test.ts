@@ -489,17 +489,30 @@ test("THE CONSOLE'S FAN-OUT PRIORITY ORDER AGREES WITH server/layout.ts'S STATE_
   // exported (adding a new export would move the pinned surface count in `scripts/surface.json`
   // off 541 for no functional reason). Per CLAUDE.md's rule for an unavoidable copy, this census
   // pins the two textual representations together — `registries.test.ts`'s pattern, applied here.
+  //
+  // A.52: `STATE_PRIORITY` is now DERIVED from `STATE_RANK`, a `Record<TaskState, number>`
+  // written so a tenth `TaskState` fails to compile until it is ranked — a plain array's
+  // length cannot enforce that. THE CENSUS SORTS BY THE NUMBERS, not by the order the keys
+  // happen to be written in: a fresh review of this file's first draft found that reading key
+  // order alone is blind to a VALUE-only edit (e.g. swapping two ranks' numbers without moving
+  // their lines), which is exactly the kind of drift this test exists to catch — verified by
+  // mutation, swapping two ranks' numbers in layout.ts left every test green until this line
+  // sorted by value instead of by source position.
   const layoutSrc = readFileSync(new URL("../../src/server/layout.ts", import.meta.url), "utf8");
-  const layoutMatch = /const STATE_PRIORITY: readonly TaskState\[\] = \[([\s\S]*?)\];/.exec(layoutSrc);
-  assert.ok(layoutMatch, "server/layout.ts no longer declares STATE_PRIORITY in a shape this test can read");
-  const layoutOrder = [...layoutMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+  const layoutMatch = /const STATE_RANK: Record<TaskState, number> = \{([\s\S]*?)\};/.exec(layoutSrc);
+  assert.ok(layoutMatch, "server/layout.ts no longer declares STATE_RANK in a shape this test can read");
+  const ranked = [...layoutMatch![1]!.matchAll(/(\w+):\s*(\d+)/g)].map((m) => ({ state: m[1]!, rank: Number(m[2]) }));
+  const layoutOrder = [...ranked].sort((a, b) => a.rank - b.rank).map((r) => r.state);
 
   const consoleMatch = /function dominant\(states\) \{\s*for \(const s of \[([\s\S]*?)\]\)/.exec(CONSOLE_HTML);
   assert.ok(consoleMatch, "console.ts's dominant() changed shape — update this census alongside it");
   const consoleOrder = [...consoleMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
 
   // Not vacuous: an empty parse on both sides would compare [] to [] and report green.
-  assert.ok(layoutOrder.length >= 5, `the priority scan found only ${layoutOrder.length} members — the regex broke, not the list`);
+  assert.equal(layoutOrder.length, 9, `the priority scan found ${layoutOrder.length} members, not the nine TaskState has — the regex broke, or the list did`);
+  // Ranks must be distinct — a tie would make "sort by value" ambiguous, and the real
+  // `Object.keys(STATE_RANK).sort(...)` in layout.ts would then be free to answer either way.
+  assert.equal(new Set(ranked.map((r) => r.rank)).size, ranked.length, "STATE_RANK must have no two states sharing a rank");
   assert.deepEqual(consoleOrder, layoutOrder, "the console's fan-out priority order has drifted from the server's STATE_PRIORITY");
 });
 

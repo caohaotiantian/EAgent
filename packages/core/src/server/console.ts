@@ -92,6 +92,10 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
   .node.leased rect, .node.ready rect { stroke:var(--accent); }
   .node.awaiting_gate rect { stroke:var(--gate); fill:color-mix(in srgb, var(--gate) 14%, var(--panel)); }
   .node.skipped rect, .node.cancelled rect { stroke-dasharray:4 3; opacity:.6; }
+  /* A.52: retrying means an attempt just failed and is backing off — distinct from both
+     "failed" (solid err stroke) and the neutral fill an un-started node gets, so it does not
+     read as nothing having happened. "pending" gets no rule on purpose: it IS "not started". */
+  .node.retrying rect { stroke:var(--err); stroke-dasharray:2 2; fill:color-mix(in srgb, var(--err) 6%, var(--panel)); }
   .edge { stroke:var(--line); stroke-width:1.5; fill:none; marker-end:url(#a); }
   .edge.taken { stroke:var(--accent); }
   .badge { font:700 10px ui-monospace,Menlo,monospace; fill:#fff; }
@@ -636,9 +640,14 @@ function drawGraph() {
   el.innerHTML = parts.join("");
 }
 
-/** One shape, many branches: show the most interesting state, not an average. */
+/**
+ * One shape, many branches: show the most interesting state, not an average.
+ *
+ * A.52: a hand-copy of server/layout.ts's STATE_PRIORITY, all nine TaskState members —
+ * console.test.ts's own census test reads both source texts and fails if they drift.
+ */
 function dominant(states) {
-  for (const s of ["failed", "awaiting_gate", "leased", "ready", "cancelled", "skipped", "succeeded"]) {
+  for (const s of ["failed", "awaiting_gate", "retrying", "leased", "ready", "pending", "cancelled", "skipped", "succeeded"]) {
     if (states.includes(s)) return s;
   }
   return states[0] || "";
