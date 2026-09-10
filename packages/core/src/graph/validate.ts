@@ -29,7 +29,7 @@ import {
   postureRank,
   isHardToUndo,
 } from "../vocab.ts";
-import { CODES } from "../errors.ts";
+import { CODES, type Code, type ErrorClass } from "../errors.ts";
 import { checkExpr, type Ty } from "./expr.ts";
 import {
   DEFAULT_EXPANSION,
@@ -518,7 +518,7 @@ function computeFanoutStacks(
     const candidates: (readonly number[] | undefined)[] = ins.map((e) => {
       const parent = stacks.get(e.from);
       if (parent === undefined) return undefined;
-      if (e.kind === "fanout") return [...parent, e.maxWidth ?? 1];
+      if (e.kind === "fanout") return [...parent, countOr1(e.maxWidth)];
       if (e.kind === "join") return parent.slice(0, -1);
       return parent;
     });
@@ -558,7 +558,7 @@ function computeFanoutStacks(
     const edgeWidth = (e: EdgeSpec): number => {
       const parentWidth = widths.get(e.from) ?? 1;
       const parentStack = stacks.get(e.from);
-      if (e.kind === "fanout") return parentWidth * (e.maxWidth ?? 1);
+      if (e.kind === "fanout") return parentWidth * countOr1(e.maxWidth);
       if (e.kind === "join") return parentStack === undefined ? parentWidth : product(parentStack.slice(0, -1));
       return parentWidth;
     };
@@ -588,7 +588,7 @@ function applyLoopFactors(
 ): Map<NodeId, number> {
   const mult = new Map<NodeId, number>(parallelWidth);
   for (const loop of loopEdges) {
-    const iterations = Math.max(1, loop.maxIterations ?? 1);
+    const iterations = countOr1(loop.maxIterations);
     for (const n of spec.nodes) {
       const isInCycle =
         n.id === loop.to ||
@@ -624,6 +624,53 @@ function computeCriticalPath(
 // Validation
 // ---------------------------------------------------------------------------
 
+/**
+ * THE CEILINGS THEMSELVES ARE A LIMIT THAT COULD MOVE ON ITS OWN, which is the one direction a
+ * limit must never move — `spec.ts`'s `POLICY_FIELDS` docstring says so about a MISSPELLED key,
+ * and `GRAPH020_UNKNOWN_FIELD` closes that half. This is the other half: the key spelled right
+ * and the value unusable. `{...DEFAULT_EXPANSION, ...spec.policy.expansion}` took whatever was
+ * there, and every reader compares against it with a bare relational operator, so a string was
+ * `NaN` on the RIGHT of the comparison and switched the ceiling off:
+ *
+ *     "maxFanout": "banana", "maxWidth": 30   ->  ok, exit 0
+ *     "maxFanout": 24,       "maxWidth": 30   ->  GRAPH007_MAX_WIDTH_EXCEEDED
+ *     "maxNodes": "banana"                    ->  ok, exit 0
+ *     "maxNodes": 64                          ->  GRAPH018_NODE_COUNT
+ *
+ * Found by a reviewer of the `maxWidth` rule below: `maxFanout` is the OTHER OPERAND of the very
+ * comparison that rule exists for, and unlike a `bigint` width it is reachable from plain JSON
+ * through the shipped CLI. It also made the new `GRAPH007_BAD_MAX_WIDTH` fix line read "a whole
+ * number between 1 and banana".
+ *
+ * The bad member falls back to its default AND is refused: falling back alone would leave the
+ * author with a ceiling they did not write, and refusing alone would leave the rest of this
+ * compile reading a `NaN`. `GRAPH003_MALFORMED` rather than a new code, for the reason
+ * `objectBlock` gives above — an eighth, or ninth, spelling of "this is not the shape it must
+ * be" is how diagnostics come to disagree about what they mean.
+ */
+function expansionOf(spec: GraphSpec, d: Diagnostic[]): ExpansionBudget {
+  const declared = (spec.policy?.expansion ?? {}) as unknown as Record<string, unknown>;
+  const out: Record<keyof ExpansionBudget, number> = { ...DEFAULT_EXPANSION };
+  for (const k of Object.keys(DEFAULT_EXPANSION) as (keyof ExpansionBudget)[]) {
+    if (!Object.hasOwn(declared, k)) continue;
+    const v = declared[k];
+    if (isPositiveInt(v)) {
+      out[k] = v;
+      continue;
+    }
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message:
+        `policy.expansion.${k} is ${describeValue(v)}, which is not a positive integer — ` +
+        `every limit is compared with \`>\`, and a value that is not a number makes that comparison false ` +
+        `for everything, so the ceiling stops refusing anything`,
+      fix: `set policy.expansion.${k} to a whole number ≥ 1, or remove it to take the default of ${DEFAULT_EXPANSION[k]}`,
+    });
+  }
+  return out;
+}
+
 export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   const { spec } = ctx;
   const d: Diagnostic[] = [];
@@ -633,7 +680,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   if (structural) return d;
 
   const idx = ctx.index === undefined ? indexGraph(spec) : ctx.index();
-  const expansion = { ...DEFAULT_EXPANSION, ...(spec.policy?.expansion ?? {}) };
+  const expansion = expansionOf(spec, d);
   const channelTypes = channelTypeMap(spec.channels);
 
   rule001Reachability(spec, idx, d);
@@ -1063,6 +1110,137 @@ const RESERVED_LIST = [...PROTOTYPE_NAMES]
  */
 const MAX_TIMER_MS = 2_147_483_647;
 
+/**
+ * THE CLASSES EACH ERROR CODE IS ACTUALLY RAISED WITH — a set, because it is not one.
+ *
+ * `retry.onlyIf` is filtered by `#retryDecision` AFTER `if (!error.retryable) return undefined;`,
+ * and `retryable` is `RETRYABLE.has(error.class)` over `{exhausted, unavailable, timeout}`. So an
+ * `onlyIf` naming a code that is never raised with one of those three is a filter that can never
+ * match: it compiles, the compiler ECHOES it back in the retry summary, and the runtime ignores
+ * it. `retry.onlyIf: ["E_FUNCTION_REFUSED"]` is the case that named the row (TODO §A.49) — that
+ * code is `validation` by design, which is the entire distinction between it and
+ * `E_FUNCTION_UNAVAILABLE`.
+ *
+ * WHY A SET AND NOT A CLASS. `class` is chosen at the RAISE SITE, not by the code, and this tree
+ * proves it: ten codes are raised under more than one class, and five sit under a section heading
+ * in `errors.ts` that disagrees with their raise sites about retryability itself —
+ * `E_GATE_DELIVERY_FAILED` is under `// policy` and raised `unavailable` twice in
+ * `run/delivery.ts`; `E_SUBGRAPH_FAILED` is under `// internal` and raised `unavailable` twice in
+ * `run/engine.ts`; `E_EXPANSION_EXHAUSTED`, `E_QUORUM_UNREACHABLE` and `E_GRAPH_MISMATCH` sit
+ * under retryable headings and are never raised retryably. A table read off the headings would
+ * refuse the first two, which WORK. This one is read off `err.<class>(CODES.X)` and
+ * `new LoomError("<class>", CODES.X)` across `packages/core/src`.
+ *
+ * WHAT COUNTS AS A SITE: `err.<class>(CODE)`, `new LoomError("<class>", CODE)`, and a
+ * `{class, code}` RECORD LITERAL — `run.failed` and `#failRun` build errors that way rather
+ * than through `LoomError`, and a class written by hand is still a class this code is paired
+ * with. A first cut of this table read only the first two forms and got three entries wrong:
+ * `E_OVERSIGHT_LOOSENED` is `policy` through `compile.ts`'s
+ * `(loosened ? err.policy : err.validation)(…)`, which a scan for `err.policy(CODES.` cannot
+ * see, and `E_GATE_EXPIRED` / `E_OUTPUT_MISSING` carry a class on a record literal.
+ *
+ * AN EMPTY ARRAY IS THE UNDECIDABLE ANSWER AND IT ACCEPTS, and it now covers exactly three
+ * codes: `E_ROUTE_NOT_FOUND` and `E_REQUEST_TIMEOUT` are sent as a bare `{code, message}` HTTP
+ * body, and `E_EFFECT_UNAVAILABLE` exists only as text inside a message a sandboxed body
+ * throws. Nothing pins a class to any of them, and refusing a graph on a class nothing pins
+ * would be the false refusal this table exists to avoid — the cost of accepting is at worst
+ * the dead filter the rule is about, never a broken run.
+ *
+ * THE DRIFT GUARD IS `tsc`, NOT A SOURCE SCAN. `Record<Code, ...>` makes a code added to
+ * `errors.ts` a type error here until somebody classifies it, so the set this table covers is
+ * exactly `CODES` and cannot quietly stop being. Not exported, and the table lives here rather
+ * than in `errors.ts`, for the reason `MAX_TIMER_MS` above states: `src/index.ts` is
+ * `export * from "./errors.ts"`, so any new export there lands on the pinned public surface.
+ *
+ * `EdgeSpec.codes` is deliberately NOT filtered by this — a non-retryable code is exactly what
+ * an `error` edge is for.
+ */
+const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
+  // validation
+  E_GRAPH_INVALID: ["validation"],
+  E_CHANNEL_UNDECLARED: ["validation"],
+  E_CONTEXT_OVERFLOW: ["validation"],
+  E_TOOL_SCHEMA_INVALID: ["validation"],
+  E_PROVIDER_BAD_REQUEST: ["validation"],
+  E_ROUTE_INVALID: ["policy"],   // raised policy, not the validation its heading claims
+  E_EXPR_INVALID: ["validation"],
+  E_RESOURCE_INVALID: ["validation"],
+  E_FUNCTION_REFUSED: ["validation"],
+  E_CONFIG_INVALID: ["internal", "validation"],   // two classes, neither retryable
+  E_COHORT_INVALIDATED: ["validation"],
+  E_PAYLOAD_TOO_DEEP: ["validation"],
+  E_PAYLOAD_TOO_LARGE: ["validation"],
+  // policy
+  E_OVERSIGHT_LOOSENED: ["policy"],   // compile.ts: `(loosened ? err.policy : err.validation)(…)`
+  E_OVERSIGHT_LOOSEN_FORBIDDEN: ["policy"],
+  E_CAP_DENIED: ["policy"],
+  E_GATE_REQUIRED: ["policy"],
+  E_GATE_NOT_AUTHORIZED: ["policy"],
+  E_CONTENT_FILTERED: ["policy"],
+  E_PROVIDER_AUTH: ["policy"],
+  E_NOT_AUTHORIZED: ["policy"],
+  E_HUMAN_APPROVAL_REQUIRED: ["policy", "validation"],   // two classes, neither retryable
+  E_EVAL_REGRESSION: ["policy"],
+  E_GATE_DELIVERY_FAILED: ["not_found", "unavailable"],   // two classes, one retryable -> CAN fire
+  // not_found
+  E_RESOURCE_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
+  E_RESOURCE_YANKED: ["policy"],   // raised policy, not the not_found its heading claims
+  E_TOOL_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
+  E_GATE_NOT_FOUND: ["not_found"],
+  E_RUN_NOT_FOUND: ["not_found"],
+  E_ROUTE_NOT_FOUND: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // conflict
+  E_SEQ_CONFLICT: ["conflict"],
+  E_FENCING_STALE: ["conflict"],
+  E_IDEMPOTENCY_MISMATCH: ["conflict"],
+  E_GATE_ALREADY_RESOLVED: ["conflict"],
+  E_ILLEGAL_TRANSITION: ["conflict"],
+  E_RESTORE_ILLEGAL: ["conflict", "validation"],   // two classes, neither retryable
+  E_EFFECT_UNRECORDED: ["validation"],   // raised validation, not the conflict its heading claims
+  E_EFFECT_UNAVAILABLE: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // exhausted
+  E_BUDGET_EXHAUSTED: ["exhausted"],
+  E_PROVIDER_RATE_LIMIT: ["exhausted"],
+  E_EXPANSION_EXHAUSTED: ["policy"],   // raised policy, not the exhausted its heading claims
+  E_QUORUM_UNREACHABLE: ["validation"],   // raised validation, not the exhausted its heading claims
+  // unavailable
+  E_FUNCTION_UNAVAILABLE: ["unavailable"],
+  E_PROVIDER_OVERLOADED: ["unavailable"],
+  E_PROVIDER_TRANSPORT: ["unavailable"],
+  E_TOOL_SOURCE_UNAVAILABLE: ["unavailable"],
+  E_CHILD_UNREACHABLE: ["unavailable"],
+  // timeout
+  E_TOOL_TIMEOUT: ["timeout"],
+  E_GATE_EXPIRED: ["timeout"],   // a `run.failed` record literal, not a LoomError
+  E_GRAPH_MISMATCH: ["conflict", "policy", "validation"],   // three classes, none retryable
+  E_TASK_TIMEOUT: ["timeout"],
+  E_REQUEST_TIMEOUT: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // cancelled
+  E_CANCELLED: ["cancelled"],
+  // internal
+  E_INTERNAL: ["internal", "validation"],   // two classes, neither retryable
+  E_REPLAY_DIVERGENCE: ["internal"],
+  E_SUBGRAPH_FAILED: ["internal", "unavailable"],   // two classes, one retryable -> CAN fire
+  E_FLOATING_REF_AT_RUNTIME: ["internal"],
+  E_TRACE_INCONSISTENT: ["internal"],
+  E_OUTPUT_MISSING: ["internal"],   // a `#failRun` record literal, not a LoomError
+  E_PAYLOAD_UNRESOLVED: ["internal"],
+};
+
+/** The three classes `LoomError` marks retryable. A copy, for the reason `RAISED_CLASS` states. */
+const RETRYABLE_CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>(["exhausted", "unavailable", "timeout"]);
+
+/**
+ * Can an `onlyIf` naming this code ever fire? Unknown to the table — an extension's own code,
+ * or one with no raise site — answers YES, because refusing is only correct where the answer
+ * is provably no.
+ */
+function neverRetryable(code: string): readonly ErrorClass[] | undefined {
+  const classes = Object.hasOwn(RAISED_CLASS, code) ? RAISED_CLASS[code as Code] : undefined;
+  if (classes === undefined || classes.length === 0) return undefined;
+  return classes.some((c) => RETRYABLE_CLASSES.has(c)) ? undefined : classes;
+}
+
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
@@ -1198,8 +1376,41 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
     }
   };
+  /**
+   * A SECOND QUESTION ABOUT THE SAME LIST, and only about `retry.onlyIf`.
+   *
+   * `checkCodes` asks whether the code EXISTS. This asks whether naming it can ever have an
+   * effect: `#retryDecision` returns on `!error.retryable` long before it reads `onlyIf`, so a
+   * member never raised with a retryable class is a filter that cannot match. The effect is
+   * "no retry", which is the safe direction — what it costs is an author who writes it, sees
+   * the compiler echo `onlyIf=E_FUNCTION_REFUSED` back in the retry summary, and concludes the
+   * runtime honours it.
+   */
+  const checkRetryable = (codes: unknown, nodeId: NodeId): void => {
+    if (!Array.isArray(codes)) return;
+    for (const c of codes) {
+      if (typeof c !== "string") continue;
+      const classes = neverRetryable(c);
+      if (classes === undefined) continue;
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNRETRYABLE_ONLY_IF",
+        message:
+          `node "${nodeId}".retry.onlyIf names error code "${c}", which is raised as ` +
+          `${classes.map((x) => `\`${x}\``).join(" and ")} — a class the retry policy never retries, ` +
+          `so this filter can never match and the policy is dead`,
+        at: { nodeId },
+        fix:
+          `remove "${c}" from onlyIf (an absent onlyIf retries every retryable error), or name a code raised as ` +
+          `\`exhausted\`, \`unavailable\` or \`timeout\` — if "${c}" is the failure you want handled, an \`error\` edge ` +
+          `with codes: ["${c}"] is the mechanism for it, not a retry`,
+      });
+    }
+  };
+
   for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge "${e.id}"`);
   for (const n of spec.nodes) checkCodes(n.retry?.onlyIf, { nodeId: n.id }, `node "${n.id}".retry.onlyIf`);
+  for (const n of spec.nodes) checkRetryable(n.retry?.onlyIf, n.id);
 
   // A BUDGET LADDER STEP THAT DOES NOT EXIST IS REFUSED, not silently downgraded. D6.5 designs
   // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
@@ -1927,13 +2138,30 @@ function rule006Cycles(spec: GraphSpec, idx: GraphIndex, channelTypes: Record<st
   }
 
   for (const e of idx.loopEdges) {
-    if (e.maxIterations === undefined || e.maxIterations < 1) {
+    // `undefined` and `<= 0` keep the code they have always had — three suites assert on it.
+    // Split off from them is the case `< 1` cannot see: `"3" < 1` and `NaN < 1` are both false,
+    // so a `maxIterations` that is not a number at all passed this test and then reached
+    // `Math.max(1, loop.maxIterations ?? 1)` and `w.task.iteration + 1 < (e.maxIterations ?? 1)`.
+    // See `isPositiveInt` under GRAPH007 for why the two fields are checked the same way.
+    const iterations: unknown = e.maxIterations;
+    if (iterations === undefined || (Number.isSafeInteger(iterations) && (iterations as number) < 1)) {
       d.push({
         severity: "error",
         code: "GRAPH006_UNBOUNDED_LOOP",
         message: `loop edge "${e.id}" has no maxIterations`,
         at: { edgeId: e.id },
         fix: `add maxIterations to edge "${e.id}"`,
+      });
+    } else if (!isPositiveInt(iterations)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH006_BAD_MAX_ITERATIONS",
+        message:
+          `loop edge "${e.id}" declares maxIterations ${describeValue(iterations)}, which is not a positive integer — ` +
+          `the bound is compared against the iteration counter and multiplied into the node's total multiplicity, ` +
+          `and neither reader can use this value`,
+        at: { edgeId: e.id },
+        fix: `set maxIterations on edge "${e.id}" to a whole number ≥ 1 (unquoted: 3, not "3")`,
       });
     }
     if (e.until === undefined) {
@@ -1978,6 +2206,61 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
 
 // ── GRAPH007 ─────────────────────────────────────────────────────────────────
 
+/**
+ * A COUNT THAT CAME OUT OF A JSON FILE IS NOT A NUMBER UNTIL SOMETHING ASKS.
+ *
+ * `maxWidth` and `maxIterations` are both `number` in `EdgeSpec` and both arrive from a parse
+ * that checks NAMES only (`graph/spec.ts`'s `EDGE_FIELDS`). Every rule that read them tested
+ * presence (`=== undefined`) and then compared with a bare relational operator, which coerces:
+ * `"24" > 25` is false, `"banana" > 25` is false because `NaN` compares false with everything,
+ * and both sailed through. The second one is the damaging case — `computeFanoutStacks`
+ * multiplies the widths, so one `NaN` makes every downstream `parallelWidth` `NaN` and
+ * GRAPH010's concurrent-writer refusal, which reads that number, silently stops firing.
+ *
+ * `0` is refused for the same reason a string is: `run/engine.ts`'s `items.slice(0, maxWidth)`
+ * takes zero branches and the run ends `E_OUTPUT_MISSING` having dropped every shard without a
+ * word. A non-integer is refused because the two readers disagree about it — `slice` truncates
+ * `2.5` to 2 while the width product keeps the fraction.
+ */
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+}
+
+/**
+ * The two fields are ALSO read by arithmetic that runs BEFORE any rule sees them —
+ * `computeFanoutStacks` multiplies the widths inside `indexGraph`, and `multiplicityOf`
+ * multiplies the loop bound. A `bigint` or a `symbol` there is a `TypeError` out of the middle
+ * of the compiler, so the refusal below never gets to be printed and the caller gets a crash
+ * where a diagnostic belonged. Driven, on a spec built in memory (JSON cannot express either,
+ * but `compile` and `validateGraph` are exported and take a `GraphSpec`):
+ *
+ *     maxWidth: 10n       -> TypeError: Cannot mix BigInt and other types
+ *     maxWidth: Symbol()  -> TypeError: Cannot convert a Symbol value to a number
+ *
+ * `1` is the stand-in and it is safe BECAUSE the graph is refused anyway: an unreadable width
+ * is `GRAPH007_BAD_MAX_WIDTH` and an unreadable bound `GRAPH006_BAD_MAX_ITERATIONS`, so no
+ * decision downstream of this number is ever taken on a graph that reached it.
+ */
+function countOr1(v: unknown): number {
+  return isPositiveInt(v) ? v : 1;
+}
+
+/**
+ * A value in a diagnostic, rendered without trusting it. `JSON.stringify` throws on a circular
+ * object, on a `bigint`, and on any `toJSON` the caller wrote — and a guard that throws while
+ * describing what it is refusing is worse than the thing it refuses.
+ */
+function describeValue(v: unknown): string {
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "symbol") return "a symbol";
+  if (typeof v === "function") return "a function";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object") return "an object";
+  return String(v);
+}
+
 function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnostic[]): void {
   for (const e of spec.edges) {
     if (e.kind !== "fanout") continue;
@@ -1999,7 +2282,22 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
       });
       continue;
     }
-    if (e.maxWidth > expansion.maxFanout) {
+    if (!isPositiveInt(e.maxWidth)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH007_BAD_MAX_WIDTH",
+        message:
+          `fanout edge "${e.id}" declares maxWidth ${describeValue(e.maxWidth)}, which is not a positive integer — ` +
+          `the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, ` +
+          `and neither reader can use this value`,
+        at: { edgeId: e.id },
+        fix: `set maxWidth on edge "${e.id}" to a whole number between 1 and ${expansion.maxFanout} (unquoted: 24, not "24")`,
+      });
+    }
+    // The ceiling test is a bare `>` and must not run on a value that coerces: `"99" > 25` is
+    // false and `NaN > 25` is false, so an unreadable width used to pass it silently. `else`
+    // rather than a second `if`, so the narrowing above is what makes the comparison safe.
+    else if (e.maxWidth > expansion.maxFanout) {
       d.push({
         severity: "error",
         code: "GRAPH007_MAX_WIDTH_EXCEEDED",
@@ -2222,6 +2520,34 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * applied in arrival order, which is exactly the nondeterminism the branch-coordinate
  * fold exists to remove. Requiring the join makes "when do these merge?" a question
  * the author answers rather than one the scheduler answers by accident.
+ *
+ * THE RULE IS ABOUT THE BRANCH, NOT ABOUT THE FAN-OUT'S TARGET, and saying otherwise cost the
+ * 2026-09-09 port a compile (F1 of `docs/workflow-port-2026-09-09.md`). This message used to
+ * suggest `branches: [<the fan-out's target>]`; typing that on a branch two nodes long then
+ * produced `GRAPH008_BRANCH_NOT_CONNECTED` about the edge, and the actual rule — *every node in
+ * a fan-out branch needs its own entry in `join.branches` AND its own `kind: join` edge into the
+ * join* — was the union of two `fix:` lines that neither stated. So the branch's contents are
+ * read here, off `fanoutEdgeStack`, BEFORE a `branches:` list is suggested.
+ *
+ * `fanoutEdgeStack` and not `ancestors`: two sibling fan-outs off one node are indistinguishable
+ * by reachability, and telling an author to fold the other fan's nodes into this one's join is
+ * worse than telling them too little. Its `undefined` = AMBIGUOUS convention means an ambiguous
+ * node is left off the list, so `e.to` is always included by hand — the one member the rule
+ * cannot be wrong about.
+ *
+ * WHAT IS ACCEPTED DOES NOT MOVE — the refusal condition is byte-identical to the one this rule
+ * shipped with, so no graph that compiled before fails now on account of it. What DID move is
+ * every `fix:` line, including a branch of one's: an earlier version of this paragraph claimed
+ * that case "still produces the sentence it always did", which was true of the MESSAGE and
+ * false of the `fix:`, and a reviewer had to run both compilers side by side to find that out.
+ * The message tail is the only part that varies with branch size: one member gets no
+ * `; the branch it opens holds N nodes (…)` clause.
+ *
+ * With two or more candidate joins the fix NAMES them and asks the author to choose. It used to
+ * say "a join downstream of X" and leave the set implicit, which let a reader pick a join that
+ * was itself in the list of things to wait for — a `kind: join` edge from that node to itself,
+ * i.e. `GRAPH006_UNMARKED_CYCLE`. Naming the candidates is what makes the sentence unambiguous;
+ * the clause about what they are not is for the reader who sees only the message.
  */
 function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   for (const e of spec.edges) {
@@ -2232,15 +2558,112 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
         n.join.branches.includes(e.to) &&
         (idx.ancestors.get(n.id)?.has(e.to) ?? false),
     );
-    if (!joined) {
-      d.push({
-        severity: "error",
-        code: "GRAPH021_FANOUT_WITHOUT_JOIN",
-        message: `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it`,
-        at: { edgeId: e.id },
-        fix: `add a join node downstream of "${e.to}" with branches: [${e.to}]`,
-      });
-    }
+    if (joined) continue;
+
+    // AT THIS FAN-OUT'S OWN LEVEL — the stack's LAST element, never mere membership. A node two
+    // fan-outs deep carries the outer edge id in its stack too, so `includes` listed the inner
+    // fan's nodes as the outer join's branches; typing that turned a graph that compiles into
+    // `GRAPH008_JOIN_DEPTH`, because the outer barrier then became reachable at two depths. The
+    // inner JOIN pops back to this level and is the node the outer join really does wait on.
+    const atThisLevel = (n: NodeSpec): boolean => {
+      if (n.id === e.to) return true;
+      const stack = idx.fanoutEdgeStack.get(n.id);
+      return stack !== undefined && stack.length > 0 && stack[stack.length - 1] === e.id;
+    };
+
+    const branch = spec.nodes.filter(atThisLevel).map((n) => n.id);
+    const branchList = branch.join(", ");
+
+    // A CANDIDATE BARRIER IS A JOIN AT THE LEVEL THIS FAN-OUT OPENS FROM — not merely one that
+    // is reachable. Reachability was the root cause of both defects a reviewer found in the
+    // first two cuts of this rule, and of two more they found in the third: a nested fan-out's
+    // INNER join is reachable from the outer target, so naming it told the author to make it
+    // the outer barrier (`GRAPH008_JOIN_DEPTH`, on a graph that otherwise compiles), and a join
+    // wired in by a `seq` edge is reachable while sitting INSIDE the branch, so it was named as
+    // its own barrier (`GRAPH006_UNMARKED_CYCLE`). Both are the same mistake: "reachable" and
+    // "is the barrier for this level" are different questions.
+    //
+    // A barrier for this fan-out sits where the fan-out started — its own stack is `e.to`'s
+    // stack with `e.id` popped. An ambiguous stack (`undefined`) names no level, so it names no
+    // candidate either, and the message falls through to the un-dictating form below.
+    const openedFrom = idx.fanoutEdgeStack.get(e.to);
+    const parentStack = openedFrom === undefined ? undefined : openedFrom.slice(0, -1);
+    const atBarrierLevel = (n: NodeSpec): boolean => {
+      const s = idx.fanoutEdgeStack.get(n.id);
+      return (
+        parentStack !== undefined &&
+        s !== undefined &&
+        s.length === parentStack.length &&
+        s.every((x, i) => x === parentStack[i])
+      );
+    };
+    const candidates = spec.nodes.filter(
+      (n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false) && atBarrierLevel(n),
+    );
+
+    // THE FIX IS ADDITIVE AND NEVER A WHOLE-LIST REPLACEMENT, and that is the fifth and last
+    // lesson this message cost. Every earlier cut phrased it as `must declare branches: [X]`,
+    // and four reviewers found four graphs where applying that literally DELETED something:
+    // one join is often the barrier for more than one fan-out, so a list built from THIS
+    // fan-out's branch drops the entries that belong to the other one. On a join collecting a
+    // nested fan-out and a sibling fan-out it did not even converge — it oscillated between two
+    // fixes, each re-breaking what the other repaired — and two GRAPH021s on one join printed
+    // contradictory lists in a single run.
+    //
+    // Narrowing WHEN to dictate was tried three times and failed three times, each on a shape
+    // the previous cut had not imagined. What is dictated is the thing to change: an entry per
+    // branch member, added to whatever the join already declares, composes across fan-outs and
+    // across diagnostics, and cannot delete. The compiler knows the branch; it does not know the
+    // author's whole intent for a join, and it no longer pretends to.
+    const named = candidates.length === 1 ? candidates[0]! : undefined;
+
+    // WHAT A BARRIER WAITS FOR IS THE BRANCH MEMBERS UPSTREAM OF IT — of EVERY candidate, so
+    // that the list is true whichever one the author picks. A branch node with no path to the
+    // barrier (a second arm, an `error` handler) cannot take a `kind: join` edge into it
+    // without changing the graph's shape, and a candidate join is not its own ancestor, so this
+    // one predicate also keeps a join out of the list it is being offered as the barrier for.
+    //
+    // ONE PREDICATE FOR BOTH ARMS, and that is the point. The ancestor filter used to live only
+    // in the single-candidate arm, so the multi-candidate sentence handed back the UNFILTERED
+    // branch — and on a graph with a join sitting inside the branch, "pick one join downstream
+    // of X" plus a list containing that join reproduced `GRAPH006_UNMARKED_CYCLE` exactly as
+    // before. A filter that has to be remembered in two places is a filter that will be
+    // remembered in one.
+    //
+    // It can never empty the list: every candidate is downstream of `e.to` by construction, so
+    // `e.to` is an ancestor of all of them and always survives.
+    const waitsFor =
+      candidates.length === 0
+        ? branch
+        : branch.filter((id) => candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false));
+
+    const each = waitsFor.join(", ");
+    const fix =
+      named !== undefined
+        ? `give join "${named.id}" an entry in its \`branches\` for each of ${each}, and a \`kind: join\` edge from ` +
+          `each of them into "${named.id}" — every node inside a fan-out branch needs both. ADD to whatever ` +
+          `"${named.id}" already declares: one join can be the barrier for more than one fan-out`
+        : candidates.length > 1
+          ? `pick one of the joins ${candidates.map((c) => `"${c.id}"`).join(" or ")} — not one of the nodes below, ` +
+            `which are what it waits FOR — and give it an entry in its \`branches\` for each of ${each}, plus a ` +
+            `\`kind: join\` edge from each of them into it, added to whatever it already declares`
+          : `add a join node downstream of "${e.to}", with an entry in its \`branches\` for every node you leave ` +
+            `inside the branch and a \`kind: join\` edge from each — as drawn that is ${each}, and a join placed ` +
+            `earlier shortens it`;
+
+    d.push({
+      severity: "error",
+      code: "GRAPH021_FANOUT_WITHOUT_JOIN",
+      message:
+        `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it` +
+        // The count describes the BRANCH, never the dictated list — reporting the filtered list
+        // here made "holds N nodes" change when an unrelated join was added elsewhere.
+        (branch.length > 1
+          ? `; the branch it opens holds ${branch.length} nodes (${branchList}), and a join must wait on every one of them`
+          : ""),
+      at: { edgeId: e.id },
+      fix,
+    });
   }
 }
 
