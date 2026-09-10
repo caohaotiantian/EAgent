@@ -2561,46 +2561,69 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
       return stack !== undefined && stack.length > 0 && stack[stack.length - 1] === e.id;
     };
 
-    // A join already downstream is named, so the author edits the one they drew rather than
-    // reading "add a join node" next to the join they can see. With two of them the fix names
-    // none: picking one for the author is a guess the rule cannot make.
-    const downstream = spec.nodes.filter((n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false));
-    const named = downstream.length === 1 ? downstream[0]! : undefined;
+    const branch = spec.nodes.filter(atThisLevel).map((n) => n.id);
+    const branchList = branch.join(", ");
 
-    // …AND UPSTREAM OF THE JOIN BEING NAMED. A join wired into the branch by a `seq` edge does
-    // not pop its level, so it and everything after it sat in its own branch list — the message
-    // told the author to add the join to its own `branches` and give it a `kind: join` edge to
-    // itself, which is a cycle. A branch member is by definition something the barrier waits
-    // FOR, so it has to be an ancestor of the barrier.
-    const branch = spec.nodes
-      .filter(atThisLevel)
-      .filter((n) => named === undefined || (idx.ancestors.get(named.id)?.has(n.id) ?? false))
-      .map((n) => n.id);
-    const list = branch.join(", ");
+    // A CANDIDATE BARRIER IS A JOIN AT THE LEVEL THIS FAN-OUT OPENS FROM — not merely one that
+    // is reachable. Reachability was the root cause of both defects a reviewer found in the
+    // first two cuts of this rule, and of two more they found in the third: a nested fan-out's
+    // INNER join is reachable from the outer target, so naming it told the author to make it
+    // the outer barrier (`GRAPH008_JOIN_DEPTH`, on a graph that otherwise compiles), and a join
+    // wired in by a `seq` edge is reachable while sitting INSIDE the branch, so it was named as
+    // its own barrier (`GRAPH006_UNMARKED_CYCLE`). Both are the same mistake: "reachable" and
+    // "is the barrier for this level" are different questions.
+    //
+    // A barrier for this fan-out sits where the fan-out started — its own stack is `e.to`'s
+    // stack with `e.id` popped. An ambiguous stack (`undefined`) names no level, so it names no
+    // candidate either, and the message falls through to the un-dictating form below.
+    const openedFrom = idx.fanoutEdgeStack.get(e.to);
+    const parentStack = openedFrom === undefined ? undefined : openedFrom.slice(0, -1);
+    const atBarrierLevel = (n: NodeSpec): boolean => {
+      const s = idx.fanoutEdgeStack.get(n.id);
+      return (
+        parentStack !== undefined &&
+        s !== undefined &&
+        s.length === parentStack.length &&
+        s.every((x, i) => x === parentStack[i])
+      );
+    };
+    const candidates = spec.nodes.filter(
+      (n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false) && atBarrierLevel(n),
+    );
 
-    // WITH NO JOIN AT ALL THE LIST IS CONTINGENT AND SAYS SO. Where the barrier goes decides
-    // which nodes are inside the branch, and the compiler cannot know where the author wants
-    // it — asserting `branches: [count, summarise]` steered a reader into joining AFTER the
-    // node that writes the graph's output, turning a `replace` output into an 8-element array.
-    const them = branch.length > 1 ? "them" : `"${e.to}"`;
+    // THE FIX DICTATES A LIST ONLY WHEN ONE IS DETERMINED, and that is exactly the case of a
+    // single candidate at the right level. Everything else — none, or a choice between two —
+    // gets the rule and the branch's contents, because the author picks where the barrier goes
+    // and the compiler cannot. Three of the four defects above were the message asserting an
+    // edit it did not have the information to assert; the fourth was this list.
+    const named = candidates.length === 1 ? candidates[0]! : undefined;
+
+    // …and what a NAMED barrier waits for is the branch members upstream of IT. A branch node
+    // with no path to the barrier (a second arm, an `error` handler) cannot take a `kind: join`
+    // edge into it without changing the graph's shape, so it is not dictated.
+    const waitsFor =
+      named === undefined ? branch : branch.filter((id) => idx.ancestors.get(named.id)?.has(id) ?? false);
+
     const fix =
       named !== undefined
-        ? `join "${named.id}" must declare branches: [${list}] and take a \`kind: join\` edge from each of ${them} — ` +
-          `every node inside a fan-out branch needs both`
-        : downstream.length > 1
-          ? `a join downstream of "${e.to}" must declare branches: [${list}] and take a \`kind: join\` edge from each ` +
-            `of ${them} — every node inside a fan-out branch needs both`
+        ? `join "${named.id}" must declare branches: [${waitsFor.join(", ")}] and take a \`kind: join\` edge from ` +
+          `each of ${waitsFor.length > 1 ? "them" : `"${e.to}"`} — every node inside a fan-out branch needs both`
+        : candidates.length > 1
+          ? `one join downstream of "${e.to}" must declare branches: covering every node you leave inside the branch ` +
+            `— as drawn that is [${branchList}] — and take a \`kind: join\` edge from each of them`
           : `add a join node downstream of "${e.to}", with a \`kind: join\` edge from every node you leave inside the ` +
-            `branch and each of them named in its branches: — as drawn that is [${list}], and a join placed earlier ` +
-            `shortens the list`;
+            `branch and each of them named in its branches: — as drawn that is [${branchList}], and a join placed ` +
+            `earlier shortens the list`;
 
     d.push({
       severity: "error",
       code: "GRAPH021_FANOUT_WITHOUT_JOIN",
       message:
         `fanout edge "${e.id}" expands "${e.to}" but no downstream join waits on it` +
+        // The count describes the BRANCH, never the dictated list — reporting the filtered list
+        // here made "holds N nodes" change when an unrelated join was added elsewhere.
         (branch.length > 1
-          ? `; the branch it opens holds ${branch.length} nodes (${list}), and a join must wait on every one of them`
+          ? `; the branch it opens holds ${branch.length} nodes (${branchList}), and a join must wait on every one of them`
           : ""),
       at: { edgeId: e.id },
       fix,

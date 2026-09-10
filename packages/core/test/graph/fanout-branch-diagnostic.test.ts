@@ -215,6 +215,43 @@ test("A NESTED FAN-OUT'S NODES ARE NOT THE OUTER JOIN'S BRANCHES — the stack's
   assert.match(said, /subJoin/, "the inner JOIN pops back to this level and IS an outer branch member");
 });
 
+test("A JOIN ONE LEVEL DOWN IS NOT NAMED AS THIS FAN-OUT'S BARRIER", () => {
+  // The third reviewer, on the second fix. `downstream` selected candidate joins by pure
+  // REACHABILITY, and a nested fan-out's INNER join is reachable from the outer target — so
+  // with no outer join yet drawn, the inner one was named and the author was told to make it
+  // the outer barrier. Applied literally that is `GRAPH008_JOIN_DEPTH`: one join reachable at
+  // two fan-out depths. Same root cause as the `seq`-wired case below — "reachable" and "is
+  // the barrier for THIS level" are different questions, and only the second one is the rule.
+  const s = shipped();
+  (s.channels as Record<string, unknown>)["subs"] = { type: "array", reduce: "append_ordered" };
+  (s.channels as Record<string, unknown>)["sub"] = { type: "string", reduce: "replace" };
+  (s.nodes as NodeSpec[]).push(
+    { id: n("sub"), type: "function", reads: ["sub"], writes: ["failures"], function: { ref: "function/sub@stable" } } as NodeSpec,
+    { id: n("subJoin"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("sub")], mode: "all", onBranchError: "fail" } } as NodeSpec,
+  );
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, writes: ["raw", "subs"] } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("sort")), 1);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("fanInner"), from: n("read"), to: n("sub"), kind: "fanout", over: "subs", as: "sub", maxWidth: 2 } as EdgeSpec,
+    { id: e("subCollect"), from: n("sub"), to: n("subJoin"), kind: "join" } as EdgeSpec,
+    { id: e("onward"), from: n("subJoin"), to: n("classify"), kind: "seq" } as EdgeSpec,
+  );
+  // Delete the OUTER join entirely, so `subJoin` is the only join reachable from `read`.
+  (s.nodes as NodeSpec[]).splice(s.nodes.findIndex((x) => x.id === n("gather")), 1);
+  for (const id of ["collect-read", "collect", "fold"]) {
+    const i = s.edges.findIndex((x) => x.id === e(id));
+    if (i !== -1) (s.edges as EdgeSpec[]).splice(i, 1);
+  }
+  (s.edges as EdgeSpec[]).push({ id: e("on2"), from: n("classify"), to: n("collate"), kind: "seq" } as EdgeSpec);
+
+  const [outer] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(outer !== undefined);
+  const said = `${outer.message}\n${outer.fix ?? ""}`;
+  assert.doesNotMatch(said, /join "subJoin" must declare/, "subJoin sits INSIDE this fan-out; it cannot be its barrier");
+  assert.match(said, /add a join node downstream of "read"/, "there is no barrier at this level, so it must ask for one");
+});
+
 test("A JOIN WIRED BY A `seq` EDGE IS NOT LISTED AS ONE OF ITS OWN BRANCHES", () => {
   // The other reviewer finding. A join reached by a plain `seq` edge does not pop its level, so
   // it — and everything after it — sat inside its own branch list, and the message asked the
@@ -229,9 +266,54 @@ test("A JOIN WIRED BY A `seq` EDGE IS NOT LISTED AS ONE OF ITS OWN BRANCHES", ()
   const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
   assert.ok(d !== undefined);
   const said = `${d.message}\n${d.fix ?? ""}`;
-  assert.match(said, /branches: \[read, classify\]/, `the barrier's own arms, and only those; got: ${said}`);
-  assert.doesNotMatch(said, /branches: \[[^\]]*\bgather\b/, "a join can never be one of its own branches");
-  assert.doesNotMatch(said, /branches: \[[^\]]*\bcollate\b/, "nor can a node downstream of it");
+  assert.doesNotMatch(said, /join "gather" must declare/, "a join inside the branch cannot be its own barrier");
+  assert.doesNotMatch(said, /branches: \[[^\]]*\bgather\b/, "and it can never be one of its own branches");
+});
+
+test("A SECOND JOIN AT THE SAME LEVEL MAKES THE FIX STOP DICTATING, rather than guess", () => {
+  // The remaining half of the third reviewer's finding: the ancestor filter was skipped whenever
+  // more than one join was a candidate, so the un-filtered list came back and could name a join
+  // among its own branches. The rule now dictates a `branches:` list ONLY when exactly one
+  // candidate sits at the barrier's level — that is the only case where the answer is
+  // determined. Everything else gets the rule and the branch, and the author picks.
+  const s = f1Step1();
+  (s.nodes as NodeSpec[]).push({
+    id: n("gather2"),
+    type: "join",
+    reads: ["failures"],
+    writes: ["failures"],
+    join: { branches: [n("classify")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("collect2"), from: n("classify"), to: n("gather2"), kind: "join" } as EdgeSpec);
+
+  const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(d !== undefined);
+  const said = `${d.message}\n${d.fix ?? ""}`;
+  assert.doesNotMatch(said, /join "gather\d?" must declare/, "with two candidates it must not pick one");
+  assert.match(said, /one join downstream of "read"/);
+  assert.match(said, /read, classify/, "and it still names the branch, which is the part it does know");
+});
+
+test("THE `holds N nodes` COUNT DESCRIBES THE BRANCH, not whichever join got named", () => {
+  // It used to be taken after the ancestor filter, so adding an unrelated join elsewhere in the
+  // graph changed the reported size of a branch that had not moved. A count that answers a
+  // different question depending on the rest of the file is worse than no count.
+  const withJoin = f1Step1();
+  const before = errorsOf(withJoin).find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")?.message ?? "";
+
+  const plusUnrelated = f1Step1();
+  (plusUnrelated.nodes as NodeSpec[]).push({
+    id: n("aside"),
+    type: "join",
+    reads: ["failures"],
+    writes: ["failures"],
+    join: { branches: [n("collate")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (plusUnrelated.edges as EdgeSpec[]).push({ id: e("aside-in"), from: n("collate"), to: n("aside"), kind: "join" } as EdgeSpec);
+  const after = errorsOf(plusUnrelated).find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")?.message ?? "";
+
+  assert.match(before, /holds 2 nodes \(read, classify\)/);
+  assert.equal(after.includes("holds 2 nodes (read, classify)"), true, `the branch did not move; got: ${after}`);
 });
 
 test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", () => {
