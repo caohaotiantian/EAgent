@@ -29,7 +29,7 @@ import {
   postureRank,
   isHardToUndo,
 } from "../vocab.ts";
-import { CODES } from "../errors.ts";
+import { CODES, type Code, type ErrorClass } from "../errors.ts";
 import { checkExpr, type Ty } from "./expr.ts";
 import {
   DEFAULT_EXPANSION,
@@ -1063,6 +1063,128 @@ const RESERVED_LIST = [...PROTOTYPE_NAMES]
  */
 const MAX_TIMER_MS = 2_147_483_647;
 
+/**
+ * THE CLASSES EACH ERROR CODE IS ACTUALLY RAISED WITH — a set, because it is not one.
+ *
+ * `retry.onlyIf` is filtered by `#retryDecision` AFTER `if (!error.retryable) return undefined;`,
+ * and `retryable` is `RETRYABLE.has(error.class)` over `{exhausted, unavailable, timeout}`. So an
+ * `onlyIf` naming a code that is never raised with one of those three is a filter that can never
+ * match: it compiles, the compiler ECHOES it back in the retry summary, and the runtime ignores
+ * it. `retry.onlyIf: ["E_FUNCTION_REFUSED"]` is the case that named the row (TODO §A.49) — that
+ * code is `validation` by design, which is the entire distinction between it and
+ * `E_FUNCTION_UNAVAILABLE`.
+ *
+ * WHY A SET AND NOT A CLASS. `class` is chosen at the RAISE SITE, not by the code, and this tree
+ * proves it: ten codes are raised under more than one class, and five sit under a section heading
+ * in `errors.ts` that disagrees with their raise sites about retryability itself —
+ * `E_GATE_DELIVERY_FAILED` is under `// policy` and raised `unavailable` twice in
+ * `run/delivery.ts`; `E_SUBGRAPH_FAILED` is under `// internal` and raised `unavailable` twice in
+ * `run/engine.ts`; `E_EXPANSION_EXHAUSTED`, `E_QUORUM_UNREACHABLE` and `E_GRAPH_MISMATCH` sit
+ * under retryable headings and are never raised retryably. A table read off the headings would
+ * refuse the first two, which WORK. This one is read off `err.<class>(CODES.X)` and
+ * `new LoomError("<class>", CODES.X)` across `packages/core/src`.
+ *
+ * AN EMPTY ARRAY IS THE UNDECIDABLE ANSWER AND IT ACCEPTS. Six codes are emitted as a bare
+ * `{code, message}` record and never become a `LoomError`, so nothing pins a class to them.
+ * Refusing a graph on a class nothing pins would be the false refusal this table exists to
+ * avoid — and the effect of the status quo for those six is at worst the dead filter the rule
+ * is about, never a broken run.
+ *
+ * THE DRIFT GUARD IS `tsc`, NOT A SOURCE SCAN. `Record<Code, ...>` makes a code added to
+ * `errors.ts` a type error here until somebody classifies it, so the set this table covers is
+ * exactly `CODES` and cannot quietly stop being. Not exported, and the table lives here rather
+ * than in `errors.ts`, for the reason `MAX_TIMER_MS` above states: `src/index.ts` is
+ * `export * from "./errors.ts"`, so any new export there lands on the pinned public surface.
+ *
+ * `EdgeSpec.codes` is deliberately NOT filtered by this — a non-retryable code is exactly what
+ * an `error` edge is for.
+ */
+const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
+  // validation
+  E_GRAPH_INVALID: ["validation"],
+  E_CHANNEL_UNDECLARED: ["validation"],
+  E_CONTEXT_OVERFLOW: ["validation"],
+  E_TOOL_SCHEMA_INVALID: ["validation"],
+  E_PROVIDER_BAD_REQUEST: ["validation"],
+  E_ROUTE_INVALID: ["policy"],   // raised policy, not the validation its heading claims
+  E_EXPR_INVALID: ["validation"],
+  E_RESOURCE_INVALID: ["validation"],
+  E_FUNCTION_REFUSED: ["validation"],
+  E_CONFIG_INVALID: ["internal", "validation"],   // two classes, neither retryable
+  E_COHORT_INVALIDATED: ["validation"],
+  E_PAYLOAD_TOO_DEEP: ["validation"],
+  E_PAYLOAD_TOO_LARGE: ["validation"],
+  // policy
+  E_OVERSIGHT_LOOSENED: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_OVERSIGHT_LOOSEN_FORBIDDEN: ["policy"],
+  E_CAP_DENIED: ["policy"],
+  E_GATE_REQUIRED: ["policy"],
+  E_GATE_NOT_AUTHORIZED: ["policy"],
+  E_CONTENT_FILTERED: ["policy"],
+  E_PROVIDER_AUTH: ["policy"],
+  E_NOT_AUTHORIZED: ["policy"],
+  E_HUMAN_APPROVAL_REQUIRED: ["policy", "validation"],   // two classes, neither retryable
+  E_EVAL_REGRESSION: ["policy"],
+  E_GATE_DELIVERY_FAILED: ["not_found", "unavailable"],   // two classes, one retryable -> CAN fire
+  // not_found
+  E_RESOURCE_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
+  E_RESOURCE_YANKED: ["policy"],   // raised policy, not the not_found its heading claims
+  E_TOOL_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
+  E_GATE_NOT_FOUND: ["not_found"],
+  E_RUN_NOT_FOUND: ["not_found"],
+  E_ROUTE_NOT_FOUND: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // conflict
+  E_SEQ_CONFLICT: ["conflict"],
+  E_FENCING_STALE: ["conflict"],
+  E_IDEMPOTENCY_MISMATCH: ["conflict"],
+  E_GATE_ALREADY_RESOLVED: ["conflict"],
+  E_ILLEGAL_TRANSITION: ["conflict"],
+  E_RESTORE_ILLEGAL: ["conflict", "validation"],   // two classes, neither retryable
+  E_EFFECT_UNRECORDED: ["validation"],   // raised validation, not the conflict its heading claims
+  E_EFFECT_UNAVAILABLE: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // exhausted
+  E_BUDGET_EXHAUSTED: ["exhausted"],
+  E_PROVIDER_RATE_LIMIT: ["exhausted"],
+  E_EXPANSION_EXHAUSTED: ["policy"],   // raised policy, not the exhausted its heading claims
+  E_QUORUM_UNREACHABLE: ["validation"],   // raised validation, not the exhausted its heading claims
+  // unavailable
+  E_FUNCTION_UNAVAILABLE: ["unavailable"],
+  E_PROVIDER_OVERLOADED: ["unavailable"],
+  E_PROVIDER_TRANSPORT: ["unavailable"],
+  E_TOOL_SOURCE_UNAVAILABLE: ["unavailable"],
+  E_CHILD_UNREACHABLE: ["unavailable"],
+  // timeout
+  E_TOOL_TIMEOUT: ["timeout"],
+  E_GATE_EXPIRED: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_GRAPH_MISMATCH: ["conflict", "policy", "validation"],   // three classes, none retryable
+  E_TASK_TIMEOUT: ["timeout"],
+  E_REQUEST_TIMEOUT: [],   // no LoomError raise site: emitted as a bare {code, message}
+  // cancelled
+  E_CANCELLED: ["cancelled"],
+  // internal
+  E_INTERNAL: ["internal", "validation"],   // two classes, neither retryable
+  E_REPLAY_DIVERGENCE: ["internal"],
+  E_SUBGRAPH_FAILED: ["internal", "unavailable"],   // two classes, one retryable -> CAN fire
+  E_FLOATING_REF_AT_RUNTIME: ["internal"],
+  E_TRACE_INCONSISTENT: ["internal"],
+  E_OUTPUT_MISSING: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_PAYLOAD_UNRESOLVED: ["internal"],
+};
+
+/** The three classes `LoomError` marks retryable. A copy, for the reason `RAISED_CLASS` states. */
+const RETRYABLE_CLASSES: ReadonlySet<ErrorClass> = new Set<ErrorClass>(["exhausted", "unavailable", "timeout"]);
+
+/**
+ * Can an `onlyIf` naming this code ever fire? Unknown to the table — an extension's own code,
+ * or one with no raise site — answers YES, because refusing is only correct where the answer
+ * is provably no.
+ */
+function neverRetryable(code: string): readonly ErrorClass[] | undefined {
+  const classes = Object.hasOwn(RAISED_CLASS, code) ? RAISED_CLASS[code as Code] : undefined;
+  if (classes === undefined || classes.length === 0) return undefined;
+  return classes.some((c) => RETRYABLE_CLASSES.has(c)) ? undefined : classes;
+}
+
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
@@ -1198,8 +1320,41 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       });
     }
   };
+  /**
+   * A SECOND QUESTION ABOUT THE SAME LIST, and only about `retry.onlyIf`.
+   *
+   * `checkCodes` asks whether the code EXISTS. This asks whether naming it can ever have an
+   * effect: `#retryDecision` returns on `!error.retryable` long before it reads `onlyIf`, so a
+   * member never raised with a retryable class is a filter that cannot match. The effect is
+   * "no retry", which is the safe direction — what it costs is an author who writes it, sees
+   * the compiler echo `onlyIf=E_FUNCTION_REFUSED` back in the retry summary, and concludes the
+   * runtime honours it.
+   */
+  const checkRetryable = (codes: unknown, nodeId: NodeId): void => {
+    if (!Array.isArray(codes)) return;
+    for (const c of codes) {
+      if (typeof c !== "string") continue;
+      const classes = neverRetryable(c);
+      if (classes === undefined) continue;
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNRETRYABLE_ONLY_IF",
+        message:
+          `node "${nodeId}".retry.onlyIf names error code "${c}", which is raised as ` +
+          `${classes.map((x) => `\`${x}\``).join(" and ")} — a class the retry policy never retries, ` +
+          `so this filter can never match and the policy is dead`,
+        at: { nodeId },
+        fix:
+          `remove "${c}" from onlyIf (an absent onlyIf retries every retryable error), or name a code raised as ` +
+          `\`exhausted\`, \`unavailable\` or \`timeout\` — if "${c}" is the failure you want handled, an \`error\` edge ` +
+          `with codes: ["${c}"] is the mechanism for it, not a retry`,
+      });
+    }
+  };
+
   for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge "${e.id}"`);
   for (const n of spec.nodes) checkCodes(n.retry?.onlyIf, { nodeId: n.id }, `node "${n.id}".retry.onlyIf`);
+  for (const n of spec.nodes) checkRetryable(n.retry?.onlyIf, n.id);
 
   // A BUDGET LADDER STEP THAT DOES NOT EXIST IS REFUSED, not silently downgraded. D6.5 designs
   // warn → degrade → gate → fail; only `fail` is built. `gate` read as "ask a human rather than
