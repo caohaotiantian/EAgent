@@ -316,25 +316,16 @@ test("more shards than the fan-out can carry REFUSES, instead of dropping the su
   // said "8 failing test(s) across 8 report file(s)" with no warning on either stream — a third of
   // the evidence missing from a document a person is being asked to approve.
   //
-  // THE CEILING HAS ONE HOME, and it is the graph. `triage-plan.js` used to carry a
-  // `SHARD_CEILING = 24` beside the `fan` edge's `maxWidth: 24`, and this test pinned the two
-  // together by reading the graph — a patch on a seam rather than the seam. Since `c2360be` a body
-  // reads `ctx.node.out`, so the constant is GONE and the assertion below is that it stays gone:
-  // a body that hard-codes the number again passes the drive but fails the read.
+  // THE CEILING HAS ONE HOME, and it is the graph — `SHARD_CEILING = 24` used to sit in the body
+  // beside the `fan` edge's `maxWidth: 24`, with this test pinning them together by reading the
+  // graph, which is a patch on a seam rather than the seam. Since `c2360be` the body reads
+  // `ctx.node.out`. THAT the read happens is the test BELOW this one ("the ceiling is whatever the
+  // graph says"); this one is the ordinary behaviour at the shipped width.
   const ws = workspace(["graphs", "resources"]);
   try {
     const spec = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: number }[] };
     const width = spec.edges.find((e) => e.id === "fan")!.maxWidth!;
     assert.equal(typeof width, "number");
-
-    // The body names `maxWidth` (it reads the edge) and never the NUMBER. Docstring and comments
-    // are stripped first, so prose that mentions a width — "30 shards with a width of 24" — is not
-    // what this catches; a literal in the code is.
-    const body = readFileSync(join(ws.dir, "resources", "function", "triage-plan.js"), "utf8")
-      .replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/\/\/[^\n]*/g, "");
-    assert.equal(new RegExp(`\\b${String(width)}\\b`).test(body), false, `triage-plan.js hard-codes the ceiling:\n${body}`);
-    assert.match(body, /ctx\.node/, "…and the number it does not carry is read off the node instead");
 
     mkdirSync(join(ws.dir, "reports"));
     const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
@@ -388,6 +379,51 @@ test("a shard with no failures is still COUNTED as a file that was read", async 
       readFileSync(join(ws.dir, "out", "triage.md"), "utf8"),
       /^2 failing test\(s\) across 3 report file\(s\) \(1 with failures\), in 1 root-cause bucket\(s\)\.$/m,
     );
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("the ceiling is whatever the GRAPH says — move maxWidth and the refusal moves with it", async () => {
+  // THE DRIFT TEST, AND IT IS BEHAVIOURAL ON PURPOSE. The first version of this read
+  // `triage-plan.js` as TEXT and asserted the shipped width did not appear in it. A fresh reviewer
+  // defeated that in one file: `const CEILING = 0x18` (24, and `\b24\b` does not match it) plus a
+  // dead `const _unused = ctx.node;` to satisfy the "it reads the node" half — a body that
+  // hard-codes the ceiling and passes every assertion. A source-text check can only ever ask
+  // whether a spelling is absent; this asks what the body DOES.
+  //
+  // So: edit the GRAPH alone to a width nothing else in the tree carries, and require the refusal
+  // to name that number. A body holding any constant either fails to refuse at all (it is above
+  // the new width and below the old) or names the wrong cap.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as {
+      edges: { id: string; maxWidth?: number }[];
+    };
+    const fan = raw.edges.find((e) => e.id === "fan")!;
+    const shipped = fan.maxWidth!;
+    const moved = 3; // ≤ policy.expansion.maxFanout (GRAPH011 refuses a width above it)
+    assert.notEqual(moved, shipped, "the moved width must differ from the shipped one or this proves nothing");
+    fan.maxWidth = moved;
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+
+    mkdirSync(join(ws.dir, "reports"));
+    const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
+    const name = (i: number): string => `shard-${String(i).padStart(3, "0")}.txt`;
+    for (let i = 0; i <= moved; i += 1) writeFileSync(join(ws.dir, "reports", name(i)), one);
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `${String(moved + 1)} shards over a width of ${String(moved)} must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(
+      String(error["message"]),
+      new RegExp(`matched ${String(moved + 1)} test-output files but this graph fans out at most ${String(moved)}`),
+      r.out,
+    );
+    // The shipped number must be nowhere in that sentence — a body that answered 24 here would be
+    // reading a constant, not the edge.
+    assert.doesNotMatch(String(error["message"]), new RegExp(`at most ${String(shipped)}`), r.out);
   } finally {
     ws.dispose();
   }

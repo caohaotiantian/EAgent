@@ -428,17 +428,18 @@ names the count and the cap instead.
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 11 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 12 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-Eleven tests: parks-with-nothing-written (and the report the gate now SHOWS, out of `loom gates`'s
+Twelve tests: parks-with-nothing-written (and the report the gate now SHOWS, out of `loom gates`'s
 `reads`), the approval and the exact ranking, the refused approver (pinned to
 `E_GATE_NOT_AUTHORIZED`, not merely to a non-zero exit), cancel, replay, the empty-pattern refusal
 (pinned to `E_FUNCTION_REFUSED`/`validation`), the four a fresh review added — a CRLF shard, a shard
 count over the fan-out ceiling, a shard with no failures still being counted as read, and a failure
-with no YAML block not swallowing the next one — and, since the ceiling moved into the graph, the
-arm where the body can find no width and refuses rather than picking one. `examples-run.test.ts` picks the new graph up without being
+with no YAML block not swallowing the next one — and the two the ceiling's move into the graph
+needed: the width EDITED in the graph alone and the refusal naming the new number, and the arm where
+the body can find no width at all and refuses rather than picking one. `examples-run.test.ts` picks the new graph up without being
 edited — its set is the directory — so the compile and resource-reachability halves were already
 covered.
 
