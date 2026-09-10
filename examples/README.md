@@ -60,9 +60,11 @@ edge names the array and the per-branch channel
 an arm into the join must be `"kind": "join"`** — a `seq` edge leaves `gather` inside the fan-out
 (`GRAPH008_HELD_JOIN_UNCOLLECTED`), no edge at all is `GRAPH008_BRANCH_NOT_CONNECTED`. A channel
 written by parallel branches needs a reducer that survives concurrent writers: `counts` is
-`append_ordered`, and `replace` is refused as `GRAPH010_CONCURRENT_WRITE` — here because `gather`
-and `summarise` both read it AFTER the join. A channel nothing outside the branch touches is
-exempt and may be `replace`; §8's `raw` is one, and names the exact conditions.
+`append_ordered`, and `replace` is refused as `GRAPH010_CONCURRENT_WRITE`. A channel NOTHING
+outside the branch touches is exempt and may be `replace` — §8's `raw` is one, and names the
+exact conditions — but `counts` fails several of them at once, and `gather` is enough on its own:
+a join that declares `"writes": ["counts"]` is a **second writer**, so deleting the post-join
+reads in `summarise` changes nothing.
 
 ## 2 · A `function` body — `resources/function/*.js`
 

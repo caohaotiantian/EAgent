@@ -2556,8 +2556,8 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     }
   }
 
-  // W6 — EVERY JOIN OVER THIS BRANCH IS `mode: "all"` AND DECLARES EVERY NODE OF THE BRANCH.
-  // Two clauses, two separate reproductions, and neither is tidiness.
+  // W6 — EVERY JOIN OVER THIS BRANCH IS `mode: "all"` AND ITS `branches` IS EXACTLY THIS BRANCH.
+  // Three clauses, three separate reproductions, and none is tidiness.
   //
   // The shared mechanism: `#withBranchWrites` returns the projection UNTOUCHED when the asking
   // branch has held nothing — a writer that failed, that returned `{writes:{}}`, or that a
@@ -2580,6 +2580,30 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   // the reader. `GRAPH008_BRANCH_NOT_CONNECTED` only enforces the other direction — a declared
   // member must have a join edge — so nothing else supplies this.
   //
+  // EXACTLY, NOT MERELY AT LEAST — the barrier must be over THIS branch and nothing else, and
+  // "`mode: all` cannot fire early" is false the moment it is over something else too.
+  // `Engine.#fireEmptyJoin` is a SECOND entrance to the barrier and it has no quiescence test at
+  // all: for a fan-out that materialised no branches it emits `task.ready` for every join whose
+  // `branches` names that fan-out's target, full stop. So a graph with a SECOND fan-out edge into
+  // the same join fires it as soon as that sibling's list is empty — while this branch is still
+  // running. Measured, on `seed --fan--> read --> mid --> classify` and `seed --fan2--> read2`
+  // both joining at one `mode: "all"` `gather`, driven twice with only the sibling's input list
+  // changing:
+  //
+  //     others = ["x"]  →  failures : ["null","raw-1","raw-2","other"]
+  //     others = []     →  failures : undefined
+  //
+  // The second run's join folded before any member had committed, `collate` ran on pre-fan-out
+  // state, and the run reported `succeeded`. A reader in a branch that held nothing then falls
+  // through to whatever that fold published. `maxWidth: 0` on the sibling edge is the same thing
+  // without needing the input data. (An empty fan-out of the branch's OWN edge is harmless —
+  // there is no branch task to read anything — which is why this is about a DIFFERENT edge.)
+  //
+  // A `human_gate` IN THE BRANCH is accepted and is the shape that most tests these three
+  // clauses: it is in `CAN_SUSPEND`, so it holds its branch open for as long as a person takes.
+  // W6 is what makes that safe rather than merely slow — the gate is forced into `branches`, a
+  // suspended Task is non-terminal, and `stillLive`/`reachesMember` therefore hold the barrier.
+  //
   // The join is invisible to every clause above: a `join` edge pops a level, so a join is never
   // in `subtree`. It has to be found through its own declaration.
   let covered = false;
@@ -2589,6 +2613,7 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     if (!Array.isArray(branches) || !branches.some((b) => subtree.has(b))) continue;
     if (n.join?.mode !== "all") return false;
     const declared = new Set<NodeId>(branches);
+    if (declared.size !== subtree.size) return false;
     for (const id of subtree) if (!declared.has(id)) return false;
     covered = true;
   }

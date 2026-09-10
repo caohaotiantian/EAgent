@@ -1,16 +1,16 @@
 /**
  * GRAPH010 EXEMPTS A CHANNEL THAT NEVER LEAVES ONE FAN-OUT BRANCH — and refuses everything else.
  *
- * This file is the ledger for a LOOSENING, so the accepts are three and the refusals twenty-four.
+ * This file is the ledger for a LOOSENING, so the accepts are three and the refusals twenty-five.
  * Each refusal names the condition of `branchLocalChannel` that catches it; if a change to the
  * analysis makes one of them compile, the loosening has moved and the test says which way.
  *
- * SIX OF THEM WERE FOUND BY REVIEWERS AFTER THE FIRST VERSION SHIPPED GREEN, and they are the
+ * SEVEN OF THEM WERE FOUND BY REVIEWERS AFTER THE FIRST VERSION SHIPPED GREEN, and they are the
  * ones to read first — a `subgraph` naming the channel, a `humanGate` delivery scope the census
  * did not cover, a loop whose back-edge source is a SIBLING of the fan-out, a short-circuiting
- * join, a branch node the join does not DECLARE, and an `agent` carrying a retry policy it never
- * wrote. Each compiled with zero diagnostics against a predicate whose own suite was green,
- * which is the whole reason this file is written as a ledger.
+ * join, a branch node the join does not DECLARE, a SECOND fan-out into the same join, and an
+ * `agent` carrying a retry policy it never wrote. Each compiled with zero diagnostics against
+ * a predicate whose own suite was green, which is why this file is written as a ledger.
  *
  * TWO OF THE ACCEPTS ARE HERE TO BE HONEST ABOUT WHAT IS ACCEPTED, not to celebrate it: an
  * `error`-edge handler reads the pre-fan-out value rather than the writer's, and the census
@@ -329,6 +329,26 @@ test("REFUSE: a SHORT-CIRCUITING join over the branch", () => {
   // in branch 1 read branch 0's value, on a graph that compiled with zero diagnostics.
   const s = spec();
   node(s, "gather", { join: { branches: [n("read"), n("classify")], mode: "any", onBranchError: "skip" } });
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: a SECOND fan-out into the same join, which can fire it with this branch pending", () => {
+  // `Engine.#fireEmptyJoin` is a second entrance to the barrier and has NO quiescence test: for a
+  // fan-out that materialised no branches it readies every join naming that fan-out's target.
+  // Driven on a real Engine before this clause existed, with only the sibling's input changing:
+  //   others = ["x"] → failures: ["null","raw-1","raw-2","other"]
+  //   others = []    → failures: undefined   ← the join folded before any member committed,
+  //                                            `collate` ran on pre-fan-out state, run succeeded
+  // `maxWidth: 0` on the sibling edge does the same with no input data at all.
+  const s = spec();
+  (s.channels as Record<string, unknown>)["others"] = { type: "array", reduce: "replace" };
+  (s.channels as Record<string, unknown>)["other"] = { type: "string", reduce: "replace" };
+  node(s, "seed", { reads: ["items"], writes: ["shards", "others"] });
+  (s.nodes as NodeSpec[]).push({ id: n("read2"), type: "function", reads: ["other"], writes: ["failures"], function: { ref: "function/r2@stable" } } as NodeSpec);
+  const all = [n("read"), n("classify"), n("read2")];
+  node(s, "gather", { join: { branches: all, mode: "all", onBranchError: "skip" } });
+  (s.edges as EdgeSpec[]).push({ id: e("fan2"), from: n("seed"), to: n("read2"), kind: "fanout", over: "others", as: "other", maxWidth: 4 } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("j3"), from: n("read2"), to: n("gather"), kind: "join", branches: all } as EdgeSpec);
   assert.equal(hasGraph010(s), true);
 });
 
