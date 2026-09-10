@@ -302,8 +302,12 @@ this one runs offline and means what it says, because there was never a model in
   stays and is a different thing: a BINDING to what the approver was shown, which `loom approve`
   re-derives and checks, not a summary anybody could read. A channel the graph classified
   (`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
-  report prints whole. `reads` is best-effort and simply ABSENT with a line on stderr when the
-  compile, the graph or the task cannot be found — absence is not "this gate reads nothing".
+  report prints whole. `reads` is best-effort and simply ABSENT, with a line on stderr naming the
+  gates and the reason, wherever it cannot be recomputed: no compile on record, a graph search that
+  fails or finds no graph carrying that hash, no such node or task (what a run MUTATED after it
+  started produces), and a gate MIRRORING one in a delegated child run — where the question is
+  about the child's channels, so printing the parent's would label the wrong values as the content.
+  Absence is not "this gate reads nothing".
   `loom serve`, then `GET /runs/<runId>` → `channels.report`, is still the fuller view and is what
   the console renders.
 
