@@ -10564,6 +10564,20 @@ export class Engine {
     const events: NewEvent[] = [];
     const scope = { ...scopeFor(p, ctx.graph.spec.channels, w.task.branch), ...outcome.writes };
 
+    // ONE MINT PER BARRIER PER WAVE. `#maybeFireJoin` stands down on `p.tasks[joinTaskId]`, and
+    // `p` predates every event in this array — so two entrances reaching one barrier inside a
+    // single `#activate` both see an empty slot and both mint it. That is reachable now that the
+    // generic arm routes here as well: a node carrying both a `seq` and a `join` edge to the same
+    // join fires from the loop below and again from the termination sweep at the bottom, which
+    // skips only edges already in `take`. `#fireEmptyJoin` guards its own array the same way and
+    // for the same reason; this is that rule at the three call sites that share one array, rather
+    // than at each exit — see `#fence` on why a rule per exit is a rule the fourth exit forgets.
+    const pushJoin = (fired: NewEvent | undefined): void => {
+      if (fired === undefined) return;
+      if (events.some((x) => x.taskId === fired.taskId)) return;
+      events.push(fired);
+    };
+
     for (const edgeId of take) {
       const e = ctx.index.edgeById.get(edgeId);
       if (e === undefined) continue;
@@ -10603,8 +10617,46 @@ export class Engine {
       }
 
       if (e.kind === "join") {
-        const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus, take);
-        if (fired !== undefined) events.push(fired);
+        pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
+        continue;
+      }
+
+      // A BARRIER'S TASK IS THE BARRIER'S TO MINT, whatever kind of edge arrives at it.
+      //
+      // Without this the arm below minted `task.ready` for `e.to` from the EDGE ALONE — no node
+      // type, no `p.tasks` lookup, no barrier state — and for a Task at the join's own parent
+      // coordinate the id it computed was byte-identical to `#maybeFireJoin`'s. So a `seq` or
+      // `conditional` edge into a join node did one of two things, and which one depended on
+      // `maxParallelism` and on the hop counts of the two paths:
+      //
+      //   - it fired the barrier EARLY, before the branches had committed, and every
+      //     contribution that had not landed yet was discarded; or
+      //   - it arrived AFTER the barrier and minted it a second time, so `#foldJoin` folded the
+      //     same members twice — four branches, eight entries under `append_ordered` — and the
+      //     node behind the join ran twice.
+      //
+      // Measured on `start --fanout(4)--> b0 …-join-> J -seq-> done` beside a second path
+      // `start -> note… -> J` whose arrival edge is `seq`, against the SAME graph with that
+      // second path removed. Branches of two nodes, baseline 8 entries under `append_ordered`:
+      // no notes at `par=16` → 0 entries, the channel never written at all; one note at
+      // `par=16` → 4. Branches of ONE node, baseline 4: three notes at `par=16` → 8, the join
+      // running two full `task.ready`/`committed`/`state.reduced` cycles and `done` running
+      // twice. Every one of those runs reported `succeeded`, and every one of those graphs
+      // compiled with zero diagnostics. `graph/validate.ts` already named this the "fourth
+      // entrance" — W6 exists because of it — but nothing in the engine refused it.
+      // `test/run/join-seq-entrance.test.ts` is the sweep.
+      //
+      // `loop` is deliberately NOT routed here. It mints at `iteration + 1`, which is a Task the
+      // barrier never owns, so folding it into `#maybeFireJoin` would turn a back-edge into a
+      // silent no-op rather than closing a hole.
+      //
+      // `#fireEmptyJoin` is deliberately NOT routed here either, and that is the trap: the
+      // planner's own `take` still holds the `fanout` edge whose `to` is a declared member, so
+      // `handingOff` is true and `quiescent` never becomes true — an empty fan would strand
+      // instead of releasing. A barrier over zero branches needs `#maybeFireJoin` to be TOLD the
+      // fan planned nothing; it is not a call-site swap.
+      if (e.kind !== "loop" && ctx.index.byId.get(e.to)?.join !== undefined) {
+        pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
         continue;
       }
 
@@ -10631,8 +10683,7 @@ export class Engine {
     // never come.
     for (const e of ctx.index.outbound.get(w.node.id) ?? []) {
       if (e.kind !== "join" || take.includes(e.id)) continue;
-      const fired = this.#maybeFireJoin(ctx, p, w, e, selfStatus, take);
-      if (fired !== undefined) events.push(fired);
+      pushJoin(this.#maybeFireJoin(ctx, p, w, e, selfStatus, take));
     }
     return events;
   }
