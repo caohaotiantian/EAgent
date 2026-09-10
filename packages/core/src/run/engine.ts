@@ -11126,17 +11126,39 @@ export class Engine {
     // `terminal >= expected` counted what had arrived rather than asking whether more
     // could. Gating the whole decision instead of just those two collapsed `any`,
     // `firstSuccess` and `quorum` into `all`: they released at exactly the same point.
+    //
+    // AND EVERY MODE NEEDS THE "NEVER" ANSWER, WHICH IS WHAT `noMoreArrivals` NAMES.
+    // `any` and `firstSuccess` were `succeeded >= 1` alone — a predicate with no false
+    // branch that terminates. Once every member is terminal and none succeeded it is
+    // permanently false, so the barrier never minted its Task, everything behind the join
+    // never ran, and `#finish` still called the run `succeeded`, because nothing was left
+    // in a live state to object. Measured on `start -fanout(2)-> b0 -join-> J -seq-> done`
+    // over a body that always throws, `onBranchError: "skip"`, `outputs: []` — `any` and
+    // `firstSuccess` read `Jready=0 done=0 status=succeeded` where `all` and `quorum` read
+    // `Jready=1 done=1`. (`outputs: []` is load-bearing in that probe: a declared output
+    // nothing writes fails the run `E_OUTPUT_MISSING`, which hides the "says it worked"
+    // half.)
+    //
+    // RELEASING IS THE ANSWER, NOT FAILING HERE, and the reason is that the outcome
+    // already has an owner. `#maybeFireJoin` decides WHEN a barrier releases; `#foldJoin`
+    // decides what the release MEANS, and it already holds the failure arm —
+    // `onBranchError === "fail" && skipped > 0` returns `E_QUORUM_UNREACHABLE`. Failing
+    // from here would compute that judgement a second time and compute it differently,
+    // overriding an operator who wrote `onBranchError: "skip"` on purpose. So all four
+    // modes now short-circuit on evidence in hand and otherwise release once no further
+    // arrival is possible, and what an empty fold is worth stays the operator's call.
+    const noMoreArrivals = quiescent && terminal >= expected;
     const fire = (() => {
       switch (join.mode) {
         case "all":
-          return quiescent && terminal >= expected;
+          return noMoreArrivals;
         case "any":
         case "firstSuccess":
-          return succeeded >= 1;
+          return succeeded >= 1 || noMoreArrivals;
         case "quorum": {
           const k = join.k ?? 1;
           const need = k <= 1 ? Math.ceil(k * expected) : k;
-          return succeeded >= need || (quiescent && terminal >= expected);
+          return succeeded >= need || noMoreArrivals;
         }
       }
     })();
