@@ -352,6 +352,48 @@ test("REFUSE: a SECOND fan-out into the same join, which can fire it with this b
   assert.equal(hasGraph010(s), true);
 });
 
+test("REFUSE: a `seq` edge into the JOIN NODE — the entrance W6 was blind to for three rounds", () => {
+  // `#activate`'s ordinary arm mints, for a `seq`/`conditional` edge whose target is the join
+  // node at the ROOT coordinate, the SAME TaskId `#maybeFireJoin` would — with no quiescence,
+  // membership or mode test — and `#maybeFireJoin` then stands down because the task exists.
+  // `GRAPH008_BRANCH_NOT_CONNECTED` matches on `e.from` only, so a `seq` edge satisfies it and
+  // nothing else refused this. Driven on a real Engine before this clause existed:
+  //   COMPILE: ok, ZERO diagnostics
+  //   readers saw: [{"myShard":"a","rawItSees":"raw-a"},{"myShard":"b","rawItSees":"raw-d"},…]
+  // Branch `b` read branch `d`'s value, and whether it did depended on the hop count.
+  const s = spec();
+  (s.nodes as NodeSpec[]).push({ id: n("d0"), type: "function", reads: ["items"], function: { ref: "function/d0@stable" } } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("d1"), from: n("seed"), to: n("d0"), kind: "seq" } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("d2"), from: n("d0"), to: n("gather"), kind: "seq" } as EdgeSpec);
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: the same `seq` entrance, with a `human_gate` in the branch holding it open", () => {
+  // A gate is in `CAN_SUSPEND`, so the window between the barrier firing and the reader running
+  // is a person's response time rather than milliseconds. Measured cross-branch on a real Engine.
+  const s = spec();
+  (s.nodes as NodeSpec[]).push({
+    id: n("ask"),
+    type: "human_gate",
+    reads: ["shard"],
+    writes: [],
+    humanGate: { ref: "oversight/x@stable", approval: { approvers: ["u:you"] } },
+  } as unknown as NodeSpec);
+  const all = [n("read"), n("ask"), n("classify")];
+  node(s, "gather", { join: { branches: all, mode: "all", onBranchError: "fail" } });
+  edge(s, "sort", { to: n("ask") });
+  (s.edges as EdgeSpec[]).push({ id: e("ac"), from: n("ask"), to: n("classify"), kind: "seq" } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("ja"), from: n("ask"), to: n("gather"), kind: "join", branches: all } as EdgeSpec);
+  // …the gate alone is ACCEPTED (W6 forces it into `branches`, and a suspended Task is
+  // non-terminal, so it holds the barrier)…
+  assert.equal(hasGraph010(s), false);
+  // …and the `seq` entrance is what breaks it.
+  (s.nodes as NodeSpec[]).push({ id: n("d0"), type: "function", reads: ["items"], function: { ref: "function/d0@stable" } } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("d1"), from: n("seed"), to: n("d0"), kind: "seq" } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("d2"), from: n("d0"), to: n("gather"), kind: "seq" } as EdgeSpec);
+  assert.equal(hasGraph010(s), true);
+});
+
 test("REFUSE: no join declares the branch at all", () => {
   // GRAPH021_FANOUT_WITHOUT_JOIN refuses such a graph anyway; this refuses the EXEMPTION rather
   // than resting on another rule having run.

@@ -22,7 +22,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { InProcessEventBus } from "../../src/bus.ts";
-import { compileOrThrow } from "../../src/graph/compile.ts";
+import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver } from "../../src/graph/validate.ts";
 import type { EdgeId, NodeId } from "../../src/ids.ts";
@@ -126,4 +126,39 @@ test("…and it is the same value on a second, independent run", async () => {
   const g = compileOrThrow({ spec: SPEC, resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
   const p = await r.engine.advance(await r.engine.submit({ graph: g, inputs: { items: ["0", "1", "2"] } }));
   assert.equal(p.channels["mid"], "mid-2");
+});
+
+/**
+ * ONE `seq` EDGE INTO THE JOIN NODE AND THE RUN IS UNSAFE — so the compiler must refuse it, and
+ * this is the compile assertion driven from the SHIPPED shape rather than from a fixture.
+ *
+ * `#activate`'s ordinary arm mints, for a `seq` edge whose target is the join at the root
+ * coordinate, the same TaskId `#maybeFireJoin` would, with no quiescence test; `#maybeFireJoin`
+ * then stands down because the Task already exists. On a real Engine that handed a branch-`b`
+ * reader branch `d`'s value on a graph that compiled with zero diagnostics.
+ *
+ * The graph here is the one this file already drives, plus one node and two edges — the same
+ * two-line edit that keeps `examples/graphs/triage-failures.json` exempt at base.
+ */
+test("a `seq` edge into the join node is REFUSED — the exemption's fourth early-fire entrance", () => {
+  const sneaky = JSON.parse(JSON.stringify(SPEC)) as GraphSpec;
+  (sneaky.nodes as unknown[]).push({ id: n("note"), type: "function", reads: ["items"], function: { ref: "function/pass@stable" } });
+  (sneaky.edges as unknown[]).push({ id: e("n1"), from: n("start"), to: n("note"), kind: "seq" });
+  (sneaky.edges as unknown[]).push({ id: e("n2"), from: n("note"), to: n("J"), kind: "seq" });
+
+  const r = compile({ spec: sneaky, resolver: RESOLVER, tools: {}, tenantCapabilities: [] });
+  assert.equal(r.ok, false, "a seq edge into the barrier must not compile with a `replace` branch channel");
+  assert.ok(
+    r.diagnostics.some((d) => d.severity === "error" && d.code === "GRAPH010_CONCURRENT_WRITE"),
+    `expected GRAPH010; got ${r.diagnostics.map((d) => d.code).join(", ")}`,
+  );
+  // …and the graph WITHOUT those two edges still compiles, so the refusal is the edges and not
+  // the extra node.
+  const plain = JSON.parse(JSON.stringify(SPEC)) as GraphSpec;
+  (plain.nodes as unknown[]).push({ id: n("note"), type: "function", reads: ["items"], function: { ref: "function/pass@stable" } });
+  (plain.edges as unknown[]).push({ id: e("n1"), from: n("start"), to: n("note"), kind: "seq" });
+  assert.equal(
+    compile({ spec: plain, resolver: RESOLVER, tools: {}, tenantCapabilities: [] }).diagnostics.some((d) => d.code === "GRAPH010_CONCURRENT_WRITE"),
+    false,
+  );
 });

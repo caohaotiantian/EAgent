@@ -2469,10 +2469,13 @@ function namedElsewhere(spec: GraphSpec, channel: string, writer: NodeId, reader
  * NOT CLAIMED, and it is a real reader of this channel: a node reached by an `error` edge from
  * the writer runs precisely when the writer FAILED, and `#withBranchWrites` folds only tasks in
  * state `succeeded` — so it reads whatever ROOT state holds. It is accepted rather than refused
- * because W6 makes that the pre-fan-out value: every join over the branch is `mode: "all"` and
- * declares every node of the branch, so the barrier cannot fire while such a reader is pending.
- * Drop either half of W6 and it reads a SIBLING's value instead — both halves have a pasted
- * reproduction at W6 below. It is still not "sees the writer's own value".
+ * because W6 constrains the covering join's whole INBOUND EDGE LIST — one `join` edge per branch
+ * member and nothing else — which is the set every entrance to that barrier is derived from.
+ * THIS SENTENCE USED TO SAY "the barrier cannot fire while such a reader is pending" as though
+ * that followed from `mode: "all"`, and it did not: four reviewers found four different ways to
+ * fire it early, three of them after this docstring first claimed otherwise. What makes the
+ * claim safe is the closure at W6, not the mode; each of the four has its pasted reproduction
+ * there. It is still not "sees the writer's own value".
  *
  * The two-writer arm of GRAPH010 is NOT relaxed and must not be: two writers inside one branch
  * fold by `compareContribution`'s `nodeId` tiebreak, which is arbitrary for `replace` in exactly
@@ -2550,59 +2553,106 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   // So: refuse if any node of the branch is reachable from any loop edge's target. That also
   // subsumes a `loop` edge INTO the writer, which `ins` filters out of the stack computation and
   // which `maxIterations: 1` would have hidden from the multiplicity test.
+  //
+  // WHAT `ancestors` DOES NOT WALK, said exactly, because it was once written down loosely as
+  // "this covers compensation and error edges". It walks `dagEdges`, which excludes `loop` AND
+  // `compensation` (see `indexGraph`). Error edges ARE in it, so an error-path node reachable
+  // from a `loop.to` is caught. Compensation is not, and needs no clause: nothing traverses a
+  // compensation edge — `Engine.#edgesToTake` has `case "compensation": break;` — so a node
+  // reached only that way never runs, and cannot re-enter this branch. That is a fact about the
+  // executor, not a gap this predicate is tolerating.
   for (const loop of idx.loopEdges) {
     for (const id of subtree) {
       if (id === loop.to || (idx.ancestors.get(id)?.has(loop.to) ?? false)) return false;
     }
   }
 
-  // W6 — EVERY JOIN OVER THIS BRANCH IS `mode: "all"` AND ITS `branches` IS EXACTLY THIS BRANCH.
-  // Three clauses, three separate reproductions, and none is tidiness.
+  // W6 — THE COVERING JOIN'S INBOUND EDGE LIST IS EXACTLY ONE `join` EDGE PER BRANCH MEMBER,
+  // AND ITS `mode` IS `"all"`.
   //
-  // The shared mechanism: `#withBranchWrites` returns the projection UNTOUCHED when the asking
+  // READ THIS CLAUSE'S HISTORY BEFORE CHANGING IT. Four reviewers in a row each found a
+  // DIFFERENT way to fire the barrier early, and the first three fixes each closed one entrance
+  // by name — `mode`, then `branches` membership, then `Engine.#fireEmptyJoin`. That was the
+  // wrong shape of fix three times over, because it keyed a compile-time guard on an enumeration
+  // of ENGINE METHODS: a list the validator cannot see, that nothing keeps in step with the
+  // engine, and that is not closed. The fourth entrance was `#activate`'s ordinary arm.
+  //
+  // THE ENTRANCE SET IS THE JOIN NODE'S INBOUND EDGE LIST, not a list of engine methods, and
+  // THAT the validator can see. So constraining the inbound list closes the set by construction,
+  // and the earlier clauses fall out of it rather than needing their own patch.
+  //
+  // NAMED RATHER THAN ASSERTED, because "this is total" is the claim that failed four times.
+  // `run/engine.ts` emits `type: "task.ready"` at exactly SEVEN sites, and here is each one
+  // against a covering join:
+  //
+  //   `#activate`, generic arm       one per INBOUND edge of any kind — the fourth entrance,
+  //                                  and the reason this clause is keyed where it is
+  //   `#activate`, join arm          reached only through an OUTBOUND `join` edge, into
+  //                                  `#maybeFireJoin`
+  //   `#maybeFireJoin`               same, and the only one that tests quiescence
+  //   `#fireEmptyJoin`               walks the empty fan-out target's OUTBOUND `join` edges
+  //   `#branchReady`                 `e.to` of a `fanout` edge — refused here as an inbound
+  //                                  edge that is not `kind: "join"`, and by W3 besides
+  //   `submit`                       `graph.entryNodes` only. A covering join has at least one
+  //                                  inbound edge (this clause requires |inbound| = |branch|),
+  //                                  so it is never an entry node
+  //   `rewind`                       re-arms STRANDED tasks under their own `task.taskId` and
+  //                                  their own `edgesIn`. That re-runs a Task that already
+  //                                  existed, so it is not a new entrance — and neither is
+  //                                  `retry`, which re-readies `w.task.taskId` for the same
+  //                                  reason
+  //
+  // Five are edge-derived and constrained here; two re-arm or start something that is not this
+  // join. If an eighth site appears, or one of these learns to ready a join with no edge, this
+  // clause is false again and the exemption has to go back to refusing.
+  //
+  // WHAT THE FOURTH ENTRANCE LOOKED LIKE. `#activate`'s generic arm mints, for a `seq` or
+  // `conditional` edge into the join node at the ROOT coordinate, the SAME TaskId
+  // `#maybeFireJoin` would — with no quiescence, membership or mode test — and `#maybeFireJoin`
+  // then stands down because `p.tasks[joinTaskId] !== undefined`. Nothing refused a
+  // non-`join`-kind edge into a join node: `GRAPH008_BRANCH_NOT_CONNECTED` matches on `e.from`
+  // only and a `seq` edge satisfies it. Measured, on this file's own accept-case graph plus one
+  // node (`seed -seq-> d0`, `d0 -seq-> gather`) and one extra hop in the branch:
+  //
+  //     COMPILE: ok, ZERO diagnostics
+  //     run status : succeeded
+  //     readers saw: [{"myShard":"a","rawItSees":"raw-a"},{"myShard":"b","rawItSees":"raw-d"},…]
+  //
+  // Branch `b` read branch `d`'s value, and whether it did depended on the hop count — the same
+  // tell the membership entrance had. The SHIPPED `examples/graphs/triage-failures.json` plus
+  // `plan -seq-> note -seq-> gather` stayed exempt, and with a `human_gate` in the branch the
+  // window is a person's response time rather than milliseconds.
+  //
+  // THE OTHER THREE, kept because each is a distinct pasted reproduction and the inbound rule
+  // subsumes rather than replaces them:
+  //
+  //   MODE. Under `any`, `quorum` or `firstSuccess` the barrier fires on evidence already in
+  //   hand and applies its CROSS-BRANCH fold to root state while siblings still run — a
+  //   short-circuiting join cancels nothing. Measured: `mode: "any"`, writer throwing on item 1,
+  //   an error-path reader in branch 1 read branch 0's value.
+  //
+  //   MEMBERSHIP. Quiescence under `mode: "all"` is computed ENTIRELY from `join.branches` —
+  //   `#maybeFireJoin` builds `members` from it and both `stillLive` and `continuesInBranch` ask
+  //   `reachesMember` — so a branch node the join does not declare never holds the barrier.
+  //   Measured on `read --error--> h0 --> h1 --> handler`: branch `b`'s handler read branch
+  //   `c`'s value. This is now the "one edge per member" half: an undeclared branch node's edge
+  //   into the join has a `from` that is not a member, and a member with no edge is
+  //   `GRAPH008_BRANCH_NOT_CONNECTED`.
+  //
+  //   A SECOND FAN-OUT INTO THE SAME JOIN. `#fireEmptyJoin` has no quiescence test at all: for a
+  //   fan-out that materialised no branches it readies every join naming that fan-out's target.
+  //   Measured, only the sibling's input changing: `others = ["x"] → failures: [...4 entries]`
+  //   versus `others = [] → failures: undefined` — the join folded before any member committed
+  //   and the run said `succeeded`. This is now the "`from` is a member of THIS branch" half.
+  //
+  // WHY ALL OF IT MATTERS: `#withBranchWrites` returns the projection UNTOUCHED when the asking
   // branch has held nothing — a writer that failed, that returned `{writes:{}}`, or that a
-  // `preNode` hook skipped — so its reader falls through to ROOT channel state. That is safe only
-  // while root state still holds the pre-fan-out value, which is the same for every branch.
+  // `preNode` hook skipped — so its reader falls through to ROOT channel state. That is safe
+  // only while root state still holds the pre-fan-out value, which is the same for every branch.
   //
-  // MODE. Under `any`, `quorum` or `firstSuccess` the barrier fires on evidence in hand and
-  // applies its CROSS-BRANCH fold to root state while the other branches are still running — a
-  // short-circuiting join cancels nothing. Measured: with `mode: "any"` and the writer throwing
-  // on item 1, an error-path reader in branch 1 read branch 0's value, on a graph that compiled
-  // with zero diagnostics.
-  //
-  // MEMBERSHIP. `mode: "all"` is quiescent-gated, but quiescence is computed ENTIRELY from
-  // `join.branches`: `#maybeFireJoin` builds `members` from it, and `stillLive` and
-  // `continuesInBranch` both ask `reachesMember`. A node inside the fan-out that the join does
-  // not declare therefore does not hold the barrier — the join fires while it is still pending,
-  // and it then reads the fold. Measured on `read --error--> h0 --> h1 --> handler` with
-  // `branches: ["read","classify"]`: branch `b`'s handler read branch `c`'s value, the run
-  // succeeded, and WHETHER it happened depended on how many nodes sat between the failure and
-  // the reader. `GRAPH008_BRANCH_NOT_CONNECTED` only enforces the other direction — a declared
-  // member must have a join edge — so nothing else supplies this.
-  //
-  // EXACTLY, NOT MERELY AT LEAST — the barrier must be over THIS branch and nothing else, and
-  // "`mode: all` cannot fire early" is false the moment it is over something else too.
-  // `Engine.#fireEmptyJoin` is a SECOND entrance to the barrier and it has no quiescence test at
-  // all: for a fan-out that materialised no branches it emits `task.ready` for every join whose
-  // `branches` names that fan-out's target, full stop. So a graph with a SECOND fan-out edge into
-  // the same join fires it as soon as that sibling's list is empty — while this branch is still
-  // running. Measured, on `seed --fan--> read --> mid --> classify` and `seed --fan2--> read2`
-  // both joining at one `mode: "all"` `gather`, driven twice with only the sibling's input list
-  // changing:
-  //
-  //     others = ["x"]  →  failures : ["null","raw-1","raw-2","other"]
-  //     others = []     →  failures : undefined
-  //
-  // The second run's join folded before any member had committed, `collate` ran on pre-fan-out
-  // state, and the run reported `succeeded`. A reader in a branch that held nothing then falls
-  // through to whatever that fold published. `maxWidth: 0` on the sibling edge is the same thing
-  // without needing the input data. (An empty fan-out of the branch's OWN edge is harmless —
-  // there is no branch task to read anything — which is why this is about a DIFFERENT edge.)
-  //
-  // A `human_gate` IN THE BRANCH is accepted and is the shape that most tests these three
-  // clauses: it is in `CAN_SUSPEND`, so it holds its branch open for as long as a person takes.
-  // W6 is what makes that safe rather than merely slow — the gate is forced into `branches`, a
-  // suspended Task is non-terminal, and `stillLive`/`reachesMember` therefore hold the barrier.
+  // A `human_gate` IN THE BRANCH is accepted and is the shape that most tests this clause: it is
+  // in `CAN_SUSPEND`, so it holds its branch open for as long as a person takes. W6 is the only
+  // thing that makes an unbounded human pause safe rather than merely slow.
   //
   // The join is invisible to every clause above: a `join` edge pops a level, so a join is never
   // in `subtree`. It has to be found through its own declaration.
@@ -2612,9 +2662,22 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     const branches = n.join?.branches;
     if (!Array.isArray(branches) || !branches.some((b) => subtree.has(b))) continue;
     if (n.join?.mode !== "all") return false;
+
+    // `branches` is EXACTLY this branch — nothing else may be waited on here.
     const declared = new Set<NodeId>(branches);
     if (declared.size !== subtree.size) return false;
     for (const id of subtree) if (!declared.has(id)) return false;
+
+    // AND THE ENTRANCE SET: one `join` edge per member, and nothing else at all.
+    const inbound = idx.inbound.get(n.id) ?? [];
+    if (inbound.length !== subtree.size) return false;
+    const seen = new Set<NodeId>();
+    for (const e of inbound) {
+      if (e.kind !== "join") return false;
+      if (!subtree.has(e.from)) return false;
+      if (seen.has(e.from)) return false;
+      seen.add(e.from);
+    }
     covered = true;
   }
   // No join declares this branch at all: `GRAPH021_FANOUT_WITHOUT_JOIN` refuses such a graph, and

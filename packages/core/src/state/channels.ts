@@ -27,11 +27,15 @@
  * is that nothing may read it.
  *
  * "NOTHING MAY READ IT" TAKES A CLAUSE ABOUT THE JOIN TO BE TRUE, because a reader whose
- * own branch held nothing — its writer failed — falls through to root state. So the
- * exemption also requires every join over the branch to be `mode: "all"` AND to declare
- * every node of the branch: a short-circuiting join, or one that leaves a branch node out
- * of `branches` and so does not wait for it, publishes the fold while that reader is still
- * pending. Both were measured reading a sibling branch's value.
+ * own branch held nothing — its writer failed, or returned no write — falls through to
+ * root state, and a barrier that fires early has already published the cross-branch fold
+ * there. This paragraph twice listed the ways that can happen and was twice wrong, so it
+ * no longer lists them: the exemption constrains the covering join's whole INBOUND EDGE
+ * LIST — one `join` edge per branch member and nothing else — because every entrance the
+ * engine has to a join Task is derived from an edge whose `to` is that join. `mode: "all"`
+ * is required as well, and is not on its own sufficient. Four different early-fire routes
+ * were each measured handing a reader a sibling branch's value; `branchLocalChannel` in
+ * `graph/validate.ts` carries all four reproductions.
  *
  */
 
