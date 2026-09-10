@@ -85,6 +85,7 @@ import { auditRun } from "./journal/audit.ts";
 import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph, type Span } from "./telemetry/spans.ts";
 import { OtlpHttpExporter } from "./telemetry/otlp.ts";
+import { encodeBranch } from "./ids.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, digestOf, sameContent, shapeOf, type Digest } from "./canonical.ts";
@@ -223,7 +224,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            row's readsTruncated names exactly
                                                            the channels cut: read that, not
                                                            the value's shape, since a channel
-                                                           can hold that shape itself.
+                                                           can hold that shape itself. N is
+                                                           written in decimal digits.
+                                                           readsMayBeStale names channels the
+                                                           gate's own branch already wrote,
+                                                           which this door cannot overlay
                                                            --max-bytes 0 caps nothing
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
@@ -5156,28 +5161,48 @@ function subgraphDirs(): readonly string[] {
  *       (`TODO.md` §A.51a). `resolveHandles` below now makes the same call.
  *   (2) A CLASSIFIED CHANNEL — the sweep below blanks what `#gatePayload` does not. Deliberate,
  *       argued at length further down, and the one difference that TIGHTENS.
- *   (3) **A BRANCH-LOCAL WRITE — OPEN, AND NOT CLOSED BY (1).** `engine.ts:6060` is
- *       `#withBranchWrites(ctx, await #resolveReads(…), branch)`, a THIRD layer this door does
- *       not apply: a sibling's committed write is held until its join folds it, so
- *       `#gatePayload` sees it and `viewFor` over the stored projection does not. Measured on
- *       a gate inside an open fan-out whose sibling had already committed `mid`:
- *       `loom gates` prints `{"chunk":"a","mid":[]}` where the engine's payload holds the
- *       write. It predates §A.51a, `withBranchWrites` is private to the engine, and closing it
- *       is a row of its own — but a list that omitted it while claiming agreement would be the
- *       same false claim in a third draft.
+ *   (3) **A BRANCH-LOCAL WRITE — OPEN, AND THE MOST SERIOUS ENTRY ON THIS LIST.**
+ *       `engine.ts:6060` is `#withBranchWrites(ctx, await #resolveReads(…), branch)`, a THIRD
+ *       layer this door does not apply: inside a fan-out a task's writes are held until a join
+ *       folds them, and `#withBranchWrites` overlays them for the reader anyway, so
+ *       `#gatePayload` sees them and `viewFor` over the stored projection does not.
  *
- *       **AND IT IS A DECISION NOW, NOT A LOOSE END** (`TODO.md` §A.58(4)). Two ways to close
- *       it were weighed and both cost more than the difference. REIMPLEMENTING the overlay
- *       here, against the journal, puts a second copy of the engine's own rule in a second
- *       file — precisely the drift this function already refuses one paragraph down, where it
- *       calls `observedChannels` and NOT `node.reads` "because it is the call `#gatePayload`
- *       makes and the two must not drift"; a fan-out's held writes are a harder rule than that
- *       one and would drift faster. EXPOSING branch-held writes from the engine is a change to
- *       the engine's read surface — a seam to design, not a field to add, and not this door's
- *       file. What makes waiting affordable is the DIRECTION: this door shows the operator
- *       LESS than the console and never more, so the residue can only under-disclose, which is
- *       the failing-closed direction. It stays enumerated here until somebody designs that
- *       seam.
+ *       **WHOSE WRITE, AND WHICH DIRECTION — TWO CLAIMS THAT WERE BOTH WRONG HERE.** This
+ *       entry used to say "a sibling's committed write" and, in a later draft, that the door
+ *       "shows LESS than the console and never more, so it can only under-disclose". Neither
+ *       survives the code. `#withBranchWrites` folds tasks at EXACTLY this branch path — its
+ *       own docstring: *"Only tasks at EXACTLY this branch path are folded, so branch `#0`
+ *       never sees branch `#1`"* — so the writes a gate is missing are its OWN BRANCH'S
+ *       EARLIER NODES, not a sibling's. And it folds them with `reduceState`, which for a
+ *       `replace` channel REPLACES: what this door prints is then not a subset of the truth
+ *       but a DIFFERENT, OLDER value.
+ *
+ *       MEASURED, on `seed --fanout--> bump --seq--> approve` where `bump` writes `mid` and the
+ *       gate reads it:
+ *
+ *           loom gates  →  reads = {"mid":"BASE-VALUE-BEFORE-THE-BRANCH-WROTE"}
+ *           loom approve …  →  succeeded, outputs = {"mid":"BUMPED-VALUE-THE-CONSOLE-SEES"}
+ *
+ *       The operator answered for a value this door never showed them, and
+ *       `#approvalStillCovers` does not fire because nothing changed between raise and
+ *       dispatch — the disagreement is between the two RENDERINGS, not across time. On the
+ *       same row, `contentDigest` is `digest(#gateBinding(…))` over the OVERLAID `p`
+ *       (`engine.ts:6216` passes the same projection `:6060` composed), so the binding on the
+ *       row does not describe the `reads` beside it.
+ *
+ *       **WHAT THIS DOOR CAN DO ABOUT IT, AND DOES.** Computing the overlaid value needs
+ *       `reduceState` over the branch's held writes, which would put a second copy of the
+ *       engine's reducer in this file — the drift this function refuses one paragraph down by
+ *       calling `observedChannels` and NOT `node.reads` "because it is the call `#gatePayload`
+ *       makes and the two must not drift". Exposing the overlay from the engine is a change to
+ *       its read surface: a seam to design, not a field to add, and not this door's file. But
+ *       the UNDECIDABLE half is only the VALUE. Whether a held write exists on a printed
+ *       channel is decidable from `p.tasks` alone, and `heldOnThisBranch` decides it: every
+ *       such gate now carries `readsMayBeStale` naming those channels and raises the `! MAY BE
+ *       STALE` notice below. So the door no longer renders a stale value in silence — which is
+ *       what it did — even though it still cannot render the right one. THAT is the residue
+ *       that stays open, and it is a value this command cannot compute rather than a warning
+ *       it forgot to print.
  *   (4) THE SIZE BOUND — the `--max-bytes` cap below is this door's alone, and at the default
  *       it bites hardest on exactly the large document (1) exists to show.
  *
@@ -5325,6 +5350,7 @@ async function gatesWithReads(
   const mirrors: string[] = [];
   const unresolved: string[] = [];
   const truncated: string[] = [];
+  const staleBranch: string[] = [];
   const spec = graph.spec;
   // A `for` AND NOT A `.map`, because resolving a handle is I/O. Sequential rather than
   // `Promise.all`: the payload store is a filesystem and the gates on one run share channels,
@@ -5363,8 +5389,11 @@ async function gatesWithReads(
     // line — and it is absent from the three ways a gate reaches the output unchanged: the early
     // `return gates` when the graph could not be resolved, and the two `continue` arms above (a
     // MIRROR, and a node or task neither the graph nor this journal carries). `{}` is a statement
-    // — "every value here is whole" — and there is nothing for it to say about a row that prints
-    // no values; each of those three already says on stderr why it prints none.
+    // — "nothing printed here was CUT" — and there is nothing for it to say about a row that
+    // prints no values; each of those three already says on stderr why it prints none.
+    //
+    // AND IT IS A CLAIM ABOUT TRUNCATION ONLY. It says nothing about whether the value is the
+    // one the gate is about; that is `readsMayBeStale`'s question, and they are two axes.
     const cut: Record<string, GateReadCut> = {};
     const reads = Object.fromEntries(
       view.visible.map((c) => [
@@ -5376,7 +5405,12 @@ async function gatesWithReads(
     for (const [c, f] of Object.entries(cut)) {
       truncated.push(`\`${c}\` is ${String(f.bytes)} bytes, showing ${String(f.shown)}`);
     }
-    rows.push({ ...g, reads, readsTruncated: cut });
+    // AND WHICH OF THEM THE GATE'S OWN BRANCH HAS ALREADY OVERWRITTEN. Without this the row
+    // above says `readsTruncated: {}` — "nothing here was cut" — over a value that is not the
+    // one being approved at all, which is a stronger claim than this door can make.
+    const stale = heldOnThisBranch(p, task, view.visible);
+    if (stale.length > 0) staleBranch.push(`${g.gateId} (${stale.map((c) => `\`${c}\``).join(", ")})`);
+    rows.push({ ...g, reads, readsTruncated: cut, readsMayBeStale: stale });
   }
   if (unexplained.length > 0) {
     process.stderr.write(
@@ -5406,6 +5440,23 @@ async function gatesWithReads(
         `  or remove it entirely with \`--max-bytes 0\`.\n`,
     );
   }
+  if (staleBranch.length > 0) {
+    // NOT "CONTENT NOT SHOWN", because content WAS shown and that is the problem. The other
+    // three arms print no `reads` and say why; this one prints a `reads` that is OLDER than
+    // what the gate is about, which is the one failure a silent door cannot be trusted through.
+    // Measured on `seed --fanout--> bump --seq--> approve`, where `bump` writes `mid`:
+    // `loom gates` printed `{"mid":"BASE-VALUE-BEFORE-THE-BRANCH-WROTE"}` and the approval then
+    // ran to `succeeded` with `mid` = the value `bump` wrote — an operator answering for a value
+    // this door never put in front of them.
+    process.stderr.write(
+      `! MAY BE STALE — ${staleBranch.join("; ")}: an earlier node on the gate's OWN branch has already\n` +
+        `  written those channels, and a fan-out holds a branch's writes until its join folds them. The\n` +
+        `  engine OVERLAYS them when it builds the gate payload and \`contentDigest\`; this door reads the\n` +
+        `  stored projection and cannot, so what is printed above is the value from BEFORE the branch\n` +
+        `  wrote. \`contentDigest\` binds to the overlaid value, not to this one — an approval executes on\n` +
+        `  the overlaid value. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.58(4).\n`,
+    );
+  }
   return rows;
 }
 
@@ -5415,10 +5466,12 @@ async function gatesWithReads(
  *
  * `#executeTask` applies THREE layers and this reproduces ONE of them:
  * `#withBranchWrites(ctx, await #resolveReads(ctx, leased, w), w.task.branch)`. The outer call
- * is a fan-out's held sibling writes, which this door does not have and cannot get —
- * `withBranchWrites` is private to the engine and the writes are not in the stored projection
- * until a join folds them. See item (3) of the enumeration in `gatesWithReads`, which is where
- * every remaining difference is listed; this function closes item (1) only.
+ * overlays the writes the gate's OWN BRANCH has already committed — NOT a sibling's, which is
+ * what this said until the code was read: `#withBranchWrites` folds tasks at exactly the branch
+ * path it is given. This door does not have them and cannot get them; `withBranchWrites` is
+ * private to the engine and the writes are not in the stored projection until a join folds them.
+ * See item (3) of the enumeration in `gatesWithReads`, which is where every remaining difference
+ * is listed and where the measured cost of this one is; this function closes item (1) only.
  *
  * `run/engine.ts` states the rule this borrows: *"HERE, AND ONLY HERE, is where a handle
  * becomes a value … the gate payload a human reads"*. That line is inside `#executeTask`, and a
@@ -5534,6 +5587,45 @@ function utf8Head(text: string, n: number): string {
   let end = n;
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
   return buf.subarray(0, end).toString("utf8");
+}
+
+/**
+ * WHICH OF A GATE'S PRINTED CHANNELS ITS OWN BRANCH HAS ALREADY OVERWRITTEN — `TODO.md` §A.58(4).
+ *
+ * THIS DOES NOT FOLD ANYTHING, AND THAT IS THE POINT. `#withBranchWrites` runs `reduceState`
+ * over the branch's held writes, which for a `replace` channel REPLACES the value; reproducing
+ * that here would put a second copy of the engine's reducer in this file, which is the drift
+ * `gatesWithReads` already refuses by calling `observedChannels` and not `node.reads`. So this
+ * answers the DECIDABLE half — *is there a held write on a channel this row prints* — and says
+ * so, instead of computing a value it has no business computing.
+ *
+ * IT OVER-REPORTS BY CONSTRUCTION, in the refusing direction. A held write whose value happens
+ * to equal the base is still reported, because deciding otherwise means running the reducer.
+ * A guard that cannot decide says so rather than answering with the passing value.
+ *
+ * THE TWO PREDICATES ARE THE ENGINE'S OWN, inlined rather than imported because both are one
+ * line and neither is the reducer. `writesHeldForJoin` is `branch.segments.length > 0` — a task
+ * at the ROOT coordinate applies its writes at commit, so nothing is ever held for it and this
+ * returns empty. And `#withBranchWrites` folds tasks at EXACTLY this branch path (its own
+ * docstring: *"Only tasks at EXACTLY this branch path are folded, so branch `#0` never sees
+ * branch `#1`"*), so this compares encoded paths for equality and not for prefix: what is
+ * missing from a gate's `reads` is its OWN branch's earlier nodes, never a sibling's.
+ */
+function heldOnThisBranch(p: RunProjection, task: TaskRecord, visible: readonly string[]): string[] {
+  if (task.branch.segments.length === 0) return [];
+  const path = encodeBranch(task.branch);
+  const held = new Set<string>();
+  for (const t of Object.values(p.tasks) as TaskRecord[]) {
+    // The gate's own task holds no write of its own to miss — a `human_gate` commits none — and
+    // excluding it keeps this about what the gate cannot see rather than what it did.
+    if (t.taskId === task.taskId) continue;
+    // The same filter `#withBranchWrites` applies before reducing: succeeded, and with writes.
+    if (t.state !== "succeeded" || Object.keys(t.writes).length === 0) continue;
+    if (encodeBranch(t.branch) !== path) continue;
+    for (const c of Object.keys(t.writes)) held.add(c);
+  }
+  // In the order they are PRINTED, so the notice reads in the same order as the row.
+  return visible.filter((c) => held.has(c));
 }
 
 /**
@@ -5665,7 +5757,7 @@ function gateReadBound(args: Args): number {
   if (!Number.isInteger(n) || n > GATE_READ_MAX_CAP) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
-      `--max-bytes must be a whole number of bytes from 0 to ${String(GATE_READ_MAX_CAP)}, where 0 means no limit — not ${
+      `--max-bytes must be a whole number of bytes written in decimal digits, from 0 to ${String(GATE_READ_MAX_CAP)}, where 0 means no limit — not ${
         raw === true ? "a bare flag with no value" : `"${raw}"`
       }. It caps each channel value \`loom gates\` prints; omit it for the default of ${String(GATE_READ_MAX_BYTES)}.`,
     );

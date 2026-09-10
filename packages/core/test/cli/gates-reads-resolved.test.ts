@@ -456,7 +456,7 @@ test("A MALFORMED `--max-bytes` IS REFUSED, in both directions that would otherw
     for (const b of [...bad, "--max-bytes=0x10", "--max-bytes=1e3", "--max-bytes=0b11", "--max-bytes= 24 "]) {
       const refused = await cli(["gates", runId, "--workspace", w.dir, b]);
       assert.notEqual(refused.code, 0, `\`${b}\` must be refused, not accepted: ${refused.out.slice(0, 200)}`);
-      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes from 0 to \d+, where 0 means no limit/, refused.err);
+      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes written in decimal digits, from 0 to \d+, where 0 means no limit/, refused.err);
     }
     // AND PLAIN DIGITS STILL WORK, so "refuse everything" cannot pass this test. `0` is the
     // spelling the refusal itself names, and it is the one value `boundedCount` would reject.
