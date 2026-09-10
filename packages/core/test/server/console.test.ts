@@ -9,15 +9,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { CONSOLE_HTML } from "../../src/server/console.ts";
 import { BearerTokenIdentity, ControlPlane } from "../../src/server/http.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { RunId } from "../../src/ids.ts";
 import { compileSkeleton, harness, skeletonSpec, DOCS } from "../run/skeleton.ts";
+import { openConsole } from "./console-page.ts";
 
-async function rig(opts: { approvers?: readonly string[]; token?: string } = {}) {
-  const h = harness();
+async function rig(opts: { approvers?: readonly string[]; token?: string; failBranch?: number } = {}) {
+  const h = harness(opts.failBranch === undefined ? {} : { failBranch: opts.failBranch });
   const spec: GraphSpec =
     opts.approvers === undefined
       ? skeletonSpec()
@@ -309,5 +311,195 @@ test("THE PAGE COMPUTES NO POSITIONS — geometry arrives from the server", () =
   assert.doesNotMatch(CONSOLE_HTML, /GAPX|GAPY/, "and so is spacing");
   assert.match(CONSOLE_HTML, /translate\(' \+ node\.x \+ ',' \+ node\.y \+ '\)/, "it places what it is given");
   assert.match(CONSOLE_HTML, /e\.midY/, "including the edge control points");
+});
+
+// ── A.45: the live fold must say the same word the projection does ──────────
+
+/**
+ * `server/console.ts`'s `applyEvent` had arms for `task.leased`, `task.committed` and
+ * `task.failed`, and none for `task.skipped` or `task.cancelled` — so a branch a `skip` join
+ * absorbed (journalled `task.skipped` since `a5937fe`) stayed `failed` on the live SSE view
+ * forever, while `GET /runs/:id` (`run/projection.ts`'s fold) correctly said `skipped`. It was
+ * fail-safe only because `STATE_PRIORITY` ranks `failed` above `skipped` — see
+ * `join-absorbed-branch-is-skipped.test.ts`'s header for the wire half of that history.
+ *
+ * This drives the page's OWN script (`openConsole`, from `./console-page.ts` — shared with
+ * `plane-watch-and-stop.test.ts` so there is one DOM mock, not two) against a real run that hits
+ * BOTH missing arms in one pass: `harness({ failBranch: 0 })` makes `skeletonSpec()`'s fan-out
+ * fail branch 0, which its `collect` join (already `onBranchError: "skip"`) absorbs as
+ * `task.skipped`; the run then parks on `approve`'s gate, and cancelling from there — over a
+ * raw `fetch`, never through the page, so the console's only route to that fact is its own SSE
+ * stream — journals `task.cancelled` for the still-open gate task (REGISTER E6 in
+ * `run/engine.ts`).
+ *
+ * `select()` is called immediately after submission, before anything has been polled to
+ * completion, so the console's `follow()` loop is the thing racing the run rather than trailing
+ * a foregone conclusion — and whichever of `applySnapshot` or `applyEvent` happens to observe
+ * either transition first, the ASSERTION is the same one the row asks for: the console's final
+ * state for each task equals what `GET /runs/:id` reports for that same task.
+ */
+test("A.45 — task.skipped and task.cancelled fold to the SAME state GET /runs/:id reports, over a real SSE stream", async () => {
+  const r = await rig({ failBranch: 0 });
+  // Declared OUTSIDE the try block: `finally` is a separate block scope, and a `const` from
+  // inside `try {}` is not visible there — referencing it anyway is a `ReferenceError` that
+  // fires whether or not the try block itself succeeded, which also skipped `r.close()` below.
+  let page: ReturnType<typeof openConsole> | undefined;
+  try {
+    const accepted = (await (
+      await fetch(`${r.base}/runs`, {
+        method: "POST",
+        headers: asLead,
+        body: JSON.stringify({ workflow: "skeleton-summarize", inputs: { paths: DOCS } }),
+      })
+    ).json()) as { runId: string };
+    const runId = accepted.runId;
+
+    // Selected BEFORE the run is polled to any particular point — see the docstring above.
+    page = openConsole(r.base, "lead-token", () => "cancelled by the console");
+    await page.run(`select(${JSON.stringify(runId)})`);
+
+    for (let i = 0; i < 400 && (await page.run("current.status")) !== "awaiting_gate"; i++) {
+      await new Promise((res) => setTimeout(res, 10));
+    }
+    assert.equal(await page.run("current.status"), "awaiting_gate", "the console's own fold must reach the gate");
+
+    const atSkip = (await r.h.engine.projection(runId as RunId))!;
+    const skippedTaskId = Object.values(atSkip.tasks).find((t) => t.nodeId === "summarize" && t.state === "skipped")?.taskId;
+    assert.ok(skippedTaskId, `the projection must have an absorbed branch: ${JSON.stringify(Object.values(atSkip.tasks).map((t) => [t.nodeId, t.state]))}`);
+    const pageSkipState = await page.run(`current.tasks.get(${JSON.stringify(skippedTaskId)})?.state`);
+    assert.equal(pageSkipState, "skipped", "the console must not still say `failed` for a branch the join absorbed");
+
+    const gateTaskId = Object.values(atSkip.tasks).find((t) => t.nodeId === "approve")?.taskId;
+    assert.ok(gateTaskId, "the gate node must have its own task");
+
+    // Cancelled over a RAW fetch, never `page.run("command(...)")` — the console must learn this
+    // only from its own stream, or the test would pass on a page that never folds the event.
+    const cancelled = await fetch(`${r.base}/runs/${runId}/commands`, {
+      method: "POST",
+      headers: asLead,
+      body: JSON.stringify({ kind: "cancel", reason: "A.45 fixture" }),
+    });
+    assert.equal(cancelled.status, 200, await cancelled.text());
+
+    for (let i = 0; i < 400 && (await page.run("current.status")) !== "cancelled"; i++) {
+      await new Promise((res) => setTimeout(res, 10));
+    }
+    assert.equal(await page.run("current.status"), "cancelled");
+
+    const atCancel = (await r.h.engine.projection(runId as RunId))!;
+    assert.equal(atCancel.tasks[gateTaskId as never]?.state, "cancelled", "the projection's own word for the gate task");
+    const pageCancelState = await page.run(`current.tasks.get(${JSON.stringify(gateTaskId)})?.state`);
+    assert.equal(pageCancelState, "cancelled", "the console must not still show `awaiting_gate`/`leased` for a cancelled run");
+
+    assert.deepEqual(page.errors, [], "no uncaught exception in a repaint");
+  } finally {
+    // `select()` is the only test in this file that starts the page's real `follow()` loop
+    // (every other one sets `selected` directly and calls `command()`, which never touches it).
+    // `follow()` reconnects on a 1 s timer forever until `selected`/`epoch` change out from under
+    // it — closing the plane alone leaves that timer, and the process, alive.
+    if (page !== undefined) await page.run("(() => { epoch++; selected = null; if (stream) stream.abort(); })()");
+    await r.close();
+  }
+});
+
+/**
+ * A SECOND GAP OF THE SAME SHAPE, found by a fresh reviewer of the diff above: `gate.decided`
+ * does not only close the gate. `run/projection.ts`'s arm also returns the RAISING TASK to
+ * `ready` (`upsertTask(p, g.taskId, { state: "ready" })`), because the decision rides on the
+ * gate record and the scheduler re-leases the task rather than re-raising the gate. The console
+ * had no line for that half — only the gate-list trim — so an approved or rejected task kept
+ * showing `awaiting_gate` on screen after the projection already said `ready`, for as long as it
+ * took the next `task.leased`/`task.ready` frame to arrive.
+ *
+ * A live SSE race is the wrong tool to pin this: with a synchronous mock model and tool
+ * execution, the window between `gate.decided` and the NEXT frame that would independently move
+ * the task off `awaiting_gate` (`task.ready`/`task.leased` for the following node) can be a
+ * single tick, so polling `current.status` live could pass even with the fix reverted. Instead
+ * this drives the page's own real `applyEvent` directly against a `gate.decided` event CAPTURED
+ * from a real run's journal — deterministic, and still the shipped function and the shipped
+ * event shape, not a copy of either.
+ */
+test("A.45, gap 2 — gate.decided returns the gate's task to `ready`, the way projection.ts does", async () => {
+  const r = await rig();
+  try {
+    const at = await drive(r);
+    const decided = await fetch(`${r.base}/runs/${at.runId}/gates/${at.gateId}`, {
+      method: "POST",
+      headers: asLead,
+      body: JSON.stringify({ decision: { kind: "approve" } }),
+    });
+    assert.equal(decided.status, 200, await decided.text());
+
+    const log = [];
+    for await (const ev of r.h.store.read(at.runId as RunId, 1)) log.push(ev);
+    const gateDecided = log.find((ev) => ev.type === "gate.decided");
+    assert.ok(gateDecided, "the approval must have journalled gate.decided");
+    assert.ok(gateDecided.taskId, "gates.ts's decidedEvent carries the gate's own taskId on the envelope");
+
+    const page = openConsole(r.base, "lead-token", () => "");
+    // Seeded to the state the task was ACTUALLY in the instant before this event, rather than
+    // relying on a live stream to have put it there — isolating the one arm under test.
+    await page.run(
+      `current.tasks.set(${JSON.stringify(gateDecided.taskId)}, ` +
+        `{ taskId: ${JSON.stringify(gateDecided.taskId)}, nodeId: "approve", state: "awaiting_gate", take: [] })`,
+    );
+    await page.run(`applyEvent(${JSON.stringify(gateDecided)})`);
+    const state = await page.run(`current.tasks.get(${JSON.stringify(gateDecided.taskId)})?.state`);
+    assert.equal(state, "ready", "the console must not still say `awaiting_gate` once the gate is decided");
+    assert.deepEqual(page.errors, [], "no uncaught exception folding a real gate.decided event");
+  } finally {
+    await r.close();
+  }
+});
+
+test("THE FOLD ARMS THEMSELVES — a regression pin independent of any race the integration tests above cannot fully control", () => {
+  // Deterministic backstop: whatever the timing of the tests above, these five lines existing
+  // in `applyEvent` is what the fix actually is. Matches the same style as the other `assert.match`
+  // pins in this file (e.g. "the page must handle run.suspended").
+  assert.match(CONSOLE_HTML, /ev\.type === "task\.skipped" && ev\.taskId/, "applyEvent must handle task.skipped");
+  assert.match(CONSOLE_HTML, /ev\.type === "task\.cancelled" && ev\.taskId/, "applyEvent must handle task.cancelled");
+  assert.match(CONSOLE_HTML, /ev\.type === "task\.retry_scheduled" && ev\.taskId/, "applyEvent must handle task.retry_scheduled");
+  assert.match(
+    CONSOLE_HTML,
+    /if \(ev\.taskId\) \{ const t = current\.tasks\.get\(ev\.taskId\); if \(t\) t\.state = "awaiting_gate"; \}/,
+    "gate.raised must also update the raising TASK's own state, the way projection.ts's arm does",
+  );
+  assert.match(
+    CONSOLE_HTML,
+    /if \(ev\.taskId\) \{ const t = current\.tasks\.get\(ev\.taskId\); if \(t\) t\.state = "ready"; \}/,
+    "gate.decided must return the gate's own task to ready, the way projection.ts's arm does",
+  );
+});
+
+test("THE HEALTH CHECK NO LONGER LEAVES AN UNCAUGHT PROMISE — a second reviewer found the actual cause of a flake this file's own tests had papered over", () => {
+  // Every OTHER startup fetch on this page (`whoami`, `loadRuns`, `loadGraphs`) already wraps its
+  // `await api(...)` in its own try/catch; `api("/health").then(...)` was the one bare `.then`
+  // with no `.catch`, called unconditionally the instant the script loads. A test that closes the
+  // plane before this settles — the A.45 "gap 2" test above did, at ~10ms, well inside a loopback
+  // round trip — turned that into an unhandled rejection. The first fix for that was a bounded
+  // `setTimeout` before `r.close()`; a second reviewer correctly called that a probabilistic
+  // work-around rather than a structural fix (it narrows the race, it does not close it), so the
+  // actual bare `.then` is fixed here instead and the timer was deleted.
+  assert.match(CONSOLE_HTML, /api\("\/health"\)\.then\(\(h\) => \{[\s\S]*?\}\)\.catch\(/, "the health check's promise chain must end in a .catch");
+});
+
+test("THE CONSOLE'S FAN-OUT PRIORITY ORDER AGREES WITH server/layout.ts'S STATE_PRIORITY — one copy, watched", () => {
+  // `dominant()`'s priority list is a hand-copy of `server/layout.ts`'s `STATE_PRIORITY` — it
+  // cannot be a shared import, because this text ships to a browser and that array is not
+  // exported (adding a new export would move the pinned surface count in `scripts/surface.json`
+  // off 541 for no functional reason). Per CLAUDE.md's rule for an unavoidable copy, this census
+  // pins the two textual representations together — `registries.test.ts`'s pattern, applied here.
+  const layoutSrc = readFileSync(new URL("../../src/server/layout.ts", import.meta.url), "utf8");
+  const layoutMatch = /const STATE_PRIORITY: readonly TaskState\[\] = \[([\s\S]*?)\];/.exec(layoutSrc);
+  assert.ok(layoutMatch, "server/layout.ts no longer declares STATE_PRIORITY in a shape this test can read");
+  const layoutOrder = [...layoutMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+
+  const consoleMatch = /function dominant\(states\) \{\s*for \(const s of \[([\s\S]*?)\]\)/.exec(CONSOLE_HTML);
+  assert.ok(consoleMatch, "console.ts's dominant() changed shape — update this census alongside it");
+  const consoleOrder = [...consoleMatch![1]!.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]!);
+
+  // Not vacuous: an empty parse on both sides would compare [] to [] and report green.
+  assert.ok(layoutOrder.length >= 5, `the priority scan found only ${layoutOrder.length} members — the regex broke, not the list`);
+  assert.deepEqual(consoleOrder, layoutOrder, "the console's fan-out priority order has drifted from the server's STATE_PRIORITY");
 });
 
