@@ -189,6 +189,41 @@ test("a command still EXITS, and a failing one still exits non-zero", async () =
   }
 });
 
+test("A READER THAT STOPS READING IS STILL EXIT 0 AND STILL SILENT — the drain must not turn EPIPE into a crash", async () => {
+  // THE REGRESSION THE FIRST DRAFT OF THE DRAIN SHIPPED, and the reason this file grew a
+  // fourth case. Waiting for the write callback also waits for the tick in which a `Writable`
+  // emits `'error'` for the same failed write, and nothing on `process.stdout` listens — so
+  // `loom … | head` went from exit 0 with an empty stderr to a Node stack trace and exit 1.
+  // `process.exit` used to pre-empt that tick; adding the drain added it.
+  //
+  // A CRASHING PIPE IS A WORSE DEFECT THAN A TRUNCATED ONE: it changes the status a shell
+  // pipeline reads and it writes an unhandled-error dump into an operator's log, on the
+  // ordinary shape `| head`, `| grep -q`, or a pager the reader quit.
+  const w = workspace();
+  try {
+    const argv = ["run", w.graphFile, "--workspace", w.dir, "--input", JSON.stringify({ source: "input.txt" })];
+    const result = await new Promise<{ code: number; err: string; ms: number }>((resolve, reject) => {
+      const began = Date.now();
+      const child = spawn(process.execPath, [CLI_SRC, ...argv], { cwd: dirname(CLI_SRC), stdio: ["ignore", "pipe", "pipe"] });
+      const err: Buffer[] = [];
+      child.stderr?.on("data", (c: Buffer) => err.push(c));
+      // CLOSE THE READ END AFTER THE FIRST CHUNK, which is what `head -c 10` does. Destroying
+      // it before any data would race the child's first write; after one chunk the child is
+      // certainly mid-write, which is the case that fails.
+      child.stdout?.once("data", () => child.stdout?.destroy());
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code: code ?? 1, err: Buffer.concat(err).toString("utf8"), ms: Date.now() - began }));
+    });
+
+    assert.equal(result.code, 0, `a reader that quit early must not change the exit status: ${result.err}`);
+    assert.ok(!/Unhandled 'error' event/.test(result.err), `an unhandled error reached the operator:\n${result.err}`);
+    assert.ok(!/EPIPE/.test(result.err), `EPIPE reached the operator:\n${result.err}`);
+    assert.ok(result.ms < 30_000, `it took ${String(result.ms)}ms — the flush hung on a dead pipe`);
+  } finally {
+    w.dispose();
+  }
+});
+
 test("the entry point is the subject — `main` in-process is untouched by this", async () => {
   // A note kept as a test so the next reader does not go looking for the drain inside `main`:
   // `--help` is the shortest path through the entry-point block, and it exits 0 with output.

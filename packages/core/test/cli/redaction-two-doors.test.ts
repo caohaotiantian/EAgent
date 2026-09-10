@@ -37,6 +37,7 @@ import { join } from "node:path";
 import { controlPlaneOptions, main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { ControlPlane } from "../../src/server/http.ts";
 import { redactChannelValue } from "../../src/security/redact-channels.ts";
+import { CLASSIFICATION_POSTURE_FLOOR } from "../../src/vocab.ts";
 
 /**
  * EVERY CLASSIFICATION THE VOCABULARY HAS, one channel each, plus one channel that declares
@@ -46,6 +47,11 @@ const MATRIX = [
   { channel: "credential", classification: "secret_ref", value: "sk-live-DO-NOT-DISCLOSE", blanked: true },
   { channel: "person", classification: "pii", value: "ada.lovelace@example.com", blanked: true },
   { channel: "brief", classification: "public", value: "ship the 4.2 release notes", blanked: false },
+  // DECLARED `internal` EXPLICITLY, which is NOT the same row as `note` below even though the
+  // two take the same path today: `internal` is a member of the union an author can write, and
+  // `note` is the declared-but-unclassified arm that DEFAULTS to it. The coverage test above
+  // added this row — it was missing, and every assertion in this file was green without it.
+  { channel: "log", classification: "internal", value: "node approve entered at 14:02", blanked: false },
   { channel: "note", classification: undefined, value: "the migration section needs a second reader", blanked: false },
 ] as const;
 
@@ -113,6 +119,24 @@ async function cli(argv: string[]): Promise<Cap> {
     process.stderr.write = realErr;
   }
 }
+
+test("THE TABLE COVERS THE WHOLE `Classification` UNION — a fifth one cannot be forgotten here", () => {
+  // WITHOUT THIS THE FILE HEADER'S CLAIM IS FALSE. It says a row "is asserted at both doors by
+  // construction … in the only form that cannot be satisfied by remembering to write the second
+  // assertion" — but `MATRIX` is a hand-written literal, so a fifth classification added to
+  // `vocab.ts` and forgotten here leaves every test below green, which is exactly "remembering".
+  //
+  // `CLASSIFICATION_POSTURE_FLOOR` is a `Record` over the full union (`vocab.ts`), so the
+  // compiler makes ITS key set total; this borrows that totality rather than restating four
+  // words. `note` declares no classification and is the fifth row on purpose — the
+  // declared-but-unclassified arm is not a member of the union and still needs a door test.
+  const covered = new Set(MATRIX.map((r) => r.classification).filter((c) => c !== undefined));
+  assert.deepEqual(
+    [...covered].sort(),
+    Object.keys(CLASSIFICATION_POSTURE_FLOOR).sort(),
+    "a classification exists that no row of MATRIX drives through either door",
+  );
+});
 
 test("EVERY CLASSIFICATION IS TREATED THE SAME WAY BY `loom gates` AND BY `GET /runs/:id`", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-two-doors-"));

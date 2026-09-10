@@ -60,16 +60,25 @@ function own<T>(rec: Readonly<Record<string, T>>, name: string): T | undefined {
  *
  * `channels` being `undefined` is the fail-closed answer and not a shortcut: it means the door
  * does not hold the graph, and every value it is about to show is therefore unclassifiable.
+ *
+ * `maxSweepBytes` IS THE DETECTOR'S WINDOW AND IT MATTERS FOR A LARGE VALUE. `redactPayload`
+ * defaults it to 8 KiB PER STRING LEAF — a bound on WORK, in that function's own words, and
+ * explicitly "not a claim that 8 KB of credential-shaped text is safe". A door printing values
+ * that routinely exceed that window must say so here rather than inherit the default and
+ * describe it as a backstop; `Number.POSITIVE_INFINITY` is the spelling `redact.ts` names for
+ * a caller that wants none. Left `undefined` by every caller that was already inside 8 KiB.
  */
 export function redactChannelValue(
   channels: Readonly<Record<string, ClassifiedChannel>> | undefined,
   name: string,
   value: unknown,
+  maxSweepBytes?: number,
 ): unknown {
+  const opts = maxSweepBytes === undefined ? {} : { maxSweepBytes };
   const declared = channels === undefined ? undefined : own(channels, name);
-  if (declared === undefined || declared === null) return redactPayload(value, "secret_ref");
+  if (declared === undefined || declared === null) return redactPayload(value, "secret_ref", opts);
   const c = declared.classification;
-  return redactPayload(value, c === undefined ? "internal" : maxClassification(c));
+  return redactPayload(value, c === undefined ? "internal" : maxClassification(c), opts);
 }
 
 /**

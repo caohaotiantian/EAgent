@@ -47,6 +47,22 @@ const CLI_SRC = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
  * measuring anything.
  */
 const BIG = "x".repeat(EXTERNALISE_ABOVE_BYTES * 3);
+
+/**
+ * A credential-shaped token FAR PAST the detector's default window, in an UNCLASSIFIED channel.
+ *
+ * `redactPayload` sweeps 8 KiB per string leaf by default — a bound on WORK, in `redact.ts`'s
+ * own words, and explicitly not a claim that 8 KB of credential-shaped text is safe. Every
+ * value §A.51a unhides is over `EXTERNALISE_ABOVE_BYTES` by construction, so it is always at
+ * least eight times that window: resolving the handle without widening the sweep swaps a digest
+ * for a document whose last 94% was never looked at.
+ *
+ * Word-bounded, because `DETECTORS` matches on boundaries. The prose before it is 81,000 bytes
+ * — past `EXTERNALISE_ABOVE_BYTES`, so the channel really leaves the journal, and ten times the
+ * 8 KiB window, so the assertion cannot pass by accident if that window moves a little.
+ */
+const AWS_KEY = "AKIAIOSFODNN7EXAMPLB";
+const LATE = `${"lorem ipsum dolor sit amet ".repeat(3000)} ${AWS_KEY} ${"trailing prose ".repeat(200)}`;
 const SMALL = "ship the release notes for 4.2";
 const SECRET = `sk-live-${"y".repeat(EXTERNALISE_ABOVE_BYTES * 2)}`;
 
@@ -69,9 +85,12 @@ const GRAPH = {
     body: { type: "string", reduce: "replace" },
     credential: { type: "string", reduce: "replace", classification: "secret_ref" },
     note: { type: "string", reduce: "replace" },
+    // UNCLASSIFIED and over the externalisation threshold — the exact shape the sweep window
+    // has to cover, and the one an author never declared anything about.
+    haystack: { type: "string", reduce: "replace" },
     written: { type: "object", reduce: "replace" },
   },
-  inputs: ["source", "credential", "note"],
+  inputs: ["source", "credential", "note", "haystack"],
   outputs: ["written"],
   nodes: [
     {
@@ -84,7 +103,7 @@ const GRAPH = {
     {
       id: "approve",
       type: "human_gate",
-      reads: ["body", "credential", "note"],
+      reads: ["body", "credential", "note", "haystack"],
       writes: ["credential"],
       humanGate: { ref: "oversight/publish@stable" },
     },
@@ -159,7 +178,7 @@ async function park(w: { dir: string; graphFile: string }): Promise<string> {
     "--workspace",
     w.dir,
     "--input",
-    JSON.stringify({ source: "input.txt", credential: SECRET, note: SMALL }),
+    JSON.stringify({ source: "input.txt", credential: SECRET, note: SMALL, haystack: LATE }),
   ]);
   assert.equal(started.code, 0, started.err);
   const p = JSON.parse(started.out) as Record<string, unknown>;
@@ -276,13 +295,23 @@ test("`--max-bytes N` is the dial, and it caps the JSON form", async () => {
     assert.ok(cut !== undefined, JSON.stringify(reads["body"]).slice(0, 200));
     assert.equal(cut.shown, 128);
 
-    // `note` is 30 characters and 32 bytes of JSON, so a cap of 128 leaves it alone and a cap
-    // of 8 does not — which is what says the cap is applied per VALUE and not per row.
+    // `note` is 30 characters and 32 bytes of JSON, so a cap of 128 leaves it alone while the
+    // 196 KB `body` beside it is cut — which is what says the cap is applied per VALUE and not
+    // per row.
     assert.equal(reads["note"], SMALL);
+
+    // AND BELOW BREAK-EVEN IT IS LEFT WHOLE, marker and all. At `--max-bytes 8` a 32-byte
+    // `note` is over the cap, but the `$truncated` wrapper that would replace it is ~60 bytes
+    // — bigger than the value, and announcing a withholding that saved nothing. A cap whose
+    // marker costs more than the value it hides is not a bound.
     const tight = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes", "8"]);
     assert.equal(tight.code, 0, tight.err);
     const tightReads = (JSON.parse(tight.out) as GateRow[])[0]!.reads!;
-    assert.equal(truncationOf(tightReads["note"])?.shown, 8);
+    assert.equal(tightReads["note"], SMALL, "below break-even the value is left alone");
+    assert.equal(truncationOf(tightReads["note"]), undefined);
+    assert.ok(!/`note` is/.test(tight.err), `nothing was withheld, so nothing is announced: ${tight.err}`);
+    // …while the value that IS worth cutting still is, at the same cap.
+    assert.equal(truncationOf(tightReads["body"])?.shown, 8);
   } finally {
     w.dispose();
   }
@@ -297,10 +326,14 @@ test("A MALFORMED `--max-bytes` IS REFUSED, in both directions that would otherw
   const w = workspace();
   try {
     const runId = await park(w);
-    for (const bad of ["--max-bytes=", "--max-bytes=abc", "--max-bytes=-5", "--max-bytes=1.5"]) {
+    // `1e30` IS THE THIRD MEMBER OF THE FAMILY AND IT WAS ACCEPTED. `Number.isInteger(1e30)`
+    // is `true`, so a mistyped exponent used to print every channel whole AND — because
+    // nothing was truncated — print no `! TRUNCATED` line saying so: the flag disregarded in
+    // the direction that discloses, which is precisely what the other two refusals exist for.
+    for (const bad of ["--max-bytes=", "--max-bytes=abc", "--max-bytes=-5", "--max-bytes=1.5", "--max-bytes=1e30"]) {
       const refused = await cli(["gates", runId, "--workspace", w.dir, bad]);
       assert.notEqual(refused.code, 0, `\`${bad}\` must be refused, not accepted: ${refused.out.slice(0, 200)}`);
-      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes, or 0 for no limit/, refused.err);
+      assert.match(refused.err, /E_CONFIG_INVALID: --max-bytes must be a whole number of bytes from 0 to \d+, where 0 means no limit/, refused.err);
     }
     // The bare form, which `parseArgs` turns into `true` rather than a string.
     const bare = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes"]);
@@ -339,6 +372,37 @@ test("A PAYLOAD THAT CANNOT BE READ BACK IS A NOTICE, NOT A REFUSAL — and the 
     // AND THE CHANNELS THAT WERE NEVER EXTERNALISED STILL PRINT. One unreadable payload must
     // not cost the rest of the gate.
     assert.equal(reads["note"], SMALL);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE DETECTOR SEES ALL OF WHAT IS PRINTED — not the first 8 KiB of a 64 KiB+ document", async () => {
+  // §A.51a UNHIDES VALUES THE SWEEP WAS NEVER SIZED FOR, and the docstring's compensating
+  // argument — "an undeclared classification is `internal`, the detector backstop" — is only
+  // true if the backstop covers what reaches the terminal. `redactPayload`'s default window is
+  // 8 KiB PER STRING LEAF; every value resolved here is over `EXTERNALISE_ABOVE_BYTES`. Under
+  // the default, a credential at offset ~43,000 of an unclassified channel printed in the
+  // clear while an identical one at offset 1,001 was redacted.
+  //
+  // `--max-bytes 0`, so the assertion is about the SWEEP and not about the cap accidentally
+  // cutting the token off the end.
+  const w = workspace();
+  try {
+    const runId = await park(w);
+    const listed = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes", "0"]);
+    assert.equal(listed.code, 0, listed.err);
+    const reads = (JSON.parse(listed.out) as GateRow[])[0]!.reads!;
+
+    // THE PRECONDITION: the token really is past the default window, and the channel really
+    // was externalised (otherwise this measures a small inline value and proves nothing).
+    const at = LATE.indexOf(AWS_KEY);
+    assert.ok(at > 8 * 1024, `the fixture must place the token past the default sweep, got offset ${String(at)}`);
+    assert.ok(Buffer.byteLength(LATE, "utf8") > EXTERNALISE_ABOVE_BYTES, "and the channel must be externalised");
+    assert.equal(handleOf(reads["haystack"]), undefined, "it must have been resolved, or this measures a handle");
+
+    assert.ok(!listed.out.includes(AWS_KEY), `a credential past the default sweep window reached stdout`);
+    assert.match(String(reads["haystack"]), /lorem ipsum/, "and the ordinary prose around it still prints");
   } finally {
     w.dispose();
   }
