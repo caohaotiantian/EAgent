@@ -50,6 +50,7 @@ import {
   type ExpansionBudget,
   type GraphSpec,
   type NodeSpec,
+  type NodeType,
   type ResolvedRef,
   type ResourceRef,
 } from "./spec.ts";
@@ -292,6 +293,20 @@ export interface GraphIndex {
    * joins and their arms and tolerates everywhere else.
    */
   readonly fanoutDepth: ReadonlyMap<NodeId, number>;
+  /**
+   * The same stack, spelled in EDGE IDS rather than in widths — which fan-outs enclose this
+   * node, innermost last.
+   *
+   * `parallelWidth` answers "how many at once" and `fanoutDepth` answers "how many coordinate
+   * segments"; neither answers "IS THIS THE SAME FAN-OUT". GRAPH010's branch-local exemption has
+   * to ask exactly that: a channel is branch-local only when its reader sits under the SAME fan
+   * edge as its writer, and two sibling fan-outs of equal width are indistinguishable by number.
+   *
+   * Computed by the same traversal, with the same `undefined` = AMBIGUOUS convention, so the two
+   * cannot drift. It is the STRICTER of the two: an edge id determines its width, so any pair of
+   * inbound paths that agree on edges agrees on widths, while the converse is false.
+   */
+  readonly fanoutEdgeStack: ReadonlyMap<NodeId, readonly EdgeId[] | undefined>;
   /** Every `join` node, so the runtime can notify barriers without scanning the spec. */
   readonly joinNodes: readonly NodeId[];
   /**
@@ -385,7 +400,7 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     for (const e of outbound.get(id) ?? []) stack.push(e.to);
   }
 
-  const { stacks, widths: parallelWidth } = computeFanoutStacks(spec, topoOrder, inbound);
+  const { stacks, widths: parallelWidth, edgeStacks: fanoutEdgeStack } = computeFanoutStacks(spec, topoOrder, inbound);
   const fanoutDepth = new Map<NodeId, number>();
   for (const [id, s] of stacks) if (s !== undefined) fanoutDepth.set(id, s.length);
   const joinNodes = spec.nodes.filter((n) => n.type === "join").map((n) => n.id);
@@ -394,6 +409,7 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
 
   return {
     fanoutDepth,
+    fanoutEdgeStack,
     joinNodes,
     byId,
     edgeById,
@@ -477,12 +493,21 @@ function computeFanoutStacks(
   spec: GraphSpec,
   topoOrder: readonly NodeId[],
   inbound: ReadonlyMap<NodeId, readonly EdgeSpec[]>,
-): { stacks: Map<NodeId, readonly number[] | undefined>; widths: Map<NodeId, number> } {
+): {
+  stacks: Map<NodeId, readonly number[] | undefined>;
+  widths: Map<NodeId, number>;
+  edgeStacks: Map<NodeId, readonly EdgeId[] | undefined>;
+} {
   const stacks = new Map<NodeId, readonly number[] | undefined>();
   const widths = new Map<NodeId, number>();
+  // The same stack in edge ids — see `GraphIndex.fanoutEdgeStack`. Folded into this traversal
+  // rather than written as a second one, because a second walk with the same push/pop/agree
+  // rules is a second thing to keep in step with this one.
+  const edgeStacks = new Map<NodeId, readonly EdgeId[] | undefined>();
   for (const n of spec.nodes) {
     stacks.set(n.id, []);
     widths.set(n.id, 1);
+    edgeStacks.set(n.id, []);
   }
 
   const product = (s: readonly number[]): number => s.reduce((a, b) => a * b, 1);
@@ -505,6 +530,20 @@ function computeFanoutStacks(
       known.every((c) => c.length === known[0]!.length && c.every((w, i) => w === known[0]![i]));
     stacks.set(id, agreed ? known[0]! : undefined);
 
+    // Same push, same pop, same agreement test, over edge ids.
+    const edgeCandidates: (readonly EdgeId[] | undefined)[] = ins.map((e) => {
+      const parent = edgeStacks.get(e.from);
+      if (parent === undefined) return undefined;
+      if (e.kind === "fanout") return [...parent, e.id];
+      if (e.kind === "join") return parent.slice(0, -1);
+      return parent;
+    });
+    const knownEdges = edgeCandidates.filter((c): c is readonly EdgeId[] => c !== undefined);
+    const edgesAgreed =
+      knownEdges.length === edgeCandidates.length &&
+      knownEdges.every((c) => c.length === knownEdges[0]!.length && c.every((x, i) => x === knownEdges[0]![i]));
+    edgeStacks.set(id, edgesAgreed ? knownEdges[0]! : undefined);
+
     // WIDTH IS COMPUTED SEPARATELY, AND NEVER FROM `known` ALONE.
     //
     // Ambiguity propagates: one undefined stack makes every descendant's stack undefined
@@ -526,7 +565,7 @@ function computeFanoutStacks(
     };
     widths.set(id, Math.max(1, ...ins.map(edgeWidth)));
   }
-  return { stacks, widths };
+  return { stacks, widths, edgeStacks };
 }
 
 /**
@@ -2317,7 +2356,9 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
     for (const w of writers) {
       // parallelWidth, NOT multiplicity: loop iterations are sequential and do not race.
       const instances = idx.parallelWidth.get(w) ?? 1;
-      if (instances > 1) {
+      // …UNLESS THE CHANNEL NEVER LEAVES THE BRANCH, in which case there is one writer per
+      // branch and no fold across them that anybody reads. See `branchLocalChannel`.
+      if (instances > 1 && !branchLocalChannel(spec, idx, channel, w)) {
         d.push({
           severity: "error",
           code: "GRAPH010_CONCURRENT_WRITE",
@@ -2359,6 +2400,201 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
       }
     }
   }
+}
+
+/**
+ * WHERE A CHANNEL NAME CAN APPEAR IN A SPEC, per authoring scope.
+ *
+ * `branchLocalChannel` has to prove a NEGATIVE — that nothing outside one fan-out branch names
+ * this channel — and a census that misses a site proves nothing. So the sites are enumerated
+ * against the field allow-lists `graph/spec.ts` already exports, and `sitesAreClassified` refuses
+ * the whole exemption when a name appears there that neither list below classifies.
+ *
+ * That is what makes the census survive the schema growing. `test/graph/allowed-fields.test.ts`
+ * already forces a new field into `NODE_FIELDS`/`EDGE_FIELDS`/`SPEC_FIELDS`/`ALLOWED_FIELDS`;
+ * this then forces somebody to say whether it can name a channel, and until they do the guard
+ * goes back to refusing — which is the direction a guard is allowed to move on its own.
+ *
+ * `free` means "cannot name a state channel", and three entries earn a word:
+ *   - `agent`: the body is handed `viewFor(…, node.reads)` (`engine.ts:7303`), so a prompt
+ *     cannot reach a channel the node did not declare.
+ *   - `humanGate`: `delivery.channels` are DELIVERY channels (slack, email) and `delivery.redact`
+ *     and `batching.key` are payload field names and a grouping label; the gate's payload itself
+ *     is built from `reads`.
+ *   - `join.branches`, `router.fallbackEdge`, `edge.compensates`: node and edge ids, not channels.
+ */
+const CHANNEL_SITES: Readonly<Record<"spec" | "node" | "edge", { readonly names: readonly string[]; readonly free: readonly string[] }>> = {
+  spec: {
+    names: ["inputs", "outputs"],
+    free: ["apiVersion", "kind", "metadata", "policy", "channels", "nodes", "edges", "hooks"],
+  },
+  node: {
+    names: ["reads", "writes", "tool", "router", "subgraph"],
+    free: ["id", "type", "policy", "retry", "timeoutMs", "checkpoint", "unhandled", "function", "agent", "evaluator", "join", "humanGate"],
+  },
+  edge: {
+    names: ["when", "until", "over", "as"],
+    free: ["id", "from", "to", "kind", "maxWidth", "branches", "maxIterations", "codes", "compensates"],
+  },
+};
+
+/** The same question one level in, for the fields of a node's own type block. */
+const CHANNEL_SITES_IN_BLOCK: Readonly<Record<NodeType, { readonly names: readonly string[]; readonly free: readonly string[] }>> = {
+  function: { names: [], free: ["ref", "effects"] },
+  agent: { names: [], free: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"] },
+  tool: { names: ["args"], free: ["name", "version"] },
+  router: { names: ["cases"], free: ["mode", "fallbackEdge", "profile"] },
+  join: { names: [], free: ["branches", "mode", "k", "onBranchError"] },
+  evaluator: { names: [], free: ["kind", "ref", "threshold"] },
+  human_gate: { names: [], free: ["ref", "approval", "sla", "batching", "dedupe", "delivery"] },
+  subgraph: { names: ["inputs", "outputs"], free: ["ref", "budgetShare"] },
+};
+
+function sitesAreClassified(): boolean {
+  const covers = (all: readonly string[], t: { readonly names: readonly string[]; readonly free: readonly string[] }): boolean =>
+    all.every((f) => t.names.includes(f) || t.free.includes(f));
+  if (!covers(SPEC_FIELDS, CHANNEL_SITES.spec)) return false;
+  if (!covers(NODE_FIELDS, CHANNEL_SITES.node)) return false;
+  if (!covers(EDGE_FIELDS, CHANNEL_SITES.edge)) return false;
+  for (const [type, fields] of Object.entries(ALLOWED_FIELDS)) {
+    const t = CHANNEL_SITES_IN_BLOCK[type as NodeType];
+    if (t === undefined || !covers(fields, t)) return false;
+  }
+  return true;
+}
+
+/**
+ * Every place in the spec that names `channel` — the census `branchLocalChannel` runs over.
+ *
+ * `reads` and `writes` are reported per node and per field, because those are the only two sites
+ * the exemption can accept. Everything else collapses to one `other` site per node, or to an
+ * `edge` or `spec` site, because the exemption refuses all of them and the caller needs no detail.
+ *
+ * EXPRESSIONS ARE MATCHED AS WORDS, NOT PARSED. `checkExpr` would give exact references, and give
+ * NONE for an expression that does not parse — which is the undecidable case answering with the
+ * passing value. A word match over-reports (a string literal spelled like a channel counts), and
+ * over-reporting refuses.
+ */
+type MentionSite =
+  | { readonly kind: "spec" }
+  | { readonly kind: "edge" }
+  | { readonly kind: "node"; readonly nodeId: NodeId; readonly field: "reads" | "writes" | "other" };
+
+function mentionsOf(spec: GraphSpec, channel: string): readonly MentionSite[] {
+  const word = new RegExp(`(?<![A-Za-z0-9_$])${channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_$])`);
+  // PRESENT BUT NOT A STRING COUNTS AS A MENTION. This rule runs before the shape rules have
+  // finished, and "I could not read it" is not "it does not name the channel".
+  const inExpr = (src: unknown): boolean => (src === undefined ? false : typeof src !== "string" || word.test(src));
+  const named = (list: unknown): boolean => (Array.isArray(list) ? list.includes(channel) : list !== undefined);
+  const mapsTo = (m: unknown): boolean => {
+    if (m === undefined) return false;
+    if (m === null || typeof m !== "object") return true;
+    return Object.values(m as Record<string, unknown>).includes(channel);
+  };
+  const out: MentionSite[] = [];
+
+  if (named(spec.inputs) || named(spec.outputs)) out.push({ kind: "spec" });
+
+  for (const e of spec.edges) {
+    if (e.over === channel || e.as === channel || inExpr(e.when) || inExpr(e.until)) out.push({ kind: "edge" });
+  }
+
+  for (const n of spec.nodes) {
+    if (named(n.reads)) out.push({ kind: "node", nodeId: n.id, field: "reads" });
+    if (named(n.writes)) out.push({ kind: "node", nodeId: n.id, field: "writes" });
+    // `observedChannels` is `reads` ∪ the `${…}` roots of `tool.args`; a name already counted as a
+    // read is not a second site, because the argument resolves at that same node's own branch.
+    const inArgs = n.tool?.args !== undefined && observedChannels(n).includes(channel) && !(n.reads ?? []).includes(channel);
+    const cases = n.router?.cases;
+    const inCases =
+      cases !== undefined && (!Array.isArray(cases) || cases.some((c) => c === null || typeof c !== "object" || inExpr(c.when)));
+    const sub = n.subgraph;
+    const inSubgraph = sub !== undefined && (typeof sub !== "object" || mapsTo(sub.inputs) || mapsTo(sub.outputs));
+    if (inArgs || inCases || inSubgraph) out.push({ kind: "node", nodeId: n.id, field: "other" });
+  }
+  return out;
+}
+
+/**
+ * Is `channel` written and read entirely inside ONE fan-out branch, so that `replace` never folds
+ * across branches for anything that reads it?
+ *
+ * THIS FUNCTION LOOSENS A GUARD, so every answer it cannot prove is `false`. What it proves, and
+ * what the runtime gives it (measured, `docs/` A.40 and the two spikes it cites):
+ *
+ *   - `Engine.#withBranchWrites` folds only the tasks at EXACTLY the asking task's branch path,
+ *     with the same reducer the join uses. A reader in the writer's branch therefore sees the
+ *     writer's own `replace` value and no sibling's.
+ *   - It deliberately does NOT fold an ANCESTOR's held write. A reader one fan-out deeper reads
+ *     `null`, so "inside the subtree" is not enough — the fan-out stack must be EQUAL.
+ *   - `#foldJoin` folds every channel a member wrote, not only the join's declared `writes`, so
+ *     the channel DOES reach shared state at the join — as the last branch in branch-coordinate
+ *     order. Deterministic, and meaningless. Nothing may read it after the join.
+ *
+ * So: the writer is the fan-out's own target, every reader sits at the same fan-out stack and
+ * strictly downstream of the writer, and NOTHING else in the spec names the channel at all.
+ * `join`, `router`, `subgraph`, a nested fan-out, a `retry` and a loop inside the branch each
+ * refuse, and each for a reason this cannot discharge rather than for tidiness — the table is in
+ * the row's plan and the test file names one case per row.
+ *
+ * The two-writer arm of GRAPH010 is NOT relaxed and must not be: two writers inside one branch
+ * fold by `compareContribution`'s `nodeId` tiebreak, which is arbitrary for `replace` in exactly
+ * the way the rule exists to refuse. A second writer anywhere refuses here too, via the census.
+ */
+function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, writer: NodeId): boolean {
+  if (!sitesAreClassified()) return false;
+  if (spec.channels[channel] === undefined) return false;
+
+  // W1 — exactly one enclosing fan-out, unambiguously.
+  const stack = idx.fanoutEdgeStack.get(writer);
+  if (stack === undefined || stack.length !== 1) return false;
+  const fanId = stack[0]!;
+  const fan = idx.edgeById.get(fanId);
+  // W2 — the writer IS the fan-out's target, so it is the first node of the branch and every
+  // other node in the branch is downstream of it. A writer partway down can have siblings in the
+  // branch that are neither its ancestors nor its descendants, and those race it.
+  if (fan === undefined || fan.kind !== "fanout" || fan.to !== writer) return false;
+
+  // The subtree: every node this fan-out encloses, at any depth.
+  const subtree = new Set<NodeId>();
+  for (const n of spec.nodes) {
+    const s = idx.fanoutEdgeStack.get(n.id);
+    if (s !== undefined && s.length >= 1 && s[0] === fanId) subtree.add(n.id);
+  }
+  if (!subtree.has(writer)) return false;
+
+  for (const id of subtree) {
+    const n = idx.byId.get(id);
+    if (n === undefined) return false;
+    // W3 — a `join` inside the branch pops a level and its fold leaves the branch; a `router`
+    // turns one static subtree into a set of possible ones, so `ancestors` stops meaning "ran
+    // before"; a `subgraph` resolves its `inputs` against the WHOLE scope and its child is a spec
+    // this walk cannot see.
+    if (n.type === "join" || n.type === "router" || n.type === "subgraph") return false;
+    // W4 — a retried write is a second contribution keyed by `iteration`, and a loop pass
+    // re-enters the branch; `#withBranchWrites` folds every succeeded task at the path.
+    if (n.retry !== undefined) return false;
+    if ((idx.multiplicity.get(id) ?? 0) !== (idx.parallelWidth.get(id) ?? 1)) return false;
+  }
+  // W3, second half — a nested fan-out under this one. Measured: its nodes read `null`.
+  for (const e of spec.edges) if (e.kind === "fanout" && subtree.has(e.from)) return false;
+
+  const atThisFan = (id: NodeId): boolean => {
+    const s = idx.fanoutEdgeStack.get(id);
+    return s !== undefined && s.length === 1 && s[0] === fanId;
+  };
+
+  // W5 — the census. Anything but this writer's `writes` and in-branch downstream `reads` refuses.
+  for (const site of mentionsOf(spec, channel)) {
+    if (site.kind !== "node" || site.field === "other") return false;
+    if (site.field === "writes") {
+      if (site.nodeId !== writer) return false;
+      continue;
+    }
+    if (!atThisFan(site.nodeId)) return false;
+    if (!(idx.ancestors.get(site.nodeId)?.has(writer) ?? false)) return false;
+  }
+  return true;
 }
 
 /** Nodes reachable from `from` over forward edges. */
