@@ -24,7 +24,7 @@ import { compile } from "./graph/compile.ts";
 import { undeclaredInputsMessage } from "./graph/declared-inputs.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpToolName, mcpTools } from "./mcp/tools.ts";
-import type { GraphSpec, RunGraph } from "./graph/spec.ts";
+import { observedChannels, type GraphSpec, type RunGraph } from "./graph/spec.ts";
 import type { ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
@@ -40,7 +40,7 @@ import {
   type DeliveryChannel,
   type WebhookChannelOptions,
 } from "./run/delivery.ts";
-import { HumanGateBroker } from "./run/gates.ts";
+import { HumanGateBroker, type GateSummary } from "./run/gates.ts";
 import { InProcessScheduler } from "./run/scheduler.ts";
 import {
   FunctionRegistry,
@@ -68,6 +68,7 @@ import {
 import { CODES, err } from "./errors.ts";
 import {
   CLASS_DEFAULT_POSTURE,
+  maxClassification,
   isLoosening,
   isSyntheticSubject,
   POSTURES,
@@ -75,7 +76,9 @@ import {
   type IrreversibilityClass,
   type Posture,
 } from "./vocab.ts";
-import { foldRun, type RunProjection, type TaskRecord } from "./run/projection.ts";
+import { redactPayload } from "./security/redact.ts";
+import type { ChannelSpec } from "./state/channels.ts";
+import { foldRun, viewFor, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
 import { HookRegistry } from "./run/hooks.ts";
@@ -110,6 +113,61 @@ import {
   type ExamAttestation,
   type ExamOutcome,
 } from "./evolution/exam.ts";
+
+/**
+ * WHAT `--extension-module` OPENS — one row each, and the SOURCE OF THE COUNT in `USAGE`.
+ *
+ * `--help` used to name four members (`called with {models, tools, channels, identity}`) and
+ * claim "FOUR things need no fork", while the call in `loadExtensionModules` passed TEN and
+ * README's "Extending it, and where that stops" documented nine rows against them — including
+ * `store.register`, which README calls the sharpest row on the list. A stranger reading the
+ * thing in front of them did not learn that `store`, `resolver`, `functions`, `hooks`,
+ * `payloads` or `jail` exist at all, on the one flag whose whole job is to say so.
+ *
+ * The number in the help text is `Object.keys(…).length` over this table rather than a word
+ * somebody typed, and the table is checked against the REGISTRAR OBJECT ITSELF:
+ * `test/cli/extension-registrar-help.test.ts` loads a module that reports `Object.keys` of
+ * what its factory was handed and asserts `--help` names every one. A member added to that
+ * call and not to this table fails that test rather than quietly making `--help` false again.
+ */
+const EXTENSION_REGISTRAR_OPENS: Readonly<Record<string, string>> = {
+  models: "a provider on a wire that is neither Anthropic's nor OpenAI's",
+  tools: "an in-process tool",
+  channels: "a gate transport that is not an HTTP webhook (email, SMS, Slack)",
+  identity: "an identity source that is not a token file (OIDC, mTLS, a header)",
+  functions: "a host-realm `function` body — async, and this process's globals",
+  hooks: "a hook body, at any of the eight points",
+  resolver: "where refs resolve from. SUBSTITUTES: one module owns them all",
+  store: "where the journal is. A module's store IS this deployment's journal",
+  payloads: "where an externalised payload value is put",
+};
+
+/**
+ * The WHOLE object a module's factory is handed: the nine slots above, plus `jail`.
+ *
+ * `jail` is an INPUT and not a registration — the operator's own fs confinement, handed in so
+ * a module can build tools bounded the way the built-ins are. That is why it is not one of the
+ * things that "need no fork", and why the two numbers in the help text differ by one.
+ *
+ * ORDER IS THE CALL'S ORDER, so a reader comparing `--help` with the line in
+ * `loadExtensionModules` sees the same sequence.
+ */
+const EXTENSION_REGISTRAR_MEMBERS: readonly string[] = [...Object.keys(EXTENSION_REGISTRAR_OPENS), "jail"];
+
+/**
+ * The member list as `--help` prints it, broken at the halfway member so the line does not run
+ * past the ~99 columns the rest of `USAGE` keeps to. Split by LENGTH, never by a typed index:
+ * a tenth member must not silently un-wrap the paragraph.
+ */
+const EXTENSION_REGISTRAR_LIST: string = [
+  EXTENSION_REGISTRAR_MEMBERS.slice(0, Math.ceil(EXTENSION_REGISTRAR_MEMBERS.length / 2)).join(", "),
+  EXTENSION_REGISTRAR_MEMBERS.slice(Math.ceil(EXTENSION_REGISTRAR_MEMBERS.length / 2)).join(", "),
+].join(",\n                                 ");
+
+/** The rows as `--help` prints them, aligned under the paragraph that introduces them. */
+const EXTENSION_REGISTRAR_HELP: string = Object.entries(EXTENSION_REGISTRAR_OPENS)
+  .map(([member, what]) => `                      ${member.padEnd(9)} ${what}`)
+  .join("\n");
 
 const USAGE = `loom — graph-native multi-agent orchestration
 
@@ -300,12 +358,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     stored in it. Accepted by every command, not just serve.
   --extension-module P,P  host-realm modules to load before anything is configured, as a
                     comma-separated list of paths. Each is imported and its DEFAULT EXPORT
-                    called with {models, tools, channels, identity} — this process's
-                    ModelRegistry and ToolRegistry, and a collector for each of the other
-                    two — so FOUR things need no fork: a provider on a wire that is neither
-                    Anthropic's nor OpenAI's, an in-process tool, a gate delivery transport
-                    that is not an HTTP webhook (email, SMS, a Slack app), and an identity
-                    source that is not a bearer-token file (OIDC, mTLS, a proxy-set header).
+                    called with {${EXTENSION_REGISTRAR_LIST}} —
+                    this process's ModelRegistry, ToolRegistry, FunctionRegistry and
+                    HookRegistry, a collector for each substitutable slot, and the
+                    operator's own jail. So ${Object.keys(EXTENSION_REGISTRAR_OPENS).length} things need no fork:
+${EXTENSION_REGISTRAR_HELP}
+                    jail REGISTERS NOTHING and is the exception: it is the fs confinement
+                    this process is already under, handed in so a module can build tools
+                    bounded the way the built-ins are.
                     A models-file "routes" row may name an adapter registered here, and a
                     channel registered here is merged with --channels-file's rows.
                     A ModelAdapter must implement provider, stream, priceOf, estimateOf and
@@ -5044,6 +5104,208 @@ function subgraphDirs(): readonly string[] {
   return SPEC_KINDS.map((k) => join("resources", k));
 }
 
+/**
+ * ADD THE THING BEING APPROVED, because `loom gates` showed a HASH and nothing else.
+ *
+ * `GateSummary.payload` — the rendered half a human reads — is EPHEMERAL: `GateBroker.list`
+ * joins the durable record with `#ephemeral.get(gateId)?.payload`, and a fresh `loom gates`
+ * process raised none of these gates, so that map is empty. `Engine.rehydrateGates` refuses to
+ * refill it on purpose ("not recoverable, and absent rather than faked"). Measured before this
+ * existed, on a run parked at a `human_gate` reading one channel:
+ *
+ *     $ loom gates 01M2… | jq '.[0] | keys'
+ *     ["approvers","contentDigest","deadline","gateId","nodeId","onTimeout","policyRef",
+ *      "raisedAtSeq","raisedAtTs","runId","slaMs","state","taskId","tier"]
+ *
+ * — a human approving on the documented CLI path approves a digest. `loom trace` shows the span
+ * tree without channel values and `loom approve` prints the report only AFTER the decision, so
+ * the content was reachable from `loom serve` and from nowhere else on this door.
+ *
+ * **`reads` IS THE CURRENT STATE, NOT THE BINDING, AND THE TWO MUST NOT BE CONFLATED.**
+ * `contentDigest` is what the approval binds — `#dispatchApproved` re-derives it from a fresh
+ * projection and refuses a mismatch — and it is left exactly as it was. This field is a second,
+ * softer thing: what the gate node observes RIGHT NOW, through the same call
+ * `Engine.#gatePayload` makes for its `state`.
+ *
+ * SO A SIBLING BRANCH CAN MOVE A CHANNEL BETWEEN THE READING AND THE DECISION, and this
+ * command cannot tell. It does not have to: an approval bound to state that has since changed
+ * is refused at dispatch rather than executed, so the undecidable question fails CLOSED one
+ * layer down. Naming it because printing values with no marker is otherwise exactly the shape
+ * of a guard answering its undecidable case with the passing value.
+ *
+ * TWO PLACES THE TWO DO NOT AGREE EVEN AT REST, and the first draft of this comment claimed
+ * they always did. (1) An EXTERNALISED channel: `#executeTask` calls `#resolveReads` before
+ * building the payload, so `#gatePayload` sees the fetched bytes while this reads the raw fold,
+ * where `withHandles` has already substituted `payloadHandle(ref)`. Over
+ * `EXTERNALISE_ABOVE_BYTES` the console operator sees text and this operator sees a handle.
+ * (2) A classified channel: the sweep below blanks what `#gatePayload` does not.
+ *
+ * BEST EFFORT, AND ABSENT RATHER THAN GUESSED. The set comes from the compiled graph, which is
+ * not journaled; the workspace's `graphs/` is searched for the hash the journal records, exactly
+ * as `loom approve` does. Where that search comes up empty — a graph edited since the run
+ * started, a run mutated by `graph.mutated` into nodes the authored file does not carry, a
+ * workspace holding only a journal — the field is omitted and everything else prints. This
+ * command answers "is anything waiting on me", and it must not start REFUSING because the
+ * content half is unavailable.
+ *
+ * `observedChannels`, not `node.reads`, because it is the call `#gatePayload` makes and the two
+ * must not drift. For a `human_gate` the two sets COINCIDE — there is no `tool.args` to resolve
+ * — so this is agreement with the payload rather than a difference anything can observe today;
+ * said that way rather than claiming a correction this call site cannot demonstrate.
+ *
+ * REDACTED BY THE GRAPH'S OWN CLASSIFICATION, and this file's other channel prints are not the
+ * precedent they look like. The first version of this shipped in the clear, on the argument that
+ * `loom run` and `loom approve` already print `p.outputs` raw. Two things make that wrong.
+ * `outputs` is `collectOutputs` over `spec.outputs` — an author-chosen PUBLISHED subset — while
+ * this is `observedChannels`, which includes INPUTS, so this would be the first CLI path to
+ * print an input channel a graph declared `secret_ref`. And `redactGateRead`'s twin in
+ * `server/http.ts` already wrote the sentence: *"Serving that value in the clear at the gate the
+ * classification demanded is the one place it must not happen"* — a gate is very often raised
+ * BECAUSE a channel is classified, since `dataFloorOf` floors a node reading `secret_ref` at
+ * posture `in`. Printing it here would be a LOOSENING, on the one non-negotiable that says
+ * loosening never is.
+ *
+ * IT COSTS A.43 NOTHING. The sweep blanks only what the author DECLARED: an undeclared
+ * classification is `internal`, the detector backstop, which passes ordinary prose through in
+ * full. The shipped example's `report` channel prints whole. What an operator loses is exactly
+ * the set the graph said must never be rendered — and losing it puts this door in agreement
+ * with the console, the delivery payload and the plane, instead of being the one that discloses.
+ *
+ * NOT TRUNCATED, though, and that half of the old argument stands: cli.ts bounds no channel
+ * value anywhere, and truncating the thing a human is about to approve is A.43 one step
+ * smaller. The 8 KiB detector bound `redactPayload` applies by default is a CPU bound on the
+ * sweep, not a bound on the output. WORST CASE, named rather than capped: `reads` repeats per
+ * gate, so a wide fan-out parked on a gate over a large channel prints that channel once per
+ * branch. A value the journal externalised already reads as a payload handle, which is the only
+ * size bound the state itself draws.
+ */
+async function gatesWithReads(
+  ws: Workspace,
+  p: RunProjection,
+  gates: readonly GateSummary[],
+): Promise<readonly unknown[]> {
+  if (gates.length === 0) return gates;
+  // The index compiles every graph in the workspace, so it is built ONCE and only when there
+  // is a gate to explain.
+  const wanted = await ws.engine.compiledGraphHash(p.runId);
+  // AND THE LOOKUP MAY NOT TURN THIS COMMAND INTO A REFUSAL. `indexGraphs` wraps `compiledFile`
+  // and NOT `readdirSync`, so an unreadable `graphs/` throws straight out of `graphsByHash` —
+  // measured with `chmod 000` on a workspace whose journal lists one open gate:
+  //
+  //     loom gates <run>  →  THREW  Error: EACCES: permission denied, scandir '…/ws/graphs'
+  //
+  // That is this function's own docstring violated by its first statement: a command that
+  // answers "is anything waiting on me" must not start refusing because the CONTENT half is
+  // unavailable, and a directory this process cannot read is exactly that. Every throw lands in
+  // the same arm, which is right — "the graph could not be resolved" is one outcome however it
+  // failed — and the reason is carried into the notice so it is not swallowed.
+  let graph: RunGraph | undefined;
+  let why: string | undefined;
+  try {
+    graph = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
+  } catch (e) {
+    why = (e as Error).message;
+  }
+  if (graph === undefined) {
+    // ABSENT IS NOT "READS NOTHING", and saying nothing here would be this command's own
+    // `absence is not zero` trap one field over — the `?? {}` two screens down answered "there
+    // is no such run" with "nothing is waiting on you" for the same reason. A caller reading
+    // `.reads` off a row gets `undefined` in both cases, and only one of them means the gate
+    // has no content. Driven on the shipped example with the graph deleted: before this line,
+    // exit 0 and a row missing one key, with nothing anywhere saying why.
+    //
+    // STDERR, so `loom gates | jq` is unaffected — the same split A.41 just made true of
+    // `loom run`.
+    process.stderr.write(
+      `! CONTENT NOT SHOWN — ${String(gates.length)} open gate(s) below print no \`reads\`, because ` +
+        (why !== undefined
+          ? `the search could not be run: ${why}\n`
+          : wanted === undefined
+            ? `this journal records no compile for run ${p.runId}.\n`
+            : // EVERY DIRECTORY THE SEARCH ACTUALLY WALKED. `graphsByHash` is `graphs/` PLUS one
+              // per spec resource kind, so naming `graphs/` alone would send an operator to look
+              // in one of three places — a correction that replaces a false claim with a
+              // differently-false one.
+              `no graph under ${["graphs", ...subgraphDirs()].map((d) => join(ws.root, d)).join(", ")} has the hash ` +
+              `this run compiled (${wanted}).\n`) +
+        `  A missing \`reads\` is not "this gate reads nothing". Publish the graph this run used to see what is\n` +
+        `  being approved — \`loom approve\` needs that same graph anyway. \`contentDigest\` binds either way.\n`,
+    );
+    return gates;
+  }
+  // WHICH GATES THE GRAPH DID NOT EXPLAIN, for the reason above. This arm is the MUTATED run:
+  // `compiledGraphHash` names the graph the run compiled and `graph.mutated` only ever appends,
+  // so a gate on an appended node is in the journal and in no file.
+  const unexplained: string[] = [];
+  const mirrors: string[] = [];
+  const spec = graph.spec;
+  const rows = gates.map((g) => {
+    // A MIRROR IS A COPY OF SOMEBODY ELSE'S QUESTION, and this is the one case where the node
+    // IS found and the answer would still be wrong. `#runSubgraph` raises the mirror on the
+    // PARENT run with `nodeId` set to the SUBGRAPH node, so `observedChannels` of that node
+    // resolves the parent's own inputs — while the thing being approved is a gate in the CHILD
+    // run, on a child node, over child channels. Printing the parent's state under `reads`
+    // would label the wrong values as the content of this gate, which is worse than printing
+    // none. `server/http.ts` draws the same distinction one level down (`state` for an ordinary
+    // gate, `channels` for a mirror). Answering a child's question through the parent is
+    // `loom approve <parent> <gate>`'s job, and it reads the child run.
+    if (g.mirrorOf !== undefined) {
+      mirrors.push(g.gateId);
+      return g;
+    }
+    const node = spec.nodes.find((n) => n.id === g.nodeId);
+    const task: TaskRecord | undefined = p.tasks[g.taskId];
+    if (node === undefined || task === undefined) {
+      unexplained.push(g.gateId);
+      return g;
+    }
+    const view = viewFor(p, spec.channels, task.branch, observedChannels(node));
+    return {
+      ...g,
+      reads: Object.fromEntries(view.visible.map((c) => [c, redactGateRead(spec.channels, c, view.get(c))])),
+    };
+  });
+  if (unexplained.length > 0) {
+    process.stderr.write(
+      `! CONTENT NOT SHOWN — ${unexplained.join(", ")} print no \`reads\`: the graph this run compiled carries no\n` +
+        `  node, or this journal no task, for them. A run MUTATED after it started produces exactly that.\n`,
+    );
+  }
+  if (mirrors.length > 0) {
+    process.stderr.write(
+      `! CONTENT NOT SHOWN — ${mirrors.join(", ")} print no \`reads\`: each MIRRORS a gate in a delegated child\n` +
+        `  run, so the question is about that run's channels and not this one's. \`loom gates <childRunId>\`\n` +
+        `  shows them; answering here still answers the original.\n`,
+    );
+  }
+  return rows;
+}
+
+/**
+ * ONE CHANNEL VALUE, SWEPT BY WHAT THE GRAPH DECLARED ABOUT IT.
+ *
+ * The same three-arm rule as `redactChannels` in `server/http.ts`, deliberately spelled the
+ * same way: an undeclared NAME is the most sensitive thing there is, a declared name with no
+ * classification is `internal` (the detector backstop), and anything else goes through
+ * `maxClassification`, which is `vocab.ts`'s membership test and answers `secret_ref` for a
+ * word this vocabulary cannot read. Fails CLOSED at both ends.
+ *
+ * IT IS A SECOND SPELLING AND THAT IS A SEAM, NOT A DECISION. `redactChannels` is private to
+ * `server/http.ts`; the honest fix is one shared function, and it belongs to whoever owns that
+ * file next. Named here so it is a known duplicate rather than a discovered one — the failure
+ * mode of two spellings is that a future classification is handled by one and not the other.
+ */
+function redactGateRead(
+  specs: Readonly<Record<string, ChannelSpec>>,
+  name: string,
+  value: unknown,
+): unknown {
+  const declared = Object.hasOwn(specs, name) ? specs[name] : undefined;
+  if (declared === undefined || declared === null) return redactPayload(value, "secret_ref");
+  const c = declared.classification;
+  return redactPayload(value, c === undefined ? "internal" : maxClassification(c));
+}
+
 interface GraphIndex {
   index: Map<string, RunGraph>;
   files: Map<string, string>;
@@ -7110,7 +7372,15 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // verbatim failed `E_GATE_NOT_AUTHORIZED` on any gate with approvers — the subject
             // defaults to "cli", which no approvers list names. It also used to need `--graph`,
             // which the workspace lookup now supplies.
-            process.stdout.write(
+            //
+            // STDERR, BECAUSE STDOUT IS THE JSON AND NOTHING ELSE. This line used to follow the
+            // object on stdout, so `loom run … | jq .status` parsed for a run that SUCCEEDED and
+            // failed for one that parked on a gate — precisely the case a script needs to branch
+            // on, and the one status this command exits 0 for without the work being done. The
+            // product already knew the rule one hint up: `announceRun`'s `run … — inspect it
+            // with:` is on stderr. A caller that grepped stdout for this line reads it with
+            // `2>&1`; a caller that piped stdout to a parser could not use this path at all.
+            process.stderr.write(
               `gate ${g.gateId} on node ${g.nodeId} — loom approve ${runId} ${g.gateId} --as YOUR_ID\n`,
             );
           }
@@ -7166,7 +7436,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         //
         // The projection above stays: it is what answers E_RUN_NOT_FOUND, and it is the SET.
         // This is only the ORDER.
-        process.stdout.write(`${JSON.stringify(await ws.engine.openGates(runId), null, 2)}\n`);
+        process.stdout.write(
+          `${JSON.stringify(await gatesWithReads(ws, p, await ws.engine.openGates(runId)), null, 2)}\n`,
+        );
         return 0;
       }
 

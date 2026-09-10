@@ -82,6 +82,20 @@ async function run(argv: string[]): Promise<{ code: number; out: string; err: st
   }
 }
 
+/**
+ * `loom run`'s gate hint, FROM STDERR.
+ *
+ * Three tests below used to take it off the end of STDOUT, which is where it was printed until
+ * it broke `loom run … | jq .status` on the one path a script needs to branch on (TODO A.41).
+ * It is matched anywhere in the stream rather than as the last line, because stderr also
+ * carries `announceRun`'s `run … — inspect it with:` and whatever the boot banner said.
+ */
+function approveHint(cap: { err: string }): RegExpExecArray {
+  const m = /loom approve (\S+) (\S+)/.exec(cap.err);
+  assert.ok(m !== null, `expected an approve hint on stderr, got: ${cap.err}`);
+  return m;
+}
+
 test("A FAILED RUN PRINTS ITS ERROR — the one door people use said only \"failed\"", async () => {
   // Every refusal written so carefully in `cli.ts` — `RoutingAdapter.#resolve`'s "no route for
   // model X; routed: …" above all — reached nobody, because `loom run` printed
@@ -772,12 +786,9 @@ test("A FRESH PROCESS APPROVES WITHOUT --graph — the command the binary prints
     writeFileSync(join(d.dir, "graphs", "g.json"), JSON.stringify(gatedGraph("after-gate.txt")));
 
     const first = await run(["run", join(d.dir, "graphs", "g.json"), "--workspace", d.dir, "--input", JSON.stringify({ note: "ship it" })]);
-    const hint = first.out.trim().split("\n").pop() ?? "";
-    const runId = /loom approve (\S+) (\S+)/.exec(hint)?.[1];
-    const gateId = /loom approve (\S+) (\S+)/.exec(hint)?.[2];
-    assert.ok(runId !== undefined && gateId !== undefined, `expected an approve hint, got: ${hint}`);
+    const [, runId, gateId] = approveHint(first);
 
-    const approved = await run(["approve", runId, gateId, "--workspace", d.dir, "--as", "u:alice"]);
+    const approved = await run(["approve", runId!, gateId!, "--workspace", d.dir, "--as", "u:alice"]);
     assert.equal(approved.code, 0, `approve must succeed without --graph: ${approved.err}`);
     assert.equal(readFileSync(join(d.dir, "after-gate.txt"), "utf8"), "ship it", "the gated action ran");
   } finally {
@@ -795,9 +806,7 @@ test("AND A SUBSTITUTED GRAPH IS REFUSED — the gate binds what the human was s
     writeFileSync(join(d.dir, "graphs", "b.json"), JSON.stringify(gatedGraph("SUBSTITUTED.txt")));
 
     const first = await run(["run", join(d.dir, "graphs", "g.json"), "--workspace", d.dir, "--input", JSON.stringify({ note: "n" })]);
-    const hint = first.out.trim().split("\n").pop() ?? "";
-    const m = /loom approve (\S+) (\S+)/.exec(hint);
-    assert.ok(m !== null, `expected an approve hint, got: ${hint}`);
+    const m = approveHint(first);
 
     // `main` THROWS here rather than returning a code — the binary's top-level catch is what
     // turns it into `E_GRAPH_MISMATCH: …` and exit 1, which is what an operator sees. `loom run`
@@ -974,8 +983,7 @@ test("A DRIFTED GRAPH STRANDS NOTHING — cancel is the exit and it needs no gra
     writeFileSync(g, JSON.stringify(gatedGraph("after-gate.txt")));
 
     const first = await run(["run", g, "--workspace", d.dir, "--input", JSON.stringify({ note: "n" })]);
-    const m = /loom approve (\S+) (\S+)/.exec(first.out.trim().split("\n").pop() ?? "");
-    assert.ok(m !== null, first.out);
+    const m = approveHint(first);
 
     // ONE BYTE. The spec is otherwise identical and the graph still compiles.
     const drifted = JSON.parse(readFileSync(g, "utf8")) as { metadata: { version: number } };
