@@ -5520,6 +5520,34 @@ export class Engine {
         { details: { runId: ctx.runId, edges: unreadable.map((edge) => ({ id: edge.id, kind: edge.kind })) } },
       );
     }
+    // AND A FAN-OUT WIDTH THIS EXECUTOR CANNOT READ REFUSES THE RUN, for the reason directly
+    // above and by the same door. `maxWidth` is `number` in `EdgeSpec` and arrives from a parse
+    // that checks NAMES only, so `"24"`, `NaN`, `0`, `2.5` and absent all reach `#activate`'s
+    // `items.slice(0, e.maxWidth ?? 0)` — which takes ZERO branches without a word — and reach
+    // `computeFanoutStacks`, where one `NaN` makes every downstream parallel width `NaN` and
+    // GRAPH010's concurrent-writer refusal silently stops firing. Closed at compile by
+    // GRAPH007_NO_MAX_WIDTH and GRAPH007_BAD_MAX_WIDTH; closed here because `submit` and
+    // `attach` take a `RunGraph` and a graph can reach the executor without passing this
+    // build's compiler. Leaving it open would refuse a run for a mistyped `kind` and accept one
+    // for a mistyped `maxWidth`, three lines apart, on the same argument.
+    //
+    // THE READABILITY TEST AND NOT THE CEILING. `rule007Fanout` also refuses a width over
+    // `expansion.maxFanout`, and that one is NOT re-checked: the ceiling is a policy number the
+    // compiler produces by merging graph policy over defaults, so re-deriving it here would be a
+    // second implementation of a budget, and any drift refuses graphs the compiler accepted —
+    // including runs already in flight, since this method runs on every `advance`. An
+    // unreadable width is a correctness hole; a width over budget is the compiler's business.
+    const unreadableWidth = ctx.graph.spec.edges.filter((edge) => edge.kind === "fanout" && !readableFanoutWidth(edge.maxWidth));
+    if (unreadableWidth.length > 0) {
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `the graph supplied for ${why} has ${unreadableWidth.length === 1 ? "a fanout edge" : "fanout edges"} whose maxWidth this build cannot read: ` +
+          `${unreadableWidth.map((edge) => `"${edge.id}" (maxWidth ${describeWidth(edge.maxWidth)})`).join(", ")} — ` +
+          `the width is sliced off the fanned channel and multiplied into every downstream node's parallel width, ` +
+          `and an unreadable one fans out zero branches in silence`,
+        { details: { runId: ctx.runId, edges: unreadableWidth.map((edge) => ({ id: edge.id, maxWidth: describeWidth(edge.maxWidth) })) } },
+      );
+    }
     const recorded = await this.#compiledIdentity(ctx.runId);
     // A run with no `run.compiled` cannot be checked, and what to do about that DIFFERS BY DOOR.
     //
@@ -13170,6 +13198,37 @@ function minDefined(...values: readonly (number | undefined)[]): number | undefi
  * names the second site.
  */
 const EDGE_KINDS: ReadonlySet<string> = new Set(["seq", "conditional", "fanout", "join", "error", "compensation", "loop"]);
+
+/**
+ * A fan-out width the executor's own readers can use — `#assertBound`'s copy of the predicate
+ * `graph/validate.ts` calls `isPositiveInt`.
+ *
+ * The executor's own copy for the reason `EDGE_KINDS` above is one: the compiler is the earlier
+ * answer and the executor must not depend on having been the caller of it. The two readers that
+ * need this are `#activate`'s `items.slice(0, e.maxWidth ?? 0)`, which truncates `2.5` to 2 and
+ * takes nothing at all for `NaN`, `0` or `"24"`, and the width product behind `parallelWidth`,
+ * which keeps the fraction and propagates the `NaN`. `0` is refused for the same reason a string
+ * is: a fan-out of nothing is silent.
+ */
+function readableFanoutWidth(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+}
+
+/**
+ * A width in a refusal, rendered without trusting it. `JSON.stringify` throws on a `bigint` and
+ * runs any `toJSON` the caller wrote, and a guard that throws while describing what it refuses is
+ * worse than the thing it refuses. `graph/validate.ts`'s `describeValue` for the same reason.
+ */
+function describeWidth(v: unknown): string {
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "symbol") return "a symbol";
+  if (typeof v === "function") return "a function";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object") return "an object";
+  return String(v);
+}
 
 function compiledPostures(graph: RunGraph): readonly { readonly nodeId: NodeId; readonly posture: Posture }[] {
   return Object.entries(graph.plans)
