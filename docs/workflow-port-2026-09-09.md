@@ -12,16 +12,17 @@ Written for somebody who has not read the code.
 ## 0 · Closed since — 2026-09-10
 
 **This is a dated record and the narrative below is left as it was measured.** What follows is the
-part of it that is no longer true, each with the commit that closed it. Five of the eight friction
-entries are gone, and the workflow itself now CONSUMES four of the five closures — the port is the
-thing that pulls on them, which was the argument for writing it down.
+part of it that is no longer true, each with the commit that closed it. Six of the eight friction
+entries are gone — F2, F3, F4, F5, F7, F8 — and the workflow itself now CONSUMES four of them; the
+port is the thing that pulls on them, which was the argument for writing it down.
 
 | # | closed by | what happens now |
 |---|---|---|
 | **F2** | `77c245a` (+ `468984b` in the example) | `GRAPH010` exempts a channel that never leaves one fan-out branch, so `raw` is `{"type":"string","reduce":"replace"}` and `triage-classify.js` reads a string. The `join("\n")` and the comment explaining a one-element array are deleted |
 | **F3** | `da86076` | `loom gates <runId>` carries a `reads` field — the gate node's declared channels and their current values, recomputed from the graph the journal's hash names, with a channel the graph classified blanked to `[secret]`. The digest stays beside it as the binding it always was |
 | **F4** | `175cdb3` | the gate hint is on **stderr**, beside the run-id hint, so `loom run … 2>/dev/null \| jq .status` parses on the gate path too. `examples-triage.test.ts`'s `summary()` no longer slices stdout — it parses the whole of it, which is now the assertion that nothing else is printed there |
-| **F5** | `52d4b43` | `--help` names all ten registrar members and the count it prints is the README's |
+| **F5** | `52d4b43` | `--help` names all ten registrar members — `{models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}` — and says "So 9 things need no fork", which is README's `--extension-module` row count and not four |
+| **F7** | `2309d3a` | `README.md:177` reads *"Its §§1–4 and §8 work offline with no key"*, and names §7 separately |
 | **F8** | `f7f74d5` | a body returns `{refuse: {reason}}` and the engine raises `validation`/`E_FUNCTION_REFUSED` on its behalf — never retried, whatever the node's `retry` policy says. `triage-plan.js` uses it for both of its refusals |
 
 And one thing the port ASKED FOR that is not a friction entry: **`ctx.node`** (`c2360be`). A body is
@@ -34,8 +35,8 @@ function "function/triage-plan@stable" on node "plan" refused: matched 25 test-o
 this graph fans out at most 12 — the rest would be dropped without a word. …
 ```
 
-Still open: **F1** (two compiles to discover a two-node fan-out branch) and **F7** (`README.md:177`
-omits §8), and every bullet of §4 that this section does not name.
+Still open: **F1** (two compiles to discover a two-node fan-out branch), and every bullet of §4 that
+this section does not name.
 
 ---
 
@@ -452,8 +453,8 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom" /tmp/loom-serve.log
 
 Every entry is a place the shipped product cost more than it should have. Each carries the exact
 command, what happened, and what was expected. **Eight found**, each logged with the file that would
-have to change; one (F6) was fixed here, inside the lane's own files. **Five more have closed since
-— F2, F3, F4, F5 and F8 — and §0 names the commit for each**; F1 and F7 are still open. Each entry
+have to change; one (F6) was fixed here, inside the lane's own files. **Six more have closed since
+— F2, F3, F4, F5, F7 and F8 — and §0 names the commit for each**; F1 alone is still open. Each entry
 below is left as it was measured, with a one-line closure note under its status.
 
 Everything in this section was re-run by a fresh reviewer who was told to refute it; F1–F5 and F7
@@ -643,10 +644,13 @@ this workflow writes `out/triage.md`. Only `notes/` was ignored, so following th
 
 ### F7 · `README.md` counts examples that need no model, and the count is now wrong
 
-*Status: logged for the docs lane — this lane must not edit `README.md`.*
+*Status: **closed 2026-09-10** by `2309d3a`, which is the docs lane this was logged for.* `:177`
+now reads *"Its §§1–4 and §8 work offline with no key; §§5–6 have an `agent` node and want a real
+model, and §7 registers an adapter for one"*, and names `examples-triage.test.ts` as what runs §8.
+What was measured before it:
 
-`README.md:177` splits the examples as *"§§1–4 work offline with no key; §§5–6 have an `agent` node
-and want a real model"*, which now omits §8 as it already omitted §7. `README.md:180` reads *"runs
+`README.md:177` split the examples as *"§§1–4 work offline with no key; §§5–6 have an `agent` node
+and want a real model"*, which omitted §8 as it already omitted §7. `README.md:180` read *"runs
 the three that need no model"*.
 
 **Narrowed after review, because the first draft of this entry overstated it.** `:180` credits the
@@ -699,7 +703,7 @@ Status is as of **2026-09-10**; "closed" rows carry the commit, and §0 says wha
 | F4 | gate hint on stdout after the JSON | **closed** `175cdb3` | `packages/core/src/cli.ts` |
 | F5 | `--extension-module` help names 4 of 10 registrar members | **closed** `52d4b43` | `packages/core/src/cli.ts` |
 | F6 | `examples/.gitignore` missed `out/` | **fixed** | `examples/.gitignore` |
-| F7 | `README.md:177` omits §8 (and already omitted §7) | logged | `README.md` (docs lane) |
+| F7 | `README.md:177` omits §8 (and already omitted §7) | **closed** `2309d3a` | `README.md` (docs lane) |
 | F8 | a body's deliberate refusal is reported as `E_INTERNAL` | **closed** `f7f74d5` | `packages/core/src/run/engine.ts` (kernel) |
 
 ### What the review found in the WORKFLOW, not in the runtime
