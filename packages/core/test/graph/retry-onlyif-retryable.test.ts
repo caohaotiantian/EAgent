@@ -32,10 +32,11 @@
  *
  * A table built from the section comments would refuse the first two, which WORK — and would let
  * the last three through. So `RAISED_CLASS` in `graph/validate.ts` records the SET of classes each
- * code is actually raised with, and the refusal fires only where that set is non-empty and holds
- * no retryable member. An EMPTY set — six codes are emitted as a bare `{code, message}` and never
- * become a `LoomError` — ACCEPTS: refusing on a class nothing pins would be the same false refusal
- * the section-comment table is rejected for.
+ * code is actually paired with — `err.<class>(CODE)`, `new LoomError("<class>", CODE)`, and a
+ * `{class, code}` RECORD LITERAL, which is how `run.failed` and `#failRun` build an error — and
+ * the refusal fires only where that set is non-empty and holds no retryable member. An EMPTY set
+ * ACCEPTS: refusing on a class nothing pins would be the same false refusal the section-comment
+ * table is rejected for. Exactly three codes have one.
  *
  * Its drift guard is `tsc`, not a source scan: `RAISED_CLASS` is `Record<Code, readonly
  * ErrorClass[]>`, so a code added to `errors.ts` is a TYPE ERROR until somebody classifies it. The
@@ -157,11 +158,23 @@ test("THE UNDECIDABLE ANSWER ACCEPTS, and these are the codes it accepts", () =>
   for (const c of [CODES.E_GATE_DELIVERY_FAILED, CODES.E_SUBGRAPH_FAILED]) {
     assert.deepEqual(dead({ onlyIf: [c] }), [], `${c} IS raised unavailable somewhere and can fire`);
   }
-  // …and a code with no `LoomError` raise site at all: emitted as a bare `{code, message}`
-  // record, so nothing pins a class to it.
-  for (const c of [CODES.E_OUTPUT_MISSING, CODES.E_REQUEST_TIMEOUT, CODES.E_GATE_EXPIRED, CODES.E_ROUTE_NOT_FOUND]) {
-    assert.deepEqual(dead({ onlyIf: [c] }), [], `${c} has no raise site to read a class off`);
+  // …and the three codes nothing anywhere pairs a class with: two are sent as a bare
+  // `{code, message}` HTTP body and one exists only as text inside a message a sandboxed body
+  // throws. THE SET IS THREE, not the six a first cut of the table claimed — a reviewer caught
+  // `E_GATE_EXPIRED` carrying `class: "timeout"` on a `run.failed` record literal, and chasing
+  // that turned up `E_OUTPUT_MISSING` (`class: "internal"`, same shape) and, worse,
+  // `E_OVERSIGHT_LOOSENED`, which is a real `LoomError` raised `policy` through
+  // `compile.ts`'s `(loosened ? err.policy : err.validation)(…)` — a form no scan for
+  // `err.policy(CODES.` can see. The last two are now REFUSED, which is the point of saying it.
+  for (const c of [CODES.E_REQUEST_TIMEOUT, CODES.E_ROUTE_NOT_FOUND, CODES.E_EFFECT_UNAVAILABLE]) {
+    assert.deepEqual(dead({ onlyIf: [c] }), [], `${c} has no class anywhere to read off`);
   }
+  for (const c of [CODES.E_OUTPUT_MISSING, CODES.E_OVERSIGHT_LOOSENED]) {
+    assert.equal(dead({ onlyIf: [c] }).length, 1, `${c} carries a non-retryable class and must be refused`);
+  }
+  // `E_GATE_EXPIRED`'s record class IS retryable, so it stays accepted — by evidence now, not
+  // by absence of it.
+  assert.deepEqual(dead({ onlyIf: [CODES.E_GATE_EXPIRED] }), []);
 });
 
 test("AND THE REFUSALS THE SECTION COMMENTS WOULD HAVE MISSED", () => {

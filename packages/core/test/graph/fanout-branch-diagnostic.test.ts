@@ -176,6 +176,64 @@ test("a fan-out with NO join anywhere still refuses, and names every node it fan
   assert.match(said, /add a join node/, "there is none to name, so it must ask for one");
 });
 
+test("A NESTED FAN-OUT'S NODES ARE NOT THE OUTER JOIN'S BRANCHES — the stack's LAST element", () => {
+  // Found by a reviewer of the first cut, and it was the worse half of the two: `includes(e.id)`
+  // is a MEMBERSHIP test, and a node two fan-outs deep carries the outer edge id in its stack
+  // too. So the outer message listed the inner fan's nodes, and typing that made the outer
+  // barrier reachable at two depths — `GRAPH008_JOIN_DEPTH`, on a graph that otherwise
+  // COMPILES. The message turned a working edit into a broken one, which is worse than saying
+  // too little. The inner JOIN pops back to the outer level and is the node the outer join
+  // really does wait on.
+  const s = shipped();
+  // Put a second fan-out inside the branch: read --fanInner--> sub --join--> subJoin, and let
+  // `classify` sit after subJoin at the outer level.
+  (s.channels as Record<string, unknown>)["subs"] = { type: "array", reduce: "append_ordered" };
+  (s.channels as Record<string, unknown>)["sub"] = { type: "string", reduce: "replace" };
+  (s.nodes as NodeSpec[]).push(
+    { id: n("sub"), type: "function", reads: ["sub"], writes: ["failures"], function: { ref: "function/sub@stable" } } as NodeSpec,
+    { id: n("subJoin"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("sub")], mode: "all", onBranchError: "fail" } } as NodeSpec,
+  );
+  (s.nodes as NodeSpec[])[s.nodes.findIndex((x) => x.id === n("read"))] = {
+    ...s.nodes[s.nodes.findIndex((x) => x.id === n("read"))]!,
+    writes: ["raw", "subs"],
+  } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("sort")), 1);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("fanInner"), from: n("read"), to: n("sub"), kind: "fanout", over: "subs", as: "sub", maxWidth: 2 } as EdgeSpec,
+    { id: e("subCollect"), from: n("sub"), to: n("subJoin"), kind: "join" } as EdgeSpec,
+    { id: e("onward"), from: n("subJoin"), to: n("classify"), kind: "seq" } as EdgeSpec,
+  );
+  // Break the outer join so rule021 fires on the OUTER fan-out.
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = { ...s.nodes[g]!, join: { branches: [n("classify")], mode: "all", onBranchError: "fail" } } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+
+  const [outer] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(outer !== undefined, "the outer fan-out is unjoined and must be refused");
+  const said = `${outer.message}\n${outer.fix ?? ""}`;
+  assert.doesNotMatch(said, /\bsub\b/, "`sub` is one fan-out deeper — it belongs to `fanInner`, not to `fan`");
+  assert.match(said, /subJoin/, "the inner JOIN pops back to this level and IS an outer branch member");
+});
+
+test("A JOIN WIRED BY A `seq` EDGE IS NOT LISTED AS ONE OF ITS OWN BRANCHES", () => {
+  // The other reviewer finding. A join reached by a plain `seq` edge does not pop its level, so
+  // it — and everything after it — sat inside its own branch list, and the message asked the
+  // author to add the join to its own `branches` and give it a `kind: join` edge to ITSELF.
+  // Following that literally produced `GRAPH006_UNMARKED_CYCLE`, and a second GRAPH021 that
+  // contradicted the first by saying "add a join node" beside the join it had just named.
+  // A branch member is by definition something the barrier waits FOR, hence: an ancestor of it.
+  const s = f1Step1(); // join.branches: ["classify"], no `read -> gather` edge
+  const i = s.edges.findIndex((x) => x.id === e("collect"));
+  (s.edges as EdgeSpec[])[i] = { ...s.edges[i]!, kind: "seq" } as EdgeSpec; // …and not even a join edge
+
+  const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(d !== undefined);
+  const said = `${d.message}\n${d.fix ?? ""}`;
+  assert.match(said, /branches: \[read, classify\]/, `the barrier's own arms, and only those; got: ${said}`);
+  assert.doesNotMatch(said, /branches: \[[^\]]*\bgather\b/, "a join can never be one of its own branches");
+  assert.doesNotMatch(said, /branches: \[[^\]]*\bcollate\b/, "nor can a node downstream of it");
+});
+
 test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", () => {
   // Two fan-outs off one node. If the list were 'everything downstream' the message would tell
   // the author to join the other fan's nodes into this one's join, which is worse than saying

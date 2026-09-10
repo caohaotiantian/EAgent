@@ -1131,11 +1131,20 @@ const MAX_TIMER_MS = 2_147_483_647;
  * refuse the first two, which WORK. This one is read off `err.<class>(CODES.X)` and
  * `new LoomError("<class>", CODES.X)` across `packages/core/src`.
  *
- * AN EMPTY ARRAY IS THE UNDECIDABLE ANSWER AND IT ACCEPTS. Six codes are emitted as a bare
- * `{code, message}` record and never become a `LoomError`, so nothing pins a class to them.
- * Refusing a graph on a class nothing pins would be the false refusal this table exists to
- * avoid — and the effect of the status quo for those six is at worst the dead filter the rule
- * is about, never a broken run.
+ * WHAT COUNTS AS A SITE: `err.<class>(CODE)`, `new LoomError("<class>", CODE)`, and a
+ * `{class, code}` RECORD LITERAL — `run.failed` and `#failRun` build errors that way rather
+ * than through `LoomError`, and a class written by hand is still a class this code is paired
+ * with. A first cut of this table read only the first two forms and got three entries wrong:
+ * `E_OVERSIGHT_LOOSENED` is `policy` through `compile.ts`'s
+ * `(loosened ? err.policy : err.validation)(…)`, which a scan for `err.policy(CODES.` cannot
+ * see, and `E_GATE_EXPIRED` / `E_OUTPUT_MISSING` carry a class on a record literal.
+ *
+ * AN EMPTY ARRAY IS THE UNDECIDABLE ANSWER AND IT ACCEPTS, and it now covers exactly three
+ * codes: `E_ROUTE_NOT_FOUND` and `E_REQUEST_TIMEOUT` are sent as a bare `{code, message}` HTTP
+ * body, and `E_EFFECT_UNAVAILABLE` exists only as text inside a message a sandboxed body
+ * throws. Nothing pins a class to any of them, and refusing a graph on a class nothing pins
+ * would be the false refusal this table exists to avoid — the cost of accepting is at worst
+ * the dead filter the rule is about, never a broken run.
  *
  * THE DRIFT GUARD IS `tsc`, NOT A SOURCE SCAN. `Record<Code, ...>` makes a code added to
  * `errors.ts` a type error here until somebody classifies it, so the set this table covers is
@@ -1162,7 +1171,7 @@ const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
   E_PAYLOAD_TOO_DEEP: ["validation"],
   E_PAYLOAD_TOO_LARGE: ["validation"],
   // policy
-  E_OVERSIGHT_LOOSENED: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_OVERSIGHT_LOOSENED: ["policy"],   // compile.ts: `(loosened ? err.policy : err.validation)(…)`
   E_OVERSIGHT_LOOSEN_FORBIDDEN: ["policy"],
   E_CAP_DENIED: ["policy"],
   E_GATE_REQUIRED: ["policy"],
@@ -1202,7 +1211,7 @@ const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
   E_CHILD_UNREACHABLE: ["unavailable"],
   // timeout
   E_TOOL_TIMEOUT: ["timeout"],
-  E_GATE_EXPIRED: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_GATE_EXPIRED: ["timeout"],   // a `run.failed` record literal, not a LoomError
   E_GRAPH_MISMATCH: ["conflict", "policy", "validation"],   // three classes, none retryable
   E_TASK_TIMEOUT: ["timeout"],
   E_REQUEST_TIMEOUT: [],   // no LoomError raise site: emitted as a bare {code, message}
@@ -1214,7 +1223,7 @@ const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
   E_SUBGRAPH_FAILED: ["internal", "unavailable"],   // two classes, one retryable -> CAN fire
   E_FLOATING_REF_AT_RUNTIME: ["internal"],
   E_TRACE_INCONSISTENT: ["internal"],
-  E_OUTPUT_MISSING: [],   // no LoomError raise site: emitted as a bare {code, message}
+  E_OUTPUT_MISSING: ["internal"],   // a `#failRun` record literal, not a LoomError
   E_PAYLOAD_UNRESOLVED: ["internal"],
 };
 
@@ -2541,20 +2550,49 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     );
     if (joined) continue;
 
+    // AT THIS FAN-OUT'S OWN LEVEL — the stack's LAST element, never mere membership. A node two
+    // fan-outs deep carries the outer edge id in its stack too, so `includes` listed the inner
+    // fan's nodes as the outer join's branches; typing that turned a graph that compiles into
+    // `GRAPH008_JOIN_DEPTH`, because the outer barrier then became reachable at two depths. The
+    // inner JOIN pops back to this level and is the node the outer join really does wait on.
+    const atThisLevel = (n: NodeSpec): boolean => {
+      if (n.id === e.to) return true;
+      const stack = idx.fanoutEdgeStack.get(n.id);
+      return stack !== undefined && stack.length > 0 && stack[stack.length - 1] === e.id;
+    };
+
+    // A join already downstream is named, so the author edits the one they drew rather than
+    // reading "add a join node" next to the join they can see. With two of them the fix names
+    // none: picking one for the author is a guess the rule cannot make.
+    const downstream = spec.nodes.filter((n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false));
+    const named = downstream.length === 1 ? downstream[0]! : undefined;
+
+    // …AND UPSTREAM OF THE JOIN BEING NAMED. A join wired into the branch by a `seq` edge does
+    // not pop its level, so it and everything after it sat in its own branch list — the message
+    // told the author to add the join to its own `branches` and give it a `kind: join` edge to
+    // itself, which is a cycle. A branch member is by definition something the barrier waits
+    // FOR, so it has to be an ancestor of the barrier.
     const branch = spec.nodes
-      .filter((n) => n.id === e.to || idx.fanoutEdgeStack.get(n.id)?.includes(e.id) === true)
+      .filter(atThisLevel)
+      .filter((n) => named === undefined || (idx.ancestors.get(named.id)?.has(n.id) ?? false))
       .map((n) => n.id);
     const list = branch.join(", ");
 
-    // A join already downstream is named, so the author edits the one they drew rather than
-    // reading "add a join node" next to the join they can see.
-    const downstream = spec.nodes.filter((n) => n.join !== undefined && (idx.ancestors.get(n.id)?.has(e.to) ?? false));
-    const target =
-      downstream.length === 1
-        ? `join "${downstream[0]!.id}" must declare branches: [${list}]`
+    // WITH NO JOIN AT ALL THE LIST IS CONTINGENT AND SAYS SO. Where the barrier goes decides
+    // which nodes are inside the branch, and the compiler cannot know where the author wants
+    // it — asserting `branches: [count, summarise]` steered a reader into joining AFTER the
+    // node that writes the graph's output, turning a `replace` output into an 8-element array.
+    const them = branch.length > 1 ? "them" : `"${e.to}"`;
+    const fix =
+      named !== undefined
+        ? `join "${named.id}" must declare branches: [${list}] and take a \`kind: join\` edge from each of ${them} — ` +
+          `every node inside a fan-out branch needs both`
         : downstream.length > 1
-          ? `a join downstream of "${e.to}" must declare branches: [${list}]`
-          : `add a join node downstream of "${e.to}" with branches: [${list}]`;
+          ? `a join downstream of "${e.to}" must declare branches: [${list}] and take a \`kind: join\` edge from each ` +
+            `of ${them} — every node inside a fan-out branch needs both`
+          : `add a join node downstream of "${e.to}", with a \`kind: join\` edge from every node you leave inside the ` +
+            `branch and each of them named in its branches: — as drawn that is [${list}], and a join placed earlier ` +
+            `shortens the list`;
 
     d.push({
       severity: "error",
@@ -2565,9 +2603,7 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           ? `; the branch it opens holds ${branch.length} nodes (${list}), and a join must wait on every one of them`
           : ""),
       at: { edgeId: e.id },
-      fix:
-        `${target}, and take a \`kind: join\` edge from each of ${branch.length > 1 ? "them" : `"${e.to}"`} — ` +
-        `every node inside a fan-out branch needs both`,
+      fix,
     });
   }
 }
