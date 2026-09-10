@@ -1107,40 +1107,6 @@ function frozenFirst(graph: RunGraph, live: ResourceResolver): ResourceResolver 
 }
 
 /**
- * A refused SoD gate, as a failed OUTCOME rather than a throw.
- *
- * The distinction is the whole reason this is a function. `#commit` — where `raise` is called
- * — runs OUTSIDE the try/catch that turns an exception into `{status:"failed"}`; that catch
- * wraps `#executeTask` only. A throw from the raise path therefore escapes `advance()` with
- * the task still `leased`, and every later `advance` re-leases it, re-executes, and throws
- * again: the run never reaches a terminal state and the command answers 500 forever. A hang
- * dressed as a policy is the one shape a refusal must not take, so the refusal is decided
- * where the outcome is CONSTRUCTED and travels as an ordinary failure.
- */
-/**
- * A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT.
- *
- * `FunctionOutcome` is `{ writes?, take? }`, and it is a TypeScript type — a
- * `resources/function/*.js` author writes plain JS and never sees it. Both ways of getting it
- * wrong were handled badly, and measured through `bin/loom`:
- *
- *   (view) => ({ seen: [x] })   the channel map returned DIRECTLY. `out.writes` is undefined,
- *                               the task commits `writes: {}`, and the run dies later with
- *                               `E_OUTPUT_MISSING` naming a channel the body believed it wrote.
- *   (view) => { ... }           no return at all — "TypeError: Cannot read properties of
- *                               undefined (reading 'writes')", an internal error shown to a
- *                               graph author.
- *
- * TWO CALLERS, because there are two places a function body runs: a `function` node and an
- * `assertion` evaluator, whose `ref` is also a function body. The first version of this check
- * lived inline in `#runFunction` and the evaluator kept the defect — the same too-small-a-set
- * mistake the register keeps recording. A helper is what stops the two drifting.
- *
- * The rule is not a heuristic: an object EVERY key of which is ignored cannot be what the author
- * meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys alongside
- * `writes`/`take` stay legal too, because then the return WAS read.
- */
-/**
  * A seed for a `random` effect the journal does not hold, derived from the effect key.
  *
  * Reached only under replay of a CANDIDATE graph (`onGraphChange: "allow"`), where a node the
@@ -1227,6 +1193,29 @@ const WHY_EXCLUSIVE: Readonly<Record<(typeof VERDICT_KEYS)[number], string>> = {
 const WHY_ONE_VERDICT =
   "one says trying again might work and the other says it will not, so there is no order in which both are true";
 
+/**
+ * A RETURN NOBODY READS IS AN AUTHORING MISTAKE, NOT AN EMPTY RESULT.
+ *
+ * `FunctionOutcome` is `{ writes?, take? }`, and it is a TypeScript type — a
+ * `resources/function/*.js` author writes plain JS and never sees it. Both ways of getting it
+ * wrong were handled badly, and measured through `bin/loom`:
+ *
+ *   (view) => ({ seen: [x] })   the channel map returned DIRECTLY. `out.writes` is undefined,
+ *                               the task commits `writes: {}`, and the run dies later with
+ *                               `E_OUTPUT_MISSING` naming a channel the body believed it wrote.
+ *   (view) => { ... }           no return at all — "TypeError: Cannot read properties of
+ *                               undefined (reading 'writes')", an internal error shown to a
+ *                               graph author.
+ *
+ * TWO CALLERS, because there are two places a function body runs: a `function` node and an
+ * `assertion` evaluator, whose `ref` is also a function body. The first version of this check
+ * lived inline in `#runFunction` and the evaluator kept the defect — the same too-small-a-set
+ * mistake the register keeps recording. A helper is what stops the two drifting.
+ *
+ * The rule is not a heuristic: an object EVERY key of which is ignored cannot be what the author
+ * meant. `{}` stays legal — a body that writes nothing is ordinary — and extra keys alongside
+ * `writes`/`take` stay legal too, because then the return WAS read.
+ */
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
   const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }, or { retry: { reason } } to ask for another attempt, or { refuse: { reason } } to fail on purpose`;
   if (out === null || typeof out !== "object") {
@@ -1376,6 +1365,17 @@ function nodeShapeOf(node: NodeSpec, outbound: readonly EdgeSpec[]): FunctionNod
   });
 }
 
+/**
+ * A refused SoD gate, as a failed OUTCOME rather than a throw.
+ *
+ * The distinction is the whole reason this is a function. `#commit` — where `raise` is called
+ * — runs OUTSIDE the try/catch that turns an exception into `{status:"failed"}`; that catch
+ * wraps `#executeTask` only. A throw from the raise path therefore escapes `advance()` with
+ * the task still `leased`, and every later `advance` re-leases it, re-executes, and throws
+ * again: the run never reaches a terminal state and the command answers 500 forever. A hang
+ * dressed as a policy is the one shape a refusal must not take, so the refusal is decided
+ * where the outcome is CONSTRUCTED and travels as an ordinary failure.
+ */
 function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
   if (node.humanGate?.approval?.separationOfDuties !== true) return undefined;
   const why = sodRefusal(p, node.humanGate.approval.approvers ?? []);
