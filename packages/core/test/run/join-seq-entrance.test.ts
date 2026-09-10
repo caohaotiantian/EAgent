@@ -167,6 +167,8 @@ async function run(spec: GraphSpec, items: readonly unknown[], maxParallelism: n
   const functions = new FunctionRegistry();
   functions.register("function/seed@stable", () => ({}));
   functions.register("function/note@stable", () => ({}));
+  functions.register("function/arm-a@stable", () => ({ writes: { seen: ["a"] } }));
+  functions.register("function/arm-b@stable", () => ({ writes: { seen: ["b"] } }));
   functions.register("function/work@stable", (view) => {
     const item = view.get<{ id: string }>("item");
     return { writes: { seen: [item?.id ?? "?"], hops: 1 } };
@@ -427,6 +429,77 @@ test("A NESTED FAN-OUT'S INNER BARRIER IS THE SAME ENTRANCE — and pre-fix it K
     assert.equal(r.status, "succeeded", `${at}: the second path must not kill the run`);
     assert.deepEqual(r.findings, base.findings, `${at}: the inner fold matches the baseline`);
     assert.equal(r.finish, 1, `${at}: and the node behind the outer join runs once`);
+  }
+});
+
+/**
+ * A STATIC sibling join whose LAST arm carries an extra ordinary edge to the join.
+ *
+ * This is the shape that collides the two arms of `#activate`'s take loop. Both edges are in
+ * `take`, so the termination sweep at the bottom skips the `join` edge (`take.includes(e.id)`)
+ * and never runs — the two mints come from the join arm and the generic arm of the loop itself.
+ * It must be the LAST arm: an earlier one does not satisfy the barrier, so neither arm fires and
+ * there is nothing to suppress.
+ *
+ * Behind a fan-out the same shape does not compile (`GRAPH008_JOIN_DEPTH`,
+ * `GRAPH010_CONCURRENT_WRITE`), so a static join is the whole of the reachable set today.
+ */
+function twoEdgesToOneJoinSpec(withExtra: boolean): GraphSpec {
+  const arms = ["a", "b"];
+  const edges: unknown[] = [
+    ...arms.map((id) => ({ id: e(`s${id}`), from: n("start"), to: n(id), kind: "seq" })),
+    ...arms.map((id) => ({ id: e(`j${id}`), from: n(id), to: n("J"), kind: "join", branches: arms.map(n) })),
+    { id: e("sq"), from: n("J"), to: n("done"), kind: "seq" },
+  ];
+  if (withExtra) edges.push({ id: e("extra"), from: n("b"), to: n("J"), kind: "seq" });
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "join-seq-entrance-dedupe", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: CHANNELS,
+    inputs: ["items"],
+    outputs: ["out"],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      ...arms.map((id) => ({
+        id: n(id),
+        type: "function",
+        reads: ["items"],
+        writes: ["seen"],
+        function: { ref: `function/arm-${id}@stable` },
+      })),
+      {
+        id: n("J"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: arms.map(n), mode: "all", onBranchError: "skip" },
+      },
+      { id: n("done"), type: "function", reads: ["seen"], writes: ["out"], function: { ref: "function/done@stable" } },
+    ],
+    edges,
+  } as unknown as GraphSpec;
+}
+
+test("TWO EDGES FROM ONE MEMBER TO ONE JOIN MINT THE BARRIER ONCE, not twice", async () => {
+  // `pushJoin`'s reason for existing, driven. `#maybeFireJoin` stands down on
+  // `p.tasks[joinTaskId]`, but `p` predates every event in the array `#activate` is building —
+  // so both arms saw an empty slot and both appended a `task.ready` for `J@root#0`. Before the
+  // guard this graph journals TWO of them; after, one. The projection happens to dedupe on
+  // taskId so the pre-fix run still committed once, which is exactly why this is asserted on the
+  // JOURNAL: a duplicate row that today only looks wrong is a fold's problem tomorrow.
+  for (const maxParallelism of [1, 2, 16]) {
+    const base = await run(twoEdgesToOneJoinSpec(false), [], maxParallelism);
+    const r = await run(twoEdgesToOneJoinSpec(true), [], maxParallelism);
+    const at = `par=${maxParallelism}`;
+
+    assert.equal(r.status, "succeeded", at);
+    assert.equal(r.joinReady, 1, `${at}: ONE task.ready row for the barrier — it was two`);
+    assert.equal(r.joinReady, base.joinReady, `${at}: and the same as without the extra edge`);
+    assert.equal(r.joinCommitted, 1, at);
+    assert.deepEqual(r.seen, base.seen, `${at}: the fold is unchanged by the extra edge`);
+    assert.equal(r.doneCommitted, 1, at);
   }
 });
 

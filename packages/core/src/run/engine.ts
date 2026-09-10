@@ -10566,12 +10566,24 @@ export class Engine {
 
     // ONE MINT PER BARRIER PER WAVE. `#maybeFireJoin` stands down on `p.tasks[joinTaskId]`, and
     // `p` predates every event in this array — so two entrances reaching one barrier inside a
-    // single `#activate` both see an empty slot and both mint it. That is reachable now that the
-    // generic arm routes here as well: a node carrying both a `seq` and a `join` edge to the same
-    // join fires from the loop below and again from the termination sweep at the bottom, which
-    // skips only edges already in `take`. `#fireEmptyJoin` guards its own array the same way and
-    // for the same reason; this is that rule at the three call sites that share one array, rather
-    // than at each exit — see `#fence` on why a rule per exit is a rule the fourth exit forgets.
+    // single `#activate` both see an empty slot and both mint it.
+    //
+    // THE COLLISION IS BETWEEN THE TWO ARMS OF THE TAKE LOOP, not between the loop and the
+    // termination sweep, and the distinction is worth writing down because the first draft of
+    // this comment got it backwards. When a member carries both a `join` and an ordinary edge to
+    // the same join, BOTH are in `take` — so the sweep at the bottom skips the join edge
+    // (`take.includes(e.id)`) and never runs. The two mints come from the join arm and the
+    // generic arm of the loop below, on the member whose commit is the one that satisfies the
+    // barrier. Driven on a static sibling join whose LAST arm carries an extra `seq` edge to the
+    // join (it must be the last: an earlier arm does not satisfy the barrier, so neither arm
+    // fires and there is nothing to suppress) — `task.ready` rows for `J@root#0`, before this
+    // guard and after: **2 → 1**. Behind a fan-out that same shape does not compile
+    // (`GRAPH008_JOIN_DEPTH`, `GRAPH010_CONCURRENT_WRITE`), so a static join is the whole of the
+    // reachable set today. `test/run/join-seq-entrance.test.ts` pins it.
+    //
+    // `#fireEmptyJoin` guards its own array the same way and for the same reason; this is that
+    // rule at the three call sites that share one array, rather than at each exit — see `#fence`
+    // on why a rule per exit is a rule the fourth exit forgets.
     const pushJoin = (fired: NewEvent | undefined): void => {
       if (fired === undefined) return;
       if (events.some((x) => x.taskId === fired.taskId)) return;
@@ -10988,6 +11000,15 @@ export class Engine {
    * Decide whether a join's barrier is satisfied. The join Task is created at the
    * PARENT branch — that is what "a join collapses branches back to one instance"
    * means concretely.
+   *
+   * `edge` IS NOT NECESSARILY A `join` EDGE, AND `w` IS NOT NECESSARILY A MEMBER. `#activate`
+   * routes every `seq`, `conditional` and `error` edge whose target is a join node here too, so
+   * that an ordinary edge cannot mint the barrier's Task behind its back. Such a caller is asking
+   * "is the barrier satisfiable right now?", not announcing an arrival — it contributes nothing
+   * to `siblings`, `expected` or `terminal`, and the answer is almost always `undefined`, because
+   * the member edges have already fired the barrier by the time it gets here. `edge` is read for
+   * `edge.to` (the join node) and for `edgesIn` on the row; nothing else about its kind is used,
+   * which is what makes the extra callers safe.
    */
   #maybeFireJoin(
     ctx: RunContext,
