@@ -174,7 +174,7 @@ test("AND THE REFUSALS THE SECTION COMMENTS WOULD HAVE MISSED", () => {
 });
 
 test("EVERY declared code has an answer in the table — the claim, named", () => {
-  // `RAISED_CLASS` is `Record<Code, ErrorClass | null>`, so this is `tsc`'s job and a runtime
+  // `RAISED_CLASS` is `Record<Code, readonly ErrorClass[]>`, so this is `tsc`'s job and a runtime
   // assertion cannot fail while the build is green. It is here because the guarantee is what
   // makes the rule sound: an unclassified code would silently take the accepting branch, and
   // the next reader needs to know that cannot happen quietly.

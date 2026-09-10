@@ -213,6 +213,52 @@ test("A HOSTILE VALUE REFUSES; IT DOES NOT THROW — the guard must survive what
   }
 });
 
+test("THE CEILING IS THE OTHER OPERAND, and it had the same hole — reachable from plain JSON", () => {
+  // Found by a reviewer of the rule above. `e.maxWidth > expansion.maxFanout` has TWO sides,
+  // and only the left one had been typed. A string on the right is `NaN`, `>` is false for
+  // everything, and GRAPH007_MAX_WIDTH_EXCEEDED stops refusing — on a graph a text editor can
+  // produce, which is worse than the bigint the test above covers. Measured before the fix,
+  // on the shipped example with maxWidth raised to 30:
+  //
+  //     "maxFanout": "banana"  ->  ok, exit 0        <- the defect
+  //     "maxFanout": 24        ->  GRAPH007_MAX_WIDTH_EXCEEDED
+  //
+  // The bad member falls back to its default AND is refused: falling back alone leaves the
+  // author with a ceiling they did not write.
+  for (const k of ["maxNodes", "maxDepth", "maxFanout", "maxLoopIterations"]) {
+    for (const bad of ["24", "banana", 0, -1, 2.5, null, true]) {
+      const s = clone(incidentTriage());
+      (s.policy as unknown as { expansion: Record<string, unknown> }).expansion[k] = bad;
+      const hit = errorsOf(s as GraphSpec).filter(
+        (x) => x.code === "GRAPH003_MALFORMED" && x.message.includes(`policy.expansion.${k}`),
+      );
+      assert.equal(hit.length, 1, `expansion.${k} = ${JSON.stringify(bad)} was not refused`);
+      assert.match(hit[0]!.message, /not a positive integer/);
+      assert.match(hit[0]!.fix ?? "", /take the default of \d+/, "and the default is named, since that is what it falls back to");
+    }
+  }
+
+  // The ceiling keeps WORKING while the bad member is reported: the fallback is a number, so
+  // every other rule still compares against something real.
+  const s = clone(incidentTriage());
+  (s.policy as unknown as { expansion: Record<string, unknown> }).expansion["maxFanout"] = "banana";
+  const i = s.edges.findIndex((x) => x.id === ("e1" as EdgeId));
+  s.edges[i] = { ...s.edges[i]!, maxWidth: 999 } as unknown as EdgeSpec;
+  const codes = errorsOf(s as GraphSpec).map((d) => d.code);
+  assert.ok(codes.includes("GRAPH003_MALFORMED"), codes.join(", "));
+  assert.ok(codes.includes("GRAPH007_MAX_WIDTH_EXCEEDED"), `the ceiling must still refuse; got ${codes.join(", ")}`);
+
+  // And a valid expansion block is untouched.
+  assert.deepEqual(errorsOf(incidentTriage()).map((d) => d.code), []);
+  const absent = clone(incidentTriage());
+  delete (absent.policy as unknown as { expansion?: unknown }).expansion;
+  assert.deepEqual(
+    errorsOf(absent as GraphSpec).filter((d) => d.code === "GRAPH003_MALFORMED").map((d) => d.code),
+    [],
+    "omitting the block entirely is legal and takes DEFAULT_EXPANSION",
+  );
+});
+
 test("one diagnostic per bad edge, not one per rule that reads the field", () => {
   const s = clone(incidentTriage());
   const i = s.edges.findIndex((x) => x.id === ("e1" as EdgeId));

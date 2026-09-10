@@ -624,6 +624,53 @@ function computeCriticalPath(
 // Validation
 // ---------------------------------------------------------------------------
 
+/**
+ * THE CEILINGS THEMSELVES ARE A LIMIT THAT COULD MOVE ON ITS OWN, which is the one direction a
+ * limit must never move — `spec.ts`'s `POLICY_FIELDS` docstring says so about a MISSPELLED key,
+ * and `GRAPH020_UNKNOWN_FIELD` closes that half. This is the other half: the key spelled right
+ * and the value unusable. `{...DEFAULT_EXPANSION, ...spec.policy.expansion}` took whatever was
+ * there, and every reader compares against it with a bare relational operator, so a string was
+ * `NaN` on the RIGHT of the comparison and switched the ceiling off:
+ *
+ *     "maxFanout": "banana", "maxWidth": 30   ->  ok, exit 0
+ *     "maxFanout": 24,       "maxWidth": 30   ->  GRAPH007_MAX_WIDTH_EXCEEDED
+ *     "maxNodes": "banana"                    ->  ok, exit 0
+ *     "maxNodes": 64                          ->  GRAPH018_NODE_COUNT
+ *
+ * Found by a reviewer of the `maxWidth` rule below: `maxFanout` is the OTHER OPERAND of the very
+ * comparison that rule exists for, and unlike a `bigint` width it is reachable from plain JSON
+ * through the shipped CLI. It also made the new `GRAPH007_BAD_MAX_WIDTH` fix line read "a whole
+ * number between 1 and banana".
+ *
+ * The bad member falls back to its default AND is refused: falling back alone would leave the
+ * author with a ceiling they did not write, and refusing alone would leave the rest of this
+ * compile reading a `NaN`. `GRAPH003_MALFORMED` rather than a new code, for the reason
+ * `objectBlock` gives above — an eighth, or ninth, spelling of "this is not the shape it must
+ * be" is how diagnostics come to disagree about what they mean.
+ */
+function expansionOf(spec: GraphSpec, d: Diagnostic[]): ExpansionBudget {
+  const declared = (spec.policy?.expansion ?? {}) as unknown as Record<string, unknown>;
+  const out: Record<keyof ExpansionBudget, number> = { ...DEFAULT_EXPANSION };
+  for (const k of Object.keys(DEFAULT_EXPANSION) as (keyof ExpansionBudget)[]) {
+    if (!Object.hasOwn(declared, k)) continue;
+    const v = declared[k];
+    if (isPositiveInt(v)) {
+      out[k] = v;
+      continue;
+    }
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message:
+        `policy.expansion.${k} is ${describeValue(v)}, which is not a positive integer — ` +
+        `every limit is compared with \`>\`, and a value that is not a number makes that comparison false ` +
+        `for everything, so the ceiling stops refusing anything`,
+      fix: `set policy.expansion.${k} to a whole number ≥ 1, or remove it to take the default of ${DEFAULT_EXPANSION[k]}`,
+    });
+  }
+  return out;
+}
+
 export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   const { spec } = ctx;
   const d: Diagnostic[] = [];
@@ -633,7 +680,7 @@ export function validateGraph(ctx: ValidationContext): readonly Diagnostic[] {
   if (structural) return d;
 
   const idx = ctx.index === undefined ? indexGraph(spec) : ctx.index();
-  const expansion = { ...DEFAULT_EXPANSION, ...(spec.policy?.expansion ?? {}) };
+  const expansion = expansionOf(spec, d);
   const channelTypes = channelTypeMap(spec.channels);
 
   rule001Reachability(spec, idx, d);
