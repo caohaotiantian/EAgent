@@ -77,23 +77,24 @@ async function loom(dir: string, argv: readonly string[]): Promise<Result> {
 }
 
 /**
- * The JSON object `loom run` prints — and ONLY it.
+ * The JSON object `loom run` prints — which is the WHOLE of stdout, and asserted as such.
  *
- * `examples-run.test.ts` can do `JSON.parse(r.out)` because its runs succeed. A run that parks on
- * a gate prints the JSON and then, ON THE SAME STREAM, the command to answer it:
+ * This used to slice stdout to the first line that was exactly `}`, because a run parking on a
+ * gate printed the JSON and then, on the same stream, the command to answer it — so stdout was
+ * unparseable in exactly the case a script most needs to branch on (friction F4 of
+ * `docs/workflow-port-2026-09-09.md`). `175cdb3` moved that hint to stderr, where the run-id hint
+ * already was, so the slice is gone and `JSON.parse` over the whole capture takes its place.
  *
- *     }
- *     gate gate_01M… on node approve — loom approve 01M… gate_01M… --as YOUR_ID
- *
- * so stdout is not parseable in exactly the case a script most needs to branch on. Recorded as
- * friction against `cli.ts` in `docs/workflow-port-2026-09-09.md`; here it is just something to
- * cut off. The closing brace of the printed object is the first line that is exactly `}`.
+ * PARSING THE WHOLE THING IS THE POINT, not a tidy-up: it is the assertion that nothing else is
+ * on stdout. The next line printed on the wrong stream breaks `| jq` for the same caller in the
+ * same way, and a slice would have absorbed it in silence.
  */
 function summary(r: Result): Record<string, unknown> {
-  const lines = r.out.split("\n");
-  const end = lines.indexOf("}");
-  assert.notEqual(end, -1, `no JSON object on stdout:\n${r.out}${r.err}`);
-  return JSON.parse(lines.slice(0, end + 1).join("\n")) as Record<string, unknown>;
+  try {
+    return JSON.parse(r.out) as Record<string, unknown>;
+  } catch (e) {
+    assert.fail(`stdout is not one JSON object (${String(e)}):\n${r.out}${r.err}`);
+  }
 }
 
 interface Gate {
@@ -101,6 +102,8 @@ interface Gate {
   readonly nodeId: string;
   readonly state: string;
   readonly approvers: readonly string[];
+  /** The gate node's declared channels and their values (`da86076`); absent when it cannot be recomputed. */
+  readonly reads?: Record<string, unknown>;
 }
 
 /** Run to the gate, and hand back the two coordinates every later verb needs. */
@@ -109,6 +112,10 @@ async function runToGate(dir: string): Promise<{ runId: string; gate: Gate }> {
   assert.equal(r.code, 0, `${r.out}${r.err}`);
   const s = summary(r);
   assert.equal(s["status"], "awaiting_gate", `${r.out}${r.err}`);
+  // …and the line telling a human how to answer it is on STDERR. `summary()` above is the half
+  // that says stdout is pure JSON; deleting the hint would pass that half and take away the one
+  // line an operator needs, so both are asserted.
+  assert.match(r.err, /^gate gate_\S+ on node approve — loom approve \S+ gate_\S+ --as YOUR_ID$/m, r.err);
   const runId = String(s["runId"]);
   const listed = await loom(dir, ["gates", runId]);
   assert.equal(listed.code, 0, `${listed.out}${listed.err}`);
@@ -124,6 +131,17 @@ test("triage-failures parks on the gate, and the report is NOT on disk yet", asy
     assert.equal(gate.nodeId, "approve");
     assert.equal(gate.state, "open");
     assert.deepEqual([...gate.approvers], ["u:you"]);
+
+    // WHAT THE APPROVER IS BEING ASKED ABOUT, on the CLI path and not only through `loom serve`.
+    // The gate node declares `reads: ["report"]`, so `loom gates` carries the report itself beside
+    // the digest — which is a binding to what was shown, not something a person can read. Asserted
+    // down to the ranking because "the field exists" would pass for an empty object, and this run
+    // is the one whose eight failures the next test counts.
+    const reads = gate.reads ?? {};
+    assert.deepEqual(Object.keys(reads), ["report"], JSON.stringify(reads));
+    const shown = reads["report"] as Record<string, unknown>;
+    assert.equal(shown["totalFailures"], 8);
+    assert.equal(shown["bucketCount"], 5);
     // THE WHOLE POINT OF THE GATE. `write` is downstream of `approve` over a `seq` edge, so a
     // run that stopped here has dispatched no `fs.write` — not "wrote it and will roll back".
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false, "nothing is written before a human answers");
@@ -233,14 +251,23 @@ test("a pattern matching nothing FAILS the run rather than reporting a clean sui
   // The undecidable-looking case answered the refusing way. A fan-out over an empty array
   // produces no branches, the join folds nothing, and the run would succeed with a report saying
   // "0 failing tests" — which reads as "your suite is green" when what happened is that the
-  // pattern was wrong. `triage-plan.js` throws instead, and names the pattern back.
+  // pattern was wrong. `triage-plan.js` refuses instead, and names the pattern back.
   const ws = workspace(["graphs", "resources"]);
   try {
     const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
     assert.notEqual(r.code, 0, `${r.out}${r.err}`);
     const s = summary(r);
     assert.equal(s["status"], "failed");
-    assert.match(String((s["error"] as Record<string, unknown>)["message"]), /no test-output files matched/);
+    const error = s["error"] as Record<string, unknown>;
+    assert.match(String(error["message"]), /no test-output files matched/);
+    // A.42's repro, and the reason the message alone is not the assertion. This arrives as
+    // `internal`/`E_INTERNAL` — the code a genuine BUG in the body produces — for as long as the
+    // body's only way to fail on purpose is `throw`. `{refuse: {reason}}` is what makes a caller
+    // able to tell a graph that declined from a body that crashed, and `validation` is what stops
+    // a `retry` policy ever granting it a second attempt.
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.equal(error["class"], "validation", r.out);
+    assert.equal(error["retryable"], false, r.out);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
   } finally {
     ws.dispose();
@@ -289,9 +316,11 @@ test("more shards than the fan-out can carry REFUSES, instead of dropping the su
   // said "8 failing test(s) across 8 report file(s)" with no warning on either stream — a third of
   // the evidence missing from a document a person is being asked to approve.
   //
-  // THE CEILING IS READ OUT OF THE GRAPH, never written here: the refusal lives in
-  // `triage-plan.js` as a duplicated constant (a body is handed channels, not its own node), and
-  // this is what stops the two drifting apart.
+  // THE CEILING HAS ONE HOME, and it is the graph — `SHARD_CEILING = 24` used to sit in the body
+  // beside the `fan` edge's `maxWidth: 24`, with this test pinning them together by reading the
+  // graph, which is a patch on a seam rather than the seam. Since `c2360be` the body reads
+  // `ctx.node.out`. THAT the read happens is the test BELOW this one ("the ceiling is whatever the
+  // graph says"); this one is the ordinary behaviour at the shipped width.
   const ws = workspace(["graphs", "resources"]);
   try {
     const spec = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: number }[] };
@@ -307,10 +336,14 @@ test("more shards than the fan-out can carry REFUSES, instead of dropping the su
     assert.notEqual(r.code, 0, `${String(width + 1)} shards over a width of ${String(width)} must refuse:\n${r.out}${r.err}`);
     const s = summary(r);
     assert.equal(s["status"], "failed");
+    const error = s["error"] as Record<string, unknown>;
     assert.match(
-      String((s["error"] as Record<string, unknown>)["message"]),
+      String(error["message"]),
       new RegExp(`matched ${String(width + 1)} test-output files but this graph fans out at most ${String(width)}`),
     );
+    // The cap in that sentence came off the graph, so this also says the read WORKED: a body that
+    // could not find its fan-out edge refuses with the other reason and this regex fails.
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
 
     // …and EXACTLY at the ceiling it still runs, so this is a ceiling and not an off-by-one.
@@ -346,6 +379,212 @@ test("a shard with no failures is still COUNTED as a file that was read", async 
       readFileSync(join(ws.dir, "out", "triage.md"), "utf8"),
       /^2 failing test\(s\) across 3 report file\(s\) \(1 with failures\), in 1 root-cause bucket\(s\)\.$/m,
     );
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("the ceiling is whatever the GRAPH says — move maxWidth and the refusal moves with it", async () => {
+  // THE DRIFT TEST, AND IT IS BEHAVIOURAL ON PURPOSE. The first version of this read
+  // `triage-plan.js` as TEXT and asserted the shipped width did not appear in it. A fresh reviewer
+  // defeated that in one file: `const CEILING = 0x18` (24, and `\b24\b` does not match it) plus a
+  // dead `const _unused = ctx.node;` to satisfy the "it reads the node" half — a body that
+  // hard-codes the ceiling and passes every assertion. A source-text check can only ever ask
+  // whether a spelling is absent; this asks what the body DOES.
+  //
+  // So: edit the GRAPH alone to a width nothing else in the tree carries, and require the refusal
+  // to name that number. A body holding any constant either fails to refuse at all (it is above
+  // the new width and below the old) or names the wrong cap.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as {
+      edges: { id: string; maxWidth?: number }[];
+    };
+    const fan = raw.edges.find((e) => e.id === "fan")!;
+    const shipped = fan.maxWidth!;
+    const moved = 3; // ≤ policy.expansion.maxFanout (GRAPH011 refuses a width above it)
+    assert.notEqual(moved, shipped, "the moved width must differ from the shipped one or this proves nothing");
+    fan.maxWidth = moved;
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+
+    mkdirSync(join(ws.dir, "reports"));
+    const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
+    const name = (i: number): string => `shard-${String(i).padStart(3, "0")}.txt`;
+    for (let i = 0; i <= moved; i += 1) writeFileSync(join(ws.dir, "reports", name(i)), one);
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `${String(moved + 1)} shards over a width of ${String(moved)} must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(
+      String(error["message"]),
+      new RegExp(`matched ${String(moved + 1)} test-output files but this graph fans out at most ${String(moved)}`),
+      r.out,
+    );
+    // The shipped number must be nowhere in that sentence — a body that answered 24 here would be
+    // reading a constant, not the edge.
+    assert.doesNotMatch(String(error["message"]), new RegExp(`at most ${String(shipped)}`), r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names that edge", async () => {
+  // A REVIEWER'S REPRO, KEPT. The first version of the read was `out.find(…)` — first match wins —
+  // so a graph spreading `shards` down a wide fan-out and a narrow one validated against the wide
+  // one, and the narrow branch clamped in silence. Measured then: 3 shards, widths 24 and 2, run
+  // `succeeded` with one branch seeing three paths and the other two, nothing said.
+  //
+  // The rule is "every matching edge, tightest wins", and the message names the edge it came from —
+  // an operator told to raise a width on an edge that was never the cap changes the wrong number.
+  const ws = workspace(["resources"]);
+  try {
+    mkdirSync(join(ws.dir, "graphs"));
+    const fn = (id: string, reads: string[], writes: string[], ref: string): Record<string, unknown> => ({
+      id,
+      type: "function",
+      reads,
+      writes,
+      function: { ref },
+    });
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "two-fanouts", project: "examples-test", version: 1 },
+      policy: { posture: "on", expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 24, maxLoopIterations: 1 } },
+      channels: {
+        found: { type: "string", reduce: "replace" },
+        shards: { type: "array", reduce: "replace" },
+        wide: { type: "string", reduce: "replace" },
+        narrow: { type: "string", reduce: "replace" },
+        seenWide: { type: "array", reduce: "append_ordered" },
+        seenNarrow: { type: "array", reduce: "append_ordered" },
+      },
+      inputs: ["found"],
+      outputs: ["seenWide", "seenNarrow"],
+      nodes: [
+        fn("plan", ["found"], ["shards"], "function/triage-plan@stable"),
+        fn("a", ["wide"], ["seenWide"], "function/triage-classify@stable"),
+        fn("b", ["narrow"], ["seenNarrow"], "function/triage-classify@stable"),
+        { id: "joinA", type: "join", reads: ["seenWide"], writes: ["seenWide"], join: { branches: ["a"], mode: "all", onBranchError: "fail" } },
+        { id: "joinB", type: "join", reads: ["seenNarrow"], writes: ["seenNarrow"], join: { branches: ["b"], mode: "all", onBranchError: "fail" } },
+      ],
+      edges: [
+        { id: "fan-wide", from: "plan", to: "a", kind: "fanout", over: "shards", as: "wide", maxWidth: 9 },
+        { id: "fan-narrow", from: "plan", to: "b", kind: "fanout", over: "shards", as: "narrow", maxWidth: 2 },
+        { id: "collect-a", from: "a", to: "joinA", kind: "join" },
+        { id: "collect-b", from: "b", to: "joinB", kind: "join" },
+      ],
+    };
+    const graph = join(ws.dir, "graphs", "two-fanouts.json");
+    writeFileSync(graph, JSON.stringify(spec, null, 2));
+
+    // Three paths: under the wide edge's 9, over the narrow edge's 2.
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt\nc.txt" })]);
+    assert.notEqual(r.code, 0, `the tightest fan-out must bind:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /fans out at most 2 /, r.out);
+    assert.match(String(error["message"]), /raise maxWidth on the "fan-narrow" edge/, r.out);
+    assert.doesNotMatch(String(error["message"]), /at most 9/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a fan-out width that is not a NUMBER is unreadable, not skipped", async () => {
+  // `maxWidth: "24"` compiles (`GRAPH007` asks whether the field is there, not what type it is) and
+  // the executor would coerce it — `slice(0, "24")` works. So the body is the only thing between a
+  // typo'd width and a clamp, and "skip the edge I cannot read" would leave zero edges and, before
+  // this, a body that refused for the wrong reason. Counted as unreadable so it fails CLOSED.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: unknown }[] };
+    raw.edges.find((e) => e.id === "fan")!.maxWidth = "24";
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+    mkdirSync(join(ws.dir, "reports"));
+    writeFileSync(join(ws.dir, "reports", "one.txt"), readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8"));
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `a non-numeric width must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /declares 1 fanout edge\(s\) over "shards", of which 0 state a numeric maxWidth/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a TRUNCATED file listing refuses, rather than triaging the part that fits", async () => {
+  // `fs.glob` caps at 100 paths and appends a `… (truncated at …)` line. The body used to filter
+  // that line out with the blanks, so at any width ≥ 100 it would have triaged 100 shards and the
+  // report would have called them the whole evidence — the silent clamp one layer above the one
+  // this body was written for, and invisible to the ceiling check because 100 < the width.
+  //
+  // Driven at a width that makes it reachable: `maxWidth` and `maxFanout` raised to 128, 101 files
+  // on disk. `GRAPH018_NODE_COUNT` warns about the worst-case task count and still compiles.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as {
+      policy: { expansion: { maxFanout: number; maxNodes: number } };
+      edges: { id: string; maxWidth?: number }[];
+    };
+    raw.policy.expansion.maxFanout = 128;
+    raw.edges.find((e) => e.id === "fan")!.maxWidth = 128;
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+
+    mkdirSync(join(ws.dir, "reports"));
+    const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
+    for (let i = 0; i < 101; i += 1) writeFileSync(join(ws.dir, "reports", `shard-${String(i).padStart(3, "0")}.txt`), one);
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `a truncated listing must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    // The refusal quotes the marker back, so the operator sees the cap that produced it rather
+    // than a count they would have to work out.
+    assert.match(String(error["message"]), /listing was TRUNCATED, so these 100 paths are not all of them/, r.out);
+    assert.match(String(error["message"]), /truncated at 100 files/, r.out);
+    assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("the body REFUSES when it cannot read a width, instead of picking one", async () => {
+  // THE ARM THE READ RESTS ON. `triage-plan.js` no longer carries the ceiling, so the case that
+  // used to be impossible — the number is not there — is now reachable, and it is the one where
+  // guessing is worst: a fan-out CLAMPS in silence, so a body that assumed a width would drop
+  // evidence out of a document a person is about to approve. Refusing is the only answer that
+  // cannot be wrong quietly.
+  //
+  // DRIVEN, not reasoned: the shipped body is put on a node with NO outgoing fan-out, in a
+  // throwaway graph written into the test's own workspace. `resources/` is the shipped directory,
+  // copied unedited — this is the real body, reached the way any graph would reach it.
+  const ws = workspace(["resources"]);
+  try {
+    mkdirSync(join(ws.dir, "graphs"));
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "no-fanout", project: "examples-test", version: 1 },
+      policy: { posture: "on", expansion: { maxNodes: 8, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+      channels: { found: { type: "string", reduce: "replace" }, shards: { type: "array", reduce: "replace" } },
+      inputs: ["found"],
+      outputs: ["shards"],
+      nodes: [{ id: "plan", type: "function", reads: ["found"], writes: ["shards"], function: { ref: "function/triage-plan@stable" } }],
+      edges: [],
+    };
+    const graph = join(ws.dir, "graphs", "no-fanout.json");
+    writeFileSync(graph, JSON.stringify(spec, null, 2));
+
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt" })]);
+    assert.notEqual(r.code, 0, `a body that cannot read its width must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    // The reason names the node and counts what it found, so the operator is told which graph is
+    // wrong rather than that "something refused".
+    assert.match(String(error["message"]), /cannot read its width: node "plan" declares 0 fanout edge\(s\) over "shards"/, r.out);
   } finally {
     ws.dispose();
   }

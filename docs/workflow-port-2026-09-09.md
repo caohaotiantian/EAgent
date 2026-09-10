@@ -9,6 +9,37 @@ Written for somebody who has not read the code.
 
 ---
 
+## 0 · Closed since — 2026-09-10
+
+**This is a dated record and the narrative below is left as it was measured.** What follows is the
+part of it that is no longer true, each with the commit that closed it. Six of the eight friction
+entries are gone — F2, F3, F4, F5, F7, F8 — and the workflow itself now CONSUMES four of them; the
+port is the thing that pulls on them, which was the argument for writing it down.
+
+| # | closed by | what happens now |
+|---|---|---|
+| **F2** | `77c245a` (+ `468984b` in the example) | `GRAPH010` exempts a channel that never leaves one fan-out branch, so `raw` is `{"type":"string","reduce":"replace"}` and `triage-classify.js` reads a string. The `join("\n")` and the comment explaining a one-element array are deleted |
+| **F3** | `da86076` | `loom gates <runId>` carries a `reads` field — the gate node's declared channels THAT HAVE A VALUE (it is built from `view.visible`, so an unwritten one is not a key), recomputed from the graph the journal's hash names, with a channel the graph classified blanked to `[secret]`. The digest stays beside it as the binding it always was |
+| **F4** | `175cdb3` | the gate hint is on **stderr**, beside the run-id hint, so `loom run … 2>/dev/null \| jq .status` parses on the gate path too. `examples-triage.test.ts`'s `summary()` no longer slices stdout — it parses the whole of it, which is now the assertion that nothing else is printed there |
+| **F5** | `52d4b43` | `--help` names all ten registrar members — `{models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}` — and says "So 9 things need no fork", which is README's `--extension-module` row count and not four |
+| **F7** | `2309d3a` | `README.md:177` reads *"Its §§1–4 and §8 work offline with no key"*, and names §7 separately |
+| **F8** | `f7f74d5` | a body returns `{refuse: {reason}}` and the engine raises `validation`/`E_FUNCTION_REFUSED` on its behalf — never retried, whatever the node's `retry` policy says. `triage-plan.js` uses it for all four of its refusals: nothing matched, the listing was truncated, no readable fan-out width, and more shards than that width |
+
+And one thing the port ASKED FOR that is not a friction entry: **`ctx.node`** (`c2360be`). A body is
+handed its own node as the graph declared it — `{id, type, reads, writes, out}` — so §4's
+`SHARD_CEILING` duplication is deleted rather than pinned. Driven on the shipped binary, 25 shards
+with the graph's `maxWidth` edited to 12 and **nothing under `resources/` touched**:
+
+```
+function "function/triage-plan@stable" on node "plan" refused: matched 25 test-output files but
+this graph fans out at most 12 — the rest would be dropped without a word. …
+```
+
+Still open: **F1** (two compiles to discover a two-node fan-out branch), and every bullet of §4 that
+this section does not name.
+
+---
+
 ## 1 · What was ported
 
 **`triage-failures` — a red CI run's output, bucketed by root cause, with a human gate before the
@@ -27,7 +58,7 @@ causes, and the expensive mistake is opening fifteen tickets. That is the chore 
 | node | type | what it does |
 |---|---|---|
 | `scan` | `tool` (`fs.glob`) | finds the report files the `pattern` input names |
-| `plan` | `function` | turns that listing into the fan-out's array; **throws if it is empty** |
+| `plan` | `function` | turns that listing into the fan-out's array; **refuses if it is empty** |
 | `read` | `tool` (`fs.read`) | one branch per shard, in parallel |
 | `classify` | `function` | buckets each failing test by its error signature |
 | `gather` | `join` | folds the branches back **in branch order** |
@@ -133,7 +164,9 @@ loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}'
 ls out                                   # ls: out: No such file or directory   exit 1
 ```
 
-stdout (the run id line goes to **stderr**, and is shown here in place so you can see both):
+As measured on the day — the run id line goes to **stderr** and is shown here in place so you can
+see both. **The gate line moved to stderr too, at `175cdb3`** (F4), so today stdout is the JSON
+object alone and the two hints arrive together on the other stream:
 
 ```
 run 01M22R66E9GPA00RQXPFA3P8K9 — inspect it with: loom trace 01M22R66E9GPA00RQXPFA3P8K9   ← stderr
@@ -150,10 +183,19 @@ run 01M22R66E9GPA00RQXPFA3P8K9 — inspect it with: loom trace 01M22R66E9GPA00RQ
 }
 gate gate_01M22R66F8N0ZANT0QSMWX6M0H on node approve — loom approve 01M22R66E9GPA00RQXPFA3P8K9 gate_01M22R66F8N0ZANT0QSMWX6M0H --as YOUR_ID
 ```
-exit 0. **That last line is on stdout, after the JSON** — see friction **F4**; it is why the block
-below extracts the ids with `grep` rather than `jq`.
+exit 0. That last line was on **stdout**, after the JSON — friction **F4**, and the reason the
+`sed` below extracts the ids rather than `jq`. Since `175cdb3` it is on stderr, so today the same
+run prints:
 
-Capture the two coordinates the rest of the walkthrough needs:
+```
+run 01M24ZN5XG91Y7S289AEC5RVEQ — inspect it with: loom trace 01M24ZN5XG91Y7S289AEC5RVEQ   ← stderr
+gate gate_01M24ZN5Y6Z1R8HVCWH63R3374 on node approve — loom approve 01M24ZN5XG91Y7S289AEC5RVEQ gate_01M24ZN5Y6Z1R8HVCWH63R3374 --as YOUR_ID   ← stderr
+```
+
+and `loom run … 2>/dev/null | jq .status` prints `"awaiting_gate"` instead of a syntax error.
+
+Capture the two coordinates the rest of the walkthrough needs. The `sed` still works and is left
+alone so this block reads the same on either binary; `jq -r .runId` is the shorter way now:
 
 ```bash
 RUN=$(loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null \
@@ -199,8 +241,10 @@ The `loom.effect (random)` under every `function` task is the seeded PRNG draw t
 for the body whether or not the body calls `Math.random()`; it is what makes the replay below
 reproduce.
 
-**See what you are being asked to approve.** `loom gates` gives you the gate's coordinates but not
-its content — friction **F3**:
+**See what you are being asked to approve.** On the day, `loom gates` gave you the gate's
+coordinates and not its content — friction **F3**. Since `da86076` the same call carries a `reads`
+field holding the gate node's declared channels, so the block below is the listing MINUS the report
+it now prints:
 
 ```bash
 loom gates "$RUN"
@@ -228,8 +272,18 @@ loom gates "$RUN"
 ]
 ```
 
-The content is on the control plane. **Start `loom serve` from `examples/`** — `--workspace`
-defaults to the current directory, and from the repo root it would find no `graphs/`:
+Today the ranking is already in that listing, under `reads` — measured on the shipped binary:
+
+```bash
+loom gates "$RUN" | jq '.[0].reads.report.ranking'
+# → [{"bucket":"assertion","count":2}, {"bucket":"missing-dependency","count":2},
+#    {"bucket":"port-in-use","count":2}, {"bucket":"timeout","count":1},
+#    {"bucket":"uncaught-type-error","count":1}]
+```
+
+The control plane is still the fuller view, and the rest of this section is how you reach it.
+**Start `loom serve` from `examples/`** — `--workspace` defaults to the current directory, and from
+the repo root it would find no `graphs/`:
 
 ```bash
 loom serve --port 8791 >/tmp/loom-serve.log 2>&1 &
@@ -353,8 +407,13 @@ loom approve "$RUN3" "$GATE3" --as u:someone-else
 
 loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
 # → "status": "failed" … no test-output files matched — check the --input pattern           exit 1
-#   It arrives wearing "class": "internal", "code": "E_INTERNAL" — see friction F8. That is the
-#   runtime reporting a DESIGNED refusal with the same code an accidental throw gets, not a crash.
+#   It arrived wearing "class": "internal", "code": "E_INTERNAL" — friction F8, the runtime
+#   reporting a DESIGNED refusal with the same code an accidental throw gets. Since f7f74d5 the
+#   body RETURNS {refuse: {reason}} and the same command prints, measured:
+#     "class": "validation", "code": "E_FUNCTION_REFUSED", "retryable": false,
+#     "message": "function \"function/triage-plan@stable\" on node \"plan\" refused: no
+#                 test-output files matched — check the --input pattern, and that it is
+#                 relative to the workspace root"
 ```
 
 The second is deliberate. A fan-out over an empty array produces no branches and the join folds
@@ -369,15 +428,19 @@ names the count and the cap instead.
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 10 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-Ten tests: parks-with-nothing-written, the approval and the exact ranking, the refused approver
-(pinned to `E_GATE_NOT_AUTHORIZED`, not merely to a non-zero exit), cancel, replay, the
-empty-pattern refusal, and the four a fresh review added — a CRLF shard, a shard count over the
-fan-out ceiling, a shard with no failures still being counted as read, and a failure with no YAML
-block not swallowing the next one. `examples-run.test.ts` picks the new graph up without being
+Fifteen tests: parks-with-nothing-written (and the report the gate now SHOWS, out of `loom gates`'s
+`reads`), the approval and the exact ranking, the refused approver (pinned to
+`E_GATE_NOT_AUTHORIZED`, not merely to a non-zero exit), cancel, replay, the empty-pattern refusal
+(pinned to `E_FUNCTION_REFUSED`/`validation`), the four a fresh review added — a CRLF shard, a shard
+count over the fan-out ceiling, a shard with no failures still being counted as read, and a failure
+with no YAML block not swallowing the next one — and five the ceiling's move into the graph needed:
+the width EDITED in the graph alone with the refusal naming the new number, two fan-outs over one
+channel where the TIGHTEST must bind, a `maxWidth` that is not a number, a listing `fs.glob`
+truncated, and no readable width at all. `examples-run.test.ts` picks the new graph up without being
 edited — its set is the directory — so the compile and resource-reachability halves were already
 covered.
 
@@ -393,8 +456,10 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom" /tmp/loom-serve.log
 ## 3 · Friction log
 
 Every entry is a place the shipped product cost more than it should have. Each carries the exact
-command, what happened, and what was expected. **Eight found: three fixed, five logged** with the
-file that would have to change.
+command, what happened, and what was expected. **Eight found**, each logged with the file that would
+have to change; one (F6) was fixed here, inside the lane's own files. **Six more have closed since
+— F2, F3, F4, F5, F7 and F8 — and §0 names the commit for each**; F1 alone is still open. Each entry
+below is left as it was measured, with a one-line closure note under its status.
 
 Everything in this section was re-run by a fresh reviewer who was told to refute it; F1–F5 and F7
 reproduced exactly, and F8 is one that reviewer added.
@@ -434,7 +499,10 @@ diagnostic that other suites assert on is not this lane's business.
 
 ### F2 · `GRAPH010` refuses a channel that is provably branch-local, and the workaround leaks into the body
 
-*Status: logged.* *File: `packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`.*
+*Status: **closed 2026-09-10** by `77c245a`, the example following at `468984b`.* *File:
+`packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`.* The exemption is keyed on the
+join's inbound edges and everything it cannot prove is still refused; `examples/README.md` §8 lists
+the conditions that put `append_ordered` back. Everything below is what was measured before it.
 
 `raw` is written by `read` in branch *i* and read by `classify` in branch *i*. Nothing else touches
 it. Declared the natural way:
@@ -445,7 +513,11 @@ $ loom compile graphs/triage-failures.json      # "raw": {"type": "string", "red
    fix: change channel "raw" to reduce: append_ordered (or another commutative reducer)
 ```
 
-The rule counts `read`'s parallel width and stops. But the runtime **is** branch-scoped, and a
+(The `8` is the `fan` edge's `maxWidth` on the day this was measured; it is 24 now, raised by the
+review below. Today the same file compiles `ok` — the message is what the pre-`77c245a` compiler
+printed, kept because the entry is about the rule and not the number.)
+
+The rule counted `read`'s parallel width and stopped. But the runtime **is** branch-scoped, and a
 branch really does see only its own contribution. Measured, against the shipped graph with
 `triage-classify.js` swapped for a probe that reports `raw.length`:
 
@@ -468,17 +540,22 @@ $ grep -a "raw is an array" out/triage.md
 
 **Expected**: `replace` accepted, because the reducer never folds across branches for this channel.
 **Got**: `raw` declared `{"type": "array", "reduce": "append_ordered"}`, and every consumer body
-paying for it — `triage-classify.js` carries a `join("\n")` and a five-line comment explaining a
-one-element array. The cost is small per graph and paid by every author of a multi-node branch.
+paying for it — `triage-classify.js` carried a `join("\n")` and a five-line comment explaining a
+one-element array. The cost was small per graph and paid by every author of a multi-node branch.
 
 The fix is a real analysis, not a message: exempt a channel when every reader is inside the same
 fan-out subtree as its writer. Deliberately not attempted here — it is a compiler-safety change,
 and *"refusing is always allowed; loosening never is"* means it needs its own adversarial review
-rather than a drive-by from an examples lane.
+rather than a drive-by from an examples lane. **That is what `77c245a` then did**, keyed on the
+join's inbound edges and with four shapes it must not accept pinned at `f94d812`; `raw` is
+`{"type":"string","reduce":"replace"}` today and the `join("\n")` is gone.
 
 ### F3 · `loom gates` shows a digest, not the thing being approved
 
-*Status: logged.* *File: `packages/core/src/cli.ts` (the `gates` verb).*
+*Status: **closed 2026-09-10** by `da86076`.* *File: `packages/core/src/cli.ts` (the `gates` verb).*
+The listing carries `reads` — the gate node's declared channels and their values, blanked to
+`[secret]` where the graph classified them, and simply absent (with a line on stderr) where the
+compile, the graph or the task cannot be found. What was measured before it: 
 
 ```bash
 $ loom gates 01M22PGS1D1XD6JKS6JRVF6W43
@@ -518,7 +595,10 @@ against — not a summary you could recognise or compare across runs.
 
 ### F4 · `loom run` puts a human hint on **stdout**, after the JSON — so `| jq` breaks on exactly the gate path
 
-*Status: logged, and worked around in the test.* *File: `packages/core/src/cli.ts`.*
+*Status: **closed 2026-09-10** by `175cdb3`.* *File: `packages/core/src/cli.ts`.* The hint is on
+stderr, and the workaround it forced on `examples-triage.test.ts` is deleted — `summary()` parses
+the whole of stdout, which is now the assertion that nothing else is printed there. What was
+measured before it: 
 
 ```bash
 $ loom run graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}' 2>/dev/null | tail -3
@@ -534,12 +614,14 @@ run 01M22PTJ1ZGBN9CEW25N0JDCNN — inspect it with: loom trace 01M22PTJ1ZGBN9CEW
 the `run … — inspect it with:` hint goes to **stderr**. **Got**: the second hint on **stdout**, so
 `loom run … | jq .status` succeeds for a run that completes and fails for one that parks on a gate,
 which is precisely the case a script needs to branch on. This is what `E_TOOL…`-free wrapper code
-trips over first; `packages/core/test/examples-triage.test.ts` carries a `summary()` helper whose
-only job is to cut the line off, with the reason written above it.
+trips over first; `packages/core/test/examples-triage.test.ts` carried a `summary()` helper whose
+only job was to cut the line off, with the reason written above it.
 
 ### F5 · `loom --help` describes a four-member extension registrar; `README.md` documents ten
 
-*Status: logged.* *File: `packages/core/src/cli.ts` (the `--extension-module` help text).*
+*Status: **closed 2026-09-10** by `52d4b43`.* *File: `packages/core/src/cli.ts` (the
+`--extension-module` help text).* `--help` now names all ten registrar members. What was measured
+before it: 
 
 ```bash
 $ loom --help | grep -a -A2 'extension-module P,P'
@@ -566,10 +648,13 @@ this workflow writes `out/triage.md`. Only `notes/` was ignored, so following th
 
 ### F7 · `README.md` counts examples that need no model, and the count is now wrong
 
-*Status: logged for the docs lane — this lane must not edit `README.md`.*
+*Status: **closed 2026-09-10** by `2309d3a`, which is the docs lane this was logged for.* `:177`
+now reads *"Its §§1–4 and §8 work offline with no key; §§5–6 have an `agent` node and want a real
+model, and §7 registers an adapter for one"*, and names `examples-triage.test.ts` as what runs §8.
+What was measured before it:
 
-`README.md:177` splits the examples as *"§§1–4 work offline with no key; §§5–6 have an `agent` node
-and want a real model"*, which now omits §8 as it already omitted §7. `README.md:180` reads *"runs
+`README.md:177` split the examples as *"§§1–4 work offline with no key; §§5–6 have an `agent` node
+and want a real model"*, which omitted §8 as it already omitted §7. `README.md:180` read *"runs
 the three that need no model"*.
 
 **Narrowed after review, because the first draft of this entry overstated it.** `:180` credits the
@@ -581,11 +666,15 @@ to edit.
 
 ### F8 · The workflow's own designed refusals surface as `E_INTERNAL`
 
-*Status: logged.* *File: `packages/core/src/run/engine.ts` (kernel) — so this one cannot be fixed
-from an extension at all, which is the point of recording it.*
+*Status: **closed 2026-09-10** by `f7f74d5`, in the kernel and with a `Kernel-seam:` trailer saying
+why it had to be — a guest object can never be a host `LoomError`, so the raise happens inside the
+executor.* *File: `packages/core/src/run/engine.ts`.* A body returns `{refuse: {reason}}` and the
+failure is `validation`/`E_FUNCTION_REFUSED`, which `#retryDecision` never retries; both of
+`triage-plan.js`'s refusals use it, and a third was added with `ctx.node` (§0). It could not be
+fixed from an extension at all, which was the point of recording it.
 
-Both of `triage-plan.js`'s refusals are deliberate guards with a written message, and both arrive
-looking like a crash:
+What was measured before it. Both of `triage-plan.js`'s refusals are deliberate guards with a
+written message, and both arrived looking like a crash:
 
 ```bash
 $ loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
@@ -601,23 +690,25 @@ from "this body threw by accident". **Got**: `E_INTERNAL`, the same code a genui
 produces. `README.md`'s "What does not work yet" already names the mechanism: *"a throw still
 cannot carry retryability — `isLoomError` is an `instanceof` against the host class and a guest
 object can never satisfy it, so every throw out of the `vm` is `E_INTERNAL`"*. A body's `return`
-channel already carries one structured verdict (`{retry: {reason}}`); a refusal has no equivalent,
-so an author who wants to fail on purpose can only throw, and every purposeful failure is reported
-as an internal error. Related to the row README calls *`retry` on a function or evaluator node*,
-but not the same one — that row is about retryability, this is about a REFUSAL.
+channel already carried one structured verdict (`{retry: {reason}}`); a refusal had no equivalent,
+so an author who wanted to fail on purpose could only throw, and every purposeful failure was
+reported as an internal error. Related to the row README calls *`retry` on a function or evaluator
+node*, but not the same one — that row is about retryability, this is about a REFUSAL.
 
 ### Fixed vs. logged
 
-| # | what | status | file that would change |
+Status is as of **2026-09-10**; "closed" rows carry the commit, and §0 says what each does now.
+
+| # | what | status | file that changed, or would |
 |---|---|---|---|
 | F1 | two-node fan-out branch takes two compiles to discover | documented | `packages/core/src/graph/validate.ts` |
-| F2 | `GRAPH010` refuses a provably branch-local channel | logged | `packages/core/src/graph/validate.ts` |
-| F3 | `loom gates` shows a digest, not the content | logged | `packages/core/src/cli.ts` |
-| F4 | gate hint on stdout after the JSON | logged | `packages/core/src/cli.ts` |
-| F5 | `--extension-module` help names 4 of 10 registrar members | logged | `packages/core/src/cli.ts` |
+| F2 | `GRAPH010` refuses a provably branch-local channel | **closed** `77c245a` | `packages/core/src/graph/validate.ts` |
+| F3 | `loom gates` shows a digest, not the content | **closed** `da86076` | `packages/core/src/cli.ts` |
+| F4 | gate hint on stdout after the JSON | **closed** `175cdb3` | `packages/core/src/cli.ts` |
+| F5 | `--extension-module` help names 4 of 10 registrar members | **closed** `52d4b43` | `packages/core/src/cli.ts` |
 | F6 | `examples/.gitignore` missed `out/` | **fixed** | `examples/.gitignore` |
-| F7 | `README.md:177` omits §8 (and already omitted §7) | logged | `README.md` (docs lane) |
-| F8 | a body's deliberate refusal is reported as `E_INTERNAL` | logged | `packages/core/src/run/engine.ts` (kernel) |
+| F7 | `README.md:177` omits §8 (and already omitted §7) | **closed** `2309d3a` | `README.md` (docs lane) |
+| F8 | a body's deliberate refusal is reported as `E_INTERNAL` | **closed** `f7f74d5` | `packages/core/src/run/engine.ts` (kernel) |
 
 ### What the review found in the WORKFLOW, not in the runtime
 
@@ -631,7 +722,7 @@ exact failure mode §2 claims the empty-pattern refusal exists to prevent.
 | found | what happened | now |
 |---|---|---|
 | **CRLF input read as clean** | every pattern in `triage-classify.js` is anchored; `.` excludes `\r` and `$` without `/m` needs true end-of-string, so a shard split on `"\n"` matched NOTHING and the run SUCCEEDED with `0 failing test(s)`. Windows CI output, or `core.autocrlf=true`, is the ordinary case | split on `/\r?\n/`; pinned by *"a CRLF shard is triaged identically to an LF one"*, which fails if the fix is reverted |
-| **shards past `maxWidth` dropped in silence** | the fan-out CLAMPS: twelve shards at a width of eight ran eight branches, and the report said `8 failing test(s) across 8 report file(s)` with no warning on either stream — while this document's own first sentence says "a dozen shards" | width raised to 24, and `triage-plan.js` now REFUSES above it, naming the count and the cap. Pinned by a test that reads `maxWidth` out of the graph, so the constant and the graph cannot drift |
+| **shards past `maxWidth` dropped in silence** | the fan-out CLAMPS: twelve shards at a width of eight ran eight branches, and the report said `8 failing test(s) across 8 report file(s)` with no warning on either stream — while this document's own first sentence says "a dozen shards" | width raised to 24, and `triage-plan.js` now REFUSES above it, naming the count and the cap. It READS the cap off `ctx.node.out` (`c2360be`), so the graph is its only home; the test drives one shard past the graph's own `maxWidth` and asserts the body carries no ceiling of its own |
 | **a clean shard was not counted as read** | `report.shards` was derived from the failures, so three all-green files reported `0 failing test(s) across 0 report file(s)` | `collate` reads the `shards` channel; the report carries `shards` (read) and `shardsWithFailures` (failed) separately |
 | **a failure with no YAML block ate the next one** | the block scan ran to the next `...` and advanced past it, so one row appeared under the wrong file wearing the next failure's evidence, and that next failure vanished | the scan stops at `...`, at the next `not ok`, at `1..N` and at `# Subtest:` |
 | **the approver test proved nothing** | it asserted only `code !== 0`, which a bad `runId` also satisfies | pinned to `E_GATE_NOT_AUTHORIZED` and to the message naming the subject |
@@ -672,10 +763,12 @@ better than the documentation implies.
 
 ## 4 · Residue
 
-- **F2 is the one worth building.** A branch-local channel exemption in `rule010ConcurrentWriters`
-  removes the only place this port had to distort the graph to satisfy the compiler.
-- **F3 is the one worth building next**, and it is small: `loom gates` printing the gate node's
-  `reads` channels turns an approval of a hash into an approval of a report.
+- ~~**F2 is the one worth building.**~~ **Built, `77c245a`.** The branch-local exemption in
+  `rule010ConcurrentWriters` removed the only place this port had to distort the graph to satisfy
+  the compiler; `raw` is `replace` and `triage-classify.js` reads a string.
+- ~~**F3 is the one worth building next**, and it is small~~ — **built, `da86076`**: `loom gates`
+  prints the gate node's `reads` channels, so the CLI path is an approval of the report and not of
+  a hash.
 - **The workflow has no `agent` node**, so it exercises nothing about providers, budgets, retries
   or fallback chains. A port that does needs a live key, and this lane was offline by mandate.
 - **The `oversight/triage@stable` ref resolves to nothing**, and correctly: `oversight` is one of
@@ -684,11 +777,13 @@ better than the documentation implies.
 - **`loom score` was not driven against this graph.** It has no evaluator node, so `S1` is
   undefined for it; making it scoreable means deciding what "a good triage" is, which is an exam
   the operator writes, not something this port should invent.
-- **`SHARD_CEILING` is duplicated**, in `triage-plan.js` and as `maxWidth` on the `fan` edge. A
-  `function` body is handed channel values and nothing about the node that called it — no
-  `ctx.node`, no `ctx.graph` — so a body cannot read its own fan-out's width. The test pins the two
-  together, which is a patch on a seam rather than the seam: the real fix is for a body's `ctx` to
-  carry the node's declared shape, and that is a kernel change this lane did not make.
+- ~~**`SHARD_CEILING` is duplicated**~~ — **the seam was built, `c2360be`.** A body's `ctx` now
+  carries `ctx.node`, the node as its graph declared it, with `out` reducing each outgoing edge to
+  `{id, kind, over?, as?, maxWidth?, maxIterations?}`. `triage-plan.js` reads the `fanout` edges
+  over `shards` off it, takes the SMALLEST `maxWidth` and names that edge back; the constant is
+  deleted, and the test that pinned the two together — a patch on a seam rather than the seam — is
+  now a test that EDITS the graph's width and requires the refusal to follow it. Where no readable
+  width is there the body refuses rather than guessing, which is one of the four refusals it has.
 - **The classifier's bucket list is fixed in the body**, so adding a signature means editing the
   file. That is correct for an example and wrong for a product: the natural next step is the bucket
   table as a `resources/` document the body reads, which needs no new mechanism.
