@@ -17,6 +17,15 @@
  * order the author never intended to be meaningful. The compiler rejects it for
  * concurrent writers (GRAPH010) rather than making it silently arbitrary.
  *
+ * WITH ONE EXEMPTION, and it does not weaken the sentence above — it narrows what
+ * "concurrent writers" means. A channel written by a fan-out's own target and read by
+ * nothing outside that branch has ONE writer per branch, and `Engine.#withBranchWrites`
+ * folds only the tasks at a reader's own branch coordinate: no reader ever sees the
+ * cross-branch fold. GRAPH010 accepts `replace` there (`branchLocalChannel` in
+ * `graph/validate.ts`), and refuses it the moment anything else in the spec names the
+ * channel — including the join node itself. The cross-branch fold still HAPPENS, and is
+ * still the arbitrary value this paragraph describes; the rule is that nothing may read it.
+ *
  */
 
 import { canonicalize, digest, type Digest } from "../canonical.ts";

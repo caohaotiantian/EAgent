@@ -50,7 +50,6 @@ import {
   type ExpansionBudget,
   type GraphSpec,
   type NodeSpec,
-  type NodeType,
   type ResolvedRef,
   type ResourceRef,
 } from "./spec.ts";
@@ -2402,117 +2401,53 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
   }
 }
 
-/**
- * WHERE A CHANNEL NAME CAN APPEAR IN A SPEC, per authoring scope.
- *
- * `branchLocalChannel` has to prove a NEGATIVE — that nothing outside one fan-out branch names
- * this channel — and a census that misses a site proves nothing. So the sites are enumerated
- * against the field allow-lists `graph/spec.ts` already exports, and `sitesAreClassified` refuses
- * the whole exemption when a name appears there that neither list below classifies.
- *
- * That is what makes the census survive the schema growing. `test/graph/allowed-fields.test.ts`
- * already forces a new field into `NODE_FIELDS`/`EDGE_FIELDS`/`SPEC_FIELDS`/`ALLOWED_FIELDS`;
- * this then forces somebody to say whether it can name a channel, and until they do the guard
- * goes back to refusing — which is the direction a guard is allowed to move on its own.
- *
- * `free` means "cannot name a state channel", and three entries earn a word:
- *   - `agent`: the body is handed `viewFor(…, node.reads)` (`engine.ts:7303`), so a prompt
- *     cannot reach a channel the node did not declare.
- *   - `humanGate`: `delivery.channels` are DELIVERY channels (slack, email) and `delivery.redact`
- *     and `batching.key` are payload field names and a grouping label; the gate's payload itself
- *     is built from `reads`.
- *   - `join.branches`, `router.fallbackEdge`, `edge.compensates`: node and edge ids, not channels.
- */
-const CHANNEL_SITES: Readonly<Record<"spec" | "node" | "edge", { readonly names: readonly string[]; readonly free: readonly string[] }>> = {
-  spec: {
-    names: ["inputs", "outputs"],
-    free: ["apiVersion", "kind", "metadata", "policy", "channels", "nodes", "edges", "hooks"],
-  },
-  node: {
-    names: ["reads", "writes", "tool", "router", "subgraph"],
-    free: ["id", "type", "policy", "retry", "timeoutMs", "checkpoint", "unhandled", "function", "agent", "evaluator", "join", "humanGate"],
-  },
-  edge: {
-    names: ["when", "until", "over", "as"],
-    free: ["id", "from", "to", "kind", "maxWidth", "branches", "maxIterations", "codes", "compensates"],
-  },
-};
-
-/** The same question one level in, for the fields of a node's own type block. */
-const CHANNEL_SITES_IN_BLOCK: Readonly<Record<NodeType, { readonly names: readonly string[]; readonly free: readonly string[] }>> = {
-  function: { names: [], free: ["ref", "effects"] },
-  agent: { names: [], free: ["profile", "prompt", "outputSchema", "maxTurns", "tools", "canMutate"] },
-  tool: { names: ["args"], free: ["name", "version"] },
-  router: { names: ["cases"], free: ["mode", "fallbackEdge", "profile"] },
-  join: { names: [], free: ["branches", "mode", "k", "onBranchError"] },
-  evaluator: { names: [], free: ["kind", "ref", "threshold"] },
-  human_gate: { names: [], free: ["ref", "approval", "sla", "batching", "dedupe", "delivery"] },
-  subgraph: { names: ["inputs", "outputs"], free: ["ref", "budgetShare"] },
-};
-
-function sitesAreClassified(): boolean {
-  const covers = (all: readonly string[], t: { readonly names: readonly string[]; readonly free: readonly string[] }): boolean =>
-    all.every((f) => t.names.includes(f) || t.free.includes(f));
-  if (!covers(SPEC_FIELDS, CHANNEL_SITES.spec)) return false;
-  if (!covers(NODE_FIELDS, CHANNEL_SITES.node)) return false;
-  if (!covers(EDGE_FIELDS, CHANNEL_SITES.edge)) return false;
-  for (const [type, fields] of Object.entries(ALLOWED_FIELDS)) {
-    const t = CHANNEL_SITES_IN_BLOCK[type as NodeType];
-    if (t === undefined || !covers(fields, t)) return false;
-  }
-  return true;
-}
 
 /**
- * Every place in the spec that names `channel` — the census `branchLocalChannel` runs over.
+ * Does anything OTHER than these sites name `channel` anywhere in the spec?
  *
- * `reads` and `writes` are reported per node and per field, because those are the only two sites
- * the exemption can accept. Everything else collapses to one `other` site per node, or to an
- * `edge` or `spec` site, because the exemption refuses all of them and the caller needs no detail.
+ * THE CENSUS IS INVERTED, AND THAT IS THE WHOLE DESIGN. `branchLocalChannel` has to prove a
+ * NEGATIVE — that nothing outside one fan-out branch can read this channel — and an enumeration
+ * of the places a channel name may appear proves nothing the moment the schema grows a place
+ * nobody added to the list. The first version of this was that enumeration, keyed off
+ * `NODE_FIELDS`/`EDGE_FIELDS`/`SPEC_FIELDS`/`ALLOWED_FIELDS`, and a reviewer found the hole it
+ * was built to prevent: `NESTED_FIELDS` exists precisely because those four lists walk straight
+ * past four more scopes, and a channel-naming key inside any of them would have left the
+ * exemption ON with an uncovered site.
  *
- * EXPRESSIONS ARE MATCHED AS WORDS, NOT PARSED. `checkExpr` would give exact references, and give
- * NONE for an expression that does not parse — which is the undecidable case answering with the
- * passing value. A word match over-reports (a string literal spelled like a channel counts), and
- * over-reporting refuses.
+ * So instead: remove the sites that ARE allowed, serialise everything else, and look for the
+ * name. Total over any field the schema ever grows, by construction. Its failure mode is
+ * over-reporting — a node id, a description, a resource ref or an unrelated string spelled like
+ * the channel counts as a mention — and over-reporting REFUSES, which is the direction a
+ * loosening guard is allowed to be wrong in.
+ *
+ * `channels` is deleted rather than searched: a channel's own DECLARATION is not a read of it,
+ * and no `ChannelSpec` field names another channel (`identityKey` and `contextProjection.fields`
+ * are field names inside the value).
+ *
+ * THE ONE WAY A NAME CAN HIDE, named rather than hand-waved: `JSON.stringify` honours `toJSON`,
+ * so an object that serialises to something other than its own fields would not show them here.
+ * Every spec the product loads is `JSON.parse` output — from a file, from HTTP, from the journal
+ * — and a spec built in code that lied this way would already hash (`digest(spec)`) as something
+ * other than what it presents. A channel NAME cannot hide: `SAFE_ID` is `[A-Za-z0-9._-]`, which
+ * `JSON.stringify` emits verbatim, so there is no escaping to slip through.
  */
-type MentionSite =
-  | { readonly kind: "spec" }
-  | { readonly kind: "edge" }
-  | { readonly kind: "node"; readonly nodeId: NodeId; readonly field: "reads" | "writes" | "other" };
-
-function mentionsOf(spec: GraphSpec, channel: string): readonly MentionSite[] {
-  const word = new RegExp(`(?<![A-Za-z0-9_$])${channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_$])`);
-  // PRESENT BUT NOT A STRING COUNTS AS A MENTION. This rule runs before the shape rules have
-  // finished, and "I could not read it" is not "it does not name the channel".
-  const inExpr = (src: unknown): boolean => (src === undefined ? false : typeof src !== "string" || word.test(src));
-  const named = (list: unknown): boolean => (Array.isArray(list) ? list.includes(channel) : list !== undefined);
-  const mapsTo = (m: unknown): boolean => {
-    if (m === undefined) return false;
-    if (m === null || typeof m !== "object") return true;
-    return Object.values(m as Record<string, unknown>).includes(channel);
+function namedElsewhere(spec: GraphSpec, channel: string, writer: NodeId, readers: ReadonlySet<NodeId>): boolean {
+  const rest = {
+    ...spec,
+    channels: {},
+    nodes: spec.nodes.map((n) => {
+      if (n.id === writer) return { ...n, writes: (n.writes ?? []).filter((c) => c !== channel) };
+      if (readers.has(n.id)) return { ...n, reads: (n.reads ?? []).filter((c) => c !== channel) };
+      return n;
+    }),
   };
-  const out: MentionSite[] = [];
-
-  if (named(spec.inputs) || named(spec.outputs)) out.push({ kind: "spec" });
-
-  for (const e of spec.edges) {
-    if (e.over === channel || e.as === channel || inExpr(e.when) || inExpr(e.until)) out.push({ kind: "edge" });
+  let text: string;
+  try {
+    text = JSON.stringify(rest) ?? "";
+  } catch {
+    return true; // a spec this cannot serialise is a spec it cannot census.
   }
-
-  for (const n of spec.nodes) {
-    if (named(n.reads)) out.push({ kind: "node", nodeId: n.id, field: "reads" });
-    if (named(n.writes)) out.push({ kind: "node", nodeId: n.id, field: "writes" });
-    // `observedChannels` is `reads` ∪ the `${…}` roots of `tool.args`; a name already counted as a
-    // read is not a second site, because the argument resolves at that same node's own branch.
-    const inArgs = n.tool?.args !== undefined && observedChannels(n).includes(channel) && !(n.reads ?? []).includes(channel);
-    const cases = n.router?.cases;
-    const inCases =
-      cases !== undefined && (!Array.isArray(cases) || cases.some((c) => c === null || typeof c !== "object" || inExpr(c.when)));
-    const sub = n.subgraph;
-    const inSubgraph = sub !== undefined && (typeof sub !== "object" || mapsTo(sub.inputs) || mapsTo(sub.outputs));
-    if (inArgs || inCases || inSubgraph) out.push({ kind: "node", nodeId: n.id, field: "other" });
-  }
-  return out;
+  return new RegExp(`(?<![A-Za-z0-9_$])${channel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_$])`).test(text);
 }
 
 /**
@@ -2520,29 +2455,28 @@ function mentionsOf(spec: GraphSpec, channel: string): readonly MentionSite[] {
  * across branches for anything that reads it?
  *
  * THIS FUNCTION LOOSENS A GUARD, so every answer it cannot prove is `false`. What it proves, and
- * what the runtime gives it (measured, `docs/` A.40 and the two spikes it cites):
+ * what the runtime gives it — measured, and pinned by `test/run/branch-local-replace.test.ts`:
  *
  *   - `Engine.#withBranchWrites` folds only the tasks at EXACTLY the asking task's branch path,
- *     with the same reducer the join uses. A reader in the writer's branch therefore sees the
- *     writer's own `replace` value and no sibling's.
+ *     with the same reducer the join uses. A reader at the writer's own coordinate, reached only
+ *     through the writer, therefore sees the writer's own `replace` value and no sibling's.
  *   - It deliberately does NOT fold an ANCESTOR's held write. A reader one fan-out deeper reads
  *     `null`, so "inside the subtree" is not enough — the fan-out stack must be EQUAL.
  *   - `#foldJoin` folds every channel a member wrote, not only the join's declared `writes`, so
  *     the channel DOES reach shared state at the join — as the last branch in branch-coordinate
  *     order. Deterministic, and meaningless. Nothing may read it after the join.
  *
- * So: the writer is the fan-out's own target, every reader sits at the same fan-out stack and
- * strictly downstream of the writer, and NOTHING else in the spec names the channel at all.
- * `join`, `router`, `subgraph`, a nested fan-out, a `retry` and a loop inside the branch each
- * refuse, and each for a reason this cannot discharge rather than for tidiness — the table is in
- * the row's plan and the test file names one case per row.
+ * NOT CLAIMED, and it is a real reader of this channel: a node reached by an `error` edge from
+ * the writer runs precisely when the writer FAILED, and `#withBranchWrites` folds only tasks in
+ * state `succeeded` — so it reads the channel's pre-fan-out value. That is deterministic and
+ * identical under every reducer, so it is accepted rather than refused, but it is not "sees the
+ * writer's own value".
  *
  * The two-writer arm of GRAPH010 is NOT relaxed and must not be: two writers inside one branch
  * fold by `compareContribution`'s `nodeId` tiebreak, which is arbitrary for `replace` in exactly
- * the way the rule exists to refuse. A second writer anywhere refuses here too, via the census.
+ * the way the rule exists to refuse. A second writer anywhere refuses here too.
  */
 function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, writer: NodeId): boolean {
-  if (!sitesAreClassified()) return false;
   if (spec.channels[channel] === undefined) return false;
 
   // W1 — exactly one enclosing fan-out, unambiguously.
@@ -2550,9 +2484,20 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
   if (stack === undefined || stack.length !== 1) return false;
   const fanId = stack[0]!;
   const fan = idx.edgeById.get(fanId);
-  // W2 — the writer IS the fan-out's target, so it is the first node of the branch and every
-  // other node in the branch is downstream of it. A writer partway down can have siblings in the
-  // branch that are neither its ancestors nor its descendants, and those race it.
+  //
+  // W2 — THE WRITER IS THE FAN-OUT'S OWN TARGET, and this is the clause that carries the
+  // ordering argument. `idx.ancestors` answers "there EXISTS a path w → r", not "EVERY path to r
+  // goes through w" — and a node with a second inbound edge that skips the writer is readied by
+  // whichever arm arrives first (`#activate` emits `task.ready` per inbound edge and `upsertTask`
+  // merges into the existing record), so it can run BEFORE the writer and read a stale value.
+  // With `w === fan.to`, that cannot happen: every node whose fan-out stack is `[fanId]` either
+  // IS the fan-out's target or inherited that stack from a node that is, and an inbound edge from
+  // outside the branch would make the two candidate stacks disagree and the node ambiguous. So
+  // reachable-from-w and dominated-by-w coincide, and `ancestors` is enough.
+  //
+  // A writer partway down the branch is therefore refused for want of a DOMINANCE computation,
+  // not because such a graph is unsafe. Widening this to "w dominates every reader within the
+  // subtree" is the obvious next step and is left undone deliberately.
   if (fan === undefined || fan.kind !== "fanout" || fan.to !== writer) return false;
 
   // The subtree: every node this fan-out encloses, at any depth.
@@ -2567,34 +2512,83 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     const n = idx.byId.get(id);
     if (n === undefined) return false;
     // W3 — a `join` inside the branch pops a level and its fold leaves the branch; a `router`
-    // turns one static subtree into a set of possible ones, so `ancestors` stops meaning "ran
-    // before"; a `subgraph` resolves its `inputs` against the WHOLE scope and its child is a spec
-    // this walk cannot see.
+    // turns one static subtree into a set of possible ones; a `subgraph` resolves its `inputs`
+    // against the WHOLE scope and its child is a spec this walk cannot see.
     if (n.type === "join" || n.type === "router" || n.type === "subgraph") return false;
-    // W4 — a retried write is a second contribution keyed by `iteration`, and a loop pass
-    // re-enters the branch; `#withBranchWrites` folds every succeeded task at the path.
+    // W4 — `retry` is refused for a weaker reason than the loop below, and it is written down
+    // rather than dressed up: a retry re-uses the Task's own id (`task.retry_scheduled` carries
+    // `w.task.taskId`), so the projection holds one record and one contribution, and the shape is
+    // very likely safe. It is refused because this analysis does not track which attempt commits,
+    // and a loosening does not get the benefit of "very likely".
     if (n.retry !== undefined) return false;
-    if ((idx.multiplicity.get(id) ?? 0) !== (idx.parallelWidth.get(id) ?? 1)) return false;
   }
   // W3, second half — a nested fan-out under this one. Measured: its nodes read `null`.
   for (const e of spec.edges) if (e.kind === "fanout" && subtree.has(e.from)) return false;
+
+  // W4, THE LOOP CLAUSE, AND IT ASKS THE REACHABILITY QUESTION DIRECTLY.
+  //
+  // It used to delegate to `multiplicity !== parallelWidth`, and that was the wrong set.
+  // `applyLoopFactors` calls a node "in the cycle" only when it is `loop.to`, `loop.from`, or
+  // both a descendant of the one and an ancestor of the other — so a fan-out hanging off a node
+  // inside the loop body but NOT on the path back to `loop.from` gets no factor at all. Measured
+  // on `top --fanout--> A --> m1 --> B`, joined, with `top --> tick --loop--> top` beside it:
+  // `multiplicity(A) === parallelWidth(A) === 4`, the graph compiled with zero diagnostics, and
+  // `B` read another pass's `mid` — pass 1's reader saw pass 2's write, and WHICH pass depended
+  // on how many nodes the branch had. `childBranch` carries no iteration, so every pass re-fires
+  // the fan onto the SAME coordinates and `#withBranchWrites` folds them all.
+  //
+  // So: refuse if any node of the branch is reachable from any loop edge's target. That also
+  // subsumes a `loop` edge INTO the writer, which `ins` filters out of the stack computation and
+  // which `maxIterations: 1` would have hidden from the multiplicity test.
+  for (const loop of idx.loopEdges) {
+    for (const id of subtree) {
+      if (id === loop.to || (idx.ancestors.get(id)?.has(loop.to) ?? false)) return false;
+    }
+  }
+
+  // W6 — EVERY JOIN OVER THIS BRANCH MUST BE `mode: "all"`, and this is not tidiness.
+  //
+  // `#withBranchWrites` returns the projection UNTOUCHED when the asking branch has held nothing
+  // — a writer that failed, that returned `{writes:{}}`, or that a `preNode` hook skipped — so
+  // its reader falls through to ROOT channel state. Under `mode: "all"` that is the pre-fan-out
+  // value, which is the same for every branch and deterministic. Under `any`, `quorum` or
+  // `firstSuccess` the barrier fires and applies its CROSS-BRANCH fold to root state while the
+  // other branches are still running (a short-circuiting join cancels nothing), so the fall-
+  // through reads a sibling's value. Measured: with `mode: "any"` and `A` throwing on item 1, an
+  // error-path reader in branch 1 read `mid-0` — branch 0's value — and the graph compiled with
+  // zero diagnostics.
+  //
+  // The join is invisible to every clause above: a `join` edge pops a level, so a join is never
+  // in `subtree`. It has to be found through its own declaration.
+  let covered = false;
+  for (const n of spec.nodes) {
+    if (n.type !== "join") continue;
+    const branches = n.join?.branches;
+    if (!Array.isArray(branches) || !branches.some((b) => subtree.has(b))) continue;
+    if (n.join?.mode !== "all") return false;
+    covered = true;
+  }
+  // No join declares this branch at all: `GRAPH021_FANOUT_WITHOUT_JOIN` refuses such a graph, and
+  // this refuses the exemption rather than relying on another rule having run.
+  if (!covered) return false;
 
   const atThisFan = (id: NodeId): boolean => {
     const s = idx.fanoutEdgeStack.get(id);
     return s !== undefined && s.length === 1 && s[0] === fanId;
   };
 
-  // W5 — the census. Anything but this writer's `writes` and in-branch downstream `reads` refuses.
-  for (const site of mentionsOf(spec, channel)) {
-    if (site.kind !== "node" || site.field === "other") return false;
-    if (site.field === "writes") {
-      if (site.nodeId !== writer) return false;
-      continue;
-    }
-    if (!atThisFan(site.nodeId)) return false;
-    if (!(idx.ancestors.get(site.nodeId)?.has(writer) ?? false)) return false;
+  // W5 — this writer is the only writer, every declared reader is in the branch and downstream of
+  // it, and nothing else in the whole spec names the channel at all.
+  const readers = new Set<NodeId>();
+  for (const n of spec.nodes) {
+    if ((n.writes ?? []).includes(channel) && n.id !== writer) return false;
+    if (!(n.reads ?? []).includes(channel)) continue;
+    if (!atThisFan(n.id)) return false;
+    if (!(idx.ancestors.get(n.id)?.has(writer) ?? false)) return false;
+    readers.add(n.id);
   }
-  return true;
+  // LAST, because it serialises the spec: everything above is cheap and refuses most graphs.
+  return !namedElsewhere(spec, channel, writer, readers);
 }
 
 /** Nodes reachable from `from` over forward edges. */

@@ -1,19 +1,24 @@
 /**
  * GRAPH010 EXEMPTS A CHANNEL THAT NEVER LEAVES ONE FAN-OUT BRANCH — and refuses everything else.
  *
- * This file is the ledger for a LOOSENING, so the accept case is one test and the refusals are
- * fourteen. Each refusal names the condition of `branchLocalChannel` that catches it; if a change
- * to the analysis makes one of them compile, the loosening has moved and the test says which way.
+ * This file is the ledger for a LOOSENING, so the accepts are three and the refusals twenty-two.
+ * Each refusal names the condition of `branchLocalChannel` that catches it; if a change to the
+ * analysis makes one of them compile, the loosening has moved and the test says which way.
  *
- * THE ACCEPT CASE IS ALSO THE DRIFT GUARD for `sitesAreClassified`. That predicate refuses the
- * whole exemption when a field appears in `NODE_FIELDS`/`EDGE_FIELDS`/`SPEC_FIELDS`/`ALLOWED_FIELDS`
- * that `CHANNEL_SITES` does not classify as channel-naming or channel-free — so adding a field to
- * the schema without saying which it is turns this test red rather than leaving a census with a
- * hole in it. Nothing here is exported from `src`, and nothing needs to be.
+ * FOUR OF THEM WERE FOUND BY REVIEWERS AFTER THE FIRST VERSION SHIPPED GREEN, and they are the
+ * ones to read first — a `subgraph` naming the channel, a `humanGate` delivery scope the census
+ * did not cover, a loop whose back-edge source is a SIBLING of the fan-out, and a
+ * short-circuiting join. Each compiled with zero diagnostics against a predicate whose own
+ * suite was green, which is the whole reason this file is written as a ledger.
  *
- * The runtime facts the exemption rests on are measured in `run/lane-a-branch-local-write.test.ts`
- * (a branch sees its own writes and no sibling's) and in `Engine.#withBranchWrites`' own docstring
- * (it does NOT fold an ancestor's held write, which is why a nested fan-out refuses).
+ * TWO OF THE ACCEPTS ARE HERE TO BE HONEST ABOUT WHAT IS ACCEPTED, not to celebrate it: an
+ * `error`-edge handler reads the pre-fan-out value rather than the writer's, and the census
+ * over-reports so freely that a graph DESCRIPTION mentioning the channel switches the exemption
+ * off. Both are stated so the next reader knows they were seen.
+ *
+ * The runtime facts the exemption rests on are pinned by `run/branch-local-replace.test.ts`,
+ * which drives a real Engine over a `replace` channel inside a three-branch fan-out. Nothing here
+ * is exported from `src`, and nothing needs to be.
  */
 
 import test from "node:test";
@@ -110,6 +115,29 @@ test("ACCEPT: `replace` on a channel written by the fan-out's target and read on
   );
   // …and no other error either, so the graph a stranger writes actually compiles.
   assert.deepEqual(d.filter((x) => x.severity === "error").map((x) => x.code), []);
+});
+
+test("ACCEPT, and stated rather than hidden: an `error`-edge handler in the branch may read it", () => {
+  // The handler runs only when the writer FAILED, and `#withBranchWrites` folds only tasks in
+  // state `succeeded` — so it reads the channel's pre-fan-out value, deterministically and
+  // identically under every reducer. Accepted, but it is NOT "sees the writer's own value".
+  // THIS IS ONLY TRUE UNDER `mode: "all"` — see the short-circuit refusal below, which is the
+  // same shape with the barrier allowed to fire early.
+  const s = spec();
+  (s.nodes as NodeSpec[]).push({ id: n("recover"), type: "function", reads: ["raw"], writes: ["failures"], function: { ref: "function/recover@stable" } } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("oops"), from: n("read"), to: n("recover"), kind: "error" } as EdgeSpec);
+  node(s, "gather", { join: { branches: [n("read"), n("classify"), n("recover")], mode: "all", onBranchError: "fail" } });
+  (s.edges as EdgeSpec[]).push({ id: e("j3"), from: n("recover"), to: n("gather"), kind: "join", branches: [n("read"), n("classify"), n("recover")] } as EdgeSpec);
+  assert.equal(hasGraph010(s), false);
+});
+
+test("ACCEPT is fragile on purpose: the DESCRIPTION mentioning the channel refuses", () => {
+  // The census is inverted — it serialises everything but the allowed sites and looks for the
+  // name — so it is total over any field the schema grows, at the cost of over-reporting. Over-
+  // reporting refuses, which is the direction a loosening guard is allowed to be wrong in.
+  const s = spec();
+  (s.metadata as { description?: string }).description = "reads the raw shard";
+  assert.equal(hasGraph010(s), true);
 });
 
 test("the exemption is doing the work — the SAME graph with a reader one node later refuses", () => {
@@ -242,6 +270,43 @@ test("REFUSE: a `retry` on a node in the branch", () => {
 test("REFUSE: a loop that re-enters the branch", () => {
   const s = spec();
   (s.edges as EdgeSpec[]).push({ id: e("again"), from: n("classify"), to: n("read"), kind: "loop", maxIterations: 2, until: 'shard == ""' } as EdgeSpec);
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: a loop whose back-edge source is a SIBLING of the fan-out", () => {
+  // The shape `multiplicity !== parallelWidth` missed, and the reason W4 asks reachability
+  // directly. `applyLoopFactors` calls a node "in the cycle" only when it is `loop.to`,
+  // `loop.from`, or between them — `read`/`classify` hang off `seed` but are not on the path
+  // back to `tick`, so both reported `multiplicity === parallelWidth === 4` while every pass
+  // re-fired the fan onto the SAME branch coordinates. Driven on a real Engine before this
+  // clause existed: the reader saw another pass's write, and which one depended on how many
+  // nodes the branch had.
+  const s = spec();
+  (s.channels as Record<string, unknown>)["tickv"] = { type: "number", reduce: "replace" };
+  (s.nodes as NodeSpec[]).push({ id: n("tick"), type: "function", reads: ["tickv"], writes: ["tickv"], function: { ref: "function/tick@stable" } } as NodeSpec);
+  node(s, "collate", { reads: ["failures", "tickv"] });
+  (s.edges as EdgeSpec[]).push({ id: e("t1"), from: n("seed"), to: n("tick"), kind: "seq" } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("t2"), from: n("tick"), to: n("collate"), kind: "seq" } as EdgeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("back"), from: n("tick"), to: n("seed"), kind: "loop", maxIterations: 3, until: "tickv > 90" } as EdgeSpec);
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: a SHORT-CIRCUITING join over the branch", () => {
+  // `#withBranchWrites` returns the projection untouched when the asking branch held nothing, so
+  // a reader whose writer failed or wrote nothing falls through to ROOT state. Under `any` the
+  // barrier has already applied its CROSS-BRANCH fold there while siblings still run. Driven on
+  // a real Engine before this clause existed: with `A` throwing on item 1, an error-path reader
+  // in branch 1 read branch 0's value, on a graph that compiled with zero diagnostics.
+  const s = spec();
+  node(s, "gather", { join: { branches: [n("read"), n("classify")], mode: "any", onBranchError: "skip" } });
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: no join declares the branch at all", () => {
+  // GRAPH021_FANOUT_WITHOUT_JOIN refuses such a graph anyway; this refuses the EXEMPTION rather
+  // than resting on another rule having run.
+  const s = spec();
+  node(s, "gather", { join: { branches: [], mode: "all", onBranchError: "fail" } });
   assert.equal(hasGraph010(s), true);
 });
 
