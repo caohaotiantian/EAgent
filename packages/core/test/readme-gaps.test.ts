@@ -474,7 +474,7 @@ const WORKS: readonly { readonly row: string; readonly claims: string; readonly 
   },
   {
     row: "Gates",
-    claims: "2,300+ tests",
+    claims: "+ tests, offline, no API key",
     probe: () => {
       // A FLOOR in the prose, so growth costs no doc edit. The number in the README must be at
       // or below what the suite actually holds — checked against the test files rather than a
