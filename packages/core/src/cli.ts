@@ -5124,8 +5124,21 @@ function subgraphDirs(): readonly string[] {
  * **`reads` IS THE CURRENT STATE, NOT THE BINDING, AND THE TWO MUST NOT BE CONFLATED.**
  * `contentDigest` is what the approval binds — `#dispatchApproved` re-derives it from a fresh
  * projection and refuses a mismatch — and it is left exactly as it was. This field is a second,
- * softer thing: what the gate node observes right now, computed the same way
- * `Engine.#gatePayload` computes its `state`, so the two agree whenever nothing has moved.
+ * softer thing: what the gate node observes RIGHT NOW, through the same call
+ * `Engine.#gatePayload` makes for its `state`.
+ *
+ * SO A SIBLING BRANCH CAN MOVE A CHANNEL BETWEEN THE READING AND THE DECISION, and this
+ * command cannot tell. It does not have to: an approval bound to state that has since changed
+ * is refused at dispatch rather than executed, so the undecidable question fails CLOSED one
+ * layer down. Naming it because printing values with no marker is otherwise exactly the shape
+ * of a guard answering its undecidable case with the passing value.
+ *
+ * TWO PLACES THE TWO DO NOT AGREE EVEN AT REST, and the first draft of this comment claimed
+ * they always did. (1) An EXTERNALISED channel: `#executeTask` calls `#resolveReads` before
+ * building the payload, so `#gatePayload` sees the fetched bytes while this reads the raw fold,
+ * where `withHandles` has already substituted `payloadHandle(ref)`. Over
+ * `EXTERNALISE_ABOVE_BYTES` the console operator sees text and this operator sees a handle.
+ * (2) A classified channel: the sweep below blanks what `#gatePayload` does not.
  *
  * BEST EFFORT, AND ABSENT RATHER THAN GUESSED. The set comes from the compiled graph, which is
  * not journaled; the workspace's `graphs/` is searched for the hash the journal records, exactly
