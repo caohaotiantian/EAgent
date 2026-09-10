@@ -76,11 +76,25 @@ valid; `module.exports = function (…) {…};` is not, and fails as in §4. A b
 a **compile error** for the graph that names it, refused before a run id is minted.
 
 The body gets `view.require(c)` / `view.get(c)` / `view.visible` for the channels the node declared,
-plus `ctx.taskId`, `ctx.now()`, `ctx.signal` — not `Date`, `Intl`, `fetch`, `require` or `process`.
-`Math.random()` works and is seeded from a journaled draw, so a replay draws the identical stream.
-**`ctx.effects` is present but refuses inside a sandboxed body** (`E_EFFECT_UNAVAILABLE`): the body
-runs synchronously inside a `vm` and cannot await a host round trip. Put the call on a `tool` node
+plus `ctx.taskId`, `ctx.now()`, `ctx.signal`, `ctx.node` — not `Date`, `Intl`, `fetch`, `require` or
+`process`. `Math.random()` works and is seeded from a journaled draw, so a replay draws the identical
+stream. **`ctx.effects` is present but refuses inside a sandboxed body** (`E_EFFECT_UNAVAILABLE`): the
+body runs synchronously inside a `vm` and cannot await a host round trip. Put the call on a `tool` node
 (§3), or register the body with `FunctionRegistry.register`.
+
+**`ctx.node` is this node as its GRAPH declared it** — `{id, type, reads, writes, out}`, frozen, with
+`out` reducing each outgoing edge to `{id, kind, over?, as?, maxWidth?, maxIterations?}`. It is there
+so a bound the graph already states is not written a second time in the body: §8's `triage-plan.js`
+reads the `fanout` edge's `maxWidth` off it. An absent field is an absent KEY on both paths, so test
+with `typeof e.maxWidth === "number"` rather than against `undefined`. A body registered by hand
+through `FunctionRegistry.register` — rather than loaded from a file — gets no `ctx.node` at all.
+
+**A body fails on purpose by RETURNING a verdict, not by throwing.** `{retry: {reason}}` is
+`unavailable`/`E_FUNCTION_UNAVAILABLE` and the node's `retry` policy may grant another attempt;
+`{refuse: {reason}}` is `validation`/`E_FUNCTION_REFUSED` and is never retried, however generous
+that policy is, because a second attempt on the same inputs refuses identically. Both are exclusive
+with `writes` and with each other. A `throw` is neither and is not the way to decline work: it
+normalizes to `internal`/`E_INTERNAL`, the code a genuine bug in the body produces.
 
 ## 3 · A `hook` body — `resources/hook/no-secrets.js`
 
@@ -246,9 +260,11 @@ by ROOT CAUSE, ranks the buckets, and asks you before it writes the report.
 loom compile graphs/triage-failures.json                                  # ok, exit 0
 loom run     graphs/triage-failures.json --input '{"pattern":"reports/*.txt"}'
 # → "status": "awaiting_gate", and out/triage.md does NOT exist yet.      exit 0
-#   THE HINT IS ON STDOUT, AFTER THE JSON — `| jq` on this path fails on that line:
+#   STDOUT IS THE JSON OBJECT AND NOTHING ELSE, so `… 2>/dev/null | jq .status` works on this
+#   path too. The line telling you how to answer the gate is on STDERR, beside the run-id hint:
 #   gate gate_01M… on node approve — loom approve 01M… gate_01M… --as YOUR_ID
 
+loom gates   <runId>       # the gate's coordinates AND `reads`: the report it is holding
 loom approve <runId> <gateId> --as u:you                                  # exit 0
 cat out/triage.md          # 8 failing tests, 5 buckets, ranked
 loom replay <runId>        # {"match": true, "hermetic": true}
@@ -277,10 +293,16 @@ this one runs offline and means what it says, because there was never a model in
   fan-out, a `retry` or a loop in the branch, or give `gather` any `mode` but `"all"`, and the
   compiler goes back to `GRAPH010_CONCURRENT_WRITE`. `counts` in §1 is one of those: `gather` and
   `summarise` both read it after the join, so it needs `append_ordered`.
-- **`loom gates <runId>` shows a `contentDigest`, not the report.** What the approver has to judge
-  is on the control plane — `loom serve`, then `GET /runs/<runId>` → `channels.report`, which is
-  also what the console renders. From the CLI alone, the report first appears in `loom approve`'s
-  own output, after the decision.
+- **`loom gates <runId>` shows the report, beside the `contentDigest`.** Its `reads` field is the
+  gate node's declared channels with their current values — `{"report": {…}}` here, since `approve`
+  declares `"reads": ["report"]` — recomputed from the graph the journal's hash names. The digest
+  stays and is a different thing: a BINDING to what the approver was shown, which `loom approve`
+  re-derives and checks, not a summary anybody could read. A channel the graph classified
+  (`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
+  report prints whole. `reads` is best-effort and simply ABSENT with a line on stderr when the
+  compile, the graph or the task cannot be found — absence is not "this gate reads nothing".
+  `loom serve`, then `GET /runs/<runId>` → `channels.report`, is still the fuller view and is what
+  the console renders.
 
 `reports/` holds three shards of real-shaped `node --test` TAP output — 8 failing tests over 5
 causes, one of them (`missing-dependency`) spanning two files, which is the case a per-file reading
@@ -290,9 +312,13 @@ of the log hides.
 would fan out zero branches and report "0 failing tests" — indistinguishable from a green suite. A
 pattern matching more than the fan-out's `maxWidth` would silently CLAMP: 30 shards at a width of
 24 runs 24 branches and says nothing about the other six, in a document a person is about to
-approve. `triage-plan.js` throws on both, naming the count and the cap. Its `SHARD_CEILING` must
-track `maxWidth` on the `fan` edge; `packages/core/test/examples-triage.test.ts` reads `maxWidth`
-out of the graph and drives one shard past it, so the two cannot drift apart.
+approve. `triage-plan.js` returns `{refuse: {reason}}` on both, naming the count and the cap, so the
+run fails as `validation`/`E_FUNCTION_REFUSED` — the class that says the graph declined, not the
+`E_INTERNAL` a crash in the body wears. **The cap is not written in the body**: it reads the `fan`
+edge's `maxWidth` off `ctx.node.out` (§2), so `graphs/triage-failures.json` is the number's only
+home and raising it is one edit. Where that edge is missing the body refuses too, rather than
+guessing a width. `packages/core/test/examples-triage.test.ts` drives one shard past the graph's
+own `maxWidth`, and asserts the body carries no ceiling of its own.
 
 **Split your shards on `/\r?\n/`, not on `"\n"`, in any body you write like this one.** Every
 pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without `/m` matches only

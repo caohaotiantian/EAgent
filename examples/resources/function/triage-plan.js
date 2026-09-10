@@ -5,8 +5,8 @@
  * its first declared write channel, so `found` here is `fs.glob`'s human-readable answer: one
  * root-relative path per line, or the literal `(no matches)`.
  *
- * THIS BODY REFUSES TWICE, and both refusals exist because the alternative is a report that
- * lies about a green suite.
+ * THIS BODY REFUSES THREE TIMES, and the first two exist because the alternative is a report
+ * that lies about a green suite.
  *
  *  - **Nothing matched.** A fan-out over an empty array produces no branches and the join folds
  *    nothing, so the run would SUCCEED with a report saying zero failures — which reads as "your
@@ -16,15 +16,21 @@
  *    branches, and nothing in the run, the trace or the report says the other six were never read.
  *    A triage report missing a quarter of its evidence is worse than no report, so the count is
  *    checked HERE, where the number is still known and the refusal can name it.
+ *  - **No fan-out to read the ceiling off.** Below.
  *
- * `SHARD_CEILING` MUST TRACK `edges[fan].maxWidth` IN THE GRAPH. It is duplicated rather than
- * derived because a `function` body is handed channel values and nothing about the graph that
- * called it — there is no `ctx.node`, no `ctx.graph`. `packages/core/test/examples-triage.test.ts`
- * pins the two together by reading `maxWidth` out of the graph and driving one shard past it.
+ * THE CEILING IS READ OFF THE GRAPH, NOT WRITTEN HERE. `ctx.node` is this node as its graph
+ * declared it — `{id, type, reads, writes, out}`, frozen — and `out` reduces each outgoing edge
+ * to `{id, kind, over?, as?, maxWidth?, maxIterations?}`. The `fanout` edge whose `over` names
+ * the channel this body writes is the one that will spread it, and its `maxWidth` is the number
+ * the executor actually clamps at. So the bound has ONE home, in `graphs/triage-failures.json`,
+ * and raising it there is the whole edit.
+ *
+ * AND IF THAT EDGE IS NOT THERE, THIS REFUSES rather than running unbounded — the third refusal.
+ * A body hand-registered through `FunctionRegistry.register` (rather than loaded from this file)
+ * gets no `ctx.node` at all, and a graph could point some other node at this ref. Guessing a
+ * ceiling there would be the silent clamp again, this time with the body's own blessing.
  */
-function (view) {
-  const SHARD_CEILING = 24;
-
+function (view, ctx) {
   // `/\r?\n/`, not `"\n"`. A CI shard produced on Windows, or checked out under
   // `core.autocrlf=true`, ends every line with `\r\n`; splitting on `"\n"` alone leaves a `\r`
   // that `.trim()` here would hide and that `triage-classify.js`'s anchored regexes would NOT.
@@ -35,14 +41,36 @@ function (view) {
     .filter((line) => line !== "" && line !== "(no matches)" && !line.startsWith("…"));
 
   if (shards.length === 0) {
-    throw new Error("no test-output files matched — check the --input pattern, and that it is relative to the workspace root");
+    return {
+      refuse: {
+        reason: "no test-output files matched — check the --input pattern, and that it is relative to the workspace root",
+      },
+    };
   }
-  if (shards.length > SHARD_CEILING) {
-    throw new Error(
-      "matched " + shards.length + " test-output files but this graph fans out at most " + SHARD_CEILING +
-        " — the rest would be dropped without a word. Narrow the pattern, or raise maxWidth on the \"fan\" edge " +
-        "(and policy.expansion.maxFanout above it) and SHARD_CEILING in triage-plan.js together.",
-    );
+
+  const node = ctx.node;
+  const fan = node === undefined ? undefined : node.out.find((e) => e.kind === "fanout" && e.over === "shards");
+  const ceiling = fan === undefined ? undefined : fan.maxWidth;
+  if (typeof ceiling !== "number") {
+    return {
+      refuse: {
+        reason:
+          "this body plans a fan-out over \"shards\" and could not read its width: no fanout edge over \"shards\" " +
+          "leaves this node (ctx.node is " + (node === undefined ? "absent — a hand-registered body gets none" : "\"" + node.id + "\"") +
+          "). Running on would silently drop every shard past a width nobody stated.",
+      },
+    };
+  }
+
+  if (shards.length > ceiling) {
+    return {
+      refuse: {
+        reason:
+          "matched " + shards.length + " test-output files but this graph fans out at most " + ceiling +
+          " — the rest would be dropped without a word. Narrow the pattern, or raise maxWidth on the \"fan\" edge " +
+          "(and policy.expansion.maxFanout above it).",
+      },
+    };
   }
   return { writes: { shards: shards } };
 }
