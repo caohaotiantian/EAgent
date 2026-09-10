@@ -68,7 +68,6 @@ import {
 import { CODES, err } from "./errors.ts";
 import {
   CLASS_DEFAULT_POSTURE,
-  maxClassification,
   isLoosening,
   isSyntheticSubject,
   POSTURES,
@@ -76,8 +75,7 @@ import {
   type IrreversibilityClass,
   type Posture,
 } from "./vocab.ts";
-import { redactPayload } from "./security/redact.ts";
-import type { ChannelSpec } from "./state/channels.ts";
+import { redactChannelValue } from "./security/redact-channels.ts";
 import { foldRun, viewFor, type RunProjection, type TaskRecord } from "./run/projection.ts";
 import { createFunctionLoader } from "./resources/functions.ts";
 import { createHookLoader } from "./resources/hook-loader.ts";
@@ -5158,8 +5156,9 @@ function subgraphDirs(): readonly string[] {
  * `loom run` and `loom approve` already print `p.outputs` raw. Two things make that wrong.
  * `outputs` is `collectOutputs` over `spec.outputs` — an author-chosen PUBLISHED subset — while
  * this is `observedChannels`, which includes INPUTS, so this would be the first CLI path to
- * print an input channel a graph declared `secret_ref`. And `redactGateRead`'s twin in
- * `server/http.ts` already wrote the sentence: *"Serving that value in the clear at the gate the
+ * print an input channel a graph declared `secret_ref`. And `server/http.ts`, which redacts
+ * through the SAME function this does — `security/redact-channels.ts`, one rule for both doors
+ * since §H.8 — already wrote the sentence: *"Serving that value in the clear at the gate the
  * classification demanded is the one place it must not happen"* — a gate is very often raised
  * BECAUSE a channel is classified, since `dataFloorOf` floors a node reading `secret_ref` at
  * posture `in`. Printing it here would be a LOOSENING, on the one non-negotiable that says
@@ -5262,7 +5261,7 @@ async function gatesWithReads(
     const view = viewFor(p, spec.channels, task.branch, observedChannels(node));
     return {
       ...g,
-      reads: Object.fromEntries(view.visible.map((c) => [c, redactGateRead(spec.channels, c, view.get(c))])),
+      reads: Object.fromEntries(view.visible.map((c) => [c, redactChannelValue(spec.channels, c, view.get(c))])),
     };
   });
   if (unexplained.length > 0) {
@@ -5279,31 +5278,6 @@ async function gatesWithReads(
     );
   }
   return rows;
-}
-
-/**
- * ONE CHANNEL VALUE, SWEPT BY WHAT THE GRAPH DECLARED ABOUT IT.
- *
- * The same three-arm rule as `redactChannels` in `server/http.ts`, deliberately spelled the
- * same way: an undeclared NAME is the most sensitive thing there is, a declared name with no
- * classification is `internal` (the detector backstop), and anything else goes through
- * `maxClassification`, which is `vocab.ts`'s membership test and answers `secret_ref` for a
- * word this vocabulary cannot read. Fails CLOSED at both ends.
- *
- * IT IS A SECOND SPELLING AND THAT IS A SEAM, NOT A DECISION. `redactChannels` is private to
- * `server/http.ts`; the honest fix is one shared function, and it belongs to whoever owns that
- * file next. Named here so it is a known duplicate rather than a discovered one — the failure
- * mode of two spellings is that a future classification is handled by one and not the other.
- */
-function redactGateRead(
-  specs: Readonly<Record<string, ChannelSpec>>,
-  name: string,
-  value: unknown,
-): unknown {
-  const declared = Object.hasOwn(specs, name) ? specs[name] : undefined;
-  if (declared === undefined || declared === null) return redactPayload(value, "secret_ref");
-  const c = declared.classification;
-  return redactPayload(value, c === undefined ? "internal" : maxClassification(c));
 }
 
 interface GraphIndex {
