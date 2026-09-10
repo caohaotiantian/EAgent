@@ -219,7 +219,11 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            marker would be BIGGER than the
                                                            value, in which case the value is
                                                            left whole and nothing is said,
-                                                           because nothing was withheld.
+                                                           because nothing was withheld. The
+                                                           row's readsTruncated names exactly
+                                                           the channels cut: read that, not
+                                                           the value's shape, since a channel
+                                                           can hold that shape itself.
                                                            --max-bytes 0 caps nothing
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
@@ -5161,6 +5165,19 @@ function subgraphDirs(): readonly string[] {
  *       write. It predates §A.51a, `withBranchWrites` is private to the engine, and closing it
  *       is a row of its own — but a list that omitted it while claiming agreement would be the
  *       same false claim in a third draft.
+ *
+ *       **AND IT IS A DECISION NOW, NOT A LOOSE END** (`TODO.md` §A.58(4)). Two ways to close
+ *       it were weighed and both cost more than the difference. REIMPLEMENTING the overlay
+ *       here, against the journal, puts a second copy of the engine's own rule in a second
+ *       file — precisely the drift this function already refuses one paragraph down, where it
+ *       calls `observedChannels` and NOT `node.reads` "because it is the call `#gatePayload`
+ *       makes and the two must not drift"; a fan-out's held writes are a harder rule than that
+ *       one and would drift faster. EXPOSING branch-held writes from the engine is a change to
+ *       the engine's read surface — a seam to design, not a field to add, and not this door's
+ *       file. What makes waiting affordable is the DIRECTION: this door shows the operator
+ *       LESS than the console and never more, so the residue can only under-disclose, which is
+ *       the failing-closed direction. It stays enumerated here until somebody designs that
+ *       seam.
  *   (4) THE SIZE BOUND — the `--max-bytes` cap below is this door's alone, and at the default
  *       it bites hardest on exactly the large document (1) exists to show.
  *
@@ -5219,6 +5236,21 @@ function subgraphDirs(): readonly string[] {
  * second one nobody chose. `--max-bytes` raises it and `--max-bytes 0` removes it, because a
  * bound with no way past it does not bound an approver's output, it withholds it: an operator
  * asked to approve a 200 KB document must be able to read the 200 KB document.
+ *
+ * **PER VALUE, AND DELIBERATELY NOT PER OUTPUT** (`TODO.md` §A.58(2)). The cap NARROWS §A.51b's
+ * worst case rather than removing it: `reads` repeats per gate, so a wide fan-out parked on
+ * gates over many channels still prints the sum, bounded by `gates × channels × maxBytes`
+ * instead of by `maxBytes`. A per-OUTPUT budget was the alternative and is rejected on what it
+ * does to the person reading. A budget spent across the document makes what an operator sees
+ * depend on how many OTHER gates happen to be parked and on the order channels are visited: the
+ * first gate in a fan-out prints whole and the last prints nothing, and the same gate shows
+ * different content as its neighbours resolve. This door's subject is ONE human deciding on ONE
+ * gate, and an approver must be able to read the gate they were asked about however many
+ * siblings are open — which the per-value cap gives, identically for every gate and predictable
+ * from the flag alone. What is accepted with it: a large total, every cut of which is named on
+ * stderr and listed in the row's own `readsTruncated`, with `--max-bytes` as the dial. The
+ * answer to "too many gates in one document" is selecting or paging gates — a different feature
+ * with a different flag, not a budget that silently decides which approver gets to read.
  *
  * ORDER IS RESOLVE, THEN REDACT, THEN BOUND, and each step depends on the one before.
  * REDACTING FIRST sweeps the HANDLE and not the value, and what that costs depends on the
@@ -5323,16 +5355,28 @@ async function gatesWithReads(
     }
     const resolved = await resolveHandles(ws, p, node, task, unresolved);
     const view = viewFor(resolved, spec.channels, task.branch, observedChannels(node));
-    rows.push({
-      ...g,
-      reads: Object.fromEntries(
-        view.visible.map((c) => [
-          c,
-          // THE SWEEP COVERS THE WHOLE VALUE HERE, and that argument is `GATE_READ_SWEEP`'s.
-          boundGateRead(redactChannelValue(spec.channels, c, view.get(c), GATE_READ_SWEEP), maxBytes, c, truncated),
-        ]),
-      ),
-    });
+    // WHICH OF THIS GATE'S VALUES THIS DOOR CUT, authored on the ROW rather than sniffed off the
+    // value. See `boundGateRead`: a channel value can be any JSON, so no key inside it is
+    // unspellable — but a channel value lives under `reads[c]` and cannot reach the row.
+    //
+    // THE SET IT APPEARS ON IS EXACTLY THE SET `reads` APPEARS ON — the rows built below this
+    // line — and it is absent from the three ways a gate reaches the output unchanged: the early
+    // `return gates` when the graph could not be resolved, and the two `continue` arms above (a
+    // MIRROR, and a node or task neither the graph nor this journal carries). `{}` is a statement
+    // — "every value here is whole" — and there is nothing for it to say about a row that prints
+    // no values; each of those three already says on stderr why it prints none.
+    const cut: Record<string, GateReadCut> = {};
+    const reads = Object.fromEntries(
+      view.visible.map((c) => [
+        c,
+        // THE SWEEP COVERS THE WHOLE VALUE HERE, and that argument is `GATE_READ_SWEEP`'s.
+        boundGateRead(redactChannelValue(spec.channels, c, view.get(c), GATE_READ_SWEEP), maxBytes, c, cut),
+      ]),
+    );
+    for (const [c, f] of Object.entries(cut)) {
+      truncated.push(`\`${c}\` is ${String(f.bytes)} bytes, showing ${String(f.shown)}`);
+    }
+    rows.push({ ...g, reads, readsTruncated: cut });
   }
   if (unexplained.length > 0) {
     process.stderr.write(
@@ -5357,8 +5401,9 @@ async function gatesWithReads(
   if (truncated.length > 0) {
     process.stderr.write(
       `! TRUNCATED — ${truncated.join("; ")}.\n` +
-        `  Each is marked in place with \`$truncated\`, which states the full size. Raise the cap with\n` +
-        `  \`--max-bytes <n>\`, or remove it entirely with \`--max-bytes 0\`.\n`,
+        `  Each is marked in place with \`$truncated\`, and the gate row's \`readsTruncated\` names exactly the\n` +
+        `  channels this door cut — read that, not the value's shape. Raise the cap with \`--max-bytes <n>\`,\n` +
+        `  or remove it entirely with \`--max-bytes 0\`.\n`,
     );
   }
   return rows;
@@ -5492,6 +5537,24 @@ function utf8Head(text: string, n: number): string {
 }
 
 /**
+ * ONE ENTRY OF A GATE ROW'S `readsTruncated` — the door's own answer to "was this value cut?".
+ *
+ * THE TWO NUMBERS AND NOT THE HEAD. `head` is CONTENT and belongs where the value was, so a
+ * console that renders `reads` and nothing else still shows it; `bytes` and `shown` are the
+ * FACTS about the cut, and they are what a reader needs before deciding whether to raise the
+ * cap. They duplicate the marker's own fields exactly as `payloadHandle` duplicates
+ * `PayloadRef`'s — one place produces both, so there is nothing for them to drift from.
+ *
+ * NOT EXPORTED, and it must not be: `loom gates` prints a JSON document, and the shape a
+ * stranger consumes is that document. Exporting a type for it would pin a row shape this file
+ * builds inline (`{...g, reads, readsTruncated}`) and that `GateSummary` does not own.
+ */
+interface GateReadCut {
+  readonly bytes: number;
+  readonly shown: number;
+}
+
+/**
  * ONE REDACTED CHANNEL VALUE, CAPPED, AND SAYING SO.
  *
  * WHY A MARKER AND NOT A SHORTER STRING. A value silently cut is a value an operator reads as
@@ -5500,15 +5563,29 @@ function utf8Head(text: string, n: number): string {
  * how much of it is here. `head` is the prefix rather than the tail because a document's first
  * bytes are what identify it.
  *
- * **AND IT IS RECOGNISED BY SHAPE, WHICH `payloadHandle` REFUSES TO BE.** `journal/payloads.ts`
- * says of `$payload`: *"NOTHING DECIDES 'IS THIS A HANDLE' BY LOOKING AT IT … sniffing the
- * shape would hand any node that can write a channel the ability to name a payload it never
- * produced"* — and answers it with the fold's authoritative `external` map. There is no
- * equivalent side channel for a rendering decision made at print time, so a channel whose real
- * value IS a `$truncated` wrapper, under the cap, is indistinguishable from a marker. Stated
- * rather than implied by the parallel: the direction of the confusion is a fabricated OMISSION
- * and never a disclosure, and the stderr notice names every channel actually cut. Closing it
- * properly means a field on the row rather than a wrapper on the value.
+ * **AND IT IS NO LONGER RECOGNISED BY SHAPE, WHICH `payloadHandle` REFUSES TO BE** (`TODO.md`
+ * §A.58(1)). `journal/payloads.ts` says of `$payload`: *"NOTHING DECIDES 'IS THIS A HANDLE' BY
+ * LOOKING AT IT … sniffing the shape would hand any node that can write a channel the ability
+ * to name a payload it never produced"* — and answers it with the fold's authoritative
+ * `external` map. This door now answers the same way, with `readsTruncated` on the gate ROW.
+ *
+ * NO KEY INSIDE THE VALUE COULD HAVE DONE IT. JSON object keys are arbitrary strings and
+ * channel values come from a JSON journal, so every key a marker could use is one a node can
+ * write; "a marker key a channel value cannot spell" is unreachable in-place. What a channel
+ * value CANNOT do is add a key to the row that carries it — `reads[c]` is as far up as it
+ * reaches — so the marker moved one level out instead of being renamed. Measured before:
+ * a channel whose input was `{"$truncated":{bytes:999999,shown:11,head:"…"}}` printed
+ * identically to a 200,002-byte value this door had cut, and only stderr — which `jq` never
+ * sees — said which was which.
+ *
+ * THE WRAPPER STAYS IN PLACE, and that is the same division `external` draws: the handle is
+ * left in `channels` and the authority is the map beside it. Dropping the value instead and
+ * moving `head` to the row would be this file's own "absence is not zero" trap one field over —
+ * `reads.body` missing reads as "this gate does not read `body`" — and would take the head away
+ * from every console that renders `reads` and nothing else.
+ *
+ * THE DIRECTION OF THE OLD CONFUSION, kept here because it is why this was residue rather than
+ * a defect: it fabricated an OMISSION and never a disclosure.
  *
  * MEASURED ON THE JSON FORM, which is the thing that actually reaches the terminal: this row
  * is printed through `JSON.stringify`, so a 100,000-character string is ~100,002 bytes on the
@@ -5531,7 +5608,7 @@ function utf8Head(text: string, n: number): string {
  * JSON journal; the `catch` is here so a future value shape fails at the printer that owns the
  * whole row rather than at a truncation helper that owns one field.
  */
-function boundGateRead(value: unknown, maxBytes: number, channel: string, truncated: string[]): unknown {
+function boundGateRead(value: unknown, maxBytes: number, channel: string, cut: Record<string, GateReadCut>): unknown {
   if (maxBytes === 0) return value;
   let text: string;
   try {
@@ -5551,7 +5628,7 @@ function boundGateRead(value: unknown, maxBytes: number, channel: string, trunca
   // saying nothing. Measured on the marker itself rather than on a constant, so the keys and
   // the numbers' own widths are counted.
   if (Buffer.byteLength(JSON.stringify(marker), "utf8") >= bytes) return value;
-  truncated.push(`\`${channel}\` is ${String(bytes)} bytes, showing ${String(shown)}`);
+  cut[channel] = { bytes, shown };
   return marker;
 }
 
@@ -5566,12 +5643,26 @@ function boundGateRead(value: unknown, maxBytes: number, channel: string, trunca
  * byte that nobody typed; `--max-bytes=` with an unset variable is `""` and `Number("")` is 0,
  * which here would silently mean "no cap at all" — the flag disregarded in the direction that
  * discloses. Both are refused.
+ *
+ * **DIGITS, NOT `Number()`'s LITERAL GRAMMAR** (`TODO.md` §A.58(3)). `Number` reads far more
+ * than a count and every extra form is `Number.isInteger`, so the range check below let all of
+ * these through, silently, as caps nobody typed — measured: `--max-bytes=0x10` → 16,
+ * `--max-bytes=1e3` → 1000, `--max-bytes=0b11` → 3, `--max-bytes=" 24 "` → 24. None of them is
+ * a disclosure (they are all SMALLER caps than the digits suggest, so they fail in the
+ * withholding direction), which is why this was residue rather than a defect — but
+ * `--max-bytes 1e9` meaning a billion while `--max-bytes 1e30` is refused by
+ * `GATE_READ_MAX_CAP` is a boundary with no author, and a byte count is a run of digits. So
+ * `/^\d+$/` is the whole grammar.
+ *
+ * THAT REGEX IS ALSO WHAT REFUSES A NEGATIVE, which is why there is no `n < 0` arm: `"-5"` does
+ * not match, becomes `NaN`, and fails `Number.isInteger`. The message still names 0 as the
+ * floor because that is the range it accepts, not because a second check enforces it.
  */
 function gateReadBound(args: Args): number {
   const raw = args.flags["max-bytes"];
   if (raw === undefined) return GATE_READ_MAX_BYTES;
-  const n = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
-  if (!Number.isInteger(n) || n < 0 || n > GATE_READ_MAX_CAP) {
+  const n = typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n > GATE_READ_MAX_CAP) {
     throw err.validation(
       CODES.E_CONFIG_INVALID,
       `--max-bytes must be a whole number of bytes from 0 to ${String(GATE_READ_MAX_CAP)}, where 0 means no limit — not ${

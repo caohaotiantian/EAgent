@@ -213,7 +213,11 @@ declared channels that have a value, recomputed from the graph the journal's has
 anything the graph classified blanked to `[secret]` (§A.43, `da86076`). A payload handle is
 resolved to the text the console shows, and each value is capped at 64 KiB with a
 `{"$truncated":{bytes,shown,head}}` marker stating the full size — `--max-bytes N` raises the cap
-and `--max-bytes 0` removes it (§A.51, `5d2053b`). The `contentDigest` stays
+and `--max-bytes 0` removes it (§A.51, `5d2053b`). **Ask the ROW which values were cut, never the
+value's shape**: a channel can hold that shape itself, so the gate row carries `readsTruncated`,
+naming exactly the channels this door truncated and empty when it truncated none (§A.58,
+`journal/payloads.ts` refuses shape-recognition for `$payload` for the same reason). The
+`contentDigest` stays
 beside it, because it is the BINDING `loom approve` later checks the graph against and never was a
 summary anybody could recognise.
 [`docs/workflow-port-2026-09-09.md`](docs/workflow-port-2026-09-09.md) is the full transcript and the
