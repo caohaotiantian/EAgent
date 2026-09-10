@@ -19,11 +19,11 @@ port is the thing that pulls on them, which was the argument for writing it down
 | # | closed by | what happens now |
 |---|---|---|
 | **F2** | `77c245a` (+ `468984b` in the example) | `GRAPH010` exempts a channel that never leaves one fan-out branch, so `raw` is `{"type":"string","reduce":"replace"}` and `triage-classify.js` reads a string. The `join("\n")` and the comment explaining a one-element array are deleted |
-| **F3** | `da86076` | `loom gates <runId>` carries a `reads` field — the gate node's declared channels and their current values, recomputed from the graph the journal's hash names, with a channel the graph classified blanked to `[secret]`. The digest stays beside it as the binding it always was |
+| **F3** | `da86076` | `loom gates <runId>` carries a `reads` field — the gate node's declared channels THAT HAVE A VALUE (it is built from `view.visible`, so an unwritten one is not a key), recomputed from the graph the journal's hash names, with a channel the graph classified blanked to `[secret]`. The digest stays beside it as the binding it always was |
 | **F4** | `175cdb3` | the gate hint is on **stderr**, beside the run-id hint, so `loom run … 2>/dev/null \| jq .status` parses on the gate path too. `examples-triage.test.ts`'s `summary()` no longer slices stdout — it parses the whole of it, which is now the assertion that nothing else is printed there |
 | **F5** | `52d4b43` | `--help` names all ten registrar members — `{models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}` — and says "So 9 things need no fork", which is README's `--extension-module` row count and not four |
 | **F7** | `2309d3a` | `README.md:177` reads *"Its §§1–4 and §8 work offline with no key"*, and names §7 separately |
-| **F8** | `f7f74d5` | a body returns `{refuse: {reason}}` and the engine raises `validation`/`E_FUNCTION_REFUSED` on its behalf — never retried, whatever the node's `retry` policy says. `triage-plan.js` uses it for both of its refusals |
+| **F8** | `f7f74d5` | a body returns `{refuse: {reason}}` and the engine raises `validation`/`E_FUNCTION_REFUSED` on its behalf — never retried, whatever the node's `retry` policy says. `triage-plan.js` uses it for all four of its refusals: nothing matched, the listing was truncated, no readable fan-out width, and more shards than that width |
 
 And one thing the port ASKED FOR that is not a friction entry: **`ctx.node`** (`c2360be`). A body is
 handed its own node as the graph declared it — `{id, type, reads, writes, out}` — so §4's
@@ -428,18 +428,19 @@ names the count and the cap instead.
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 12 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-Twelve tests: parks-with-nothing-written (and the report the gate now SHOWS, out of `loom gates`'s
+Fifteen tests: parks-with-nothing-written (and the report the gate now SHOWS, out of `loom gates`'s
 `reads`), the approval and the exact ranking, the refused approver (pinned to
 `E_GATE_NOT_AUTHORIZED`, not merely to a non-zero exit), cancel, replay, the empty-pattern refusal
 (pinned to `E_FUNCTION_REFUSED`/`validation`), the four a fresh review added — a CRLF shard, a shard
 count over the fan-out ceiling, a shard with no failures still being counted as read, and a failure
-with no YAML block not swallowing the next one — and the two the ceiling's move into the graph
-needed: the width EDITED in the graph alone and the refusal naming the new number, and the arm where
-the body can find no width at all and refuses rather than picking one. `examples-run.test.ts` picks the new graph up without being
+with no YAML block not swallowing the next one — and five the ceiling's move into the graph needed:
+the width EDITED in the graph alone with the refusal naming the new number, two fan-outs over one
+channel where the TIGHTEST must bind, a `maxWidth` that is not a number, a listing `fs.glob`
+truncated, and no readable width at all. `examples-run.test.ts` picks the new graph up without being
 edited — its set is the directory — so the compile and resource-reachability halves were already
 covered.
 
@@ -778,10 +779,11 @@ better than the documentation implies.
   the operator writes, not something this port should invent.
 - ~~**`SHARD_CEILING` is duplicated**~~ — **the seam was built, `c2360be`.** A body's `ctx` now
   carries `ctx.node`, the node as its graph declared it, with `out` reducing each outgoing edge to
-  `{id, kind, over?, as?, maxWidth?, maxIterations?}`. `triage-plan.js` reads the `fan` edge's
-  `maxWidth` off it, the constant is deleted, and the test that pinned the two together — a patch
-  on a seam rather than the seam — is now a test that the body carries no ceiling at all. Where the
-  edge is missing the body refuses rather than guessing, which is the third refusal it has.
+  `{id, kind, over?, as?, maxWidth?, maxIterations?}`. `triage-plan.js` reads the `fanout` edges
+  over `shards` off it, takes the SMALLEST `maxWidth` and names that edge back; the constant is
+  deleted, and the test that pinned the two together — a patch on a seam rather than the seam — is
+  now a test that EDITS the graph's width and requires the refusal to follow it. Where no readable
+  width is there the body refuses rather than guessing, which is one of the four refusals it has.
 - **The classifier's bucket list is fixed in the body**, so adding a signature means editing the
   file. That is correct for an example and wrong for a product: the natural next step is the bucket
   table as a `resources/` document the body reads, which needs no new mechanism.

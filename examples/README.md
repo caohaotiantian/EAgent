@@ -76,11 +76,18 @@ valid; `module.exports = function (…) {…};` is not, and fails as in §4. A b
 a **compile error** for the graph that names it, refused before a run id is minted.
 
 The body gets `view.require(c)` / `view.get(c)` / `view.visible` for the channels the node declared,
-plus `ctx.taskId`, `ctx.now()`, `ctx.signal`, `ctx.node` — not `Date`, `Intl`, `fetch`, `require` or
+plus `ctx.taskId`, `ctx.now()`, `ctx.signal`, `ctx.node` — not `Intl`, `fetch`, `require` or
 `process`. `Math.random()` works and is seeded from a journaled draw, so a replay draws the identical
 stream. **`ctx.effects` is present but refuses inside a sandboxed body** (`E_EFFECT_UNAVAILABLE`): the
 body runs synchronously inside a `vm` and cannot await a host round trip. Put the call on a `tool` node
 (§3), or register the body with `FunctionRegistry.register`.
+
+**`Date` IS here, bound to `ctx.now()`** — `new Date()`, `Date()` and `Date.now()` all answer the
+task's journaled lease timestamp, so a replay computes the same number and nothing new is written;
+every explicit-argument form (`new Date(0)`, `Date.parse`, `Date.UTC`) is the real one, because none
+of them reads a clock. `Intl` stays absent and that is not an oversight: `new
+Intl.DateTimeFormat(…).format()` with no argument reads the WALL clock, which is the second door the
+same rule has to close. A hook body (§3) gets neither — `HookContext` has no `now` to bind `Date` to.
 
 **`ctx.node` is this node as its GRAPH declared it** — `{id, type, reads, writes, out}`, frozen, with
 `out` reducing each outgoing edge to `{id, kind, over?, as?, maxWidth?, maxIterations?}`. It is there
@@ -95,9 +102,10 @@ graph is reported as an absent field rather than one holding `undefined`.
 **A body fails on purpose by RETURNING a verdict, not by throwing.** `{retry: {reason}}` is
 `unavailable`/`E_FUNCTION_UNAVAILABLE` and the node's `retry` policy may grant another attempt;
 `{refuse: {reason}}` is `validation`/`E_FUNCTION_REFUSED` and is never retried, however generous
-that policy is, because a second attempt on the same inputs refuses identically. Both are exclusive
-with `writes` and with each other. A `throw` is neither and is not the way to decline work: it
-normalizes to `internal`/`E_INTERNAL`, the code a genuine bug in the body produces.
+that policy is, because a second attempt on the same inputs refuses identically. Each is exclusive
+with `writes`, with `take` and with the other — `{writes, take}` together is the ordinary shape, a
+verdict beside either is refused as `E_RESOURCE_INVALID`. A `throw` is neither and is not the way to
+decline work: it normalizes to `internal`/`E_INTERNAL`, the code a genuine bug in the body produces.
 
 ## 3 · A `hook` body — `resources/hook/no-secrets.js`
 
@@ -297,8 +305,10 @@ this one runs offline and means what it says, because there was never a model in
   compiler goes back to `GRAPH010_CONCURRENT_WRITE`. `counts` in §1 is one of those: `gather` and
   `summarise` both read it after the join, so it needs `append_ordered`.
 - **`loom gates <runId>` shows the report, beside the `contentDigest`.** Its `reads` field is the
-  gate node's declared channels with their current values — `{"report": {…}}` here, since `approve`
-  declares `"reads": ["report"]` — recomputed from the graph the journal's hash names. The digest
+  gate node's declared channels **that have a value** — `{"report": {…}}` here, since `approve`
+  declares `"reads": ["report"]` — recomputed from the graph the journal's hash names. A declared
+  channel nothing has written yet is simply not a key, exactly as `view.visible` does not carry it;
+  read `reads` as "what the approver is being shown", not as the node's declaration. The digest
   stays and is a different thing: a BINDING to what the approver was shown, which `loom approve`
   re-derives and checks, not a summary anybody could read. A channel the graph classified
   (`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
@@ -315,17 +325,24 @@ this one runs offline and means what it says, because there was never a model in
 causes, one of them (`missing-dependency`) spanning two files, which is the case a per-file reading
 of the log hides.
 
-**It refuses at BOTH ends of the shard count, and for one reason.** A pattern matching nothing
-would fan out zero branches and report "0 failing tests" — indistinguishable from a green suite. A
-pattern matching more than the fan-out's `maxWidth` would silently CLAMP: 30 shards at a width of
-24 runs 24 branches and says nothing about the other six, in a document a person is about to
-approve. `triage-plan.js` returns `{refuse: {reason}}` on both, naming the count and the cap, so the
-run fails as `validation`/`E_FUNCTION_REFUSED` — the class that says the graph declined, not the
-`E_INTERNAL` a crash in the body wears. **The cap is not written in the body**: it reads the `fan`
-edge's `maxWidth` off `ctx.node.out` (§2), so `graphs/triage-failures.json` is the number's only
-home and raising it is one edit. Where that edge is missing the body refuses too, rather than
-guessing a width. `packages/core/test/examples-triage.test.ts` drives one shard past the graph's
-own `maxWidth`, and asserts the body carries no ceiling of its own.
+**It refuses FOUR times, and every one is the same defect wearing a different hat**: evidence going
+missing from a document a person is about to approve, with nothing saying so.
+
+- **Nothing matched** would fan out zero branches and report "0 failing tests" — indistinguishable
+  from a green suite.
+- **More shards than the fan-out's `maxWidth`** would silently CLAMP: 30 shards at a width of 24
+  runs 24 branches and says nothing about the other six.
+- **A truncated listing.** `fs.glob` caps at 100 paths and says so in a final `… ` line; triaging
+  the 100 and dropping the marker is the clamp one layer up, and the width check cannot see it.
+- **No readable fan-out width**, which is the fail-closed arm of the read below.
+
+Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` — the class
+that says the graph declined, not the `E_INTERNAL` a crash in the body wears — and each names the
+numbers it saw. **The cap is not written in the body**: it reads `ctx.node.out` (§2) for the `fanout`
+edges over `shards`, takes the SMALLEST `maxWidth` of them and names that edge, so
+`graphs/triage-failures.json` is the number's only home and raising it is one edit.
+`packages/core/test/examples-triage.test.ts` drives all four arms, and pins the read by EDITING the
+graph's width and requiring the refusal to name the new number.
 
 **Split your shards on `/\r?\n/`, not on `"\n"`, in any body you write like this one.** Every
 pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without `/m` matches only

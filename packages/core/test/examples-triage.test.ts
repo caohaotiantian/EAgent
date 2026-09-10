@@ -429,6 +429,128 @@ test("the ceiling is whatever the GRAPH says — move maxWidth and the refusal m
   }
 });
 
+test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names that edge", async () => {
+  // A REVIEWER'S REPRO, KEPT. The first version of the read was `out.find(…)` — first match wins —
+  // so a graph spreading `shards` down a wide fan-out and a narrow one validated against the wide
+  // one, and the narrow branch clamped in silence. Measured then: 3 shards, widths 24 and 2, run
+  // `succeeded` with one branch seeing three paths and the other two, nothing said.
+  //
+  // The rule is "every matching edge, tightest wins", and the message names the edge it came from —
+  // an operator told to raise a width on an edge that was never the cap changes the wrong number.
+  const ws = workspace(["resources"]);
+  try {
+    mkdirSync(join(ws.dir, "graphs"));
+    const fn = (id: string, reads: string[], writes: string[], ref: string): Record<string, unknown> => ({
+      id,
+      type: "function",
+      reads,
+      writes,
+      function: { ref },
+    });
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "two-fanouts", project: "examples-test", version: 1 },
+      policy: { posture: "on", expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 24, maxLoopIterations: 1 } },
+      channels: {
+        found: { type: "string", reduce: "replace" },
+        shards: { type: "array", reduce: "replace" },
+        wide: { type: "string", reduce: "replace" },
+        narrow: { type: "string", reduce: "replace" },
+        seenWide: { type: "array", reduce: "append_ordered" },
+        seenNarrow: { type: "array", reduce: "append_ordered" },
+      },
+      inputs: ["found"],
+      outputs: ["seenWide", "seenNarrow"],
+      nodes: [
+        fn("plan", ["found"], ["shards"], "function/triage-plan@stable"),
+        fn("a", ["wide"], ["seenWide"], "function/triage-classify@stable"),
+        fn("b", ["narrow"], ["seenNarrow"], "function/triage-classify@stable"),
+        { id: "joinA", type: "join", reads: ["seenWide"], writes: ["seenWide"], join: { branches: ["a"], mode: "all", onBranchError: "fail" } },
+        { id: "joinB", type: "join", reads: ["seenNarrow"], writes: ["seenNarrow"], join: { branches: ["b"], mode: "all", onBranchError: "fail" } },
+      ],
+      edges: [
+        { id: "fan-wide", from: "plan", to: "a", kind: "fanout", over: "shards", as: "wide", maxWidth: 9 },
+        { id: "fan-narrow", from: "plan", to: "b", kind: "fanout", over: "shards", as: "narrow", maxWidth: 2 },
+        { id: "collect-a", from: "a", to: "joinA", kind: "join" },
+        { id: "collect-b", from: "b", to: "joinB", kind: "join" },
+      ],
+    };
+    const graph = join(ws.dir, "graphs", "two-fanouts.json");
+    writeFileSync(graph, JSON.stringify(spec, null, 2));
+
+    // Three paths: under the wide edge's 9, over the narrow edge's 2.
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt\nc.txt" })]);
+    assert.notEqual(r.code, 0, `the tightest fan-out must bind:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /fans out at most 2 /, r.out);
+    assert.match(String(error["message"]), /raise maxWidth on the "fan-narrow" edge/, r.out);
+    assert.doesNotMatch(String(error["message"]), /at most 9/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a fan-out width that is not a NUMBER is unreadable, not skipped", async () => {
+  // `maxWidth: "24"` compiles (`GRAPH007` asks whether the field is there, not what type it is) and
+  // the executor would coerce it — `slice(0, "24")` works. So the body is the only thing between a
+  // typo'd width and a clamp, and "skip the edge I cannot read" would leave zero edges and, before
+  // this, a body that refused for the wrong reason. Counted as unreadable so it fails CLOSED.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: unknown }[] };
+    raw.edges.find((e) => e.id === "fan")!.maxWidth = "24";
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+    mkdirSync(join(ws.dir, "reports"));
+    writeFileSync(join(ws.dir, "reports", "one.txt"), readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8"));
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `a non-numeric width must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /declares 1 fanout edge\(s\) over "shards", of which 0 state a numeric maxWidth/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a TRUNCATED file listing refuses, rather than triaging the part that fits", async () => {
+  // `fs.glob` caps at 100 paths and appends a `… (truncated at …)` line. The body used to filter
+  // that line out with the blanks, so at any width ≥ 100 it would have triaged 100 shards and the
+  // report would have called them the whole evidence — the silent clamp one layer above the one
+  // this body was written for, and invisible to the ceiling check because 100 < the width.
+  //
+  // Driven at a width that makes it reachable: `maxWidth` and `maxFanout` raised to 128, 101 files
+  // on disk. `GRAPH018_NODE_COUNT` warns about the worst-case task count and still compiles.
+  const ws = workspace(["graphs", "resources"]);
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as {
+      policy: { expansion: { maxFanout: number; maxNodes: number } };
+      edges: { id: string; maxWidth?: number }[];
+    };
+    raw.policy.expansion.maxFanout = 128;
+    raw.edges.find((e) => e.id === "fan")!.maxWidth = 128;
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+
+    mkdirSync(join(ws.dir, "reports"));
+    const one = readFileSync(join(EXAMPLES, "reports", "unit-shard-2.txt"), "utf8");
+    for (let i = 0; i < 101; i += 1) writeFileSync(join(ws.dir, "reports", `shard-${String(i).padStart(3, "0")}.txt`), one);
+
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, `a truncated listing must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    // The refusal quotes the marker back, so the operator sees the cap that produced it rather
+    // than a count they would have to work out.
+    assert.match(String(error["message"]), /listing was TRUNCATED, so these 100 paths are not all of them/, r.out);
+    assert.match(String(error["message"]), /truncated at 100 files/, r.out);
+    assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
+  } finally {
+    ws.dispose();
+  }
+});
+
 test("the body REFUSES when it cannot read a width, instead of picking one", async () => {
   // THE ARM THE READ RESTS ON. `triage-plan.js` no longer carries the ceiling, so the case that
   // used to be impossible — the number is not there — is now reachable, and it is the one where

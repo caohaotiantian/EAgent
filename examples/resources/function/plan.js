@@ -5,7 +5,9 @@
  * and no wrapper: the loader evaluates `(<this file>)` and keeps the completion value, so a
  * `module.exports =` line is a syntax error before your code ever runs.
  *
- * Signature: `(view, ctx) => { writes? } | { take? } | { retry: {reason} } | { refuse: {reason} }`.
+ * Signature: `(view, ctx) => { writes?, take? }` — or, INSTEAD of those, one verdict:
+ * `{ retry: {reason} }` or `{ refuse: {reason} }`. `writes` and `take` go together; a verdict
+ * beside either, or beside the other verdict, is refused as `E_RESOURCE_INVALID`.
  *   view.require(c)  the value of channel `c`, throwing if the node did not declare it
  *   view.get(c)      the same, `undefined` instead of throwing
  *   view.visible     the channels this node declared it reads
@@ -24,8 +26,13 @@
  * because a second attempt on the same inputs would refuse identically. A `throw` is neither: it
  * normalizes to `internal`/`E_INTERNAL`, the code a genuine BUG in the body produces.
  *
- * What is NOT here: `Date`, `Intl`, `fetch`, `require`, `process`. A body that could read a
- * second clock is a body no replay reproduces. `Math.random()` works and is seeded from a
+ * What is NOT here: `Intl`, `fetch`, `require`, `process`. A body that could read a second clock
+ * is a body no replay reproduces — which is why `Intl` is absent even though `Date` is not:
+ * `new Intl.DateTimeFormat(…).format()` with no argument reads the WALL clock.
+ *
+ * `Date` IS here and is BOUND TO `ctx.now()`: `new Date()`, `Date()` and `Date.now()` all answer
+ * the task's journaled lease timestamp, while `new Date(0)`, `Date.parse` and `Date.UTC` are the
+ * real ones, because none of those reads a clock. `Math.random()` works too and is seeded from a
  * journaled draw, so the stream is the same on replay.
  */
 function (view) {
