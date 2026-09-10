@@ -152,6 +152,7 @@ import {
   ModelRegistry,
   ToolRegistry,
   type FunctionBody,
+  type FunctionNodeShape,
   type FunctionOutcome,
   type Message,
   type ModelAdapter,
@@ -1298,6 +1299,46 @@ function retryRequested(out: FunctionOutcome, ref: string, nodeId: NodeId): void
  * clock, the outcome shape, `take`, and whichever one comes next. `functions.require` has exactly
  * two callers — `#runFunction` and `#runEvaluator`'s `assertion` arm.
  */
+/**
+ * The node a body is running on, reduced to what it may see. TODO A.44, and see
+ * `FunctionNodeShape` in `run/registry.ts` for the membership rule and every exclusion.
+ *
+ * BUILT FRESH PER CALL AND NOT CACHED. It is a handful of string copies off a frozen spec, once
+ * per task, against a task that is about to enter a `vm`; a cache keyed by node would be a `Map`
+ * on the Engine, which is the shape CLAUDE.md's restart lens asks about, for a saving nobody
+ * measured. Per call it is a pure function of the compiled graph and there is nothing to empty.
+ *
+ * FROZEN THREE DEEP, because `Object.freeze` is shallow and the two levels below it are an array
+ * and its members. It changes nothing the engine reads — nothing reads this back — and everything
+ * a hand-registered body could otherwise do to the object it was handed while a sandboxed one,
+ * working on a `JSON.parse` copy, could not. Same object, same answer, both paths.
+ *
+ * CONDITIONAL SPREAD, NOT `maxWidth: e.maxWidth`. Only JSON crosses into the realm and
+ * `JSON.stringify` drops undefined-valued keys, so writing them would make `"maxWidth" in edge`
+ * true for a hand-registered body and false for a resource-loaded one — the two paths answering
+ * differently about the same graph, which is the one thing this object must never do.
+ */
+function nodeShapeOf(node: NodeSpec, outbound: readonly EdgeSpec[]): FunctionNodeShape {
+  return Object.freeze({
+    id: String(node.id),
+    type: node.type,
+    reads: Object.freeze([...(node.reads ?? [])]),
+    writes: Object.freeze([...(node.writes ?? [])]),
+    out: Object.freeze(
+      outbound.map((e) =>
+        Object.freeze({
+          id: String(e.id),
+          kind: e.kind,
+          ...(e.over === undefined ? {} : { over: e.over }),
+          ...(e.as === undefined ? {} : { as: e.as }),
+          ...(e.maxWidth === undefined ? {} : { maxWidth: e.maxWidth }),
+          ...(e.maxIterations === undefined ? {} : { maxIterations: e.maxIterations }),
+        }),
+      ),
+    ),
+  });
+}
+
 function refusalDeclared(out: FunctionOutcome, ref: string, nodeId: NodeId): void {
   if (out.refuse === undefined) return;
   const why = typeof out.refuse.reason === "string" && out.refuse.reason.length > 0 ? out.refuse.reason : "no reason given";
@@ -7078,6 +7119,9 @@ export class Engine {
       signal: ctx.abort.signal,
       now: this.#bodyClock(p, w.task.taskId),
       seed: await this.#randomSeedEffect(ctx, p, w),
+      // BOTH ARMS, IN THE SAME COMMIT — the fifth time this contract has changed, and the first
+      // four each landed here a commit before `#runEvaluator`. See `nodeShapeOf`.
+      node: nodeShapeOf(w.node, ctx.index.outbound.get(w.node.id) ?? []),
       ...(() => {
         const e = this.#effectsFor(ctx, p, w);
         return e === undefined ? {} : { effects: e };
@@ -7292,6 +7336,11 @@ export class Engine {
           // one field over, and this is the second time this pair has needed the same change.
           now: this.#bodyClock(p, w.task.taskId),
           seed: await this.#randomSeedEffect(ctx, p, w),
+          // THE SECOND ARM, and it is here because of the four times it was not. An `assertion`
+          // evaluator's `ref` IS a function body, so it gets the same `ctx` — and an assertion
+          // that wants to know the width of the fan-out below it is asking the same question a
+          // `function` node asks.
+          node: nodeShapeOf(w.node, ctx.index.outbound.get(w.node.id) ?? []),
         })) as unknown,
         ev.ref,
         w.node.id,

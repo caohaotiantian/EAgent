@@ -13,6 +13,7 @@ import { CLASS_DEFAULT_POSTURE, type IrreversibilityClass } from "../vocab.ts";
 import { CODES, err, type LoomError } from "../errors.ts";
 import type { TaskId } from "../ids.ts";
 import type { JSONSchema } from "../schema.ts";
+import type { EdgeKind, NodeType } from "../graph/spec.ts";
 import type { StateView } from "../state/channels.ts";
 import type { ToolManifestLite } from "../graph/validate.ts";
 import type { UsageRecord } from "../vocab.ts";
@@ -488,6 +489,86 @@ export class ToolRegistry {
 // Functions — deterministic node bodies
 // ---------------------------------------------------------------------------
 
+/**
+ * WHAT A BODY MAY KNOW ABOUT THE NODE IT IS RUNNING ON. TODO A.44.
+ *
+ * A body was handed channel values and nothing about the graph that called it, so a bound the
+ * graph already declares had to be spelled a second time in the body. The shipped example is the
+ * repro: `examples/resources/function/triage-plan.js` carries `const SHARD_CEILING = 24` beside a
+ * `fanout` edge declaring `maxWidth: 24`, and a comment saying the two "MUST TRACK" each other.
+ * A fan-out CLAMPS silently — 30 shards at a width of 24 runs 24 branches and nothing in the run,
+ * the trace or the report says the other six were never read — so a body that wants to REFUSE
+ * above the width has to hard-code the number, and the duplicate is load-bearing.
+ *
+ * IT DECIDES NOTHING, WHICH IS THE CONSTRAINT THE ROW SET. It is derived from the compiled
+ * `RunGraph.spec` alone — no clock, no draw, no projection — so a replay re-executing the body
+ * against the same `graphHash` computes the identical object, and nothing is journaled for it.
+ * The engine reads nothing back off it: `NodeOutcome` is `{status, writes, usage, take}` and a
+ * body's only influence on scheduling is `take`, which it already had.
+ *
+ * ── `out`, AND THE RULE ITS MEMBERS FOLLOW ──────────────────────────────────
+ *
+ * **The outgoing-edge fields that BOUND WHAT THIS NODE'S OWN OUTPUT CAN PRODUCE.** `maxWidth` and
+ * `maxIterations` are the two real ones — a fan-out width and a loop ceiling, each REQUIRED by
+ * `graph/validate.ts` (`GRAPH007_NO_MAX_WIDTH`, `GRAPH006_UNBOUNDED_LOOP`) and each read at run
+ * time to cut this node's output short. `over` and `as` name the CHANNEL the fan-out draws from
+ * and the one each branch receives, which is how a body finds the right edge among several.
+ *
+ * WHAT IS OUT, and why, since a named set needs its boundary. `to`, `branches` and `compensates`
+ * name OTHER nodes — topology, not this node's shape. `when` and `until` are expressions the
+ * EXECUTOR evaluates, and handing a body the source text of a decision it does not make invites
+ * it to re-implement one. (`over` is a channel NAME rather than an expression, which is the line
+ * between it and `when`.) `codes` is an `error`-edge filter, selected by a failure rather than by
+ * a choice. `from` is this node.
+ *
+ * `id` IS HERE BECAUSE `take` ALREADY NAMES EDGE IDS — and `out` is the node's DECLARED shape,
+ * NOT "the edges you may take". Those differ: `run/engine.ts`'s `TAKEABLE_EDGE_KINDS` is
+ * `seq`, `conditional`, `fanout`, `join`, `loop`, so an `error` or `compensation` edge appears
+ * here and is refused if named in a `take`. `kind` is on every member precisely so a body can
+ * tell which is which, and stating the difference is cheaper than filtering it away — a body
+ * that wants to know it HAS a rescue arm is asking a fair question.
+ *
+ * `reads` IS THE DECLARED SET, NOT `view.visible`. `makeStateView` builds `visible` out of the
+ * channels that actually hold a value, so a channel declared and unset appears in one and not
+ * the other. That difference is the only reason this field is not redundant.
+ *
+ * NO `timeoutMs`, DELIBERATELY, AND IT IS THE ONE FIELD THAT WAS CUT. `NodeSpec.timeoutMs` is not
+ * the bound a body actually runs under: `graph/compile.ts`'s `effectiveTimeout` defaults a
+ * `function` node with none to `DEFAULT_NODE_TIMEOUT_MS`, and a SANDBOXED body with none keeps
+ * `FunctionLoaderOptions.callTimeoutMs` (30 s) inside the realm — so a body reading `undefined`
+ * here and concluding "I am unbounded" would be wrong twice over. Every other field on this
+ * object is the number the runtime actually uses; a field that is not does not belong beside
+ * them, and there is no named need for it.
+ *
+ * `type` RANGES OVER TWO VALUES IN PRACTICE — `"function"` and `"evaluator"` — because those are
+ * the only node types `Engine.#dispatchBody` runs a `FunctionBody` for. It is typed as the full
+ * `NodeType` because that is what it is copied from, not because a third is reachable.
+ */
+export interface FunctionNodeShape {
+  readonly id: string;
+  readonly type: NodeType;
+  /** The channels the node DECLARED it reads — a superset of `view.visible`. See above. */
+  readonly reads: readonly string[];
+  readonly writes: readonly string[];
+  /**
+   * This node's outgoing edges, reduced to the fields above.
+   *
+   * AN ABSENT FIELD IS AN ABSENT KEY, on both paths. The host builder uses a conditional spread
+   * rather than writing `maxWidth: undefined`, because only JSON crosses into a sandboxed body's
+   * realm and `JSON.stringify` DROPS undefined-valued keys — so writing them would make
+   * `"maxWidth" in edge` and `Object.keys(edge).length` answer differently for a hand-registered
+   * body than for a resource-loaded one, which is the divergence this whole object must not have.
+   */
+  readonly out: readonly {
+    readonly id: string;
+    readonly kind: EdgeKind;
+    readonly over?: string;
+    readonly as?: string;
+    readonly maxWidth?: number;
+    readonly maxIterations?: number;
+  }[];
+}
+
 export interface FunctionContext {
   readonly taskId: TaskId;
   readonly signal: AbortSignal;
@@ -508,8 +589,12 @@ export interface FunctionContext {
    * The seed for the body's `Math.random`, drawn ONCE per task and journaled as an effect.
    *
    * NOT VISIBLE TO THE BODY. The loader's bridge consumes this to reseed `Math.random`
-   * inside the realm before `__loomBody` is entered; the `ctx` a body receives still has
-   * exactly `{taskId, signal, now}` and nothing else, which is what invariant 4 states.
+   * inside the realm before `__loomBody` is entered, and the `ctx` a body receives is
+   * `{taskId, signal, now, node}` — the seed is not on it and must not be, because a seed a
+   * body can read is a value it can record or branch on. `node` joined that set for TODO A.44
+   * and is spec-derived, so invariant 4 is untouched by it; `seed` staying off is the part
+   * invariant 4 is actually about, and `test/resources/functions.test.ts` asserts the exact key
+   * set for exactly that reason.
    *
    * WHY A SEED AND NOT A RECORDED VALUE PER CALL. A body runs synchronously inside
    * `vm.runInContext` under a per-call timeout, so it cannot await a journal append between
@@ -547,6 +632,22 @@ export interface FunctionContext {
    * no-op.
    */
   readonly effects?: Readonly<Record<string, (args: unknown) => Promise<ToolResult>>>;
+  /**
+   * The node this body is running on, as its GRAPH declared it. See `FunctionNodeShape`.
+   *
+   * OPTIONAL IN THE TYPE, SUPPLIED BY BOTH ENGINE CALLERS — the shape `seed` and `effects`
+   * already take, and for the same reason: a `FunctionBody` is an ordinary function an embedder
+   * may call by hand, and making this required would be a typecheck sweep over every hand-caller
+   * to hand them a graph they do not have. A body reaching for `ctx.node` without one gets
+   * `undefined` rather than a lie.
+   *
+   * FROZEN, INCLUDING `out` AND EACH OF ITS MEMBERS, on the host side — `Object.freeze` is
+   * shallow, so one call would leave the edges writable. The realm side is not frozen and cannot
+   * usefully be: a sandboxed body's `ctx.node` is a fresh `JSON.parse` of that call's payload, so
+   * a body mutating it changes a copy that is discarded when the call returns. Neither path lets
+   * a mutation reach the engine, which never reads this object back.
+   */
+  readonly node?: FunctionNodeShape;
 }
 
 export interface FunctionOutcome {

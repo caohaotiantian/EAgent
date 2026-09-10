@@ -585,14 +585,30 @@ test("…and the SEEDED draw still works for a body that reads `Math.random` whe
   assert.ok(first > 0 && first < 1, `and it must still look like a draw: got ${String(first)}`);
 });
 
-test("the seed is NOT visible to the body — ctx stays {taskId, now, signal}", () => {
+test("the seed is NOT visible to the body — the exact ctx key set, asserted", () => {
   // Invariant 4 states what a body is handed, and the seed is consumed by the bridge on the way
   // in. Widening `ctx` would make the seed a value a body could read, record, or branch on.
+  //
+  // THE SET MOVED ONCE AND THE ASSERTION MOVED WITH IT, RATHER THAN BEING RELAXED. This read
+  // `"now,signal,taskId"` until TODO A.44 put the node's declared shape on `ctx`. `node` is
+  // spec-derived — no clock, no draw — so invariant 4 is untouched by it, and the thing this
+  // test is NAMED for is unchanged: `seed` is still absent. Loosening the equality to a
+  // `.includes` would have deleted the guard rather than moving it, so the next widening still
+  // has to come here and argue for itself.
   const keys = `(view, ctx) => ({ writes: { doubled: Object.keys(ctx).sort().join(",") } })`;
   const { store } = storeWith(keys, "keys");
   const body = createFunctionLoader({ store }).load("function/keys@stable")!;
-  const out = body(view({ amount: 0 }), { ...ctx(), seed: 1 }) as { writes: { doubled: string } };
-  assert.equal(out.writes.doubled, "now,signal,taskId");
+
+  const shape = { id: "n", type: "function", reads: [], writes: [], out: [] } as never;
+  const withNode = body(view({ amount: 0 }), { ...ctx(), seed: 1, node: shape }) as { writes: { doubled: string } };
+  assert.equal(withNode.writes.doubled, "node,now,signal,taskId");
+  assert.doesNotMatch(withNode.writes.doubled, /seed/, "the field this test is named for");
+
+  // AND A HAND-CALLER WHO PASSES NO NODE GETS NO KEY, rather than one holding `undefined`. Both
+  // engine callers supply it; this is the only other way to invoke a `FunctionBody`, and an
+  // absent graph is honestly reported as an absent field.
+  const without = body(view({ amount: 0 }), { ...ctx(), seed: 1 }) as { writes: { doubled: string } };
+  assert.equal(without.writes.doubled, "now,signal,taskId");
 });
 
 test("A SANDBOXED BODY IS TOLD WHY IT CANNOT INVOKE A DECLARED EFFECT", async () => {
