@@ -204,10 +204,17 @@ const HOOK_BRIDGE = `
  * It said *"Draw it in a function node, where ctx.seed makes it reproducible"*. A hook body never
  * sees `ctx.seed` — `HOOK_BRIDGE` builds `{point, runId, taskId, signal}`. Neither does a FUNCTION
  * body, which is what made the advice worth measuring rather than assuming: `functions.ts` sends
- * `seed` in the payload and says of it, *"deliberately NOT put on the `ctx` the body sees — that
- * stays `{taskId, now, signal}`"*, because `ARGUMENT_BRIDGE` consumes it to reseed `Math.random`
- * and then drops it. So an author following the old advice went hunting for a field that is in
- * neither realm, having been told the thing they wanted was one field away.
+ * `seed` in the payload and says of it, *"deliberately NOT put on the `ctx` the body sees"*,
+ * because `ARGUMENT_BRIDGE` consumes it to reseed `Math.random` and then drops it. So an author
+ * following the old advice went hunting for a field that is in neither realm, having been told
+ * the thing they wanted was one field away.
+ *
+ * (That sentence used to be quoted here with its tail — *"that stays `{taskId, now, signal}`"* —
+ * and the tail stopped being true when TODO A.44 put `node` on a `function` body's `ctx`. What
+ * this paragraph needs from it is that `seed` is NOT there, which is unchanged; the enumeration
+ * was decoration, and a quoted enumeration in a second file is a claim nobody updates. A hook
+ * body's own `{point, runId, taskId, signal}` above is this file's to keep true, and it has no
+ * `node` because a hook is not a node.)
  *
  * What replaced it is the ACTION, not a field: call `Math.random()` inside a `function` node and
  * the engine has already seeded it. Naming `effectKey(taskId, "random", 0)` gives them the term to

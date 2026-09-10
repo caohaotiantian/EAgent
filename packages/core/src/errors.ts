@@ -271,6 +271,53 @@ export const CODES = {
   E_EXPR_INVALID: "E_EXPR_INVALID",
   /** A resource's content is not what its kind requires. */
   E_RESOURCE_INVALID: "E_RESOURCE_INVALID",
+  /**
+   * A `function` or `evaluator{assertion}` body REFUSED ON PURPOSE, by returning
+   * `{ refuse: { reason } }`.
+   *
+   * THE SIBLING OF `E_FUNCTION_UNAVAILABLE` AND ITS OPPOSITE. That one says "this did not work
+   * and trying again might"; this one says "I will not do this, and a second attempt with the
+   * same inputs will not either". `validation`, so it is not in `RETRYABLE` and `#retryDecision`
+   * declines it however generous the node's `retry` policy is — which is the entire distinction
+   * between the two verdicts, and the reason a body needs both.
+   *
+   * IT EXISTS BECAUSE ONE CODE CANNOT ANSWER TWO QUESTIONS, the argument `E_CHILD_UNREACHABLE`
+   * (0270d84) made one layer down. A body's only way to fail on purpose was `throw`, and every
+   * throw out of the realm normalizes to `internal`/`E_INTERNAL` — `isLoomError` is an
+   * `instanceof` against the HOST class and a guest object can never satisfy it. So a deliberate
+   * refusal was reported under the code a genuine bug in the body produces, `internal` "always
+   * alerts", and `EdgeSpec.codes` / `RetryPolicy.onlyIf` — which take codes and nothing else —
+   * could not tell the two apart. Measured before this existed, on the shipped binary:
+   *
+   *     $ loom run graphs/triage-failures.json --input '{"pattern":"nope/*.txt"}'
+   *       "error": { "class": "internal", "code": "E_INTERNAL",
+   *         "message": "Error: no test-output files matched — check the --input pattern, …" }
+   *
+   * RAISED BY THE ENGINE ON THE BODY'S BEHALF, not by the body, for the same reason the retry
+   * verdict is: a guest object cannot be a host `LoomError`. The body picks the VERDICT and the
+   * kernel picks the vocabulary — a body that could name its own `class` could name `exhausted`
+   * and buy itself an unbounded retry, which is a LOOSENING chosen by the least trusted party on
+   * the path. `run/engine.ts`'s `refusalDeclared` is the only raiser, reached from both callers
+   * of `functions.require`.
+   *
+   * NOT `policy`, and the reason is the class's own definition rather than a borrowed one:
+   * `policy` means "denied by policy, retry only after a human changes something", which
+   * promises an authorization outcome a human can go and change. A body's refusal is a verdict
+   * about the VALUES it was handed — the thing to change is the input, and often the input is a
+   * typo. (`run/engine.ts`'s SoD refusal is `policy` and is correctly so: a human genuinely can
+   * add an approver. The sentence next to it — "a hang dressed as a policy is the one shape a
+   * refusal must not take" — is about a THROW escaping `#commit`, not about this class, and it
+   * is cited here only so the next reader does not mistake it for this argument.)
+   *
+   * NOT IN `RUN_FATAL_CODES`: a refusal is precisely the thing an `error` edge is for, and a
+   * graph routing one to a fallback arm is handling a failure it IS allowed to handle. NOT in
+   * `NOT_ABSORBED_AS_SKIP` either, which is the same decision one step further out — that set
+   * holds codes meaning "the run can no longer say anything true" plus two about oversight, and
+   * a body's refusal is neither. It is "this node's work did not work", which that set's own
+   * boundary paragraph names as exactly the population `skip` exists for, beside its closest
+   * sibling `E_RESOURCE_INVALID`.
+   */
+  E_FUNCTION_REFUSED: "E_FUNCTION_REFUSED",
   E_CONFIG_INVALID: "E_CONFIG_INVALID",
   /** A cohort measured under different score weights is a different metric. */
   E_COHORT_INVALIDATED: "E_COHORT_INVALIDATED",

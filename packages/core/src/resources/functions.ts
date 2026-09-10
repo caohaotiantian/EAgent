@@ -373,6 +373,20 @@ const ARGUMENT_BRIDGE = `
       now: function () { return p.now; },
       signal: { aborted: p.aborted },
     };
+    // THE NODE'S DECLARED SHAPE (TODO A.44), and it needs no rebuilding: \`p\` is already the
+    // product of this context's own \`JSON.parse\`, so \`p.node\` is a CONTEXT object carrying
+    // context intrinsics — the whole point of the payload being JSON. Nothing host-side is in
+    // reach through it, which is the property \`ARGUMENT_BRIDGE\` exists to hold.
+    //
+    // CONDITIONAL, like \`declaredEffects\` below, and NOT because a body might not deserve it.
+    // Both engine callers send it; reaching the absent case means calling a \`FunctionBody\` by
+    // hand, and an absent \`ctx.node\` is the honest answer there — there is no graph.
+    //
+    // NOT FROZEN HERE. It is a fresh parse of THIS call's payload, discarded when the call
+    // returns, so a body mutating it changes nothing anyone reads. The host side freezes its own
+    // copy for the same reason it is here at all: a hand-registered body gets the engine's actual
+    // object, and the two paths must not differ.
+    if (p.node) ctx.node = p.node;
     // Date reads the same number ctx.now() does, reseeded per call for the reason Math.random
     // is: bodies are cached per digest, so a body run in an earlier task must not see this
     // call's now, and a body definition-time IIFE (which runs before any call, at populate
@@ -523,9 +537,16 @@ export function createFunctionLoader(opts: FunctionLoaderOptions): FunctionLoade
         now: callCtx.now(),
         aborted: callCtx.signal.aborted,
         // Consumed by the bridge to reseed `Math.random`, and deliberately NOT put on the
-        // `ctx` the body sees — that stays `{taskId, now, signal}`. Omitted rather than sent
-        // as `undefined` so the bridge's `typeof === "number"` test reads one thing.
+        // `ctx` the body sees — a seed a body can read is a value it can record or branch on.
+        // Omitted rather than sent as `undefined` so the bridge's `typeof === "number"` test
+        // reads one thing.
         ...(callCtx.seed === undefined ? {} : { seed: callCtx.seed }),
+        // THE NODE'S DECLARED SHAPE, which DOES go on the `ctx` the body sees (TODO A.44). It is
+        // plain JSON by construction — see `FunctionNodeShape`, whose members are strings and
+        // numbers for exactly this crossing — so it needs no bridge of its own, only a ride.
+        // Omitted rather than sent as `undefined` for the reason `seed` is: the bridge's test is
+        // `if (p.node)`, and an absent key and a null one must not be two answers.
+        ...(callCtx.node === undefined ? {} : { node: callCtx.node }),
         // The NAMES only. A bound invoker cannot cross the boundary — see the bridge — so what
         // travels is just enough to build a stub that names each one when it is called.
         ...(callCtx.effects === undefined ? {} : { declaredEffects: Object.keys(callCtx.effects) }),

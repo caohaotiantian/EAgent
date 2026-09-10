@@ -125,6 +125,7 @@
   "FunctionLoader",
   "FunctionLoaderOptions",
   "FunctionNode",
+  "FunctionNodeShape",
   "FunctionOutcome",
   "FunctionRegistry",
   "FunctionRegistryOptions",
