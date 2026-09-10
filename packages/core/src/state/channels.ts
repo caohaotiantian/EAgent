@@ -20,11 +20,18 @@
  * WITH ONE EXEMPTION, and it does not weaken the sentence above — it narrows what
  * "concurrent writers" means. A channel written by a fan-out's own target and read by
  * nothing outside that branch has ONE writer per branch, and `Engine.#withBranchWrites`
- * folds only the tasks at a reader's own branch coordinate: no reader ever sees the
- * cross-branch fold. GRAPH010 accepts `replace` there (`branchLocalChannel` in
- * `graph/validate.ts`), and refuses it the moment anything else in the spec names the
- * channel — including the join node itself. The cross-branch fold still HAPPENS, and is
- * still the arbitrary value this paragraph describes; the rule is that nothing may read it.
+ * folds only the tasks at a reader's own branch coordinate. GRAPH010 accepts `replace`
+ * there (`branchLocalChannel` in `graph/validate.ts`), and refuses it the moment anything
+ * else in the spec names the channel — including the join node itself. The cross-branch
+ * fold still HAPPENS, and is still the arbitrary value this paragraph describes; the rule
+ * is that nothing may read it.
+ *
+ * "NOTHING MAY READ IT" TAKES A CLAUSE ABOUT THE JOIN TO BE TRUE, because a reader whose
+ * own branch held nothing — its writer failed — falls through to root state. So the
+ * exemption also requires every join over the branch to be `mode: "all"` AND to declare
+ * every node of the branch: a short-circuiting join, or one that leaves a branch node out
+ * of `branches` and so does not wait for it, publishes the fold while that reader is still
+ * pending. Both were measured reading a sibling branch's value.
  *
  */
 

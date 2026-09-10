@@ -1,15 +1,16 @@
 /**
  * GRAPH010 EXEMPTS A CHANNEL THAT NEVER LEAVES ONE FAN-OUT BRANCH — and refuses everything else.
  *
- * This file is the ledger for a LOOSENING, so the accepts are three and the refusals twenty-two.
+ * This file is the ledger for a LOOSENING, so the accepts are three and the refusals twenty-four.
  * Each refusal names the condition of `branchLocalChannel` that catches it; if a change to the
  * analysis makes one of them compile, the loosening has moved and the test says which way.
  *
- * FOUR OF THEM WERE FOUND BY REVIEWERS AFTER THE FIRST VERSION SHIPPED GREEN, and they are the
+ * SIX OF THEM WERE FOUND BY REVIEWERS AFTER THE FIRST VERSION SHIPPED GREEN, and they are the
  * ones to read first — a `subgraph` naming the channel, a `humanGate` delivery scope the census
- * did not cover, a loop whose back-edge source is a SIBLING of the fan-out, and a
- * short-circuiting join. Each compiled with zero diagnostics against a predicate whose own
- * suite was green, which is the whole reason this file is written as a ledger.
+ * did not cover, a loop whose back-edge source is a SIBLING of the fan-out, a short-circuiting
+ * join, a branch node the join does not DECLARE, and an `agent` carrying a retry policy it never
+ * wrote. Each compiled with zero diagnostics against a predicate whose own suite was green,
+ * which is the whole reason this file is written as a ledger.
  *
  * TWO OF THE ACCEPTS ARE HERE TO BE HONEST ABOUT WHAT IS ACCEPTED, not to celebrate it: an
  * `error`-edge handler reads the pre-fan-out value rather than the writer's, and the census
@@ -121,14 +122,43 @@ test("ACCEPT, and stated rather than hidden: an `error`-edge handler in the bran
   // The handler runs only when the writer FAILED, and `#withBranchWrites` folds only tasks in
   // state `succeeded` — so it reads the channel's pre-fan-out value, deterministically and
   // identically under every reducer. Accepted, but it is NOT "sees the writer's own value".
-  // THIS IS ONLY TRUE UNDER `mode: "all"` — see the short-circuit refusal below, which is the
-  // same shape with the barrier allowed to fire early.
+  // TWO THINGS MAKE THAT TRUE AND BOTH ARE LOAD-BEARING — `mode: "all"`, and `recover` being a
+  // DECLARED member of the join. Each has its own refusal below, and each was measured reading a
+  // sibling branch's value when it was missing.
   const s = spec();
   (s.nodes as NodeSpec[]).push({ id: n("recover"), type: "function", reads: ["raw"], writes: ["failures"], function: { ref: "function/recover@stable" } } as NodeSpec);
   (s.edges as EdgeSpec[]).push({ id: e("oops"), from: n("read"), to: n("recover"), kind: "error" } as EdgeSpec);
   node(s, "gather", { join: { branches: [n("read"), n("classify"), n("recover")], mode: "all", onBranchError: "fail" } });
   (s.edges as EdgeSpec[]).push({ id: e("j3"), from: n("recover"), to: n("gather"), kind: "join", branches: [n("read"), n("classify"), n("recover")] } as EdgeSpec);
   assert.equal(hasGraph010(s), false);
+});
+
+test("REFUSE: the same handler, one word different — the join does not DECLARE it", () => {
+  // Quiescence is computed entirely from `join.branches` (`#maybeFireJoin`'s `members`,
+  // `stillLive` and `continuesInBranch` all read it), so a node inside the fan-out that the join
+  // does not declare never holds the barrier. `mode: "all"` does not save it. Driven on a real
+  // Engine before this clause existed: branch `b`'s handler read branch `c`'s `raw`, the run
+  // succeeded, and whether it happened at all depended on how many nodes sat between the failure
+  // and the reader. `GRAPH008_BRANCH_NOT_CONNECTED` enforces only the other direction.
+  const s = spec();
+  (s.nodes as NodeSpec[]).push({ id: n("recover"), type: "function", reads: ["raw"], writes: ["failures"], function: { ref: "function/recover@stable" } } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("oops"), from: n("read"), to: n("recover"), kind: "error" } as EdgeSpec);
+  assert.equal(hasGraph010(s), true);
+});
+
+test("REFUSE: an `agent` in the branch, which the compiler gives a retry policy it never declared", () => {
+  // `effectiveRetry` hands `DEFAULT_PROVIDER_RETRY` to any node that reaches a provider, so
+  // reading `n.retry` alone refused an author who wrote `maxAttempts: 2` and accepted an `agent`
+  // that retries three times.
+  const s = spec();
+  retype(s, "classify", {
+    id: n("classify"),
+    type: "agent",
+    reads: ["shard", "raw"],
+    writes: ["failures"],
+    agent: { profile: "profile/x@stable", prompt: "prompt/y@stable", maxTurns: 1 },
+  });
+  assert.equal(hasGraph010(s), true);
 });
 
 test("ACCEPT is fragile on purpose: the DESCRIPTION mentioning the channel refuses", () => {

@@ -2468,9 +2468,11 @@ function namedElsewhere(spec: GraphSpec, channel: string, writer: NodeId, reader
  *
  * NOT CLAIMED, and it is a real reader of this channel: a node reached by an `error` edge from
  * the writer runs precisely when the writer FAILED, and `#withBranchWrites` folds only tasks in
- * state `succeeded` — so it reads the channel's pre-fan-out value. That is deterministic and
- * identical under every reducer, so it is accepted rather than refused, but it is not "sees the
- * writer's own value".
+ * state `succeeded` — so it reads whatever ROOT state holds. It is accepted rather than refused
+ * because W6 makes that the pre-fan-out value: every join over the branch is `mode: "all"` and
+ * declares every node of the branch, so the barrier cannot fire while such a reader is pending.
+ * Drop either half of W6 and it reads a SIBLING's value instead — both halves have a pasted
+ * reproduction at W6 below. It is still not "sees the writer's own value".
  *
  * The two-writer arm of GRAPH010 is NOT relaxed and must not be: two writers inside one branch
  * fold by `compareContribution`'s `nodeId` tiebreak, which is arbitrary for `replace` in exactly
@@ -2520,7 +2522,15 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     // `w.task.taskId`), so the projection holds one record and one contribution, and the shape is
     // very likely safe. It is refused because this analysis does not track which attempt commits,
     // and a loosening does not get the benefit of "very likely".
-    if (n.retry !== undefined) return false;
+    //
+    // AND THE DEFAULTED POLICY COUNTS, not only the declared one. `compile.ts`'s `effectiveRetry`
+    // gives a node that declared none `DEFAULT_PROVIDER_RETRY` when it reaches a provider and
+    // `DEFAULT_SUBGRAPH_RETRY` when it re-enters a child — so reading `n.retry` alone refused an
+    // author who wrote `maxAttempts: 2` while accepting an `agent` node that retries three times.
+    // The types are named here rather than `reachesProvider` re-implemented: this is a SUPERSET
+    // of it (`agent`, and `evaluator` of any kind rather than `rubric` only), so it cannot drift
+    // into being narrower than the thing it stands in for. `subgraph` is refused above.
+    if (n.retry !== undefined || n.type === "agent" || n.type === "evaluator") return false;
   }
   // W3, second half — a nested fan-out under this one. Measured: its nodes read `null`.
   for (const e of spec.edges) if (e.kind === "fanout" && subtree.has(e.from)) return false;
@@ -2546,17 +2556,29 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     }
   }
 
-  // W6 — EVERY JOIN OVER THIS BRANCH MUST BE `mode: "all"`, and this is not tidiness.
+  // W6 — EVERY JOIN OVER THIS BRANCH IS `mode: "all"` AND DECLARES EVERY NODE OF THE BRANCH.
+  // Two clauses, two separate reproductions, and neither is tidiness.
   //
-  // `#withBranchWrites` returns the projection UNTOUCHED when the asking branch has held nothing
-  // — a writer that failed, that returned `{writes:{}}`, or that a `preNode` hook skipped — so
-  // its reader falls through to ROOT channel state. Under `mode: "all"` that is the pre-fan-out
-  // value, which is the same for every branch and deterministic. Under `any`, `quorum` or
-  // `firstSuccess` the barrier fires and applies its CROSS-BRANCH fold to root state while the
-  // other branches are still running (a short-circuiting join cancels nothing), so the fall-
-  // through reads a sibling's value. Measured: with `mode: "any"` and `A` throwing on item 1, an
-  // error-path reader in branch 1 read `mid-0` — branch 0's value — and the graph compiled with
-  // zero diagnostics.
+  // The shared mechanism: `#withBranchWrites` returns the projection UNTOUCHED when the asking
+  // branch has held nothing — a writer that failed, that returned `{writes:{}}`, or that a
+  // `preNode` hook skipped — so its reader falls through to ROOT channel state. That is safe only
+  // while root state still holds the pre-fan-out value, which is the same for every branch.
+  //
+  // MODE. Under `any`, `quorum` or `firstSuccess` the barrier fires on evidence in hand and
+  // applies its CROSS-BRANCH fold to root state while the other branches are still running — a
+  // short-circuiting join cancels nothing. Measured: with `mode: "any"` and the writer throwing
+  // on item 1, an error-path reader in branch 1 read branch 0's value, on a graph that compiled
+  // with zero diagnostics.
+  //
+  // MEMBERSHIP. `mode: "all"` is quiescent-gated, but quiescence is computed ENTIRELY from
+  // `join.branches`: `#maybeFireJoin` builds `members` from it, and `stillLive` and
+  // `continuesInBranch` both ask `reachesMember`. A node inside the fan-out that the join does
+  // not declare therefore does not hold the barrier — the join fires while it is still pending,
+  // and it then reads the fold. Measured on `read --error--> h0 --> h1 --> handler` with
+  // `branches: ["read","classify"]`: branch `b`'s handler read branch `c`'s value, the run
+  // succeeded, and WHETHER it happened depended on how many nodes sat between the failure and
+  // the reader. `GRAPH008_BRANCH_NOT_CONNECTED` only enforces the other direction — a declared
+  // member must have a join edge — so nothing else supplies this.
   //
   // The join is invisible to every clause above: a `join` edge pops a level, so a join is never
   // in `subtree`. It has to be found through its own declaration.
@@ -2566,6 +2588,8 @@ function branchLocalChannel(spec: GraphSpec, idx: GraphIndex, channel: string, w
     const branches = n.join?.branches;
     if (!Array.isArray(branches) || !branches.some((b) => subtree.has(b))) continue;
     if (n.join?.mode !== "all") return false;
+    const declared = new Set<NodeId>(branches);
+    for (const id of subtree) if (!declared.has(id)) return false;
     covered = true;
   }
   // No join declares this branch at all: `GRAPH021_FANOUT_WITHOUT_JOIN` refuses such a graph, and
