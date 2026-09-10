@@ -574,6 +574,34 @@ export interface FunctionOutcome {
    * the failure and reaches the operator.
    */
   readonly retry?: { readonly reason?: string };
+  /**
+   * "I will not do this." The only way a body can fail ON PURPOSE and be told apart from a bug.
+   *
+   * THE SIBLING OF `retry`, AND ITS OPPOSITE. `retry` says trying again might work; this says a
+   * second attempt with the same inputs will refuse identically. The engine raises
+   * `validation`/`E_FUNCTION_REFUSED` on the body's behalf, which is NOT in `errors.ts`'s
+   * `RETRYABLE`, so `#retryDecision` declines it however generous the node's `retry` policy is.
+   * That is the whole reason a body needs both verdicts and not one.
+   *
+   * WHY A RETURN AND NOT A THROW — the same argument `retry` makes above, and the row it closes
+   * (TODO A.42) is the one where it BITES. A `throw` normalizes to `internal`/`E_INTERNAL`, the
+   * code a genuine bug in the body produces: `internal` "always alerts", and `EdgeSpec.codes`
+   * and `RetryPolicy.onlyIf` take codes and nothing else, so a graph could not route a
+   * deliberate refusal without also routing every crash. A returned object crosses through
+   * `intoHostRealm`, which rebuilds it structurally, so no getter of the body's is consulted.
+   *
+   * THE BODY PICKS THE VERDICT; THE KERNEL PICKS THE VOCABULARY. There is no `code` or `class`
+   * field here, and that is the design rather than an omission: a body that could name its class
+   * could name `exhausted` and buy itself an unbounded retry — a LOOSENING chosen by the least
+   * trusted party on the path — and a fold can only reproduce a decision whose vocabulary the
+   * folding binary knows, which is the same closure that keeps node types, reducers and hook
+   * points in README's fork list.
+   *
+   * EXCLUSIVE WITH `writes`, `take` AND `retry`, refused by `requireOutcome` rather than picked.
+   * A refused node commits nothing, so writes beside it have no reading; "refuse me and retry me"
+   * is a contradiction. `reason` is journaled on the failure and reaches the operator.
+   */
+  readonly refuse?: { readonly reason?: string };
 }
 
 export type FunctionBody = (view: StateView, ctx: FunctionContext) => Promise<FunctionOutcome> | FunctionOutcome;

@@ -563,9 +563,13 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
  *
  * WHAT IS DELIBERATELY ABSORBABLE, since a named set needs its boundary: `E_CAP_DENIED`,
  * `E_TOOL_NOT_FOUND`, `E_TOOL_SOURCE_UNAVAILABLE`, `E_PROVIDER_BAD_REQUEST`, `E_SUBGRAPH_FAILED`,
- * `E_RESOURCE_INVALID`, `E_QUORUM_UNREACHABLE` and whatever `#runWave`'s catch wraps as
+ * `E_RESOURCE_INVALID`, `E_QUORUM_UNREACHABLE`, the two verdicts a `function` body can return
+ * (`E_FUNCTION_UNAVAILABLE` and `E_FUNCTION_REFUSED`), and whatever `#runWave`'s catch wraps as
  * `E_INTERNAL` — "this node's work did not work" is an ordinary branch failure, which is exactly
- * the population `skip` exists for. NOT, note, because "a rescue arm is an answer to it", which is
+ * the population `skip` exists for. THE REFUSAL IS THE ONE WORTH ARGUING, because it is the only
+ * member here a body chose deliberately: a graph that says `onBranchError: "skip"` has already
+ * said what to do with a branch that fails, and a branch refusing ON PURPOSE is the case that
+ * instruction fits best, not least. It is `validation`, not a statement about the run. NOT, note, because "a rescue arm is an answer to it", which is
  * how `RUN_FATAL_CODES` argues its own boundary one screen up: this predicate fires ONLY when
  * `take.length === 0`, i.e. precisely when no rescue arm was taken, so that argument cannot be
  * borrowed here even though it reaches the same members.
@@ -1185,10 +1189,32 @@ const REBIND_DEADLINE = Symbol.for("@loom/core:function.rebindDeadline");
 
 type Rebindable = { [REBIND_DEADLINE]?: (callTimeoutMs: number) => FunctionBody };
 
-const OUTCOME_KEYS = ["writes", "take", "retry"] as const;
+const OUTCOME_KEYS = ["writes", "take", "retry", "refuse"] as const;
+
+/**
+ * THE TWO VERDICTS, WHICH SHARE EVERY RULE AND DIFFER ONLY IN WHAT THEY MEAN.
+ *
+ * `retry` says "this did not work and trying again might"; `refuse` says "I will not do this, and
+ * a second attempt with the same inputs will not either". Both are refused when they are not an
+ * object, both are exclusive with `writes`, `take` and each other, and both are raised by the
+ * ENGINE as a host `LoomError` because a guest object can never be one.
+ *
+ * ONE LOOP RATHER THAN A SECOND COPY OF THE FIRST'S THREE CHECKS. This function's own history is
+ * the argument: every previous change to the body contract landed at one of `functions.require`'s
+ * two callers a commit before the other, and a rule written twice is how `resources/functions.ts`
+ * and `resources/hook-loader.ts` came to disagree about `async`. What is NOT shared is the
+ * sentence explaining each exclusion, which is `WHY_EXCLUSIVE` — the two reasons are genuinely
+ * different and collapsing them would print a message about retries to somebody who refused.
+ */
+const VERDICT_KEYS = ["retry", "refuse"] as const;
+
+const WHY_EXCLUSIVE: Readonly<Record<(typeof VERDICT_KEYS)[number], string>> = {
+  retry: "a retry re-runs the body, so anything it also asked to commit would be proposed twice",
+  refuse: "a refused node commits nothing, so anything it also asked to commit would be silently dropped",
+};
 
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
-  const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }, or { retry: { reason } } to ask for another attempt`;
+  const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }, or { retry: { reason } } to ask for another attempt, or { refuse: { reason } } to fail on purpose`;
   if (out === null || typeof out !== "object") {
     throw err.validation(
       CODES.E_RESOURCE_INVALID,
@@ -1203,25 +1229,28 @@ function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutc
         `Did you mean { writes: { ${keys[0]!}: … } }?`,
     );
   }
-  const retry = (out as { retry?: unknown }).retry;
-  if (retry !== undefined) {
+  for (const verb of VERDICT_KEYS) {
+    const verdict = (out as Record<string, unknown>)[verb];
+    if (verdict === undefined) continue;
     // THE SHAPE IS REFUSED RATHER THAN COERCED, for the reason the whole of this function
     // exists: `retry: true` is the obvious thing to write, it is not the contract, and
     // accepting it would make `{retry: "maybe"}` and `{retry: 0}` mean different things by
     // accident. One shape, named in the message.
-    if (retry === null || typeof retry !== "object" || Array.isArray(retry)) {
+    if (verdict === null || typeof verdict !== "object" || Array.isArray(verdict)) {
       throw err.validation(
         CODES.E_RESOURCE_INVALID,
-        `function "${ref}" on node "${nodeId}" returned retry: ${String(retry)} — retry is an object, ${'{ retry: { reason: "…" } }'}`,
+        `function "${ref}" on node "${nodeId}" returned ${verb}: ${String(verdict)} — ${verb} is an object, { ${verb}: { reason: "…" } }`,
       );
     }
-    // EXCLUSIVE. "Retry me, and also commit this" has no coherent reading — a retry re-runs
-    // the body, so the writes would be proposed a second time. Refusing beats picking one,
-    // which is the lesson from the return-value defect this function was written for.
-    if ("writes" in out || "take" in out) {
+    // EXCLUSIVE, AND THE OTHER VERDICT IS ONE OF THE THINGS IT IS EXCLUSIVE WITH. "Retry me and
+    // also commit this" has no coherent reading, "refuse me and also commit this" drops the
+    // writes silently, and "retry me and refuse me" is a contradiction. Refusing beats picking
+    // one, which is the lesson from the return-value defect this function was written for.
+    const clash = ["writes", "take", ...VERDICT_KEYS.filter((k) => k !== verb)].find((k) => k in out);
+    if (clash !== undefined) {
       throw err.validation(
         CODES.E_RESOURCE_INVALID,
-        `function "${ref}" on node "${nodeId}" returned retry alongside ${"writes" in out ? "writes" : "take"} — a retry re-runs the body, so anything it also asked to commit would be proposed twice. Return one or the other`,
+        `function "${ref}" on node "${nodeId}" returned ${verb} alongside ${clash} — ${WHY_EXCLUSIVE[verb]}. Return one or the other`,
       );
     }
   }
@@ -1244,6 +1273,35 @@ function retryRequested(out: FunctionOutcome, ref: string, nodeId: NodeId): void
   if (out.retry === undefined) return;
   const why = typeof out.retry.reason === "string" && out.retry.reason.length > 0 ? out.retry.reason : "no reason given";
   throw err.unavailable(CODES.E_FUNCTION_UNAVAILABLE, `function "${ref}" on node "${nodeId}" asked to be retried: ${why}`);
+}
+
+/**
+ * Turn a body's `{ refuse: … }` into the failure a caller can tell apart from a bug. TODO A.42.
+ *
+ * NOT "asked to be", WHICH IS THE WHOLE DIFFERENCE FROM `retryRequested` ABOVE. A retry is a
+ * REQUEST the graph may decline — a node with no `retry` policy fails on it immediately, and that
+ * is correct. A refusal is not a request and nothing declines it: the body has decided, and the
+ * only question left is what the failure is CALLED. `refusalDeclared` rather than
+ * `refusalRequested` for that reason, and the two names are meant to be read together.
+ *
+ * `validation` is what makes it stick: `RETRYABLE` in `errors.ts` holds exactly `exhausted`,
+ * `unavailable` and `timeout`, so `#retryDecision`'s `if (!error.retryable) return undefined`
+ * declines this however generous the node's policy is. A body that wanted another attempt had a
+ * way to ask for one and did not use it.
+ *
+ * RAISED HERE AND NOT IN THE BODY, for the reason `E_FUNCTION_UNAVAILABLE` is: `isLoomError` is
+ * an `instanceof` against the host class, a guest object can never satisfy it, and `toLoomError`
+ * deliberately refuses to read a `class` off injected code. So the body names the verdict and the
+ * kernel names the error — which is also what stops a body choosing `exhausted` for itself.
+ *
+ * ONE HELPER, TWO CALLERS, and this file has now made that mistake five times: the seed, the
+ * clock, the outcome shape, `take`, and whichever one comes next. `functions.require` has exactly
+ * two callers — `#runFunction` and `#runEvaluator`'s `assertion` arm.
+ */
+function refusalDeclared(out: FunctionOutcome, ref: string, nodeId: NodeId): void {
+  if (out.refuse === undefined) return;
+  const why = typeof out.refuse.reason === "string" && out.refuse.reason.length > 0 ? out.refuse.reason : "no reason given";
+  throw err.validation(CODES.E_FUNCTION_REFUSED, `function "${ref}" on node "${nodeId}" refused: ${why}`);
 }
 
 function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
@@ -7027,6 +7085,7 @@ export class Engine {
     })) as unknown;
     const out = requireOutcome(raw, w.node.function!.ref, w.node.id);
     retryRequested(out, w.node.function!.ref, w.node.id);
+    refusalDeclared(out, w.node.function!.ref, w.node.id);
     return {
       status: "succeeded",
       writes: { ...(out.writes ?? {}) },
@@ -7240,6 +7299,11 @@ export class Engine {
       // BOTH ARMS, in the same commit as the contract. This is the third change to the
       // function-body contract, and the first two each landed here a commit late.
       retryRequested(out, ev.ref, w.node.id);
+      // AND THE REFUSAL, WHICH IS THE FIFTH — landed here in the SAME commit as `#runFunction`'s,
+      // which is the only way this pair has ever stayed together. An `assertion` body that cannot
+      // evaluate its assertion is a real case, and it is not the same fact as one that evaluated
+      // it and found it false.
+      refusalDeclared(out, ev.ref, w.node.id);
       this.#checkConfidence(ctx, w, out.writes ?? {}, ev.threshold);
       // AND `take`, WHICH IS THE FOURTH TIME. `requireOutcome` — the ONE validator both callers
       // share — names `take` in the shape it prints and refuses it alongside `retry`, so an
