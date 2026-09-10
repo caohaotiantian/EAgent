@@ -10646,9 +10646,23 @@ export class Engine {
       // entrance" — W6 exists because of it — but nothing in the engine refused it.
       // `test/run/join-seq-entrance.test.ts` is the sweep.
       //
+      // THE SET THIS ARM COVERS, named rather than asserted, over all seven `EdgeKind`s:
+      // `fanout` and `join` are handled above and never reach here; `compensation` cannot be in
+      // `take` at all (`untakeableMessage` refuses it, and `#edgesToTake` never selects one);
+      // `loop` is excluded just below. So it is exactly `seq`, `conditional` and `error` — and
+      // `error` belongs here, since a failure routed at a join node is an arrival like any
+      // other and was minting the barrier's Task the same way.
+      //
       // `loop` is deliberately NOT routed here. It mints at `iteration + 1`, which is a Task the
       // barrier never owns, so folding it into `#maybeFireJoin` would turn a back-edge into a
-      // silent no-op rather than closing a hole.
+      // silent no-op rather than closing a hole. Measured on
+      // `start -fanout(2)-> A -join-> J -seq-> mid -loop-> J`, which compiles with only
+      // `warning/GRAPH002_DEAD_END`: the loop's second pass is `J@root#1`, a DISTINCT id from
+      // the barrier's `J@root#0`, so there is no collision to close — and routing it would have
+      // deleted the second pass outright. (That graph re-folds `A`'s contributions on the second
+      // pass, `seen=[a,b,a,b]`; it does so identically before and after this change, so it is
+      // pre-existing and on no row.) A `loop` edge that is NOT a back-edge — `X -loop-> J`
+      // beside the fan-out — never reaches the engine: `GRAPH006_STUCK_LOOP` refuses it.
       //
       // `#fireEmptyJoin` is deliberately NOT routed here either, and that is the trap: the
       // planner's own `take` still holds the `fanout` edge whose `to` is a declared member, so
