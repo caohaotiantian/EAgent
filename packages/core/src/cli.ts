@@ -5484,7 +5484,7 @@ async function gatesWithReads(
         `  holds a branch's writes until its join folds them. The engine OVERLAYS them when it builds\n` +
         `  the gate payload and \`contentDigest\`; this door reads the stored projection and cannot. So\n` +
         `  \`contentDigest\` may not describe the values printed above, and an approval executes on the\n` +
-        `  overlaid ones. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.58(4).\n`,
+        `  overlaid ones. \`readsMayBeStale\` on each row names the channels. \`TODO.md\` §A.60.\n`,
     );
   }
   return rows;

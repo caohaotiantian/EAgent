@@ -24,7 +24,7 @@
  *
  * WHAT IS FIXED HERE AND WHAT IS NOT. Computing the overlaid value needs `reduceState` in `cli.ts`
  * — a second copy of the engine's reducer, which is the drift `gatesWithReads` refuses by design —
- * so the VALUE is still wrong and §A.58(4) stays open. What is closed is the SILENCE: whether a
+ * so the VALUE is still wrong and §A.60 stays open. What is closed is the SILENCE: whether a
  * held write exists on a printed channel is decidable from `p.tasks` alone, so the row now carries
  * `readsMayBeStale` and stderr says so. These tests pin the notice, the field, and the control that
  * keeps it from becoming a warning printed on every gate.
@@ -182,7 +182,7 @@ test("A GATE INSIDE A FAN-OUT SAYS ITS `reads` MAY BE STALE, on the row and on s
 
     // THE RESIDUE IS STILL THERE, and this is what says so rather than pretending otherwise: the
     // printed value is the PRE-BRANCH one. If this ever starts failing because `reads.mid` is
-    // `BUMPED`, the overlay has been closed and §A.58(4) is done — delete the field, not this
+    // `BUMPED`, the overlay has been closed and §A.60 is done — delete the field, not this
     // assertion's expectation.
     assert.equal(row.reads?.["mid"], BASE, "the value is still the stale one — only the silence is fixed");
 

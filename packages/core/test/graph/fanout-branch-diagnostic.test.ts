@@ -594,7 +594,8 @@ test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", ()
  * there, which is the F1 shape exactly: the entry is one edit and the `kind: join` edge is the
  * other, so following the line literally produced `GRAPH008_BRANCH_NOT_CONNECTED` next. Measured
  * on `examples/graphs/triage-failures.json` plus an inner
- * `read --fanout(subs)--> sub --join--> subJoin`, converging took FOUR compiles.
+ * `read --fanout(subs)--> sub --join--> subJoin`: two compiles to converge, and three when the
+ * outer join is also incomplete so GRAPH021 refuses in the same run.
  *
  * The same graph is what §A.57 is about: GRAPH021's count is what the branch CONTAINS and its
  * dictated list is what a barrier can be told to WAIT ON, `subJoin` is in the first and not the
