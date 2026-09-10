@@ -3137,10 +3137,31 @@ export class Engine {
         // which is the half that makes recovery automatic rather than a person clicking.
         //
         // A LEASE THAT NEVER EXPIRES LEAVES THE RUN `running` RATHER THAN `failed`, and that is
-        // the intended trade: the four node types with no enforced deadline (`join`, `router`,
-        // `human_gate`, `subgraph`) are the ones where "the holder is dead" is not knowable, and
-        // "I do not know" is not a terminal verdict. `driveToRest` returns on this shape instead
-        // of spinning — "running with nothing to wait for is a run this process cannot move".
+        // the intended trade — but WHOSE lease never expires is the DEPLOYMENT's answer, not the
+        // graph's, and this paragraph used to give only the graph's half.
+        //
+        // The four node types with no enforced deadline are `join`, `router`, `human_gate` and
+        // `subgraph` — `graph/compile.ts`'s `effectiveTimeout` defaults the other four to
+        // `DEFAULT_NODE_TIMEOUT_MS` and returns `undefined` for these. They are the ones where
+        // "the holder is dead" is not knowable FROM THE GRAPH. Whether it is knowable AT ALL
+        // depends on which scheduler the process built:
+        //
+        //   - AN EMBEDDER TAKING THE DEFAULT `new InProcessScheduler()` supplies no
+        //     `strandedLeaseMs`, so `deadlineExpired` reads `plans[nodeId]?.timeoutMs ?? undefined`,
+        //     skips the task, and such a run stays `running` for ever. "I do not know" is not a
+        //     terminal verdict, and the seams that answer it are both on the public surface: a
+        //     `LeasedScheduler`, or an `InProcessScheduler` given a `strandedLeaseMs`.
+        //   - UNDER THIS BINARY IT IS ANSWERED, and has been since B.1 (`7952c6a`): `cli.ts`'s
+        //     `openWorkspace` passes `STRANDED_LEASE_MS`, so those four ARE adjudicable and a
+        //     stranded run is reclaimed and driven rather than parked.
+        //
+        // `test/run/inprocess-reclaims-a-dead-lease.test.ts` drives the two as a PAIR — "NOT
+        // reclaimed BY DEFAULT" and "IS reclaimed when the deployment supplies a fallback" — over
+        // one folded journal at one instant with one constructor argument different, which is why
+        // neither half can be corrected here without the other going red.
+        //
+        // Either way `driveToRest` returns on this shape instead of spinning — "running with
+        // nothing to wait for is a run this process cannot move".
         if (tasksInState(p, "leased").length > 0) return p;
 
         await this.#finish(ctx, p);
