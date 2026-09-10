@@ -114,6 +114,61 @@ import {
   type ExamOutcome,
 } from "./evolution/exam.ts";
 
+/**
+ * WHAT `--extension-module` OPENS — one row each, and the SOURCE OF THE COUNT in `USAGE`.
+ *
+ * `--help` used to name four members (`called with {models, tools, channels, identity}`) and
+ * claim "FOUR things need no fork", while the call in `loadExtensionModules` passed TEN and
+ * README's "Extending it, and where that stops" documented nine rows against them — including
+ * `store.register`, which README calls the sharpest row on the list. A stranger reading the
+ * thing in front of them did not learn that `store`, `resolver`, `functions`, `hooks`,
+ * `payloads` or `jail` exist at all, on the one flag whose whole job is to say so.
+ *
+ * The number in the help text is `Object.keys(…).length` over this table rather than a word
+ * somebody typed, and the table is checked against the REGISTRAR OBJECT ITSELF:
+ * `test/cli/extension-registrar-help.test.ts` loads a module that reports `Object.keys` of
+ * what its factory was handed and asserts `--help` names every one. A member added to that
+ * call and not to this table fails that test rather than quietly making `--help` false again.
+ */
+const EXTENSION_REGISTRAR_OPENS: Readonly<Record<string, string>> = {
+  models: "a provider on a wire that is neither Anthropic's nor OpenAI's",
+  tools: "an in-process tool",
+  channels: "a gate transport that is not an HTTP webhook (email, SMS, Slack)",
+  identity: "an identity source that is not a token file (OIDC, mTLS, a header)",
+  functions: "a host-realm `function` body — async, and this process's globals",
+  hooks: "a hook body, at any of the eight points",
+  resolver: "where refs resolve from. SUBSTITUTES: one module owns them all",
+  store: "where the journal is. A module's store IS this deployment's journal",
+  payloads: "where an externalised payload value is put",
+};
+
+/**
+ * The WHOLE object a module's factory is handed: the nine slots above, plus `jail`.
+ *
+ * `jail` is an INPUT and not a registration — the operator's own fs confinement, handed in so
+ * a module can build tools bounded the way the built-ins are. That is why it is not one of the
+ * things that "need no fork", and why the two numbers in the help text differ by one.
+ *
+ * ORDER IS THE CALL'S ORDER, so a reader comparing `--help` with the line in
+ * `loadExtensionModules` sees the same sequence.
+ */
+const EXTENSION_REGISTRAR_MEMBERS: readonly string[] = [...Object.keys(EXTENSION_REGISTRAR_OPENS), "jail"];
+
+/**
+ * The member list as `--help` prints it, broken at the halfway member so the line does not run
+ * past the ~99 columns the rest of `USAGE` keeps to. Split by LENGTH, never by a typed index:
+ * a tenth member must not silently un-wrap the paragraph.
+ */
+const EXTENSION_REGISTRAR_LIST: string = [
+  EXTENSION_REGISTRAR_MEMBERS.slice(0, Math.ceil(EXTENSION_REGISTRAR_MEMBERS.length / 2)).join(", "),
+  EXTENSION_REGISTRAR_MEMBERS.slice(Math.ceil(EXTENSION_REGISTRAR_MEMBERS.length / 2)).join(", "),
+].join(",\n                                 ");
+
+/** The rows as `--help` prints them, aligned under the paragraph that introduces them. */
+const EXTENSION_REGISTRAR_HELP: string = Object.entries(EXTENSION_REGISTRAR_OPENS)
+  .map(([member, what]) => `                      ${member.padEnd(9)} ${what}`)
+  .join("\n");
+
 const USAGE = `loom — graph-native multi-agent orchestration
 
   loom serve   [--workspace .] [--port 8787] [--token T]   start the control plane
@@ -303,12 +358,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                     stored in it. Accepted by every command, not just serve.
   --extension-module P,P  host-realm modules to load before anything is configured, as a
                     comma-separated list of paths. Each is imported and its DEFAULT EXPORT
-                    called with {models, tools, channels, identity} — this process's
-                    ModelRegistry and ToolRegistry, and a collector for each of the other
-                    two — so FOUR things need no fork: a provider on a wire that is neither
-                    Anthropic's nor OpenAI's, an in-process tool, a gate delivery transport
-                    that is not an HTTP webhook (email, SMS, a Slack app), and an identity
-                    source that is not a bearer-token file (OIDC, mTLS, a proxy-set header).
+                    called with {${EXTENSION_REGISTRAR_LIST}} —
+                    this process's ModelRegistry, ToolRegistry, FunctionRegistry and
+                    HookRegistry, a collector for each substitutable slot, and the
+                    operator's own jail. So ${Object.keys(EXTENSION_REGISTRAR_OPENS).length} things need no fork:
+${EXTENSION_REGISTRAR_HELP}
+                    jail REGISTERS NOTHING and is the exception: it is the fs confinement
+                    this process is already under, handed in so a module can build tools
+                    bounded the way the built-ins are.
                     A models-file "routes" row may name an adapter registered here, and a
                     channel registered here is merged with --channels-file's rows.
                     A ModelAdapter must implement provider, stream, priceOf, estimateOf and
