@@ -557,6 +557,18 @@ test("WITH TWO CANDIDATES the list is what feeds BOTH — a node feeding only on
   assert.deepEqual(namesIn(fix), ["read"], `only what feeds both candidates: ${fix}`);
   // The message still reports the whole branch, which is a different question and stays true.
   assert.match(d.message, /holds 3 nodes \(read, armX, armY\)/);
+  // §A.57, and this graph is where the disclosure's PREDICATE is pinned: `armX` does run into a
+  // join the fix offers (`j1`), so "runs into a join it offers" would be false of the sentence.
+  // What drops it from the list is that it does not run into EVERY candidate, and the message
+  // must say so — the whole point of the multi-candidate filter is a list true for either choice.
+  assert.match(d.message, /run into every join it offers — "armX", "armY" do not, so they are in this count and not in that list/);
+  // AND IT PROMISES NO REFUSAL. The first cut of this clause said a join "must wait on every one
+  // of them — directly, or through another branch node that folds it", and a reviewer compiled
+  // both halves false: nothing refuses a branch node left unfolded, and the escape cannot exist
+  // for the nodes the clause names — ancestry being transitive, with ONE candidate. With two it
+  // can exist for whichever join the author picks, which makes the promise uncheckable rather
+  // than false; the removal stands on the first reason either way.
+  assert.doesNotMatch(d.message, /must wait on every one of them/, "the naming form may not promise a refusal");
 });
 
 test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", () => {
@@ -572,4 +584,230 @@ test("the branch list is the fan-out's OWN nodes, never a sibling fan-out's", ()
   const said = `${g21.message}\n${g21.fix ?? ""}`;
   assert.match(said, /\bother\b/);
   assert.doesNotMatch(said, /\bclassify\b/, "classify is under `fan`, not under `fan2`");
+});
+
+/**
+ * THE HELD INNER JOIN — the same defect, in the rule next door (§A.56), and the pair of name sets
+ * one diagnostic carries (§A.57).
+ *
+ * `GRAPH008_HELD_JOIN_UNCOLLECTED` said `add "X" to the enclosing join's \`branches\`` and stopped
+ * there, which is the F1 shape exactly: the entry is one edit and the `kind: join` edge is the
+ * other, so following the line literally produced `GRAPH008_BRANCH_NOT_CONNECTED` next. Measured
+ * on `examples/graphs/triage-failures.json` plus an inner
+ * `read --fanout(subs)--> sub --join--> subJoin`, converging took FOUR compiles.
+ *
+ * The same graph is what §A.57 is about: GRAPH021's count is what the branch CONTAINS and its
+ * dictated list is what a barrier can be told to WAIT ON, `subJoin` is in the first and not the
+ * second, and the sentence disclosed neither.
+ */
+
+/** `shipped()` with an inner fan-out held inside the outer branch, and nothing collecting it. */
+function heldInner(): GraphSpec {
+  const s = shipped();
+  (s.channels as Record<string, unknown>)["subs"] = { type: "array", reduce: "append_ordered" };
+  (s.channels as Record<string, unknown>)["sub"] = { type: "string", reduce: "replace" };
+  // `read` fanning out inside its own branch switches GRAPH010's branch-local exemption off
+  // (§A.48's W6). That is a different rule; these tests are about the two messages, so the
+  // fixture gives GRAPH010 nothing to say.
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, writes: ["raw", "subs"] } as NodeSpec;
+  (s.nodes as NodeSpec[]).push(
+    { id: n("sub"), type: "function", reads: ["sub"], writes: ["failures"], function: { ref: "function/sub@stable" } } as NodeSpec,
+    { id: n("subJoin"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("sub")], mode: "all", onBranchError: "fail" } } as NodeSpec,
+  );
+  (s.edges as EdgeSpec[]).push(
+    { id: e("fanInner"), from: n("read"), to: n("sub"), kind: "fanout", over: "subs", as: "sub", maxWidth: 2 } as EdgeSpec,
+    { id: e("subCollect"), from: n("sub"), to: n("subJoin"), kind: "join" } as EdgeSpec,
+  );
+  return s;
+}
+
+/**
+ * THE TWO EDITS A HELD JOIN'S `fix:` DICTATES, read off the sentence rather than assumed.
+ *
+ * Same contract as `namesIn`: it THROWS on a line it does not recognise, so a reworded `fix:`
+ * breaks this file instead of quietly asserting nothing. The old line matched only the first
+ * half — no `kind: join` clause existed to find — which is what made following it two compiles.
+ *
+ * THE REFERENT IS PARSED TOO, and INNERMOST is part of the pattern rather than prose around it.
+ * Under double nesting "the fan-out X is inside" names two fan-outs, and only the inner one's
+ * barrier works: collecting a doubly-held join with the OUTER barrier makes that barrier reachable
+ * at two depths and fails closed on `GRAPH008_JOIN_DEPTH`, while the inner one compiles. So the
+ * adjective decides whether following the line converges, and dropping it must break this file.
+ */
+function heldFixEdits(fix: string): {
+  readonly entry: string;
+  readonly edgeFrom: string;
+  readonly barrierOf: string;
+} {
+  const entry = /an entry in its `branches` for "([^"]+)"/.exec(fix);
+  const edge = /`kind: join` edge from "([^"]+)" into that join/.exec(fix);
+  const barrier = /the barrier of the INNERMOST fan-out "([^"]+)" is inside/.exec(fix);
+  assert.ok(entry !== null, `fix line dictates no \`branches\` entry — has the sentence changed shape?\n  ${fix}`);
+  assert.ok(edge !== null, `fix line dictates no \`kind: join\` edge — THAT IS THE DEFECT §A.56 closed:\n  ${fix}`);
+  assert.ok(barrier !== null, `fix line names no INNERMOST enclosing fan-out — that adjective is load-bearing:\n  ${fix}`);
+  return { entry: entry[1]!, edgeFrom: edge[1]!, barrierOf: barrier[1]! };
+}
+
+/** The nodes GRAPH021's message COUNTS, as a set — the other half of the pair §A.57 is about. */
+function countedIn(message: string): readonly string[] {
+  const m = /holds \d+ nodes \(([^)]+)\)/.exec(message);
+  assert.ok(m !== null, `message reports no branch count — has the sentence changed shape?\n  ${message}`);
+  return m[1]!.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+test("A HELD INNER JOIN'S fix: NAMES BOTH HALVES — the entry AND the `kind: join` edge", () => {
+  const found = errorsOf(heldInner());
+  assert.deepEqual(found.map((d) => d.code), ["GRAPH008_HELD_JOIN_UNCOLLECTED"], "one diagnostic, so its fix is the whole remedy");
+
+  const fix = found[0]!.fix ?? "";
+  const edits = heldFixEdits(fix);
+  assert.equal(edits.entry, "subJoin");
+  assert.equal(edits.edgeFrom, "subJoin");
+  // The F1 lesson, in the words §A.53 settled on: the entry is added, never a replacement.
+  assert.match(fix, /ADDED to whatever the join already declares/);
+  // AND IT ADMITS THERE MAY BE NO SUCH JOIN. "the enclosing join" reads as a reference to
+  // something that exists; on a fan-out with no barrier at all there is nothing to add an entry
+  // to, and the author has to draw one first. Found by a reviewer, on a graph where GRAPH021 was
+  // simultaneously saying "add a join node downstream of ...".
+  assert.match(fix, /adding one if that fan-out has none/);
+});
+
+/** `heldInner()` with a THIRD level: `sub --fanout(deeps)--> deep --join--> deepJoin`. */
+function doubleNested(): GraphSpec {
+  const s = heldInner();
+  (s.channels as Record<string, unknown>)["deeps"] = { type: "array", reduce: "append_ordered" };
+  (s.channels as Record<string, unknown>)["deep"] = { type: "string", reduce: "replace" };
+  const i = s.nodes.findIndex((x) => x.id === n("sub"));
+  (s.nodes as NodeSpec[])[i] = { ...s.nodes[i]!, writes: ["failures", "deeps"] } as NodeSpec;
+  (s.nodes as NodeSpec[]).push(
+    { id: n("deep"), type: "function", reads: ["deep"], writes: ["failures"], function: { ref: "function/deep@stable" } } as NodeSpec,
+    { id: n("deepJoin"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("deep")], mode: "all", onBranchError: "fail" } } as NodeSpec,
+  );
+  (s.edges as EdgeSpec[]).push(
+    { id: e("fanDeep"), from: n("sub"), to: n("deep"), kind: "fanout", over: "deeps", as: "deep", maxWidth: 2 } as EdgeSpec,
+    { id: e("deepCollect"), from: n("deep"), to: n("deepJoin"), kind: "join" } as EdgeSpec,
+  );
+  return s;
+}
+
+test("the held join's fix: points at ITS OWN fan-out's barrier, and says INNERMOST", () => {
+  // Two reviewer findings in one place. First: a sibling fan's barrier, wired with edits of the
+  // SHAPE this line dictates, compiles clean — `GRAPH008_JOIN_DEPTH` compares `fanoutDepth`
+  // numbers and never `fanoutEdgeStack`, so a join one level up in a different fan satisfies it.
+  // That acceptance is a real gap and not this rule's to close here; what is pinned is that the
+  // sentence names WHICH join it means rather than papering over it.
+  const [held] = errorsOf(heldInner()).filter((x) => x.code === "GRAPH008_HELD_JOIN_UNCOLLECTED");
+  const edits = heldFixEdits(held!.fix ?? "");
+  assert.equal(edits.barrierOf, "subJoin", "the referent is the fan-out the held join is inside");
+  assert.doesNotMatch(held!.fix ?? "", /any join|whichever join/, "no suggestion that any join one level up will do");
+});
+
+test("INNERMOST IS LOAD-BEARING: a doubly-held join collected one level too far out is refused", () => {
+  // Second finding. Under double nesting "the fan-out X is inside" names TWO fan-outs, and the
+  // control below is why the adjective had to be added rather than left to the reader.
+  const s = doubleNested();
+  const codes = errorsOf(s).map((d) => d.code);
+  assert.deepEqual(codes, ["GRAPH008_HELD_JOIN_UNCOLLECTED", "GRAPH008_HELD_JOIN_UNCOLLECTED"], codes.join(", "));
+
+  const [deep] = errorsOf(s).filter((x) => x.code === "GRAPH008_HELD_JOIN_UNCOLLECTED" && x.at?.nodeId === n("deepJoin"));
+  assert.equal(heldFixEdits(deep!.fix ?? "").barrierOf, "deepJoin");
+
+  const collect = (g: GraphSpec, join: string, arm: string): GraphSpec => {
+    const i = g.nodes.findIndex((x) => x.id === n(join));
+    const j = g.nodes[i]!.join!;
+    (g.nodes as NodeSpec[])[i] = { ...g.nodes[i]!, join: { ...j, branches: [...j.branches, n(arm)] } } as NodeSpec;
+    (g.edges as EdgeSpec[]).push({ id: e(`x-${arm}-${join}`), from: n(arm), to: n(join), kind: "join" } as EdgeSpec);
+    return g;
+  };
+
+  // INNERMOST — `deepJoin` into `subJoin`, `subJoin` into `gather`. Each held join goes to the
+  // barrier of the fan-out it is directly inside, which is what the line says.
+  const inner = collect(collect(clone(s) as unknown as GraphSpec, "subJoin", "deepJoin"), "gather", "subJoin");
+  assert.deepEqual(errorsOf(inner).map((d) => d.code), [], "following the line as written converges");
+
+  // ONE LEVEL TOO FAR OUT — `deepJoin` straight into `gather`, the reading the adjective rules
+  // out. `gather` becomes reachable at two fan-out depths and fails closed.
+  const outer = collect(collect(clone(s) as unknown as GraphSpec, "gather", "deepJoin"), "gather", "subJoin");
+  assert.ok(
+    errorsOf(outer).some((d) => d.code === "GRAPH008_JOIN_DEPTH"),
+    `the outer reading must be refused; got ${errorsOf(outer).map((d) => d.code).join(", ") || "no errors"}`,
+  );
+});
+
+test("FOLLOWING THE HELD JOIN'S SINGLE LINE COMPILES — one edit, where it used to take two", () => {
+  // The acceptance test for §A.56. Do exactly what the sentence says — both halves, no more —
+  // and recompile. Before, doing the half it named produced GRAPH008_BRANCH_NOT_CONNECTED.
+  const s = heldInner();
+  const [held] = errorsOf(s).filter((x) => x.code === "GRAPH008_HELD_JOIN_UNCOLLECTED");
+  const edits = heldFixEdits(held!.fix ?? "");
+
+  // "the enclosing join" — the one whose fan-out contains the held join. Here that is `gather`.
+  const applyEntry = (g: GraphSpec): GraphSpec => {
+    const i = g.nodes.findIndex((x) => x.id === n("gather"));
+    const j = g.nodes[i]!.join!;
+    (g.nodes as NodeSpec[])[i] = {
+      ...g.nodes[i]!,
+      join: { ...j, branches: [...j.branches, n(edits.entry)] },
+    } as NodeSpec;
+    return g;
+  };
+
+  const fixed = applyEntry(clone(s) as unknown as GraphSpec);
+  (fixed.edges as EdgeSpec[]).push({ id: e("collect-held"), from: n(edits.edgeFrom), to: n("gather"), kind: "join" } as EdgeSpec);
+  assert.deepEqual(errorsOf(fixed).map((d) => d.code), [], "the message's own instructions must produce a graph that compiles");
+
+  // THE CONTROL: the half the old line named, on its own, is not enough — which is why the
+  // omission cost a compile rather than being a wording preference.
+  const halfDone = applyEntry(clone(s) as unknown as GraphSpec);
+  assert.deepEqual(
+    errorsOf(halfDone).map((d) => d.code),
+    ["GRAPH008_BRANCH_NOT_CONNECTED"],
+    "the `branches` entry alone lands on the sibling GRAPH008 — the second half is load-bearing",
+  );
+});
+
+test("GRAPH021'S COUNT AND ITS DICTATED LIST ARE DIFFERENT SETS, and the message says which", () => {
+  // §A.57. `subJoin` is IN the branch and runs into no candidate join, so it is counted and not
+  // dictated. Both numbers were always right; the sentence disclosed neither.
+  const s = heldInner();
+  // Break the outer join so GRAPH021 fires on `fan` — the shape the row's graph is in.
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = { ...s.nodes[g]!, join: { branches: [n("classify")], mode: "all", onBranchError: "fail" } } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+
+  const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined);
+  const counted = countedIn(d.message);
+  const dictated = namesIn(d.fix ?? "");
+
+  assert.deepEqual([...counted].sort(), ["classify", "read", "subJoin"], "the count is what the branch CONTAINS");
+  assert.deepEqual([...dictated].sort(), ["classify", "read"], "the list is what the barrier can be told to WAIT ON");
+
+  // The disclosure, asserted over the NAME SET rather than the prose: every node the two sets
+  // disagree about is named in the message as counted-and-not-dictated.
+  const difference = counted.filter((c) => !dictated.includes(c));
+  assert.deepEqual(difference, ["subJoin"]);
+  for (const name of difference) {
+    assert.match(
+      d.message,
+      new RegExp(`"${name}"[^.]*in this count and not in that list`),
+      `the message must disclose that ${name} is counted and not dictated: ${d.message}`,
+    );
+  }
+
+  // AND NOTHING ABOUT WHICH JOINS ARE OFFERED MOVED — §A.53's four rounds were spent on that
+  // set, and §A.57 is a prose row. A change that narrows it is the wrong change.
+  assert.deepEqual(offeredJoins(d.fix ?? ""), ["gather"]);
+});
+
+test("the count/list disclosure appears ONLY when the two sets disagree", () => {
+  // On the F1 graph every branch member feeds `gather`, so the count and the list are the same
+  // set and the sentence is exactly true without a qualifier. A clause that always fires would
+  // teach a divergence that is not there.
+  const [d] = errorsOf(f1Step1()).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(d !== undefined);
+  assert.deepEqual([...countedIn(d.message)].sort(), [...namesIn(d.fix ?? "")].sort());
+  assert.doesNotMatch(d.message, /in this count and not in that list/);
 });
