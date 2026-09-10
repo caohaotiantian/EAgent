@@ -492,11 +492,17 @@ test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names t
   }
 });
 
-test("a fan-out width that is not a NUMBER is unreadable, not skipped", async () => {
-  // `maxWidth: "24"` compiles (`GRAPH007` asks whether the field is there, not what type it is) and
-  // the executor would coerce it — `slice(0, "24")` works. So the body is the only thing between a
-  // typo'd width and a clamp, and "skip the edge I cannot read" would leave zero edges and, before
-  // this, a body that refused for the wrong reason. Counted as unreadable so it fails CLOSED.
+test("a fan-out width that is not a NUMBER is refused BY THE COMPILER, before any body runs", async () => {
+  // THIS TEST CHANGED SIDES, and that is the finding. It used to assert that the shipped
+  // `triage-plan.js` refused `maxWidth: "24"` — because `GRAPH007` asked whether the field was
+  // there and not what type it was, so the graph compiled and `slice(0, "24")` coerced. A guard
+  // in a userland body was the only thing between a typo'd width and a silent clamp, which is
+  // the wrong place for it: the same typo in a graph with no such body ran zero branches and
+  // reported success (TODO §A.50).
+  //
+  // `GRAPH007_BAD_MAX_WIDTH` now refuses it at compile, so the run never reaches the body. The
+  // body's own guard is not lost with this assertion — "the body REFUSES when it cannot read a
+  // width" below drives the shipped body directly, on a graph with no fan-out edge at all.
   const ws = workspace(["graphs", "resources"]);
   try {
     const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { edges: { id: string; maxWidth?: unknown }[] };
@@ -507,9 +513,10 @@ test("a fan-out width that is not a NUMBER is unreadable, not skipped", async ()
 
     const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
     assert.notEqual(r.code, 0, `a non-numeric width must refuse:\n${r.out}${r.err}`);
-    const error = summary(r)["error"] as Record<string, unknown>;
-    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
-    assert.match(String(error["message"]), /declares 1 fanout edge\(s\) over "shards", of which 0 state a numeric maxWidth/, r.out);
+    assert.match(`${r.out}${r.err}`, /GRAPH007_BAD_MAX_WIDTH/, r.out + r.err);
+    assert.match(`${r.out}${r.err}`, /not a positive integer/, r.out + r.err);
+    // And the message tells the author the one thing they need: the quotes.
+    assert.match(`${r.out}${r.err}`, /unquoted: 24, not "24"/, r.out + r.err);
   } finally {
     ws.dispose();
   }

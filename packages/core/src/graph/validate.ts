@@ -1927,13 +1927,30 @@ function rule006Cycles(spec: GraphSpec, idx: GraphIndex, channelTypes: Record<st
   }
 
   for (const e of idx.loopEdges) {
-    if (e.maxIterations === undefined || e.maxIterations < 1) {
+    // `undefined` and `<= 0` keep the code they have always had — three suites assert on it.
+    // Split off from them is the case `< 1` cannot see: `"3" < 1` and `NaN < 1` are both false,
+    // so a `maxIterations` that is not a number at all passed this test and then reached
+    // `Math.max(1, loop.maxIterations ?? 1)` and `w.task.iteration + 1 < (e.maxIterations ?? 1)`.
+    // See `isPositiveInt` under GRAPH007 for why the two fields are checked the same way.
+    const iterations: unknown = e.maxIterations;
+    if (iterations === undefined || (Number.isSafeInteger(iterations) && (iterations as number) < 1)) {
       d.push({
         severity: "error",
         code: "GRAPH006_UNBOUNDED_LOOP",
         message: `loop edge "${e.id}" has no maxIterations`,
         at: { edgeId: e.id },
         fix: `add maxIterations to edge "${e.id}"`,
+      });
+    } else if (!isPositiveInt(iterations)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH006_BAD_MAX_ITERATIONS",
+        message:
+          `loop edge "${e.id}" declares maxIterations ${JSON.stringify(iterations)}, which is not a positive integer — ` +
+          `the bound is compared against the iteration counter and multiplied into the node's total multiplicity, ` +
+          `and neither reader can use this value`,
+        at: { edgeId: e.id },
+        fix: `set maxIterations on edge "${e.id}" to a whole number ≥ 1 (unquoted: 3, not "3")`,
       });
     }
     if (e.until === undefined) {
@@ -1978,6 +1995,26 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
 
 // ── GRAPH007 ─────────────────────────────────────────────────────────────────
 
+/**
+ * A COUNT THAT CAME OUT OF A JSON FILE IS NOT A NUMBER UNTIL SOMETHING ASKS.
+ *
+ * `maxWidth` and `maxIterations` are both `number` in `EdgeSpec` and both arrive from a parse
+ * that checks NAMES only (`graph/spec.ts`'s `EDGE_FIELDS`). Every rule that read them tested
+ * presence (`=== undefined`) and then compared with a bare relational operator, which coerces:
+ * `"24" > 25` is false, `"banana" > 25` is false because `NaN` compares false with everything,
+ * and both sailed through. The second one is the damaging case — `computeFanoutStacks`
+ * multiplies the widths, so one `NaN` makes every downstream `parallelWidth` `NaN` and
+ * GRAPH010's concurrent-writer refusal, which reads that number, silently stops firing.
+ *
+ * `0` is refused for the same reason a string is: `run/engine.ts`'s `items.slice(0, maxWidth)`
+ * takes zero branches and the run ends `E_OUTPUT_MISSING` having dropped every shard without a
+ * word. A non-integer is refused because the two readers disagree about it — `slice` truncates
+ * `2.5` to 2 while the width product keeps the fraction.
+ */
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+}
+
 function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnostic[]): void {
   for (const e of spec.edges) {
     if (e.kind !== "fanout") continue;
@@ -1999,7 +2036,22 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
       });
       continue;
     }
-    if (e.maxWidth > expansion.maxFanout) {
+    if (!isPositiveInt(e.maxWidth)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH007_BAD_MAX_WIDTH",
+        message:
+          `fanout edge "${e.id}" declares maxWidth ${JSON.stringify(e.maxWidth)}, which is not a positive integer — ` +
+          `the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, ` +
+          `and neither reader can use this value`,
+        at: { edgeId: e.id },
+        fix: `set maxWidth on edge "${e.id}" to a whole number between 1 and ${expansion.maxFanout} (unquoted: 24, not "24")`,
+      });
+    }
+    // The ceiling test is a bare `>` and must not run on a value that coerces: `"99" > 25` is
+    // false and `NaN > 25` is false, so an unreadable width used to pass it silently. `else`
+    // rather than a second `if`, so the narrowing above is what makes the comparison safe.
+    else if (e.maxWidth > expansion.maxFanout) {
       d.push({
         severity: "error",
         code: "GRAPH007_MAX_WIDTH_EXCEEDED",
