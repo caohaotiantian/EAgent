@@ -213,9 +213,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
   loom gates   <runId> [--max-bytes N]                     list open gates, with what each
                                                            one reads. N caps EACH channel
                                                            value (default 65536); over it
-                                                           the value is replaced by
-                                                           {"$truncated":{bytes,shown,head}}.
-                                                           --max-bytes 0 prints it whole
+                                                           the value becomes
+                                                           {"$truncated":{bytes,shown,head}}
+                                                           and stderr names it — unless that
+                                                           marker would be BIGGER than the
+                                                           value, in which case the value is
+                                                           left whole and nothing is said,
+                                                           because nothing was withheld.
+                                                           --max-bytes 0 caps nothing
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
