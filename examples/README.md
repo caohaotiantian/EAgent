@@ -86,8 +86,11 @@ body runs synchronously inside a `vm` and cannot await a host round trip. Put th
 `out` reducing each outgoing edge to `{id, kind, over?, as?, maxWidth?, maxIterations?}`. It is there
 so a bound the graph already states is not written a second time in the body: §8's `triage-plan.js`
 reads the `fanout` edge's `maxWidth` off it. An absent field is an absent KEY on both paths, so test
-with `typeof e.maxWidth === "number"` rather than against `undefined`. A body registered by hand
-through `FunctionRegistry.register` — rather than loaded from a file — gets no `ctx.node` at all.
+with `typeof e.maxWidth === "number"` rather than against `undefined`. **Both engine callers supply
+it** — a `function` node and an `assertion` evaluator, a hand-registered body and a resource-loaded
+one, all get the same object off the same builder. It is nonetheless optional, because a caller who
+invokes a `FunctionBody` DIRECTLY (the only other way to run one) passes no node, and an absent
+graph is reported as an absent field rather than one holding `undefined`.
 
 **A body fails on purpose by RETURNING a verdict, not by throwing.** `{retry: {reason}}` is
 `unavailable`/`E_FUNCTION_UNAVAILABLE` and the node's `retry` policy may grant another attempt;

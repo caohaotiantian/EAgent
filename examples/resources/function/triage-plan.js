@@ -26,9 +26,10 @@
  * and raising it there is the whole edit.
  *
  * AND IF THAT EDGE IS NOT THERE, THIS REFUSES rather than running unbounded — the third refusal.
- * A body hand-registered through `FunctionRegistry.register` (rather than loaded from this file)
- * gets no `ctx.node` at all, and a graph could point some other node at this ref. Guessing a
- * ceiling there would be the silent clamp again, this time with the body's own blessing.
+ * Both engine callers supply `ctx.node`, so the missing cases are a graph pointing some OTHER node
+ * at this ref (one with no `fanout` over `shards`) and a caller invoking this body directly, which
+ * passes no node at all. Guessing a ceiling in either would be the silent clamp again, this time
+ * with the body's own blessing.
  */
 function (view, ctx) {
   // `/\r?\n/`, not `"\n"`. A CI shard produced on Windows, or checked out under
@@ -48,19 +49,26 @@ function (view, ctx) {
     };
   }
 
-  const node = ctx.node;
-  const fan = node === undefined ? undefined : node.out.find((e) => e.kind === "fanout" && e.over === "shards");
-  const ceiling = fan === undefined ? undefined : fan.maxWidth;
-  if (typeof ceiling !== "number") {
+  // EVERY fanout edge over this channel, and the SMALLEST of their widths — not the first found.
+  // Nothing stops a graph spreading one array down two fan-outs, and the tightest of them is the
+  // one that would drop evidence first; a body that read the loosest would refuse too late, which
+  // is the silent clamp with an extra step. An edge whose `maxWidth` is not a number is counted as
+  // unreadable rather than skipped, so a width this body cannot see can never widen the ceiling.
+  const fans = (ctx.node === undefined ? [] : ctx.node.out).filter((e) => e.kind === "fanout" && e.over === "shards");
+  const widths = fans.map((e) => e.maxWidth).filter((w) => typeof w === "number");
+  if (widths.length === 0 || widths.length !== fans.length) {
     return {
       refuse: {
         reason:
-          "this body plans a fan-out over \"shards\" and could not read its width: no fanout edge over \"shards\" " +
-          "leaves this node (ctx.node is " + (node === undefined ? "absent — a hand-registered body gets none" : "\"" + node.id + "\"") +
-          "). Running on would silently drop every shard past a width nobody stated.",
+          "this body plans a fan-out over \"shards\" and cannot read its width: node " +
+          (ctx.node === undefined ? "(no ctx.node was supplied)" : "\"" + ctx.node.id + "\"") +
+          " declares " + fans.length + " fanout edge(s) over \"shards\", of which " + widths.length +
+          " state a numeric maxWidth. Running on would drop every shard past a width nobody stated, " +
+          "without a word.",
       },
     };
   }
+  const ceiling = Math.min.apply(null, widths);
 
   if (shards.length > ceiling) {
     return {

@@ -393,6 +393,45 @@ test("a shard with no failures is still COUNTED as a file that was read", async 
   }
 });
 
+test("the body REFUSES when it cannot read a width, instead of picking one", async () => {
+  // THE ARM THE READ RESTS ON. `triage-plan.js` no longer carries the ceiling, so the case that
+  // used to be impossible — the number is not there — is now reachable, and it is the one where
+  // guessing is worst: a fan-out CLAMPS in silence, so a body that assumed a width would drop
+  // evidence out of a document a person is about to approve. Refusing is the only answer that
+  // cannot be wrong quietly.
+  //
+  // DRIVEN, not reasoned: the shipped body is put on a node with NO outgoing fan-out, in a
+  // throwaway graph written into the test's own workspace. `resources/` is the shipped directory,
+  // copied unedited — this is the real body, reached the way any graph would reach it.
+  const ws = workspace(["resources"]);
+  try {
+    mkdirSync(join(ws.dir, "graphs"));
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "no-fanout", project: "examples-test", version: 1 },
+      policy: { posture: "on", expansion: { maxNodes: 8, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+      channels: { found: { type: "string", reduce: "replace" }, shards: { type: "array", reduce: "replace" } },
+      inputs: ["found"],
+      outputs: ["shards"],
+      nodes: [{ id: "plan", type: "function", reads: ["found"], writes: ["shards"], function: { ref: "function/triage-plan@stable" } }],
+      edges: [],
+    };
+    const graph = join(ws.dir, "graphs", "no-fanout.json");
+    writeFileSync(graph, JSON.stringify(spec, null, 2));
+
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt" })]);
+    assert.notEqual(r.code, 0, `a body that cannot read its width must refuse:\n${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    // The reason names the node and counts what it found, so the operator is told which graph is
+    // wrong rather than that "something refused".
+    assert.match(String(error["message"]), /cannot read its width: node "plan" declares 0 fanout edge\(s\) over "shards"/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
 test("a failure with no YAML block does not swallow the next one", async () => {
   // The block scan ran forward to the next `...` and then advanced PAST it, so a `not ok` with no
   // block ate the FOLLOWING failure and wore its evidence: one row reading "alpha/one.test.ts —
