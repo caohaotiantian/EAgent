@@ -11129,12 +11129,62 @@ function startedAsTheEntryPoint(): boolean {
   return import.meta.url.endsWith(basename(entry));
 }
 
+/**
+ * EVERYTHING WRITTEN IS ON THE FD BEFORE THE PROCESS GOES, which `process.exit` alone does not
+ * give you and which nothing in this file could see, because the two ways it is normally read
+ * are the two ways it cannot fail.
+ *
+ * `process.stdout` is SYNCHRONOUS to a TTY and to a file, and ASYNCHRONOUS to a pipe. Every
+ * `write` in this file therefore lands whole when a human runs the command and whole when they
+ * redirect it — and on `loom … | jq` a write larger than one pipe buffer returns having queued
+ * the remainder, `process.exit` discards the queue, and the process exits **0**. Measured on a
+ * 200,000-byte write, macOS, before this existed:
+ *
+ *     node probe.mjs exit  | wc -c   →   65536      ← exactly one pipe buffer
+ *     node probe.mjs exit  > f; wc -c < f → 200001
+ *
+ * `jq` says `Unfinished JSON term at EOF`; `cat`, `tee`, `head` and every shell pipeline that
+ * does not validate say nothing at all, and the exit code says the command worked. `loom gates`
+ * over a wide fan-out and `loom run` over a large output channel both clear 64 KiB routinely.
+ *
+ * WHY THIS AND NOT `process.exitCode = code`. Letting the loop empty on its own is the shorter
+ * fix and it is the wrong one here: `loom serve` builds a control plane, a gate clock, a run
+ * clock and a bus subscription, and this file's own comments record that one of those was
+ * already forgotten once ("a second timer left running is a process that will not exit — the
+ * `.unref()` saves it in practice and relying on that is how the first one would have been
+ * missed"). Under `exitCode` a single un-torn-down handle turns a clean exit into a hang, and
+ * a hang is a worse failure than the one being fixed and a quieter one. `process.exit` stays
+ * the single exit; this only makes sure the bytes are gone first.
+ *
+ * THE EMPTY WRITE IS THE DRAIN. `write("", cb)` queues `cb` behind everything already buffered,
+ * so it fires once the stream is empty — a `'drain'` listener would not, because `'drain'` is
+ * only emitted after a write that returned `false`, and a stream holding data from a write that
+ * returned `true` would wait for an event that never comes. A destroyed or errored stream calls
+ * back with an error rather than hanging (measured: `loom … | head -c 10` exits 0, no hang), so
+ * the error is deliberately ignored — there is nowhere left to report it to.
+ */
+async function flushStdio(): Promise<void> {
+  for (const s of [process.stdout, process.stderr]) {
+    if (s.writableEnded || s.destroyed) continue;
+    await new Promise<void>((resolve) => {
+      s.write("", () => resolve());
+    });
+  }
+}
+
 if (startedAsTheEntryPoint()) {
   main(process.argv.slice(2))
-    .then((code) => process.exit(code))
-    .catch((e: unknown) => {
+    .then(async (code) => {
+      await flushStdio();
+      process.exit(code);
+    })
+    .catch(async (e: unknown) => {
       const le = isLoomError(e) ? e : toLoomError(e);
       process.stderr.write(`${le.code}: ${le.message}\n`);
+      // THE REFUSAL PATH DRAINS TOO. It is the shorter output, so it is the one least likely to
+      // be truncated and the one whose truncation would be hardest to explain: a diagnostic cut
+      // in half, on the path an operator reaches only when something already went wrong.
+      await flushStdio();
       process.exit(1);
     });
 }
