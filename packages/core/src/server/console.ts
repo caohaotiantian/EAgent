@@ -447,11 +447,34 @@ function applyEvent(ev) {
     const t = current.tasks.get(ev.taskId); if (t) { t.state = p.status; t.take = p.take || []; }
   } else if (ev.type === "task.failed" && ev.taskId) {
     const t = current.tasks.get(ev.taskId); if (t) { t.state = "failed"; t.error = p.error; }
+  } else if (ev.type === "task.skipped" && ev.taskId) {
+    // A.45: THE SAME RULE projection.ts's fold APPLIES — upsertTask(p, e.taskId, { state:
+    // "skipped" }), no more and no less. Before this arm existed, a branch a skip join
+    // absorbed kept whatever state its preceding task.failed had left it in (failed) and
+    // stayed there, so the live console over-reported severity in the one view whose job is
+    // to show the worst thing in a collapsed fan-out — fail-safe (STATE_PRIORITY ranks
+    // failed above skipped) but still a disagreement with GET /runs/:id.
+    const t = current.tasks.get(ev.taskId); if (t) t.state = "skipped";
+  } else if (ev.type === "task.cancelled" && ev.taskId) {
+    // Same rule, same reason: upsertTask(p, e.taskId, { state: "cancelled" }). A task still
+    // leased or awaiting_gate when its run was cancelled used to stay that way on screen
+    // forever — the run showed cancelled while one of its tasks looked like it was still
+    // going.
+    const t = current.tasks.get(ev.taskId); if (t) t.state = "cancelled";
+  } else if (ev.type === "task.retry_scheduled" && ev.taskId) {
+    // Same rule again — projection.ts's arm sets state: "retrying". Without this a task
+    // being retried after a deferral kept showing failed from the attempt that just ended.
+    const t = current.tasks.get(ev.taskId); if (t) t.state = "retrying";
   } else if (ev.type === "state.reduced") {
     Object.assign(current.channels, p.values || {});
   } else if (ev.type === "gate.raised") {
     current.gates.push({ gateId: p.gateId, nodeId: p.nodeId, state: "open" });
     current.status = "awaiting_gate";
+    // projection.ts's gate.raised arm also sets the RAISING TASK's own state to
+    // awaiting_gate (upsertTask(p, e.taskId, { state: "awaiting_gate" })), not only the
+    // run's. Without this line the gated node kept showing leased in the graph until it
+    // was answered, disagreeing with the projection the whole time it was on screen.
+    if (ev.taskId) { const t = current.tasks.get(ev.taskId); if (t) t.state = "awaiting_gate"; }
   } else if (ev.type === "gate.decided") {
     current.gates = current.gates.filter((g) => g.gateId !== p.gateId);
   } else if (ev.type === "run.suspended") {
