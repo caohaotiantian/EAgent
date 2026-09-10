@@ -518,7 +518,7 @@ function computeFanoutStacks(
     const candidates: (readonly number[] | undefined)[] = ins.map((e) => {
       const parent = stacks.get(e.from);
       if (parent === undefined) return undefined;
-      if (e.kind === "fanout") return [...parent, e.maxWidth ?? 1];
+      if (e.kind === "fanout") return [...parent, countOr1(e.maxWidth)];
       if (e.kind === "join") return parent.slice(0, -1);
       return parent;
     });
@@ -558,7 +558,7 @@ function computeFanoutStacks(
     const edgeWidth = (e: EdgeSpec): number => {
       const parentWidth = widths.get(e.from) ?? 1;
       const parentStack = stacks.get(e.from);
-      if (e.kind === "fanout") return parentWidth * (e.maxWidth ?? 1);
+      if (e.kind === "fanout") return parentWidth * countOr1(e.maxWidth);
       if (e.kind === "join") return parentStack === undefined ? parentWidth : product(parentStack.slice(0, -1));
       return parentWidth;
     };
@@ -588,7 +588,7 @@ function applyLoopFactors(
 ): Map<NodeId, number> {
   const mult = new Map<NodeId, number>(parallelWidth);
   for (const loop of loopEdges) {
-    const iterations = Math.max(1, loop.maxIterations ?? 1);
+    const iterations = countOr1(loop.maxIterations);
     for (const n of spec.nodes) {
       const isInCycle =
         n.id === loop.to ||
@@ -2101,7 +2101,7 @@ function rule006Cycles(spec: GraphSpec, idx: GraphIndex, channelTypes: Record<st
         severity: "error",
         code: "GRAPH006_BAD_MAX_ITERATIONS",
         message:
-          `loop edge "${e.id}" declares maxIterations ${JSON.stringify(iterations)}, which is not a positive integer — ` +
+          `loop edge "${e.id}" declares maxIterations ${describeValue(iterations)}, which is not a positive integer — ` +
           `the bound is compared against the iteration counter and multiplied into the node's total multiplicity, ` +
           `and neither reader can use this value`,
         at: { edgeId: e.id },
@@ -2170,6 +2170,41 @@ function isPositiveInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 }
 
+/**
+ * The two fields are ALSO read by arithmetic that runs BEFORE any rule sees them —
+ * `computeFanoutStacks` multiplies the widths inside `indexGraph`, and `multiplicityOf`
+ * multiplies the loop bound. A `bigint` or a `symbol` there is a `TypeError` out of the middle
+ * of the compiler, so the refusal below never gets to be printed and the caller gets a crash
+ * where a diagnostic belonged. Driven, on a spec built in memory (JSON cannot express either,
+ * but `compile` and `validateGraph` are exported and take a `GraphSpec`):
+ *
+ *     maxWidth: 10n       -> TypeError: Cannot mix BigInt and other types
+ *     maxWidth: Symbol()  -> TypeError: Cannot convert a Symbol value to a number
+ *
+ * `1` is the stand-in and it is safe BECAUSE the graph is refused anyway: an unreadable width
+ * is `GRAPH007_BAD_MAX_WIDTH` and an unreadable bound `GRAPH006_BAD_MAX_ITERATIONS`, so no
+ * decision downstream of this number is ever taken on a graph that reached it.
+ */
+function countOr1(v: unknown): number {
+  return isPositiveInt(v) ? v : 1;
+}
+
+/**
+ * A value in a diagnostic, rendered without trusting it. `JSON.stringify` throws on a circular
+ * object, on a `bigint`, and on any `toJSON` the caller wrote — and a guard that throws while
+ * describing what it is refusing is worse than the thing it refuses.
+ */
+function describeValue(v: unknown): string {
+  if (typeof v === "string") return JSON.stringify(v);
+  if (typeof v === "bigint") return `${v}n`;
+  if (typeof v === "symbol") return "a symbol";
+  if (typeof v === "function") return "a function";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object") return "an object";
+  return String(v);
+}
+
 function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnostic[]): void {
   for (const e of spec.edges) {
     if (e.kind !== "fanout") continue;
@@ -2196,7 +2231,7 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
         severity: "error",
         code: "GRAPH007_BAD_MAX_WIDTH",
         message:
-          `fanout edge "${e.id}" declares maxWidth ${JSON.stringify(e.maxWidth)}, which is not a positive integer — ` +
+          `fanout edge "${e.id}" declares maxWidth ${describeValue(e.maxWidth)}, which is not a positive integer — ` +
           `the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, ` +
           `and neither reader can use this value`,
         at: { edgeId: e.id },

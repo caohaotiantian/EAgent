@@ -162,6 +162,57 @@ test("the check reads the EDGE KIND, so a stray field on another kind is not inv
   );
 });
 
+test("A HOSTILE VALUE REFUSES; IT DOES NOT THROW — the guard must survive what it is refusing", () => {
+  // Found while reviewing the first cut of this rule, and four of these seven CRASHED the
+  // compiler rather than refusing. Two ways, and neither was the new check itself:
+  //
+  //   `computeFanoutStacks` multiplies the widths INSIDE `indexGraph`, before any rule runs,
+  //   so `10n` was `TypeError: Cannot mix BigInt and other types` and `Symbol()` was `Cannot
+  //   convert a Symbol value to a number` — out of the middle of the compiler, with the
+  //   refusal never printed.
+  //
+  //   The diagnostic's own `JSON.stringify` threw on a circular object and on any `toJSON`
+  //   the caller wrote. A guard that throws while describing what it is refusing is worse
+  //   than the thing it refuses.
+  //
+  // JSON cannot express a bigint, a symbol or a cycle — but `compile` and `validateGraph` are
+  // EXPORTED and take a `GraphSpec`, which is the same door `#assertBound` re-checks
+  // `EdgeKind` at. `countOr1` and `describeValue` are the two answers.
+  const circular: Record<string, unknown> = {};
+  circular["self"] = circular;
+  const hostile: [string, unknown][] = [
+    ["bigint", 10n],
+    ["circular object", circular],
+    ["symbol", Symbol("x")],
+    ["an object with valueOf", { valueOf: () => 24 }],
+    ["an object whose toJSON throws", { toJSON: () => { throw new Error("boom"); } }],
+    ["1e21, past the safe integer range", 1e21],
+    ["an array holding the number", [24]],
+  ];
+  for (const [name, bad] of hostile) {
+    const s = clone(incidentTriage());
+    const i = s.edges.findIndex((x) => x.id === ("e1" as EdgeId));
+    s.edges[i] = { ...s.edges[i]!, maxWidth: bad } as unknown as EdgeSpec;
+    const d = errorsOf(s as GraphSpec);
+    assert.ok(
+      d.some((x) => x.code === "GRAPH007_BAD_MAX_WIDTH"),
+      `${name} must be refused, not crashed through; got ${d.map((x) => x.code).join(", ") || "no errors"}`,
+    );
+  }
+
+  // The same two readers exist for the loop bound.
+  for (const [name, bad] of hostile) {
+    const s = clone(incidentTriage());
+    const i = s.edges.findIndex((x) => x.id === ("e9" as EdgeId));
+    s.edges[i] = { ...s.edges[i]!, maxIterations: bad } as unknown as EdgeSpec;
+    const d = errorsOf(s as GraphSpec);
+    assert.ok(
+      d.some((x) => x.code === "GRAPH006_BAD_MAX_ITERATIONS"),
+      `${name} on maxIterations must be refused; got ${d.map((x) => x.code).join(", ") || "no errors"}`,
+    );
+  }
+});
+
 test("one diagnostic per bad edge, not one per rule that reads the field", () => {
   const s = clone(incidentTriage());
   const i = s.edges.findIndex((x) => x.id === ("e1" as EdgeId));
