@@ -493,26 +493,43 @@ export class ToolRegistry {
  * WHAT A BODY MAY KNOW ABOUT THE NODE IT IS RUNNING ON. TODO A.44.
  *
  * A body was handed channel values and nothing about the graph that called it, so a bound the
- * graph already declares had to be spelled a second time in the body. The shipped example is the
- * repro: `examples/resources/function/triage-plan.js` carries `const SHARD_CEILING = 24` beside a
- * `fanout` edge declaring `maxWidth: 24`, and a comment saying the two "MUST TRACK" each other.
- * A fan-out CLAMPS silently — 30 shards at a width of 24 runs 24 branches and nothing in the run,
- * the trace or the report says the other six were never read — so a body that wants to REFUSE
- * above the width has to hard-code the number, and the duplicate is load-bearing.
+ * graph already declares had to be spelled a second time in the body. The repro this closed was
+ * the shipped example: `examples/resources/function/triage-plan.js` carried
+ * `const SHARD_CEILING = 24` beside a `fanout` edge declaring `maxWidth: 24`, with a comment
+ * saying the two "MUST TRACK" each other. A fan-out CLAMPS silently — 30 shards at a width of 24
+ * runs 24 branches and nothing in the run, the trace or the report says the other six were never
+ * read — so a body that wanted to REFUSE above the width had to hard-code the number.
+ *
+ * (PAST TENSE ON PURPOSE. That example is another lane's file and consuming this is its job, so
+ * this docstring must not assert what that file currently contains — a kernel type citing an
+ * example's present state is a wrong citation the moment the example is fixed. What is permanent
+ * is the SHAPE of the problem, which is what the paragraph above describes.)
  *
  * IT DECIDES NOTHING, WHICH IS THE CONSTRAINT THE ROW SET. It is derived from the compiled
  * `RunGraph.spec` alone — no clock, no draw, no projection — so a replay re-executing the body
  * against the same `graphHash` computes the identical object, and nothing is journaled for it.
- * The engine reads nothing back off it: `NodeOutcome` is `{status, writes, usage, take}` and a
- * body's only influence on scheduling is `take`, which it already had.
+ * The engine reads nothing back off it: the object is built, handed over, and dropped when the
+ * call returns. A body's only influence on what happens next is the `FunctionOutcome` it returns
+ * — `writes`, `take` and the two verdicts — and it had all of those before this field existed.
  *
  * ── `out`, AND THE RULE ITS MEMBERS FOLLOW ──────────────────────────────────
  *
- * **The outgoing-edge fields that BOUND WHAT THIS NODE'S OWN OUTPUT CAN PRODUCE.** `maxWidth` and
- * `maxIterations` are the two real ones — a fan-out width and a loop ceiling, each REQUIRED by
- * `graph/validate.ts` (`GRAPH007_NO_MAX_WIDTH`, `GRAPH006_UNBOUNDED_LOOP`) and each read at run
- * time to cut this node's output short. `over` and `as` name the CHANNEL the fan-out draws from
- * and the one each branch receives, which is how a body finds the right edge among several.
+ * The rule is TWO clauses, because one did not cover the set — `id`, `over` and `as` bound
+ * nothing, and a rule its own members contradict is worse than no rule:
+ *
+ *   (i)  **the outgoing-edge fields that BOUND WHAT THIS NODE'S OWN OUTPUT CAN PRODUCE**, and
+ *   (ii) **the fields needed to say WHICH edge is which**, since (i) is useless on a node with
+ *        several outgoing edges and no way to tell them apart.
+ *
+ * Clause (i) is `maxWidth` and `maxIterations`. Clause (ii) is `id` (which `take` already names),
+ * `kind`, and `over`/`as` (the channels a fan-out draws from and hands each branch — how a body
+ * finds the fan-out it feeds when a node has more than one).
+ *
+ * Both of clause (i) are REQUIRED by `graph/validate.ts` (`GRAPH007_NO_MAX_WIDTH`,
+ * `GRAPH006_UNBOUNDED_LOOP`) and both are read at run time to cut this node's output short —
+ * `#activate`'s `items.slice(0, e.maxWidth ?? 0)` and `#loopMayContinue`'s
+ * `w.task.iteration + 1 < (e.maxIterations ?? 1)`. That is what "bound" means here: a number the
+ * executor will silently apply to this node's output whether the body knows it or not.
  *
  * WHAT IS OUT, and why, since a named set needs its boundary. `to`, `branches` and `compensates`
  * name OTHER nodes — topology, not this node's shape. `when` and `until` are expressions the
@@ -521,12 +538,11 @@ export class ToolRegistry {
  * between it and `when`.) `codes` is an `error`-edge filter, selected by a failure rather than by
  * a choice. `from` is this node.
  *
- * `id` IS HERE BECAUSE `take` ALREADY NAMES EDGE IDS — and `out` is the node's DECLARED shape,
- * NOT "the edges you may take". Those differ: `run/engine.ts`'s `TAKEABLE_EDGE_KINDS` is
- * `seq`, `conditional`, `fanout`, `join`, `loop`, so an `error` or `compensation` edge appears
- * here and is refused if named in a `take`. `kind` is on every member precisely so a body can
- * tell which is which, and stating the difference is cheaper than filtering it away — a body
- * that wants to know it HAS a rescue arm is asking a fair question.
+ * `out` IS THE NODE'S DECLARED SHAPE, NOT "THE EDGES YOU MAY TAKE". Those differ:
+ * `run/engine.ts`'s `TAKEABLE_EDGE_KINDS` is `seq`, `conditional`, `fanout`, `join`, `loop`, so
+ * an `error` or `compensation` edge appears here and is REFUSED if named in a `take`. Showing it
+ * and stating the difference beats filtering it away — a body that wants to know it HAS a rescue
+ * arm is asking a fair question — and `kind` is on every member precisely so it can tell.
  *
  * `reads` IS THE DECLARED SET, NOT `view.visible`. `makeStateView` builds `visible` out of the
  * channels that actually hold a value, so a channel declared and unset appears in one and not
@@ -588,13 +604,16 @@ export interface FunctionContext {
   /**
    * The seed for the body's `Math.random`, drawn ONCE per task and journaled as an effect.
    *
-   * NOT VISIBLE TO THE BODY. The loader's bridge consumes this to reseed `Math.random`
-   * inside the realm before `__loomBody` is entered, and the `ctx` a body receives is
-   * `{taskId, signal, now, node}` — the seed is not on it and must not be, because a seed a
-   * body can read is a value it can record or branch on. `node` joined that set for TODO A.44
-   * and is spec-derived, so invariant 4 is untouched by it; `seed` staying off is the part
-   * invariant 4 is actually about, and `test/resources/functions.test.ts` asserts the exact key
-   * set for exactly that reason.
+   * NOT VISIBLE TO THE BODY. The loader's bridge consumes this to reseed `Math.random` inside
+   * the realm before `__loomBody` is entered, and the `ctx` a body receives is
+   * `{taskId, signal, now, node}`, PLUS `effects` where the node declares any — the seed is not
+   * on it and must not be, because a seed a body can read is a value it can record or branch on.
+   *
+   * The "plus `effects`" is not padding: the sentence used to enumerate three members and omit
+   * it, and the rewrite that added `node` reproduced the omission. `node` joined the set for
+   * TODO A.44 and is spec-derived, so invariant 4 is untouched by it; `seed` staying OFF is the
+   * part invariant 4 is actually about, and `test/resources/functions.test.ts` asserts the exact
+   * key set — for a node declaring no effects — for exactly that reason.
    *
    * WHY A SEED AND NOT A RECORDED VALUE PER CALL. A body runs synchronously inside
    * `vm.runInContext` under a per-call timeout, so it cannot await a journal append between

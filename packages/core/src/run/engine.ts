@@ -570,7 +570,9 @@ const RUN_FATAL_CODES: ReadonlySet<string> = new Set([
  * the population `skip` exists for. THE REFUSAL IS THE ONE WORTH ARGUING, because it is the only
  * member here a body chose deliberately: a graph that says `onBranchError: "skip"` has already
  * said what to do with a branch that fails, and a branch refusing ON PURPOSE is the case that
- * instruction fits best, not least. It is `validation`, not a statement about the run. NOT, note, because "a rescue arm is an answer to it", which is
+ * instruction fits best, not least. It is `validation`, not a statement about the run.
+ *
+ * NOT, note, because "a rescue arm is an answer to it", which is
  * how `RUN_FATAL_CODES` argues its own boundary one screen up: this predicate fires ONLY when
  * `take.length === 0`, i.e. precisely when no rescue arm was taken, so that argument cannot be
  * borrowed here even though it reaches the same members.
@@ -1214,6 +1216,17 @@ const WHY_EXCLUSIVE: Readonly<Record<(typeof VERDICT_KEYS)[number], string>> = {
   refuse: "a refused node commits nothing, so anything it also asked to commit would be silently dropped",
 };
 
+/**
+ * The clash of the two VERDICTS is a third sentence, not either of the two above.
+ *
+ * Both of those explain what happens to something the body ASKED TO COMMIT, and a body returning
+ * `{retry, refuse}` asked to commit nothing — so printing either one tells an author about writes
+ * they did not write. That is exactly the harm `WHY_EXCLUSIVE` exists to avoid, reproduced one
+ * case further along, which is the shape this file's register keeps recording.
+ */
+const WHY_ONE_VERDICT =
+  "one says trying again might work and the other says it will not, so there is no order in which both are true";
+
 function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutcome {
   const shape = `a function body returns { writes: { <channel>: value } } and optionally { take: [<edgeId>] }, or { retry: { reason } } to ask for another attempt, or { refuse: { reason } } to fail on purpose`;
   if (out === null || typeof out !== "object") {
@@ -1247,11 +1260,20 @@ function requireOutcome(out: unknown, ref: string, nodeId: NodeId): FunctionOutc
     // also commit this" has no coherent reading, "refuse me and also commit this" drops the
     // writes silently, and "retry me and refuse me" is a contradiction. Refusing beats picking
     // one, which is the lesson from the return-value defect this function was written for.
-    const clash = ["writes", "take", ...VERDICT_KEYS.filter((k) => k !== verb)].find((k) => k in out);
+    //
+    // `!== undefined`, NOT `in`, AND THE TWO DISAGREE ABOUT ONE VALUE. The skip above tests
+    // `verdict === undefined`, so `in` here would refuse `{retry: {...}, refuse: undefined}` —
+    // which is what `refuse: cond ? {reason} : undefined` produces, an ordinary way to write a
+    // conditional verdict — while accepting `{writes, refuse: undefined}`. One predicate answering
+    // "is this key absent?" two ways inside one function is a defect whichever way it leans, and
+    // an explicit `undefined` is absent everywhere else in this contract (`callCtx.seed`,
+    // `out.take`, `out.retry` are all read that way). A body that means "refuse" writes an object.
+    const other = VERDICT_KEYS.find((k) => k !== verb && (out as Record<string, unknown>)[k] !== undefined);
+    const clash = other ?? ["writes", "take"].find((k) => (out as Record<string, unknown>)[k] !== undefined);
     if (clash !== undefined) {
       throw err.validation(
         CODES.E_RESOURCE_INVALID,
-        `function "${ref}" on node "${nodeId}" returned ${verb} alongside ${clash} — ${WHY_EXCLUSIVE[verb]}. Return one or the other`,
+        `function "${ref}" on node "${nodeId}" returned ${verb} alongside ${clash} — ${other === undefined ? WHY_EXCLUSIVE[verb] : WHY_ONE_VERDICT}. Return one or the other`,
       );
     }
   }
@@ -1295,10 +1317,25 @@ function retryRequested(out: FunctionOutcome, ref: string, nodeId: NodeId): void
  * deliberately refuses to read a `class` off injected code. So the body names the verdict and the
  * kernel names the error — which is also what stops a body choosing `exhausted` for itself.
  *
- * ONE HELPER, TWO CALLERS, and this file has now made that mistake five times: the seed, the
- * clock, the outcome shape, `take`, and whichever one comes next. `functions.require` has exactly
- * two callers — `#runFunction` and `#runEvaluator`'s `assertion` arm.
+ * ONE HELPER, TWO CALLERS. `functions.require` has exactly two — `#runFunction` and
+ * `#runEvaluator`'s `assertion` arm — and the contract they share has now been extended SIX
+ * times, counted by naming every member rather than by carrying a number:
+ *
+ *   1 the seed · 2 the clock · 3 the outcome shape · 4 `take`      landed at one caller a commit
+ *                                                                  before the other, every time
+ *   5 `refuse` (this) · 6 `ctx.node`                                landed at both in one commit
+ *
+ * `ctx.effects` is a SEVENTH that is deliberately still open at one arm only — see TODO G.1 and
+ * `#functionBody`, which says why the declaration has nowhere to live. Add the next to this list
+ * rather than incrementing a total: "five times" over four named members is what this comment
+ * said before, and a count nobody can check is a count nobody maintains.
  */
+function refusalDeclared(out: FunctionOutcome, ref: string, nodeId: NodeId): void {
+  if (out.refuse === undefined) return;
+  const why = typeof out.refuse.reason === "string" && out.refuse.reason.length > 0 ? out.refuse.reason : "no reason given";
+  throw err.validation(CODES.E_FUNCTION_REFUSED, `function "${ref}" on node "${nodeId}" refused: ${why}`);
+}
+
 /**
  * The node a body is running on, reduced to what it may see. TODO A.44, and see
  * `FunctionNodeShape` in `run/registry.ts` for the membership rule and every exclusion.
@@ -1337,12 +1374,6 @@ function nodeShapeOf(node: NodeSpec, outbound: readonly EdgeSpec[]): FunctionNod
       ),
     ),
   });
-}
-
-function refusalDeclared(out: FunctionOutcome, ref: string, nodeId: NodeId): void {
-  if (out.refuse === undefined) return;
-  const why = typeof out.refuse.reason === "string" && out.refuse.reason.length > 0 ? out.refuse.reason : "no reason given";
-  throw err.validation(CODES.E_FUNCTION_REFUSED, `function "${ref}" on node "${nodeId}" refused: ${why}`);
 }
 
 function sodOn(node: NodeSpec, p: RunProjection): NodeOutcome | undefined {
@@ -7119,8 +7150,8 @@ export class Engine {
       signal: ctx.abort.signal,
       now: this.#bodyClock(p, w.task.taskId),
       seed: await this.#randomSeedEffect(ctx, p, w),
-      // BOTH ARMS, IN THE SAME COMMIT — the fifth time this contract has changed, and the first
-      // four each landed here a commit before `#runEvaluator`. See `nodeShapeOf`.
+      // BOTH ARMS, IN THE SAME COMMIT. Member SIX of the list in `refusalDeclared`'s docstring,
+      // which names its members instead of counting them. See `nodeShapeOf`.
       node: nodeShapeOf(w.node, ctx.index.outbound.get(w.node.id) ?? []),
       ...(() => {
         const e = this.#effectsFor(ctx, p, w);

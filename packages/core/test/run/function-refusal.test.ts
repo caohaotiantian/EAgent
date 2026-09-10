@@ -37,7 +37,6 @@ import assert from "node:assert/strict";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
-import type { NodeId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { createFunctionLoader } from "../../src/resources/functions.ts";
 import { ResourceStore } from "../../src/resources/store.ts";
@@ -202,6 +201,18 @@ test("A GRAPH CAN ROUTE A REFUSAL AND NOT A CRASH — which is what a CODE buys"
   assert.equal(crashed.p.status, "failed", "an E_INTERNAL crash must not take an E_FUNCTION_REFUSED edge");
   assert.equal(crashed.p.error?.code, "E_INTERNAL", JSON.stringify(crashed.p.error ?? {}));
   assert.equal(crashed.p.channels["rescued"], undefined);
+
+  // AND NOT THE SIBLING VERDICT'S EDGE EITHER, which is the control that matters most: `retry`
+  // and `refuse` are the two returns most likely to be conflated by a future edit, and an edge
+  // keyed on `E_FUNCTION_UNAVAILABLE` catching a refusal would mean the two codes had quietly
+  // become one. Same body, same graph shape, only the edge's `codes` different.
+  const wrongEdge = await run(() => ({ refuse: { reason: "empty match set" } }), "function", {
+    retry: false,
+    rescue: "retry",
+  });
+  assert.equal(wrongEdge.p.status, "failed", "a refusal must not take an edge keyed on the RETRY code");
+  assert.equal(wrongEdge.p.error?.code, "E_FUNCTION_REFUSED", JSON.stringify(wrongEdge.p.error ?? {}));
+  assert.equal(wrongEdge.p.channels["rescued"], undefined);
 });
 
 // ── the second caller ────────────────────────────────────────────────────────
@@ -244,6 +255,27 @@ test("`refuse` IS EXCLUSIVE WITH `writes`, `take` AND `retry`", async () => {
   const both = await run(() => ({ retry: { reason: "x" }, refuse: { reason: "y" } }), "function");
   assert.equal(both.p.error?.code, "E_RESOURCE_INVALID", JSON.stringify(both.p.error ?? {}));
   assert.match(String(both.p.error?.message), /retry alongside refuse/);
+  // AND THE MESSAGE IS THE VERDICT-VS-VERDICT ONE, not either writes/take sentence. Neither body
+  // asked to commit anything, so "would be proposed twice" / "would be silently dropped" would be
+  // telling an author about writes they did not write — the exact harm the two-message split
+  // exists to avoid, which the first version of this reproduced one case further along.
+  assert.match(String(both.p.error?.message), /no order in which both are true/);
+  assert.doesNotMatch(String(both.p.error?.message), /proposed twice|silently dropped/);
+});
+
+test("AN EXPLICIT `undefined` VERDICT IS ABSENT, not a clash — `refuse: cond ? {…} : undefined`", async () => {
+  // `requireOutcome` SKIPS a verdict on `=== undefined` and used to detect a clash with `in`, so
+  // the two halves of one predicate answered "is this key absent?" differently: this body — the
+  // ordinary way to write a conditional verdict — was refused, while `{writes, refuse: undefined}`
+  // was fine. An explicit `undefined` is absent everywhere else in this contract (`ctx.seed`,
+  // `out.take`, `out.retry` are all read that way), so it is absent here.
+  const { p } = await run(() => ({ retry: { reason: "x" }, refuse: undefined }), "function");
+  assert.equal(p.error?.code, "E_FUNCTION_UNAVAILABLE", JSON.stringify(p.error ?? {}));
+  assert.doesNotMatch(String(p.error?.message), /alongside/, "an absent verdict is not a clash");
+
+  // The same, one field over, as the control: `{writes, retry: undefined}` commits.
+  const w = (await run(() => ({ writes: { seen: ["ok"] }, retry: undefined }), "function")).p;
+  assert.deepEqual(w.channels["seen"], ["ok"], JSON.stringify(w.error ?? {}));
 });
 
 test("A REFUSAL WITH NO REASON STILL SAYS SO, rather than printing `undefined`", async () => {

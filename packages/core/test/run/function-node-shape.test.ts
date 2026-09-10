@@ -112,7 +112,7 @@ async function hostRun(body: unknown, kind: "function" | "evaluator" = "function
 }
 
 /** The same graph with the `plan` body living in a `vm` realm, reached through the loader. */
-function sandbox(source: string) {
+function sandbox(source: string, kind: "function" | "evaluator" = "function") {
   const store = new MemoryStateStore({ now: () => NOW });
   const resources = new ResourceStore({ now: () => 1 });
   for (const [name, content] of [
@@ -136,12 +136,12 @@ function sandbox(source: string) {
     sleep: async () => {},
     policy: { granted: [], systemFloor: "out" },
   });
-  const graph = compileOrThrow({ spec: spec("function"), resolver: resources, tools: {}, tenantCapabilities: [] });
+  const graph = compileOrThrow({ spec: spec(kind), resolver: resources, tools: {}, tenantCapabilities: [] });
   return { store, engine, graph, functions };
 }
 
-async function sandboxRun(source: string) {
-  const h = sandbox(source);
+async function sandboxRun(source: string, kind: "function" | "evaluator" = "function") {
+  const h = sandbox(source, kind);
   const runId = await h.engine.submit({ graph: h.graph, inputs: { items: [] } });
   let p = await h.engine.advance(runId);
   for (let i = 0; i < 4 && p.status === "running"; i++) p = await h.engine.advance(runId);
@@ -212,12 +212,139 @@ test("`reads` IS THE DECLARED SET, NOT `view.visible` — which is why it is not
   assert.equal(p.channels["probe"], "items+absent/items", JSON.stringify(p.error ?? {}));
 });
 
+test("`maxIterations` IS CARRIED TOO — the loop analogue of `maxWidth`, and the SECOND clause member", async () => {
+  // WITHOUT THIS TEST THE FIELD SHIPPED UNEXERCISED. A reviewer deleted the `maxIterations`
+  // spread from `nodeShapeOf` outright and the whole 3,693-test suite stayed green: no fixture in
+  // the tree gave a `function`/`evaluator` node a `loop` edge, so the key-set test above only ever
+  // proved that its ABSENCE was spelled correctly. `maxIterations` is a member the plan chose on
+  // purpose, and a member with no fixture is a member nobody has checked.
+  //
+  // This is the exact twin of `A BODY READS ITS OWN FAN-OUT CEILING`: `#loopMayContinue` reads
+  // `w.task.iteration + 1 < (e.maxIterations ?? 1)`, so a body re-entered by a loop is cut off at
+  // a number it could not see, for the same reason a fan-out clamps at one.
+  const loopSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "nodeshape-loop", project: "t", version: 1 },
+    policy: { posture: "out", expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 5 } },
+    channels: {
+      seed: { type: "string", reduce: "replace" },
+      probe: { type: "string", reduce: "replace" },
+      hop: { type: "string", reduce: "replace" },
+    },
+    inputs: ["seed"],
+    outputs: ["probe"],
+    nodes: [
+      { id: "plan", type: "function", reads: ["seed"], writes: ["probe"], function: { ref: REF } },
+      { id: "again", type: "function", reads: ["probe"], writes: ["hop"], function: { ref: "function/work@stable" } },
+    ],
+    edges: [
+      { id: "fwd", from: "plan", to: "again", kind: "seq" },
+      { id: "back", from: "again", to: "plan", kind: "loop", until: "has(hop)", maxIterations: 3 },
+    ],
+  } as unknown as GraphSpec;
+
+  const functions = new FunctionRegistry();
+  // `plan` reports what it can see of its OWN outgoing edges. The loop edge leaves `again`, not
+  // `plan`, so this asserts the field on the node that declares it — `again` is where it lands.
+  functions.register(REF, ((_v: unknown, ctx: { node: { out: { id: string }[] } }) => ({
+    writes: { probe: JSON.stringify(ctx.node.out) },
+  })) as never);
+  functions.register("function/work@stable", ((_v: unknown, ctx: { node: { out: { kind: string; maxIterations?: number }[] } }) => ({
+    writes: { hop: String(ctx.node.out.find((e) => e.kind === "loop")?.maxIterations) },
+  })) as never);
+
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: [], systemFloor: "out" },
+  });
+  const graph = compileOrThrow({ spec: loopSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  const runId = await engine.submit({ graph, inputs: { seed: "go" } });
+  let p = await engine.advance(runId);
+  for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+
+  assert.equal(p.channels["hop"], "3", `the loop ceiling must be readable off the node that declares it: ${JSON.stringify(p.error ?? {})}`);
+  // ...and `plan`'s own `out` carries the plain `seq` edge with NO `maxIterations` key, which is
+  // the conditional spread doing its job on the other side.
+  assert.deepEqual(JSON.parse(String(p.channels["probe"])), [{ id: "fwd", kind: "seq" }]);
+});
+
+test("AN `error` EDGE APPEARS IN `out` AND IS NOT TAKEABLE — the docstring's claim, pinned", async () => {
+  // `FunctionNodeShape` says an `error` or `compensation` edge "appears here and is REFUSED if
+  // named in a `take`", and that `kind` is there so a body can tell. Both halves were unpinned:
+  // no fixture gave the probed node an error edge. This drives the pair on one node.
+  const errSpec = {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "nodeshape-err", project: "t", version: 1 },
+    policy: { posture: "out" },
+    channels: { seed: { type: "string", reduce: "replace" }, probe: { type: "string", reduce: "replace" }, caught: { type: "string", reduce: "replace" } },
+    inputs: ["seed"],
+    outputs: ["probe"],
+    nodes: [
+      { id: "plan", type: "function", reads: ["seed"], writes: ["probe"], function: { ref: REF } },
+      { id: "rescue", type: "function", reads: ["seed"], writes: ["caught"], function: { ref: "function/work@stable" }, unhandled: true },
+    ],
+    edges: [{ id: "err", from: "plan", to: "rescue", kind: "error" }],
+  } as unknown as GraphSpec;
+
+  const run = async (body: unknown) => {
+    const functions = new FunctionRegistry();
+    functions.register(REF, body as () => FunctionOutcome);
+    functions.register("function/work@stable", (() => ({ writes: { caught: "x" } })) as never);
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: new ToolRegistry(),
+      functions,
+      models: new ModelRegistry(),
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: [], systemFloor: "out" },
+    });
+    const graph = compileOrThrow({ spec: errSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+    const runId = await engine.submit({ graph, inputs: { seed: "go" } });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 4 && p.status === "running"; i++) p = await engine.advance(runId);
+    return p;
+  };
+
+  // IT APPEARS, with its kind, so a body can tell it HAS a rescue arm.
+  const seen = await run((_v: unknown, ctx: { node: { out: { id: string; kind: string }[] } }) => ({
+    writes: { probe: ctx.node.out.map((e) => `${e.id}:${e.kind}`).join(",") },
+  }));
+  assert.equal(seen.channels["probe"], "err:error", JSON.stringify(seen.error ?? {}));
+
+  // AND NAMING IT IN A `take` IS REFUSED, not silently dropped — `TAKEABLE_EDGE_KINDS`.
+  const took = await run((_v: unknown, ctx: { node: { out: { id: string }[] } }) => ({
+    writes: { probe: "x" },
+    take: [ctx.node.out[0]!.id],
+  }));
+  assert.equal(took.status, "failed", JSON.stringify(took.error ?? {}));
+  assert.match(String(took.error?.message), /error|take/i, JSON.stringify(took.error ?? {}));
+});
+
 // ── the second caller ────────────────────────────────────────────────────────
 
 test("AND THE EVALUATOR ARM GETS IT TOO — the caller that has kept every previous defect", async () => {
   // A mutation deleting `node:` from `#runEvaluator`'s ctx leaves every test above green.
   const p = await hostRun(new Function("return " + CEILING)(), "evaluator");
   assert.equal(p.channels["probe"], String(MAX_WIDTH), JSON.stringify(p.error ?? {}));
+
+  // THE FOURTH CELL OF THE MATRIX. {function, evaluator} x {host, sandbox} is four cases, and
+  // three of them were driven while the evaluator arm was only ever host code. An `assertion`
+  // evaluator's ref IS a function body and the shipped ones are resources, so this is the cell a
+  // real graph is most likely to be in.
+  const sand = await sandboxRun(CEILING, "evaluator");
+  assert.equal(sand.channels["probe"], String(MAX_WIDTH), JSON.stringify(sand.error ?? {}));
 });
 
 // ── it decides nothing ───────────────────────────────────────────────────────
@@ -226,12 +353,15 @@ test("IT IS FROZEN, THREE DEEP — `Object.freeze` is shallow and two levels sit
   // A hand-registered body is handed the engine's ACTUAL object. Without the inner freezes a
   // body could rewrite the edge list it was shown; nothing reads it back, so nothing would
   // break — which is exactly why an unfrozen version would survive every other test here.
+  // EVERY ARRAY, NAMED — `writes` was missing from this probe for one review round, and deleting
+  // its freeze left the whole 3,693-test suite green. A freeze test that skips a member is a
+  // freeze test for the members it happens to list.
   const probe = `(view, ctx) => ({ writes: { shards: [], probe: [
     Object.isFrozen(ctx.node), Object.isFrozen(ctx.node.out), Object.isFrozen(ctx.node.out[0]),
-    Object.isFrozen(ctx.node.reads)
+    Object.isFrozen(ctx.node.reads), Object.isFrozen(ctx.node.writes)
   ].join(",") } })`;
   const p = await hostRun(new Function("return " + probe)());
-  assert.equal(p.channels["probe"], "true,true,true,true", JSON.stringify(p.error ?? {}));
+  assert.equal(p.channels["probe"], "true,true,true,true,true", JSON.stringify(p.error ?? {}));
 });
 
 test("A BODY CANNOT REACH THE HOST THROUGH IT — the argument bridge's whole job", async () => {
@@ -239,10 +369,8 @@ test("A BODY CANNOT REACH THE HOST THROUGH IT — the argument bridge's whole jo
   // a HOST object handed to a body hands over the host `Function` with it:
   // `ctx.now.constructor("return globalThis")().process` reached the real `process`. This asserts
   // the new field did not reopen that door.
-  const probe = `(view, ctx) => ({ writes: { shards: [], probe: String(
-    typeof ctx.node.constructor.constructor("return typeof globalThis.process")()
-    === "string" ? ctx.node.constructor.constructor("return typeof globalThis.process")() : "?"
-  ) } })`;
+  const probe = `(view, ctx) => ({ writes: { shards: [],
+    probe: String(ctx.node.constructor.constructor("return typeof globalThis.process")()) } })`;
   const p = await sandboxRun(probe);
   assert.equal(p.channels["probe"], "undefined", `a realm body must not see the host's process: ${JSON.stringify(p.error ?? {})}`);
 });
