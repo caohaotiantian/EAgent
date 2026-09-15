@@ -27,9 +27,11 @@
  *      iterated out of `GLOBAL_FLAGS` in the source rather than listed here, so a global added
  *      later is covered on the day it is added.
  *
- * (2) was open, and so was most of (6): measured on the parent commit, five globals refused with
- * nothing on disk (`--workspace`, `--data-dir`, `--channels-file`, `--models-file`,
- * `--extension-module`) and EIGHT left three directories (`--grant`, `--egress`, `--exec-env`,
+ * (2) was open, and so was most of (6): measured on the parent commit, SEVEN of the fifteen
+ * refused with nothing on disk — `--workspace`, `--data-dir`, `--channels-file`, `--models-file`
+ * and `--extension-module` by `openWorkspace`'s own pre-flight, plus `--mcp-file`, which held for
+ * a DIFFERENT reason (`main` reads it before it calls `openWorkspace` at all), and `--help`, which
+ * is not a value — and EIGHT left three directories (`--grant`, `--egress`, `--exec-env`,
  * `--allow-exec`, the three `--budget-*`, `--max-parallelism`), because `openWorkspace` ran its
  * three `mkdirSync`s the moment the two path flags were read. They are read before it now. The
  * rest of the set already held, and each holds for a DIFFERENT reason — orderings a later edit can
@@ -70,7 +72,10 @@ async function inAnEmptyDirectory(
   try {
     for (const [name, body] of Object.entries(plant)) writeFileSync(join(dir, name), body);
     const { code, out, err } = await refusing(argv(dir), dir);
-    return { code, out, err, left: readdirSync(dir).filter((f) => !(f in plant)).sort() };
+    // `Object.hasOwn`, not `f in plant`: `"constructor" in {}` is TRUE, so a file the command
+    // created called `constructor`, `toString` or `__proto__` would be subtracted from what it
+    // left behind — which is `dispatchesVerb`'s own defect, in the file whose subject is it.
+    return { code, out, err, left: readdirSync(dir).filter((f) => !Object.hasOwn(plant, f)).sort() };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -116,12 +121,17 @@ test("EVERY GLOBAL FLAG GIVEN NO VALUE REFUSES WITH NOTHING ON DISK — the list
   // argv — and reading it out of the source is what makes a global added next year covered on the
   // day it is added, instead of covered by whoever remembers this file.
   //
-  // WHAT THIS CAUGHT. Five of them refused with nothing on disk and EIGHT did not, because
-  // `openWorkspace` ran its three `mkdirSync`s as soon as the two path flags had been read and
-  // everything else — the jail, the grant list, the ceiling, the budget — was read between forty
-  // and four hundred lines later. Those four reads are pure over `args` and now happen first.
+  // WHAT THIS CAUGHT. Seven of the fifteen refused with nothing on disk — the five path flags
+  // `openWorkspace` reads first, plus `--mcp-file` (refused in `main`, before this function is
+  // called) and `--help` (not a value) — and EIGHT did not, because `openWorkspace` ran its three
+  // `mkdirSync`s as soon as the two path flags had been read and everything else — the jail, the
+  // grant list, the ceiling, the budget — was read between forty and four hundred lines later.
+  // Those four reads are pure over `args` and now happen first.
   const flags = globalFlags();
-  assert.ok(flags.length >= 13, `the scan found ${String(flags.length)} global flags — the regex broke, not the CLI`);
+  // EXACT, NOT A FLOOR. The number moves with `GLOBAL_FLAGS` and bumping it is the point: a floor
+  // with two members of slack passes on exactly the scan this line exists to catch — a regex that
+  // matched most of the list — and a new global arriving uncovered is the other thing it catches.
+  assert.equal(flags.length, 15, `the scan found ${String(flags.length)} global flags: ${flags.join(", ")}. Either the regex broke, or GLOBAL_FLAGS changed — check the new flag is covered below, then set this number to it`);
   for (const f of flags) {
     const { code, out, err, left } = await inAnEmptyDirectory(() => ["compile", `--${f}`]);
     assert.deepEqual(left, [], `\`loom compile --${f}\` (no value) created ${left.join(", ")} — stderr was:\n${err}`);

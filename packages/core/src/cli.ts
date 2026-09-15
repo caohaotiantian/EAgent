@@ -1531,13 +1531,15 @@ export function openWorkspace(
   // the same rule the two file flags above already follow for the same reason.
   //
   // WHAT WAS WRONG, measured in an empty directory with `loom compile --<flag>` and no value:
-  // five of the thirteen global flags refused with nothing on disk (`--workspace`, `--data-dir`,
-  // `--channels-file`, `--models-file`, `--extension-module`) and EIGHT left `.loom/`, `graphs/`
-  // and `resources/` behind (`--grant`, `--egress`, `--exec-env`, `--allow-exec`, the three
-  // `--budget-*` and `--max-parallelism`) — because the three `mkdirSync`s ran the moment the two
-  // path flags had been read, and everything else was read between forty and four hundred lines
-  // later. An argv-only refusal that costs the caller three directories is §H.11 again, reached
-  // by a flag instead of by a verb.
+  // SEVEN of the fifteen names in `GLOBAL_FLAGS` refused with nothing on disk — `--workspace`,
+  // `--data-dir`, `--channels-file`, `--models-file` and `--extension-module`, refused by this
+  // function's own pre-flight above, plus `--mcp-file`, which is a different reason (`main` reads
+  // it before it ever calls this) and `--help`, which is not a value at all — and EIGHT left
+  // `.loom/`, `graphs/` and `resources/` behind: `--grant`, `--egress`, `--exec-env`,
+  // `--allow-exec`, the three `--budget-*` and `--max-parallelism`. Because the three `mkdirSync`s
+  // ran the moment the two path flags had been read, and everything else was read between forty
+  // and four hundred lines later. An argv-only refusal that costs the caller three directories is
+  // §H.11 again, reached by a flag instead of by a verb.
   //
   // FOUR PURE READS, so this is an ordering change and not a second parse. `jailFor` recomputes
   // `root` and `dataDir` from the same flags rather than closing over these (see its body), so
