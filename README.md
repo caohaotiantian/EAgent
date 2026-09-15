@@ -218,16 +218,19 @@ not the value's shape**, because a channel can hold that shape itself: alongside
 carries `readsTruncated`, naming exactly the channels this door truncated and empty when it
 truncated none (§A.58; `journal/payloads.ts` refuses shape-recognition for `$payload` for the same
 reason, and this door follows it — a handle is resolved off the fold's authoritative `external`
-map, never off the value's shape. What has no row-level answer YET is the reader's side of that:
-a node-written `{"$payload":…}` is an ordinary value, is never resolved, and prints identically to
-an externalised channel this door could not read back, the two told apart only by a stderr line
-— §A.61). A second row field, `readsMayBeStale`,
+map, never off the value's shape). **The same question about a `{"$payload":…}` is answered the
+same way**: a node can write that shape into an ordinary channel, and it then prints identically
+to an externalised channel this door could not read back. Two more row fields say which is which —
+`readsResolved`, the payload handles this gate reads that were fetched from the store, and
+`readsUnresolved`, the ones that could not be, whose `reads` entry is still the handle. A value in
+neither list was never a handle, and their union is the set of printed values that did not come out
+of the journal `contentDigest` binds (§A.61). A fourth row field, `readsMayBeStale`,
 names channels **the gate reads** that its own fan-out branch has already written — whether or not
 a value for them is printed, since a branch write can be the first value a channel ever had, in
 which case `reads` shows nothing for it at all. The engine overlays those writes when it builds the
 gate payload and `contentDigest`, and this door cannot, so it says so on stderr instead of printing
 a pre-branch value, or a blank, in silence (the VALUE half is still open: §A.60, cited as
-§A.58(4) in the source that shipped it). All three fields are absent,
+§A.58(4) in the source that shipped it). All five fields are absent,
 rather than empty, on the rows that print no `reads` at all — each of those says why on stderr. The
 `contentDigest` stays
 beside it, because it is the BINDING `loom approve` later checks the graph against and never was a
