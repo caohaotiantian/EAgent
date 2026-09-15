@@ -278,9 +278,18 @@ test("parseRef handles kind/name@selector, including digests", () => {
 
 // ── THE PINNING RULE ─────────────────────────────────────────────────────────
 
+/**
+ * THE PROMPT'S CONTENT IS A STRING, AND THAT IS LOAD-BEARING. It was `{ text: "ORIGINAL" }` until
+ * 2026-09-15, and `ResourceStore.document` answers `undefined` for content that is not text — so
+ * every one of the five `summarize` branches failed `E_RESOURCE_NOT_FOUND` before reaching a
+ * model, the join folded nothing, and the run reached its gate and `succeeded` with zero digests.
+ * The assertions below all held on a run in which the pinned prompt was never read by anything.
+ * §D.9's answer (a join may not fold zero contributions out of a fan that planned some) turned
+ * that run `failed` and surfaced it.
+ */
 test("THE PINNING RULE — publishing and promoting mid-run cannot affect an in-flight run", async () => {
   const s = store();
-  const prompt = s.publish({ kind: "prompt", name: "summarize-file", content: { text: "ORIGINAL" }, actor: HUMAN });
+  const prompt = s.publish({ kind: "prompt", name: "summarize-file", content: "ORIGINAL", actor: HUMAN });
   s.promote(prompt, "canary", HUMAN);
   s.promote(prompt, "stable", HUMAN);
   const profile = s.publish({ kind: "agent_profile", name: "summarizer", content: { model: "mock" }, actor: HUMAN });
@@ -311,7 +320,7 @@ test("THE PINNING RULE — publishing and promoting mid-run cannot affect an in-
   await h.engine.advance(runId); // suspends at the gate, mid-run
 
   // …and now the world moves on underneath it.
-  const v2 = s.publish({ kind: "prompt", name: "summarize-file", content: { text: "REWRITTEN" }, actor: HUMAN });
+  const v2 = s.publish({ kind: "prompt", name: "summarize-file", content: "REWRITTEN", actor: HUMAN });
   s.promote(v2, "canary", HUMAN);
   s.promote(v2, "stable", HUMAN);
   assert.notEqual(v2.digest, prompt.digest);
@@ -323,7 +332,8 @@ test("THE PINNING RULE — publishing and promoting mid-run cannot affect an in-
     prompt.digest,
     "a Run reads only what its manifest names",
   );
-  assert.deepEqual(s.fetch(pinned.digest).content, { text: "ORIGINAL" });
+  assert.equal(s.fetch(pinned.digest).content, "ORIGINAL");
+  assert.equal(s.document(pinned.digest), "ORIGINAL", "and the run could actually read it");
 
   // And it finishes on the pinned version.
   const open = Object.values((await h.engine.projection(runId))!.gates).find((g) => g.state === "open")!;

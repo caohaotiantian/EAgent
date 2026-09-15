@@ -66,6 +66,20 @@ exact conditions — but `counts` fails several of them at once, and `gather` is
 a join that declares `"writes": ["counts"]` is a **second writer**, so deleting the post-join
 reads in `summarise` changes nothing.
 
+**A join not one of whose members succeeded fails the run**, and that is a run-time refusal rather
+than a compile one. The barrier still releases; the fold then fails `E_QUORUM_UNREACHABLE` and the
+run reports `failed`. It does so under `"onBranchError": "skip"` too — `skip` still absorbs every
+loss short of the last one, but a run in which nothing succeeded is not a success.
+
+**Not on THIS graph, though**, and the distinction is worth having before you go looking for it:
+`gather` here declares `"onBranchError": "fail"`, so the older arm beside it fires as soon as ONE
+branch is lost and you never reach the new one. The shape that reaches it is a `"skip"` join every
+one of whose members died — most sharply, a `human_gate` inside each fanned-out branch with every
+human rejecting, which used to run the node behind the join and report `succeeded`. Two shapes are
+deliberately untouched: a fan-out over an **empty array** materialises no branch at all, so there
+is nothing to have succeeded and the graph behind the barrier runs exactly as before; and a branch
+that lost a node AFTER an earlier node in it wrote still folds, writes included.
+
 ## 2 · A `function` body — `resources/function/*.js`
 
 A file in `resources/<kind>/` publishes `<kind>/<basename>@stable`, so `resources/function/count.js`

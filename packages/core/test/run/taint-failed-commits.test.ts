@@ -10,13 +10,19 @@
  * measured the two shapes that follow at `a638e7d`, at the branch head and on `loom`, so neither
  * is a regression of anything: they have been open the whole time.
  *
- *   `errfan`  — SUPPRESSING EVERY WRITE IS HOW YOU GET AN ATTACKER-CHOSEN VALUE THAT IS CLEAN.
+ *   `errfan`  — SUPPRESSING THE WRITES IS HOW YOU GET AN ATTACKER-CHOSEN VALUE THAT IS CLEAN.
  *     A clean fan (the list is built from the run's own input, so the WIDTH is nobody's choice)
  *     whose body reads the page and throws iff it says PAY. `onBranchError: "skip"` lets the join
- *     complete with zero contributions, so nothing ever writes the folded channel, so
- *     `applyTaint` never taints it — and the join's own arms branch on `!has(parts)`, which is
- *     the value the attacker just chose by making every branch fail. The width form of this is
+ *     complete, and the branch the page killed wrote nothing, so nothing ever writes the folded
+ *     channel and `applyTaint` never taints it — and the join's own arms branch on `!has(parts)`,
+ *     which is the value the attacker just chose. The width form of this is
  *     `applyFanoutWidthTaint`, closed; the FAILURE form was not.
+ *
+ *     ONE BRANCH OF TWO, NOT BOTH, and `function/throwsparts@stable` carries the reason: since
+ *     §D.9's answer a join whose members ALL fail refuses the fold outright, which stops the run
+ *     before the conditional this file is about is ever evaluated. The surviving branch succeeds
+ *     writing NOTHING, so `parts` is still unwritten and `!has(parts)` is still the arm a failed
+ *     commit's absence chooses — the subject is unchanged and it is still reachable.
  *
  *   `errthrow` — A CONTENT-CONDITIONAL THROW IS A BRANCH. The body reads the page and throws iff
  *     it says PAY; a catch-all `error` edge leads to the charge and a `seq` edge leads past it.
@@ -99,9 +105,22 @@ function engineOver(store: MemoryStateStore, page: string): { engine: Engine; ch
   // The two deciding bodies, and they are one body: it throws iff what its node declared in
   // `reads` says PAY NOW. Swapping that one entry between `untrusted` and `request` is the whole
   // difference between the dirty arm and the clean one.
+  //
+  // ONE BRANCH DIES AND ONE SURVIVES WITHOUT WRITING, and that asymmetry is NOT cosmetic. It
+  // used to throw in every branch, which since §D.9's answer (`#foldJoin` refuses a barrier not
+  // one of whose members succeeded) is a run the JOIN fails — `failed/0/0`, before the
+  // conditional this file is about is ever evaluated. The charge still never runs, so the
+  // safety property survives, but the TAINT mechanism would no longer be exercised at all and
+  // this file would be pinning a different guard than the one it is named for. Losing one of two
+  // branches keeps the fold non-empty, keeps `parts` unwritten, and keeps `!has(parts)` as the
+  // arm a failed commit's absence chooses — which is the whole subject. `join-all-branches-fail`
+  // pins the all-branches-lost shape.
   functions.register("function/throwsparts@stable", (view) => {
     const text = view.visible.map((c) => String(view.get(c) ?? "")).join(" ");
-    if (text.includes("PAY NOW")) throw new Error("the content made me fail");
+    if (text.includes("PAY NOW")) {
+      if (String(view.get("item") ?? "") === "x") throw new Error("the content made me fail");
+      return { writes: {} };
+    }
     return { writes: { parts: ["ok"] } };
   });
   // `errthrow`'s body, and the token it tests is `PAY` rather than `PAY NOW` ON PURPOSE. The run
@@ -264,9 +283,10 @@ async function drive(spec: GraphSpec, page: string): Promise<Row> {
 
 test("A FAILED BRANCH WROTE NOTHING, AND THE JOIN BRANCHED ON THAT — `errfan`", async () => {
   // THE DEFECT. The list is clean, so the fan's width is nobody's decision; what the page decides
-  // is whether every branch THROWS. It does, `onBranchError: "skip"` lets the join finish, and
-  // `parts` — which no node ever wrote — reads as absent to `!has(parts)`, which is the arm with
-  // the charge on it. Measured at `3d05cff` (`loom`, before this file): `succeeded/0/1`.
+  // is whether a branch THROWS. It does — one of the two, and see `function/throwsparts@stable`
+  // for why one and not both — `onBranchError: "skip"` lets the join finish, and `parts`, which
+  // no node ever wrote, reads as absent to `!has(parts)`, which is the arm with the charge on it.
+  // Measured at `3d05cff` (`loom`, before this file): `succeeded/0/1`.
   const dirty = await drive(errfanSpec("untrusted"), INJECTED);
   assert.equal(dirty.charged, 0, `the page suppressed every write and the charge ran: ${dirty.row}`);
   assert.equal(dirty.status, "awaiting_gate", `expected a gate on the join's choice, got ${dirty.row}`);

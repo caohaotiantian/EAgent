@@ -310,12 +310,26 @@ test("the journal of the refused run says which edge, not just that something fa
     (err: Error) => err.message,
   );
   assert.match(message, /Conditional/, "the operator is told which spelling this build could not read");
-  // AND NOTHING RAN. The refusal is at the door, so the journal stops where `submit` left it.
+  // AND NOTHING RAN — but the journal no longer stops where `submit` left it.
+  //
+  // THIS ASSERTION USED TO END AT `task.ready`, AND THAT WAS §A.63: a decision was taken at the
+  // door and the fold, which is the only authoritative state, could not reconstruct it. A second
+  // process attaching later saw a `running` run with no reason and no terminal row. The refusal
+  // is still AT the door and still runs nothing; what changed is that a run bound to a graph this
+  // build cannot read is now FAILED, with the code and the offending edge on the row. See
+  // `advance-refusal-is-journaled.test.ts` for both vocabulary checks and the ordinary half.
   const events: JournalEvent[] = [];
   for await (const ev of store.read(runId, 1)) events.push(ev);
   assert.deepEqual(
     events.map((ev) => ev.type),
-    ["run.submitted", "run.compiled", "run.started", "task.ready"],
+    ["run.submitted", "run.compiled", "run.started", "task.ready", "run.failed"],
+  );
+  const failure = events.at(-1) as { payload: { error: { code: string; details?: unknown } } };
+  assert.equal(failure.payload.error.code, "E_GRAPH_INVALID", "the terminal row carries the door's own code");
+  assert.deepEqual(
+    (failure.payload.error.details as { edges?: { kind: string }[] } | undefined)?.edges?.map((x) => x.kind),
+    ["Conditional"],
+    "and the spelling the message names is on the row too, where a fold can read it",
   );
   assert.equal(ran.length, 0);
 });

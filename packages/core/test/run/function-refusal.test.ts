@@ -338,9 +338,11 @@ test("A REFUSED BRANCH IS ABSORBED BY `onBranchError: \"skip\"` — deliberately
   const functions = new FunctionRegistry();
   functions.register("function/plan@stable", (() => ({ writes: { seen: ["planned"] } })) as never);
   // ONE BRANCH REFUSES AND ONE SUCCEEDS, which is the shape that actually shows absorption: with
-  // every branch refusing the join folds nothing, `done` is never written, and the run dies at
-  // `#finish` with `E_OUTPUT_MISSING` — a verdict about a stranded path that would tell us
-  // nothing about whether the refusal was absorbed.
+  // every branch refusing, not one member of the barrier succeeds, so since §D.9's answer
+  // `#foldJoin` refuses the fold and the run dies `E_QUORUM_UNREACHABLE` at the join (measured;
+  // before that answer it folded nothing, `done` was never written and the run died
+  // `E_OUTPUT_MISSING` at `#finish`). Either verdict is about the barrier or a stranded path and
+  // tells us nothing about whether the refusal was absorbed.
   functions.register(REF, ((view: { get(c: string): unknown }) =>
     view.get("shard") === "a" ? { refuse: { reason: "this shard is not mine to read" } } : { writes: { done: ["b"] } }) as never);
   const store = new MemoryStateStore({ now: () => NOW });
