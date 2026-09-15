@@ -2677,10 +2677,17 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * The message tail is the only part that varies with branch size: one member gets no
  * `; the branch it opens holds N nodes (…)` clause. That tail has two forms, chosen by whether the
  * count and the dictated list AGREE — the count is what the branch contains and the list is what a
- * barrier can be told to wait on, so a branch node that does not run into EVERY candidate join is
- * in the first and not the second. "every", not "some": with two candidates a node feeding only
- * one of them is dropped from the list precisely because the list has to be true whichever the
- * author picks. It was always so and the sentence never said so.
+ * barrier can be told to wait on.
+ *
+ * A NAME IS IN THE FIRST AND NOT THE SECOND FOR EXACTLY TWO REASONS, and the clause names which.
+ * (1) It does not run into EVERY candidate join — "every", not "some": with two candidates a node
+ * feeding only one of them is dropped precisely because the list has to be true whichever the
+ * author picks. (2) Some join OTHER than the candidates already folds it (§A.65). Holding is a
+ * property of the task's own depth, so a second folder is what `GRAPH008_JOIN_DEPTH` refuses —
+ * dictating such a name printed, on the next compile, an error the compile before it had not.
+ * Reason (1) was always so and the sentence said so only from §A.57; reason (2) is stated per
+ * name, with the folding join named, and the reason-(1)-only sentence is byte-identical to the
+ * one §A.57 settled on.
  *
  * THE DISAGREEING FORM PROMISES NO REFUSAL, which cost two review rounds. It first read "a join
  * must wait on every one of them — directly, or through another branch node that folds it", and
@@ -2789,10 +2796,35 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     //
     // It can never empty the list: every candidate is downstream of `e.to` by construction, so
     // `e.to` is an ancestor of all of them and always survives.
-    const waitsFor =
-      candidates.length === 0
-        ? branch
-        : branch.filter((id) => candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false));
+    const reachesEveryCandidate = (id: NodeId): boolean =>
+      candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false);
+
+    // AND A MEMBER SOME OTHER JOIN ALREADY FOLDS IS NOT DICTATED EITHER — §A.65, and it is the
+    // same predicate as `joined` above with the candidates excluded. Holding is a property of the
+    // TASK'S OWN DEPTH (`writesHeldForJoin` in `run/engine.ts`), so EVERY join naming a node
+    // inside a fan-out folds that node's writes, and §A.64's rule refuses a second folder. On
+    // `a53-pickone` the branch's own inner join `gather` already declares `classify`; dictating
+    // `classify` for the barrier too gave it two folders, so following this line printed a
+    // `GRAPH008_JOIN_DEPTH` the compile before it had not.
+    //
+    // A `branches` ENTRY IS NOT ENOUGH — the claiming join must also be DOWNSTREAM of the member,
+    // because an entry naming a node the join cannot reach folds nothing. That is not a nicety:
+    // it is what makes the no-empty-list invariant above survive this filter. If some non-
+    // candidate join collected `e.to`, it would satisfy `joined` at the top of the loop and this
+    // rule would have said nothing at all — so `e.to` reaches this filter only when nothing else
+    // folds it, and it still always survives.
+    const foldersOf = (id: NodeId): readonly NodeId[] =>
+      spec.nodes
+        .filter(
+          (j) =>
+            j.join !== undefined &&
+            !candidates.some((c) => c.id === j.id) &&
+            j.join.branches.includes(id) &&
+            (idx.ancestors.get(j.id)?.has(id) ?? false),
+        )
+        .map((j) => j.id);
+
+    const waitsFor = branch.filter((id) => reachesEveryCandidate(id) && foldersOf(id).length === 0);
 
     // THE COUNT AND THE LIST ANSWER DIFFERENT QUESTIONS, so the message says which nodes the two
     // disagree about. `branch` is what the branch CONTAINS; `waitsFor` is what a barrier can be
@@ -2802,15 +2834,40 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // "each of read, classify", leaving a reader no way to tell the omission from a bug.
     //
     // WHAT THE CLAUSE MAY NOT CLAIM, twice over. Not that the difference is collected by
-    // something: on the graph that motivated this, NOTHING collects `subJoin` —
-    // `GRAPH008_HELD_JOIN_UNCOLLECTED` is refusing it in the same run — so "already folded by an
-    // inner join" would swap a silent omission for a false statement. And not that leaving one
-    // unfolded is refused: it is not. An `error` arm sitting in `held` compiles clean once the
-    // dictated names are wired, so a clause naming it and saying a join "must" wait on it
-    // promises a refusal this rule does not make. It reports which names the `fix:` line
-    // dictates and which it does not, and asserts nothing about either cause or consequence.
+    // something WHEN IT IS NOT: on the graph that motivated §A.57, NOTHING collects `subJoin` —
+    // `GRAPH008_HELD_JOIN_UNCOLLECTED` is refusing it in the same run — so a blanket "already
+    // folded by an inner join" would swap a silent omission for a false statement. The reason is
+    // therefore stated PER NAME and only where `foldersOf` found the folder, which is checkable
+    // rather than asserted: `subJoin` still reads "does not", and `classify` reads the join that
+    // has it. And not that leaving one unfolded is refused: it is not. An `error` arm sitting in
+    // `held` compiles clean once the dictated names are wired, so a clause naming it and saying a
+    // join "must" wait on it promises a refusal this rule does not make.
+    //
+    // A NAME DROPPED FOR BOTH REASONS IS REPORTED UNDER THE FIRST — a reporting choice, not a fact
+    // about the graph. Reason (1) is about SHAPE: a member with no path to the barrier would have
+    // to gain one before it could be waited on, and drawing that path is not an edit this line
+    // dictates. Reason (2) is repaired by editing a `branches` list. So (1) is the one that
+    // survives the other being removed, and naming both would read as two independent obstacles
+    // when clearing (2) alone still leaves the name undictated.
     const held = branch.filter((id) => !waitsFor.includes(id));
-    const heldList = held.map((id) => `"${id}"`).join(", ");
+    const unreached = held.filter((id) => !reachesEveryCandidate(id));
+    const foldedElsewhere = held.filter((id) => reachesEveryCandidate(id));
+    const unreachedList = unreached.map((id) => `"${id}"`).join(", ");
+    const foldedClauses = foldedElsewhere
+      .map((id) => `"${id}" is already folded by ${foldersOf(id).map((j) => `"${j}"`).join(", ")}`)
+      .join(", and ");
+
+    // THE PREFIX NAMES ONLY THE REASONS THIS GRAPH ACTUALLY USED, and the reason-1-only form is
+    // byte-identical to the sentence §A.57 settled on — the divergence it discloses has not
+    // changed, so its words do not either.
+    const disclosure =
+      foldedElsewhere.length === 0
+        ? `the ones that run into every join it offers — ${unreachedList} ` +
+          `${unreached.length > 1 ? "do" : "does"} not`
+        : unreached.length === 0
+          ? `the ones no other join already folds — ${foldedClauses}`
+          : `the ones that run into every join it offers and that no other join already folds — ` +
+            `${unreachedList} ${unreached.length > 1 ? "do" : "does"} not, and ${foldedClauses}`;
 
     const each = waitsFor.join(", ");
     const fix =
@@ -2836,8 +2893,7 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
         (branch.length > 1
           ? held.length > 0
             ? `; the branch it opens holds ${branch.length} nodes (${branchList}), and the \`fix:\` line dictates ` +
-              `the ones that run into every join it offers — ${heldList} ${held.length > 1 ? "do" : "does"} not, ` +
-              `so ${held.length > 1 ? "they are" : "it is"} in this count and not in that list`
+              `${disclosure}, so ${held.length > 1 ? "they are" : "it is"} in this count and not in that list`
             : `; the branch it opens holds ${branch.length} nodes (${branchList}), and a join must wait on every one of them`
           : ""),
       at: { edgeId: e.id },
