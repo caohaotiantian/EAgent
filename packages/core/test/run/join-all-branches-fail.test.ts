@@ -5,9 +5,13 @@
  * `firstSuccess` whose members all terminate without succeeding RELEASES rather than waiting for
  * an arrival that cannot come — in all four modes, with and without a second entrance, at every
  * parallelism, and across a restart. Second (2026-09-15, §D.9 answered as option (a)): that
- * release is not a SUCCESS. `#foldJoin` refuses `succeededMembers === 0 && members.length > 0`, so
- * a barrier not one of whose members succeeded fails `E_QUORUM_UNREACHABLE` instead of folding
- * nothing and letting the graph carry on. It binds all four modes and both `onBranchError`
+ * release is not a SUCCESS: a barrier not one of whose members succeeded fails
+ * `E_QUORUM_UNREACHABLE` instead of folding nothing and letting the graph carry on. (The
+ * predicate was `succeededMembers === 0 && members.length > 0` when this file was written; §A.67
+ * narrowed the unit to the barrier's WORK members, because an approved `human_gate` is a member
+ * that succeeded and wrote nothing — `join-evidence-and-work.test.ts` owns that half. Every graph
+ * in THIS file is gateless, so every member of every barrier here is a work member and the two
+ * readings coincide on all of it.) It binds all four modes and both `onBranchError`
  * values, because all four released the same empty fold and always had. The unit is MEMBER TASKS
  * and the last three tests in this file are why.
  *
@@ -45,7 +49,7 @@
  * THE BARRIER RELEASES RATHER THAN FAILING, and the two `onBranchError` values are both in the
  * sweep because that is what the division of labour rests on. `#maybeFireJoin` decides WHEN a
  * barrier releases; `#foldJoin` decides what the release MEANS, and it holds BOTH failure arms —
- * `onBranchError === "fail" && skipped > 0`, and now `succeededMembers === 0`. Under
+ * `onBranchError === "fail" && skipped > 0`, and now "no work member succeeded". Under
  * `"fail"` the run ended `failed` before any of this — but for the ORPHAN BRANCH, with
  * `Jready=0`: the barrier had still not resolved, and the code naming the reason was never
  * raised. That is why this file asserts the join's own error code and not just the run's status.
@@ -398,8 +402,9 @@ function gateEngine(store: SqliteStateStore): Engine {
  * the barrier. That much is measured by this test.
  *
  * WHAT THE RESTART LENS SAYS, as reasoning and not as a second measurement: the refusal reads
- * `members` and `succeededMembers`, both derived from `p.tasks`, which `#project` folds from
- * `task.*` rows. There is no in-memory side to come back empty — a fold that lost the task rows
+ * `members` and its succeeded counts, all derived from `p.tasks`, which `#project` folds from
+ * `task.*` rows — and, since §A.67, each member's node type, which comes off the compiled graph
+ * the fresh Engine attaches. There is no in-memory side to come back empty — a fold that lost the task rows
  * would lose the barrier's own `task.ready` with them and nothing would be folded at all. It
  * reads NOTHING off `p.fanouts`, deliberately, which is the other half of why: a plan whose
  * branches were never materialised is `#finish`'s unmaterialised-branch net, not this arm's.
@@ -488,7 +493,7 @@ test("THE BARRIER RELEASES FROM THE JOURNAL ALONE — a fresh Engine, two reject
  * branches ("an alert with no pods strands the entire downstream graph while the run still
  * reports success"). That barrier folds NOTHING and must still SUCCEED.
  *
- * WITHOUT THIS TEST, `#foldJoin` REFUSING `succeededMembers === 0` ALONE PASSES EVERY OTHER
+ * WITHOUT THIS TEST, `#foldJoin` REFUSING "NOTHING SUCCEEDED" ALONE PASSES EVERY OTHER
  * ASSERTION IN THIS FILE and breaks every empty fan in the product — a barrier with no members
  * has none that succeeded. `members.length > 0` is the clause that separates "the fan
  * materialised nothing" from "the fan materialised two and lost both", and this is what holds it
@@ -547,9 +552,10 @@ test("A FAN-OUT THAT PLANNED ZERO BRANCHES STILL RELEASES AND STILL SUCCEEDS —
  * The conjunct `byChannel.size === 0` does not rescue either, and was measured too: a member at
  * the ROOT coordinate never enters `byChannel` at all (`writesHeldForJoin` is false there, so its
  * writes were applied at commit), which leaves the static shape failing exactly as before.
- * `succeededMembers === 0` is the question the row actually asks — did any member of this barrier
- * finish successfully — and it is the same in both units for a fan and correct in the one that
- * matters for a static join.
+ * "Did any member of this barrier finish successfully" is the question the row actually asks, and
+ * counted per TASK it is the same in both units for a fan and correct in the one that matters for
+ * a static join. (§A.67 then narrowed WHICH members are asked — the work ones, where the barrier
+ * has any. Every barrier in this file is gateless, so it asks all of them, as it always did.)
  */
 const ARMS = ["a", "b", "c"] as const;
 
