@@ -7402,8 +7402,41 @@ export class Engine {
     // join puts every arm at the SAME (root) coordinate, so one lost arm empties it while two
     // others succeeded and wrote.
     let succeededMembers = 0;
+    // EVIDENCE OR WORK, AND THIS FOLD WAS THE LAST PLACE IN THIS FILE NOT ASKING (§A.67).
+    //
+    // An EVIDENCE member is a `human_gate` task that produced nothing: its success means "a human
+    // answered", not "something was made". Every other member is WORK. The distinction is not
+    // invented here and is not a guess about node types — `#gateOrDispatch` already keys the same
+    // one on the same field, and for the same reason: "APPROVE ON A WORK NODE MEANS 'GO AHEAD',
+    // NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval, so approving completes it;
+    // every other node type has work behind the gate, and treating approval as completion would
+    // report success for an action that never happened." `STRUCTURALLY_PURE` reads a gate the same
+    // way. So `NodeSpec.type` already carries this fact for every member, totally, and a
+    // `JoinSpec` field naming which members are evidence would be a second spelling of it — new
+    // vocabulary in the artifact `graphHash` is taken over, for an override no graph asks for.
+    //
+    // "PRODUCED NOTHING" IS A CONJUNCT AND NOT DECORATION, because a gate CAN produce. A node's
+    // declared `writes` become the gate's `allowEdit` (`gateAuthorizationOf`), so a human may
+    // answer `{kind: "edit", writes: {…}}` and `#applyGateDecision` returns that as the task's own
+    // succeeded writes. That gate made something, and refusing the barrier would discard the one
+    // thing in it that a person actually produced. `examples/graphs/two-person-approval.json`
+    // declares `writes` on all three of its gates, so the editable case is shipped, not theoretical.
+    //
+    // COUNTED OVER MEMBER TASKS, not over `join.branches` filtered by type, and the unit is the
+    // one this arm already argued for below: a declared work node a router legitimately routed
+    // around materialises no task, and a barrier whose gate then carries it is outside this row and
+    // succeeds exactly as before. A member whose node id is not in the spec at all counts as WORK —
+    // `undefined !== "human_gate"` — which is the direction that refuses more.
+    let workMembers = 0;
+    let succeededWork = 0;
     for (const t of members) {
       const coord = encodeBranch(t.branch);
+      const evidence =
+        ctx.index.byId.get(t.nodeId)?.type === "human_gate" && Object.keys(t.writes).length === 0;
+      if (!evidence) {
+        workMembers++;
+        if (t.state === "succeeded") succeededWork++;
+      }
       if (t.state === "succeeded") {
         contributing.add(coord);
         succeededMembers++;
@@ -7452,7 +7485,7 @@ export class Engine {
       };
     }
 
-    // AND A BARRIER NOT ONE OF WHOSE MEMBERS SUCCEEDED IS NOT A SUCCESS.
+    // AND A BARRIER NOT ONE OF WHOSE WORK MEMBERS SUCCEEDED IS NOT A SUCCESS.
     //
     // §D.9, answered as option (a) — the decision taken by the 2026-09-15 wave's ORCHESTRATOR
     // following that row's own recommendation, not by the maintainer. §A.55 closed one half of
@@ -7508,15 +7541,29 @@ export class Engine {
     // all succeed writing nothing folds and succeeds: "the run produced no data" is not this
     // row's shape, which is "no branch came through at all, on evidence a human refused".
     //
-    // AND THE INSTANCE OF THAT WHICH IS WORTH KNOWING BEFORE YOU TRUST THIS ARM: an APPROVED
-    // `human_gate` is a member that succeeded and wrote nothing. Listing one in `join.branches`
-    // therefore DISARMS this refusal for its whole barrier — two humans approve, every unit of
-    // work behind them throws, and the run reports `succeeded` with nothing folded, in all four
-    // modes (measured; the base reads the same, so it is disarmed rather than broken). The
-    // gate-reject case §D.9 is named for survives because a REJECTED gate is a lost member. A
-    // rule that told a gate's success apart from a worker's would need the fold to know which
-    // members are evidence and which are work, which is a `JoinSpec` question and not this
-    // arm's; recorded as a §D.9 residual row rather than guessed at here.
+    // SO THE QUESTION IS ASKED OF THE WORK MEMBERS WHERE THE BARRIER HAS ANY — §A.67, and it is
+    // why `succeededMembers` is no longer the predicate on its own. An APPROVED `human_gate` is a
+    // member that succeeded and wrote nothing, so listing one in `join.branches` used to DISARM
+    // this refusal for the whole barrier: two humans approve, every unit of work behind them
+    // throws, nothing is folded, and the run reported `succeeded` in all four modes. AND IT WAS
+    // NOT AN AUTHORING MISTAKE — `GRAPH021_FANOUT_WITHOUT_JOIN` REQUIRES the gate to be named
+    // there ("the branch it opens holds 2 nodes (hold, work), and a join must wait on every one of
+    // them"), so every fan-out branch holding a gate was disarmed by compiler order.
+    //
+    // AND OF EVERY MEMBER WHERE IT HAS NO WORK MEMBER AT ALL — the EVIDENCE-ONLY BARRIER, which is
+    // `examples/graphs/two-person-approval.json`: N `human_gate` nodes under one quorum join, the
+    // shipped composition `ApprovalSpec` was stripped of `mode`/`k` in favour of. Nothing there
+    // was ever going to be produced, so "did any work succeed" has no numerator and the fallback is
+    // §D.9's rule verbatim — one approval folds, every member rejected refuses. It is measured
+    // unchanged, in all four of that graph's driven decision sets.
+    //
+    // THE COST, NAMED: a run fails now where it succeeded before iff its barrier has at least one
+    // materialised WORK member, not one of them is `succeeded`, and some member is. Two shapes
+    // reach it — the one above, and a barrier that RELEASED while its work members were still live
+    // with a gate already succeeded, which needs a gate that does NOT hand off within the branch
+    // (`#maybeFireJoin` skips `continuesInBranch` members, which is why `mode: "any"` does not fire
+    // on a gate that feeds its own branch's worker). The second is refused on this arm's own terms:
+    // those members' writes are HELD FOR THIS FOLD, so releasing as a success drops them silently.
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
     // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
@@ -7527,15 +7574,20 @@ export class Engine {
     // way a release can carry no usable result, and the distinction the two arms need is carried
     // by the message. A new `CODES` member would be new error vocabulary in the kernel for a
     // difference nothing branches on.
-    if (succeededMembers === 0 && members.length > 0) {
+    const countedSucceeded = workMembers > 0 ? succeededWork : succeededMembers;
+    if (countedSucceeded === 0 && members.length > 0) {
       return {
         status: "failed",
         writes: {},
         usage: { ...ZERO_USAGE },
         error: err.validation(
           CODES.E_QUORUM_UNREACHABLE,
-          `join "${w.node.id}": not one of the ${members.length} task(s) it waited on succeeded — ` +
-            `folding nothing and carrying on would report a run that did no work as a success`,
+          workMembers > 0
+            ? `join "${w.node.id}": not one of the ${workMembers} work task(s) it waited on succeeded — ` +
+              `an approved human_gate is a human answering, not work being done, so folding nothing ` +
+              `and carrying on would report a run that did no work as a success`
+            : `join "${w.node.id}": not one of the ${members.length} task(s) it waited on succeeded — ` +
+              `folding nothing and carrying on would report a run that did no work as a success`,
         ),
       };
     }
@@ -11408,8 +11460,9 @@ export class Engine {
     // RELEASING IS THE ANSWER, NOT FAILING HERE, and the reason is that the outcome
     // already has an owner. `#maybeFireJoin` decides WHEN a barrier releases; `#foldJoin`
     // decides what the release MEANS, and it holds BOTH failure arms —
-    // `onBranchError === "fail" && skipped > 0`, and since §D.9's answer
-    // `succeededMembers === 0 && members.length > 0`, each returning `E_QUORUM_UNREACHABLE`.
+    // `onBranchError === "fail" && skipped > 0`, and since §D.9's answer a barrier not one of whose
+    // WORK members succeeded (§A.67 narrowed the unit; `members.length > 0` still separates an empty
+    // fan from an emptied one), each returning `E_QUORUM_UNREACHABLE`.
     // So all four modes short-circuit on evidence in hand and otherwise release once no
     // further arrival is possible.
     //
