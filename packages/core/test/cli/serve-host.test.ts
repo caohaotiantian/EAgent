@@ -459,7 +459,14 @@ test("AN IDENTITY SOURCE **IS** THE CREDENTIAL — a module's source binds 0.0.0
   //
   // Reached through `unknown command`, which prints the whole usage text to STDERR and exits 2
   // — `--help` writes the same text to stdout and exits 0, which `refusing` does not capture.
-  const usage = await refusing(["nonsense"]);
+  //
+  // `--workspace w.dir` ON A VERB THAT DOES NOT EXIST, which reads as pointless and is not
+  // (`TODO.md` §H.10, the same defect one file over). `refusing` spawns with no `cwd`, so the
+  // child inherits the test runner's — the repo root — and `main` opens the workspace BEFORE it
+  // decides the verb is unknown. Measured: `node --test packages/core/test/cli/serve-host.test.ts`
+  // created `<repo>/.loom/journal.db` on every run, which `.gitignore` line 9 covers, so the only
+  // sign of it was a journal in the source tree nobody had a name for.
+  const usage = await refusing(["nonsense", "--workspace", w.dir]);
   assert.equal(usage.code, 2);
   // Column-padded across five lines, so the run of whitespace is collapsed before matching —
   // otherwise this assertion is about the usage block's indentation and not about its claim.

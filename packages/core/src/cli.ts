@@ -229,7 +229,18 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            --max-bytes 0 caps nothing.
                                                            readsMayBeStale names channels the
                                                            gate's own branch already wrote,
-                                                           which this door cannot overlay
+                                                           which this door cannot overlay.
+                                                           readsResolved / readsUnresolved name
+                                                           the payload handles this door read
+                                                           back and the ones it could not: a
+                                                           {"$payload":...} in reads is a HANDLE
+                                                           only if readsUnresolved lists that
+                                                           channel — otherwise it is content,
+                                                           either a value a node wrote or a
+                                                           payload whose own content has that
+                                                           shape. Names, not positions: reads
+                                                           prints its keys alphabetically and
+                                                           these lists are in declared order
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
@@ -5159,6 +5170,13 @@ function subgraphDirs(): readonly string[] {
  *       `withHandles` has already substituted `payloadHandle(ref)`: over
  *       `EXTERNALISE_ABOVE_BYTES` the console operator saw text and this operator saw a handle
  *       (`TODO.md` §A.51a). `resolveHandles` below now makes the same call.
+ *
+ *       **AND WHEN THE CALL FAILS, THE ROW SAYS SO** (`TODO.md` §A.61). `#resolveReads` throws
+ *       and fails the run; this door keeps the handle and carries on, for the reason
+ *       `resolveHandles` gives. That left a `{"$payload":{digest,bytes}}` in `reads` which is
+ *       byte-identical to one a node WROTE into an ordinary channel — the fold calls one a
+ *       handle and the other a value, and the document said neither. `readsResolved` and
+ *       `readsUnresolved` are that answer, on the row.
  *   (2) A CLASSIFIED CHANNEL — the sweep below blanks what `#gatePayload` does not. Deliberate,
  *       argued at length further down, and the one difference that TIGHTENS.
  *   (3) **A BRANCH-LOCAL WRITE — OPEN, AND THE MOST SERIOUS ENTRY ON THIS LIST.**
@@ -5357,7 +5375,9 @@ async function gatesWithReads(
   // so a gate on an appended node is in the journal and in no file.
   const unexplained: string[] = [];
   const mirrors: string[] = [];
-  const unresolved: string[] = [];
+  // THE PROSE FOR STDERR, one line per (gate, channel) this door could not read back. The per-gate
+  // CHANNEL list is a different thing and goes on the row — `readsUnresolved`, below.
+  const unreadable: string[] = [];
   const truncated: string[] = [];
   const staleBranch: string[] = [];
   // ONE PASS OVER `p.tasks`, SHARED BY EVERY GATE. `heldOnThisBranch` asks "which tasks sit at
@@ -5394,9 +5414,9 @@ async function gatesWithReads(
       rows.push(g);
       continue;
     }
-    const resolved = await resolveHandles(ws, p, node, task, unresolved);
+    const handles = await resolveHandles(ws, p, node, task, unreadable);
     const observed = observedChannels(node);
-    const view = viewFor(resolved, spec.channels, task.branch, observed);
+    const view = viewFor(handles.p, spec.channels, task.branch, observed);
     // WHICH OF THIS GATE'S VALUES THIS DOOR CUT, authored on the ROW rather than sniffed off the
     // value. See `boundGateRead`: a channel value can be any JSON, so no key inside it is
     // unspellable — but a channel value lives under `reads[c]` and cannot reach the row.
@@ -5440,7 +5460,49 @@ async function gatesWithReads(
     const notPrintedAtAll = stale.filter((c) => !view.visible.includes(c));
     if (printedButStale.length > 0) staleBranch.push(`${g.gateId} prints an OLDER value for ${fence(printedButStale)}`);
     if (notPrintedAtAll.length > 0) staleBranch.push(`${g.gateId} prints NOTHING for ${fence(notPrintedAtAll)}, whose only value is held`);
-    rows.push({ ...g, reads, readsTruncated: cut, readsMayBeStale: stale });
+    // AND WHICH OF THEM WERE PAYLOAD HANDLES — `TODO.md` §A.61, and §A.58(1)'s collision one
+    // field over. `resolveHandles` decides what is a handle from `p.external` and must keep
+    // doing so; what had no authority was the READER. A channel a node wrote as
+    // `{"$payload":{digest,bytes}}` is not in `p.external`, is never resolved, and printed
+    // identically to an externalised channel whose `payloads.get` threw — the two told apart
+    // only by a `! CONTENT NOT SHOWN` line on stderr, which `jq` never sees. Measured before,
+    // on the fixture in `test/cli/gates-payload-provenance.test.ts`:
+    //
+    //     reads.docB  = {"$payload":{"digest":"sha256:9c2df12b…","bytes":69646}}   ← a handle
+    //     reads.mimic = {"$payload":{"digest":"sha256:0000…","bytes":108002}}      ← a VALUE
+    //     row keys: …,reads,readsTruncated,readsMayBeStale                         ← nothing
+    //
+    // BOTH LISTS, NOT JUST THE FAILURES, and the reason is what a `jq` reader can compute.
+    // `readsUnresolved` alone answers "this LOOKS like a handle — is it one?"; it cannot answer
+    // "this does NOT look like a handle — WAS it one?", because after a successful fetch the
+    // value carries nothing saying it came from outside the journal, and an empty
+    // `readsUnresolved` is the same document for a gate that read every handle back as for a
+    // gate that had none. Their UNION is the set of channels the fold externalised and this gate
+    // reads, and it is recoverable only if both are named.
+    //
+    // THAT UNION IS NOT "THE VALUES THAT DID NOT COME OUT OF THE JOURNAL", which an earlier draft
+    // of this said and which is false in both directions. An UNRESOLVED channel prints exactly the
+    // handle the journal recorded, so its printed value came from the journal and nowhere else;
+    // and a RESOLVED channel the graph classified prints `[secret]`, which came from neither.
+    // The union is a statement about what the fold externalised — nothing more.
+    //
+    // ON THE ROW, for §A.58(1)'s reason exactly: JSON object keys are arbitrary strings, so every
+    // marker a value might carry is one a node can write; what a channel value CANNOT do is add a
+    // key to the row that carries it.
+    //
+    // PRESENT WHENEVER `reads` IS, AND `[]` WHEN THIS GATE READ NO HANDLE — the same rule and the
+    // same reason as `readsTruncated`. An OMITTED field means only "this binary has no such field"
+    // and sends the reader straight back to the value's shape, which is the thing being closed.
+    // Both are absent from the three rows that carry no `reads` at all, each of which already says
+    // on stderr why it prints none.
+    rows.push({
+      ...g,
+      reads,
+      readsResolved: handles.resolved,
+      readsUnresolved: handles.unresolved,
+      readsTruncated: cut,
+      readsMayBeStale: stale,
+    });
   }
   if (unexplained.length > 0) {
     process.stderr.write(
@@ -5455,11 +5517,14 @@ async function gatesWithReads(
         `  shows them; answering here still answers the original.\n`,
     );
   }
-  if (unresolved.length > 0) {
+  if (unreadable.length > 0) {
     process.stderr.write(
-      `! CONTENT NOT SHOWN — ${unresolved.join("; ")}\n` +
+      `! CONTENT NOT SHOWN — ${unreadable.join("; ")}\n` +
         `  Those channels print the payload HANDLE the journal recorded, which is a digest and not the value.\n` +
-        `  \`contentDigest\` binds either way; \`loom serve\` reads the same store and will fail the same way.\n`,
+        `  The gate row's \`readsUnresolved\` names exactly those channels — read that, not the value's shape,\n` +
+        `  since a node can write that shape into an ordinary channel; \`readsResolved\` names the handles this\n` +
+        `  door DID read back. \`contentDigest\` binds either way; \`loom serve\` reads the same store and will\n` +
+        `  fail the same way.\n`,
     );
   }
   if (truncated.length > 0) {
@@ -5527,25 +5592,53 @@ async function gatesWithReads(
  * the reason goes to stderr. DROPPING the channel instead would be this file's own "absence is
  * not zero" trap: `undefined` under `reads.big` is indistinguishable from "this gate reads
  * nothing", which is the trap the missing-`reads` notice exists for one field over.
+ *
+ * **AND IT RETURNS WHAT IT DID, NOT ONLY WHAT IT PRODUCED** (`TODO.md` §A.61). Keeping the handle
+ * on a failed `get` leaves a value in `reads` that is byte-identical to one a node wrote itself —
+ * `{"$payload":{digest,bytes}}` is an ordinary JSON object and any node that can write a channel
+ * can write it. The DECISION stays where `payloadHandle` demands, on `p.external`; what changes is
+ * that the answer is carried out of here instead of being spent on a stderr line, so the caller can
+ * put it on the row. `resolved` and `unresolved` are subsets of `need`, so they name only channels
+ * the FOLD calls handles — a node-written lookalike is in neither, which is exactly what says it is
+ * a value. Both are in the gate's declared channel order — `observedChannels`, the same order
+ * `readsMayBeStale` uses — and that is NOT the order `reads` prints in: `makeStateView` slices over
+ * `[...allowed].sort()`, so `reads`'s keys are ALPHABETICAL. Measured on a gate declaring
+ * `reads: ["zeta", "alpha"]` with both externalised: `readsResolved` is `["zeta","alpha"]` and
+ * `Object.keys(reads)` is `["alpha","zeta"]`. A reader who pairs the two by POSITION is wrong;
+ * these lists carry names for that reason, and `test/cli/gates-payload-provenance.test.ts` pins it.
  */
+interface GateHandles {
+  /** The projection `reads` is built from: `p` with every handle this door read back substituted. */
+  readonly p: RunProjection;
+  /** Channels in `p.external` this gate reads and this door fetched from the payload store. */
+  readonly resolved: readonly string[];
+  /** Channels in `p.external` this gate reads whose payload could NOT be read back; they keep their handle. */
+  readonly unresolved: readonly string[];
+}
+
 async function resolveHandles(
   ws: Workspace,
   p: RunProjection,
   node: GraphSpec["nodes"][number],
   task: TaskRecord,
-  unresolved: string[],
-): Promise<RunProjection> {
+  notices: string[],
+): Promise<GateHandles> {
   const need = observedChannels(node).filter((c) => p.external[c] !== undefined);
-  if (need.length === 0) return p;
+  if (need.length === 0) return { p, resolved: [], unresolved: [] };
   const fetched: Record<string, unknown> = {};
+  const resolved: string[] = [];
+  const unresolved: string[] = [];
   for (const c of need) {
     try {
       fetched[c] = await ws.payloads.get(p.runId, p.external[c]!);
+      // AFTER the await, so a channel is only called resolved once its bytes are actually here.
+      resolved.push(c);
     } catch (e) {
-      unresolved.push(`\`${c}\` on node "${node.id}" could not be read back: ${(e as Error).message}`);
+      unresolved.push(c);
+      notices.push(`\`${c}\` on node "${node.id}" could not be read back: ${(e as Error).message}`);
     }
   }
-  return Object.keys(fetched).length === 0 ? p : withResolved(p, task.branch, fetched);
+  return { p: resolved.length === 0 ? p : withResolved(p, task.branch, fetched), resolved, unresolved };
 }
 
 /**
