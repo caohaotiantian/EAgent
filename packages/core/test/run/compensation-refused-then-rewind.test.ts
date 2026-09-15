@@ -54,6 +54,12 @@
  * boolean, because the two arms of the fix land in different places: a refusal in
  * `#rewindRefusals` reaches `planRewind` too, and one in `#rewindSerially` does not. A test that
  * could not tell them apart would pass for a fix that put an arm in the wrong verb.
+ *
+ * TODAY NOTHING REFUSES IN SHAPES 1 AND 2, so which verb SHOULD refuse is stated in the comment
+ * above each `TODAY:` line and asserted nowhere — `assert.equal(out.refusedBy, undefined)` is the
+ * only thing there is to assert while the defect stands. The one live assertion on the field is
+ * in "THE DOOR THAT ALREADY HOLDS", which pins `"planRewind"` on the refusal that exists today;
+ * it is there so the field is known to WORK before the fixer relies on it.
  */
 
 import assert from "node:assert/strict";
@@ -444,7 +450,14 @@ test("SHAPE 3 — a policy-refused undo settles, and the rewind that COULD have 
 
     const recs = records(ran.events);
     assert.equal(recs.length, 1);
-    assert.equal(recs[0]!.outcome, "failed", "recorded `failed`, though the undo tool never ran");
+    // TODAY: recorded `failed` — the outcome that means "the undo tool ran and did not work" —
+    // over a dispatch that was refused before the tool was reached. AFTER THE FIX:
+    // `"not_attempted"`, which is what "nothing was attempted" is called.
+    assert.equal(recs[0]!.outcome, "failed", "TODAY: `failed`, though the undo tool never ran — AFTER: `not_attempted`");
+    // NOT `TODAY`, and the fix design is what makes that true: the split arm is specified to carry
+    // the refusal's own text through UNWRAPPED (`reason: out.content`, the same string as
+    // `out.error.message`) rather than re-wrapping it as `"X did not undo Y: …"`. If the fixer
+    // wraps it instead this line flips too, which is why the design writes the string down.
     assert.match(recs[0]!.reason ?? "", /requires human approval this turn cannot request/, "the reason is about the TRIGGER, not about the undo");
     // TODAY: and it settles, because nothing writes `retryable` on this arm. AFTER THE FIX this
     // must be `true` — it is a fact about the `run_failed` trigger, not about the step — which is
