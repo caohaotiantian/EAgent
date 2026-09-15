@@ -2402,15 +2402,13 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
           // AND THE ARM MUST BE INSIDE THE JOIN'S OWN FAN-OUTS, not merely as deep as them —
           // §A.64, and the first time this rule reads `fanoutEdgeStack` instead of a number.
           //
-          // AMBIGUITY WITH ONE OWNER IS TOLERATED HERE; AMBIGUITY WITH TWO IS REFUSED BELOW.
-          // `undefined` means the node is reachable through two fan-out edges of the same width,
-          // and that is a shape people AUTHOR: `test/run/empty-fanout-oversight.test.ts` routes
-          // between two list-builders that each fan out into one shared body node, so exactly one
-          // of the two edges ever fires. Refusing THAT was tried here and broke it — and the
-          // fixture declares exactly ONE join over the ambiguous body, which is the whole licence
-          // it grants. So this comparison is silent on an identity it does not have, and the
-          // second pass at the end of this function counts OWNERS instead of edges for exactly
-          // those arms: one is the fixture, two is a double fold whichever fan-out it was.
+          // IT SAYS NOTHING WHERE THE IDENTITY IS MISSING, and nothing about how many joins claim
+          // the arm. `undefined` means the node is reachable through two fan-out edges of the same
+          // width, which is a shape people AUTHOR — `test/run/empty-fanout-oversight.test.ts`
+          // routes between two list-builders that each fan out into one shared body node, so
+          // exactly one of the two edges ever fires — and refusing it was tried here and broke
+          // that fixture. How many joins fold a node is a different question from which fan-out it
+          // is in, it needs no stacks at all, and the pass at the end of this function answers it.
           //
           // IT IS NOT MADE UNREACHABLE by `computeFanoutStacks`'s agreement test, which does
           // force this prefix for an arm wired `kind: join`. `join.branches` is a NAME list and
@@ -2464,23 +2462,18 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     // with the inner one compiles. The adjective is the whole difference between a line that
     // converges and a line that costs another compile.
     //
-    // THE ENCLOSING JOIN IS REFERRED TO AND NOT NAMED, AND THE CHOICE IS NOW CHECKED — §A.64.
-    // Naming a candidate is what cost GRAPH021 four review rounds, so this line still does not
-    // try. What changed is what happens when the author picks wrong. Three rules answer, and the
-    // third is new: `BRANCH_NOT_CONNECTED` below catches a `branches` entry with no edge;
-    // `GRAPH008_JOIN_DEPTH` above catches an arm at the wrong DEPTH; and the per-fan-out pass at
-    // the end of this function catches the wrong FAN-OUT — a held join handed to a barrier that
-    // is not the one folding its own fan-out's branch leaves that fan-out with two barriers, and
-    // two barriers is the refusal. Until §A.64 the depth arms compared `fanoutDepth` numbers and
-    // never `fanoutEdgeStack`, so any join one level up satisfied `armDepth === joinDepth + 1`.
+    // THE ENCLOSING JOIN IS REFERRED TO AND NOT NAMED, AND WHICH ONE IT IS STILL IS NOT CHECKED.
+    // Naming a candidate is what cost GRAPH021 four review rounds, so this line does not try. What
+    // §A.64 settled is the neighbouring question — HOW MANY joins collect this fold, not which —
+    // and the answer is exactly one, enforced by the pass at the end of this function.
     //
-    // WHAT IS STILL NOT CHECKED, stated so the next reader does not over-read the above. A held
-    // join's fold may be collected only once — the pass at the end of this function counts owners
-    // per fan-out edge, and per ARM NODE where the fan-out cannot be named — but WHICH single
-    // join that is, among the ones a fan-out's branch could legally offer, is still the author's
-    // call, and so is a barrier that serves several sibling fan-outs at once. A join that
-    // collects every node of both fans is a correct graph and stays one; measured on the §A.64
-    // repro itself, which folds each branch's nodes exactly once and in branch order.
+    // THE SIBLING FAN'S BARRIER IS NOT WRONG, which is the claim two earlier drafts of this
+    // comment got backwards in opposite directions. One said the author's pick was validated
+    // downstream (it was not); the next said handing a held join to a sibling fan's barrier was a
+    // real gap. Measured on a real `Engine`, that graph folds every contribution EXACTLY ONCE
+    // (n=8 against 8 succeeded writer tasks) and differs from the same-fan spelling only in fold
+    // ORDER. So the author picking a different legal barrier is still their call, and the only
+    // thing refused is picking two.
     if (joinDepth !== undefined && joinDepth > 0) {
       const collectedBy = spec.nodes.filter((o) => o.join?.branches.includes(n.id) === true);
       if (collectedBy.length === 0) {
@@ -2581,102 +2574,64 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
     }
   }
 
-  // ONE FAN-OUT, ONE BARRIER — the half of §A.64 with teeth, and the reason the arm check above
-  // had to learn `fanoutEdgeStack` at all.
+  // ONE ARM, ONE JOIN — the half of §A.64 with teeth, and a rule about NODES, not about stacks.
   //
-  // A node inside a fan-out HOLDS its writes: `#immediateReduce` does not apply them, and
-  // `#foldJoin` applies them once, for the enclosing join, in branch order. Both sentences say
-  // "the" join. Nothing checked that there was only one, and the depth arms above cannot: two
-  // barriers over one fan-out are both at `joinDepth`, and a held join handed to a SIBLING fan's
-  // barrier is still at `joinDepth + 1`. Only the fan-out EDGE that opened the arm distinguishes
-  // them, which is what `fanoutEdgeStack` carries and `fanoutDepth` cannot.
+  // THE FACT IT RESTS ON: `writesHeldForJoin(branch) = branch.segments.length > 0` (`run/engine.ts`).
+  // Holding is a property of the TASK'S OWN DEPTH and of nothing else — not of its relation to any
+  // join. `#immediateReduce` does not apply the writes of a Task inside a fan-out, and `#foldJoin`
+  // applies the held writes of EVERY declared member at or under the join's own coordinate. So any
+  // join that names a node with `fanoutDepth >= 1` folds that node's writes, whatever the join's
+  // own depth is and whichever fan-out either of them sits in. Two joins naming it fold it twice,
+  // and every non-idempotent reducer — `append_ordered`, `sum` — doubles in silence.
   //
-  // MEASURED, not argued, on a real `Engine` — `start --fanout(3)--> work --join--> jA` with a
-  // second root join `jB` declaring the same arm, over an `append_ordered` channel:
+  // THREE EARLIER SHAPES OF THIS CHECK EACH LEFT AN ESCAPE AT THEIR OWN SEAM, which is why it is
+  // one rule now: a map keyed on the fan-out EDGE missed every graph whose stacks are ambiguous
+  // (ambiguity propagates from the body to the joins below it); a second map keyed on the arm NODE
+  // for the ambiguous case missed a pair of claimants with one of each kind; and the
+  // `armDepth === joinDepth + 1` filter both of them shared missed a join at the arm's OWN depth,
+  // which the predicate above shows folds it all the same.
   //
-  //     one barrier    found = ["f0","f1","f2"]
-  //     two barriers   found = ["f0","f1","f2","f0","f1","f2"]   status = succeeded
+  // MEASURED ON A REAL ENGINE over an `append_ordered` channel, counting contributions against
+  // succeeded writer tasks. Folded twice, all accepted before this rule: one arm under two root
+  // joins (n=4, expected 2); an ambiguous body under two joins (8/4), including through a router
+  // (4/2) and at two different depths (8/4); a pair of claimants one of whose stacks is known and
+  // one of whose is not (6/4); and a join at the arm's own depth plus one above it (4/2). Folded
+  // ONCE EACH, and all still accepted: the ordinary fan-out and join; one barrier over several
+  // sibling fan-outs; a held join collected by its own fan's barrier AND by a sibling fan's; a
+  // doubly-nested pair each collected by its innermost barrier; an ambiguous body with one join;
+  // and a fan-out branch whose two nodes go to two DISJOINT joins.
   //
-  // which is the hazard `#foldJoin`'s own comment names ("every non-idempotent reducer —
-  // `append_ordered`, `sum` — silently doubles"), reached through a graph that compiled clean.
-  // The split-across-two-barriers shape does not double but breaks the other promise: the fold is
-  // no longer per branch, because a fan-out's own nodes land in two different folds ordered
-  // against two different coordinate spaces.
-  //
-  // WHAT IT DOES NOT REFUSE is one barrier over SEVERAL sibling fan-outs. That shape is what
-  // `#maybeFireJoin` sums `expected` for — one plan per fan-out edge at the parent coordinate,
-  // added up — so each fan-out still has exactly one barrier and the rule is silent. The check is
-  // per fan-out edge, never per join, for exactly that reason.
-  //
-  // AND AN AMBIGUOUS FAN-OUT IS COUNTED BY OWNER INSTEAD OF BY EDGE, which is the half a reviewer
-  // refuted. Ambiguity PROPAGATES: a body reachable through two fan-out edges of the same width
-  // has `fanoutEdgeStack === undefined`, and so does every join below it — so keying on the edge
-  // skipped the graph entirely and "one fan-out, one barrier" was not true of the ambiguous case
-  // at all. Measured at that point, on a real `Engine`, two same-width fan-out edges into one
-  // body with an `append_ordered` channel:
-  //
-  //     one barrier    parts n=6    two barriers   parts n=12    status = succeeded
-  //
-  // What CANNOT be named is which fan-out opened the arm; what can still be counted is how many
-  // joins claim it. One claimant is `test/run/empty-fanout-oversight.test.ts`'s router shape and
-  // stays legal; two is a double fold whichever fan-out it turns out to be, so the ambiguity is
-  // the reason to refuse rather than the reason to allow. The two maps are disjoint by
-  // construction: an arm lands in `barriersOf` only when both stacks are known.
-  const barriersOf = new Map<string, NodeId[]>();
-  const ambiguousOwners = new Map<NodeId, NodeId[]>();
-  const claim = <K>(m: Map<K, NodeId[]>, key: K, owner: NodeId): void => {
-    const owners = m.get(key) ?? [];
-    if (!owners.includes(owner)) owners.push(owner);
-    m.set(key, owners);
-  };
+  // WHICH IS WHY DISJOINT ARMS ARE NOT REFUSED. An earlier cut counted barriers per fan-out and
+  // refused a branch split across two joins; measured, it folds every contribution exactly once
+  // and only the ORDER differs. Refusing a working graph to protect an ordering nobody declared is
+  // the trade this rule does not make.
+  const claimedBy = new Map<NodeId, NodeId[]>();
   for (const n of spec.nodes) {
     const join = n.join;
     if (join === undefined) continue;
-    const joinDepth = idx.fanoutDepth.get(n.id);
-    if (joinDepth === undefined) continue; // reachable at two depths — already refused above
-    const joinStack = idx.fanoutEdgeStack.get(n.id);
     for (const branch of join.branches) {
-      // Only an arm ONE LEVEL DEEPER holds its writes for this barrier; an arm at the join's own
-      // depth applied its own writes at commit and is nobody's exclusive property. Depth rather
-      // than stack length, because the stacks are exactly what may be missing here.
-      if (idx.fanoutDepth.get(branch) !== joinDepth + 1) continue;
-      const armStack = idx.fanoutEdgeStack.get(branch);
-      if (joinStack === undefined || armStack === undefined) {
-        claim(ambiguousOwners, branch, n.id);
-        continue;
-      }
-      if (joinStack.some((id, i) => armStack[i] !== id)) continue; // wrong fan — the arm check refused it
-      claim(barriersOf, String(armStack[joinStack.length]), n.id);
+      // `undefined` is an unknown node or one reachable at two depths — both already refused, and
+      // adding a second diagnostic about them says nothing the first does not.
+      const armDepth = idx.fanoutDepth.get(branch);
+      if (armDepth === undefined || armDepth < 1) continue;
+      const owners = claimedBy.get(branch) ?? [];
+      if (!owners.includes(n.id)) owners.push(n.id);
+      claimedBy.set(branch, owners);
     }
   }
-  for (const [edgeId, owners] of barriersOf) {
+  for (const [branch, owners] of claimedBy) {
     if (owners.length < 2) continue;
     d.push({
       severity: "error",
       code: "GRAPH008_JOIN_DEPTH",
       message:
-        `fan-out "${edgeId}" has ${String(owners.length)} barriers (${owners.map((o) => `"${o}"`).join(", ")}) — its branches hold their ` +
-        `writes for ONE enclosing join to fold in branch order, so every extra barrier folds the same held writes again`,
-      at: { edgeId: edgeId as EdgeId },
-      fix:
-        `keep one join for "${edgeId}" and give it every node of that branch — ` +
-        `${owners.slice(1).map((o) => `"${o}"`).join(", ")} must drop the entries opened by "${edgeId}", ` +
-        `or take "${owners[0]!}"'s result as an arm instead of the branch nodes`,
-    });
-  }
-  for (const [branch, owners] of ambiguousOwners) {
-    if (owners.length < 2) continue;
-    d.push({
-      severity: "error",
-      code: "GRAPH008_JOIN_DEPTH",
-      message:
-        `node "${branch}" is inside a fan-out the compiler cannot name — it is reachable through two fan-out edges ` +
-        `of the same width — and ${String(owners.length)} joins (${owners.map((o) => `"${o}"`).join(", ")}) declare it as an arm; it HOLDS its ` +
-        `writes for ONE of them and which one owns them cannot be told apart`,
+        `node "${branch}" is inside a fan-out, so it HOLDS its writes for ONE join to fold in branch order — but ` +
+        `${String(owners.length)} joins (${owners.map((o) => `"${o}"`).join(", ")}) declare it among their branches, and each of them folds ` +
+        `those same writes again`,
       at: { nodeId: branch },
       fix:
-        `keep one join over "${branch}" — ${owners.slice(1).map((o) => `"${o}"`).join(", ")} must drop it from \`branches\` and take ` +
-        `"${owners[0]!}"'s result instead — or give "${branch}" one enclosing fan-out so the barriers can be told apart`,
+        `keep one join over "${branch}": ${owners.slice(1).map((o) => `"${o}"`).join(", ")} must drop it from \`branches\` and drop the ` +
+        `\`kind: join\` edge from "${branch}", and take "${owners[0]!}"'s result as an arm instead if it still needs those writes`,
     });
   }
 }

@@ -479,17 +479,22 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     `offered ${JSON.stringify(offered)} and waits for ${JSON.stringify(waited)} — that overlap is the cycle`,
   );
 
-  // AND THE SECOND COMPILE IS THE OTHER BARRIER — §A.64, and this assertion used to read "the fix
-  // converges in ONE step, for either choice" over a graph that DOUBLE-FOLDS.
+  // AND FOLLOWING THIS LINE DOES NOT CONVERGE — §A.64, measured, and the honest cost is TWO more
+  // edits that the line does not dictate. This assertion used to read "the fix converges in ONE
+  // step, for either choice" over a graph that DOUBLE-FOLDS.
   //
-  // Picking one candidate leaves the other still popping `fan`, and a fan-out's nodes hold their
-  // writes for ONE enclosing join. Measured on a real `Engine` on the same shape — a fanned-out
-  // node behind a held `gather`, with a second root barrier declaring `gather` too — over an
-  // `append_ordered` channel: `failures = ["r0","r1"]` with one barrier and
-  // `["r0","r1","r0","r1"]` with two, run `succeeded` both times. So this fixture's own converged
-  // graph was one of the graphs §A.64 was about, and what converges is two steps: pick a barrier,
-  // then stop the other one being a barrier. The second step is what the new `fix:` dictates —
-  // take the picked join's RESULT as an arm instead of the branch nodes.
+  // `writesHeldForJoin` is a property of the TASK'S OWN DEPTH (`run/engine.ts`), so every join
+  // naming a node inside a fan-out folds that node's writes. `gather` sits inside the branch and
+  // already declares `classify`; the dictated list names `classify` again for the barrier, so
+  // `classify` ends up with two folders — and `gather` itself ends up with two, the picked join
+  // and the other candidate. Measured on a real `Engine` over an `append_ordered` channel:
+  // the dictated graph gives n=6 against 4 contributions, and the spelling that leaves `classify`
+  // to the join that already collects it gives 4 against 4.
+  //
+  // The list is what would have to change — a branch member already claimed by a join OTHER than
+  // the candidates should not be dictated again — and that is §A.65 rather than this round, both
+  // because the disclosure sentence §A.57 settled would have to state a second reason for dropping
+  // a name, and because `namesIn` is asserted against this exact set in four other tests.
   for (const pick of offered) {
     const other = offered.find((o) => o !== pick)!;
     const fixed = clone(s) as unknown as GraphSpec;
@@ -506,13 +511,16 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     const afterPick = errorsOf(fixed as GraphSpec);
     assert.deepEqual(
       afterPick.map((x) => x.code),
-      ["GRAPH008_JOIN_DEPTH"],
-      `picking "${pick}" must leave exactly the second barrier to answer for`,
+      ["GRAPH008_JOIN_DEPTH", "GRAPH008_JOIN_DEPTH"],
+      `picking "${pick}" leaves two nodes with two folders each: ${afterPick.map((x) => x.message).join(" | ")}`,
     );
-    assert.equal(afterPick[0]!.at?.edgeId, e("fan"), "the refusal is about the fan-out, not about either join");
-    assert.match(afterPick[0]!.message, new RegExp(`"${pick}".*"${other}"|"${other}".*"${pick}"`), afterPick[0]!.message);
+    assert.deepEqual(
+      afterPick.map((x) => String(x.at?.nodeId)).sort(),
+      ["classify", "gather"],
+      "one for the node the inner join already collects, one for the inner join itself",
+    );
 
-    // Step two, exactly as the line dictates: `other` takes `pick`'s result as its arm.
+    // EDIT ONE, which the line does dictate: `other` takes `pick`'s result instead of the nodes.
     const o = fixed.nodes.findIndex((x) => x.id === n(other));
     (fixed.nodes as NodeSpec[])[o] = {
       ...fixed.nodes[o]!,
@@ -522,9 +530,23 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     for (const x of drop) (fixed.edges as EdgeSpec[]).splice(fixed.edges.indexOf(x), 1);
     (fixed.edges as EdgeSpec[]).push({ id: e(`chain-${pick}-${other}`), from: n(pick), to: n(other), kind: "join" } as EdgeSpec);
     assert.deepEqual(
+      errorsOf(fixed as GraphSpec).map((x) => String(x.at?.nodeId)),
+      ["classify"],
+      "and `classify` is still folded by `gather` and by the barrier",
+    );
+
+    // EDIT TWO, which it does NOT: drop `classify` from the barrier, because `gather` collects it.
+    const j2 = fixed.nodes.findIndex((x) => x.id === n(pick));
+    (fixed.nodes as NodeSpec[])[j2] = {
+      ...fixed.nodes[j2]!,
+      join: { branches: waited.filter((w) => w !== "classify").map((w) => n(w)), mode: "all", onBranchError: "fail" },
+    } as NodeSpec;
+    const dropC = fixed.edges.filter((x) => x.to === n(pick) && x.from === n("classify"));
+    for (const x of dropC) (fixed.edges as EdgeSpec[]).splice(fixed.edges.indexOf(x), 1);
+    assert.deepEqual(
       errorsOf(fixed as GraphSpec).map((x) => x.code),
       [],
-      `picking "${pick}" and then doing what the second line says must compile`,
+      `picking "${pick}" converges only after the edit the line does not dictate`,
     );
   }
 });
@@ -724,12 +746,13 @@ function doubleNested(): GraphSpec {
 
 test("the held join's fix: points at ITS OWN fan-out's barrier, and says INNERMOST", () => {
   // Two reviewer findings in one place. First: a sibling fan's barrier, wired with edits of the
-  // SHAPE this line dictates, used to compile clean — `GRAPH008_JOIN_DEPTH` compared `fanoutDepth`
-  // numbers and never `fanoutEdgeStack`, so a join one level up in a different fan satisfied it.
-  // That acceptance was §A.64 and is closed: handing a held join to a barrier that is not the one
-  // folding its own fan-out's branch leaves that fan-out with two barriers, which is refused —
-  // see `join-depth.test.ts`. What is pinned HERE is still only that the sentence names WHICH
-  // join it means rather than papering over it.
+  // SHAPE this line dictates, compiles clean — and §A.64 settled that this is CORRECT rather than
+  // a gap: measured on a real `Engine`, the sibling-fan spelling folds every contribution exactly
+  // once (n=8 against 8) and only the ORDER differs. What §A.64 did refuse is a node inside a
+  // fan-out with TWO joins folding it, which is a different graph — see `join-depth.test.ts`.
+  // What is pinned HERE is still only that the sentence names WHICH join it means rather than
+  // papering over it: a reader who follows it converges, and a reader who does not still has a
+  // referent to argue with.
   const [held] = errorsOf(heldInner()).filter((x) => x.code === "GRAPH008_HELD_JOIN_UNCOLLECTED");
   const edits = heldFixEdits(held!.fix ?? "");
   assert.equal(edits.barrierOf, "subJoin", "the referent is the fan-out the held join is inside");
