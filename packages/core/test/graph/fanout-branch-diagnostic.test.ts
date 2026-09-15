@@ -480,7 +480,7 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
   );
 
   // AND FOLLOWING THIS LINE DOES NOT CONVERGE — §A.64, measured, and the honest cost is TWO more
-  // edits that the line does not dictate. This assertion used to read "the fix converges in ONE
+  // edits that GRAPH021's line does not dictate. This assertion used to read "the fix converges in ONE
   // step, for either choice" over a graph that DOUBLE-FOLDS.
   //
   // `writesHeldForJoin` is a property of the TASK'S OWN DEPTH (`run/engine.ts`), so every join
@@ -520,7 +520,7 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
       "one for the node the inner join already collects, one for the inner join itself",
     );
 
-    // EDIT ONE, which the line does dictate: `other` takes `pick`'s result instead of the nodes.
+    // EDIT ONE, which GRAPH008's line does dictate: `other` takes `pick`'s result instead of the nodes.
     const o = fixed.nodes.findIndex((x) => x.id === n(other));
     (fixed.nodes as NodeSpec[])[o] = {
       ...fixed.nodes[o]!,
@@ -546,7 +546,7 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     assert.deepEqual(
       errorsOf(fixed as GraphSpec).map((x) => x.code),
       [],
-      `picking "${pick}" converges only after the edit the line does not dictate`,
+      `picking "${pick}" converges only after the edit GRAPH021's line does not dictate`,
     );
   }
 });

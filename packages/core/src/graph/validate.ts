@@ -2584,6 +2584,15 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   // own depth is and whichever fan-out either of them sits in. Two joins naming it fold it twice,
   // and every non-idempotent reducer — `append_ordered`, `sum` — doubles in silence.
   //
+  // THE "WHICHEVER FAN-OUT" HALF IS THE ONE THE TWO SENTENCES ABOVE DO NOT PROVE, and its
+  // mechanism is one line over in `#maybeFireJoin`: the instance of the barrier an arrival belongs
+  // to is `segments.slice(0, depth)` of the ARRIVING task's own coordinate, where `depth` is the
+  // JOIN's compiled `fanoutDepth`. So a cross-fan arm does not fail to find its barrier — the
+  // barrier is MINTED in the arriving arm's own fan, at the join's depth, and `#foldJoin` then
+  // applies that arm's held writes there. That is why a sibling fan's barrier folds a held join
+  // once and correctly (`test/graph/join-depth.test.ts`), and why two claimants fold twice
+  // wherever they sit.
+  //
   // THREE EARLIER SHAPES OF THIS CHECK EACH LEFT AN ESCAPE AT THEIR OWN SEAM, which is why it is
   // one rule now: a map keyed on the fan-out EDGE missed every graph whose stacks are ambiguous
   // (ambiguity propagates from the body to the joins below it); a second map keyed on the arm NODE
