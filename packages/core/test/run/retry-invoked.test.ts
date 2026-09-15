@@ -36,10 +36,13 @@ test("A MODEL BLIP IS STILL RETRYABLE when the declared tool was never called", 
       // A RETRYABLE BLIP, AND THAT MATTERS. This threw a bare `Error` until 2026-09-15 —
       // `toLoomError` makes that `E_INTERNAL`/`internal`, which is not in `RETRYABLE`, so
       // `#retryDecision` returned at its SECOND line and never reached `#mayHaveRungABell` at
-      // all. The assertion below then passed on `!failed` alone: the one branch died, the join
-      // folded nothing, and the run reported `succeeded` — §D.9's defect carrying a test of a
-      // different mechanism. `E_PROVIDER_TRANSPORT`/`unavailable` is what a transport blip
-      // actually is, and with it this file at least reaches a retry decision.
+      // all. The assertion below then passed on `!failed` alone, with ZERO retry rows on the
+      // log: measured on the fixture as it stood, `status: awaiting_gate | retry rows: 0 |
+      // run.failed: 0 | gates: ["open"]` — the one branch died, the join folded nothing, and the
+      // run parked on the skeleton's human gate, which is not `failed` and so satisfied the
+      // disjunction. (It was §D.9's answer, turning that same run `failed`, that surfaced it.)
+      // `E_PROVIDER_TRANSPORT`/`unavailable` is what a transport blip actually is, and with it
+      // this file at least reaches a retry decision.
       //
       // WHAT IT STILL DOES NOT REACH, said plainly rather than left to be inferred:
       // `#mayHaveRungABell` returns `false` on its FIRST line here, because `fs.read` is

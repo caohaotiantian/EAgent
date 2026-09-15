@@ -204,11 +204,14 @@ test("A RUN WHOSE OWN GRAPH THE EXECUTOR CANNOT READ IS FAILED, with the code on
           `${what}: and the details name the offending edge`,
         );
 
-        // FAILING CLOSED ON A REPEAT, and appending nothing the second time.
+        // FAILING CLOSED ON A REPEAT, and appending nothing the second time. It is
+        // `#failUnreadableGraph`'s OWN `isTerminal` return that suppresses the second row, not
+        // the terminal short-circuit inside `advance` — for a run this engine still holds,
+        // `#assertBound` throws above that short-circuit and it is never reached.
         await assert.rejects(
           () => engine.advance(runId),
           (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
-          `${what}: a second advance still refuses`,
+          `${what}: a second advance on the ATTACHED run still refuses`,
         );
         assert.equal(
           (await typesOf(first, runId)).filter((ev) => ev.type === "run.failed").length,
@@ -222,8 +225,21 @@ test("A RUN WHOSE OWN GRAPH THE EXECUTOR CANNOT READ IS FAILED, with the code on
       // A FRESH ENGINE OVER THE SAME FILE, holding nothing but the journal, sees the same end.
       const second = new SqliteStateStore({ path, now: () => NOW });
       try {
-        const p = await engineWith(second).projection(runId!);
-        assert.equal(p?.status, "failed", `${what}: a restart reads the terminal state off the log`);
+        const engine = engineWith(second);
+        assert.equal((await engine.projection(runId!))?.status, "failed", `${what}: a restart reads the terminal state off the log`);
+
+        // AND A FRESH PROCESS ANSWERS RATHER THAN REFUSING, which is a different answer from the
+        // attached one above and is pinned so the asymmetry is on the record. Holding no context,
+        // `advance` takes `#advanceSerially`'s retired-run fallback, folds the journal, sees a
+        // terminal run and RETURNS it — `#assertBound` is never reached, so the unreadable graph
+        // is never looked at. Terminal is terminal, and a run that ended is allowed to say so.
+        const answered = await engine.advance(runId!);
+        assert.equal(answered.status, "failed", `${what}: a fresh process answers the finished run`);
+        assert.equal(
+          (await typesOf(second, runId!)).filter((ev) => ev.type === "run.failed").length,
+          1,
+          `${what}: and still writes no second terminal row`,
+        );
       } finally {
         second.close();
       }
@@ -233,71 +249,85 @@ test("A RUN WHOSE OWN GRAPH THE EXECUTOR CANNOT READ IS FAILED, with the code on
   }
 });
 
+/**
+ * TWO WAYS TO ARRIVE WITH SOMEBODY ELSE'S BROKEN GRAPH, and the second is the one that cost a
+ * round. `RunGraph.graphHash` is a plain field of an object a caller `attach`ed, so a foreign
+ * graph can simply WEAR the run's hash. The first cut of `#failUnreadableGraph` compared that
+ * field alone, and the forged row below read `status: failed  run.failed rows: 1  gates:
+ * ["cancelled"]` — one caller with a broken graph ending a healthy parked run and cancelling the
+ * question in somebody's queue. Identity is the pair `#graphIdentityMismatch` owns, hash AND
+ * manifest, and `#assertBound` and this door now ask it through the same function.
+ */
 test("A FOREIGN UNREADABLE GRAPH REFUSES WITHOUT KILLING THE RUN — the ordinary half", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-a63-foreign-"));
   try {
     for (const { what, mangle } of FAULTS) {
-      const path = join(dir, `${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
-      const good = compileOrThrow({
-        spec: gateSpec(),
-        resolver: resolver(),
-        tools: {},
-        tenantCapabilities: SKELETON_TENANT_CAPS,
-      });
-      // A DIFFERENT graph, unreadable, and NOT the one this run compiled — the fan graph, so its
-      // hash cannot collide with the gate graph's by construction.
-      const foreign = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+      for (const wearsTheRunsHash of [false, true]) {
+        const where = `${what}${wearsTheRunsHash ? " (wearing the run's own graphHash)" : ""}`;
+        const path = join(dir, `${what.slice(0, 12).replace(/\W+/g, "-")}-${String(wearsTheRunsHash)}.db`);
+        const good = compileOrThrow({
+          spec: gateSpec(),
+          resolver: resolver(),
+          tools: {},
+          tenantCapabilities: SKELETON_TENANT_CAPS,
+        });
+        // A DIFFERENT graph, unreadable, and NOT the one this run compiled — the fan graph, so its
+        // hash cannot collide with the gate graph's by construction, and on the second pass it is
+        // handed the run's hash outright.
+        const built = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+        const foreign = (wearsTheRunsHash ? { ...built, graphHash: good.graphHash } : built) as RunGraph;
 
-      // ── the process that parks ─────────────────────────────────────────────
-      const first = new SqliteStateStore({ path, now: () => NOW });
-      let runId: RunId;
-      try {
-        const engine = engineWith(first);
-        runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
-        const p = await engine.advance(runId);
-        assert.equal(p.status, "awaiting_gate", `${what}: precondition — a healthy parked run`);
-      } finally {
-        first.close();
-      }
-
-      // ── a caller arriving with somebody else's broken graph ────────────────
-      const second = new SqliteStateStore({ path, now: () => NOW });
-      try {
-        const engine = engineWith(second);
-        engine.attach(runId, foreign);
-        await assert.rejects(
-          () => engine.advance(runId),
-          (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
-          `${what}: the caller is refused`,
-        );
-        assert.equal(
-          (await typesOf(second, runId)).filter((ev) => ev.type === "run.failed").length,
-          0,
-          `${what}: and the run it did not compile is NOT failed`,
-        );
-        assert.equal((await engine.projection(runId))?.status, "awaiting_gate", `${what}: still parked`);
-      } finally {
-        second.close();
-      }
-
-      // ── and the run is still advanceable by a process holding the right graph ─
-      const third = new SqliteStateStore({ path, now: () => NOW });
-      try {
-        const engine = engineWith(third);
-        engine.attach(runId, good);
-        for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
-          await engine.resolveGate(runId, {
-            gateId: gate.gateId,
-            decision: { kind: "approve" },
-            actor: { kind: "human", subject: "u:alice", via: "console" },
-            idempotencyKey: `k-${gate.gateId}`,
-          });
+        // ── the process that parks ─────────────────────────────────────────────
+        const first = new SqliteStateStore({ path, now: () => NOW });
+        let runId: RunId;
+        try {
+          const engine = engineWith(first);
+          runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
+          const p = await engine.advance(runId);
+          assert.equal(p.status, "awaiting_gate", `${where}: precondition — a healthy parked run`);
+        } finally {
+          first.close();
         }
-        const p = await engine.advance(runId);
-        assert.equal(p.status, "succeeded", `${what}: the bad caller cost the run nothing`);
-        assert.deepEqual(p.channels["note"], ["done-ran"], `${what}: and the work behind the gate ran`);
-      } finally {
-        third.close();
+
+        // ── a caller arriving with somebody else's broken graph ────────────────
+        const second = new SqliteStateStore({ path, now: () => NOW });
+        try {
+          const engine = engineWith(second);
+          engine.attach(runId, foreign);
+          await assert.rejects(
+            () => engine.advance(runId),
+            (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+            `${where}: the caller is refused`,
+          );
+          assert.equal(
+            (await typesOf(second, runId)).filter((ev) => ev.type === "run.failed").length,
+            0,
+            `${where}: and the run it did not compile is NOT failed`,
+          );
+          assert.equal((await engine.projection(runId))?.status, "awaiting_gate", `${where}: still parked`);
+        } finally {
+          second.close();
+        }
+
+        // ── and the run is still advanceable by a process holding the right graph ─
+        const third = new SqliteStateStore({ path, now: () => NOW });
+        try {
+          const engine = engineWith(third);
+          engine.attach(runId, good);
+          for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
+            await engine.resolveGate(runId, {
+              gateId: gate.gateId,
+              decision: { kind: "approve" },
+              actor: { kind: "human", subject: "u:alice", via: "console" },
+              idempotencyKey: `k-${gate.gateId}`,
+            });
+          }
+          const p = await engine.advance(runId);
+          assert.equal(p.status, "succeeded", `${where}: the bad caller cost the run nothing`);
+          assert.deepEqual(p.channels["note"], ["done-ran"], `${where}: and the work behind the gate ran`);
+        } finally {
+          third.close();
+        }
       }
     }
   } finally {

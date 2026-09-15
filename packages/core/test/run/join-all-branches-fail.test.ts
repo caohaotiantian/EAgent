@@ -5,10 +5,11 @@
  * `firstSuccess` whose members all terminate without succeeding RELEASES rather than waiting for
  * an arrival that cannot come — in all four modes, with and without a second entrance, at every
  * parallelism, and across a restart. Second (2026-09-15, §D.9 answered as option (a)): that
- * release is not a SUCCESS. `#foldJoin` refuses `branchCount === 0 && expected > 0`, so a fold
- * with no contributions out of a fan that planned some fails `E_QUORUM_UNREACHABLE` instead of
- * folding nothing and letting the graph carry on. It binds all four modes and both
- * `onBranchError` values, because all four released the same empty fold and always had.
+ * release is not a SUCCESS. `#foldJoin` refuses `succeededMembers === 0 && members.length > 0`, so
+ * a barrier not one of whose members succeeded fails `E_QUORUM_UNREACHABLE` instead of folding
+ * nothing and letting the graph carry on. It binds all four modes and both `onBranchError`
+ * values, because all four released the same empty fold and always had. The unit is MEMBER TASKS
+ * and the last three tests in this file are why.
  *
  * THE DECISION WAS THE ORCHESTRATOR'S, following §D.9's own written recommendation — not the
  * maintainer's. The alternatives it declined: a `join.minBranches` knob, which prices a
@@ -16,11 +17,11 @@
  * semantics and documenting them, which leaves a gate-reject run looking exactly like success in
  * the journal.
  *
- * `expected > 0` IS THE WHOLE SAFETY OF THAT RULE, and the empty-fan control below is what shows
- * it: a fan-out over an EMPTY channel plans zero branches, appends `fanout.planned{width: 0}`,
- * materialises no member Task, and must still release and still SUCCEED (§A.47's
- * `#fireEmptyJoin`). "The fan planned nothing" and "the fan planned two and lost both" are
- * different runs and only the second is a failure.
+ * `members.length > 0` IS THE WHOLE SAFETY OF THAT RULE, and the empty-fan control below is what
+ * shows it: a fan-out over an EMPTY channel materialises no member Task at all, so the barrier
+ * has nothing to have succeeded and must still release and still SUCCEED (§A.47's
+ * `#fireEmptyJoin`). "The fan materialised nothing" and "the fan materialised two and lost both"
+ * are different runs and only the second is a failure.
  *
  * `#maybeFireJoin`'s `any` and `firstSuccess` arms were `succeeded >= 1` and nothing else — a
  * predicate with no false branch that terminates. Once every member of the barrier is terminal
@@ -44,7 +45,7 @@
  * THE BARRIER RELEASES RATHER THAN FAILING, and the two `onBranchError` values are both in the
  * sweep because that is what the division of labour rests on. `#maybeFireJoin` decides WHEN a
  * barrier releases; `#foldJoin` decides what the release MEANS, and it holds BOTH failure arms —
- * `onBranchError === "fail" && skipped > 0`, and now `branchCount === 0 && expected > 0`. Under
+ * `onBranchError === "fail" && skipped > 0`, and now `succeededMembers === 0`. Under
  * `"fail"` the run ended `failed` before any of this — but for the ORPHAN BRANCH, with
  * `Jready=0`: the barrier had still not resolved, and the code naming the reason was never
  * raised. That is why this file asserts the join's own error code and not just the run's status.
@@ -392,11 +393,16 @@ function gateEngine(store: SqliteStateStore): Engine {
  * `now` line above is what the two flipped assertions read. It binds all four modes, which is why
  * the sweep runs over all four.
  *
- * THE FRESH PROCESS IS WHERE THE REFUSAL IS COMPUTED, not merely re-read. `#foldJoin`'s
- * `expected` comes from `p.fanouts` — folded from `fanout.planned` rows the FIRST process wrote —
- * so the restart lens asks what happens if that map comes back empty: `plannedWidth` is 0, the
- * member-count fallback answers 2 from the branch Tasks the same fold rebuilt, and the refusal
- * still fires. It fails CLOSED on an empty restart, which is the direction that is allowed.
+ * THE FRESH PROCESS IS WHERE THE REFUSAL IS COMPUTED, not merely re-read — the second Engine
+ * holds no run context, no leases and no member list, and the drive above is what mints and folds
+ * the barrier. That much is measured by this test.
+ *
+ * WHAT THE RESTART LENS SAYS, as reasoning and not as a second measurement: the refusal reads
+ * `members` and `succeededMembers`, both derived from `p.tasks`, which `#project` folds from
+ * `task.*` rows. There is no in-memory side to come back empty — a fold that lost the task rows
+ * would lose the barrier's own `task.ready` with them and nothing would be folded at all. It
+ * reads NOTHING off `p.fanouts`, deliberately, which is the other half of why: a plan whose
+ * branches were never materialised is `#finish`'s unmaterialised-branch net, not this arm's.
  */
 test("THE BARRIER RELEASES FROM THE JOURNAL ALONE — a fresh Engine, two rejected gates", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-join-never-"));
@@ -482,11 +488,12 @@ test("THE BARRIER RELEASES FROM THE JOURNAL ALONE — a fresh Engine, two reject
  * branches ("an alert with no pods strands the entire downstream graph while the run still
  * reports success"). That barrier folds NOTHING and must still SUCCEED.
  *
- * WITHOUT THIS TEST, `#foldJoin` REFUSING `branchCount === 0` ALONE PASSES EVERY OTHER
- * ASSERTION IN THIS FILE and breaks every empty fan in the product. `expected > 0` is the
- * clause that separates "the fan planned nothing" from "the fan planned two and lost both",
- * and this is what holds it in place. Measured before and after §D.9's answer, unchanged in
- * all four modes: `status=succeeded Jready=1 done=1 note=["done-ran"]`.
+ * WITHOUT THIS TEST, `#foldJoin` REFUSING `succeededMembers === 0` ALONE PASSES EVERY OTHER
+ * ASSERTION IN THIS FILE and breaks every empty fan in the product — a barrier with no members
+ * has none that succeeded. `members.length > 0` is the clause that separates "the fan
+ * materialised nothing" from "the fan materialised two and lost both", and this is what holds it
+ * in place. Measured before and after §D.9's answer, unchanged in all four modes:
+ * `status=succeeded Jready=1 done=1 note=["done-ran"]`.
  *
  * `function/work@stable` AND NOT `function/boom@stable`, deliberately: the body is never
  * entered — that is the point — so a throwing body would prove nothing and would read as a
@@ -511,5 +518,213 @@ test("A FAN-OUT THAT PLANNED ZERO BRANCHES STILL RELEASES AND STILL SUCCEEDS —
       { branchCount: 0, skipped: 0 },
       `${mode}: the fold ran, over nothing, and committed a reduction`,
     );
+  }
+});
+
+// ── THE UNIT THE REFUSAL COUNTS IN ────────────────────────────────────────────
+
+/**
+ * THE REFUSAL COUNTS MEMBER TASKS, NOT BRANCH COORDINATES, and these two shapes are why.
+ *
+ * `#foldJoin`'s first cut of §D.9's answer read `branchCount === 0`, which is
+ * `contributing.size` — a set of BRANCH COORDINATES that the `lost` subtraction empties whenever
+ * ANY member of a coordinate dies. Two graphs that were succeeding on `loom` started failing with
+ * their data already in the channel:
+ *
+ *   - `staticSpec` below: three sibling arms wired `kind: "join"` with no fan-out above them, so
+ *     every arm sits at the SAME root coordinate. One loser emptied the set. Measured, `mode:
+ *     all`, `onBranchError: "skip"`, `losers: ["a"]` — `status=failed found=["b","c"] total=2
+ *     err=E_QUORUM_UNREACHABLE`, against a base reading `succeeded`. This is the shape of the
+ *     SHIPPED `examples/graphs/two-person-approval.json`, where two-of-three approval lives in a
+ *     `quorum` join over three `human_gate` arms: one rejection would have failed the run.
+ *   - `degradedSpec` below: a fanned branch of two nodes where the FIRST wrote and succeeded and
+ *     the second threw. Every coordinate is lost, so the run failed and discarded `seen`, where
+ *     the base read `seen: ["a","b"]` — under a message saying the run "did no work".
+ *
+ * The conjunct `byChannel.size === 0` does not rescue either, and was measured too: a member at
+ * the ROOT coordinate never enters `byChannel` at all (`writesHeldForJoin` is false there, so its
+ * writes were applied at commit), which leaves the static shape failing exactly as before.
+ * `succeededMembers === 0` is the question the row actually asks — did any member of this barrier
+ * finish successfully — and it is the same in both units for a fan and correct in the one that
+ * matters for a static join.
+ */
+const ARMS = ["a", "b", "c"] as const;
+
+const STATIC_CHANNELS = {
+  ...CHANNELS,
+  seed: { type: "string", reduce: "replace" },
+  found: { type: "array", reduce: "append_ordered" },
+  total: { type: "number", reduce: "sum", initial: 0 },
+};
+
+/** Three static sibling arms joined AT the root coordinate — no fan-out anywhere. */
+function staticSpec(mode: string): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "join-static-arms", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: STATIC_CHANNELS,
+    inputs: ["seed"],
+    outputs: [],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["seed"], function: { ref: "function/seed@stable" } },
+      ...ARMS.map((id) => ({
+        id: n(id),
+        type: "function",
+        reads: ["seed"],
+        writes: ["found", "total"],
+        function: { ref: `function/arm-${id}@stable` },
+      })),
+      {
+        id: n("J"),
+        type: "join",
+        reads: ["found"],
+        writes: ["found", "total"],
+        join: { branches: ARMS.map(n), mode, onBranchError: "skip", ...(mode === "quorum" ? { k: 0.5 } : {}) },
+      },
+    ],
+    edges: [
+      ...ARMS.map((id) => ({ id: e(`s${id}`), from: n("start"), to: n(id), kind: "seq" })),
+      ...ARMS.map((id) => ({ id: e(`j${id}`), from: n(id), to: n("J"), kind: "join", branches: ARMS.map(n) })),
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** `start --fanout(2)--> b0 --seq--> b1 --join--> J`; `b0` writes and succeeds, `b1` throws. */
+function degradedSpec(mode: string): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "join-degraded-branch", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 8, maxLoopIterations: 1 } },
+    channels: CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: n("b0"), type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/work@stable" } },
+      { id: n("b1"), type: "function", reads: ["item"], function: { ref: "function/boom@stable" } },
+      {
+        id: n("J"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: [n("b0"), n("b1")], mode, onBranchError: "skip", ...(mode === "quorum" ? { k: 0.5 } : {}) },
+      },
+    ],
+    edges: [
+      { id: e("fo"), from: n("start"), to: n("b0"), kind: "fanout", over: "items", as: "item", maxWidth: 2 },
+      { id: e("sq"), from: n("b0"), to: n("b1"), kind: "seq" },
+      // BOTH members need their own `kind: join` edge — the rule §A.56's `fix:` line states.
+      { id: e("jn0"), from: n("b0"), to: n("J"), kind: "join", branches: [n("b0"), n("b1")] },
+      { id: e("jn1"), from: n("b1"), to: n("J"), kind: "join", branches: [n("b0"), n("b1")] },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** Every branch SUCCEEDS and writes nothing — success with no data is not this row's shape. */
+function silentSpec(mode: string): GraphSpec {
+  return fanSpec({ mode, onBranchError: "skip", body: "function/silent@stable", width: 2, secondPath: false });
+}
+
+interface ArmResult {
+  readonly status: string;
+  readonly found: unknown;
+  readonly total: unknown;
+  readonly seen: unknown;
+  readonly joinError: string | undefined;
+}
+
+async function runArms(spec: GraphSpec, inputs: Record<string, unknown>, losers: readonly string[]): Promise<ArmResult> {
+  const store = new MemoryStateStore({ now: () => NOW });
+  const functions = new FunctionRegistry();
+  functions.register("function/seed@stable", () => ({}));
+  functions.register("function/silent@stable", () => ({}));
+  functions.register("function/boom@stable", () => {
+    throw new Error("boom");
+  });
+  functions.register("function/work@stable", (view) => ({ writes: { seen: [view.get<{ id: string }>("item")?.id ?? "?"] } }));
+  functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
+  for (const id of ARMS) {
+    functions.register(`function/arm-${id}@stable`, () => {
+      if (losers.includes(id)) throw new Error(`${id} failed`);
+      return { writes: { found: [id], total: 1 } };
+    });
+  }
+  const models = new ModelRegistry();
+  models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models,
+    now: () => NOW,
+    maxParallelism: 8,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+  const runId = await engine.submit({ graph: compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] }), inputs });
+  const p = await engine.advance(runId);
+  const log: JournalEvent[] = [];
+  for await (const ev of store.read(runId, 1)) log.push(ev);
+  const jf = log.find((ev) => ev.type === "task.failed" && String(ev.taskId).startsWith("J@")) as
+    | { payload?: { error?: { code?: string } } }
+    | undefined;
+  return {
+    status: p.status,
+    found: p.channels["found"],
+    total: p.channels["total"],
+    seen: p.channels["seen"],
+    joinError: jf?.payload?.error?.code,
+  };
+}
+
+test("A STATIC SIBLING JOIN LOSING SOME ARMS STILL FOLDS — the refusal counts tasks, not coordinates", async () => {
+  for (const mode of MODES) {
+    // Every arm is at the ROOT coordinate, so `contributing` holds at most ONE entry and any
+    // loss empties it. The rows that must FOLD are the ones a coordinate count gets wrong.
+    const survives: readonly (readonly [readonly string[], unknown, unknown])[] = [
+      [[], ["a", "b", "c"], 3],
+      [["a"], ["b", "c"], 2],
+      [["a", "b"], ["c"], 1],
+    ];
+    for (const [losers, found, total] of survives) {
+      const r = await runArms(staticSpec(mode), { seed: "s" }, losers);
+      const where = `mode=${mode} losers=${JSON.stringify(losers)}`;
+      assert.equal(r.status, "succeeded", `${where}: an arm that succeeded is a fold`);
+      assert.deepEqual(r.found, found, `${where}: and its writes are in the channel`);
+      assert.equal(r.total, total, `${where}: under both reducers`);
+      assert.equal(r.joinError, undefined, `${where}: with no refusal`);
+    }
+
+    // And the one row that must REFUSE: not one arm succeeded.
+    const none = await runArms(staticSpec(mode), { seed: "s" }, [...ARMS]);
+    assert.equal(none.status, "failed", `mode=${mode}: every arm lost is still a refusal`);
+    assert.equal(none.joinError, "E_QUORUM_UNREACHABLE", `mode=${mode}: named by the barrier`);
+    assert.equal(none.found, undefined, `mode=${mode}: and nothing reached the channel`);
+  }
+});
+
+test("A DEGRADED BRANCH WHOSE EARLIER MEMBER WROTE STILL FOLDS", async () => {
+  for (const mode of MODES) {
+    // `b0` succeeds and writes, `b1` throws — so EVERY coordinate is `lost` and `branchCount` is
+    // 0, while two member tasks succeeded and their writes are held for this barrier.
+    const r = await runArms(degradedSpec(mode), { items: [{ id: "a" }, { id: "b" }] }, []);
+    assert.equal(r.status, "succeeded", `mode=${mode}: a branch that produced something is not nothing`);
+    assert.deepEqual(r.seen, ["a", "b"], `mode=${mode}: and what it produced survives the fold`);
+    assert.equal(r.joinError, undefined, `mode=${mode}: with no refusal`);
+  }
+});
+
+test("A FAN WHOSE BRANCHES ALL SUCCEED WRITING NOTHING STILL FOLDS", async () => {
+  for (const mode of MODES) {
+    // The boundary on the other side: "the run produced no data" is NOT this row's shape, which
+    // is "no branch came through at all". `taint-failed-commits.test.ts`'s `errfan` fixture rests
+    // on exactly this — its surviving branch succeeds and writes nothing.
+    const r = await runArms(silentSpec(mode), { items: [{ id: "a" }, { id: "b" }] }, []);
+    assert.equal(r.status, "succeeded", `mode=${mode}: a member that succeeded is a fold`);
+    assert.equal(r.seen, undefined, `mode=${mode}: even though nothing was written`);
+    assert.equal(r.joinError, undefined, `mode=${mode}: and no refusal`);
   }
 });

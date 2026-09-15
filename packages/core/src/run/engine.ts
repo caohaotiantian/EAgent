@@ -3145,7 +3145,22 @@ export class Engine {
     try {
       await this.#assertBound(ctx, `advancing run ${runId}`, { requireRecord: false });
     } catch (thrown) {
-      await this.#failUnreadableGraph(ctx, thrown);
+      // THE ORIGINAL REFUSAL ALWAYS REACHES THE CALLER, whatever journaling it costs. The
+      // handler reads the store twice (`#compiledIdentity`, `#project`) and appends, so a store
+      // fault or an `E_TRACE_INCONSISTENT` fold would otherwise REPLACE `E_GRAPH_INVALID` with a
+      // secondary error — leaving the caller told the wrong thing about a run that is still
+      // non-terminal, which is §A.63's own symptom wearing a different code. The failure to
+      // journal is said out loud rather than swallowed: `process.emitWarning` is the channel a
+      // library may use without owning stderr, the same one `#finish` uses for a throwing
+      // `onComplete` hook.
+      try {
+        await this.#failUnreadableGraph(ctx, thrown);
+      } catch (secondary) {
+        process.emitWarning(
+          `run ${runId} was refused at the advance door and the refusal could not be journaled; the run stays non-terminal`,
+          { code: "LOOM_REFUSAL_NOT_JOURNALED", detail: JSON.stringify({ runId, reason: toLoomError(secondary).message }) },
+        );
+      }
       throw thrown;
     }
     await this.#rehydrateGraph(ctx);
@@ -5500,6 +5515,55 @@ export class Engine {
   }
 
   /**
+   * Is the graph in hand the graph this run is on — and if not, WHICH of the two facts moved?
+   *
+   * `#assertBound` owns this question and `#failUnreadableGraph` has to ask the SAME one, so it
+   * is one function rather than two readings of one rule. The second reading is what §A.63's
+   * first cut shipped: it compared the spec hash ALONE, so a FOREIGN broken graph wearing the
+   * run's `graphHash` was taken for the run's own and the healthy parked run it was attached to
+   * was failed, its open gate cancelled with it. The manifest is what refuses that — measured,
+   * on a `human_gate` run parked in one process with a different unreadable graph carrying
+   * `graphHash: good.graphHash` attached in the next: `status: failed  run.failed rows: 1
+   * gates: ["cancelled"]` before, `status: awaiting_gate  run.failed rows: 0  gates: ["open"]`
+   * after.
+   *
+   * TWO HASHES ARE AUTHORIZED, and binding only the first was a regression that wedged every run
+   * that mutates. Both `#applyMutation` and `#rehydrateGraph` REPLACE `ctx.graph` with the
+   * successor, so after any mutation `ctx.graph.graphHash` can never equal
+   * `run.compiled.graphHash` again — approve became impossible forever, on the designed flow
+   * where a mutation introduces an irreversible node and gates it. Reproduced in one process
+   * with no attack and no restart.
+   *
+   * The folded `p.graphHash` is authoritative for that case because only the ENGINE writes
+   * `graph.mutated`: a caller cannot forge a successor into the journal. So "the graph the run is
+   * currently on" is as recorded a fact as "the graph the run compiled".
+   *
+   * IT IS EXACTLY AS STRONG AS THE JOURNAL, AND NO STRONGER, which is worth stating because a
+   * reader will reach for `graphHashOf(ctx.graph.spec)` here. `run.compiled.graphHash` is the
+   * `RunGraph.graphHash` FIELD the submitter supplied, not a hash this engine recomputed — so
+   * recomputing on this side compares two different things and declines every run whose
+   * submitter hand-built a `RunGraph` with a stale field, which is precisely the §A.63 shape and
+   * the only shape that can reach the vocabulary refusals at all (the compiler stamps the field
+   * and refuses both faults, so a compiled graph has neither). What is left, named rather than
+   * hidden: a caller holding the run's OWN compiled graph can bend one edge, keep the field and
+   * the manifest, and end the run — and such a caller is the embedder, who can call `cancel`.
+   */
+  #graphIdentityMismatch(
+    ctx: RunContext,
+    recorded: RecordedIdentity,
+    current: string | undefined,
+  ): "spec" | "resources" | undefined {
+    const isCompiled = recorded.graphHash === ctx.graph.graphHash;
+    const isCurrent = current !== undefined && current === ctx.graph.graphHash;
+    if (!isCompiled && !isCurrent) return "spec";
+    // The manifest is journaled on `run.compiled` alone, so it can only be checked against the
+    // compiled graph. A successor carries no recorded manifest to compare — an honest gap,
+    // narrowed by mutation being unreachable from the shipped binary today.
+    if (isCompiled && recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)) return "resources";
+    return undefined;
+  }
+
+  /**
    * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
    *
    * §A.63. `#assertBound`'s two VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, and a
@@ -5529,18 +5593,27 @@ export class Engine {
    * advances it. And `resolveGate`/`decideGateBatch` keep throwing without failing anything: a
    * human's approve call carrying the wrong `--graph` is a typo, not a dead run.
    *
-   * FAILING CLOSED ON A REPEAT. The run is terminal after this, so the next `advance` finds
-   * `isTerminal` and appends nothing — while `#assertBound` still throws, because the terminal
-   * short-circuit inside `advance` sits below this door for an ATTACHED run. Refusing twice is
-   * the behaviour §A.63 already had and wanted kept.
+   * "THIS RUN'S OWN" IS `#graphIdentityMismatch`, THE WHOLE OF IT — see that method. This
+   * compared the spec HASH alone in its first cut, which is one of the two facts that identity
+   * rests on, and a FOREIGN broken graph wearing the run's `graphHash` was therefore taken for
+   * the run's own and killed a healthy parked run.
+   *
+   * REPEATING. Nothing is appended twice, and the `isTerminal` return BELOW is what does that —
+   * not the terminal short-circuit inside `advance`, which for an ATTACHED run sits under this
+   * door and is never reached while `#assertBound` keeps throwing. What the caller sees on a
+   * second `advance` depends on whether this process still holds the run: an attached one is
+   * refused `E_GRAPH_INVALID` again, and a FRESH process holding no context takes
+   * `#advanceSerially`'s retired-run fallback, folds the journal, sees a terminal run and
+   * RETURNS that projection rather than refusing. Both are pinned; terminal is terminal, and a
+   * run that ended is allowed to answer.
    */
   async #failUnreadableGraph(ctx: RunContext, thrown: unknown): Promise<void> {
     if (!isLoomError(thrown) || thrown.code !== CODES.E_GRAPH_INVALID || thrown.class !== "validation") return;
     const recorded = await this.#compiledIdentity(ctx.runId);
     const p = await this.#project(ctx);
     if (p === undefined || isTerminal(p.status)) return;
-    const ours = recorded?.graphHash === ctx.graph.graphHash || p.graphHash === ctx.graph.graphHash;
-    if (!ours) return;
+    if (recorded === undefined) return;
+    if (this.#graphIdentityMismatch(ctx, recorded, p.graphHash) !== undefined) return;
     // `errorRecord` AND NOT A HAND-BUILT LITERAL, so the row carries the refusal's own
     // `details` — the edge ids and the unreadable values — and a fold can say WHICH edge
     // stopped the run rather than only that one did.
@@ -5636,16 +5709,7 @@ export class Engine {
     // `graph.mutated`: a caller cannot forge a successor into the journal. So "the graph the run
     // is currently on" is as recorded a fact as "the graph the run compiled".
     const current = (await this.#project(ctx))?.graphHash;
-    const isCompiled = recorded.graphHash === ctx.graph.graphHash;
-    const isCurrent = current !== undefined && current === ctx.graph.graphHash;
-    const mismatch = !isCompiled && !isCurrent
-      ? "spec"
-      : // The manifest is journaled on `run.compiled` alone, so it can only be checked against
-        // the compiled graph. A successor carries no recorded manifest to compare — an honest
-        // gap, narrowed by mutation being unreachable from the shipped binary today.
-        isCompiled && recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)
-        ? "resources"
-        : undefined;
+    const mismatch = this.#graphIdentityMismatch(ctx, recorded, current);
     if (mismatch !== undefined) {
       throw err.conflict(
         CODES.E_GRAPH_MISMATCH,
@@ -7310,10 +7374,17 @@ export class Engine {
     // is exactly where that happens and exactly where the failure matters most.
     const contributing = new Set<string>();
     const lost = new Set<string>();
+    // COUNTED PER TASK, BESIDE THE TWO COORDINATE SETS, and the two units are not
+    // interchangeable — see the zero-contribution refusal below, which is the one decision that
+    // needs this one. `contributing` is a set of BRANCH COORDINATES and a static sibling-branch
+    // join puts every arm at the SAME (root) coordinate, so one lost arm empties it while two
+    // others succeeded and wrote.
+    let succeededMembers = 0;
     for (const t of members) {
       const coord = encodeBranch(t.branch);
       if (t.state === "succeeded") {
         contributing.add(coord);
+        succeededMembers++;
         // A CONTRIBUTION THIS JOIN MAY FOLD IS ONE THAT WAS HELD FOR IT, and a member that
         // already applied its own writes is not one. `#immediateReduce` applies a Task's
         // writes at commit whenever `writesHeldForJoin` is false; folding those again here
@@ -7359,15 +7430,15 @@ export class Engine {
       };
     }
 
-    // AND A FOLD WITH NO CONTRIBUTIONS AT ALL IS NOT A SUCCESS, when the fan planned some.
+    // AND A BARRIER NOT ONE OF WHOSE MEMBERS SUCCEEDED IS NOT A SUCCESS.
     //
     // §D.9, answered as option (a) — the decision taken by the 2026-09-15 wave's ORCHESTRATOR
     // following that row's own recommendation, not by the maintainer. §A.55 closed one half of
     // this (all four modes now RELEASE a barrier whose members can no longer arrive) and left the
-    // other open: the released fold had zero contributions and the run still reported
-    // `succeeded`. Its sharpest shape is a GATE REJECT, where the emptiness is a human's decision
-    // and not a crash — a `human_gate` in each fanned-out branch, both humans reject, measured on
-    // a fresh `Engine` over the parked journal, identically in all four modes:
+    // other open: the released fold had nothing in it and the run still reported `succeeded`. Its
+    // sharpest shape is a GATE REJECT, where the emptiness is a human's decision and not a crash
+    // — a `human_gate` in each fanned-out branch, both humans reject, measured on a fresh
+    // `Engine` over the parked journal, identically in all four modes:
     //
     //     mode=any  status=succeeded Jready=1 done=1 note=["done-ran"]   joinError=undefined
     //     mode=any  status=failed    Jready=1 done=0 note=undefined      joinError=E_QUORUM_UNREACHABLE
@@ -7379,39 +7450,59 @@ export class Engine {
     // `#maybeFireJoin` decides WHEN a barrier releases, this method decides what the release
     // MEANS, and the arm directly above is the other half of the same judgement.
     //
-    // `expected > 0` IS WHAT SEPARATES AN EMPTY FAN FROM AN EMPTIED ONE, and it is the whole
-    // reason (a) is safe. A fan-out over an empty channel is a legitimate shape —
-    // `#fireEmptyJoin` exists for it (§A.47) — and it appends `fanout.planned{width: 0}` and
-    // materialises no member Task, so `expected` is 0 and that barrier folds and succeeds exactly
-    // as before, measured in all four modes. A fan that PLANNED branches and lost every one of
-    // them reads `expected: 2`.
+    // MEMBER TASKS AND NOT `branchCount`, AND THAT UNIT IS THE WHOLE CORRECTNESS OF THIS ARM.
+    // The first version of it read `branchCount === 0`, which is `contributing.size` — a count of
+    // BRANCH COORDINATES, emptied by the `lost` subtraction above whenever any member of a
+    // coordinate dies. Two shapes fall out of that and both were measured, on `loom`, against a
+    // base that succeeded:
     //
-    // COMPUTED THE WAY `#maybeFireJoin` COMPUTES IT, off the fan-out PLAN with a member-count
-    // fallback for a join whose members were never fanned out at all. Counting one set and
-    // folding another is the shape this file forbids one subsystem over; the fold uses the
-    // barrier's own arithmetic, over the same `join.branches` and the same coordinate.
+    //   - A STATIC sibling-branch join (`join-folds-once.test.ts`'s `staticSpec`, and the shipped
+    //     `examples/graphs/two-person-approval.json`) puts every arm at the SAME root coordinate.
+    //     Three arms, one loser, `onBranchError: "skip"`: the run failed with
+    //     `found: ["b","c"] total: 2` already in the channel. Two arms had succeeded and written.
+    //   - A DEGRADED branch whose earlier member wrote and whose later member threw
+    //     (`b0 --seq--> b1`, both declared members): every coordinate is lost, so the run failed
+    //     with `seen` discarded, where the base read `seen: ["a","b"]`.
+    //
+    // `succeededMembers` is counted per TASK beside the two sets, so the question this arm asks
+    // is the one it means: did ANY member of this barrier finish successfully? One that did makes
+    // the fold a real fold, however degraded its coordinate is. `byChannel.size === 0` is NOT an
+    // additional conjunct because it cannot be one: only a succeeded member ever adds to
+    // `byChannel`, and a member at the ROOT coordinate never does at all (`writesHeldForJoin` is
+    // false there, three lines up), so it is redundant on a fan and vacuously true on a static
+    // join — it would have left the first shape above failing.
+    //
+    // `members.length > 0` IS WHAT SEPARATES AN EMPTY FAN FROM AN EMPTIED ONE, and it is the
+    // whole reason (a) is safe. A fan-out over an empty channel is a legitimate shape —
+    // `#fireEmptyJoin` exists for it (§A.47) — and it materialises NO member Task, so this
+    // barrier has nothing to have succeeded and folds and succeeds exactly as before, measured in
+    // all four modes. It is the member set and NOT the fan-out plan, which is why this arm holds
+    // no second copy of `#maybeFireJoin`'s `expected` arithmetic: a plan whose branches were
+    // never materialised at all is `#finish`'s unmaterialised-branch net, which fails the run
+    // `E_INTERNAL` naming the fan-out, and duplicating that judgement here would be the drift
+    // `#escalateSkippedGate` already paid for once.
+    //
+    // A MEMBER THAT SUCCEEDED AND WROTE NOTHING STILL COUNTS, deliberately. A fan whose branches
+    // all succeed writing nothing folds and succeeds: "the run produced no data" is not this
+    // row's shape, which is "no branch came through at all, on evidence a human refused".
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
-    // `onBranchError: "skip"` says "one lost branch must not stop the run" — it still absorbs a
-    // PARTIAL loss, which is the whole of its ordinary use — and it does not say "a run that
-    // produced nothing is a success".
+    // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
+    // folds, and so does a branch that lost a member after an earlier member wrote — and it does
+    // not say that a run in which nothing succeeded is a success.
     //
     // `E_QUORUM_UNREACHABLE` RATHER THAN A NEW CODE: this door already raises it for the other
     // way a release can carry no usable result, and the distinction the two arms need is carried
     // by the message. A new `CODES` member would be new error vocabulary in the kernel for a
     // difference nothing branches on.
-    const plannedWidth = Object.entries(p.fanouts)
-      .filter(([key, plan]) => key.endsWith(`@${prefix}`) && declared.has(plan.nodeId))
-      .reduce((a, [, plan]) => a + plan.width, 0);
-    const expected = plannedWidth > 0 ? plannedWidth : members.length;
-    if (branchCount === 0 && expected > 0) {
+    if (succeededMembers === 0 && members.length > 0) {
       return {
         status: "failed",
         writes: {},
         usage: { ...ZERO_USAGE },
         error: err.validation(
           CODES.E_QUORUM_UNREACHABLE,
-          `join "${w.node.id}": none of the ${expected} branch(es) it waited on contributed — ` +
+          `join "${w.node.id}": not one of the ${members.length} task(s) it waited on succeeded — ` +
             `folding nothing and carrying on would report a run that did no work as a success`,
         ),
       };
@@ -11284,12 +11375,25 @@ export class Engine {
     //
     // RELEASING IS THE ANSWER, NOT FAILING HERE, and the reason is that the outcome
     // already has an owner. `#maybeFireJoin` decides WHEN a barrier releases; `#foldJoin`
-    // decides what the release MEANS, and it already holds the failure arm —
-    // `onBranchError === "fail" && skipped > 0` returns `E_QUORUM_UNREACHABLE`. Failing
-    // from here would compute that judgement a second time and compute it differently,
-    // overriding an operator who wrote `onBranchError: "skip"` on purpose. So all four
-    // modes now short-circuit on evidence in hand and otherwise release once no further
-    // arrival is possible, and what an empty fold is worth stays the operator's call.
+    // decides what the release MEANS, and it holds BOTH failure arms —
+    // `onBranchError === "fail" && skipped > 0`, and since §D.9's answer
+    // `succeededMembers === 0 && members.length > 0`, each returning `E_QUORUM_UNREACHABLE`.
+    // So all four modes short-circuit on evidence in hand and otherwise release once no
+    // further arrival is possible.
+    //
+    // A RELEASE THAT THE FOLD THEN REFUSES IS NOT THE SAME JUDGEMENT TWICE, and the
+    // distinction is why this stayed a release rather than becoming a failure here. This
+    // predicate answers "can another arrival change the answer?" from the SIBLING set,
+    // `p.fanouts` and quiescence — evidence about the future. The fold answers "is what
+    // arrived worth folding?" from the MEMBER TASKS and their writes, which this method never
+    // looks at and which are not final until the barrier's own Task runs (lazy materialisation
+    // tops the fan up in between, so an early mint still folds every member that commits
+    // meanwhile — see the short-circuit test). Computing the verdict here would read a
+    // different set, at an earlier instant, and get a different answer.
+    //
+    // WHAT IT NO LONGER SAYS, because §D.9 answered it: that an empty fold's worth is the
+    // operator's call. `onBranchError: "skip"` still absorbs every loss short of the last one,
+    // but a barrier not one of whose members succeeded is refused whatever it says.
     const noMoreArrivals = quiescent && terminal >= expected;
     const fire = (() => {
       switch (join.mode) {

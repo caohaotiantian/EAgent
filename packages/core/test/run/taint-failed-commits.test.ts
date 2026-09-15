@@ -10,13 +10,19 @@
  * measured the two shapes that follow at `a638e7d`, at the branch head and on `loom`, so neither
  * is a regression of anything: they have been open the whole time.
  *
- *   `errfan`  — SUPPRESSING EVERY WRITE IS HOW YOU GET AN ATTACKER-CHOSEN VALUE THAT IS CLEAN.
+ *   `errfan`  — SUPPRESSING THE WRITES IS HOW YOU GET AN ATTACKER-CHOSEN VALUE THAT IS CLEAN.
  *     A clean fan (the list is built from the run's own input, so the WIDTH is nobody's choice)
  *     whose body reads the page and throws iff it says PAY. `onBranchError: "skip"` lets the join
- *     complete with zero contributions, so nothing ever writes the folded channel, so
- *     `applyTaint` never taints it — and the join's own arms branch on `!has(parts)`, which is
- *     the value the attacker just chose by making every branch fail. The width form of this is
+ *     complete, and the branch the page killed wrote nothing, so nothing ever writes the folded
+ *     channel and `applyTaint` never taints it — and the join's own arms branch on `!has(parts)`,
+ *     which is the value the attacker just chose. The width form of this is
  *     `applyFanoutWidthTaint`, closed; the FAILURE form was not.
+ *
+ *     ONE BRANCH OF TWO, NOT BOTH, and `function/throwsparts@stable` carries the reason: since
+ *     §D.9's answer a join whose members ALL fail refuses the fold outright, which stops the run
+ *     before the conditional this file is about is ever evaluated. The surviving branch succeeds
+ *     writing NOTHING, so `parts` is still unwritten and `!has(parts)` is still the arm a failed
+ *     commit's absence chooses — the subject is unchanged and it is still reachable.
  *
  *   `errthrow` — A CONTENT-CONDITIONAL THROW IS A BRANCH. The body reads the page and throws iff
  *     it says PAY; a catch-all `error` edge leads to the charge and a `seq` edge leads past it.
@@ -101,8 +107,8 @@ function engineOver(store: MemoryStateStore, page: string): { engine: Engine; ch
   // difference between the dirty arm and the clean one.
   //
   // ONE BRANCH DIES AND ONE SURVIVES WITHOUT WRITING, and that asymmetry is NOT cosmetic. It
-  // used to throw in every branch, which since §D.9's answer (`#foldJoin` refuses
-  // `branchCount === 0 && expected > 0`) is a run the JOIN fails — `failed/0/0`, before the
+  // used to throw in every branch, which since §D.9's answer (`#foldJoin` refuses a barrier not
+  // one of whose members succeeded) is a run the JOIN fails — `failed/0/0`, before the
   // conditional this file is about is ever evaluated. The charge still never runs, so the
   // safety property survives, but the TAINT mechanism would no longer be exercised at all and
   // this file would be pinning a different guard than the one it is named for. Losing one of two
