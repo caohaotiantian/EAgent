@@ -829,18 +829,6 @@ const FLAG_CONSEQUENCE: Readonly<Record<string, string>> = {
 };
 
 /**
- * Refuse a flag this verb does not read, naming the verbs that do.
- *
- * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
- * message for a name nothing reads anywhere, and this one would otherwise answer a typo with a
- * list of verbs that do not have it either.
- *
- * NAMING THE READERS rather than saying "not valid here", for `onlyKeys`' reason: a refusal that
- * says an operator is wrong without saying what right looks like has spent their attention and
- * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
- * command they were reaching for.
- */
-/**
  * Does this binary have this verb? — `VERB_FLAGS`' own keys, which
  * `test/cli/verb-flags.test.ts` already holds equal to the `case` labels of `main`'s switch by
  * recomputing both out of this source file. So this is the switch's arm set, read one screen early.
@@ -869,6 +857,18 @@ function refuseUnknownCommand(command: string): number {
   return 2;
 }
 
+/**
+ * Refuse a flag this verb does not read, naming the verbs that do.
+ *
+ * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
+ * message for a name nothing reads anywhere, and this one would otherwise answer a typo with a
+ * list of verbs that do not have it either.
+ *
+ * NAMING THE READERS rather than saying "not valid here", for `onlyKeys`' reason: a refusal that
+ * says an operator is wrong without saying what right looks like has spent their attention and
+ * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
+ * command they were reaching for.
+ */
 function refuseFlagsThisVerbDoesNotRead(args: Args): void {
   if (!dispatchesVerb(args.command)) return;
   const applies = VERB_FLAGS[args.command]!;
@@ -1526,6 +1526,34 @@ export function openWorkspace(
   // `loom gates <runId>` in the intended workspace answers `[]`.
   const root = resolve(pathFlag(args, "workspace") ?? process.cwd());
   const dataDir = resolve(pathFlag(args, "data-dir") ?? join(root, ".loom"));
+
+  // EVERY REMAINING GLOBAL FLAG IS READ HERE, BEFORE THE FIRST `mkdirSync` — TODO.md §H.11, and
+  // the same rule the two file flags above already follow for the same reason.
+  //
+  // WHAT WAS WRONG, measured in an empty directory with `loom compile --<flag>` and no value:
+  // five of the thirteen global flags refused with nothing on disk (`--workspace`, `--data-dir`,
+  // `--channels-file`, `--models-file`, `--extension-module`) and EIGHT left `.loom/`, `graphs/`
+  // and `resources/` behind (`--grant`, `--egress`, `--exec-env`, `--allow-exec`, the three
+  // `--budget-*` and `--max-parallelism`) — because the three `mkdirSync`s ran the moment the two
+  // path flags had been read, and everything else was read between forty and four hundred lines
+  // later. An argv-only refusal that costs the caller three directories is §H.11 again, reached
+  // by a flag instead of by a verb.
+  //
+  // FOUR PURE READS, so this is an ordering change and not a second parse. `jailFor` recomputes
+  // `root` and `dataDir` from the same flags rather than closing over these (see its body), so
+  // the two derivations cannot disagree; `grantFlag`, `deploymentBudget` and `boundedCount` are
+  // functions of `args` alone. Their values are used where they always were. The relative order
+  // of the refusals among themselves is unchanged — jail, then grant, then the ceiling, then the
+  // budget — so a caller who spells two of them wrong is told about the same one as before.
+  //
+  // AND IT IS STRICTLY MORE THAN THE DIRECTORIES: `jailFor` used to run after `new
+  // SqliteStateStore`, so a bad `--egress` was a refusal that had already opened a journal
+  // handle, which is exactly what the paragraph at the top of this function refuses to do.
+  const jail = jailFor(args);
+  const grants = grantFlag(args);
+  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
+  const budget = deploymentBudget(args);
+
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(join(root, "graphs"), { recursive: true });
   // CREATED SO THAT DENYING IT MEANS SOMETHING. `assertWithin` canonicalises a deny entry with
@@ -1573,8 +1601,8 @@ export function openWorkspace(
   // exists, `loadExtensionModules` reserved the prefix before any module's factory ran, and
   // `extensions.mcpRegistrar` is that same claim; there is nothing to reserve twice.
   const mcpRegistrar = extensions?.mcpRegistrar ?? tools.reservePrefix("mcp__", MCP_PREFIX_RESERVED_FOR);
-  // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`.
-  const jail = jailFor(args);
+  // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`. Built
+  // at the top of this function, before anything is created: see the §H.11 paragraph there.
   const execPrograms = jail.execAllowlist;
   // A COLLISION WITH A BUILT-IN REFUSES TO BOOT, and this line used to say the opposite was
   // fine: "the built-ins are registered on top, so a name collision leaves the BUILT-IN live:
@@ -1917,11 +1945,13 @@ export function openWorkspace(
     for (const t of mcpTools(client, irreversibility)) mcpRegistrar.register(t);
   }
 
-  const granted = capabilitiesOf(tools, grantFlag(args));
-  // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS, so a malformed ceiling is a process that
-  // does not start rather than one that starts without the ceiling it was told to hold.
-  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
-  const budget = deploymentBudget(args);
+  // `grants` is `--grant`, read at the top of this function; the capabilities are derived HERE
+  // because `tools` is what they are derived against and it does not exist until now.
+  const granted = capabilitiesOf(tools, grants);
+  // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS — and, since §H.11, before the workspace
+  // directories exist either: `maxParallelism` and `budget` are read at the top of this function,
+  // so a malformed ceiling is a process that does not start rather than one that starts without
+  // the ceiling it was told to hold, and it is now also one that created nothing.
   const engine = new Engine({
     store,
     bus,
