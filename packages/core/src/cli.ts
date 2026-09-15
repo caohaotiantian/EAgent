@@ -840,9 +840,38 @@ const FLAG_CONSEQUENCE: Readonly<Record<string, string>> = {
  * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
  * command they were reaching for.
  */
+/**
+ * Does this binary have this verb? — `VERB_FLAGS`' own keys, which
+ * `test/cli/verb-flags.test.ts` already holds equal to the `case` labels of `main`'s switch by
+ * recomputing both out of this source file. So this is the switch's arm set, read one screen early.
+ *
+ * `Object.hasOwn` AND NOT `VERB_FLAGS[command] !== undefined`, because `VERB_FLAGS` is an object
+ * literal and `VERB_FLAGS["constructor"]` is therefore a FUNCTION. Measured before this existed:
+ * `loom constructor --port 1` answered `E_INTERNAL: TypeError: applies.includes is not a function`
+ * and exit 1, where the operator's mistake was a verb that does not exist. Both readers go through
+ * here, so the door in `main` and the check below cannot disagree about what a verb is.
+ */
+function dispatchesVerb(command: string): boolean {
+  return Object.hasOwn(VERB_FLAGS, command);
+}
+
+/**
+ * `unknown command "…"`, the usage, exit 2 — written ONCE because it is said from two places.
+ *
+ * The door in `main` says it BEFORE a workspace is opened, which is the whole of §H.11; the
+ * `default:` arm of the switch says it after, and is unreachable while `dispatchesVerb` reads a key
+ * set that test pins to the switch's arms. Unreachable is not deleted: if those two sets ever part,
+ * the operator still gets the right sentence — one directory later, which is the old defect and not
+ * a worse one.
+ */
+function refuseUnknownCommand(command: string): number {
+  process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
+  return 2;
+}
+
 function refuseFlagsThisVerbDoesNotRead(args: Args): void {
-  const applies = VERB_FLAGS[args.command];
-  if (applies === undefined) return;
+  if (!dispatchesVerb(args.command)) return;
+  const applies = VERB_FLAGS[args.command]!;
   const offenders = Object.keys(args.flags)
     .filter((f) => !GLOBAL_FLAGS.includes(f) && !applies.includes(f))
     .sort();
@@ -7815,8 +7844,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   }
   // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
   assertKnownFlags(args);
-  // AFTER `assertKnownFlags`, so a MISSPELLED flag is answered by the list of flags rather than
-  // by a list of verbs that do not read it either.
+  // THE VERB IS DECIDED BEFORE ANY DIRECTORY EXISTS — TODO.md §H.11. `openWorkspace` creates
+  // `.loom/`, `graphs/` and `resources/`, and `--workspace` defaults to the cwd, so until this line
+  // `loom nonsense` left three directories in whatever directory a stranger happened to be standing
+  // in, and then printed "unknown command". Nothing above it needs a workspace: `parseArgs` already
+  // knows the verb, and `default:` never told the operator anything this line cannot.
+  //
+  // BEFORE `refuseFlagsThisVerbDoesNotRead` and AFTER `assertKnownFlags`, which is the order those
+  // two docstrings already argue for. An unknown flag is answered by the list of flags even on a
+  // verb that does not exist — that is the name the binary knows nowhere, and it already cost
+  // nothing. A flag a NON-EXISTENT verb does not read is a lecture instead of the mistake.
+  if (!dispatchesVerb(args.command)) return refuseUnknownCommand(args.command);
   refuseFlagsThisVerbDoesNotRead(args);
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
@@ -9072,9 +9110,11 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         return verdict.promote ? 0 : 1;
       }
 
+      // UNREACHABLE, and kept — see `refuseUnknownCommand`. The door in `main` answers every verb
+      // this switch has no arm for, before the workspace is opened; this arm is what happens if
+      // `VERB_FLAGS` ever loses a row the switch still has, which `verb-flags.test.ts` refuses.
       default:
-        process.stderr.write(`unknown command "${args.command}"\n\n${USAGE}`);
-        return 2;
+        return refuseUnknownCommand(args.command);
     }
   } finally {
     // Children first: a server left running outlives the process that spawned it, and a

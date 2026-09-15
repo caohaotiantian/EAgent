@@ -228,10 +228,34 @@ const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
 const spawned = new Set<ChildProcess>();
 after(() => {
   for (const c of spawned) c.kill("SIGKILL");
+  if (sharedCwd !== undefined) rmSync(sharedCwd, { recursive: true, force: true });
+  sharedCwd = undefined;
 });
 process.on("exit", () => {
   for (const c of spawned) c.kill("SIGKILL");
 });
+
+/**
+ * WHERE A SPAWNED `loom` STANDS — a temp directory, never the repo, and never by accident.
+ *
+ * `spawn` with no `cwd` inherits the test runner's, which is the repository root. Every argv
+ * below passes an absolute `--workspace`, so that inheritance is invisible until one does not:
+ * `--workspace` DEFAULTS TO THE CWD, so a call that omits it opens a workspace wherever the
+ * runner stood and leaves `.loom/`, `graphs/` and `resources/` there. That is not hypothetical —
+ * it is TODO.md §H.10's second file, found by bisecting `npm test` after a `.loom/` appeared in a
+ * worktree, and hidden for as long as it was because `.loom/` is in `.gitignore` and so
+ * `git status` said nothing.
+ *
+ * ONE DIRECTORY PER TEST PROCESS, reaped with the children: the callers that want a cwd of their
+ * own pass one, and the default only has to be somewhere harmless. It is not the guard — §H.11's
+ * fix, that `main` decides the verb before it opens anything, is — it is the net under it, so the
+ * next call that omits `--workspace` litters a temp dir instead of the tree.
+ */
+let sharedCwd: string | undefined;
+function spawnCwd(): string {
+  if (sharedCwd === undefined) sharedCwd = mkdtempSync(join(tmpdir(), "loom-spawn-cwd-"));
+  return sharedCwd;
+}
 
 /** A bare temp directory — the workspace a spawned `loom serve` creates the rest of for itself. */
 export function scratchWorkspace(prefix = "loom-host-"): { dir: string; dispose: () => void } {
@@ -585,9 +609,13 @@ export interface Serving {
   stop(): Promise<number | null>;
 }
 
-/** `loom serve`, booted, with the address it ANNOUNCED parsed back out of its own stdout. */
-export async function serving(argv: readonly string[]): Promise<Serving> {
-  const child = spawn(process.execPath, [CLI, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+/**
+ * `loom serve`, booted, with the address it ANNOUNCED parsed back out of its own stdout.
+ *
+ * `cwd` defaults to a temp directory and never to the runner's — see `spawnCwd`.
+ */
+export async function serving(argv: readonly string[], cwd: string = spawnCwd()): Promise<Serving> {
+  const child = spawn(process.execPath, [CLI, ...argv], { cwd, stdio: ["ignore", "pipe", "pipe"] });
   spawned.add(child);
   child.on("close", () => spawned.delete(child));
   let out = "";
@@ -697,14 +725,28 @@ export async function serving(argv: readonly string[]): Promise<Serving> {
   }
 }
 
-/** `loom …`, expected to END BY ITSELF, non-zero, having bound nothing. */
-export async function refusing(argv: readonly string[]): Promise<{ code: number | null; err: string }> {
-  const child = spawn(process.execPath, [CLI, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+/**
+ * `loom …`, expected to END BY ITSELF, non-zero, having bound nothing.
+ *
+ * `cwd` defaults to a temp directory and never to the runner's — see `spawnCwd`. A caller that
+ * wants to assert on what the command left BEHIND passes its own, which is what
+ * `test/cli/refusals-leave-no-workspace.ts` does for every path in that set.
+ */
+export async function refusing(argv: readonly string[], cwd: string = spawnCwd()): Promise<{ code: number | null; out: string; err: string }> {
+  const child = spawn(process.execPath, [CLI, ...argv], { cwd, stdio: ["ignore", "pipe", "pipe"] });
   spawned.add(child);
   child.on("close", () => spawned.delete(child));
+  let out = "";
   let err = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (c: string) => (err += c));
+  // STDOUT IS DRAINED TOO, for `serving`'s reason one screen up: an undrained pipe is a child
+  // that BLOCKS once it fills, and `USAGE` is 25,607 bytes against a 16 KiB pipe on macOS. Every
+  // caller before this one refused on stderr, so the hazard was real and unexercised; `loom help`
+  // is a command that ends by itself and writes only to stdout, and it is in the set
+  // `refusals-leave-no-workspace.test.ts` has to drive.
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (c: string) => (out += c));
   // `close`, not `exit`: it fires once the pipes have DRAINED, so `err` below is the whole of
   // what the process wrote to stderr and not a prefix of it. This one was already right, and
   // it is the property `serving`'s boot wait was missing.
@@ -713,7 +755,7 @@ export async function refusing(argv: readonly string[]): Promise<{ code: number 
     setTimeout(() => reject(new Error(`\`loom ${argv.join(" ")}\` never exited — it must refuse BEFORE it binds anything`)), 15_000).unref();
   });
   try {
-    return { code: await Promise.race([exited, timer]), err };
+    return { code: await Promise.race([exited, timer]), out, err };
   } finally {
     child.kill("SIGKILL");
   }
