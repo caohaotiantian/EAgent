@@ -3138,7 +3138,16 @@ export class Engine {
     // BEFORE `#rehydrateGraph`, deliberately: rehydration REPLACES `ctx.graph` with the journal's
     // successor, so checking after it would be checking the engine's own work rather than what
     // the caller attached.
-    await this.#assertBound(ctx, `advancing run ${runId}`, { requireRecord: false });
+    //
+    // AND THE REFUSAL IS JOURNALED WHEN THE GRAPH IT REFUSES IS THIS RUN'S OWN — see
+    // `#failUnreadableGraph`. Throwing alone left the run `running` with nothing on the log
+    // saying why, which is invariant 2 in its ordinary form.
+    try {
+      await this.#assertBound(ctx, `advancing run ${runId}`, { requireRecord: false });
+    } catch (thrown) {
+      await this.#failUnreadableGraph(ctx, thrown);
+      throw thrown;
+    }
     await this.#rehydrateGraph(ctx);
 
     for (;;) {
@@ -5488,6 +5497,54 @@ export class Engine {
       ...(limits === undefined ? {} : { limits }),
       ...(capabilities === undefined ? {} : { capabilities }),
     };
+  }
+
+  /**
+   * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
+   *
+   * §A.63. `#assertBound`'s two VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, and a
+   * `maxWidth` outside `readableFanoutWidth`, three lines apart — both `throw` before anything is
+   * appended. The caller got `E_GRAPH_INVALID` and the journal, which is the only authoritative
+   * state, held `run.submitted, run.compiled, run.started, task.ready` and not one word about the
+   * width; a second process attaching later saw a `running` run with no reason and no terminal
+   * row. A decision was taken and the fold could not reconstruct it.
+   *
+   * BOTH CHECKS BY CONSTRUCTION, and that is why this keys on the CODE rather than on either
+   * arm. `0dd0a524` closed a three-lines-apart asymmetry between those two checks; answering one
+   * of them here and not the other would put it straight back.
+   *
+   * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
+   * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
+   * vocabulary checks sit ABOVE the compile-identity check on purpose — so a caller who
+   * `attach`es a forged graph to a healthy parked run reaches this refusal with a graph the run
+   * never compiled. Failing the run there would let one bad caller destroy a live run, which is
+   * a loosening dressed as a guard. The two hashes accepted are exactly the two `#assertBound`
+   * itself accepts as "this run's graph" (`isCompiled || isCurrent`): the one `run.compiled`
+   * recorded, and the folded successor a `graph.mutated` produced. The §A.63 shape satisfies it
+   * without help — `submit` records the hash of the graph it was handed, so a run submitted with
+   * an unreadable width really is bound to a graph nothing can read and can never progress.
+   *
+   * NOT THE IDENTITY ARMS, and not the gate doors. A hash, manifest or posture mismatch says
+   * "the graph you supplied is not this run's" — the run is intact and the right graph still
+   * advances it. And `resolveGate`/`decideGateBatch` keep throwing without failing anything: a
+   * human's approve call carrying the wrong `--graph` is a typo, not a dead run.
+   *
+   * FAILING CLOSED ON A REPEAT. The run is terminal after this, so the next `advance` finds
+   * `isTerminal` and appends nothing — while `#assertBound` still throws, because the terminal
+   * short-circuit inside `advance` sits below this door for an ATTACHED run. Refusing twice is
+   * the behaviour §A.63 already had and wanted kept.
+   */
+  async #failUnreadableGraph(ctx: RunContext, thrown: unknown): Promise<void> {
+    if (!isLoomError(thrown) || thrown.code !== CODES.E_GRAPH_INVALID || thrown.class !== "validation") return;
+    const recorded = await this.#compiledIdentity(ctx.runId);
+    const p = await this.#project(ctx);
+    if (p === undefined || isTerminal(p.status)) return;
+    const ours = recorded?.graphHash === ctx.graph.graphHash || p.graphHash === ctx.graph.graphHash;
+    if (!ours) return;
+    // `errorRecord` AND NOT A HAND-BUILT LITERAL, so the row carries the refusal's own
+    // `details` — the edge ids and the unreadable values — and a fold can say WHICH edge
+    // stopped the run rather than only that one did.
+    await this.#failRun(ctx, p, errorRecord(thrown));
   }
 
   /**
