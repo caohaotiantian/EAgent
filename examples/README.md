@@ -66,6 +66,15 @@ exact conditions — but `counts` fails several of them at once, and `gather` is
 a join that declares `"writes": ["counts"]` is a **second writer**, so deleting the post-join
 reads in `summarise` changes nothing.
 
+**A join that folds NOTHING fails the run**, and that is a run-time refusal rather than a compile
+one. If the fan planned branches and not one of them came through intact — every branch threw,
+every branch was cancelled, or a human rejected the gate inside each one — the barrier still
+releases, and then `gather` fails `E_QUORUM_UNREACHABLE` and the run reports `failed`. It reports
+`failed` under `"onBranchError": "skip"` too: `skip` says one lost branch must not stop the run,
+and it still absorbs a partial loss, but a run that produced nothing is not a success. The one
+shape this does NOT touch is a fan-out over an **empty array** — that plans zero branches, so the
+barrier folds nothing and the graph behind it runs exactly as before.
+
 ## 2 · A `function` body — `resources/function/*.js`
 
 A file in `resources/<kind>/` publishes `<kind>/<basename>@stable`, so `resources/function/count.js`

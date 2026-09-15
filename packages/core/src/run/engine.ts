@@ -7359,6 +7359,64 @@ export class Engine {
       };
     }
 
+    // AND A FOLD WITH NO CONTRIBUTIONS AT ALL IS NOT A SUCCESS, when the fan planned some.
+    //
+    // §D.9, answered as option (a) — the decision taken by the 2026-09-15 wave's ORCHESTRATOR
+    // following that row's own recommendation, not by the maintainer. §A.55 closed one half of
+    // this (all four modes now RELEASE a barrier whose members can no longer arrive) and left the
+    // other open: the released fold had zero contributions and the run still reported
+    // `succeeded`. Its sharpest shape is a GATE REJECT, where the emptiness is a human's decision
+    // and not a crash — a `human_gate` in each fanned-out branch, both humans reject, measured on
+    // a fresh `Engine` over the parked journal, identically in all four modes:
+    //
+    //     mode=any  status=succeeded Jready=1 done=1 note=["done-ran"]   joinError=undefined
+    //     mode=any  status=failed    Jready=1 done=0 note=undefined      joinError=E_QUORUM_UNREACHABLE
+    //
+    // Two people said no and the graph behind the barrier carried on. This project's own lens
+    // names that shape: a guard answering its undecidable case with the passing value.
+    //
+    // HERE AND NOT IN `#maybeFireJoin`, which is the division of labour §A.55 settled:
+    // `#maybeFireJoin` decides WHEN a barrier releases, this method decides what the release
+    // MEANS, and the arm directly above is the other half of the same judgement.
+    //
+    // `expected > 0` IS WHAT SEPARATES AN EMPTY FAN FROM AN EMPTIED ONE, and it is the whole
+    // reason (a) is safe. A fan-out over an empty channel is a legitimate shape —
+    // `#fireEmptyJoin` exists for it (§A.47) — and it appends `fanout.planned{width: 0}` and
+    // materialises no member Task, so `expected` is 0 and that barrier folds and succeeds exactly
+    // as before, measured in all four modes. A fan that PLANNED branches and lost every one of
+    // them reads `expected: 2`.
+    //
+    // COMPUTED THE WAY `#maybeFireJoin` COMPUTES IT, off the fan-out PLAN with a member-count
+    // fallback for a join whose members were never fanned out at all. Counting one set and
+    // folding another is the shape this file forbids one subsystem over; the fold uses the
+    // barrier's own arithmetic, over the same `join.branches` and the same coordinate.
+    //
+    // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
+    // `onBranchError: "skip"` says "one lost branch must not stop the run" — it still absorbs a
+    // PARTIAL loss, which is the whole of its ordinary use — and it does not say "a run that
+    // produced nothing is a success".
+    //
+    // `E_QUORUM_UNREACHABLE` RATHER THAN A NEW CODE: this door already raises it for the other
+    // way a release can carry no usable result, and the distinction the two arms need is carried
+    // by the message. A new `CODES` member would be new error vocabulary in the kernel for a
+    // difference nothing branches on.
+    const plannedWidth = Object.entries(p.fanouts)
+      .filter(([key, plan]) => key.endsWith(`@${prefix}`) && declared.has(plan.nodeId))
+      .reduce((a, [, plan]) => a + plan.width, 0);
+    const expected = plannedWidth > 0 ? plannedWidth : members.length;
+    if (branchCount === 0 && expected > 0) {
+      return {
+        status: "failed",
+        writes: {},
+        usage: { ...ZERO_USAGE },
+        error: err.validation(
+          CODES.E_QUORUM_UNREACHABLE,
+          `join "${w.node.id}": none of the ${expected} branch(es) it waited on contributed — ` +
+            `folding nothing and carrying on would report a run that did no work as a success`,
+        ),
+      };
+    }
+
     const wave: Record<string, readonly Contribution[]> = {};
     for (const [channel, list] of byChannel) wave[channel] = list;
 
