@@ -2682,12 +2682,22 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * A NAME IS IN THE FIRST AND NOT THE SECOND FOR EXACTLY TWO REASONS, and the clause names which.
  * (1) It does not run into EVERY candidate join — "every", not "some": with two candidates a node
  * feeding only one of them is dropped precisely because the list has to be true whichever the
- * author picks. (2) Some join OTHER than the candidates already folds it (§A.65). Holding is a
- * property of the task's own depth, so a second folder is what `GRAPH008_JOIN_DEPTH` refuses —
+ * author picks. (2) A join OTHER than the one this line NAMES already folds it (§A.65). Holding is
+ * a property of the task's own depth, so a second folder is what `GRAPH008_JOIN_DEPTH` refuses —
  * dictating such a name printed, on the next compile, an error the compile before it had not.
  * Reason (1) was always so and the sentence said so only from §A.57; reason (2) is stated per
  * name, with the folding join named, and the reason-(1)-only sentence is byte-identical to the
  * one §A.57 settled on.
+ *
+ * "OTHER THAN THE ONE THIS LINE NAMES" is exact and was wrong once. The first cut of §A.65 excluded
+ * every CANDIDATE from reason (2), so with two candidates a member one of them already folds was
+ * dictated to the other, and the line compiled for one of the two names it offered and was refused
+ * for the other — breaking reason (1)'s own rationale. What a member's folders become after the
+ * author picks barrier C is its existing folders PLUS C, so dictating it is safe exactly when its
+ * only folder could be C: knowable with ONE candidate (it IS `named`, which is why the F1 shape's
+ * sentence does not move), unknowable with two. The one exception is `e.to`, dictated whatever
+ * folds it, because `joined` — the condition that fires this whole rule — is "some join waits on
+ * `e.to`", so a list without it dictates an edit that does not clear the error.
  *
  * THE DISAGREEING FORM PROMISES NO REFUSAL, which cost two review rounds. It first read "a join
  * must wait on every one of them — directly, or through another branch node that folds it", and
@@ -2799,32 +2809,55 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     const reachesEveryCandidate = (id: NodeId): boolean =>
       candidates.every((c) => idx.ancestors.get(c.id)?.has(id) ?? false);
 
-    // AND A MEMBER SOME OTHER JOIN ALREADY FOLDS IS NOT DICTATED EITHER — §A.65, and it is the
-    // same predicate as `joined` above with the candidates excluded. Holding is a property of the
-    // TASK'S OWN DEPTH (`writesHeldForJoin` in `run/engine.ts`), so EVERY join naming a node
-    // inside a fan-out folds that node's writes, and §A.64's rule refuses a second folder. On
-    // `a53-pickone` the branch's own inner join `gather` already declares `classify`; dictating
-    // `classify` for the barrier too gave it two folders, so following this line printed a
-    // `GRAPH008_JOIN_DEPTH` the compile before it had not.
+    // AND A MEMBER SOME JOIN ALREADY FOLDS IS NOT DICTATED EITHER — §A.65. Holding is a property
+    // of the TASK'S OWN DEPTH (`writesHeldForJoin` in `run/engine.ts`), so every join naming a
+    // node inside a fan-out folds that node's writes, and `rule008`'s one-join rule (§A.64)
+    // refuses a second folder. On `a53-pickone` the branch's own inner join `gather` already
+    // declares `classify`; dictating `classify` for the barrier too gave it two folders, so
+    // following this line printed a `GRAPH008_JOIN_DEPTH` the compile before it had not.
     //
-    // A `branches` ENTRY IS NOT ENOUGH — the claiming join must also be DOWNSTREAM of the member,
-    // because an entry naming a node the join cannot reach folds nothing. That is not a nicety:
-    // it is what makes the no-empty-list invariant above survive this filter. If some non-
-    // candidate join collected `e.to`, it would satisfy `joined` at the top of the loop and this
-    // rule would have said nothing at all — so `e.to` reaches this filter only when nothing else
-    // folds it, and it still always survives.
-    const foldersOf = (id: NodeId): readonly NodeId[] =>
-      spec.nodes
-        .filter(
-          (j) =>
-            j.join !== undefined &&
-            !candidates.some((c) => c.id === j.id) &&
-            j.join.branches.includes(id) &&
-            (idx.ancestors.get(j.id)?.has(id) ?? false),
-        )
-        .map((j) => j.id);
+    // `foldersOf` IS `claimedBy`, DELIBERATELY. The question this predicate answers is not "what
+    // really folds at run time" — it is "what will `GRAPH008_JOIN_DEPTH` count if the author types
+    // what we are about to dictate". So it makes the test that rule makes and no other: `branches`
+    // membership, for a member whose `fanoutDepth` is at least 1, with NO reachability.
+    //
+    // AN EARLIER CUT ANSWERED THE OTHER QUESTION, and that is the whole of what was wrong with it.
+    // It required the claiming join to be DOWNSTREAM (`idx.ancestors`), reasoning that an entry
+    // naming a node the join cannot reach folds nothing. MEASURED, that reasoning is not wrong
+    // about the executor: with both compile-time refusals neutralised, a join declaring a
+    // fanned-out node it has no edge to folds that node's writes zero extra times — 2
+    // contributions with it and 2 without. It is wrong about the COMPILER, which is the only thing
+    // a `fix:` line has to predict: `claimedBy` counts that entry, so the author who types what we
+    // dictated is refused. `idx.ancestors` also walks neither `loop` nor `compensation` edges, so
+    // a folder joined to its member by one of those was invisible here and counted there. Both
+    // shapes are pinned below, and the second one is why this is not merely conservative.
+    const foldersOf = (id: NodeId): readonly NodeId[] => {
+      const armDepth = idx.fanoutDepth.get(id);
+      if (armDepth === undefined || armDepth < 1) return [];
+      return spec.nodes.filter((j) => j.join !== undefined && j.join.branches.includes(id)).map((j) => j.id);
+    };
 
-    const waitsFor = branch.filter((id) => reachesEveryCandidate(id) && foldersOf(id).length === 0);
+    // A FOLDER THAT IS THE ONE JOIN WE NAME IS NOT AN OBSTACLE — and that distinction is the whole
+    // of the multi-candidate case. After the author picks barrier C and adds the dictated names,
+    // a member's folders become its existing ones PLUS C, so dictating it is safe exactly when its
+    // only folder could be C. With ONE candidate that is knowable: `named` IS the barrier, so a
+    // member it already declares stays on the list and the sentence is unchanged (the F1 shape
+    // `examples/graphs/triage-failures.json` sits on, where `gather` already declares `classify`).
+    // With TWO it is not: excluding BOTH candidates dictated a member one of them already folds,
+    // and the graph then compiled for one choice and was refused for the other — the list has to
+    // be true whichever the author picks, which is `reachesEveryCandidate`'s own rationale.
+    //
+    // `e.to` IS DICTATED WHATEVER FOLDS IT, and that is the guard the no-empty-list invariant now
+    // rests on rather than on a reachability argument. `joined` — the condition that makes this
+    // whole diagnostic fire — is "some join waits on `e.to`", so a list that leaves `e.to` out
+    // dictates an edit that does not clear the error it is attached to. THE RESIDUE, NAMED: if
+    // another join already claims `e.to`, following this line produces `GRAPH008_JOIN_DEPTH` on
+    // `e.to`, and the author has to decide which join is the barrier. The graph is broken twice
+    // over and the second break is the one this rule cannot dictate around.
+    const foldedElsewhereThan = (id: NodeId): readonly NodeId[] =>
+      id === e.to ? [] : foldersOf(id).filter((j) => j !== named?.id);
+
+    const waitsFor = branch.filter((id) => reachesEveryCandidate(id) && foldedElsewhereThan(id).length === 0);
 
     // THE COUNT AND THE LIST ANSWER DIFFERENT QUESTIONS, so the message says which nodes the two
     // disagree about. `branch` is what the branch CONTAINS; `waitsFor` is what a barrier can be
@@ -2854,7 +2887,7 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     const foldedElsewhere = held.filter((id) => reachesEveryCandidate(id));
     const unreachedList = unreached.map((id) => `"${id}"`).join(", ");
     const foldedClauses = foldedElsewhere
-      .map((id) => `"${id}" is already folded by ${foldersOf(id).map((j) => `"${j}"`).join(", ")}`)
+      .map((id) => `"${id}" is already folded by ${foldedElsewhereThan(id).map((j) => `"${j}"`).join(", ")}`)
       .join(", and ");
 
     // THE PREFIX NAMES ONLY THE REASONS THIS GRAPH ACTUALLY USED, and the reason-1-only form is
