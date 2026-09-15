@@ -829,6 +829,35 @@ const FLAG_CONSEQUENCE: Readonly<Record<string, string>> = {
 };
 
 /**
+ * Does this binary have this verb? — `VERB_FLAGS`' own keys, which
+ * `test/cli/verb-flags.test.ts` already holds equal to the `case` labels of `main`'s switch by
+ * recomputing both out of this source file. So this is the switch's arm set, read one screen early.
+ *
+ * `Object.hasOwn` AND NOT `VERB_FLAGS[command] !== undefined`, because `VERB_FLAGS` is an object
+ * literal and `VERB_FLAGS["constructor"]` is therefore a FUNCTION. Measured before this existed:
+ * `loom constructor --port 1` answered `E_INTERNAL: TypeError: applies.includes is not a function`
+ * and exit 1, where the operator's mistake was a verb that does not exist. Both readers go through
+ * here, so the door in `main` and the check below cannot disagree about what a verb is.
+ */
+function dispatchesVerb(command: string): boolean {
+  return Object.hasOwn(VERB_FLAGS, command);
+}
+
+/**
+ * `unknown command "…"`, the usage, exit 2 — written ONCE because it is said from two places.
+ *
+ * The door in `main` says it BEFORE a workspace is opened, which is the whole of §H.11; the
+ * `default:` arm of the switch says it after, and is unreachable while `dispatchesVerb` reads a key
+ * set that test pins to the switch's arms. Unreachable is not deleted: if those two sets ever part,
+ * the operator still gets the right sentence — one directory later, which is the old defect and not
+ * a worse one.
+ */
+function refuseUnknownCommand(command: string): number {
+  process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
+  return 2;
+}
+
+/**
  * Refuse a flag this verb does not read, naming the verbs that do.
  *
  * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
@@ -841,8 +870,8 @@ const FLAG_CONSEQUENCE: Readonly<Record<string, string>> = {
  * command they were reaching for.
  */
 function refuseFlagsThisVerbDoesNotRead(args: Args): void {
-  const applies = VERB_FLAGS[args.command];
-  if (applies === undefined) return;
+  if (!dispatchesVerb(args.command)) return;
+  const applies = VERB_FLAGS[args.command]!;
   const offenders = Object.keys(args.flags)
     .filter((f) => !GLOBAL_FLAGS.includes(f) && !applies.includes(f))
     .sort();
@@ -1497,6 +1526,36 @@ export function openWorkspace(
   // `loom gates <runId>` in the intended workspace answers `[]`.
   const root = resolve(pathFlag(args, "workspace") ?? process.cwd());
   const dataDir = resolve(pathFlag(args, "data-dir") ?? join(root, ".loom"));
+
+  // EVERY REMAINING GLOBAL FLAG IS READ HERE, BEFORE THE FIRST `mkdirSync` — TODO.md §H.11, and
+  // the same rule the two file flags above already follow for the same reason.
+  //
+  // WHAT WAS WRONG, measured in an empty directory with `loom compile --<flag>` and no value:
+  // SEVEN of the fifteen names in `GLOBAL_FLAGS` refused with nothing on disk — `--workspace`,
+  // `--data-dir`, `--channels-file`, `--models-file` and `--extension-module`, refused by this
+  // function's own pre-flight above, plus `--mcp-file`, which is a different reason (`main` reads
+  // it before it ever calls this) and `--help`, which is not a value at all — and EIGHT left
+  // `.loom/`, `graphs/` and `resources/` behind: `--grant`, `--egress`, `--exec-env`,
+  // `--allow-exec`, the three `--budget-*` and `--max-parallelism`. Because the three `mkdirSync`s
+  // ran the moment the two path flags had been read, and everything else was read between forty
+  // and four hundred lines later. An argv-only refusal that costs the caller three directories is
+  // §H.11 again, reached by a flag instead of by a verb.
+  //
+  // FOUR PURE READS, so this is an ordering change and not a second parse. `jailFor` recomputes
+  // `root` and `dataDir` from the same flags rather than closing over these (see its body), so
+  // the two derivations cannot disagree; `grantFlag`, `deploymentBudget` and `boundedCount` are
+  // functions of `args` alone. Their values are used where they always were. The relative order
+  // of the refusals among themselves is unchanged — jail, then grant, then the ceiling, then the
+  // budget — so a caller who spells two of them wrong is told about the same one as before.
+  //
+  // AND IT IS STRICTLY MORE THAN THE DIRECTORIES: `jailFor` used to run after `new
+  // SqliteStateStore`, so a bad `--egress` was a refusal that had already opened a journal
+  // handle, which is exactly what the paragraph at the top of this function refuses to do.
+  const jail = jailFor(args);
+  const grants = grantFlag(args);
+  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
+  const budget = deploymentBudget(args);
+
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(join(root, "graphs"), { recursive: true });
   // CREATED SO THAT DENYING IT MEANS SOMETHING. `assertWithin` canonicalises a deny entry with
@@ -1544,8 +1603,8 @@ export function openWorkspace(
   // exists, `loadExtensionModules` reserved the prefix before any module's factory ran, and
   // `extensions.mcpRegistrar` is that same claim; there is nothing to reserve twice.
   const mcpRegistrar = extensions?.mcpRegistrar ?? tools.reservePrefix("mcp__", MCP_PREFIX_RESERVED_FOR);
-  // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`.
-  const jail = jailFor(args);
+  // THE JAIL, from the SAME derivation `main` handed the extension modules — see `jailFor`. Built
+  // at the top of this function, before anything is created: see the §H.11 paragraph there.
   const execPrograms = jail.execAllowlist;
   // A COLLISION WITH A BUILT-IN REFUSES TO BOOT, and this line used to say the opposite was
   // fine: "the built-ins are registered on top, so a name collision leaves the BUILT-IN live:
@@ -1888,11 +1947,13 @@ export function openWorkspace(
     for (const t of mcpTools(client, irreversibility)) mcpRegistrar.register(t);
   }
 
-  const granted = capabilitiesOf(tools, grantFlag(args));
-  // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS, so a malformed ceiling is a process that
-  // does not start rather than one that starts without the ceiling it was told to hold.
-  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
-  const budget = deploymentBudget(args);
+  // `grants` is `--grant`, read at the top of this function; the capabilities are derived HERE
+  // because `tools` is what they are derived against and it does not exist until now.
+  const granted = capabilitiesOf(tools, grants);
+  // BOTH REFUSALS ARE SPENT BEFORE THE ENGINE EXISTS — and, since §H.11, before the workspace
+  // directories exist either: `maxParallelism` and `budget` are read at the top of this function,
+  // so a malformed ceiling is a process that does not start rather than one that starts without
+  // the ceiling it was told to hold, and it is now also one that created nothing.
   const engine = new Engine({
     store,
     bus,
@@ -7815,8 +7876,17 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   }
   // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
   assertKnownFlags(args);
-  // AFTER `assertKnownFlags`, so a MISSPELLED flag is answered by the list of flags rather than
-  // by a list of verbs that do not read it either.
+  // THE VERB IS DECIDED BEFORE ANY DIRECTORY EXISTS — TODO.md §H.11. `openWorkspace` creates
+  // `.loom/`, `graphs/` and `resources/`, and `--workspace` defaults to the cwd, so until this line
+  // `loom nonsense` left three directories in whatever directory a stranger happened to be standing
+  // in, and then printed "unknown command". Nothing above it needs a workspace: `parseArgs` already
+  // knows the verb, and `default:` never told the operator anything this line cannot.
+  //
+  // BEFORE `refuseFlagsThisVerbDoesNotRead` and AFTER `assertKnownFlags`, which is the order those
+  // two docstrings already argue for. An unknown flag is answered by the list of flags even on a
+  // verb that does not exist — that is the name the binary knows nowhere, and it already cost
+  // nothing. A flag a NON-EXISTENT verb does not read is a lecture instead of the mistake.
+  if (!dispatchesVerb(args.command)) return refuseUnknownCommand(args.command);
   refuseFlagsThisVerbDoesNotRead(args);
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
@@ -9072,9 +9142,11 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         return verdict.promote ? 0 : 1;
       }
 
+      // UNREACHABLE, and kept — see `refuseUnknownCommand`. The door in `main` answers every verb
+      // this switch has no arm for, before the workspace is opened; this arm is what happens if
+      // `VERB_FLAGS` ever loses a row the switch still has, which `verb-flags.test.ts` refuses.
       default:
-        process.stderr.write(`unknown command "${args.command}"\n\n${USAGE}`);
-        return 2;
+        return refuseUnknownCommand(args.command);
     }
   } finally {
     // Children first: a server left running outlives the process that spawned it, and a
@@ -10472,6 +10544,29 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   // suite silently mixed cases that check oversight with cases that do not, and nothing told the
   // operator which. Excluded and counted instead, like its three neighbours: a suite is a
   // regression floor, and a floor with unmarked gaps in it is the shape this repo keeps finding.
+  //
+  // WHICH RUNS THIS ACTUALLY EXCLUDES — TODO.md §A.21, settled by construction rather than by
+  // argument, because mutating the line away left the suite 9/9 green. An eligible run is already
+  // `succeeded` (that is what `components.delivered` two screens down implies) and `gateShapeOf`
+  // calls a gate unresolved only in `open` or `expired`. Driven on a real Engine over a real
+  // SQLite store, four paths, none of them this state:
+  //
+  //   join `any` / `firstSuccess` / `all` with a gate branch nobody answered → `awaiting_gate`,
+  //     gate `open`. A barrier does short-circuit past a parked sibling, but `advance`'s drain
+  //     re-suspends the run on `openGates(p).length > 0` before it can reach `#finish`.
+  //   the budget/fatal floor, which DOES reach `#finish` past that drain → `succeeded`, and the
+  //     surviving gate folds `cancelled`: `#finish` appends `cancelOpenGates` in the SAME append
+  //     as `run.completed`.
+  //   a gate SLA expiring (`onTimeout: fail`) → gate `expired` and run `failed`, because `#expire`
+  //     ships `gate.timeout` and `run.failed` in one append. So `expired` implies `failed`.
+  //
+  // THE STATE IS STILL REACHABLE, AND NOT THROUGH THE ENGINE: this verb's input is a JOURNAL, and
+  // journals outlive the binary that wrote them. `#finish`'s own docstring dates a build whose
+  // SUCCESS path did not close its gates; deleting that one line and re-running the floor probe
+  // above yields `status=succeeded gates=[decided, open]` — a workspace holding such a recording
+  // is what this line is for, and `suite-freeze.test.ts` freezes one. Admitting it would write
+  // `noIrreversibleWithoutGate: true` onto a case whose own recording fails it, so the baseline
+  // would fail the exam frozen from it.
   let unresolvedGate = 0;
   const otherKeysSeen = new Set<string>();
   let excludedForWeights = 0;
