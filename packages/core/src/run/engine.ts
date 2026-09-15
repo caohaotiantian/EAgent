@@ -7410,8 +7410,8 @@ export class Engine {
     // keys the same one on the same field, and for the same reason: "APPROVE ON A WORK NODE MEANS 'GO AHEAD',
     // NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval, so approving completes it;
     // every other node type has work behind the gate, and treating approval as completion would
-    // report success for an action that never happened." `STRUCTURALLY_PURE` reads a gate the same
-    // way. So `NodeSpec.type` already carries this fact for every member, totally, and a
+    // report success for an action that never happened — silently, in exactly the place oversight
+    // exists for." So `NodeSpec.type` already carries this fact for every member, and a
     // `JoinSpec` field naming which members are evidence would be a second spelling of it — new
     // vocabulary in the artifact `graphHash` is taken over, for an override no graph asks for.
     //
@@ -7425,16 +7425,27 @@ export class Engine {
     // COUNTED OVER MEMBER TASKS, not over `join.branches` filtered by type, and the unit is the
     // one this arm already argued for below: a declared work node a router legitimately routed
     // around materialises no task, and a barrier whose gate then carries it is outside this row and
-    // succeeds exactly as before. A member whose node id is not in the spec at all counts as WORK —
-    // `undefined !== "human_gate"` — which is the direction that refuses more.
+    // succeeds exactly as before.
+    //
+    // A MEMBER WHOSE NODE IS NOT IN THE SPEC COUNTS AS WORK, AND THAT IS NOT THE SAFE DIRECTION —
+    // an earlier draft of this comment claimed it was, and running it says otherwise. A member
+    // classified WORK that SUCCEEDED is exactly what satisfies the refusal, so an unreadable node
+    // DISARMS it: forcing the lookup to `undefined` for the gate in §A.67's own graph returns the
+    // run to `succeeded` in all four modes. It is unreachable rather than guarded — `indexGraph`
+    // builds `byId` from `spec.nodes` exhaustively and `GRAPH008_UNKNOWN_BRANCH` refuses a
+    // `branches` entry naming no node — so no guard is added here, because a second check of a
+    // thing the compiler already makes impossible is the drift this file keeps paying for. What
+    // is fixed is the SENTENCE, which asserted a safety property the code does not have.
     let workMembers = 0;
     let succeededWork = 0;
+    let terminalWork = 0;
     for (const t of members) {
       const coord = encodeBranch(t.branch);
-      const evidence =
-        ctx.index.byId.get(t.nodeId)?.type === "human_gate" && Object.keys(t.writes).length === 0;
+      const type = ctx.index.byId.get(t.nodeId)?.type;
+      const evidence = type !== undefined && PRODUCES_NOTHING.has(type) && Object.keys(t.writes).length === 0;
       if (!evidence) {
         workMembers++;
+        if (isTerminalTaskState(t.state)) terminalWork++;
         if (t.state === "succeeded") succeededWork++;
       }
       if (t.state === "succeeded") {
@@ -7557,19 +7568,44 @@ export class Engine {
     // §D.9's rule verbatim — one approval folds, every member rejected refuses. It is measured
     // unchanged, in all four of that graph's driven decision sets.
     //
+    // AND `terminalWork === workMembers` IS NOT BELT-AND-BRACES — IT IS WHAT MAKES THIS AN
+    // ANSWERABLE QUESTION, and the first cut of §A.67 shipped without it and broke working runs.
+    //
+    // A BARRIER CAN RELEASE WHILE A WORK MEMBER IS STILL LIVE. `#maybeFireJoin` fires `any`,
+    // `firstSuccess` and `quorum` on `succeeded >= 1` WITHOUT quiescence, on purpose — "QUIESCENCE
+    // GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES" — and on a STATIC join an approved gate IS that
+    // one success. Measured, zero diagnostics: `alice` (a `human_gate`) and `worker` (a
+    // `function` at posture `in`, so it raises its own policy gate) as sibling `kind: "join"` arms
+    // of one barrier, approve `alice` only —
+    //
+    //     first cut:  mid [J:failed alice:succeeded worker:awaiting_gate]
+    //                 post status=failed seen=["real-work"] error=E_QUORUM_UNREACHABLE
+    //     with this:  mid [J:succeeded …] post status=succeeded seen=["real-work"] note=["done-ran"]
+    //
+    // The run failed WITH the worker's own writes already in the channel, under a message saying it
+    // did no work. That is this project's own lens pointed the other way: a guard answering a
+    // question whose answer could still change. "Not one succeeded" is an ABSENCE claim, and an
+    // absence claim needs quiescence exactly as `#maybeFireJoin`'s two do.
+    //
+    // THE FIRST CUT'S COMMENT SAID THE SHAPE WAS NOT KNOWN TO BE REACHABLE, having had three
+    // attempts refused by the compiler (`GRAPH021_FANOUT_WITHOUT_JOIN` twice,
+    // `GRAPH008_BRANCH_NOT_CONNECTED` once). All three were FAN-OUTS, and GRAPH021 is what refuses
+    // them: it requires every node of a fan-out branch to be a member, so such a branch always has
+    // a work member that runs. The shape needs NO FAN-OUT, and a static join has no GRAPH021 to
+    // answer to. Reachability was concluded from three failures to build it, which is not a proof
+    // of anything, and this paragraph records that because the mistake is more reusable than the fix.
+    //
     // THE COST, NAMED: a run fails now where it succeeded before iff its barrier has at least one
-    // materialised WORK member, not one of them is `succeeded`, and some member is. ONE shape is
-    // measured to reach it — the one above, every work member terminal and lost — and the set is
-    // named that narrowly on purpose. The other candidate is a barrier that RELEASED while a work
-    // member was still LIVE, with a gate already succeeded; it needs a gate that does NOT hand off
-    // within its branch, since `#maybeFireJoin` skips `continuesInBranch` members (which is why
-    // `mode: "any"` does not fire on a gate feeding its own branch's worker — measured: the fold
-    // sees `work` terminal in all four modes). THREE ATTEMPTS TO BUILD IT WERE REFUSED BY THE
-    // COMPILER, twice `GRAPH021_FANOUT_WITHOUT_JOIN` and once `GRAPH008_BRANCH_NOT_CONNECTED`,
-    // because GRAPH021 requires every node of a fan-out branch to be a member and a branch with a
-    // work node in it therefore has one that runs. So it is NOT known to be reachable, and this
-    // comment does not claim it is. Were it reached it would be refused, and rightly: those
-    // members' writes are HELD FOR THIS FOLD, so releasing as a success drops them silently.
+    // materialised WORK member, EVERY one of them is terminal, not one succeeded, and some member
+    // is. Two shapes reach it and both are driven in `join-evidence-and-work.test.ts`: a fan-out
+    // whose work all died behind approved gates or routed routers, and a STATIC `mode: "all"`
+    // barrier, which waits for quiescence and therefore sees the loss.
+    //
+    // WHAT IT STILL DOES NOT REACH, pinned rather than left implicit: a short-circuiting mode whose
+    // barrier released on evidence alone and whose work THEN failed. The fold is final at release —
+    // the barrier does not re-evaluate — so the run ends `succeeded` with nothing folded. That is
+    // the residue a short-circuiting mode buys by definition, it is UNCHANGED from before §A.67,
+    // and closing it means straggler cancellation or a second fold, neither of which is this arm's.
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
     // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
@@ -7580,8 +7616,10 @@ export class Engine {
     // way a release can carry no usable result, and the distinction the two arms need is carried
     // by the message. A new `CODES` member would be new error vocabulary in the kernel for a
     // difference nothing branches on.
-    const countedSucceeded = workMembers > 0 ? succeededWork : succeededMembers;
-    if (countedSucceeded === 0 && members.length > 0) {
+    const refused =
+      members.length > 0 &&
+      (workMembers > 0 ? succeededWork === 0 && terminalWork === workMembers : succeededMembers === 0);
+    if (refused) {
       return {
         status: "failed",
         writes: {},
@@ -7589,9 +7627,9 @@ export class Engine {
         error: err.validation(
           CODES.E_QUORUM_UNREACHABLE,
           workMembers > 0
-            ? `join "${w.node.id}": not one of the ${workMembers} work task(s) it waited on succeeded — ` +
-              `an approved human_gate is a human answering, not work being done, so folding nothing ` +
-              `and carrying on would report a run that did no work as a success`
+            ? `join "${w.node.id}": all ${workMembers} work task(s) it waited on are finished and not one ` +
+              `succeeded — an approved human_gate or a router that routed is a decision recorded, not work ` +
+              `done, so folding nothing and carrying on would report a run that did no work as a success`
             : `join "${w.node.id}": not one of the ${members.length} task(s) it waited on succeeded — ` +
               `folding nothing and carrying on would report a run that did no work as a success`,
         ),
@@ -11383,8 +11421,6 @@ export class Engine {
 
     // `p` predates this Task's own commit, so substitute its outcome rather than
     // counting it twice — once as still-running and once as finished.
-    const isTerminalState = (s: string): boolean =>
-      s === "succeeded" || s === "failed" || s === "skipped" || s === "cancelled";
 
     // A Task that HANDED OFF within the join's own branch set has not terminated its
     // branch: an investigation that failed onto an error edge is still being handled by
@@ -11425,7 +11461,7 @@ export class Engine {
     });
     const stillLive = all.some((t) => {
       if (t.taskId === w.task.taskId) return false;
-      if (isTerminalState(t.state)) return false;
+      if (isTerminalTaskState(t.state)) return false;
       if (!isAtOrUnderBranch(t.branch, parent)) return false;
       return reachesMember(t.nodeId);
     });
@@ -11437,7 +11473,7 @@ export class Engine {
       const state = t.taskId === w.task.taskId ? selfStatus : t.state;
       if (continuesInBranch(t)) continue;
       if (state === "succeeded") succeeded++;
-      if (isTerminalState(state)) terminal++;
+      if (isTerminalTaskState(state)) terminal++;
     }
 
     // QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
@@ -11963,6 +11999,44 @@ function pick(obj: Readonly<Record<string, unknown>>, keys: readonly string[]): 
 function writesHeldForJoin(branch: BranchCoordinate): boolean {
   return branch.segments.length > 0;
 }
+
+/**
+ * A Task state from which no further arrival is possible. THE ONE DEFINITION.
+ *
+ * It was a closure inside `#maybeFireJoin` and nowhere else, which was correct while that method
+ * was the only place asking. §A.67's fold asks the same question — "can this member still arrive?"
+ * — and a second copy is the drift `writesHeldForJoin` above exists to prevent and that
+ * `#escalateSkippedGate` already paid for once. One function, both callers.
+ */
+function isTerminalTaskState(state: string): boolean {
+  return state === "succeeded" || state === "failed" || state === "skipped" || state === "cancelled";
+}
+
+/**
+ * Node types whose SUCCESS records a decision rather than produces a value — §A.67's EVIDENCE.
+ *
+ * `#applyGateDecision` returns `writes: {...gate.writes}`, empty for a plain `approve`: a
+ * `human_gate`'s success means a human answered. `#runRouter` returns `writes: {}`
+ * UNCONDITIONALLY on both of its two exits — "it never writes state — its entire output is an edge
+ * subset". So neither type can be the reason a barrier has anything in it, and a barrier not one
+ * of whose OTHER members succeeded folded nothing whatever these two did.
+ *
+ * MEASURED AND NOT ASSUMED: the row's own graph with the `human_gate` replaced by a `router`
+ * compiles with zero diagnostics and reproduces §A.67 verbatim — `status=succeeded
+ * note=["done-ran"]` with every unit of work behind the router dead, in all four modes. GRAPH021
+ * forces the router into `branches` exactly as it forces the gate.
+ *
+ * `join` IS DELIBERATELY NOT HERE, and that is the one difference from `STRUCTURALLY_PURE`, which
+ * holds all three. That set answers "can this node reach outside the process", where a join cannot;
+ * this one answers "can this node be the reason the barrier has something in it", where a join is
+ * the node whose WHOLE JOB is to produce one — `#foldJoin` at depth returns the fold as its own
+ * writes. A nested join that folded nothing is judged by this very arm one level down and fails
+ * there, so treating it as evidence here would launder a refusal into a success.
+ *
+ * ANY NODE TYPE ADDED LATER IS WORK until somebody looks at it here, which is why this is a named
+ * set and not a default arm: work is the answer that refuses more.
+ */
+const PRODUCES_NOTHING: ReadonlySet<NodeSpec["type"]> = new Set(["human_gate", "router"]);
 
 function isDescendantBranch(prefix: string, candidate: string): boolean {
   return candidate !== prefix && candidate.startsWith(prefix === "root" ? "root/" : `${prefix}/`);

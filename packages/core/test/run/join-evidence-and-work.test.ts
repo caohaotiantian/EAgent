@@ -27,8 +27,9 @@
  * carries the distinction for every member, and the kernel already keys the SAME evidence/work
  * distinction on the SAME field, in this same file — `#executeTask`'s settled-gate arm: *"APPROVE
  * ON A WORK NODE MEANS 'GO AHEAD', NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval,
- * so approving completes it; every other node type has work behind the gate."* A field would be a second
- * spelling of a fact the spec already states, new replay vocabulary in the one artifact
+ * so approving completes it; every other node type has work behind the gate, and treating approval
+ * as completion would report success for an action that never happened — silently, in exactly the
+ * place oversight exists for."* A field would be a second spelling of a fact the spec already states, new replay vocabulary in the one artifact
  * `graphHash` is taken over, and its DEFAULT would have to be the node-type rule anyway — so it
  * would buy an override no graph in the tree asks for. §D.9 declined `join.minBranches` on the
  * same ground: it prices a correctness question as configuration.
@@ -40,21 +41,32 @@
  * person's edit would be refused and that data discarded — a guard refusing a run that did work.
  *
  * THE EVIDENCE-ONLY FALLBACK IS WHAT KEEPS THE SHIPPED GRAPH WHOLE, and it is driven here on the
- * shipped file itself. `examples/graphs/two-person-approval.json` is three `human_gate` nodes
- * under one quorum join and nothing else — the composition `ApprovalSpec` was stripped of `mode`
- * and `k` in favour of. Nothing there was ever going to be produced, so "did any work succeed" has
- * no numerator, and the fallback is §D.9's rule verbatim: one approval folds, every member lost
- * refuses. All four of `a68.mjs`'s decision sets read identically before and after this change.
+ * shipped file itself. `examples/graphs/two-person-approval.json` has FIVE nodes — three
+ * `human_gate`s (`alice`, `bob`, `carol`), the quorum `join` they feed, and an `fs.write` `tool`
+ * node `save` BEHIND the join, which is the write the test below counts. What is evidence-only is
+ * the BARRIER: `join.branches` names the three gates and nothing else, so no work member exists
+ * at the fold and "did any work succeed" has no numerator. The fallback is then §D.9's rule
+ * verbatim: one approval folds, every member lost refuses. All four of `a68.mjs`'s decision sets
+ * read identically before and after this change.
  *
  * WHAT THIS FILE DELIBERATELY DOES NOT DO: it does not touch §A.68. The shipped graph's
  * `onBranchError: "fail"` still fails the run on ONE rejection whatever the other two people say,
  * and the assertion below records that as the CURRENT behaviour rather than endorsing it.
  *
- * EVERY GATED CASE IS DRIVEN ACROSS A RESTART — the run is parked by one `Engine`, its store
- * closed, and a FRESH `Engine` over the same SQLite file attaches, answers the gates and advances.
- * That is not decoration either: the fold reads `p.tasks`, which a restart rebuilds from rows, and
- * this project's own lens asks of every decision what it does on a restart that hands its state
- * back empty.
+ * EVERY CASE THAT EXERCISES THE FOLD IS DRIVEN ACROSS A RESTART — the run is parked by one
+ * `Engine`, its store closed, and a FRESH `Engine` over the same SQLite file attaches, answers the
+ * gates and advances. That is not decoration: the fold reads `p.tasks`, which a restart rebuilds
+ * from rows, and this project's own lens asks of every decision what it does on a restart that
+ * hands its state back empty.
+ *
+ * THE ONE EXCEPTION IS THE SHIPPED-GRAPH TEST, WHICH DRIVES ONE `Engine`, and it is named here
+ * rather than glossed. Its subject is the shipped file's decision behaviour end to end — the four
+ * decision sets `a68.mjs` reports — and its barrier is evidence-only, so it exercises the FALLBACK
+ * and not the work count. The restart property of the fold is carried by the six above it.
+ *
+ * AND THE REPLAY HALF IS ASSERTED, not left to a probe: the last test re-folds a FINISHED journal
+ * with a third `Engine` and pins that it reproduces the RECORDED verdict — on a journal whose
+ * verdict today's rule would not produce if it were re-run.
  */
 
 import assert from "node:assert/strict";
@@ -140,6 +152,108 @@ function gateFanSpec(opts: { readonly mode: string; readonly body: string; reado
 }
 
 /**
+ * The SAME graph with the `human_gate` replaced by a `router` — §A.67 with no human in it.
+ *
+ * `#runRouter` returns `writes: {}` on both of its exits ("it never writes state — its entire
+ * output is an edge subset"), so a router's success can no more be the reason a barrier has
+ * something in it than a gate's can. GRAPH021 forces it into `branches` exactly as it forces the
+ * gate. Measured on `ee4f1c14` AND on §A.67's first cut: `status=succeeded note=["done-ran"]` with
+ * every unit of work behind the router dead, in all four modes, zero diagnostics — the row
+ * verbatim, which is why `PRODUCES_NOTHING` is a set and not one type.
+ */
+function routerFanSpec(opts: { readonly mode: string; readonly body: string }): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a67-router-fan", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 2, maxFanout: 16, maxLoopIterations: 1 } },
+    channels: CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: n("r"), type: "router", reads: ["item"], router: { mode: "expression", cases: [], fallbackEdge: e("sw") } },
+      { id: n("work"), type: "function", reads: ["item"], writes: ["seen"], function: { ref: opts.body } },
+      {
+        id: n("J"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: {
+          branches: [n("r"), n("work")],
+          mode: opts.mode,
+          onBranchError: "skip",
+          ...(opts.mode === "quorum" ? { k: 0.5 } : {}),
+        },
+      },
+      { id: n("done"), type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: e("fo"), from: n("start"), to: n("r"), kind: "fanout", over: "items", as: "item", maxWidth: 2 },
+      { id: e("sw"), from: n("r"), to: n("work"), kind: "seq" },
+      { id: e("jr"), from: n("r"), to: n("J"), kind: "join", branches: [n("r"), n("work")] },
+      { id: e("jw"), from: n("work"), to: n("J"), kind: "join", branches: [n("r"), n("work")] },
+      { id: e("sq"), from: n("J"), to: n("done"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/**
+ * THE STATIC BARRIER THAT RELEASES ON EVIDENCE ALONE WHILE ITS WORK IS STILL LIVE (B1).
+ *
+ * `alice` (a `human_gate`) and `worker` (a `function` at posture `in`, so it raises a POLICY gate
+ * of its own) are sibling arms wired `kind: "join"` with NO fan-out above them, both members of
+ * `J`. Approve only `alice`: `any`, `firstSuccess` and `quorum` short-circuit on
+ * `succeeded >= 1` WITHOUT quiescence — "QUIESCENCE GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES" —
+ * so the barrier releases while `worker` is still `awaiting_gate`.
+ *
+ * NO FAN-OUT IS WHY THIS COMPILES, and it is what §A.67's first cut missed: three attempts to
+ * build it as a FAN-OUT were refused (`GRAPH021_FANOUT_WITHOUT_JOIN`, `GRAPH008_BRANCH_NOT_CONNECTED`),
+ * and a comment was written saying the shape was not known to be reachable. It is reachable, with
+ * zero diagnostics, and this graph is the counterexample.
+ */
+function staticLiveWorkSpec(mode: string, body: string): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a67-static-live-work", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: n("alice"), type: "human_gate", reads: ["items"], humanGate: { ref: "oversight/hold@stable" } },
+      {
+        id: n("worker"),
+        type: "function",
+        reads: ["items"],
+        writes: ["seen"],
+        policy: { posture: "in" },
+        function: { ref: body },
+      },
+      {
+        id: n("J"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: {
+          branches: [n("alice"), n("worker")],
+          mode,
+          onBranchError: "skip",
+          ...(mode === "quorum" ? { k: 0.5 } : {}),
+        },
+      },
+      { id: n("done"), type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: e("ja"), from: n("alice"), to: n("J"), kind: "join", branches: [n("alice"), n("worker")] },
+      { id: e("jw"), from: n("worker"), to: n("J"), kind: "join", branches: [n("alice"), n("worker")] },
+      { id: e("sq"), from: n("J"), to: n("done"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/**
  * The EVIDENCE-ONLY barrier, in the shape the shipped example uses: static sibling gates wired
  * `kind: "join"` with no fan-out above them, so every member sits at the ROOT coordinate.
  */
@@ -196,6 +310,9 @@ function newEngine(store: SqliteStateStore, tools: ToolRegistry = new ToolRegist
     const item = view.get<{ id: string }>("item");
     return { writes: { seen: [item?.id ?? "?"] } };
   });
+  // The static B1 graph reads `items`, not the fan-out's `item`, so it needs its own body: reusing
+  // `function/work@stable` there writes "?" and the assertion would be pinning the probe, not the run.
+  functions.register("function/static-work@stable", () => ({ writes: { seen: ["real-work"] } }));
   functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
   return new Engine({
     store,
@@ -274,6 +391,91 @@ async function runAcrossRestart(
 }
 
 type Decision = { kind: string; [k: string]: unknown };
+/**
+ * Submit, park, CLOSE THE STORE, and hand the journal to a fresh `Engine` that answers the gates
+ * in STAGES — `who` first, then everything still open — snapshotting between the two.
+ *
+ * Staged and not all-at-once because the whole subject is what the fold sees while a member is
+ * still LIVE. Answering every gate in one pass makes `worker` terminal before the barrier ever
+ * runs, which is the state the defect cannot be seen in.
+ */
+async function runStaged(
+  spec: GraphSpec,
+  who: string,
+): Promise<{ mid: Result; post: Result; midTasks: string; postTasks: string; replayStatus: string; replayAdvanced: string }> {
+  const dir = mkdtempSync(pathJoin(tmpdir(), "a67s-"));
+  const path = pathJoin(dir, "j.db");
+  const graph = compileOrThrow({ spec, resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+  try {
+    const first = new SqliteStateStore({ path, now: () => NOW });
+    const opener = newEngine(first);
+    const runId = await opener.submit({ graph, inputs: { items: [{ id: "a" }] } });
+    await opener.advance(runId);
+    first.close();
+
+    const second = new SqliteStateStore({ path, now: () => NOW });
+    const engine = newEngine(second);
+    engine.attach(runId, graph);
+    const answer = async (pick: (nodeId: string) => boolean): Promise<void> => {
+      for (const g of (await engine.openGates(runId)).filter((x) => x.state === "open" && pick(String(x.nodeId)))) {
+        await engine.resolveGate(runId, {
+          gateId: g.gateId,
+          decision: { kind: "approve" } as never,
+          actor: { kind: "human", subject: "u:alice", via: "console" },
+          idempotencyKey: `k-${g.gateId}`,
+        });
+      }
+    };
+    const snap = async (): Promise<Result> => {
+      const pr = await engine.advance(runId);
+      const log: JournalEvent[] = [];
+      for await (const ev of second.read(runId, 1)) log.push(ev);
+      const jf = log.find((ev) => ev.type === "task.failed" && String(ev.taskId).startsWith("J@")) as
+        | { payload?: { error?: { code?: string; message?: string } } }
+        | undefined;
+      return {
+        status: pr.status,
+        seen: (pr.channels["seen"] as string[]) ?? [],
+        note: pr.channels["note"],
+        joinError: jf?.payload?.error?.code,
+        joinMessage: jf?.payload?.error?.message ?? "",
+        doneCommitted: log.filter((ev) => ev.type === "task.committed" && String(ev.taskId).startsWith("done@")).length,
+      };
+    };
+    const tasks = async (): Promise<string> =>
+      Object.values((await engine.projection(runId))?.tasks ?? {})
+        .map((t) => `${String(t.nodeId)}:${t.state}`)
+        .sort()
+        .join(" ");
+
+    await answer((id) => id === who);
+    const mid = await snap();
+    const midTasks = await tasks();
+    await answer(() => true);
+    const post = await snap();
+    const postTasks = await tasks();
+    second.close();
+
+    // A THIRD Engine over the FINISHED journal — the replay half (N7).
+    const third = new SqliteStateStore({ path, now: () => NOW });
+    const replayer = newEngine(third);
+    const folded = await replayer.projection(runId);
+    replayer.attach(runId, graph);
+    const advanced = await replayer.advance(runId);
+    third.close();
+    return {
+      mid,
+      post,
+      midTasks,
+      postTasks,
+      replayStatus: folded?.status ?? "(none)",
+      replayAdvanced: advanced.status,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const approve = (): Decision => ({ kind: "approve" });
 const reject = (): Decision => ({ kind: "reject", reason: "no" });
 
@@ -290,8 +492,8 @@ test("§A.67 — AN APPROVED GATE NO LONGER CARRIES A BARRIER WHOSE WORK ALL DIE
     assert.equal(r.joinError, "E_QUORUM_UNREACHABLE", `${where}: and the BARRIER names why`);
     assert.match(
       r.joinMessage,
-      /work task\(s\) it waited on succeeded/,
-      `${where}: the message says WORK, so a reader is not told the gates failed`,
+      /all 2 work task\(s\) it waited on are finished and not one succeeded/,
+      `${where}: the message says WORK, and says they are FINISHED — a pending member is not "waited on and failed"`,
     );
     assert.equal(r.doneCommitted, 0, `${where}: nothing behind the barrier runs`);
     assert.equal(r.note, undefined, `${where}: and nothing reaches the channel behind it`);
@@ -452,4 +654,100 @@ test("THE SHIPPED `examples/graphs/two-person-approval.json`, driven end to end,
     { status: "failed", wrote: 0 },
   );
   assert.deepEqual(await drive([["alice", "reject"]]), { status: "awaiting_gate", wrote: 0 });
+});
+
+test("B1 — A BARRIER THAT RELEASED WHILE ITS WORK IS STILL LIVE MUST NOT REFUSE, in all four modes", async () => {
+  // THE REGRESSION §A.67's FIRST CUT SHIPPED, and the reason the refusal needs quiescence.
+  //
+  // `any`, `firstSuccess` and `quorum` release on `succeeded >= 1` WITHOUT quiescence, and on a
+  // STATIC join an approved gate IS that one success. The fold then answered an ABSENCE question —
+  // "did no work member succeed?" — over a member set still holding a live task. Measured on the
+  // first cut, across the restart below:
+  //
+  //     mid  status=awaiting_gate [J:failed alice:succeeded worker:awaiting_gate]
+  //     post status=failed seen=["real-work"] error=E_QUORUM_UNREACHABLE
+  //
+  // The run failed WITH the work's own writes already in the channel, under a message saying it
+  // did no work. The refusal now also requires every work member to be TERMINAL, so the question
+  // is only asked once the answer can no longer change — which is `#maybeFireJoin`'s own rule,
+  // "QUIESCENCE GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES", applied to the fold.
+  for (const mode of MODES) {
+    const where = `mode=${mode}`;
+    const r = await runStaged(staticLiveWorkSpec(mode, "function/static-work@stable"), "alice");
+    assert.equal(r.mid.joinError, undefined, `${where}: the barrier must not refuse a member that can still arrive — ${r.midTasks}`);
+    assert.match(r.midTasks, /worker:awaiting_gate/, `${where}: and the shape is only driven if the worker IS live — ${r.midTasks}`);
+    assert.equal(r.post.status, "succeeded", `${where}: the worker then ran and produced`);
+    assert.deepEqual(r.post.seen, ["real-work"], `${where}: its writes are in the channel`);
+    assert.deepEqual(r.post.note, ["done-ran"], `${where}: and the node behind the barrier ran on them`);
+  }
+});
+
+test("AND WHEN THE LIVE MEMBER LATER FAILS: the fold is FINAL at release, except where the mode waited", async () => {
+  // The question B1 leaves: the barrier released on evidence alone and folded nothing — what
+  // happens when the work it did not wait for then dies? MEASURED, not reasoned, and it is
+  // UNCHANGED FROM `ee4f1c14` in all four modes, so this pins existing behaviour rather than
+  // endorsing new behaviour.
+  //
+  //   any / firstSuccess / quorum — the barrier committed BEFORE the worker was terminal, so
+  //     there is no second fold: the run ends `succeeded` with nothing folded. THE BARRIER DOES
+  //     NOT RE-EVALUATE. That is the residue a short-circuiting mode buys by definition — it
+  //     released on evidence in hand — and it is out of §A.67's reach for the same reason B1 is:
+  //     at fold time the answer could still have changed.
+  //   all — waits for quiescence, so the worker IS terminal when the fold runs, and §A.67's
+  //     refusal fires exactly as it should: the gate's approval no longer carries a barrier whose
+  //     only work died. THIS ONE CHANGES from the base, on a STATIC join, and it is the change
+  //     §A.67 is for.
+  for (const mode of MODES) {
+    const where = `mode=${mode}`;
+    const r = await runStaged(staticLiveWorkSpec(mode, "function/boom@stable"), "alice");
+    assert.deepEqual(r.post.seen, [], `${where}: nothing was produced either way`);
+    if (mode === "all") {
+      assert.equal(r.post.status, "failed", `${where}: quiescence means the fold saw the loss`);
+      assert.equal(r.post.joinError, "E_QUORUM_UNREACHABLE", `${where}: and the barrier names why`);
+      assert.equal(r.post.doneCommitted, 0, `${where}: nothing behind it ran`);
+    } else {
+      assert.equal(r.post.status, "succeeded", `${where}: the fold was final at release — base reads the same`);
+      assert.equal(r.post.joinError, undefined, `${where}: the barrier does not re-evaluate`);
+      assert.equal(r.post.doneCommitted, 1, `${where}: and the node behind it had already run`);
+
+      // N7 — REPLAY, ASSERTED HERE BECAUSE THIS IS THE JOURNAL THAT MAKES IT MEAN SOMETHING.
+      //
+      // "A journal folds to its recorded verdict" is vacuous on a journal the current rule would
+      // also produce. THIS one it would not: the finished run records `J: succeeded` (it folded
+      // nothing, having released on the gate alone) beside `worker: skipped`, so re-running
+      // `#foldJoin` over the FINAL task set — every work member terminal, none succeeded — would
+      // refuse it. It is therefore the same shape as a PRE-§A.67 journal of the row's own graph,
+      // and it is written by this binary rather than checked in as a fixture nothing can regenerate.
+      //
+      // A third `Engine` over the closed store reads `succeeded` and advancing it leaves
+      // `succeeded`: the decision is RECONSTRUCTED from rows, not recomputed from the rule. That is
+      // what "the journal is the only authoritative state" requires, and it is why §A.67 changes
+      // what a FRESH advance decides and nothing about what an old journal says.
+      assert.match(r.postTasks, /J:succeeded/, `${where}: the recorded fold is a success — ${r.postTasks}`);
+      assert.match(r.postTasks, /worker:skipped/, `${where}: beside a work member that is terminal and lost`);
+      assert.equal(r.replayStatus, "succeeded", `${where}: a fresh Engine folds the journal to its RECORDED verdict`);
+      assert.equal(r.replayAdvanced, "succeeded", `${where}: and advancing a terminal run does not re-judge it`);
+    }
+  }
+});
+
+test("N1 — A ROUTER IS EVIDENCE TOO: §A.67 with no human in it", async () => {
+  // `#runRouter` returns `writes: {}` unconditionally, so a router that routed is a decision
+  // recorded, not work done — the same sentence as an approved gate. Measured on `ee4f1c14` AND
+  // on §A.67's first cut, which classified only `human_gate`: `status=succeeded
+  // note=["done-ran"]` in all four modes with every unit of work behind the router dead. This is
+  // why `PRODUCES_NOTHING` is a named SET.
+  for (const mode of MODES) {
+    const where = `mode=${mode}`;
+    const dead = await runAcrossRestart(routerFanSpec({ mode, body: "function/boom@stable" }), [{ id: "a" }, { id: "b" }], approve);
+    assert.equal(dead.status, "failed", `${where}: a router routed and every unit of work died`);
+    assert.equal(dead.joinError, "E_QUORUM_UNREACHABLE", `${where}: the barrier names why`);
+    assert.equal(dead.doneCommitted, 0, `${where}: nothing behind it runs`);
+
+    // The control, without which "refuse every barrier holding a router" would pass the above.
+    const live = await runAcrossRestart(routerFanSpec({ mode, body: "function/work@stable" }), [{ id: "a" }, { id: "b" }], approve);
+    assert.equal(live.status, "succeeded", `${where}: the work behind the router produced`);
+    assert.equal(live.joinError, undefined, `${where}: so nothing is refused`);
+    assert.equal(live.seen.length, 2, `${where}: and both branches folded — seen=${JSON.stringify(live.seen)}`);
+  }
 });
