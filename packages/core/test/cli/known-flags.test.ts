@@ -27,10 +27,10 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { controlPlaneOptions, main, openWorkspace, parseArgs } from "../../src/cli.ts";
@@ -241,14 +241,46 @@ test("`loom help` still works, and every real flag is accepted", async () => {
     // `--max-runs-in-flight` that verb is `serve`, which BINDS A SOCKET, and this file's own
     // `cli` helper exists because a test that starts a server instead of failing is worse than
     // no test. `verb-flags.test.ts` holds the table to what each case block reads.
+    //
+    // AND THE VALUE IS A PATH INSIDE THIS TEST'S OWN TEMP DIRECTORY, which is `TODO.md` §H.10.
+    // The literal `"x"` used to be the value for every flag, and for ONE of them that is not an
+    // opaque token: `--data-dir x` is resolved against `process.cwd()` at `cli.ts:1488`, so
+    // `compile` created `<repo>/x/journal.db` on every `npm test`. `.gitignore`'s `*.db` covered
+    // the only file in it and git does not report a directory whose whole content is ignored, so
+    // the litter was invisible rather than absent.
+    //
+    // ONE VALUE FOR EVERY FLAG, not a table of which ones are paths. A table is a second list to
+    // keep in step with `KNOWN_FLAGS` — this file's whole subject is three lists drifting apart —
+    // and the next flag that resolves its value as a path would re-open this in silence. What the
+    // loop asserts is unchanged: the value's CONTENT never mattered, only that it is a value, so
+    // the flag is not read as a valueless `true` and `parseArgs` does not swallow the next
+    // argument. `compile nope.json` still fails for its own missing-file reason whatever the flag
+    // says, which is what makes "not refused as unknown" the assertion.
+    const value = join(w.dir, "x");
+    // THE PIN FOR §H.10, stated as a DIFFERENCE rather than as an absolute. `resolve(cwd, "x")` is
+    // the exact path `--data-dir x` used to create, and asserting it simply does not exist would
+    // make this test hostage to a directory some earlier run left behind. What this claims is that
+    // the loop below creates nothing there.
+    const litter = resolve(process.cwd(), "x");
+    const litterBefore = existsSync(litter);
     for (const flag of advertised()) {
       if (flag === "help") continue;
+      // NOT PASSED TWICE. When the flag under test IS `--workspace` or `--data-dir` the base argv
+      // drops it, so no name reaches `parseArgs` twice — a repeated flag is a thing `Args.repeated`
+      // is about, and this loop must not start exercising it by accident. Either way both resolve
+      // inside `w.dir`: as the flag under test they point at `<tmp>/x`, and otherwise at `w.dir`
+      // and `<tmp>/.loom`.
+      const base = [
+        ...(flag === "workspace" ? [] : ["--workspace", w.dir]),
+        ...(flag === "data-dir" ? [] : ["--data-dir", join(w.dir, ".loom")]),
+      ];
       await assert.rejects(
-        () => cli(["compile", "nope.json", `--${flag}`, "x", "--workspace", w.dir]),
+        () => cli(["compile", "nope.json", `--${flag}`, value, ...base]),
         (e: unknown) => isLoomError(e) && !/unknown flag/.test(e.message),
         `--${flag} is advertised and must not be refused as unknown`,
       );
     }
+    assert.equal(existsSync(litter), litterBefore, `this suite created ${litter} — a flag value is being resolved against the repo`);
   } finally {
     w.dispose();
   }
