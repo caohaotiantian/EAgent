@@ -7558,12 +7558,18 @@ export class Engine {
     // unchanged, in all four of that graph's driven decision sets.
     //
     // THE COST, NAMED: a run fails now where it succeeded before iff its barrier has at least one
-    // materialised WORK member, not one of them is `succeeded`, and some member is. Two shapes
-    // reach it — the one above, and a barrier that RELEASED while its work members were still live
-    // with a gate already succeeded, which needs a gate that does NOT hand off within the branch
-    // (`#maybeFireJoin` skips `continuesInBranch` members, which is why `mode: "any"` does not fire
-    // on a gate that feeds its own branch's worker). The second is refused on this arm's own terms:
-    // those members' writes are HELD FOR THIS FOLD, so releasing as a success drops them silently.
+    // materialised WORK member, not one of them is `succeeded`, and some member is. ONE shape is
+    // measured to reach it — the one above, every work member terminal and lost — and the set is
+    // named that narrowly on purpose. The other candidate is a barrier that RELEASED while a work
+    // member was still LIVE, with a gate already succeeded; it needs a gate that does NOT hand off
+    // within its branch, since `#maybeFireJoin` skips `continuesInBranch` members (which is why
+    // `mode: "any"` does not fire on a gate feeding its own branch's worker — measured: the fold
+    // sees `work` terminal in all four modes). THREE ATTEMPTS TO BUILD IT WERE REFUSED BY THE
+    // COMPILER, twice `GRAPH021_FANOUT_WITHOUT_JOIN` and once `GRAPH008_BRANCH_NOT_CONNECTED`,
+    // because GRAPH021 requires every node of a fan-out branch to be a member and a branch with a
+    // work node in it therefore has one that runs. So it is NOT known to be reachable, and this
+    // comment does not claim it is. Were it reached it would be refused, and rightly: those
+    // members' writes are HELD FOR THIS FOLD, so releasing as a success drops them silently.
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
     // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
