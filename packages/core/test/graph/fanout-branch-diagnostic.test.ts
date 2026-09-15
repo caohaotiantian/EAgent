@@ -49,11 +49,32 @@ const e = (id: string): EdgeId => id as EdgeId;
  * sentence shape must break this file rather than quietly return `[]`.
  */
 function namesIn(fix: string): readonly string[] {
+  // FOUR SHAPES, and the PLURAL one is tried first on purpose: `/for ([^,]+), (?:and|plus) a/`
+  // would otherwise match "for each of read, classify, and a …" and hand back "each of read".
+  // The singular arrived with §A.65, which made a one-name list the common case for the
+  // multi-candidate arm; it is a separate branch here rather than an optional group because an
+  // optional group is a pattern that stops distinguishing them.
   const m =
     /for each of (.+?),? (?:and|plus) a `kind: join`/.exec(fix) ??
+    /for ([^,]+), (?:and|plus) a `kind: join` edge from \1 into/.exec(fix) ??
     /as drawn that is (.+?), and a join placed/.exec(fix);
   assert.ok(m !== null, `fix line enumerates no names — has the sentence changed shape?\n  ${fix}`);
-  return m[1]!.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const names = m[1]!.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+
+  // AND THE SENTENCE'S NUMBER MUST AGREE WITH THE LIST. The two list clauses are pinned by the
+  // patterns above; the multi-candidate arm's "not one of the nodes below, which are what it waits
+  // FOR" is the one clause NOTHING else reads, and reverting it to the plural over a one-name list
+  // left the whole file green. Checked here so that every call site enforces it.
+  if (/not (?:the node|one of the nodes) below/.test(fix)) {
+    assert.match(
+      fix,
+      names.length === 1
+        ? /not the node below, which is what it waits FOR/
+        : /not one of the nodes below, which are what it waits FOR/,
+      `the "nodes below" clause disagrees with a list of ${names.length}:\n  ${fix}`,
+    );
+  }
+  return names;
 }
 
 /** The join the fix line offers as the barrier: one name, several, or none ("add a join node"). */
@@ -151,6 +172,22 @@ test("ONE DIAGNOSTIC NAMES THE WHOLE RULE: both branch members and the kind: joi
   assert.match(said, /\bclassify\b/, "and the node behind it in the SAME branch — this is the half that was missing");
   assert.match(said, /kind: join/, "the edges, which the old message left to GRAPH008 to say later");
   assert.match(said, /gather/, "and the join that already exists, rather than 'add a join node'");
+
+  // AND BYTE FOR BYTE, because this is the sentence `examples/graphs/triage-failures.json` is one
+  // node away from, and the one §A.53 quotes. §A.65 changed what the DICTATED LIST excludes; on
+  // this shape nothing else folds `read` or `classify`, so nothing here may move — a single
+  // character of drift is a message change the port would feel and a name-set assertion would not.
+  assert.equal(
+    g21.message,
+    'fanout edge "fan" expands "read" but no downstream join waits on it; the branch it opens holds ' +
+      "2 nodes (read, classify), and a join must wait on every one of them",
+  );
+  assert.equal(
+    g21.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out',
+  );
 });
 
 test("FOLLOWING THAT FIX LITERALLY COMPILES — one step, not two", () => {
@@ -332,7 +369,14 @@ test("A SECOND JOIN AT THE SAME LEVEL MAKES THE FIX STOP DICTATING, rather than 
   // so they cannot reach for a join that is not one. It used to say "a join downstream of X"
   // and leave the set implicit, which is how `a53-pickone.json` below got a cycle.
   assert.deepEqual([...offeredJoins(fix)].sort(), ["gather", "gather2"]);
-  assert.deepEqual(namesIn(fix), ["read", "classify"], "and it still names the branch, which it does know");
+  // AND `classify` IS NOT DICTATED, because BOTH candidates already declare it — dictating it to
+  // whichever the author picks would be the third claimant on a node that already has two
+  // (`GRAPH008_JOIN_DEPTH` is in this same compile). `read` is the fan-out's own target and is
+  // dictated whatever folds it: `joined` is a CONJUNCTION about `read` — some join declares it in
+  // `branches` AND is downstream of it — and naming it for a candidate satisfies both, so a list
+  // without it dictates an edit that does not clear this error.
+  assert.deepEqual(namesIn(fix), ["read"], `only what no join already folds: ${fix}`);
+  assert.deepEqual(countedIn(d.message).absent.get("classify"), { reason: "folded", by: ["gather", "gather2"] });
 });
 
 test("THE `holds N nodes` COUNT DESCRIBES THE BRANCH, not whichever join got named", () => {
@@ -414,20 +458,16 @@ test("ONE JOIN, TWO FAN-OUTS: the fix ADDS and never replaces, so two of them co
   assert.deepEqual(errorsOf(s).map((x) => x.code), [], "one step, and the first fan-out's arms survive");
 });
 
-test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth defect", () => {
-  // A refuting reviewer's graph, and it shipped through four rounds because the tests that
-  // should have caught it were matching prose the rule had stopped emitting. The shape:
-  //
-  //     plan --fan--> read --seq--> classify --seq--> gather(join) --join--> gA(join)
-  //                                                          \----join--> gB(join)
-  //
-  // `gather` is reached by a `seq` edge, so it never pops and sits INSIDE the branch; `gA` and
-  // `gB` pop and are the two candidates. The ancestor filter added for the single-candidate
-  // arm was never applied on the multi-candidate one, so the sentence said "a join downstream
-  // of read" over a list containing `gather` — and picking `gather` is a `kind: join` edge
-  // from a node to itself: GRAPH006_UNMARKED_CYCLE, plus a second, contradicting GRAPH021.
-  //
-  // Both halves are asserted, over NAME SETS: which joins are offered, and what they wait for.
+/**
+ * `a53-pickone` — a refuting reviewer's graph, and the fixture two tests below share.
+ *
+ *     plan --fan--> read --seq--> classify --seq--> gather(join) --join--> gA(join)
+ *                                                          \----join--> gB(join)
+ *
+ * `gather` is reached by a `seq` edge, so it never pops and sits INSIDE the branch; `gA` and `gB`
+ * pop and are the two candidates. It also already declares `classify`, which is §A.65's half.
+ */
+function a53PickOne(): GraphSpec {
   const s = shipped();
   // `raw` to `append_ordered`: rewiring `gather` behind a `seq` edge is one of the conditions
   // that switches GRAPH010's branch-local exemption off (§A.48's W6). That is a different rule,
@@ -463,6 +503,24 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
   } as EdgeSpec;
   (s.edges as EdgeSpec[]).push({ id: e("foldB"), from: n("gB"), to: n("collate"), kind: "seq" } as EdgeSpec);
 
+  return s;
+}
+
+test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth defect", () => {
+  // A refuting reviewer's graph, and it shipped through four rounds because the tests that
+  // should have caught it were matching prose the rule had stopped emitting. The shape:
+  //
+  //     plan --fan--> read --seq--> classify --seq--> gather(join) --join--> gA(join)
+  //                                                          \----join--> gB(join)
+  //
+  // `gather` is reached by a `seq` edge, so it never pops and sits INSIDE the branch; `gA` and
+  // `gB` pop and are the two candidates. The ancestor filter added for the single-candidate
+  // arm was never applied on the multi-candidate one, so the sentence said "a join downstream
+  // of read" over a list containing `gather` — and picking `gather` is a `kind: join` edge
+  // from a node to itself: GRAPH006_UNMARKED_CYCLE, plus a second, contradicting GRAPH021.
+  //
+  // Both halves are asserted, over NAME SETS: which joins are offered, and what they wait for.
+  const s = a53PickOne();
   const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
   assert.ok(d !== undefined);
   const fix = d.fix ?? "";
@@ -471,7 +529,20 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
 
   assert.deepEqual([...offered].sort(), ["gA", "gB"], `only the two joins at the barrier's level: ${fix}`);
   assert.equal(offered.includes("gather"), false, "`gather` is inside the branch and must not be offered");
-  assert.deepEqual(waited, ["read", "classify", "gather"], "and `gather` IS waited for — it holds a fold");
+  // ONLY `read` IS DICTATED, and that is §A.65. `classify` is already folded by the branch's own
+  // inner join `gather`; `gather` is already folded by BOTH candidates, so adding it to whichever
+  // one the author picks would be a third claimant. A second folder is what §A.64 refuses. `read`
+  // is the fan-out's target, the node `joined`'s two conjuncts are both about, and is dictated
+  // whatever folds it.
+  assert.deepEqual(waited, ["read"], `the barrier waits for what no join already folds: ${fix}`);
+
+  // AND THE MESSAGE SAYS WHY EACH MISSING NAME IS MISSING, with its folders named. Read off the
+  // sentence by a parser that throws on a shape it does not know, so a rewording cannot pass this.
+  const { counted, absent } = countedIn(d.message);
+  assert.deepEqual(counted, ["read", "classify", "gather"], "the count is still what the branch CONTAINS");
+  assert.deepEqual([...absent.keys()].sort(), ["classify", "gather"]);
+  assert.deepEqual(absent.get("classify"), { reason: "folded", by: ["gather"] });
+  assert.deepEqual(absent.get("gather"), { reason: "folded", by: ["gA", "gB"] });
   // THE INVARIANT the four earlier rounds each broke, in one line.
   assert.equal(
     offered.some((j) => waited.includes(j)),
@@ -479,29 +550,40 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     `offered ${JSON.stringify(offered)} and waits for ${JSON.stringify(waited)} — that overlap is the cycle`,
   );
 
-  // AND FOLLOWING THIS LINE DOES NOT CONVERGE — §A.64, measured, and the honest cost is TWO more
-  // edits that GRAPH021's line does not dictate. This assertion used to read "the fix converges in ONE
-  // step, for either choice" over a graph that DOUBLE-FOLDS.
+  // THE CLAIM, STATED THE WAY IT IS TRUE: following the dictated line introduces NO diagnostic the
+  // first compile did not print, and both remedies are in that one output. It is NOT "converges in
+  // one compile" — §A.65's own words — because the dictated edit alone still exits 1 here: this
+  // fixture also carries a `GRAPH008_JOIN_DEPTH` on `gather`, which the first compile printed and
+  // whose own `fix:` line closes it. Before §A.65,
+  // the dictated list named `classify` as well, and applying it printed TWO `GRAPH008_JOIN_DEPTH`s:
+  // one on `gather` (which the first compile had already printed, because `gA` and `gB` both claim
+  // it) and one on `classify`, WHICH NO LINE IN THE FIRST COMPILE NAMED. Converging then took one
+  // edit GRAPH008 dictates plus one nothing dictates.
   //
   // `writesHeldForJoin` is a property of the TASK'S OWN DEPTH (`run/engine.ts`), so every join
-  // naming a node inside a fan-out folds that node's writes. `gather` sits inside the branch and
-  // already declares `classify`; the dictated list names `classify` again for the barrier, so
-  // `classify` ends up with two folders — and `gather` itself ends up with two, the picked join
-  // and the other candidate. Measured on a real `Engine` over an `append_ordered` channel:
-  // the dictated graph gives n=6 against 4 contributions, and the spelling that leaves `classify`
-  // to the join that already collects it gives 4 against 4.
+  // naming a node inside a fan-out folds that node's writes; `gather` sits inside the branch and
+  // already declares `classify`, so dictating `classify` for the barrier gave it two folders.
   //
-  // The list is what would have to change — a branch member already claimed by a join OTHER than
-  // the candidates should not be dictated again — and that is §A.65 rather than this round, both
-  // because the disclosure sentence §A.57 settled would have to state a second reason for dropping
-  // a name, and because `namesIn` is asserted against this exact set in four other tests.
+  // What is asserted below is the whole claim: the dictated edit introduces NO diagnostic the
+  // first compile did not print, and the one it leaves is closed by that compile's OTHER `fix:`
+  // line. No edit here is invented.
+  const firstCompile = errorsOf(s);
+  const rest = firstCompile.filter((x) => x.code !== "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.deepEqual(
+    rest.map((x) => `${x.code}@${String(x.at?.nodeId)}`),
+    ["GRAPH008_JOIN_DEPTH@gather"],
+    `the first compile's other line, which the convergence below is allowed to follow: ${rest.map((x) => x.message).join(" | ")}`,
+  );
+
   for (const pick of offered) {
     const other = offered.find((o) => o !== pick)!;
     const fixed = clone(s) as unknown as GraphSpec;
     const j = fixed.nodes.findIndex((x) => x.id === n(pick));
+    // ADD to whatever it already declares — the fix line's own word, and `gather` is already there.
+    const had = (fixed.nodes[j]! as NodeSpec).join!.branches;
     (fixed.nodes as NodeSpec[])[j] = {
       ...fixed.nodes[j]!,
-      join: { branches: waited.map((w) => n(w)), mode: "all", onBranchError: "fail" },
+      join: { branches: [...had, ...waited.filter((w) => !had.includes(n(w))).map((w) => n(w))], mode: "all", onBranchError: "fail" },
     } as NodeSpec;
     for (const w of waited) {
       if (!fixed.edges.some((x) => x.from === n(w) && x.to === n(pick) && x.kind === "join")) {
@@ -510,43 +592,34 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     }
     const afterPick = errorsOf(fixed as GraphSpec);
     assert.deepEqual(
-      afterPick.map((x) => x.code),
-      ["GRAPH008_JOIN_DEPTH", "GRAPH008_JOIN_DEPTH"],
-      `picking "${pick}" leaves two nodes with two folders each: ${afterPick.map((x) => x.message).join(" | ")}`,
+      afterPick.map((x) => `${x.code}@${String(x.at?.nodeId)}`),
+      ["GRAPH008_JOIN_DEPTH@gather"],
+      `picking "${pick}" must leave only what the first compile already printed: ${afterPick.map((x) => x.message).join(" | ")}`,
     );
     assert.deepEqual(
-      afterPick.map((x) => String(x.at?.nodeId)).sort(),
-      ["classify", "gather"],
-      "one for the node the inner join already collects, one for the inner join itself",
+      afterPick.map((x) => x.fix),
+      rest.map((x) => x.fix),
+      "and the same remedy, so the author has not been handed a new problem",
     );
 
-    // EDIT ONE, which GRAPH008's line does dictate: `other` takes `pick`'s result instead of the nodes.
+    // THE ONE REMAINING EDIT, and GRAPH008's own line dictates it: `other` drops `gather` from
+    // `branches`, drops its `kind: join` edge from `gather`, and takes the barrier's result as an
+    // arm. (Its line names "gA" as the keeper both times — which join to keep is the author's
+    // choice, and picking `gB` is the mirror of the same sentence.)
     const o = fixed.nodes.findIndex((x) => x.id === n(other));
     (fixed.nodes as NodeSpec[])[o] = {
       ...fixed.nodes[o]!,
       join: { branches: [n(pick)], mode: "all", onBranchError: "fail" },
     } as NodeSpec;
-    const drop = fixed.edges.filter((x) => x.to === n(other) && waited.includes(String(x.from)));
+    const drop = fixed.edges.filter((x) => x.to === n(other) && x.from === n("gather") && x.kind === "join");
+    assert.equal(drop.length, 1, "the `kind: join` edge GRAPH008's line says to drop");
     for (const x of drop) (fixed.edges as EdgeSpec[]).splice(fixed.edges.indexOf(x), 1);
     (fixed.edges as EdgeSpec[]).push({ id: e(`chain-${pick}-${other}`), from: n(pick), to: n(other), kind: "join" } as EdgeSpec);
-    assert.deepEqual(
-      errorsOf(fixed as GraphSpec).map((x) => String(x.at?.nodeId)),
-      ["classify"],
-      "and `classify` is still folded by `gather` and by the barrier",
-    );
 
-    // EDIT TWO, which it does NOT: drop `classify` from the barrier, because `gather` collects it.
-    const j2 = fixed.nodes.findIndex((x) => x.id === n(pick));
-    (fixed.nodes as NodeSpec[])[j2] = {
-      ...fixed.nodes[j2]!,
-      join: { branches: waited.filter((w) => w !== "classify").map((w) => n(w)), mode: "all", onBranchError: "fail" },
-    } as NodeSpec;
-    const dropC = fixed.edges.filter((x) => x.to === n(pick) && x.from === n("classify"));
-    for (const x of dropC) (fixed.edges as EdgeSpec[]).splice(fixed.edges.indexOf(x), 1);
     assert.deepEqual(
       errorsOf(fixed as GraphSpec).map((x) => x.code),
       [],
-      `picking "${pick}" converges only after the edit GRAPH021's line does not dictate`,
+      `picking "${pick}" converges on the two lines of ONE compile, with no edit neither dictates`,
     );
   }
 });
@@ -702,11 +775,76 @@ function heldFixEdits(fix: string): {
   return { entry: entry[1]!, edgeFrom: edge[1]!, barrierOf: barrier[1]! };
 }
 
-/** The nodes GRAPH021's message COUNTS, as a set — the other half of the pair §A.57 is about. */
-function countedIn(message: string): readonly string[] {
+/**
+ * THE NODES GRAPH021'S MESSAGE COUNTS, AND THE REASON IT GIVES FOR EACH ONE IT DOES NOT DICTATE.
+ *
+ * §A.57 put a disclosure clause on this message; §A.65 gave it a SECOND reason, because a branch
+ * member an inner join already folds is now dropped from the dictated list too. Reading only the
+ * count would let either reason be reworded into nothing, so this parser reads the whole clause
+ * and THROWS on a fragment it does not recognise — the same contract as `namesIn` and
+ * `heldFixEdits`. The three sentence shapes are exhaustive by construction: reason 1 alone (the
+ * §A.57 wording, unchanged), reason 2 alone, and both.
+ */
+type Absent = { readonly reason: "unreached" | "folded"; readonly by: readonly string[] };
+
+const QUOTED_LIST = /^(?:"[^"]+")(?:, "[^"]+")*$/;
+const names = (list: string): readonly string[] => [...list.matchAll(/"([^"]+)"/g)].map((m) => m[1]!);
+
+function countedIn(message: string): {
+  readonly counted: readonly string[];
+  readonly absent: ReadonlyMap<string, Absent>;
+} {
   const m = /holds \d+ nodes \(([^)]+)\)/.exec(message);
   assert.ok(m !== null, `message reports no branch count — has the sentence changed shape?\n  ${message}`);
-  return m[1]!.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const counted = m[1]!.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+
+  const disclosed = /, and the `fix:` line dictates (.+?), so (?:they are|it is) in this count and not in that list/.exec(message);
+  if (disclosed === null) {
+    // No clause is legal only in the AGREEING form, which must still say what it always said.
+    // (The one-member branch prints no `holds N nodes` clause at all and never reaches here —
+    // the count assertion above has already thrown.)
+    assert.match(
+      message,
+      /, and a join must wait on every one of them$/,
+      `message neither discloses a difference nor states the agreeing form — what is it saying?\n  ${message}`,
+    );
+    return { counted, absent: new Map() };
+  }
+
+  const [head, tail] = disclosed[1]!.split(" — ");
+  assert.ok(tail !== undefined, `disclosure clause gives no reasons after an em dash:\n  ${message}`);
+  const absent = new Map<string, Absent>();
+
+  /** `"x" is already folded by "j"`, one per name, joined with `, and `. */
+  const readFolded = (text: string): void => {
+    for (const clause of text.split(", and ")) {
+      const f = /^"([^"]+)" is already folded by ((?:"[^"]+")(?:, "[^"]+")*)$/.exec(clause);
+      assert.ok(f !== null, `unrecognised reason fragment — has the sentence changed shape?\n  ${clause}\n  ${message}`);
+      absent.set(f[1]!, { reason: "folded", by: names(f[2]!) });
+    }
+  };
+
+  /** `"x", "y" do not` / `"x" does not` — §A.57's reason, byte-identical. */
+  const readUnreached = (list: string): void => {
+    assert.match(list, QUOTED_LIST, `unrecognised name list in the disclosure clause:\n  ${list}\n  ${message}`);
+    for (const id of names(list)) absent.set(id, { reason: "unreached", by: [] });
+  };
+
+  if (head === "the ones that run into every join it offers") {
+    const one = /^((?:"[^"]+")(?:, "[^"]+")*) (?:do|does) not$/.exec(tail);
+    assert.ok(one !== null, `reason-1 clause is not a name list — changed shape?\n  ${tail}\n  ${message}`);
+    readUnreached(one[1]!);
+  } else if (head === "the ones no other join already folds") {
+    readFolded(tail);
+  } else if (head === "the ones that run into every join it offers and that no other join already folds") {
+    const both = /^((?:"[^"]+")(?:, "[^"]+")*) (?:do|does) not, and (.+)$/.exec(tail);
+    assert.ok(both !== null, `two-reason clause does not carry both reasons — changed shape?\n  ${tail}\n  ${message}`);
+    readUnreached(both[1]!);
+    readFolded(both[2]!);
+  } else {
+    assert.fail(`unrecognised disclosure criterion — a fourth reason must break this file:\n  ${head}\n  ${message}`);
+  }
+  return { counted, absent };
 }
 
 test("A HELD INNER JOIN'S fix: NAMES BOTH HALVES — the entry AND the `kind: join` edge", () => {
@@ -834,16 +972,29 @@ test("GRAPH021'S COUNT AND ITS DICTATED LIST ARE DIFFERENT SETS, and the message
 
   const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
   assert.ok(d !== undefined);
-  const counted = countedIn(d.message);
+  const { counted, absent } = countedIn(d.message);
   const dictated = namesIn(d.fix ?? "");
 
   assert.deepEqual([...counted].sort(), ["classify", "read", "subJoin"], "the count is what the branch CONTAINS");
   assert.deepEqual([...dictated].sort(), ["classify", "read"], "the list is what the barrier can be told to WAIT ON");
 
+  // §A.65 DID NOT MOVE THIS SENTENCE. Nothing collects `subJoin` here —
+  // `GRAPH008_HELD_JOIN_UNCOLLECTED` is refusing it in the same run — so the reason is still the
+  // §A.57 one, and the clause is asserted BYTE FOR BYTE: a second reason exists now, and a rule
+  // that reached for it on this graph would be making the false claim §A.57 refused to make.
+  assert.equal(
+    d.message,
+    'fanout edge "fan" expands "read" but no downstream join waits on it; the branch it opens holds ' +
+      '3 nodes (read, classify, subJoin), and the `fix:` line dictates the ones that run into every ' +
+      'join it offers — "subJoin" does not, so it is in this count and not in that list',
+  );
+  assert.deepEqual(absent.get("subJoin"), { reason: "unreached", by: [] });
+
   // The disclosure, asserted over the NAME SET rather than the prose: every node the two sets
   // disagree about is named in the message as counted-and-not-dictated.
   const difference = counted.filter((c) => !dictated.includes(c));
   assert.deepEqual(difference, ["subJoin"]);
+  assert.deepEqual([...absent.keys()], difference, "and the parsed reasons cover exactly that difference");
   for (const name of difference) {
     assert.match(
       d.message,
@@ -857,12 +1008,290 @@ test("GRAPH021'S COUNT AND ITS DICTATED LIST ARE DIFFERENT SETS, and the message
   assert.deepEqual(offeredJoins(d.fix ?? ""), ["gather"]);
 });
 
+/**
+ * `a53-pickone` with a SECOND ARM off `read` that runs into neither candidate, so one counted
+ * name is absent for §A.57's reason and another for §A.65's, in the same message.
+ */
+function twoReasons(): GraphSpec {
+  const s = a53PickOne();
+  (s.nodes as NodeSpec[]).push({
+    id: n("armY"),
+    type: "function",
+    reads: ["shard"],
+    writes: ["failures"],
+    function: { ref: "function/armY@stable" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("toY"), from: n("read"), to: n("armY"), kind: "seq" } as EdgeSpec);
+  return s;
+}
+
+test("BOTH REASONS IN ONE SENTENCE: a name that reaches no candidate and a name something folds", () => {
+  // §A.65's second half. The two reasons are different facts about different nodes, and a message
+  // carrying one generic reason for both would recreate exactly the defect §A.57 closed: a reader
+  // could not tell which applied to which, so could not tell a deliberate omission from a bug.
+  //
+  //     plan --fan--> read --seq--> classify --seq--> gather(join, branches:[classify])
+  //                        \--seq--> armY                    \--join--> gA / gB
+  //
+  // `armY` runs into neither `gA` nor `gB`; `classify` runs into both but `gather` already folds it.
+  const [d] = errorsOf(twoReasons()).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined);
+
+  const { counted, absent } = countedIn(d.message);
+  assert.deepEqual([...counted].sort(), ["armY", "classify", "gather", "read"]);
+  assert.deepEqual(absent.get("armY"), { reason: "unreached", by: [] }, `§A.57's reason: ${d.message}`);
+  assert.deepEqual(absent.get("classify"), { reason: "folded", by: ["gather"] }, `§A.65's reason: ${d.message}`);
+  assert.deepEqual(absent.get("gather"), { reason: "folded", by: ["gA", "gB"] }, `and the same reason: ${d.message}`);
+  assert.deepEqual(namesIn(d.fix ?? ""), ["read"], "and none of the three is dictated");
+  // The two sets the message reports are the count and the dictated list, and nothing else:
+  // every counted name is either dictated or carries a reason.
+  for (const c of counted) {
+    assert.equal(
+      namesIn(d.fix ?? "").includes(c) !== absent.has(c),
+      true,
+      `"${c}" is neither dictated nor explained, or is both: ${d.message}`,
+    );
+  }
+});
+
+test("THE ZERO-CANDIDATE ARM FILTERS TOO — `add a join node` must not dictate a folded member", () => {
+  // The same predicate in the arm that has no join to offer, which is the half a second copy of
+  // the filter would have been written into and then forgotten (§A.53's own lesson). `inner` sits
+  // INSIDE the branch behind a `seq` edge and already declares `classify`; the new join the
+  // message asks for must collect `read` and `inner`, and leave `classify` where it is.
+  //
+  //     plan --fan--> read --seq--> classify --seq--> inner(join, branches:[classify]) --seq--> collate
+  const s = shipped();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = {
+    ...s.nodes[g]!,
+    id: n("inner"),
+    join: { branches: [n("classify")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+  (s.edges as EdgeSpec[])[s.edges.findIndex((x) => x.id === e("collect"))] = {
+    id: e("collect"), from: n("classify"), to: n("inner"), kind: "seq",
+  } as EdgeSpec;
+  (s.edges as EdgeSpec[])[s.edges.findIndex((x) => x.id === e("fold"))] = {
+    id: e("fold"), from: n("inner"), to: n("collate"), kind: "seq",
+  } as EdgeSpec;
+
+  const [d] = errorsOf(s).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined);
+  assert.deepEqual(offeredJoins(d.fix ?? ""), [], "there is no join at the barrier's level, so none is offered");
+  // `collate` is in the branch too — with no barrier anywhere the fan-out runs to the end of the
+  // graph — and nothing folds it, so it is dictated like `read`.
+  assert.deepEqual(namesIn(d.fix ?? ""), ["read", "inner", "collate"], `and "classify" is left to "inner": ${d.fix}`);
+  assert.deepEqual(countedIn(d.message).absent.get("classify"), { reason: "folded", by: ["inner"] });
+});
+
+test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated whatever folds it", () => {
+  // `e.to` is an explicit guard in the code, and this is the reason it has to be one. `joined` —
+  // the condition that makes GRAPH021 fire at all — is a CONJUNCTION: some join declares `e.to` in
+  // `branches` AND is downstream of it. Naming `e.to` for a CANDIDATE satisfies both, so a list
+  // that leaves `e.to` out dictates an edit that does not clear the error it is attached to — and
+  // a claimer satisfying only the first half does not clear it either, which is (b) and (c).
+  //
+  // AN EARLIER CUT LEANED ON AN IMPLICATION INSTEAD, and it was false. It required a folder to be
+  // DOWNSTREAM of its member, arguing that a join collecting `read` would satisfy `joined` and so
+  // never reach the filter. `rule008`'s `claimedBy` counts a folder from `branches` membership
+  // alone, with no reachability, so a claim `idx.ancestors` cannot see is a claim GRAPH008 will
+  // still refuse — (b) below is one such, and `A FOLDER THIS RULE CANNOT REACH` is the other.
+  //
+  // (a) A join that declares `read` AND is downstream of it: nothing is said.
+  const collected = shipped();
+  const gc = collected.nodes.findIndex((x) => x.id === n("gather"));
+  (collected.nodes as NodeSpec[])[gc] = {
+    ...collected.nodes[gc]!,
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec;
+  assert.deepEqual(
+    errorsOf(collected).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN").map((x) => x.at?.edgeId),
+    [],
+    "a join that folds the fan-out's target IS the barrier, so GRAPH021 says nothing",
+  );
+
+  // (b) A join that declares `read` with no path to it at all. `read` is still dictated — the
+  //     guard, and the only way this rule could otherwise print an empty list.
+  //
+  //     AND THE RESIDUE IS PINNED, not described: following the line then DOES produce a
+  //     `GRAPH008_JOIN_DEPTH` on `read`, because `off` is a claimant too. This rule cannot dictate
+  //     around it — dropping `read` would dictate a non-fix — and the author has to decide which
+  //     join is the barrier. HERE the first compile is not silent: `off` has no inbound edge from
+  //     `read`, so `GRAPH008_BRANCH_NOT_CONNECTED` names the entry in the same output. THAT IS A
+  //     PROPERTY OF THIS SHAPE AND NOT OF THE RESIDUE — (c) is the same residue with nothing
+  //     naming it, and the pair is the whole disclosure.
+  const off = f1Step1();
+  (off.nodes as NodeSpec[]).push({
+    id: n("off"),
+    type: "join",
+    reads: ["failures"],
+    writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (off.edges as EdgeSpec[]).push({ id: e("toOff"), from: n("plan"), to: n("off"), kind: "seq" } as EdgeSpec);
+  const firstOff = errorsOf(off);
+  const [d] = firstOff.filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined);
+  assert.deepEqual(namesIn(d.fix ?? ""), ["read", "classify"], `the fan-out's target is dictated anyway: ${d.fix}`);
+  assert.deepEqual(
+    firstOff.map((x) => x.code).sort(),
+    // GRAPH010 arrives with `f1Step1`: dropping `collect-read` switches the branch-local exemption
+    // off (§A.48 W6). On `f1Step1` ALONE the dictated edit clears it (the test above compiles to
+    // `[]`); with `off` in the graph it survives the same edit, which is measured below and is a
+    // second consequence of the same bogus entry rather than anything this rule chose.
+    ["GRAPH008_BRANCH_NOT_CONNECTED", "GRAPH010_CONCURRENT_WRITE", "GRAPH021_FANOUT_WITHOUT_JOIN"],
+    "and the first compile does name `off`\'s entry, under the sibling code",
+  );
+  assert.deepEqual(
+    applyDictated(off, d, "gather").map((x) => `${x.code}@${String(x.at?.nodeId)}`).sort(),
+    ["GRAPH008_BRANCH_NOT_CONNECTED@off", "GRAPH008_JOIN_DEPTH@read", "GRAPH010_CONCURRENT_WRITE@read"],
+    "THE RESIDUE: `read` now has two claimants, and this rule cannot dictate around it",
+  );
+
+  // (c) THE SAME RESIDUE WITH NOTHING NAMING IT, which is why (b) alone would have been a
+  //     misleading disclosure. `again` declares `read` and is wired to it by a `loop` edge:
+  //     `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind, so it is silent,
+  //     while `idx.ancestors` walks no `loop` edge, so `joined` is false and GRAPH021 fires.
+  //     The first compile prints exactly ONE diagnostic and the dictated edit produces a second.
+  //
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //                       \--loop--> again(join, branches:["read"])
+  const looped = f1Step1();
+  (looped.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (looped.inputs as string[]).push("failures");
+  const r = looped.nodes.findIndex((x) => x.id === n("read"));
+  (looped.nodes as NodeSpec[])[r] = { ...looped.nodes[r]!, reads: ["shard", "failures"], writes: ["raw", "failures"] } as NodeSpec;
+  (looped.nodes as NodeSpec[]).push({
+    id: n("again"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (looped.edges as EdgeSpec[]).push(
+    { id: e("back"), from: n("read"), to: n("again"), kind: "loop", until: "len(failures) > 0", maxIterations: 2 } as unknown as EdgeSpec,
+    { id: e("out"), from: n("again"), to: n("collate"), kind: "seq" } as EdgeSpec,
+  );
+
+  const firstLoop = errorsOf(looped);
+  assert.deepEqual(
+    firstLoop.map((x) => x.code),
+    ["GRAPH021_FANOUT_WITHOUT_JOIN"],
+    `ONE diagnostic, and nothing in it names the claim on "read": ${firstLoop.map((x) => x.message).join(" | ")}`,
+  );
+  const dl = firstLoop[0]!;
+  assert.deepEqual(namesIn(dl.fix ?? ""), ["read", "classify"], `"read" is dictated anyway: ${dl.fix}`);
+  assert.deepEqual(
+    applyDictated(looped, dl, "gather").map((x) => `${x.code}@${String(x.at?.nodeId)}`),
+    ["GRAPH008_JOIN_DEPTH@read"],
+    "and the edit produces a collision the first compile named under NO code",
+  );
+});
+
+/** `heldInner`-style helper: type the `fix:` line's `branches` entries and `kind: join` edges. */
+function applyDictated(spec: GraphSpec, d: Diagnostic, pick: string): readonly Diagnostic[] {
+  const s = clone(spec) as unknown as GraphSpec;
+  const names = namesIn(d.fix ?? "");
+  const j = s.nodes.findIndex((x) => x.id === n(pick));
+  const had = (s.nodes[j]! as NodeSpec).join!.branches;
+  (s.nodes as NodeSpec[])[j] = {
+    ...s.nodes[j]!,
+    join: { ...(s.nodes[j]! as NodeSpec).join!, branches: [...had, ...names.filter((w) => !had.includes(n(w))).map(n)] },
+  } as NodeSpec;
+  for (const w of names) {
+    if (!s.edges.some((x) => x.from === n(w) && x.to === n(pick) && x.kind === "join")) {
+      (s.edges as EdgeSpec[]).push({ id: e(`add-${w}-${pick}`), from: n(w), to: n(pick), kind: "join" } as EdgeSpec);
+    }
+  }
+  return errorsOf(s);
+}
+
+test("A CANDIDATE THAT ALREADY FOLDS A MEMBER: BOTH choices must compile, not one", () => {
+  // The first fix round excluded EVERY candidate from the fold test, so a member one candidate
+  // already declares was dictated to the OTHER — and the line then compiled for one of the two
+  // names it offered and was refused for the other. `reachesEveryCandidate`'s own rationale, the
+  // list has to be true whichever the author picks, is what that broke.
+  //
+  //     plan --fan--> read --seq--> classify --join--> gA(join, branches:["classify"])
+  //                                                       --join--> gB(join, branches:["gA"])
+  const s = shipped();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = { ...s.nodes[g]!, id: n("gA"), join: { branches: [n("classify")], mode: "all", onBranchError: "fail" } } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+  (s.edges as EdgeSpec[])[s.edges.findIndex((x) => x.id === e("collect"))] = {
+    id: e("collect"), from: n("classify"), to: n("gA"), kind: "join",
+  } as EdgeSpec;
+  (s.nodes as NodeSpec[]).push({
+    id: n("gB"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("gA")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("toB"), from: n("gA"), to: n("gB"), kind: "join" } as EdgeSpec);
+  (s.edges as EdgeSpec[])[s.edges.findIndex((x) => x.id === e("fold"))] = {
+    id: e("fold"), from: n("gB"), to: n("collate"), kind: "seq",
+  } as EdgeSpec;
+
+  const first = errorsOf(s);
+  assert.deepEqual(first.map((x) => x.code), ["GRAPH021_FANOUT_WITHOUT_JOIN"], "one error, so the fix line is the whole remedy");
+  const d = first[0]!;
+  assert.deepEqual([...offeredJoins(d.fix ?? "")].sort(), ["gA", "gB"]);
+  assert.deepEqual(namesIn(d.fix ?? ""), ["read"], `\`classify\` is already folded by a candidate: ${d.fix}`);
+  assert.deepEqual(countedIn(d.message).absent.get("classify"), { reason: "folded", by: ["gA"] });
+
+  // THE ASSERTION THE ROUND BEFORE THIS ONE COULD NOT MAKE: both names it offers, not one.
+  for (const pick of offeredJoins(d.fix ?? "")) {
+    assert.deepEqual(applyDictated(s, d, pick).map((x) => x.code), [], `picking "${pick}" must compile: ${d.fix}`);
+  }
+});
+
+test("A CLAIM `idx.ancestors` CANNOT SEE IS ONE `GRAPH008` STILL COUNTS — a `compensation` edge", () => {
+  // F3. `foldersOf` used to require the claiming join to be DOWNSTREAM of its member, which
+  // `idx.ancestors` answers — and `idx.ancestors` walks neither `loop` nor `compensation` edges,
+  // while `rule008`'s `claimedBy` needs no path at all. So a claim joined to its member by one of
+  // those was invisible here and counted there, and following the line printed a
+  // `GRAPH008_JOIN_DEPTH` the first compile had not. The predicate now makes `claimedBy`'s test —
+  // what the COMPILER will count, which is the only thing a `fix:` line has to predict.
+  //
+  //     plan --fan--> read --seq--> classify --seq--> extra --join--> gather(branches:["extra"])
+  //                                     \--compensation--> again(join, branches:["classify"])
+  const s = shipped();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.nodes as NodeSpec[]).push(
+    { id: n("extra"), type: "function", reads: ["shard"], writes: ["failures"], function: { ref: "function/extra@stable" } } as NodeSpec,
+    { id: n("again"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("classify")], mode: "all", onBranchError: "fail" } } as NodeSpec,
+  );
+  const g = s.nodes.findIndex((x) => x.id === n("gather"));
+  (s.nodes as NodeSpec[])[g] = { ...s.nodes[g]!, join: { branches: [n("extra")], mode: "all", onBranchError: "fail" } } as NodeSpec;
+  (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("collect-read")), 1);
+  (s.edges as EdgeSpec[])[s.edges.findIndex((x) => x.id === e("collect"))] = {
+    id: e("collect"), from: n("extra"), to: n("gather"), kind: "join",
+  } as EdgeSpec;
+  (s.edges as EdgeSpec[]).push(
+    { id: e("more"), from: n("classify"), to: n("extra"), kind: "seq" } as EdgeSpec,
+    { id: e("back"), from: n("classify"), to: n("again"), kind: "compensation" } as EdgeSpec,
+  );
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+  assert.deepEqual(namesIn(d.fix ?? ""), ["read", "extra"], `\`classify\` belongs to \`again\`: ${d.fix}`);
+  assert.deepEqual(countedIn(d.message).absent.get("classify"), { reason: "folded", by: ["again"] });
+
+  // And following the line introduces nothing the first compile did not print. (`again`\'s
+  // compensation edge draws its own GRAPH012, which is there before and after and is not this
+  // rule\'s business.)
+  const before = first.map((x) => `${x.code}@${String(x.at?.nodeId ?? x.at?.edgeId)}`).sort();
+  const after = applyDictated(s, d, "gather").map((x) => `${x.code}@${String(x.at?.nodeId ?? x.at?.edgeId)}`).sort();
+  assert.deepEqual(after, before.filter((x) => !x.startsWith("GRAPH021")), `nothing new: ${after.join(", ")}`);
+});
+
 test("the count/list disclosure appears ONLY when the two sets disagree", () => {
   // On the F1 graph every branch member feeds `gather`, so the count and the list are the same
   // set and the sentence is exactly true without a qualifier. A clause that always fires would
   // teach a divergence that is not there.
   const [d] = errorsOf(f1Step1()).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
   assert.ok(d !== undefined);
-  assert.deepEqual([...countedIn(d.message)].sort(), [...namesIn(d.fix ?? "")].sort());
+  const { counted, absent } = countedIn(d.message);
+  assert.deepEqual([...counted].sort(), [...namesIn(d.fix ?? "")].sort());
+  assert.equal(absent.size, 0);
   assert.doesNotMatch(d.message, /in this count and not in that list/);
 });
