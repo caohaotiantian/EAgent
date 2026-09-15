@@ -195,12 +195,12 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-10-c.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-15.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-10-c wave is merged into `loom`; the handoff says what each lane
-did and left open.
+Every branch through the 2026-09-15 wave is merged into `loom`; the handoff says what each lane
+did and left open, and which of its lanes' claims did not survive being re-run.
 
 ## Commands
 
