@@ -2696,8 +2696,10 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
  * author picks barrier C is its existing folders PLUS C, so dictating it is safe exactly when its
  * only folder could be C: knowable with ONE candidate (it IS `named`, which is why the F1 shape's
  * sentence does not move), unknowable with two. The one exception is `e.to`, dictated whatever
- * folds it, because `joined` — the condition that fires this whole rule — is "some join waits on
- * `e.to`", so a list without it dictates an edit that does not clear the error.
+ * folds it, because `joined` — the condition that fires this whole rule — is a CONJUNCTION: some
+ * join declares `e.to` in `branches` AND is downstream of it. Both halves matter. A list without
+ * `e.to` dictates an edit that does not clear the error, and a claimer satisfying only the first
+ * half does not clear it either — which is the residue named at the guard below.
  *
  * THE DISAGREEING FORM PROMISES NO REFUSAL, which cost two review rounds. It first read "a join
  * must wait on every one of them — directly, or through another branch node that folds it", and
@@ -2849,11 +2851,20 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     //
     // `e.to` IS DICTATED WHATEVER FOLDS IT, and that is the guard the no-empty-list invariant now
     // rests on rather than on a reachability argument. `joined` — the condition that makes this
-    // whole diagnostic fire — is "some join waits on `e.to`", so a list that leaves `e.to` out
-    // dictates an edit that does not clear the error it is attached to. THE RESIDUE, NAMED: if
-    // another join already claims `e.to`, following this line produces `GRAPH008_JOIN_DEPTH` on
-    // `e.to`, and the author has to decide which join is the barrier. The graph is broken twice
-    // over and the second break is the one this rule cannot dictate around.
+    // whole diagnostic fire — is a CONJUNCTION: some join declares `e.to` in `branches` AND is
+    // downstream of it. Naming `e.to` for a CANDIDATE satisfies both, candidates being downstream
+    // by construction, so a list that leaves `e.to` out dictates an edit that does not clear the
+    // error it is attached to.
+    //
+    // THE RESIDUE, NAMED: a join satisfying only the FIRST half — declares `e.to`, not downstream
+    // of it — leaves `joined` false, so this diagnostic fires and dictates `e.to`, and the edit
+    // then produces `GRAPH008_JOIN_DEPTH` on `e.to`. The author has to decide which join is the
+    // barrier; the graph is broken twice over and the second break is the one this rule cannot
+    // dictate around. WHETHER THE FIRST COMPILE SAYS SO DEPENDS ON THE EDGE:
+    // `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind while `idx.ancestors`
+    // walks neither `loop` nor `compensation`, so a claimer with NO edge at all is named there in
+    // the same compile and a claimer wired by one of those two is named by nothing. Both are
+    // pinned in `fanout-branch-diagnostic.test.ts`.
     const foldedElsewhereThan = (id: NodeId): readonly NodeId[] =>
       id === e.to ? [] : foldersOf(id).filter((j) => j !== named?.id);
 
@@ -2902,16 +2913,30 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           : `the ones that run into every join it offers and that no other join already folds — ` +
             `${unreachedList} ${unreached.length > 1 ? "do" : "does"} not, and ${foldedClauses}`;
 
+    // ONE NAME GETS A SINGULAR SENTENCE. Since §A.65 a one-name list is the COMMON case for the
+    // multi-candidate arm — everything but `e.to` is usually already folded — and "for each of
+    // read, plus a `kind: join` edge from each of them into it" reads as though a list were
+    // elided. Only the list clauses move: the two-or-more wording is byte-identical, which is what
+    // keeps the F1 / `triage-failures.json` and §A.57 sentences (two names each) where they are.
     const each = waitsFor.join(", ");
+    const one = waitsFor.length === 1;
     const fix =
       named !== undefined
-        ? `give join "${named.id}" an entry in its \`branches\` for each of ${each}, and a \`kind: join\` edge from ` +
-          `each of them into "${named.id}" — every node inside a fan-out branch needs both. ADD to whatever ` +
+        ? (one
+            ? `give join "${named.id}" an entry in its \`branches\` for ${each}, and a \`kind: join\` edge from ` +
+              `${each} into "${named.id}"`
+            : `give join "${named.id}" an entry in its \`branches\` for each of ${each}, and a \`kind: join\` edge from ` +
+              `each of them into "${named.id}"`) +
+          ` — every node inside a fan-out branch needs both. ADD to whatever ` +
           `"${named.id}" already declares: one join can be the barrier for more than one fan-out`
         : candidates.length > 1
-          ? `pick one of the joins ${candidates.map((c) => `"${c.id}"`).join(" or ")} — not one of the nodes below, ` +
-            `which are what it waits FOR — and give it an entry in its \`branches\` for each of ${each}, plus a ` +
-            `\`kind: join\` edge from each of them into it, added to whatever it already declares`
+          ? `pick one of the joins ${candidates.map((c) => `"${c.id}"`).join(" or ")} — ` +
+            (one
+              ? `not the node below, which is what it waits FOR — and give it an entry in its \`branches\` for ` +
+                `${each}, plus a \`kind: join\` edge from ${each} into it, added to whatever it already declares`
+              : `not one of the nodes below, which are what it waits FOR — and give it an entry in its \`branches\` ` +
+                `for each of ${each}, plus a \`kind: join\` edge from each of them into it, added to whatever it ` +
+                `already declares`)
           : `add a join node downstream of "${e.to}", with an entry in its \`branches\` for every node you leave ` +
             `inside the branch and a \`kind: join\` edge from each — as drawn that is ${each}, and a join placed ` +
             `earlier shortens it`;
