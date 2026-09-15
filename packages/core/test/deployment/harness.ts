@@ -246,10 +246,18 @@ process.on("exit", () => {
  * worktree, and hidden for as long as it was because `.loom/` is in `.gitignore` and so
  * `git status` said nothing.
  *
- * ONE DIRECTORY PER TEST PROCESS, reaped with the children: the callers that want a cwd of their
- * own pass one, and the default only has to be somewhere harmless. It is not the guard — §H.11's
- * fix, that `main` decides the verb before it opens anything, is — it is the net under it, so the
- * next call that omits `--workspace` litters a temp dir instead of the tree.
+ * ONE DIRECTORY PER TEST PROCESS, AND IT IS SHARED BY EVERY CHILD IN IT. Two things follow and
+ * both are deliberate. A caller that wants to assert on what its command left BEHIND must pass a
+ * cwd of its own — this one accumulates whatever the file's other children wrote, so it can answer
+ * "is it the repo?" and cannot answer "what did THIS command create?"; that is what
+ * `test/cli/refusals-leave-no-workspace.test.ts` passes its own `mkdtempSync` for. And it is
+ * removed in `after()` ALONE: the `process.on("exit")` above kills children and deletes nothing,
+ * because `rmSync` on the way out of a crashing process is how the evidence of the crash gets
+ * thrown away. A directory a hard exit leaves in `tmpdir()` is the operating system's problem.
+ *
+ * It is not the guard — §H.11's fix, that `main` decides the verb before it opens anything, is —
+ * it is the net under it, so the next call that omits `--workspace` litters a temp dir instead of
+ * the tree.
  */
 let sharedCwd: string | undefined;
 function spawnCwd(): string {
@@ -730,7 +738,11 @@ export async function serving(argv: readonly string[], cwd: string = spawnCwd())
  *
  * `cwd` defaults to a temp directory and never to the runner's — see `spawnCwd`. A caller that
  * wants to assert on what the command left BEHIND passes its own, which is what
- * `test/cli/refusals-leave-no-workspace.ts` does for every path in that set.
+ * `test/cli/refusals-leave-no-workspace.test.ts` does for every path in that set.
+ *
+ * `out` is returned as well as `err`, because a command that ends by itself is not always a
+ * command that refused: `loom help` exits 0 and writes only to stdout, and a caller checking that
+ * the usage actually reached somebody has nowhere else to read it.
  */
 export async function refusing(argv: readonly string[], cwd: string = spawnCwd()): Promise<{ code: number | null; out: string; err: string }> {
   const child = spawn(process.execPath, [CLI, ...argv], { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -740,11 +752,19 @@ export async function refusing(argv: readonly string[], cwd: string = spawnCwd()
   let err = "";
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (c: string) => (err += c));
-  // STDOUT IS DRAINED TOO, for `serving`'s reason one screen up: an undrained pipe is a child
-  // that BLOCKS once it fills, and `USAGE` is 25,607 bytes against a 16 KiB pipe on macOS. Every
-  // caller before this one refused on stderr, so the hazard was real and unexercised; `loom help`
-  // is a command that ends by itself and writes only to stdout, and it is in the set
-  // `refusals-leave-no-workspace.test.ts` has to drive.
+  // STDOUT IS DRAINED TOO, and the reason is NOT that today's output would block — it would not,
+  // and the first draft of this comment said it would. Measured rather than assumed, twice: `loom
+  // help` spawned with stdout piped and never read exits 0, and a child that writes N bytes and
+  // waits for the FLUSH before exiting first hangs somewhere in (128 KiB, 256 KiB] on this
+  // machine, against `USAGE`'s 25,607 bytes. So the hazard was hypothetical, not "real and
+  // unexercised".
+  //
+  // It is here as defence and for the return value. Defence: this is a harness, the margin is one
+  // order of magnitude and not two, and a command that grows a long report on stdout would fail as
+  // a HANG — the failure mode `serving`'s own drain one screen up was added for, which reported
+  // less than no test at all. The return value: `out` is what a caller reads when the command's
+  // own words are the claim and it wrote them to stdout, which is every `loom help` in
+  // `refusals-leave-no-workspace.test.ts`.
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (c: string) => (out += c));
   // `close`, not `exit`: it fires once the pipes have DRAINED, so `err` below is the whole of

@@ -458,14 +458,17 @@ test("AN IDENTITY SOURCE **IS** THE CREDENTIAL — a module's source binds 0.0.0
   // NOW THE TWO STRINGS. Neither may enumerate two doors when the binary has three.
   //
   // Reached through `unknown command`, which prints the whole usage text to STDERR and exits 2
-  // — `--help` writes the same text to stdout and exits 0, which `refusing` does not capture.
+  // — `--help` writes the same text to stdout and exits 0, and this assertion reads `err`.
   //
-  // `--workspace w.dir` ON A VERB THAT DOES NOT EXIST, which reads as pointless and is not
-  // (`TODO.md` §H.10, the same defect one file over). `refusing` spawns with no `cwd`, so the
-  // child inherits the test runner's — the repo root — and `main` opens the workspace BEFORE it
-  // decides the verb is unknown. Measured: `node --test packages/core/test/cli/serve-host.test.ts`
-  // created `<repo>/.loom/journal.db` on every run, which `.gitignore` line 9 covers, so the only
-  // sign of it was a journal in the source tree nobody had a name for.
+  // `--workspace w.dir` ON A VERB THAT DOES NOT EXIST, which reads as pointless and is HISTORY
+  // rather than protection (`TODO.md` §H.10, and then §H.11). It was protection: `refusing` used
+  // to spawn with no `cwd`, so the child inherited the test runner's — the repo root — and `main`
+  // opened the workspace BEFORE it decided the verb was unknown, which created
+  // `<repo>/.loom/journal.db` on every run of this file; `.gitignore` line 9 covers `.loom/`, so
+  // the only sign was a journal in the source tree nobody had a name for. BOTH halves are closed
+  // now — `refusing` spawns in a temp directory (`spawnCwd`) and `main` decides the verb before it
+  // opens anything (`dispatchesVerb`) — so the flag is kept only because it costs nothing and
+  // deleting it would leave this comment as the sole record of what it was for.
   const usage = await refusing(["nonsense", "--workspace", w.dir]);
   assert.equal(usage.code, 2);
   // Column-padded across five lines, so the run of whitespace is collapsed before matching —
