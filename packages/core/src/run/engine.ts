@@ -7406,8 +7406,8 @@ export class Engine {
     //
     // An EVIDENCE member is a `human_gate` task that produced nothing: its success means "a human
     // answered", not "something was made". Every other member is WORK. The distinction is not
-    // invented here and is not a guess about node types — `#gateOrDispatch` already keys the same
-    // one on the same field, and for the same reason: "APPROVE ON A WORK NODE MEANS 'GO AHEAD',
+    // invented here and is not a guess about node types — `#executeTask`'s settled-gate arm already
+    // keys the same one on the same field, and for the same reason: "APPROVE ON A WORK NODE MEANS 'GO AHEAD',
     // NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval, so approving completes it;
     // every other node type has work behind the gate, and treating approval as completion would
     // report success for an action that never happened." `STRUCTURALLY_PURE` reads a gate the same

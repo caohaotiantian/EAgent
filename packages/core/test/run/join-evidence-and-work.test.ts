@@ -25,9 +25,9 @@
  *
  * WHY THIS IS NOT A `JoinSpec` FIELD, which is what the row proposed. `NodeSpec.type` already
  * carries the distinction for every member, and the kernel already keys the SAME evidence/work
- * distinction on the SAME field, in this same file — `#gateOrDispatch`: *"APPROVE ON A WORK NODE
- * MEANS 'GO AHEAD', NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval, so approving
- * completes it; every other node type has work behind the gate."* A field would be a second
+ * distinction on the SAME field, in this same file — `#executeTask`'s settled-gate arm: *"APPROVE
+ * ON A WORK NODE MEANS 'GO AHEAD', NOT 'CONSIDER IT DONE'. A `human_gate` node is its own approval,
+ * so approving completes it; every other node type has work behind the gate."* A field would be a second
  * spelling of a fact the spec already states, new replay vocabulary in the one artifact
  * `graphHash` is taken over, and its DEFAULT would have to be the node-type rule anyway — so it
  * would buy an override no graph in the tree asks for. §D.9 declined `join.minBranches` on the
