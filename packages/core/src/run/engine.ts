@@ -5544,9 +5544,31 @@ export class Engine {
    * recomputing on this side compares two different things and declines every run whose
    * submitter hand-built a `RunGraph` with a stale field, which is precisely the §A.63 shape and
    * the only shape that can reach the vocabulary refusals at all (the compiler stamps the field
-   * and refuses both faults, so a compiled graph has neither). What is left, named rather than
-   * hidden: a caller holding the run's OWN compiled graph can bend one edge, keep the field and
-   * the manifest, and end the run — and such a caller is the embedder, who can call `cancel`.
+   * and refuses both faults, so a compiled graph has neither).
+   *
+   * THE RESIDUE, AT ITS REAL WIDTH — and it is wider than "you must hold the run's own graph",
+   * which is what this paragraph used to say. Neither fact is secret. `run.compiled` carries
+   * BOTH `graphHash` and `resolutionManifest`, and `manifestKey` normalises the second, so a
+   * caller who knows the runId and can READ the journal synthesises a matching identity from
+   * scratch: build any graph, copy the two recorded values onto it, bend an edge. Measured, on a
+   * parked `human_gate` run whose graph the caller never saw — `synthesised-from-journal advance
+   * threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1  gates: ["cancelled"]`. The
+   * manifest is a NAME set too, so any foreign graph naming the same refs passes it, and two
+   * graphs that name no resources at all share the empty manifest. So this check raises the bar
+   * from "know the hash" — which `compiledGraphHash` and `RunProjection.graphHash` hand out
+   * anyway — to "read one journal row", and no further. It is a guard against a caller who
+   * brings the WRONG graph by accident, not against one who wants the run dead.
+   *
+   * AND WHAT SUCH A CALLER GETS IS NOT `cancel`, which this paragraph also used to claim. Two
+   * differences, both auditable facts about the journal: `#failRun` runs `#compensate` BEFORE the
+   * terminal row, so the forged path can dispatch every compensation the run has recorded, while
+   * `#cancelTree` compensates nothing; and the row lands as `run.failed` from
+   * `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where a cancel writes
+   * `operator.command` attributed to the caller. So an auditor reading the log cannot tell a
+   * caller's deliberate destruction from a build that genuinely could not read the graph.
+   * Narrowing it needs a door that is not reachable with journal read access — a process
+   * boundary, or an identity the journal does not publish. Recorded as a residual row rather
+   * than closed here.
    */
   #graphIdentityMismatch(
     ctx: RunContext,
@@ -7485,6 +7507,16 @@ export class Engine {
     // A MEMBER THAT SUCCEEDED AND WROTE NOTHING STILL COUNTS, deliberately. A fan whose branches
     // all succeed writing nothing folds and succeeds: "the run produced no data" is not this
     // row's shape, which is "no branch came through at all, on evidence a human refused".
+    //
+    // AND THE INSTANCE OF THAT WHICH IS WORTH KNOWING BEFORE YOU TRUST THIS ARM: an APPROVED
+    // `human_gate` is a member that succeeded and wrote nothing. Listing one in `join.branches`
+    // therefore DISARMS this refusal for its whole barrier — two humans approve, every unit of
+    // work behind them throws, and the run reports `succeeded` with nothing folded, in all four
+    // modes (measured; the base reads the same, so it is disarmed rather than broken). The
+    // gate-reject case §D.9 is named for survives because a REJECTED gate is a lost member. A
+    // rule that told a gate's success apart from a worker's would need the fold to know which
+    // members are evidence and which are work, which is a `JoinSpec` question and not this
+    // arm's; recorded as a §D.9 residual row rather than guessed at here.
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
     // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
@@ -11386,7 +11418,7 @@ export class Engine {
     // predicate answers "can another arrival change the answer?" from the SIBLING set,
     // `p.fanouts` and quiescence — evidence about the future. The fold answers "is what
     // arrived worth folding?" from the MEMBER TASKS and their writes, which this method never
-    // looks at and which are not final until the barrier's own Task runs (lazy materialisation
+    // reads and which are not final until the barrier's own Task runs (lazy materialisation
     // tops the fan up in between, so an early mint still folds every member that commits
     // meanwhile — see the short-circuit test). Computing the verdict here would read a
     // different set, at an earlier instant, and get a different answer.

@@ -534,9 +534,12 @@ test("A FAN-OUT THAT PLANNED ZERO BRANCHES STILL RELEASES AND STILL SUCCEEDS —
  *   - `staticSpec` below: three sibling arms wired `kind: "join"` with no fan-out above them, so
  *     every arm sits at the SAME root coordinate. One loser emptied the set. Measured, `mode:
  *     all`, `onBranchError: "skip"`, `losers: ["a"]` — `status=failed found=["b","c"] total=2
- *     err=E_QUORUM_UNREACHABLE`, against a base reading `succeeded`. This is the shape of the
- *     SHIPPED `examples/graphs/two-person-approval.json`, where two-of-three approval lives in a
- *     `quorum` join over three `human_gate` arms: one rejection would have failed the run.
+ *     err=E_QUORUM_UNREACHABLE`, against a base reading `succeeded`. It is the SAME SHAPE as the
+ *     shipped `examples/graphs/two-person-approval.json`, where two-of-three approval lives in a
+ *     `quorum` join over three static `human_gate` arms — though NOT a defect on that graph:
+ *     it declares `onBranchError: "fail"`, so one rejection fires the PRE-EXISTING arm on both
+ *     engines and the first cut never got a word in (measured). The shape is what matters; the
+ *     graph that happens to ship carries a posture that hides it.
  *   - `degradedSpec` below: a fanned branch of two nodes where the FIRST wrote and succeeded and
  *     the second threw. Every coordinate is lost, so the run failed and discarded `seen`, where
  *     the base read `seen: ["a","b"]` — under a message saying the run "did no work".
