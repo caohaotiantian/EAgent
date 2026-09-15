@@ -233,8 +233,14 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                                            readsResolved / readsUnresolved name
                                                            the payload handles this door read
                                                            back and the ones it could not: a
-                                                           {"$payload":...} in reads is a value
-                                                           a node wrote unless the row lists it
+                                                           {"$payload":...} in reads is a HANDLE
+                                                           only if readsUnresolved lists that
+                                                           channel — otherwise it is content,
+                                                           either a value a node wrote or a
+                                                           payload whose own content has that
+                                                           shape. Names, not positions: reads
+                                                           prints its keys alphabetically and
+                                                           these lists are in declared order
   loom approve <runId> <gateId> --as ID [--reject REASON]  resolve a gate
                [--graph <graph.json|yaml>]                  override the graph lookup
   loom cancel  <runId> --as ID [--reason WHY]              stop a run; needs no graph
@@ -5462,7 +5468,7 @@ async function gatesWithReads(
     // only by a `! CONTENT NOT SHOWN` line on stderr, which `jq` never sees. Measured before,
     // on the fixture in `test/cli/gates-payload-provenance.test.ts`:
     //
-    //     reads.docB  = {"$payload":{"digest":"sha256:e2560629…","bytes":70014}}   ← a handle
+    //     reads.docB  = {"$payload":{"digest":"sha256:9c2df12b…","bytes":69646}}   ← a handle
     //     reads.mimic = {"$payload":{"digest":"sha256:0000…","bytes":108002}}      ← a VALUE
     //     row keys: …,reads,readsTruncated,readsMayBeStale                         ← nothing
     //
@@ -5472,8 +5478,13 @@ async function gatesWithReads(
     // value carries nothing saying it came from outside the journal, and an empty
     // `readsUnresolved` is the same document for a gate that read every handle back as for a
     // gate that had none. Their UNION is the set of channels the fold externalised and this gate
-    // reads — the printed values that did not come out of the journal `contentDigest` binds —
-    // and it is recoverable only if both are named.
+    // reads, and it is recoverable only if both are named.
+    //
+    // THAT UNION IS NOT "THE VALUES THAT DID NOT COME OUT OF THE JOURNAL", which an earlier draft
+    // of this said and which is false in both directions. An UNRESOLVED channel prints exactly the
+    // handle the journal recorded, so its printed value came from the journal and nowhere else;
+    // and a RESOLVED channel the graph classified prints `[secret]`, which came from neither.
+    // The union is a statement about what the fold externalised — nothing more.
     //
     // ON THE ROW, for §A.58(1)'s reason exactly: JSON object keys are arbitrary strings, so every
     // marker a value might carry is one a node can write; what a channel value CANNOT do is add a
@@ -5589,8 +5600,12 @@ async function gatesWithReads(
  * that the answer is carried out of here instead of being spent on a stderr line, so the caller can
  * put it on the row. `resolved` and `unresolved` are subsets of `need`, so they name only channels
  * the FOLD calls handles — a node-written lookalike is in neither, which is exactly what says it is
- * a value. Both are in the gate's declared channel order, the same order `reads` and
- * `readsMayBeStale` use.
+ * a value. Both are in the gate's declared channel order — `observedChannels`, the same order
+ * `readsMayBeStale` uses — and that is NOT the order `reads` prints in: `makeStateView` slices over
+ * `[...allowed].sort()`, so `reads`'s keys are ALPHABETICAL. Measured on a gate declaring
+ * `reads: ["zeta", "alpha"]` with both externalised: `readsResolved` is `["zeta","alpha"]` and
+ * `Object.keys(reads)` is `["alpha","zeta"]`. A reader who pairs the two by POSITION is wrong;
+ * these lists carry names for that reason, and `test/cli/gates-payload-provenance.test.ts` pins it.
  */
 interface GateHandles {
   /** The projection `reads` is built from: `p` with every handle this door read back substituted. */

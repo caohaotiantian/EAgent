@@ -244,10 +244,17 @@ test("`loom help` still works, and every real flag is accepted", async () => {
     //
     // AND THE VALUE IS A PATH INSIDE THIS TEST'S OWN TEMP DIRECTORY, which is `TODO.md` §H.10.
     // The literal `"x"` used to be the value for every flag, and for ONE of them that is not an
-    // opaque token: `--data-dir x` is resolved against `process.cwd()` at `cli.ts:1488`, so
+    // opaque token: `openWorkspace` in `cli.ts` computes
+    // `resolve(pathFlag(args, "data-dir") ?? join(root, ".loom"))`, which resolves a relative
+    // `--data-dir x` against `process.cwd()`, so
     // `compile` created `<repo>/x/journal.db` on every `npm test`. `.gitignore`'s `*.db` covered
     // the only file in it and git does not report a directory whose whole content is ignored, so
     // the litter was invisible rather than absent.
+    //
+    // CITED BY FUNCTION, NOT BY LINE. This said `cli.ts:1488`, which had already rotted to 1493
+    // within the wave that wrote it and to 1499 by the end of it — and a line number was never
+    // unique here anyway: `resolve(pathFlag(args, "data-dir") …)` appears twice in the file,
+    // once in `jailFor` and once in `openWorkspace`, and only the second one is this defect.
     //
     // ONE VALUE FOR EVERY FLAG, not a table of which ones are paths. A table is a second list to
     // keep in step with `KNOWN_FLAGS` — this file's whole subject is three lists drifting apart —

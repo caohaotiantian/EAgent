@@ -222,9 +222,11 @@ map, never off the value's shape). **The same question about a `{"$payload":…}
 same way**: a node can write that shape into an ordinary channel, and it then prints identically
 to an externalised channel this door could not read back. Two more row fields say which is which —
 `readsResolved`, the payload handles this gate reads that were fetched from the store, and
-`readsUnresolved`, the ones that could not be, whose `reads` entry is still the handle. A value in
-neither list was never a handle, and their union is the set of printed values that did not come out
-of the journal `contentDigest` binds (§A.61). A fourth row field, `readsMayBeStale`,
+`readsUnresolved`, the ones that could not be, whose `reads` entry is still the handle. A channel in
+neither list was never a handle, and their union is the set of channels the fold externalised that
+this gate reads (§A.61). Pair them with `reads` by NAME and never by position: `reads` prints its
+keys alphabetically and these lists are in the gate's declared order. A fifth row field,
+`readsMayBeStale`,
 names channels **the gate reads** that its own fan-out branch has already written — whether or not
 a value for them is printed, since a branch write can be the first value a channel ever had, in
 which case `reads` shows nothing for it at all. The engine overlays those writes when it builds the

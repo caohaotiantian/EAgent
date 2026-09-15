@@ -11,7 +11,7 @@
  *
  * MEASURED ON THIS FIXTURE, before the row carried the answer:
  *
- *     reads.docB  = {"$payload":{"digest":"sha256:e2560629…","bytes":70014}}    ← a real handle
+ *     reads.docB  = {"$payload":{"digest":"sha256:9c2df12b…","bytes":69646}}    ← a real handle
  *     reads.mimic = {"$payload":{"digest":"sha256:0000…","bytes":108002}}       ← a node's value
  *     row keys: …,reads,readsTruncated,readsMayBeStale                          ← nothing tells
  *     stderr: ! CONTENT NOT SHOWN — `docB` … could not be read back
@@ -28,7 +28,17 @@
  * answers one of them. "This LOOKS like a handle — is it?" is `readsUnresolved`. "This does NOT
  * look like a handle — WAS it?" has no answer from an empty `readsUnresolved`, which reads the
  * same for a gate that read every handle back as for a gate that had none. Their union is the set
- * of printed values that did not come out of the journal `contentDigest` binds.
+ * of channels the fold externalised that this gate reads — and nothing more than that: an
+ * unresolved channel prints exactly the handle the journal recorded, and a resolved channel the
+ * graph classified prints `[secret]`, so "the values that did not come out of the journal" is a
+ * claim neither of them supports.
+ *
+ * AND THE QUESTION IS ABOUT THE CHANNEL, NOT ABOUT THE VALUE'S SHAPE — in both directions. A
+ * `{"$payload":…}` in `reads` is a HANDLE only if `readsUnresolved` names its channel. A payload
+ * whose own CONTENT is `$payload`-shaped resolves to that content and is named in `readsResolved`,
+ * which is the invariant `THE PAYLOAD WHOSE CONTENT IS ITSELF` test below exists to pin: without
+ * it, a `resolveHandles` that skipped a fetched value for looking like a handle left all four of
+ * this file's other tests green while the row said the gate read no handles at all.
  */
 
 import test from "node:test";
@@ -124,6 +134,87 @@ const NO_HANDLE_GRAPH = {
   edges: [{ id: "e1", from: "approve", to: "finish", kind: "seq" }],
 };
 
+/**
+ * TWO EXTERNALISED CHANNELS DECLARED OUT OF ALPHABETICAL ORDER.
+ *
+ * `readsResolved`, `readsUnresolved` and `readsMayBeStale` are in `observedChannels` order — the
+ * gate's DECLARED order — and `reads` is not: `makeStateView` slices over `[...allowed].sort()`, so
+ * its keys come out alphabetical. A reader who pairs the row's lists with `reads` by POSITION is
+ * wrong, and this graph is what makes the two orders disagree.
+ */
+const ORDER_GRAPH = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "declared-order", project: "demo", version: 1 },
+  policy: { posture: "out", capabilities: ["fs:read"] },
+  channels: {
+    srcZ: { type: "string", reduce: "replace" },
+    srcA: { type: "string", reduce: "replace" },
+    zeta: { type: "string", reduce: "replace" },
+    alpha: { type: "string", reduce: "replace" },
+    report: { type: "string", reduce: "replace" },
+  },
+  inputs: ["srcZ", "srcA"],
+  outputs: ["report"],
+  nodes: [
+    { id: "readZ", type: "tool", reads: ["srcZ"], writes: ["zeta"], tool: { name: "fs.read", version: "1.0", args: { path: "${srcZ}" } } },
+    { id: "readA", type: "tool", reads: ["srcA"], writes: ["alpha"], tool: { name: "fs.read", version: "1.0", args: { path: "${srcA}" } } },
+    { id: "approve", type: "human_gate", reads: ["zeta", "alpha"], writes: [], humanGate: { ref: "oversight/publish@stable" } },
+    { id: "finish", type: "function", reads: [], writes: ["report"], function: { ref: "function/finish@stable" } },
+  ],
+  edges: [
+    { id: "e1", from: "readZ", to: "readA", kind: "seq" },
+    { id: "e2", from: "readA", to: "approve", kind: "seq" },
+    { id: "e3", from: "approve", to: "finish", kind: "seq" },
+  ],
+};
+
+/**
+ * A PAYLOAD WHOSE OWN CONTENT IS `$payload`-SHAPED — the invariant this file exists for, and the
+ * one the first draft of it did not pin.
+ *
+ * `selfish` is a `replace` object channel a node writes as `{"$payload":{…, filler}}`, big enough
+ * to be externalised. So the journal holds a REAL handle for it, and reading that handle back
+ * yields a value that LOOKS like a handle. The door must resolve it and name it in `readsResolved`
+ * anyway, because the decision is `p.external` and never the shape — in either direction.
+ *
+ * Measured with a `resolveHandles` that skipped a fetched value carrying `$payload`: this file's
+ * other four tests all stayed green while the row said `readsResolved: []`, `readsUnresolved: []`
+ * and `reads.selfish` was the journal's handle. That is the mechanism §A.61 protects, reported by
+ * the row as "this gate read no handles at all".
+ */
+const CONTENT_GRAPH = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "content-is-a-handle", project: "demo", version: 1 },
+  policy: { posture: "on", capabilities: [] },
+  channels: {
+    selfish: { type: "object", reduce: "replace" },
+    report: { type: "string", reduce: "replace" },
+  },
+  inputs: [],
+  outputs: ["report"],
+  nodes: [
+    { id: "make", type: "function", reads: [], writes: ["selfish"], function: { ref: "function/selfish@stable" } },
+    { id: "approve", type: "human_gate", reads: ["selfish"], writes: [], humanGate: { ref: "oversight/publish@stable" } },
+    { id: "finish", type: "function", reads: [], writes: ["report"], function: { ref: "function/finish@stable" } },
+  ],
+  edges: [
+    { id: "e1", from: "make", to: "approve", kind: "seq" },
+    { id: "e2", from: "approve", to: "finish", kind: "seq" },
+  ],
+};
+
+/**
+ * The content `make` writes. `digest` is deliberately NOT a digest — 71 characters of `sha256:` and
+ * 64 hex is what a real handle carries, and this is 12 characters of prose — so the assertion that
+ * the CONTENT was printed cannot be satisfied by printing the handle.
+ */
+const NOT_A_DIGEST = "NOT-A-DIGEST";
+const SELFISH_SRC =
+  `function (view) { return { writes: { selfish: { $payload: { digest: ${JSON.stringify(NOT_A_DIGEST)}, ` +
+  `bytes: 1, filler: "z".repeat(70000) } } } }; }\n`;
+
 interface Cap {
   code: number;
   out: string;
@@ -157,6 +248,7 @@ function workspace(graph: unknown): { dir: string; graphFile: string; dispose: (
   const graphFile = join(dir, "graphs", "g.json");
   writeFileSync(graphFile, JSON.stringify(graph));
   writeFileSync(join(dir, "resources", "function", "finish.js"), FINISH);
+  writeFileSync(join(dir, "resources", "function", "selfish.js"), SELFISH_SRC);
   writeFileSync(join(dir, "a.txt"), DOC_A);
   writeFileSync(join(dir, "b.txt"), DOC_B);
   writeFileSync(join(dir, "c.txt"), DOC_C);
@@ -328,6 +420,87 @@ test("EVERY HANDLE READ BACK IS NAMED — an empty `readsUnresolved` is not the 
     assert.deepEqual(row.reads?.["mimic"], MIMIC);
     assert.ok(!listed.out.includes("$payload") || JSON.stringify(row.reads?.["mimic"]).includes("$payload"), "the only `$payload` in the document is the value a node wrote");
     assert.ok(!/CONTENT NOT SHOWN/.test(listed.err), `everything resolved: ${listed.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE PAYLOAD WHOSE CONTENT IS ITSELF `$payload`-SHAPED IS RESOLVED AND NAMED — the shape is not the question in EITHER direction", async () => {
+  // THE INVARIANT §A.61 EXISTS FOR, and the one the first draft of this file did not pin. A door
+  // that answered "is this a handle" by looking at the FETCHED value — skipping one that carries
+  // `$payload` — left every other test here green while the row reported `readsResolved: []`,
+  // `readsUnresolved: []` and printed the journal's handle for a channel it had every reason to
+  // resolve. That is a row saying "this gate read no handles" about a gate reading one.
+  const w = workspace(CONTENT_GRAPH);
+  try {
+    const runId = await park(w, {});
+    const listed = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes", "0"]);
+    assert.equal(listed.code, 0, listed.err);
+    const row = (JSON.parse(listed.out) as GateRow[])[0]!;
+    const value = row.reads!["selfish"] as { $payload?: { digest?: unknown; filler?: unknown } };
+
+    // THE PRECONDITION: the channel really left the journal, so there really is a handle to decide
+    // about. Without this the test passes on an inline channel and measures nothing.
+    assert.deepEqual(row.readsResolved, ["selfish"], `the handle must be read back and named: ${JSON.stringify(row.readsResolved)}`);
+    assert.deepEqual(row.readsUnresolved, [], JSON.stringify(row.readsUnresolved));
+
+    // AND WHAT IS PRINTED IS THE CONTENT, not the handle. The two are told apart by the one field
+    // a real handle cannot fake: `sha256:` + 64 hex is 71 characters and this is not that.
+    assert.ok(looksLikeAHandle(value) !== undefined, "the content still LOOKS like a handle — that is the fixture");
+    assert.equal(value.$payload?.digest, NOT_A_DIGEST, `the HANDLE was printed instead of its content: ${JSON.stringify(value).slice(0, 160)}`);
+    assert.notEqual(String(value.$payload?.digest).length, 71, "a real handle's digest is `sha256:` + 64 hex");
+    assert.equal(typeof value.$payload?.filler, "string", "the whole content came back, not a two-key summary of it");
+    assert.ok(!/CONTENT NOT SHOWN/.test(listed.err), `nothing failed to resolve: ${listed.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE LISTS ARE IN DECLARED ORDER AND `reads` IS ALPHABETICAL — pair them by NAME, never by position", async () => {
+  // `makeStateView` slices over `[...allowed].sort()` (`state/channels.ts`), so `reads` prints its
+  // keys alphabetically; `observedChannels` returns the gate's declared order and that is what
+  // `readsResolved`, `readsUnresolved` and `readsMayBeStale` use. An earlier draft of
+  // `resolveHandles`'s docstring claimed the two orders agree. They do not, and on a gate declaring
+  // `["zeta","alpha"]` they are exactly reversed.
+  const w = workspace(ORDER_GRAPH);
+  try {
+    const runId = await park(w, { srcZ: "c.txt", srcA: "a.txt" });
+    const listed = await cli(["gates", runId, "--workspace", w.dir, "--max-bytes", "0"]);
+    assert.equal(listed.code, 0, listed.err);
+    const row = (JSON.parse(listed.out) as GateRow[])[0]!;
+
+    assert.deepEqual(row.readsResolved, ["zeta", "alpha"], "the gate's DECLARED order");
+    assert.deepEqual(Object.keys(row.reads!), ["alpha", "zeta"], "…and `reads` is sorted, which is the disagreement");
+    assert.deepEqual(row.readsUnresolved, []);
+    // Named rather than positional is the whole point: index 0 of one is index 1 of the other.
+    assert.equal(row.reads!["zeta"], DOC_C, "the names still line up with the values; only the ORDER does not");
+    assert.equal(row.reads!["alpha"], DOC_A);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("AND BOTH FIELDS ARE ABSENT — not empty — ON A ROW THAT PRINTS NO `reads` AT ALL", async () => {
+  // D3's other half. `readsResolved: []` is a statement — "this gate read no payload handle" — and
+  // there is nothing for it to say about a row this door never opened a graph for. The three arms
+  // that return a gate unchanged (an unresolvable graph, a MIRROR, a node or task neither the graph
+  // nor the journal carries) each say on stderr why they print nothing; the row stays as the engine
+  // built it. Driven through the first of them, by deleting the graph the run compiled.
+  const w = workspace(GRAPH);
+  try {
+    const runId = await park(w, INPUT);
+    rmSync(w.graphFile);
+    const listed = await cli(["gates", runId, "--workspace", w.dir]);
+    assert.equal(listed.code, 0, listed.err);
+    const row = (JSON.parse(listed.out) as GateRow[])[0]!;
+
+    assert.ok(!Object.hasOwn(row, "reads"), `the premise: this row prints no reads: ${Object.keys(row).join(",")}`);
+    for (const f of ["readsResolved", "readsUnresolved", "readsTruncated", "readsMayBeStale"]) {
+      assert.ok(!Object.hasOwn(row, f), `${f} is a claim about values this row does not carry: ${Object.keys(row).join(",")}`);
+    }
+    // …and the row is still a gate an operator can act on, which is why this arm returns it at all.
+    assert.match(row.contentDigest, /\S/);
+    assert.match(listed.err, /! CONTENT NOT SHOWN — 1 open gate\(s\) below print no `reads`/, listed.err);
   } finally {
     w.dispose();
   }
