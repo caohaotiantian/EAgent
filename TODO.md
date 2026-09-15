@@ -20,25 +20,25 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-15 on `015f3547`
+## State — one command each, re-run 2026-09-15 on `a9214611`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,862 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,835 → 3,862) | `npm test` |
-| pinned exports | 542, **unmoved** — the 2026-09-15 wave added no exported name either: `#graphIdentityMismatch` and `#failUnreadableGraph` are private methods and `GateHandles` is module-private, for the reason `GateReadCut` is | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-15 wave's kernel edits (`run/engine.ts`, by `562bd7c5`, `6b7ed2c7`, `ee316e88`, `b9bdb5f4`) all landed under `fix:` and owe no trailer | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files, unmoved — the 2026-09-15 wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **3,906 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,862 → 3,906) | `npm test` |
+| pinned exports | 542, **unmoved** — the 2026-09-15b wave added no exported name either: `dispatchesVerb` and `PRODUCES_NOTHING` are module-private, and the evidence/work split is two counters inside `#foldJoin` | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-15b wave's only kernel edits are `run/engine.ts` (`4700a03d`, `bfc45730`, `c9f8b1ec`, `bbe05c3e`, `0081c058`), all under `fix:` and owing no trailer. `cli.ts` and `graph/validate.ts`, the other two files it touched, are not on the pinned list | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files, unmoved — the 2026-09-15b wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | 60 codes, unmoved — this wave's two new refusals reuse `E_GRAPH_INVALID` and `E_QUORUM_UNREACHABLE`, each raised by the arm beside it already | `Object.keys(CODES).length` |
+| error vocabulary | 60 codes, unmoved — this wave's one new refusal reuses `E_QUORUM_UNREACHABLE`, the code the arm beside it already raised | `Object.keys(CODES).length` |
 
-The kernel guard also prints a commits-judged count (732 at `015f3547`). It is deliberately not a
+The kernel guard also prints a commits-judged count (756 at `a9214611`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-15.md` is the current handoff; `docs/handoff-2026-09-10-c.md` is the one before it.
+`docs/handoff-2026-09-15b.md` is the current handoff; `docs/handoff-2026-09-15.md` is the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -54,14 +54,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 67 | 45 | 22 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and four opened by the 2026-09-15 settlement (§A.65-§A.68). The open count is unchanged because this wave closed four and opened four |
+| §A | 71 | 48 | 23 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and four opened by the 2026-09-15b settlement (§A.69-§A.72). The open count rose by one: the wave closed three (§A.21, §A.65, §A.67) and opened four, three of them residues of what it closed |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 9 | 5 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 12 | 10 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and §H.11 is the product half of §H.10 — an unknown verb still opens a workspace where it stands |
+| §H | 14 | 11 | 3 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and §H.12/§H.13 are the six cases §H.11's closure named as NOT in its set — a verb flag with no value, and a missing positional |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -225,15 +225,26 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
 
 ### Guards over states nobody has constructed
 
-- **A.21 · `suite freeze`'s unresolved-gate exclusion is a guard over a state nobody has
-  constructed.** Repro: mutate the exclusion away and run
-  `node --test packages/core/test/cli/suite-freeze.test.ts` → 9/9 still green (the case "every frozen
-  case carries the safety invariant" says so in its own prose). A run must be `succeeded` AND
-  `delivered` to reach that line, and `gateShapeOf` counts a gate unresolved only when its folded
-  state is neither `decided` nor `cancelled`. Two possibilities wanting different answers: the state
-  is unreachable for an eligible run (delete it and say why), or it is reachable by a path nobody has
-  found (build the fixture). **Closes when** somebody decides which, by construction rather than by
-  argument.
+- ~~**A.21 · `suite freeze`'s unresolved-gate exclusion is a guard over a state nobody has
+  constructed.**~~ CLOSED at `25b906ee` — **settled BY CONSTRUCTION, and the exclusion is KEPT.**
+  Unreachable through the Engine: twelve paths driven on a real `Engine` over SQLite (seven the
+  builder's, five a reviewer's) each land somewhere other than `succeeded` + an unresolved gate.
+  `any`/`firstSuccess`/`all` with an unanswered gate branch park `awaiting_gate` with the gate
+  still OPEN, because `advance`'s drain re-suspends on `openGates` before `#finish`; the
+  budget/fatal floor gives `succeeded` + `cancelled`, because `#finish` appends `cancelOpenGates`
+  in the SAME append as `run.completed`; an SLA expiry gives `failed` + `expired`; and
+  cancel-then-resume, edit-then-floor, three-gates-then-floor, a subgraph parent after the floor
+  and a zero-width fan all miss too. The structural argument is the reviewer's and it is stronger
+  than the sweep: exactly ONE writer of `run.completed` and it co-appends `cancelOpenGates`; both
+  writers of `gate.timeout` co-append `run.failed` or `gate.decided`; and rewind suppression is a
+  SUFFIX range, so it cannot drop the cancel without dropping the completion with it.
+  **But it IS reachable through a JOURNAL, which is the verb's only input.** Delete the
+  `cancelOpenGates` line from one and the fold gives `succeeded` + an OPEN gate — an ELIGIBLE run
+  the exclusion is the only thing dropping. So: a fixture, not a deletion. A 30-run scored corpus
+  holding one such journal freezes **29** cases, and mutating the exclusion away turns that one
+  test red at 30 vs 29 and nothing else.
+  `node --test packages/core/test/cli/suite-freeze.test.ts` → **10 pass / 0 fail** (9 before),
+  re-run on `a9214611`.
 - ~~**A.22 · `loom score`'s `! N run(s) folded without their graph` line has no end-to-end test.**~~
   CLOSED by `fabc360` — the branch is reachable (a prefix graph compiles to its successor's hash) and
   its message named the wrong hash; `Trajectory.authoredGraphHash` is the repair.
@@ -325,16 +336,67 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   `d9a8173` — `runIdIn` decodes all NINE run-id captures in `server/http.ts` (the row said three),
   and `run/delivery.ts`'s `callbackFor` encodes, so emitter and route agree.
   `test/server/child-run-by-url.test.ts`.
-- **A.37 · A compensation refused for missing arguments is the last word, and the operator's obvious
-  next move quietly makes it worse.** Repro:
-  `/usr/bin/grep -anc 'retryable !== true' packages/core/src/run/compensation.ts` → 1 —
-  `planCompensation` skips settled seqs, so an operator who reads `#compensateOne`'s honest
-  `not_attempted` reason and then runs `rewind` to put it right gets a ZERO-STEP plan and a rewind
-  that is ACCEPTED, suppressing the `effect.completed` while the effect is still in the world. Not a
-  regression: the pre-fix path settled the seq too, and lied about why. **Closes when** the rewind
-  refusal (`#uncompensatedIrreversible`) reads the same fact the plan does — a step the plan already
-  knows cannot be dispatched — rather than permitting the rewind because the tool merely DECLARES a
-  compensation. The `dispatch` count already reads that fact, so the seam exists.
+- **A.37 · The rewind refusal and the rollback plan read two different facts — FOUR shapes, and
+  two of them are recoveries the obvious fix would wall off.** *(DIAGNOSED this wave at
+  `e3041e8a`, `2b3407f3`, `9b26f8f4` — a test file and no `src/` change. The row stays OPEN.)*
+  File: `packages/core/src/run/engine.ts`. `#uncompensatedIrreversible` asks **"does the TOOL
+  declare a compensation?"**; `planCompensation` / `RewindPlan.dispatch` ask **"will a step
+  actually dispatch one?"** — and a rewind is permitted on the first answer while nothing is
+  undone according to the second.
+  ```
+  $ node --test packages/core/test/run/compensation-refused-then-rewind.test.ts
+  ℹ tests 7   ℹ pass 7   ℹ fail 0                    # re-run on `a9214611`
+  ```
+  | # | how the seq got there | plan | rewind today | what the fix must do |
+  |---|---|---|---|---|
+  | 1 | `not_attempted`, no `details` recorded | 0 steps | accepted | **REFUSE**, in `planRewind` too — this row's original shape, and the `effect.completed` is hidden while the effect stands |
+  | 2 | nothing settled, no `details` recorded | 1 step, `dispatch 0`, `blocked 1` | accepted | **REFUSE**, in `rewind` only — the plan already says it cannot dispatch |
+  | 3 | `failed`: the undo is itself hard-to-undo, so the `run_failed` leg could not approve it | 0 steps | accepted | **ACCEPT, AND UNDO IT.** A rewind passes `nodeApproved: true` (engine.ts:2559), so the SAME undo works under rewind — the settled row walls off the recovery |
+  | 4 | `not_attempted`: the undo was absent from THAT process's registry | 0 steps | accepted | **ACCEPT, AND UNDO IT.** Registering it in process 2 does not bring it back |
+  **ROOT CAUSE, in one sentence.** `run/compensation.ts:170` says *"`retryable` is the
+  discriminant and it is written at the append rather than inferred here, so this fold does not
+  have to parse a reason string"* — and **it is written by no arm of `#compensateOne` at all**:
+  that method's return type (engine.ts:2493) does not carry the field, `compensationRecord` only
+  forwards it (:1007), and the sole producer is `#dispatchRollback`'s context-less arm (:2442). So
+  `planCompensation`, a correct READER, settles every seq whose blocker is a fact about this
+  PROCESS or this TRIGGER — which is exactly what makes shapes 3 and 4 permanent.
+  **Closes when** the fix below lands. It is written out in full, verbatim, in
+  `docs/handoff-2026-09-15b.md` §Repros, because `.agent/` is gitignored and the lane's worktree is
+  gone; condensed, it is three changes and change 1 is the one to build first — without it, 2 and
+  3 wall off shapes 3 and 4 instead of fixing them.
+  **(1) Write `retryable: true` at `#compensateOne`'s PROCESS- and TRIGGER-dependent arms**:
+  `unknown_tool`, `unknown_compensation` (shape 4), "the task is not in the projection",
+  "compensation tool X is not registered", and a SPLIT of the `out.isError` arm — whose
+  gate-refusal half never ran the undo at all and must record `not_attempted, retryable: true`
+  (shape 3). The split reads a typed `err.policy(E_HUMAN_APPROVAL_REQUIRED)` that `#invokeTool`'s
+  gate arm has to start returning the way its `deny` arm already does; no consumer depends on its
+  absence, which was checked rather than assumed. The arms that keep `retryable` ABSENT are the
+  invariant ones: "declares no compensation", "no live `effect.completed`", and "the recorded
+  result carries no `details`". `compensation.recorded` needs no vocabulary change — `retryable`
+  stays set only on `not_attempted`, which is what its own docstring in the kernel file
+  `journal/events.ts` says.
+  **(2) `#uncompensatedIrreversible` refuses only a settled, in-range, hard-to-undo row whose undo
+  ARGUMENTS are not reconstructible** (`detailsOf` of the last live `effect.completed` is
+  `undefined`) — ANY-OCCURRENCE aggregation over the range, never latest-wins, because
+  `planCompensation`'s `settled` is a `Set` that only grows. The arguments are the one input that
+  genuinely cannot change, which is why the wall is keyed on them and not on which blocker
+  happened to be recorded: the existing `no_compensation` wall reads the LIVE registry and an
+  operator can clear it by deploying, while a wall derived from a journal row is permanent.
+  **(3) A SECOND `if` in `#rewindSerially`, beside the existing `unrunnable` filter and NOT merged
+  with it.** The existing arm fires only `&& live === undefined`, because an undispatchable step
+  under a live parent is one a later attach can still run; arguments that were never recorded are
+  never recorded, so the new clause must fire regardless of `live`. Merging them re-introduces
+  refusing exactly the case `retryable` exists for.
+  **Zero existing tests need updating**: the four reason strings whose rows would gain `retryable`
+  were grepped across `packages/core/test/` and the only hit is `compensation-plan.test.ts:124`, a
+  READER test that journals no `compensation.recorded` at all. **And one doc line is false at HEAD,
+  to carry in the same commit**: `journal/events.ts:626` says `compensation.recorded.undo` is
+  *"Absent iff `outcome` is `not_attempted`"*, while `compensationRecord` (engine.ts:1004) writes
+  `undo` whenever `step.undo` is defined, on every outcome — which this lane's SHAPE 1 asserts
+  directly.
+  **Two fix designs were REFUTED by running them** — refuse-on-`failed`, and
+  `not_attempted`-only — because both convert shapes 3 and 4 from recoverable into permanent. So
+  would this row's own former closing sentence, *"reads the same fact the plan does"*.
 
 ### Two things that are NOT defects, written down so nobody "fixes" them
 
@@ -1368,33 +1430,41 @@ row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work be
 Found while building or reviewing the third wave, and each re-run on `015f3547` by the settlement
 rather than taken from a lane report.
 
-- **A.65 · GRAPH021's multi-candidate `fix:` line dictates a graph the compiler now refuses.**
-  File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`'s multi-candidate branch, and
-  the one-join rule that closed §A.64. The line lists every node in the fan-out branch as an entry for the barrier
-  the author picks — but a node the branch's OWN inner join already collects then has two folders,
-  which is exactly what §A.64's rule refuses. On `a53-pickone` (`plan --fan--> read --seq-->
-  classify --seq--> gather(join)`, with `gA` and `gB` as the two candidates), following the line
-  for either choice leaves **two `GRAPH008_JOIN_DEPTH` errors, on `classify` and on `gather`**, and
-  converging takes **one edit the line dictates plus one it does not** (drop `classify` from the
-  barrier, because `gather` collects it). The lane also measured the dictated graph on a real
-  `Engine` at n=6 against 4 contributions, against 4/4 for the spelling that leaves `classify` to
-  the join already collecting it — **reported, not re-run by this settlement**; the compile half
-  below was.
-  Repro — the whole of it is asserted, so the file is the pin:
-  ```
-  $ node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts
-  ℹ tests 20   ℹ pass 20   ℹ fail 0
-  # `A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — a53-pickone` asserts, for each candidate,
-  # ["GRAPH008_JOIN_DEPTH","GRAPH008_JOIN_DEPTH"] at ["classify","gather"], then converges only
-  # after the edit GRAPH021's line does not dictate.
-  ```
-  **The one-predicate remedy is known and was NOT taken**: drop from the dictated list any member
-  already claimed by a join other than the candidates. It was declined for two reasons that are
-  the row's real content — §A.57's count/list disclosure sentence would have to state a SECOND
-  reason for a name being dropped, and `namesIn` is asserted against the current set in four other
-  tests, so the change is a message change across the whole file rather than a predicate.
-  **Closes when** the dictated list excludes members an inner join collects AND following the line
-  converges in ONE compile, with `a53-pickone`'s assertion inverted to say so.
+- ~~**A.65 · GRAPH021's multi-candidate `fix:` line dictates a graph the compiler now refuses.**~~
+  CLOSED at `3dcaf728`, `e491162b`, `1f8adaf6`. `waitsFor` drops from the dictated list any branch
+  member a join OTHER THAN THE ONE THE LINE NAMES already claims — in EVERY arm of the rule and
+  not only the multi-candidate one, because the zero-candidate arm gives a brand-new join the same
+  second folder — and `foldersOf` is `claimedBy`'s exact test: `branches` membership plus
+  `fanoutDepth >= 1`, with NO reachability, because a `fix:` line has to predict the COMPILER and
+  not the executor.
+  **Both intermediate cuts were wrong in an instructive direction.** The first excluded EVERY
+  candidate, so with two candidates a member one of them already folds was dictated to the other
+  and the line compiled for one of the two names it offered and was refused for the other. The
+  second required the claiming join to be DOWNSTREAM; measured on an `Engine` with both
+  compile-time refusals neutralised, a disconnected `branches` entry folds nothing extra — **2
+  contributions with it and 2 without** — which is true of the executor and answers the wrong
+  question.
+  **THE CLOSING CLAIM IS NOT THIS ROW'S LITERAL "converges in ONE compile", and the difference is
+  the honest part.** What is asserted is that following the dictated line introduces **no
+  diagnostic the first compile did not print**: `a53-pickone` also carries a `GRAPH008_JOIN_DEPTH`
+  on `gather` from the FIRST compile (both candidates claim it), so the dictated edit alone still
+  exits 1 and the one edit left is the one that compile's OTHER `fix:` line dictates. Claiming
+  "one compile" would have been false, and buying it would have meant suppressing a line the
+  author needs.
+  §A.57's disclosure sentence now carries the reason PER NAME with the folding join named
+  (`{reason: "folded", by: ["gather"]}`); the reason-1-only form is byte-identical, the F1 /
+  `triage-failures.json` single-candidate string is byte-identical and asserted whole, a one-name
+  list gets a singular sentence, and `countedIn` parses the whole clause and throws on a shape it
+  does not know. `e.to` — the fan-out's own target — is dictated whatever folds it, by an explicit
+  guard, because a list without it dictates an edit that does not clear the error it is attached
+  to. Differential at each step: 861 → 867 → 869 specs, **0 diagnostic rows added, 0 removed**, 5
+  / 7 / 9 GRAPH021 texts changed and zero other messages.
+  Re-run on `a9214611`: `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` →
+  **25 pass / 0 fail** (20 before); `node --test 'packages/core/test/graph/*.test.ts'` → **422 pass
+  / 0 fail**. The Engine fold probe (n=6 against 4 contributions dictated, 4/4 converged) is
+  **reported, not re-run by this settlement** — it needs §A.64's `claimedBy` loop neutralised to
+  run at all; the compile half above was re-run.
+  **The residue is §A.69**: this rule cannot dictate around a join that already claims `e.to`.
 
 - **A.66 · A caller with a runId and READ access to the journal can end a parked run through the
   advance door.** File: `packages/core/src/run/engine.ts`, `#graphIdentityMismatch` and
@@ -1430,33 +1500,51 @@ rather than taken from a lane report.
   caller is trusted, stated BESIDE the compensate and attribution facts above rather than instead
   of them.
 
-- **A.67 · An APPROVED `human_gate` in `join.branches` disarms §D.9's zero-fold refusal, and the
-  compiler requires it to be there.** *(The residual of §D.9, and the reason §A.55's closure is
-  narrower than it reads.)* File: `packages/core/src/run/engine.ts`, `#foldJoin`. The refusal is
-  `succeededMembers === 0`, and a gate a human APPROVED is a member that succeeded — so a barrier
-  holding one can fold nothing at all and still release as a success. Repro:
-  `start --fanout(2)--> hold (human_gate) --seq--> work (always throws) --join--> J --seq--> done`
-  with `J.branches: ["hold","work"]`, both gates approved — pasted whole in
-  `docs/handoff-2026-09-15.md` §Repros (`a67.mjs`), `node /tmp/a67.mjs` on `015f3547`:
+- ~~**A.67 · An APPROVED `human_gate` in `join.branches` disarms §D.9's zero-fold refusal, and the
+  compiler requires it to be there.**~~ CLOSED at `4700a03d`, `d222e146`, `bfc45730`, `c9f8b1ec`,
+  `bbe05c3e`, `0081c058`. **NO `JoinSpec` FIELD — this row's own recommendation was wrong.**
+  `#foldJoin` classifies each member by `NodeSpec.type`: a member is EVIDENCE if its type is in
+  `PRODUCES_NOTHING` = {`human_gate`, `router`} AND it wrote nothing, and WORK otherwise — so a
+  gate answered `{kind: "edit", writes}` is WORK and the human's own data is folded rather than
+  discarded. The refusal is `members.length > 0 && no WORK member succeeded && every WORK member
+  terminal`, falling back to §D.9's rule verbatim when there are no work members at all, which is
+  what leaves the shipped `examples/graphs/two-person-approval.json` byte-identical through the
+  CLI — the only committed spec with gates in a barrier, five nodes with `save` behind it. A new
+  field would have been a second spelling of a fact `NodeSpec.type` already states totally, new
+  replay vocabulary in the one artifact `graphHash` is taken over, and its default would have had
+  to be the node-type rule anyway.
+  **THE FIRST CUT SHIPPED A REGRESSION, and both reviewers found it independently.** It refused on
+  "no work member succeeded" alone — an ABSENCE claim over a member set still holding a LIVE task.
+  On a STATIC join (a `human_gate` arm and a posture-gated `function` arm, zero diagnostics),
+  `any`/`firstSuccess`/`quorum` short-circuit on the gate's success, so the fold failed a run whose
+  worker then SUCCEEDED and wrote. Re-run on the first cut `4700a03d` for this settlement:
+  `post status=failed seen=["real-work"] error=E_QUORUM_UNREACHABLE` with `worker:succeeded`, in
+  those three modes, against `succeeded note=["done-ran"]` at `a9214611` and on the base. The
+  lane's end-to-end CLI form of the same measurement (a `charge.txt` on disk) is reported, not
+  re-run. **The lane had declared that shape unreachable after
+  three failed constructions, and all three were FAN-OUTS**, where GRAPH021 forces a work member
+  into every branch; a static join has no GRAPH021 to answer to. *"Not reachable after N failed
+  constructions" is not a result.* `terminalWork === workMembers` is now a conjunct.
+  **The set is stated by RELEASE rather than enumerated**: the refusal needs a fold state in which
+  every work member is terminal, and a release out of `noMoreArrivals` (`quiescent && terminal >=
+  expected`) guarantees it — `all` has no other exit; a `quorum` whose `need` the survivors cannot
+  meet (`k: 1` reaches it over the same two members `k: 0.5` short-circuits past);
+  `any`/`firstSuccess` fallen through, which is this row's own fan-out.
+  Re-run on `a9214611` — `node /tmp/a67.mjs`, the script in `docs/handoff-2026-09-15.md` §Repros,
+  unchanged:
   ```
-  mode=any          status=succeeded seen=undefined note=["done-ran"] error=none
-  mode=firstSuccess status=succeeded seen=undefined note=["done-ran"] error=none
-  mode=all          status=succeeded seen=undefined note=["done-ran"] error=none
-  mode=quorum       status=succeeded seen=undefined note=["done-ran"] error=none
+  mode=any          status=failed seen=undefined note=undefined error=E_QUORUM_UNREACHABLE
+  mode=firstSuccess status=failed seen=undefined note=undefined error=E_QUORUM_UNREACHABLE
+  mode=all          status=failed seen=undefined note=undefined error=E_QUORUM_UNREACHABLE
+  mode=quorum       status=failed seen=undefined note=undefined error=E_QUORUM_UNREACHABLE
   ```
-  Every unit of work behind the humans died, nothing was folded, the node behind the barrier ran,
-  and the run says it worked. The engine lane measured the same four lines on `dbaa5671`, so this
-  is **DISARMED, not broken** — reported there, not re-run by this settlement; the `015f3547`
-  half above was.
-  **AND IT IS NOT AN AUTHORING MISTAKE**: dropping `hold` from `branches` does not compile —
-  `GRAPH021_FANOUT_WITHOUT_JOIN` refuses it, *"the branch it opens holds 2 nodes (hold, work), and
-  a join must wait on every one of them"*. So every fan-out branch containing a `human_gate` has
-  that gate in its barrier's member set by compiler order, and the refusal is disarmed for all of
-  them.
-  **Closes when** the fold can tell an EVIDENCE member from a WORK member — which is a `JoinSpec`
-  question, not an arm of `#foldJoin`: today `branches` is one list and a gate's success means
-  "a human answered", not "something was produced". With a test driving the graph above and
-  asserting the run fails, beside a control where the work behind the gate DOES write.
+  `node --test packages/core/test/run/join-evidence-and-work.test.ts` → **12 pass / 0 fail**, and
+  replay is asserted IN it, on a journal the new predicate would refuse if it were re-folded — the
+  recorded decision is reproduced, not recomputed. No `CODES` member, no `EVENT_TYPES` member, no
+  field and no export; every commit `fix:`, no trailer owed.
+  **Two residues, both PINNED rather than described**: §A.70 (a nested join over an EMPTY fan is a
+  work member that succeeded producing nothing) and §A.72 (a short-circuit release folds final, so
+  evidence whose work THEN dies still reports success in three of four modes).
 
 - **A.68 · The shipped `two-person-approval.json` fails the run on ONE rejection, whatever the
   other two people say.** File: `examples/graphs/two-person-approval.json`, whose own
@@ -1479,6 +1567,101 @@ rather than taken from a lane report.
   approvals should then meet `k: 2` and land the write, while all three rejecting still fails on
   §D.9's arm — or says in its own description and `labels.residue` that a single rejection fails
   the run. One of the two, not both, and the decision is which behaviour the example is FOR.
+
+### Opened by the 2026-09-15b settlement
+
+Found while building or reviewing the fourth wave. Each was RE-RUN on `a9214611` by the settlement
+rather than taken from a lane report; where a number could not be re-run, the row says so.
+
+- **A.69 · GRAPH021 cannot dictate around a join that already claims `e.to`, and a `loop` or
+  `compensation` claimer is named by nothing.** *(§A.65's residue, disclosed in the rule's own
+  comment and pinned as case (c) of `fanout-branch-diagnostic.test.ts`'s no-empty-list test.)*
+  File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`'s `waitsFor`. The fan-out's
+  own target `e.to` is dictated whatever folds it — by an explicit guard, because a list without it
+  dictates an edit that does not clear the GRAPH021 it is attached to. So where another join
+  already claims `e.to`, following the line produces a `GRAPH008_JOIN_DEPTH` the first compile did
+  not print. When that claimer has no inbound edge at all the first compile is not silent — it
+  prints `GRAPH008_BRANCH_NOT_CONNECTED` on the bogus entry — but when the claimer is wired by a
+  `loop` or `compensation` edge it IS silent: that rule accepts an inbound edge of ANY kind and
+  `idx.ancestors` walks neither. Repro through the shipped binary on `a9214611`, on the `eto`
+  graph pasted in `docs/handoff-2026-09-15b.md` §Repros (`again` is a join declaring `read`,
+  reached from it by a `loop` edge):
+  ```
+  $ node packages/core/src/cli.ts compile graphs/eto.json
+  ✗ eto.json: GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" but no downstream join
+    waits on it; the branch it opens holds 2 nodes (read, classify) …
+     fix: give join "gather" an entry in its `branches` for each of read, classify …
+  E_GRAPH_INVALID: graph has 1 error(s): GRAPH021_FANOUT_WITHOUT_JOIN      # ONE line, naming no claim
+  $ node packages/core/src/cli.ts compile graphs/eto-dictated.json         # that edit, applied exactly
+  ✗ eto-dictated.json: GRAPH008_JOIN_DEPTH: node "read" is inside a fan-out … but 2 joins ("gather",
+    "again") declare it among their branches, and each of them folds those same writes again
+  ```
+  **Closes when** either (a) the blind spot is made visible — `GRAPH008_BRANCH_NOT_CONNECTED`
+  refuses a `branches` entry whose only connection is a `loop` or `compensation` edge, so the first
+  compile names it; or (b) GRAPH021 names the EXISTING claimer in its own message, so the author is
+  told which join to keep before making the edit. One of the two, and (a) is a new refusal whose
+  cost has to be measured against the 9 committed `GraphSpec` files first.
+
+- **A.70 · A nested join over an EMPTY fan is a WORK member that succeeded producing nothing, so it
+  carries an outer barrier whose real work died.** *(§A.67's residue — §A.67's own shape with a join
+  where the gate was.)* File: `packages/core/src/run/engine.ts`, `#foldJoin`. §A.47 REQUIRES a
+  fan-out over an empty channel to succeed folding nothing, so an inner join named in an outer
+  barrier's `branches` is a work member that succeeded and wrote nothing — which is what an approved
+  `human_gate` was before §A.67. Repro on `a9214611` and identically on the base `ee4f1c14`: `start
+  --fanout(over [])--> ib --join--> IJ`, `start --seq--> worker (throws)`,
+  `OJ.branches: ["IJ","worker"]`, zero diagnostics, all four modes:
+  ```
+  mode=any          diags=0 status=succeeded seen=undefined note=["done-ran"] err=none
+     IJ:succeeded{} OJ:succeeded{} done:succeeded{note} start:succeeded{} worker:skipped{}
+  ```
+  **The cheap fix is refused and MEASURED.** Adding `join` to `PRODUCES_NOTHING` closes this and
+  fails the same graph with a NON-empty inner fan — `failed seen=["inner","inner"]
+  error=E_QUORUM_UNREACHABLE` — because a ROOT-coordinate join always returns `writes: {}` (its fold
+  goes out in `reduced`), so "produced nothing" cannot tell it from "folded everything". That is
+  §A.67's own B1 defect re-created one layer up.
+  **Closes when** `#foldJoin` can read a member join's own `branchCount`, which today exists only in
+  its `state.reduced` payload and not on `TaskRecord` — a projection question, not an arm of this
+  predicate. Both halves are pinned as `P4` in
+  `packages/core/test/run/join-evidence-and-work.test.ts`, so neither can move in silence.
+
+- **A.71 · A parent completing through the budget/fatal floor abandons its subgraph CHILD on an
+  open gate.** File: `packages/core/src/run/engine.ts`, `#finish` and `#failRun`. Both close the
+  run's OWN open gates — `cancelOpenGates(p, …)` in the same append as `run.completed` (:11714) or
+  `run.failed` (:11782) — and neither recurses into child runs; only `#cancelTree` does (:4205),
+  which is why `cancel` cascades and a floor does not. Measured on a real `Engine` over SQLite on
+  `a9214611`: a parent with one `subgraph` node, a child holding a `human_gate`, run with and
+  without a `budget.exhausted {action: "fail"}` row appended before the parent's mirror gate is
+  answered:
+  ```
+  CONTROL (no floor row)  parent failed     gates=[delegate:decided]  child failed         gates=[ask:decided]
+  FLOOR   (floor row)     parent succeeded  gates=[delegate:decided]  child awaiting_gate  gates=[ask:open]
+  ```
+  The child run is left `awaiting_gate` with a gate nothing will ever close while its parent is
+  terminal, and the parent reports `succeeded` under a budget floor. **It is NOT the §A.21 hole**:
+  the abandoned run is `awaiting_gate`, never `succeeded`, so `suite freeze` never sees it.
+  **Needs a §D-series decision before any fix** — whether a floor is a cascade like `cancel` (the
+  child is cancelled with a reason naming the parent's floor, which is oversight TIGHTENING and
+  therefore allowed) or whether an orphaned child is a state the operator must be shown and left to
+  resolve. Building either without that decision picks it by accident.
+
+- **A.72 · A short-circuit release folds FINAL, so a barrier released on evidence whose work then
+  dies still reports success.** *(§A.67's second residue. Unchanged from the base and left
+  deliberately; the decision is `docs/handoff-2026-09-15b.md` §4.)* File:
+  `packages/core/src/run/engine.ts`, `#maybeFireJoin` and `#foldJoin`. `any`, `firstSuccess` and a
+  `quorum` whose `need` the evidence alone meets release WITHOUT quiescence, so the fold runs while
+  the work member is still live — and §A.67's refusal is keyed on a FOLD state, with no second fold
+  afterwards. Measured on `a9214611`, on a static join (`alice` a `human_gate`, `worker` a
+  `function` behind a posture gate, zero diagnostics), approving `alice` only and then letting the
+  worker through to throw:
+  ```
+  any / firstSuccess / quorum(k:0.5)   post status=succeeded note=["done-ran"]  worker:skipped
+  all                                  post status=failed    error=E_QUORUM_UNREACHABLE
+  ```
+  `all` waits for quiescence and catches the loss; the other three folded before it happened.
+  **Closes when** a barrier either re-evaluates after a straggler's loss — a SECOND fold, which
+  needs a decision about what a released barrier means — or cancels its stragglers at release,
+  which is `JoinNode`'s documented `drain` gap. Pinned as CURRENT behaviour in
+  `packages/core/test/run/join-evidence-and-work.test.ts`, so it cannot move in silence.
 
 ---
 
@@ -1741,9 +1924,12 @@ a decision's argument is the thing a future reader needs.
   `examples/README.md` gained the operator-facing paragraph, under a graph that can actually
   reach the new arm — `fan-out-join.json` declares `onBranchError: "fail"`, so the older arm fires
   there first.
-  **THE RESIDUAL IS §A.67**: an APPROVED `human_gate` named in `join.branches` is a member that
-  succeeded, so it disarms this refusal for its whole barrier — and GRAPH021 requires the gate to
-  be named there.
+  **THE RESIDUAL WAS §A.67, AND IT IS NOW CLOSED** (`4700a03d` … `0081c058`): an APPROVED
+  `human_gate` named in `join.branches` was a member that succeeded, so it disarmed this refusal
+  for its whole barrier — and GRAPH021 requires the gate to be named there. `#foldJoin` now asks
+  the barrier's WORK members, with an evidence-only fallback that leaves this answer verbatim where
+  a barrier has none. What that closure leaves is §A.70 (a nested join over an empty fan is a work
+  member that produced nothing) and §A.72 (the fold is final at a short-circuit release).
 
 ---
 
@@ -2133,28 +2319,70 @@ Each traces to a decision in `DESIGN.md`.
   the `.loom` half is a straight before/after on one suite.
   **Closes when** was "the suite drives its flags in a temp directory … with the repro above
   finding no `x/` afterwards": satisfied, for both files. Adding `x/` to `.gitignore` was the wrong
-  fix and was not taken. **The PRODUCT half is not closed and is now §H.11** — `loom <unknown verb>`
-  still creates a workspace in whatever directory it is run from.
+  fix and was not taken. **The PRODUCT half became §H.11, and it is now closed too**
+  (`57dcbcfa`, `cbc67bae`): the verb is decided before the workspace is opened.
 
-- **H.11 · `loom <unknown verb>` creates a workspace in the current directory before printing
-  "unknown command".** *(The product half of §H.10, which closed the two test files that were
-  standing in it.)* File: `packages/core/src/cli.ts`, `openWorkspace`, called in `main` before the
-  `switch (args.command)` whose `default` arm prints the usage. Repro, in an empty directory:
+- ~~**H.11 · `loom <unknown verb>` creates a workspace in the current directory before printing
+  "unknown command".**~~ CLOSED at `57dcbcfa`, `cbc67bae` (with `11f70683` and `9b0bb527` for the
+  prose and the harness). `main` decides the verb at the door — `Object.hasOwn(VERB_FLAGS,
+  command)` through one helper, `dispatchesVerb`, shared with `refuseFlagsThisVerbDoesNotRead` so
+  the two cannot disagree — before `openWorkspace` runs. The `default:` arm keeps the same refusal
+  and is unreachable while `verb-flags.test.ts` pins `VERB_FLAGS`' key set equal to the switch's
+  case labels. Prototype names came with it: `loom constructor --port 1` used to answer
+  `E_INTERNAL: TypeError: applies.includes is not a function` and now answers `unknown command`.
+  **A BONUS THE REVIEWER FOUND**: on the base, `loom nonsense --extension-module evil.mjs`
+  IMPORTED AND RAN the module before refusing. It no longer does, and that is pinned.
+  **THE SET, named rather than claimed** — the refusals decided from ARGV ALONE: no verb, `help`,
+  `--help`; an unknown verb, prototype names and `--extension-module` included; an unknown flag; a
+  known flag the verb does not read; a repeated `--extension-module`; and EVERY ONE of the fifteen
+  names in `GLOBAL_FLAGS` given with no value. That last clause is a measurement and not a claim
+  because the first cut asserted it and was wrong: **seven of the fifteen were clean and eight
+  littered** — `allow-exec`, `egress`, `exec-env`, `grant`, `max-parallelism` and the three
+  `budget-*` — because `openWorkspace` mkdir'd right after the two path flags. The four late
+  readers (`jailFor`, `grantFlag`, `boundedCount`, `deploymentBudget`) are pure over `args` and
+  were hoisted above the first `mkdirSync`, precedence unchanged (measured on six double-fault
+  lines), and `jailFor` now runs before `new SqliteStateStore`, so a bad `--egress` no longer opens
+  a journal handle.
+  Re-run on `a9214611`, and on the first cut `57dcbcfa` for the before:
   ```
-  $ R=$PWD; D=$(mktemp -d); cd "$D"; node "$R/packages/core/src/cli.ts" nonsense 2>err; echo "exit $?"; ls -a
+  $ R=$PWD; D=$(mktemp -d); cd "$D"; node "$R/packages/core/src/cli.ts" nonsense 2>err; echo "exit $?"; ls -A
   exit 2
-  .   ..   .loom   err   graphs   resources     # `err` holds `unknown command "nonsense"` + USAGE
+  err                                      # was: .loom  err  graphs  resources
+  $ for f in <the fifteen names in GLOBAL_FLAGS>; do (cd "$(mktemp -d)"; node …/cli.ts gates --$f); done
+  a9214611  15/15 leave [err] only         57dcbcfa  7 clean, 8 leave [.loom err graphs resources]
   ```
-  A verb the binary does not have still journals nothing and refuses correctly; what it does is
-  leave three directories in a stranger's cwd, and `--workspace` defaults to cwd, so "wherever you
-  happened to be" is where they land. It is also the reason §H.10's second file existed:
-  `test/deployment/harness.ts`'s `refusing` and `serving` spawn with no `cwd`, so **any future call
-  that omits `--workspace` re-opens §H.10 in a third file** — the harness cannot be the guard here.
-  **Closes when** the verb is decided before the workspace is opened — the parse already knows
-  `args.command`, so the `default` arm can answer from `parseArgs` alone — with a test running an
-  unknown verb in a `mkdtempSync` directory and asserting it holds nothing afterwards. A narrower
-  fix that only skips the open for `default` leaves `--help` and a bad flag on the same footing, so
-  the test should name the set it covers.
+  `node --test packages/core/test/cli/refusals-leave-no-workspace.test.ts` → **19 pass / 0 fail**,
+  every member driven in its own `mkdtempSync` cwd, with `GLOBAL_FLAGS.length` asserted `=== 15`.
+  **NOT IN THE SET, and pinned as six litter cases rather than glossed over**: a VERB flag with no
+  value (`run --input`, `serve --port`, `serve --token`) and a missing positional (`compile`,
+  `score`, `gates`) still open a workspace — §H.12, with §H.13 for what those last three answer.
+
+- **H.12 · A verb flag with no value, and a missing positional, still open a workspace.** *(The six
+  cases §H.11's set deliberately excludes, measured rather than asserted.)* File:
+  `packages/core/src/cli.ts` — the per-verb `case` blocks, which validate after `openWorkspace` has
+  already run. Repro on `a9214611`, each in a fresh `mktemp -d`:
+  ```
+  [run --input]   exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --input was given with no value at all…
+  [serve --port]  exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --port was given with no value at all…
+  [serve --token] exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --token needs a non-empty value…
+  [compile]       exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: compile requires a graph file
+  [score]         exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: score requires a runId
+  [gates]         exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: gates requires a runId
+  ```
+  These are decided from ARGV alone too, so §H.11's argument covers them; what stopped them being
+  hoisted with the rest is that the door would need a flag-ARITY table — a SECOND list beside
+  `KNOWN_FLAGS` and `VERB_FLAGS`, which is the drift §H.10 was about. **Closes when** the arity is
+  DERIVED rather than hand-kept: one table the parse, the door and the verb bodies all read, with a
+  test recomputing it from the source the way `verb-flags.test.ts` recomputes the verb set.
+
+- **H.13 · A missing positional answers `E_INTERNAL` and a plain `Error`.** File:
+  `packages/core/src/cli.ts`, the `compile`, `score` and `gates` arms — the last three lines of
+  §H.12's block: `E_INTERNAL: Error: compile requires a graph file`, a bare `throw new Error(…)`
+  reaching the top-level handler, so an operator's omission is reported in the class reserved for
+  "a bug in Loom". **Closes when** all three raise
+  `err.validation(CODES.E_CONFIG_INVALID, …)` through one `requirePositional(args, verb, what)`
+  helper naming the verb and what it wanted, with a test asserting the CODE for each of the
+  three.
 
 ---
 
@@ -2257,6 +2485,10 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.55 | `3a27a98d`, `6b7ed2c7`, `ee316e88` | **both halves**: the barrier releases once no arrival can come, and a barrier not one of whose MEMBER TASKS succeeded fails `E_QUORUM_UNREACHABLE` instead of folding nothing |
 | D.9 | `6b7ed2c7`, `ee316e88`, `b9bdb5f4` | ANSWERED (a) — **by the wave orchestrator following the row's own recommendation, not by the maintainer**. Residual: §A.67 |
 | H.10 | `e7498c3f`, `b96e9c3c` | the flag suite and `serve-host.test.ts` write nothing into the repo; `npm test` leaves no `x/` and no `.loom/`. Product half → §H.11 |
+| A.21 | `25b906ee` | the `suite freeze` unresolved-gate exclusion is KEPT and settled BY CONSTRUCTION — unreachable through the Engine, reachable through a journal, frozen as a 30-run fixture that yields 29 cases |
+| A.65 | `3dcaf728`, `e491162b`, `1f8adaf6` | GRAPH021 stops dictating a member another join already claims, by `rule008`'s own test — following the line prints no diagnostic the first compile did not. Residue → §A.69 |
+| A.67 | `4700a03d`, `d222e146`, `bfc45730`, `c9f8b1ec`, `bbe05c3e`, `0081c058` | a join asks its WORK members whether anything succeeded, needs quiescence before saying no, and reads a router as evidence — and NO `JoinSpec` field. Residues → §A.70, §A.72 |
+| H.11 | `57dcbcfa`, `cbc67bae` | the verb is decided before the workspace opens, all fifteen global flags refuse with nothing on disk, and an unknown verb no longer imports `--extension-module`. Residue → §H.12, §H.13 |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
