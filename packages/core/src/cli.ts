@@ -10512,6 +10512,29 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   // suite silently mixed cases that check oversight with cases that do not, and nothing told the
   // operator which. Excluded and counted instead, like its three neighbours: a suite is a
   // regression floor, and a floor with unmarked gaps in it is the shape this repo keeps finding.
+  //
+  // WHICH RUNS THIS ACTUALLY EXCLUDES — TODO.md §A.21, settled by construction rather than by
+  // argument, because mutating the line away left the suite 9/9 green. An eligible run is already
+  // `succeeded` (that is what `components.delivered` two screens down implies) and `gateShapeOf`
+  // calls a gate unresolved only in `open` or `expired`. Driven on a real Engine over a real
+  // SQLite store, four paths, none of them this state:
+  //
+  //   join `any` / `firstSuccess` / `all` with a gate branch nobody answered → `awaiting_gate`,
+  //     gate `open`. A barrier does short-circuit past a parked sibling, but `advance`'s drain
+  //     re-suspends the run on `openGates(p).length > 0` before it can reach `#finish`.
+  //   the budget/fatal floor, which DOES reach `#finish` past that drain → `succeeded`, and the
+  //     surviving gate folds `cancelled`: `#finish` appends `cancelOpenGates` in the SAME append
+  //     as `run.completed`.
+  //   a gate SLA expiring (`onTimeout: fail`) → gate `expired` and run `failed`, because `#expire`
+  //     ships `gate.timeout` and `run.failed` in one append. So `expired` implies `failed`.
+  //
+  // THE STATE IS STILL REACHABLE, AND NOT THROUGH THE ENGINE: this verb's input is a JOURNAL, and
+  // journals outlive the binary that wrote them. `#finish`'s own docstring dates a build whose
+  // SUCCESS path did not close its gates; deleting that one line and re-running the floor probe
+  // above yields `status=succeeded gates=[decided, open]` — a workspace holding such a recording
+  // is what this line is for, and `suite-freeze.test.ts` freezes one. Admitting it would write
+  // `noIrreversibleWithoutGate: true` onto a case whose own recording fails it, so the baseline
+  // would fail the exam frozen from it.
   let unresolvedGate = 0;
   const otherKeysSeen = new Set<string>();
   let excludedForWeights = 0;

@@ -43,8 +43,9 @@ import { join } from "node:path";
 
 import { main, openWorkspace, parseArgs } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
-import type { RunId } from "../../src/ids.ts";
+import { newGateId, type NodeId, type RunId } from "../../src/ids.ts";
 import { isEvent, type EventPayloads, type JournalEvent } from "../../src/journal/events.ts";
+import { foldRun } from "../../src/run/projection.ts";
 import type { EvalSuite } from "../../src/evolution/gate.ts";
 
 // ---------------------------------------------------------------------------
@@ -488,14 +489,13 @@ test("every frozen case carries the safety invariant", async () => {
   // cases that check oversight with cases that do not and nothing said which. It is
   // unconditional now, and this asserts that — which is the half that is checkable.
   //
-  // WHAT THIS DOES NOT COVER, said rather than implied. The exclusion that makes the field
-  // unconditional — a recording whose fold shows a gate neither `decided` nor `cancelled` is
-  // dropped and counted — is NOT exercised here, and I could not build a fixture that reaches
-  // it: a run must be `succeeded` AND `delivered` to get this far, and no such run in this
-  // corpus carries an unresolved gate. Measured: mutating the exclusion away leaves this suite
-  // 9/9, so this test does not discriminate on that branch and must not be read as if it does.
-  // Whether the branch is reachable at all is recorded in TODO.md §A.21; it is kept as a
-  // fail-closed guard over a state nobody has constructed, not as covered behaviour.
+  // WHAT THIS TEST DOES NOT COVER, said rather than implied, and where it now IS covered. The
+  // exclusion that makes the field unconditional — a recording whose fold shows a gate neither
+  // `decided` nor `cancelled` is dropped and counted — is not exercised here: this corpus has no
+  // such run, and mutating the exclusion away used to leave the whole file green. That was
+  // TODO.md §A.21, and it is settled at the bottom of this file, by a fixture rather than by an
+  // argument: the state is unreachable through this engine and reachable through a JOURNAL, which
+  // is the only input `suite freeze` has. The mutation goes red there, not here.
   const c = await scoredCorpus();
   const out = join(c.dir, "invariant.json");
   const r = await freeze(c.dir, c.ids[0]!, out);
@@ -508,5 +508,98 @@ test("every frozen case carries the safety invariant", async () => {
       true,
       `case ${k.id} was frozen without the safety invariant — every case must carry it`,
     );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 5 · the exclusion that was a guard over a state nobody had constructed
+// ---------------------------------------------------------------------------
+
+/**
+ * A RECORDING WHOSE GATE WAS NEVER RESOLVED, on a run that folded to `succeeded` — TODO.md §A.21.
+ *
+ * The exclusion above it was measured as a guard over a state nobody had built: mutating it away
+ * left this file 9/9 green. This is the fixture, and it is a fixture about the verb's INPUT rather
+ * than about the engine.
+ *
+ * **WHAT THE ENGINE DOES, measured on a real Engine over a real SQLite store** — none of it this
+ * state. A join in `any`/`firstSuccess` mode really does short-circuit past a branch parked on a
+ * gate, but `advance`'s drain re-suspends the run on `openGates(p).length > 0`, so it folds
+ * `awaiting_gate` and never becomes eligible. The budget/fatal floor DOES reach `#finish` past
+ * that drain, and `#finish` appends `cancelOpenGates` in the same append as `run.completed`, so
+ * the surviving gate folds `cancelled` — resolved. A gate whose SLA expires folds `expired`, which
+ * IS unresolved, but `#expire` ships `gate.timeout` and `run.failed` in one append, so `expired`
+ * implies `failed`.
+ *
+ * **AND WHY THE STATE IS REACHABLE ANYWAY.** `suite freeze` reads journals, and a journal outlives
+ * the binary that wrote it. `#finish`'s docstring dates a build whose SUCCESS path did not close
+ * its gates; deleting that one line from `#finish` and re-running the floor probe yields
+ * `status=succeeded gates=[decided, open]` — measured, not quoted. So the shape below is one a
+ * workspace can really be holding, and it is built here by appending the raise to a run this
+ * corpus recorded, because the fold reads gate STATE and not row order.
+ *
+ * What admitting it would cost: `noIrreversibleWithoutGate: true` is written onto EVERY case, so
+ * the suite would carry a case whose own recording fails its own expectation — and the baseline
+ * would then fail the exam frozen from it.
+ */
+test("A RUN THAT ENDED ON AN UNRESOLVED GATE IS EXCLUDED, AND IT IS THE ONLY REASON IT IS", async () => {
+  const c = await corpus(30, { score: true });
+  try {
+    const gated = c.ids[5]!;
+    const ws = openWorkspace(parseArgs(["gates", "--workspace", c.dir]));
+    try {
+      await ws.store.append({
+        runId: gated as RunId,
+        expectedSeq: await ws.store.head(gated as RunId),
+        events: [
+          {
+            type: "gate.raised",
+            payload: {
+              gateId: newGateId(1),
+              nodeId: "check" as NodeId,
+              policyRef: "oversight/ship@stable",
+              contentDigest: "sha256:unanswered",
+            },
+            actor: { kind: "system", component: "a-build-that-did-not-close-its-gates" },
+          },
+        ],
+      });
+    } finally {
+      ws.close();
+    }
+
+    // THE FIXTURE IS WHAT IT CLAIMS TO BE, asserted rather than assumed — otherwise this test
+    // could pass while exercising nothing. Succeeded, still delivered under its journaled score
+    // (so every earlier exclusion in the loop passes it through), and holding a gate that is
+    // neither `decided` nor `cancelled`.
+    const events = await journal(c.dir, gated);
+    const p = foldRun(events)!;
+    assert.equal(p.status, "succeeded", "the run still folds to succeeded");
+    assert.deepEqual(
+      Object.values(p.gates).map((g) => g.state),
+      ["open"],
+      "…and to exactly one gate nobody answered",
+    );
+    assert.equal(lastScore(events)!.components.delivered, true, "it passes `!delivered` — the exclusion before this one");
+
+    const out = join(c.dir, "unresolved-gate.json");
+    const r = await freeze(c.dir, c.ids[0]!, out);
+    assert.equal(r.code, 0, `${r.out}${r.err}`);
+    const suite = readSuite(out);
+    assert.equal(suite.cases.length, 29, "one of the thirty was dropped");
+    assert.equal(
+      suite.cases.some((k) => k.runId === gated),
+      false,
+      "the recording that could not carry `noIrreversibleWithoutGate` was frozen into the exam anyway",
+    );
+    // THE CONTROL, so the count above is not passing for some other reason: every OTHER run in
+    // the corpus is a case.
+    assert.deepEqual(
+      suite.cases.map((k) => k.runId).sort(),
+      c.ids.filter((id) => id !== gated).sort(),
+      "exactly one run is missing, and it is the gated one",
+    );
+  } finally {
+    c.dispose();
   }
 });
