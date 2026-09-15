@@ -385,13 +385,14 @@ test("…and an arm two levels up is still refused for the OLD reason", () => {
   );
 });
 
-test("§A.64 AND AN AMBIGUOUS FAN-OUT IS TOLERATED, because people author it", () => {
+test("§A.64 AND AN AMBIGUOUS FAN-OUT WITH ONE OWNER IS TOLERATED, because people author it", () => {
   // The direction this rule deliberately does NOT take, pinned so the next reader does not
   // "fail closed" here and break a working graph. `x` is reachable through two fan-outs of the
   // SAME width, so its width stack agrees and its EDGE stack does not — and a refusal was tried
   // here and broke `test/run/empty-fanout-oversight.test.ts`, whose router steers between two
   // list-builders that each fan out into ONE shared body node. Exactly one of the two edges ever
-  // fires; the ambiguity is the compiler's, not the graph's.
+  // fires; the ambiguity is the compiler's, not the graph's. ONE OWNER is the whole licence that
+  // fixture grants, and the test below is the other side of it.
   const spec = {
     ...a64Base,
     nodes: [
@@ -447,4 +448,126 @@ test("§A.64 AND AN ARM IN A DIFFERENT OUTER FAN IS REFUSED where the identity I
   );
   assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
   assert.match(found[0]!.message, /inside fan-out "F2" where the join is inside "F1"/, found[0]!.message);
+});
+
+/**
+ * …AND AMBIGUITY WITH TWO OWNERS IS REFUSED — a reviewer's finding on the first cut of §A.64.
+ *
+ * Ambiguity PROPAGATES. A body reachable through two fan-out edges of the same width has
+ * `fanoutEdgeStack === undefined`, and so does every join below it — so the per-fan-out-EDGE pass
+ * skipped the graph entirely, and "one fan-out, one barrier" was not true of the ambiguous case at
+ * all. Measured on a real `Engine` before the refusal existed, two same-width fan-out edges into
+ * one body over an `append_ordered` channel:
+ *
+ *     one barrier    parts n=6     ["f0","f1","f2"] twice, one per firing fan-out
+ *     two barriers   parts n=12    the same six again           status = succeeded
+ *
+ * What cannot be named is WHICH fan-out opened the arm. What can still be counted is how many
+ * joins claim it, and two claimants double the fold whichever fan-out it turns out to be. So the
+ * ambiguity is the reason to refuse here, not the reason to allow.
+ */
+
+/** Two same-width fan-out edges into one body, and `second` gives it a second root barrier. */
+function ambiguousBody(second: boolean): GraphSpec {
+  return {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      { id: n("plan2"), type: "function", reads: ["outers"], function: { ref: "function/plan2@stable" } },
+      work("body", "outerItem"),
+      barrier("jA", ["body"]),
+      ...(second ? [barrier("jB", ["body"])] : []),
+    ],
+    edges: [
+      { id: e("seq2"), from: n("plan"), to: n("plan2"), kind: "seq" },
+      fanout("f1", "plan", "body", "outers", "outerItem"),
+      fanout("f2", "plan2", "body", "outers", "outerItem"),
+      joins("j1", "body", "jA"),
+      ...(second ? [joins("j2", "body", "jB")] : []),
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("§A.64 AND AN AMBIGUOUS FAN-OUT WITH TWO OWNERS IS REFUSED — ambiguity propagates", () => {
+  const spec = ambiguousBody(true);
+
+  // The precondition, and the reason the per-fan-out-EDGE pass could not see this: NEITHER the
+  // body NOR the joins below it have an edge stack, so there is no edge to key the count on.
+  const idx = indexGraph(spec);
+  assert.equal(idx.fanoutDepth.get(n("body")), 1, "precondition: the body's depth IS decided");
+  assert.equal(idx.fanoutEdgeStack.get(n("body")), undefined, "precondition: and its fan-out is not");
+  assert.equal(idx.fanoutEdgeStack.get(n("jA")), undefined, "precondition: ambiguity reaches the joins too");
+
+  const found = validateGraph({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] }).filter(
+    (x) => x.code === "GRAPH008_JOIN_DEPTH",
+  );
+  assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
+  assert.equal(found[0]!.at?.nodeId, n("body"), "the refusal names the arm, because no fan-out edge can be named");
+  // The NAME SET, not the prose: both claimants have to be named or the author cannot act.
+  assert.deepEqual(
+    [...found[0]!.message.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((x) => x === "jA" || x === "jB"),
+    ["jA", "jB"],
+    found[0]!.message,
+  );
+});
+
+test("…and the SAME ambiguous body with ONE owner still compiles", () => {
+  // The two-sided control, and the shape `test/run/empty-fanout-oversight.test.ts` actually
+  // declares: one join over the ambiguous body. One edge and one `branches` entry of difference.
+  assert.deepEqual(codes(ambiguousBody(false)), [], "an ambiguous fan-out with one barrier is a working graph");
+});
+
+/**
+ * …AND THE SAME THING THROUGH A ROUTER, which is the shape the tolerance was granted for.
+ *
+ * `test/run/empty-fanout-oversight.test.ts` steers between two list-builders that each fan out
+ * into ONE shared body node, so exactly one of the two edges ever fires. That fixture declares
+ * exactly ONE join over the ambiguous body, and that is the whole licence it grants: the same
+ * graph with a second join is the double fold again, and a router cannot tell the compiler which
+ * edge won.
+ */
+function steeredBody(second: boolean): GraphSpec {
+  return {
+    ...a64Base,
+    channels: { ...a64Base.channels, request: { type: "string", reduce: "replace" } },
+    inputs: ["request", "outers", "inners"],
+    nodes: [
+      {
+        id: n("route"),
+        type: "router",
+        reads: ["request"],
+        router: { mode: "expression", cases: [{ when: `contains(request, "NONE")`, take: ["toEmpty"] }], fallbackEdge: "toFull" },
+      },
+      { id: n("planEmpty"), type: "function", reads: ["request"], writes: ["outers"], function: { ref: "function/none@stable" } },
+      { id: n("planFull"), type: "function", reads: ["request"], writes: ["outers"], function: { ref: "function/two@stable" } },
+      work("hold", "outerItem"),
+      barrier("j", ["hold"]),
+      ...(second ? [barrier("j2", ["hold"])] : []),
+    ],
+    edges: [
+      { id: e("toEmpty"), from: n("route"), to: n("planEmpty"), kind: "seq" },
+      { id: e("toFull"), from: n("route"), to: n("planFull"), kind: "seq" },
+      fanout("fanE", "planEmpty", "hold", "outers", "outerItem"),
+      fanout("fanF", "planFull", "hold", "outers", "outerItem"),
+      joins("jj", "hold", "j"),
+      ...(second ? [joins("jj2", "hold", "j2")] : []),
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("…and the ROUTER-STEERED body the tolerance was granted for keeps compiling with ONE join", () => {
+  assert.deepEqual(codes(steeredBody(false)), [], "this is `empty-fanout-oversight`'s own shape and must not move");
+});
+
+test("…and the SAME steered body with TWO joins is refused", () => {
+  const found = validateGraph({ spec: steeredBody(true), resolver: resolver(), tools: {}, tenantCapabilities: [] }).filter(
+    (x) => x.code === "GRAPH008_JOIN_DEPTH",
+  );
+  assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
+  assert.equal(found[0]!.at?.nodeId, n("hold"));
+  assert.deepEqual(
+    [...found[0]!.message.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((x) => x === "j" || x === "j2"),
+    ["j", "j2"],
+    found[0]!.message,
+  );
 });
