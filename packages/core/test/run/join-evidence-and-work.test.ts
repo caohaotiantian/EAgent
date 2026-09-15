@@ -212,7 +212,7 @@ function routerFanSpec(opts: { readonly mode: string; readonly body: string }): 
  * and a comment was written saying the shape was not known to be reachable. It is reachable, with
  * zero diagnostics, and this graph is the counterexample.
  */
-function staticLiveWorkSpec(mode: string, body: string): GraphSpec {
+function staticLiveWorkSpec(mode: string, body: string, k = 0.5): GraphSpec {
   return {
     apiVersion: "loom.dev/v1",
     kind: "GraphSpec",
@@ -240,7 +240,7 @@ function staticLiveWorkSpec(mode: string, body: string): GraphSpec {
           branches: [n("alice"), n("worker")],
           mode,
           onBranchError: "skip",
-          ...(mode === "quorum" ? { k: 0.5 } : {}),
+          ...(mode === "quorum" ? { k } : {}),
         },
       },
       { id: n("done"), type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
@@ -291,6 +291,62 @@ function evidenceOnlySpec(mode: string): GraphSpec {
   } as unknown as GraphSpec;
 }
 
+/**
+ * §A.67 WITH A NESTED JOIN AS THE CARRIER (P4), and its own control in one spec.
+ *
+ * `start --fanout(over "empty")--> ib --join--> IJ` is §A.47's legitimate empty fan when `empty`
+ * is `[]`: no member Task materialises, `#fireEmptyJoin` mints the barrier, and IJ SUCCEEDS having
+ * folded nothing. `IJ` is then named in the OUTER barrier's `branches` beside `worker`, which
+ * throws — so the outer barrier's only real work died and a join that produced nothing carries it.
+ *
+ * Seed `empty` with entries instead and the SAME graph is the control: IJ folds real contributions
+ * and the outer barrier must fold and succeed.
+ */
+function nestedJoinSpec(mode: string): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a67-nested-join", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 2, maxFanout: 16, maxLoopIterations: 1 } },
+    channels: { ...CHANNELS, empty: { type: "array", reduce: "replace" } },
+    inputs: ["items", "empty"],
+    outputs: [],
+    nodes: [
+      { id: n("start"), type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: n("ib"), type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/inner@stable" } },
+      {
+        id: n("IJ"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: [n("ib")], mode: "all", onBranchError: "skip" },
+      },
+      { id: n("worker"), type: "function", reads: ["items"], writes: ["seen"], function: { ref: "function/boom@stable" } },
+      {
+        id: n("OJ"),
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: {
+          branches: [n("IJ"), n("worker")],
+          mode,
+          onBranchError: "skip",
+          ...(mode === "quorum" ? { k: 0.5 } : {}),
+        },
+      },
+      { id: n("done"), type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: e("fo"), from: n("start"), to: n("ib"), kind: "fanout", over: "empty", as: "item", maxWidth: 4 },
+      { id: e("ji"), from: n("ib"), to: n("IJ"), kind: "join", branches: [n("ib")] },
+      { id: e("sw"), from: n("start"), to: n("worker"), kind: "seq" },
+      { id: e("jo1"), from: n("IJ"), to: n("OJ"), kind: "join", branches: [n("IJ"), n("worker")] },
+      { id: e("jo2"), from: n("worker"), to: n("OJ"), kind: "join", branches: [n("IJ"), n("worker")] },
+      { id: e("sq"), from: n("OJ"), to: n("done"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
 interface Result {
   readonly status: string;
   readonly seen: readonly string[];
@@ -313,6 +369,7 @@ function newEngine(store: SqliteStateStore, tools: ToolRegistry = new ToolRegist
   // The static B1 graph reads `items`, not the fan-out's `item`, so it needs its own body: reusing
   // `function/work@stable` there writes "?" and the assertion would be pinning the probe, not the run.
   functions.register("function/static-work@stable", () => ({ writes: { seen: ["real-work"] } }));
+  functions.register("function/inner@stable", () => ({ writes: { seen: ["inner"] } }));
   functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
   return new Engine({
     store,
@@ -334,6 +391,7 @@ async function runAcrossRestart(
   spec: GraphSpec,
   items: readonly unknown[],
   decide: (nodeId: string) => { kind: string; [k: string]: unknown },
+  extraInputs: Readonly<Record<string, unknown>> = {},
 ): Promise<Result> {
   const dir = mkdtempSync(pathJoin(tmpdir(), "a67-"));
   const path = pathJoin(dir, "j.db");
@@ -346,7 +404,7 @@ async function runAcrossRestart(
   try {
     const first = new SqliteStateStore({ path, now: () => NOW });
     const opener = newEngine(first);
-    const runId = await opener.submit({ graph, inputs: { items } });
+    const runId = await opener.submit({ graph, inputs: { items, ...extraInputs } });
     await opener.advance(runId);
     first.close();
 
@@ -749,5 +807,70 @@ test("N1 — A ROUTER IS EVIDENCE TOO: §A.67 with no human in it", async () => 
     assert.equal(live.status, "succeeded", `${where}: the work behind the router produced`);
     assert.equal(live.joinError, undefined, `${where}: so nothing is refused`);
     assert.equal(live.seen.length, 2, `${where}: and both branches folded — seen=${JSON.stringify(live.seen)}`);
+  }
+});
+
+test("P1 — A STATIC `quorum` WHOSE `k` ONE SUCCESS CANNOT MEET IS THE THIRD QUIESCENCE SHAPE", async () => {
+  // THE REFUSAL FIRES ON A FOLD STATE, NOT ON A LIST OF GRAPHS, and this test exists because an
+  // earlier comment enumerated "two shapes" and a third turned up the next day. `#maybeFireJoin`
+  // computes `need = k <= 1 ? ceil(k * expected) : k`, so over the SAME two members:
+  //
+  //   k: 0.5 -> need 1 -> the approved gate short-circuits the barrier while the worker is LIVE,
+  //             and the refusal must NOT fire (that is the B1 test above, and it reads `succeeded`)
+  //   k: 1   -> need 2 -> one success never fires it, so the barrier falls through to
+  //             `noMoreArrivals`, the worker IS terminal at the fold, and the refusal MUST fire
+  //
+  // One knob, one graph, both sides of the line. Measured: base `succeeded note=["done-ran"]`,
+  // here `failed E_QUORUM_UNREACHABLE`.
+  const meets = await runStaged(staticLiveWorkSpec("quorum", "function/boom@stable", 0.5), "alice");
+  assert.equal(meets.post.status, "succeeded", `k=0.5 short-circuits on the gate, so the fold was final at release`);
+
+  const cannot = await runStaged(staticLiveWorkSpec("quorum", "function/boom@stable", 1), "alice");
+  assert.match(cannot.midTasks, /worker:awaiting_gate/, `k=1 must not fire on one success — ${cannot.midTasks}`);
+  assert.equal(cannot.mid.joinError, undefined, `and it has not folded yet while the worker can still arrive`);
+  assert.equal(cannot.post.status, "failed", `once the worker died, every work member is terminal and none succeeded`);
+  assert.equal(cannot.post.joinError, "E_QUORUM_UNREACHABLE", `and the barrier names why`);
+  assert.equal(cannot.post.doneCommitted, 0, `nothing behind it ran`);
+});
+
+test("P4 — RESIDUE: a nested join over an EMPTY fan still carries an outer barrier, and the cheap fix is worse", async () => {
+  // §A.67 WITH A JOIN AS THE CARRIER INSTEAD OF A GATE, and it is NOT closed. §A.47 requires a
+  // fan-out over an empty channel to succeed folding nothing, so the inner join is a WORK member
+  // that succeeded and produced nothing — exactly what an approved gate was. Measured, zero
+  // diagnostics, IDENTICAL on `ee4f1c14` and here, in all four modes:
+  //
+  //     status=succeeded note=["done-ran"]   IJ:succeeded{} OJ:succeeded{} worker:skipped{}
+  //
+  // THE OUTER BARRIER'S ONLY REAL WORKER DIED AND THE RUN SAYS IT WORKED. This test pins that as
+  // the CURRENT behaviour so it cannot change in silence, and does not endorse it.
+  //
+  // WHY `join` IS NOT IN `PRODUCES_NOTHING`, measured rather than argued: a ROOT-COORDINATE JOIN
+  // ALWAYS RETURNS `writes: {}` — its fold goes out in `reduced` — so the "produced nothing"
+  // conjunct cannot tell a root join that folded EVERYTHING from one that folded nothing. Adding
+  // `join` to the set was built and run: it closes the first assertion below and turns the SECOND
+  // one — the same graph whose inner fan is NOT empty — into
+  //
+  //     failed seen=["inner","inner"] error=E_QUORUM_UNREACHABLE
+  //
+  // a run refused with two real contributions already in the channel, under a message saying it did
+  // no work. That is B1's defect one layer up, so the second assertion is the control that refutes
+  // the cheap fix, and it is the reason this is a row and not a patch.
+  //
+  // PROPOSED ROW: "A nested join over an EMPTY fan is a WORK member that succeeded producing
+  // nothing, so it carries an outer barrier whose real work died." Closing it needs the fold to see
+  // a member join's own `branchCount`, which lives in its `state.reduced` payload and is not on
+  // `TaskRecord` — a projection question, not an arm of `#foldJoin`.
+  for (const mode of MODES) {
+    const where = `mode=${mode}`;
+    const empty = await runAcrossRestart(nestedJoinSpec(mode), [{ id: "a" }], approve, { empty: [] });
+    assert.equal(empty.status, "succeeded", `${where}: RESIDUE — the empty-fan join carries the barrier`);
+    assert.deepEqual(empty.seen, [], `${where}: with nothing folded`);
+    assert.deepEqual(empty.note, ["done-ran"], `${where}: and the node behind the barrier ran`);
+
+    // THE CONTROL THAT REFUTES THE CHEAP FIX. Same graph, non-empty inner fan.
+    const full = await runAcrossRestart(nestedJoinSpec(mode), [{ id: "a" }], approve, { empty: [{ id: "x" }, { id: "y" }] });
+    assert.equal(full.status, "succeeded", `${where}: a root join that folded real work is WORK, not evidence`);
+    assert.deepEqual(full.seen, ["inner", "inner"], `${where}: and its contributions are in the channel`);
+    assert.equal(full.joinError, undefined, `${where}: nothing is refused`);
   }
 });

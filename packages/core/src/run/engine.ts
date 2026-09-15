@@ -7571,10 +7571,11 @@ export class Engine {
     // AND `terminalWork === workMembers` IS NOT BELT-AND-BRACES — IT IS WHAT MAKES THIS AN
     // ANSWERABLE QUESTION, and the first cut of §A.67 shipped without it and broke working runs.
     //
-    // A BARRIER CAN RELEASE WHILE A WORK MEMBER IS STILL LIVE. `#maybeFireJoin` fires `any`,
-    // `firstSuccess` and `quorum` on `succeeded >= 1` WITHOUT quiescence, on purpose — "QUIESCENCE
-    // GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES" — and on a STATIC join an approved gate IS that
-    // one success. Measured, zero diagnostics: `alice` (a `human_gate`) and `worker` (a
+    // A BARRIER CAN RELEASE WHILE A WORK MEMBER IS STILL LIVE. `#maybeFireJoin` short-circuits
+    // WITHOUT quiescence, on purpose — "QUIESCENCE GATES THE 'NO' ANSWERS, NOT THE 'YES' ONES":
+    // `any` and `firstSuccess` on `succeeded >= 1`, `quorum` on `succeeded >= need` (where
+    // `need = k <= 1 ? ceil(k * expected) : k`). On a STATIC join an approved gate can be that
+    // success. Measured, zero diagnostics: `alice` (a `human_gate`) and `worker` (a
     // `function` at posture `in`, so it raises its own policy gate) as sibling `kind: "join"` arms
     // of one barrier, approve `alice` only —
     //
@@ -7597,15 +7598,58 @@ export class Engine {
     //
     // THE COST, NAMED: a run fails now where it succeeded before iff its barrier has at least one
     // materialised WORK member, EVERY one of them is terminal, not one succeeded, and some member
-    // is. Two shapes reach it and both are driven in `join-evidence-and-work.test.ts`: a fan-out
-    // whose work all died behind approved gates or routed routers, and a STATIC `mode: "all"`
-    // barrier, which waits for quiescence and therefore sees the loss.
+    // is.
     //
-    // WHAT IT STILL DOES NOT REACH, pinned rather than left implicit: a short-circuiting mode whose
-    // barrier released on evidence alone and whose work THEN failed. The fold is final at release —
-    // the barrier does not re-evaluate — so the run ends `succeeded` with nothing folded. That is
-    // the residue a short-circuiting mode buys by definition, it is UNCHANGED from before §A.67,
-    // and closing it means straggler cancellation or a second fold, neither of which is this arm's.
+    // WHICH RELEASES CAN REACH THAT, AS A SET AND NOT A LIST OF GRAPHS — an earlier draft said
+    // "two shapes" and a third was found the next day, which is what an enumeration of examples is
+    // worth. The condition is about the FOLD: every work member terminal. A release out of
+    // `noMoreArrivals` GUARANTEES it, because that predicate is `quiescent && terminal >= expected`,
+    // and every mode reaches it:
+    //
+    //   - `all`, which has no other exit;
+    //   - `quorum` whose `need` the surviving successes cannot meet — `k: 1` over two members
+    //     needs BOTH, so one approved gate never fires it (measured on a static barrier: base
+    //     `succeeded note=["done-ran"]`, here `failed E_QUORUM_UNREACHABLE`). `k: 0.5` over the
+    //     same two members needs ONE and short-circuits instead, so `k` alone decides which side
+    //     of this line a graph is on;
+    //   - `any` and `firstSuccess` that fell through to it — the row's own fan-out is this case,
+    //     because `continuesInBranch` keeps a gate that feeds its own branch's worker out of the
+    //     fire count entirely.
+    //
+    // AND ONE RELEASE THAT IS NOT A QUIESCENCE RELEASE STILL REACHES IT: a short-circuit that
+    // happens to land when the work is ALREADY terminal. The predicate is keyed on the member
+    // states, not on which branch of `fire` ran, so that case is covered by construction rather
+    // than by this list being complete.
+    //
+    // All three quiescence cases are driven in `join-evidence-and-work.test.ts`.
+    //
+    // WHAT IT STILL DOES NOT REACH — TWO RESIDUES, both pinned rather than left implicit.
+    //
+    // (1) A short-circuiting mode whose barrier released on evidence alone and whose work THEN
+    // failed. The fold is final at release — the barrier does not re-evaluate — so the run ends
+    // `succeeded` with nothing folded. That is what a short-circuiting mode buys by definition, it
+    // is UNCHANGED from before §A.67, and closing it means straggler cancellation or a second fold.
+    //
+    // (2) A NESTED JOIN OVER AN EMPTY FAN CARRIES AN OUTER BARRIER, which is §A.67 with a join as
+    // the carrier instead of a gate. §A.47 requires a fan-out over an empty channel to SUCCEED
+    // folding nothing, so an inner join named in an outer barrier's `branches` is a WORK member
+    // that succeeded and produced nothing. Measured, zero diagnostics, all four modes, IDENTICAL on
+    // `ee4f1c14` and here — `status=succeeded note=["done-ran"]` with the outer barrier's only real
+    // worker `skipped`.
+    //
+    // ADDING `join` TO `PRODUCES_NOTHING` CLOSES IT AND BREAKS SOMETHING WORSE, which is why it is
+    // residue and not a fix. It was built and run. A ROOT-COORDINATE JOIN ALWAYS RETURNS
+    // `writes: {}` — sixty lines below, its fold goes out in `reduced`, not in `writes` — so
+    // `Object.keys(t.writes).length === 0` cannot tell a root join that folded EVERYTHING from one
+    // that folded nothing. With `join` in the set, the same graph with a NON-empty inner fan reads:
+    //
+    //     failed  seen=["inner","inner"]  error=E_QUORUM_UNREACHABLE
+    //
+    // a run refused with two real contributions already in the channel, under a message saying it
+    // did no work — B1's own defect, re-created one layer up. The discriminator the fold would need
+    // is the member join's own `branchCount`, which lives in its `state.reduced` payload and is not
+    // on `TaskRecord`; putting it there is a projection question, not an arm of this predicate.
+    // Both halves are pinned in `join-evidence-and-work.test.ts` so neither can move in silence.
     //
     // INDEPENDENT OF `onBranchError`, which is the compatibility cost and is deliberate.
     // `onBranchError: "skip"` still absorbs every loss short of the last one — a partial loss
@@ -11503,8 +11547,13 @@ export class Engine {
     // already has an owner. `#maybeFireJoin` decides WHEN a barrier releases; `#foldJoin`
     // decides what the release MEANS, and it holds BOTH failure arms —
     // `onBranchError === "fail" && skipped > 0`, and since §D.9's answer a barrier not one of whose
-    // WORK members succeeded (§A.67 narrowed the unit; `members.length > 0` still separates an empty
-    // fan from an emptied one), each returning `E_QUORUM_UNREACHABLE`.
+    // WORK members succeeded — `succeededWork === 0 && terminalWork === workMembers`, §A.67, with
+    // `members.length > 0` still separating an empty fan from an emptied one. THE SECOND CONJUNCT
+    // IS THERE BECAUSE OF THIS METHOD: the short-circuit above releases WITHOUT quiescence, so the
+    // fold can be handed a member set still holding a live task, and "not one succeeded" is an
+    // absence claim that needs the same quiescence the two "no" answers here need. Without it a
+    // barrier released on an approved gate failed a run whose worker then succeeded and wrote.
+    // Both arms return `E_QUORUM_UNREACHABLE`.
     // So all four modes short-circuit on evidence in hand and otherwise release once no
     // further arrival is possible.
     //
