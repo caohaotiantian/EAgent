@@ -37,8 +37,8 @@
  * `{"$payload":…}` in `reads` is a HANDLE only if `readsUnresolved` names its channel. A payload
  * whose own CONTENT is `$payload`-shaped resolves to that content and is named in `readsResolved`,
  * which is the invariant `THE PAYLOAD WHOSE CONTENT IS ITSELF` test below exists to pin: without
- * it, a `resolveHandles` that skipped a fetched value for looking like a handle left all four of
- * this file's other tests green while the row said the gate read no handles at all.
+ * it, a `resolveHandles` that skipped a fetched value for looking like a handle left every other
+ * test in this file green while the row said the gate read no handles at all.
  */
 
 import test from "node:test";
@@ -178,8 +178,8 @@ const ORDER_GRAPH = {
  * yields a value that LOOKS like a handle. The door must resolve it and name it in `readsResolved`
  * anyway, because the decision is `p.external` and never the shape — in either direction.
  *
- * Measured with a `resolveHandles` that skipped a fetched value carrying `$payload`: this file's
- * other four tests all stayed green while the row said `readsResolved: []`, `readsUnresolved: []`
+ * Measured with a `resolveHandles` that skipped a fetched value carrying `$payload`: every other
+ * test in this file stayed green while the row said `readsResolved: []`, `readsUnresolved: []`
  * and `reads.selfish` was the journal's handle. That is the mechanism §A.61 protects, reported by
  * the row as "this gate read no handles at all".
  */
