@@ -479,8 +479,19 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
     `offered ${JSON.stringify(offered)} and waits for ${JSON.stringify(waited)} — that overlap is the cycle`,
   );
 
-  // And the fix converges in ONE step, for either choice.
+  // AND THE SECOND COMPILE IS THE OTHER BARRIER — §A.64, and this assertion used to read "the fix
+  // converges in ONE step, for either choice" over a graph that DOUBLE-FOLDS.
+  //
+  // Picking one candidate leaves the other still popping `fan`, and a fan-out's nodes hold their
+  // writes for ONE enclosing join. Measured on a real `Engine` on the same shape — a fanned-out
+  // node behind a held `gather`, with a second root barrier declaring `gather` too — over an
+  // `append_ordered` channel: `failures = ["r0","r1"]` with one barrier and
+  // `["r0","r1","r0","r1"]` with two, run `succeeded` both times. So this fixture's own converged
+  // graph was one of the graphs §A.64 was about, and what converges is two steps: pick a barrier,
+  // then stop the other one being a barrier. The second step is what the new `fix:` dictates —
+  // take the picked join's RESULT as an arm instead of the branch nodes.
   for (const pick of offered) {
+    const other = offered.find((o) => o !== pick)!;
     const fixed = clone(s) as unknown as GraphSpec;
     const j = fixed.nodes.findIndex((x) => x.id === n(pick));
     (fixed.nodes as NodeSpec[])[j] = {
@@ -492,10 +503,28 @@ test("A CANDIDATE IS NEVER ALSO A THING TO WAIT FOR — `a53-pickone`, the sixth
         (fixed.edges as EdgeSpec[]).push({ id: e(`add-${w}-${pick}`), from: n(w), to: n(pick), kind: "join" } as EdgeSpec);
       }
     }
+    const afterPick = errorsOf(fixed as GraphSpec);
+    assert.deepEqual(
+      afterPick.map((x) => x.code),
+      ["GRAPH008_JOIN_DEPTH"],
+      `picking "${pick}" must leave exactly the second barrier to answer for`,
+    );
+    assert.equal(afterPick[0]!.at?.edgeId, e("fan"), "the refusal is about the fan-out, not about either join");
+    assert.match(afterPick[0]!.message, new RegExp(`"${pick}".*"${other}"|"${other}".*"${pick}"`), afterPick[0]!.message);
+
+    // Step two, exactly as the line dictates: `other` takes `pick`'s result as its arm.
+    const o = fixed.nodes.findIndex((x) => x.id === n(other));
+    (fixed.nodes as NodeSpec[])[o] = {
+      ...fixed.nodes[o]!,
+      join: { branches: [n(pick)], mode: "all", onBranchError: "fail" },
+    } as NodeSpec;
+    const drop = fixed.edges.filter((x) => x.to === n(other) && waited.includes(String(x.from)));
+    for (const x of drop) (fixed.edges as EdgeSpec[]).splice(fixed.edges.indexOf(x), 1);
+    (fixed.edges as EdgeSpec[]).push({ id: e(`chain-${pick}-${other}`), from: n(pick), to: n(other), kind: "join" } as EdgeSpec);
     assert.deepEqual(
       errorsOf(fixed as GraphSpec).map((x) => x.code),
       [],
-      `picking "${pick}" and doing what the line says must compile`,
+      `picking "${pick}" and then doing what the second line says must compile`,
     );
   }
 });
@@ -695,10 +724,12 @@ function doubleNested(): GraphSpec {
 
 test("the held join's fix: points at ITS OWN fan-out's barrier, and says INNERMOST", () => {
   // Two reviewer findings in one place. First: a sibling fan's barrier, wired with edits of the
-  // SHAPE this line dictates, compiles clean — `GRAPH008_JOIN_DEPTH` compares `fanoutDepth`
-  // numbers and never `fanoutEdgeStack`, so a join one level up in a different fan satisfies it.
-  // That acceptance is a real gap and not this rule's to close here; what is pinned is that the
-  // sentence names WHICH join it means rather than papering over it.
+  // SHAPE this line dictates, used to compile clean — `GRAPH008_JOIN_DEPTH` compared `fanoutDepth`
+  // numbers and never `fanoutEdgeStack`, so a join one level up in a different fan satisfied it.
+  // That acceptance was §A.64 and is closed: handing a held join to a barrier that is not the one
+  // folding its own fan-out's branch leaves that fan-out with two barriers, which is refused —
+  // see `join-depth.test.ts`. What is pinned HERE is still only that the sentence names WHICH
+  // join it means rather than papering over it.
   const [held] = errorsOf(heldInner()).filter((x) => x.code === "GRAPH008_HELD_JOIN_UNCOLLECTED");
   const edits = heldFixEdits(held!.fix ?? "");
   assert.equal(edits.barrierOf, "subJoin", "the referent is the fan-out the held join is inside");

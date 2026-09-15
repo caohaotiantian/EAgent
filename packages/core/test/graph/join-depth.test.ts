@@ -188,3 +188,263 @@ test("A JOIN INSIDE A FAN-OUT THAT NO OUTER JOIN COLLECTS IS REFUSED", () => {
     `expected the held join to be refused; got ${got.join(", ") || "(no diagnostics)"}`,
   );
 });
+
+/**
+ * §A.64 — A DEPTH NUMBER DOES NOT SAY WHICH FAN-OUT.
+ *
+ * `GRAPH008_JOIN_DEPTH` compared `fanoutDepth` NUMBERS and never `fanoutEdgeStack`. Two fan-outs
+ * off one node are two instance spaces at the same depth, so an arm one level up in the WRONG fan
+ * satisfied `armDepth === joinDepth + 1`, and a fan-out could quietly acquire a second barrier.
+ *
+ * WHAT THAT COSTS, measured on a real `Engine` before the refusal existed — one fanned-out node
+ * over an `append_ordered` channel, width 3, with a second root join declaring the same arm:
+ *
+ *     one barrier    found = ["f0","f1","f2"]
+ *     two barriers   found = ["f0","f1","f2","f0","f1","f2"]     status = succeeded
+ *
+ * A node inside a fan-out HOLDS its writes for one enclosing join; every extra barrier folds them
+ * again, and a non-idempotent reducer doubles in silence. So the arm check now reads the EDGE
+ * stack, and a second pass refuses a fan-out with more than one barrier.
+ *
+ * THE SHAPE THIS DOES NOT REFUSE is the two-sided control below: one barrier over several sibling
+ * fan-outs. `#maybeFireJoin` sums `expected` over every fan-out plan at the parent coordinate
+ * whose target is a member, which is written for exactly that graph.
+ */
+
+const a64Base = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "a64", project: "probe", version: 1 },
+  policy: { expansion: { maxNodes: 32, maxDepth: 3, maxFanout: 4, maxLoopIterations: 1 } },
+  channels: {
+    outers: { type: "array", reduce: "replace" },
+    inners: { type: "array", reduce: "replace" },
+    outerItem: { type: "object", reduce: "replace" },
+    innerItem: { type: "object", reduce: "replace" },
+    findings: { type: "array", reduce: "append_ordered" },
+  },
+  inputs: ["outers", "inners"],
+  outputs: ["findings"],
+};
+
+const work = (id: string, reads: string): unknown => ({
+  id: n(id),
+  type: "function",
+  reads: [reads],
+  writes: ["findings"],
+  function: { ref: `function/${id}@stable` },
+});
+
+const barrier = (id: string, branches: readonly string[]): unknown => ({
+  id: n(id),
+  type: "join",
+  reads: ["findings"],
+  writes: ["findings"],
+  join: { branches: branches.map(n), mode: "all", onBranchError: "skip" },
+});
+
+const fanout = (id: string, from: string, to: string, over: string, as: string): unknown => ({
+  id: e(id),
+  from: n(from),
+  to: n(to),
+  kind: "fanout",
+  over,
+  as,
+  maxWidth: 2,
+});
+
+const joins = (id: string, from: string, to: string): unknown => ({ id: e(id), from: n(from), to: n(to), kind: "join" });
+
+/**
+ * Two sibling fan-outs off `plan`. Fan A holds an inner barrier `aJoin`; fan A's OWN barrier is
+ * `aOuter`. `crossed` hands `aJoin` to fan B's barrier instead — the entry and the `kind: join`
+ * edge, exactly the shape `GRAPH008_HELD_JOIN_UNCOLLECTED`'s `fix:` dictates, made into the wrong
+ * fan. `fanA` then has two barriers.
+ */
+function siblingFans(crossed: boolean): GraphSpec {
+  return {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      work("a0", "outerItem"),
+      work("a1", "innerItem"),
+      barrier("aJoin", ["a1"]),
+      barrier("aOuter", crossed ? ["a0"] : ["a0", "aJoin"]),
+      work("b0", "outerItem"),
+      barrier("bJoin", crossed ? ["b0", "aJoin"] : ["b0"]),
+    ],
+    edges: [
+      fanout("fanA", "plan", "a0", "outers", "outerItem"),
+      fanout("fanB", "plan", "b0", "outers", "outerItem"),
+      fanout("fanInner", "a0", "a1", "inners", "innerItem"),
+      joins("jInner", "a1", "aJoin"),
+      joins("jOuter", "a0", "aOuter"),
+      joins("jB", "b0", "bJoin"),
+      joins("jHeld", "aJoin", crossed ? "bJoin" : "aOuter"),
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("§A.64 A HELD JOIN HANDED TO A SIBLING FAN'S BARRIER IS REFUSED", () => {
+  const spec = siblingFans(true);
+
+  // The precondition, stated as the compiler sees it: the numbers agree and the FAN-OUTS do not.
+  // `aJoin` is one level deeper than `bJoin`, which is all the old arm check asked.
+  const idx = indexGraph(spec);
+  assert.equal(idx.fanoutDepth.get(n("aJoin")), (idx.fanoutDepth.get(n("bJoin")) ?? -1) + 1, "precondition: one level up");
+  assert.deepEqual([...(idx.fanoutEdgeStack.get(n("aJoin")) ?? [])], [e("fanA")], "precondition: and it is in fan A");
+  assert.deepEqual([...(idx.fanoutEdgeStack.get(n("bJoin")) ?? [])], [], "precondition: while the barrier is in neither");
+
+  const got = codes(spec);
+  assert.deepEqual(got, ["GRAPH008_JOIN_DEPTH"], got.join(", ") || "(no diagnostics)");
+
+  const [d] = validateGraph({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+  assert.equal(d!.at?.edgeId, e("fanA"), "the refusal is about the fan-out that ended up with two barriers");
+  // The NAME SET, not the prose: both barriers have to be named or the author cannot act.
+  assert.deepEqual(
+    [...d!.message.matchAll(/"([^"]+)"/g)].map((m) => m[1]).filter((x) => x === "aOuter" || x === "bJoin").sort(),
+    ["aOuter", "bJoin"],
+    d!.message,
+  );
+});
+
+test("…and the SAME shape with the held join in its OWN fan compiles", () => {
+  // The two-sided control. One entry and one edge move — from `bJoin` to `aOuter` — and nothing
+  // else. If this failed, the rule would be refusing the graph the `fix:` line asks for.
+  assert.deepEqual(codes(siblingFans(false)), [], "a legitimate one-level-up arm in the same fan must compile");
+});
+
+test("…and ONE barrier over SEVERAL sibling fan-outs still compiles", () => {
+  // The other side of the same control, and the reason the check is per FAN-OUT EDGE rather than
+  // per join: a join may serve two fan-outs at once, and each of them still has exactly one
+  // barrier. `#maybeFireJoin` sums `expected` over one plan per fan-out edge for this graph.
+  const spec = {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      work("a0", "outerItem"),
+      work("b0", "outerItem"),
+      barrier("both", ["a0", "b0"]),
+    ],
+    edges: [
+      fanout("fanA", "plan", "a0", "outers", "outerItem"),
+      fanout("fanB", "plan", "b0", "outers", "outerItem"),
+      joins("jA", "a0", "both"),
+      joins("jB", "b0", "both"),
+    ],
+  } as unknown as GraphSpec;
+  assert.deepEqual(codes(spec), [], "one barrier serving two fan-outs is not two barriers over one");
+});
+
+test("…and TWO barriers over ONE fan-out are refused, which is the fold that doubles", () => {
+  // The minimal form of the same violation, and the one measured on the Engine in this file's
+  // header: one arm, two root joins, each folding the same held writes.
+  const spec = {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      work("a0", "outerItem"),
+      barrier("jA", ["a0"]),
+      barrier("jB", ["a0"]),
+    ],
+    edges: [
+      fanout("fanA", "plan", "a0", "outers", "outerItem"),
+      joins("j1", "a0", "jA"),
+      joins("j2", "a0", "jB"),
+    ],
+  } as unknown as GraphSpec;
+  assert.deepEqual(codes(spec), ["GRAPH008_JOIN_DEPTH"]);
+});
+
+test("…and an arm two levels up is still refused for the OLD reason", () => {
+  // The control that the depth arm did not become dead code. `a1` sits two fan-outs below the
+  // barrier and is DECLARED WITHOUT AN EDGE, which is the only way to reach that arm: any edge
+  // from `a1` to `far` would put `far` itself at two depths, and the join-level check answers
+  // first. So this graph is refused twice, and one of the two must still be "never further".
+  const spec = {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      work("a0", "outerItem"),
+      work("a1", "innerItem"),
+      barrier("far", ["a0", "a1"]),
+    ],
+    edges: [
+      fanout("fanA", "plan", "a0", "outers", "outerItem"),
+      fanout("fanInner", "a0", "a1", "inners", "innerItem"),
+      joins("jA", "a0", "far"),
+    ],
+  } as unknown as GraphSpec;
+  const found = validateGraph({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] }).filter(
+    (x) => x.code === "GRAPH008_JOIN_DEPTH",
+  );
+  assert.ok(found.length > 0, "an arm two levels deeper must still be refused");
+  assert.ok(
+    found.some((x) => /never further/.test(x.message)),
+    `the depth arm must still be the one that answers: ${found.map((x) => x.message).join(" | ")}`,
+  );
+});
+
+test("§A.64 AND AN AMBIGUOUS FAN-OUT IS TOLERATED, because people author it", () => {
+  // The direction this rule deliberately does NOT take, pinned so the next reader does not
+  // "fail closed" here and break a working graph. `x` is reachable through two fan-outs of the
+  // SAME width, so its width stack agrees and its EDGE stack does not — and a refusal was tried
+  // here and broke `test/run/empty-fanout-oversight.test.ts`, whose router steers between two
+  // list-builders that each fan out into ONE shared body node. Exactly one of the two edges ever
+  // fires; the ambiguity is the compiler's, not the graph's.
+  const spec = {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      work("x", "outerItem"),
+      barrier("j", ["x"]),
+    ],
+    edges: [
+      fanout("fanA", "plan", "x", "outers", "outerItem"),
+      fanout("fanB", "plan", "x", "outers", "outerItem"),
+      joins("jx", "x", "j"),
+    ],
+  } as unknown as GraphSpec;
+
+  const idx = indexGraph(spec);
+  assert.equal(idx.fanoutDepth.get(n("j")), 0, "precondition: the NUMBER is decided");
+  assert.equal(idx.fanoutEdgeStack.get(n("j")), undefined, "precondition: and the EDGES are not");
+
+  assert.deepEqual(codes(spec), [], "an identity the compiler does not have is not an identity it refuses");
+});
+
+test("§A.64 AND AN ARM IN A DIFFERENT OUTER FAN IS REFUSED where the identity IS known", () => {
+  // The arm-side half, on the one shape that reaches it: `b1` is declared as an arm of `j` and
+  // wired by a LOOP edge, which the stack traversal excludes — so `j`'s own stack stays `["F1"]`
+  // while its arm's is `["F2","fanB"]`. Depths agree (1 and 2) and the fan-outs do not.
+  const spec = {
+    ...a64Base,
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["outers"], function: { ref: "function/plan@stable" } },
+      { id: n("x"), type: "function", reads: ["outerItem"], function: { ref: "function/x@stable" } },
+      { id: n("y"), type: "function", reads: ["outerItem"], function: { ref: "function/y@stable" } },
+      work("a0", "innerItem"),
+      work("b1", "innerItem"),
+      barrier("j", ["a0", "b1"]),
+    ],
+    edges: [
+      fanout("F1", "plan", "x", "outers", "outerItem"),
+      fanout("F2", "plan", "y", "outers", "outerItem"),
+      fanout("fanA", "x", "a0", "inners", "innerItem"),
+      fanout("fanB", "y", "b1", "inners", "innerItem"),
+      joins("jA", "a0", "j"),
+      { id: e("lb"), from: n("b1"), to: n("j"), kind: "loop", maxIterations: 2 },
+    ],
+  } as unknown as GraphSpec;
+
+  const idx = indexGraph(spec);
+  assert.deepEqual([...(idx.fanoutEdgeStack.get(n("j")) ?? [])], [e("F1")], "precondition: the join is in F1");
+  assert.deepEqual([...(idx.fanoutEdgeStack.get(n("b1")) ?? [])], [e("F2"), e("fanB")], "precondition: the arm is in F2");
+  assert.equal(idx.fanoutDepth.get(n("b1")), (idx.fanoutDepth.get(n("j")) ?? -1) + 1, "precondition: and the DEPTHS agree");
+
+  const found = validateGraph({ spec, resolver: resolver(), tools: {}, tenantCapabilities: [] }).filter(
+    (x) => x.code === "GRAPH008_JOIN_DEPTH",
+  );
+  assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
+  assert.match(found[0]!.message, /inside fan-out "F2" where the join is inside "F1"/, found[0]!.message);
+});
