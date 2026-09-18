@@ -442,9 +442,10 @@ test("a run's own failure does not approve an undo that needs a human", async ()
   // breaks: with it, `db.purge` runs and `world.purged` is `[7]`.
   //
   // `not_attempted`, AND `retryable` — §A.37's shape 3, arriving here first. It read `failed`
-  // until the approval floor's refusal grew a typed `E_HUMAN_APPROVAL_REQUIRED` and
-  // `#compensateOne` split on it: `failed` means the undo tool RAN and did not work, and this
-  // one never ran. `retryable: true` is the other half and the one with teeth — the refusal is
+  // until `#compensateOne` learned to split the `isError` arm on WHICH result object it is
+  // holding — `APPROVAL_FLOOR_REFUSALS`, the module-private `WeakSet` the approval floor adds
+  // its own refusal to, and not a code on the result, which a tool that RAN could answer with
+  // itself: `failed` means the undo tool RAN and did not work, and this one never ran. `retryable: true` is the other half and the one with teeth — the refusal is
   // a fact about the `run_failed` TRIGGER, so an operator's rewind, which dispatches with
   // `nodeApproved: true`, must be able to re-plan the seq rather than find it settled forever.
   // WHAT IS UNCHANGED IS THE CLAIM THIS TEST IS ABOUT: `world.purged` is still empty, so the
