@@ -54,6 +54,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { main } from "../../src/cli.ts";
 import { refusing } from "../deployment/harness.ts";
 
 const SRC = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
@@ -92,12 +93,29 @@ function argvOnlyReaders(): Map<string, string> {
   return out;
 }
 
-/** `FLAGS` as the source writes it: flag name → the entry's text (`null`, or a function name). */
+/**
+ * `FLAGS` as the source writes it: flag name → the entry's text (`null`, or a function name).
+ *
+ * A ROW THIS CANNOT PARSE IS A FAILURE, NOT A SKIP, and that is the whole of the second half of
+ * this function. The value pattern is a bare identifier: a row that grew a trailing comment, a
+ * cast, an arrow or a second line would match the KEY regex and not this one, and every gate in
+ * this file reads its flags from here — so a dropped row would silently leave a flag unchecked by
+ * BOTH the structural test and the sweep, which is the failure mode this file exists to prevent.
+ * The keys are counted a second way, with the loose pattern `known-flags.test.ts` uses, and the
+ * two counts must agree. A floor like `size >= 40` against 43 rows cannot see three rows go
+ * missing; this can see one.
+ */
 function flagsTable(): Map<string, string> {
   const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, string>();
   for (const row of m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?: ([A-Za-z0-9_]+),$/gm)) out.set(row[1]!, row[2]!);
+  const keys = [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?:/gm)].map((x) => x[1]!);
+  assert.deepEqual(
+    [...out.keys()].sort(),
+    [...keys].sort(),
+    `a FLAGS row's value is not a bare identifier, so this file's gates would silently skip it: ${keys.filter((k) => !out.has(k)).map((k) => `--${k}`).join(", ")}`,
+  );
   return out;
 }
 
@@ -133,6 +151,23 @@ function globalFlags(): readonly string[] {
 }
 
 // ── the tables, recomputed ──────────────────────────────────────────────────
+
+test("THE ROWS THIS FILE PARSED ARE THE FLAGS THE BINARY RUNS WITH — not two regexes agreeing", async () => {
+  // Both halves of `flagsTable`'s own check scan the SAME string, so they can agree and both be
+  // wrong. This is the third path and the only one that goes through the module: `main(["help"])`
+  // renders `USAGE`, and `known-flags.test.ts` holds `USAGE` equal to the flag table's keys. A
+  // row that this file's regexes dropped would be advertised by the binary and missing here.
+  const real = process.stdout.write.bind(process.stdout);
+  let printed = "";
+  process.stdout.write = ((c: string) => ((printed += c), true)) as typeof process.stdout.write;
+  try {
+    assert.equal(await main(["help"]), 0);
+  } finally {
+    process.stdout.write = real;
+  }
+  const advertised = [...new Set([...printed.matchAll(/--([a-z][a-z-]*)/g)].map((x) => x[1]!))].sort();
+  assert.deepEqual([...flagsTable().keys()].sort(), advertised, "a flag the binary advertises is not a row this file parsed, or vice versa");
+});
 
 test("`FLAGS`' SECOND COLUMN IS WHAT ACTUALLY READS THE FLAG — recomputed from the source", () => {
   const declared = flagsTable();

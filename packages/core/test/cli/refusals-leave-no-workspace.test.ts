@@ -53,12 +53,28 @@
  * for "a bug in Loom" — for an operator who left out an argument, and answer `E_CONFIG_INVALID`
  * now.
  *
- * **WHAT IS STILL NOT COVERED**, named rather than described: the twelve flags `FLAGS` gives no
- * reader — `--as`, `--baseline`, `--cohort`, `--graph`, `--identity-file`,
- * `--max-runs-in-flight`, `--node`, `--reason`, `--reject`, `--scope`, `--suite`, `--take` —
- * because each is read either by more than one function (so the message depends on the verb) or
- * by one that needs a `Workspace` (so argv alone cannot decide it). `flag-door.test.ts` derives
- * that list from the source rather than restating it, so it can only shrink deliberately.
+ * **WHAT IS STILL NOT COVERED IS FIVE FLAGS, AND THEY ARE DRIVEN BELOW**, one row each, with the
+ * list derived from `FLAGS`' `null` rows rather than restated — so a flag that gains a reader
+ * leaves this block on the day it gains one. The reason differs per flag and the first cut of
+ * this header got it wrong for eight of twelve by offering only two reasons; there are three:
+ *
+ *   - MORE READERS THAN ONE, so the sentence depends on the verb and the door must not guess:
+ *     `--as` (`subjectFlag`, `submitterFlag`, `attesterFlag`) and `--cohort` (`examCohortFlag`,
+ *     `suiteCohortFlag`).
+ *   - NEEDS MORE THAN ARGV: `--graph` and `--identity-file` are read through a `(ws, args)`
+ *     helper, and `--scope` needs the RUN ID the command named — `ceilingScope(args, runId)`
+ *     refuses a scope naming a different run, which is the check that makes it more than a flag.
+ *
+ * Three further rows are `null` and are NOT in that set, because there is nothing there to
+ * refuse: `--help` is answered before the door is reached, and `--reason` and `--reject` have no
+ * bad shape at all — a bare `--reason` is deliberately the default `"operator"` and a bare
+ * `--reject` is deliberately the reason "(no reason given)". Measured:
+ * `cancel <id> --reason` and `approve <id> <g> --reject` both fail with `E_RUN_NOT_FOUND`,
+ * never about the flag.
+ *
+ * Seven flags that WERE in this paragraph are gone from it: `--baseline`, `--max-runs-in-flight`,
+ * `--node`, `--suite` and `--take` were each read inline in a `case` block, which is not a reason
+ * argv cannot decide them — they are named readers now and refuse at the door.
  */
 
 import assert from "node:assert/strict";
@@ -207,18 +223,62 @@ test("AN UNKNOWN VERB SAYS SO — even one whose name is a property of Object.pr
 });
 
 /**
- * THE BOUNDARY, STILL ASSERTED — one flag `FLAGS` gives no reader, still costing three directories.
+ * THE BOUNDARY, STILL ASSERTED — EVERY flag `FLAGS` gives no reader, each still costing three
+ * directories, and the list read out of that table rather than written here.
  *
  * A RECORD, NOT A WISH, and the reason this block did not simply disappear when §H.12 closed: a
- * set whose boundary is only described is a set nobody has checked. `--as` is read by three
- * functions — `subjectFlag`, `submitterFlag` and `attesterFlag`, each with its own sentence — so
- * the door cannot know which of the three a given verb would have used, and does not guess. It is
- * the shape of the remaining twelve, driven once here so the day one of them is closed this row
- * goes red and says so.
+ * set whose boundary is only described is a set nobody has checked. Driving ONE member and calling
+ * it "the shape of the rest" is the same failure one step in — only that member closing would turn
+ * it red — so every member is driven, and the membership itself is asserted against `FLAGS`'
+ * `null` rows. Adding a reader for `--graph` therefore fails this file until its row is removed,
+ * and removing a row for a flag that still litters fails it too.
+ *
+ * The ARGV is written per flag and cannot be derived: each needs its verb's positionals supplied,
+ * because a missing positional is now refused at the door and would leave the directory empty for
+ * a reason that has nothing to do with the flag.
  */
-test("NOT IN THE SET · a flag with more than one reader — `loom cancel --as` still opens a workspace first", async () => {
-  const { code, err, left } = await inAnEmptyDirectory(() => ["cancel", "01NOSUCHRUN", "--as"]);
-  assert.equal(code, 1, err);
-  assert.match(err, /--as needs a subject/);
-  assert.deepEqual(left, [".loom", "graphs", "resources"], "`loom cancel --as` no longer opens a workspace — good: move it into LEAVES_NOTHING");
+const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly string[]; readonly says: RegExp }>> = {
+  as: { argv: ["cancel", "01NOSUCHRUN", "--as"], says: /--as needs a subject/ },
+  cohort: { argv: ["exam", "attest", "e.json", "--as", "alice", "--cohort"], says: /exam attest --cohort needs a runId/ },
+  graph: { argv: ["replay", "01NOSUCHRUN", "--graph"], says: /--graph needs a path/ },
+  "identity-file": { argv: ["serve", "--identity-file"], says: /--identity-file needs a path/ },
+  scope: { argv: ["deescalate", "01NOSUCHRUN", "--scope"], says: /--scope must be run:01NOSUCHRUN/ },
+};
+
+/** `null` rows that are not in the set above, each because there is nothing to refuse. */
+const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject"];
+
+test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the table, not with this file", () => {
+  const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
+  const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(src);
+  assert.ok(m, "FLAGS moved — this test reads it from the source on purpose");
+  const nulls = [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?: null,$/gm)].map((x) => x[1]!).sort();
+  assert.deepEqual(
+    nulls,
+    [...Object.keys(STILL_OPENS_A_WORKSPACE), ...NOTHING_TO_REFUSE].sort(),
+    "a flag gained or lost a door reader and this file still claims the old boundary",
+  );
+});
+
+for (const [flag, row] of Object.entries(STILL_OPENS_A_WORKSPACE)) {
+  test(`NOT IN THE SET · --${flag} — \`loom ${row.argv.join(" ")}\` still opens a workspace first`, async () => {
+    const { code, err, left } = await inAnEmptyDirectory(() => row.argv);
+    assert.equal(code, 1, err);
+    assert.match(err, row.says);
+    assert.deepEqual(left, [".loom", "graphs", "resources"], `\`loom ${row.argv.join(" ")}\` no longer opens a workspace — good: give --${flag} a reader row and move it`);
+  });
+}
+
+test("A `null` ROW WITH NOTHING TO REFUSE REFUSES NOTHING — measured, not assumed", async () => {
+  // `--reason` and `--reject` are `null` for a reason unlike the five above, and the difference
+  // is worth a measurement rather than a sentence: neither flag has a shape it rejects. A bare
+  // `--reason` becomes the default "operator" on purpose and a bare `--reject` becomes the reason
+  // "(no reason given)", so giving either a door reader would close nothing. If that ever changes
+  // — if someone decides a bare `--reason` should refuse — this test says so instead of the
+  // change landing silently.
+  for (const argv of [["cancel", "01NOSUCHRUN", "--reason"], ["approve", "01NOSUCHRUN", "g1", "--reject"]]) {
+    const { err } = await inAnEmptyDirectory(() => argv);
+    assert.match(err, /E_RUN_NOT_FOUND/, `\`loom ${argv.join(" ")}\` no longer fails on the run — did the flag start refusing?\n${err}`);
+    assert.doesNotMatch(err, /E_CONFIG_INVALID/, `\`loom ${argv.join(" ")}\` now refuses the flag, which is a behaviour change:\n${err}`);
+  }
 });

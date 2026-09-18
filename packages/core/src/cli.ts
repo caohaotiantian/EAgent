@@ -639,29 +639,42 @@ export function resourceRefsIn(text: string): readonly string[] {
  * `(args: Args)` and that reads this flag, ignoring `main`; and `null` when no such function
  * exists, or when more than one does.
  *
- *   - `(args: Args)` is the mechanical spelling of "decidable from argv alone". A reader that
- *     takes a `Workspace` is not one, and hoisting it would be a lie about what it needs. It is
- *     also what forced `serveToken` out of `controlPlaneOptions` and gave `--channels-file`,
- *     `--models-file`, `--mcp-file`, `--max-parallelism` and `--extension-module` names of their
- *     own — the rule earning its keep rather than being satisfied.
+ *   - `(args: Args)` is the SIGNATURE the rule keys on. It is not a proof of purity — `jailFor`
+ *     reads `process.cwd()` — and the claim it is used for is narrower: a function taking only
+ *     `args` cannot need the workspace, so calling it at the door is not calling it early. What
+ *     it buys, it buys by being MECHANICAL: it forced `serveToken` out of
+ *     `controlPlaneOptions(ws, args)`, which needed a `Workspace` and never touched one, and it
+ *     named nine readers that were expressions inline at a single call site — `channelsFile`,
+ *     `modelsFile`, `mcpFile`, `maxParallelismFlag`, `extensionModulePaths`, `serveInFlight`,
+ *     `steerNode`, `steerTake`, `promoteBaseline`/`promoteSuite`.
  *   - MORE THAN ONE reader means the message depends on the verb — `--as` has three and
  *     `--cohort` two — and the door does not know which is right, so it does not guess.
  *   - NO EXCEPTION FOR A GLOBAL. §H.11 hoisted the globals' checks above `openWorkspace`'s first
  *     `mkdirSync`, which is one directory later than this; they are decided here now, by the same
  *     rule as everything else, and `openWorkspace` reads them again where it always did. Two
- *     calls to one pure function, so the two cannot disagree — the argument `jailFor` already
- *     makes for being called from both `main` and `openWorkspace`.
+ *     calls to one function of `args`, so the two cannot disagree — the argument `jailFor`
+ *     already makes for being called from both `main` and `openWorkspace`.
  *
- * `null` is therefore also the list of what still opens a workspace before refusing: `--as`,
- * `--baseline`, `--cohort`, `--graph`, `--identity-file`, `--max-runs-in-flight`, `--node`,
- * `--reason`, `--reject`, `--scope`, `--suite` and `--take`. Named, not claimed away. (`--help`
- * is `null` for a different reason: `main` answers it and returns before the door is reached.)
+ * **WHAT `null` MEANS, IN THREE KINDS — and it is NOT "this still opens a workspace".** Two of
+ * the rows are `null` because there is nothing to refuse:
+ *
+ *   - `--reason` and `--reject` HAVE NO BAD SHAPE. `cancel`/`pause`/`resume`/`steer` read a bare
+ *     `--reason` as the default `"operator"` on purpose, and `approve` reads a bare `--reject` as
+ *     the reason "(no reason given)". Neither is refused anywhere, so neither has a reader to
+ *     name and neither costs a directory for being given with no value.
+ *   - `--graph` and `--identity-file` need a `Workspace`, and `--scope` needs the runId the
+ *     command named (`ceilingScope` checks the scope is THAT run's). Argv alone cannot decide
+ *     them, and these three are what still opens a workspace before refusing, with —
+ *   - `--as` and `--cohort`, which have more readers than one.
+ *
+ * `--help` is `null` for a fourth reason: `main` answers it and returns before the door is
+ * reached. `refusals-leave-no-workspace.test.ts` drives all five of the open ones.
  */
 const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   "against-cohort": cohortAnchorFlag,
   "allow-exec": jailFor,
   as: null,
-  baseline: null,
+  baseline: promoteBaseline,
   bucket: bucketFlag,
   budget: budgetFlag,
   "budget-tokens": deploymentBudget,
@@ -682,10 +695,10 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   input: runInputs,
   "max-bytes": gateReadBound,
   "max-parallelism": maxParallelismFlag,
-  "max-runs-in-flight": null,
+  "max-runs-in-flight": serveInFlight,
   "mcp-file": mcpFile,
   "models-file": modelsFile,
-  node: null,
+  node: steerNode,
   otlp: otlpEndpoint,
   out: suiteOutFlag,
   port: httpPort,
@@ -694,9 +707,9 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   reject: null,
   runs: runsFlag,
   scope: null,
-  suite: null,
+  suite: promoteSuite,
   "sweep-ms": gateClockInterval,
-  take: null,
+  take: steerTake,
   to: postureFlag,
   token: serveToken,
   why: justificationFlag,
@@ -878,10 +891,12 @@ const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
  * `resume`'s block — and asserts each row is exactly that long. A verb that grows an argument
  * cannot keep a stale row, and a row cannot claim an argument the block never asks for.
  *
- * A CONDITIONAL POSITIONAL IS NOT A ROW. `attestExam` requires a second one, the exam graph file,
- * and only when the first is `attest`; it keeps an explicit `what` and stays inside the case
- * block, because a door that demanded it before the subcommand was known would answer
- * `loom exam bogus` with the wrong sentence.
+ * A CONDITIONAL POSITIONAL IS NOT A ROW. `attestExam` — a top-level function the `exam` case
+ * calls once it has read `attest` out of position 0 — requires a second one, the exam graph file.
+ * It keeps an explicit `what` and is asked for there rather than at the door, because a door that
+ * demanded it before the subcommand was known would answer `loom exam bogus` with the wrong
+ * sentence. The scan below reads INDICES out of the `case` blocks, and `attestExam` is not one, so
+ * `exam`'s row is one long and the recomputation agrees with it.
  */
 const VERB_POSITIONALS: Readonly<Record<string, readonly string[]>> = {
   compile: ["a graph file"],
@@ -998,17 +1013,35 @@ function refuseFlagsThisVerbDoesNotRead(args: Args): void {
  * because it is the same function. That is the whole reason the column is a function and not a
  * `"takes a value"` boolean — a boolean would have forced the door to restate forty messages.
  *
- * THE READERS ARE PURE OVER `args` BY CONSTRUCTION — `FLAGS`' derivation rule admits only
- * `(args: Args)` — so calling one early cannot observe or change anything, and the verb body's
- * later call gets the same answer. It is called twice; both calls are a few string comparisons.
+ * CALLING A READER EARLY IS SAFE, AND NOT BECAUSE OF ITS SIGNATURE. `(args: Args)` says a reader
+ * cannot need the workspace; it does not say the body is pure. What was checked is the narrower
+ * thing this loop needs, and it was checked by SCANNING rather than argued from the signature:
+ * over the transitive closure of top-level calls out of all TWENTY-NINE distinct readers this
+ * table names, none writes a file, touches `fs` at all, opens a store or a plane, writes to
+ * `stdout`/`stderr`, reads `process.env`, reads a clock, spawns, or fetches. So running one
+ * before `openWorkspace` observes nothing the verb body will not observe again, and changes
+ * nothing either call can see. `process.cwd()`, in `jailFor` and nowhere else, is the one ambient
+ * read, and it is the same value both times because nothing here calls `chdir`.
+ *
+ * A READER IS CALLED ONCE PER FLAG OF ITS OWN THAT ARGV CARRIES, plus once more by the verb body:
+ * so twice for most, up to SEVEN times for `jailFor` (five flags, and `openWorkspace` calls it
+ * too) and FOUR for `deploymentBudget`. Every call is a few string comparisons.
  *
  * ARGV ORDER, and that is a decision rather than an accident: on a line with TWO bad flags the
  * one the operator typed first is the one named. It used to be whichever the reader happened to
  * run first — the `case` block's order for a verb flag, and `openWorkspace`'s pre-flight order
  * (channels, models, jail, grant, ceiling, budget) for a global — which is an order nothing
  * states and nobody can predict from the outside. §H.11's hoist kept that internal order and
- * said so; this replaces it with one an operator can. THE EXCEPTION IS INSIDE ONE READER:
- * `jailFor` decides five flags, so two bad flags that are both its are still named in its order.
+ * said so; this replaces it with one an operator can.
+ *
+ * THE EXCEPTION IS INSIDE A MULTI-FLAG READER, AND THERE ARE TWO OF THEM: `jailFor` decides five
+ * flags (`--workspace`, `--data-dir`, `--egress`, `--allow-exec`, `--exec-env`, in that order) and
+ * `deploymentBudget` three (`--budget-usd`, `--budget-tokens`, `--budget-wall-ms`, in that order).
+ * Two bad flags belonging to the SAME reader are still named in its internal order, whichever the
+ * operator typed first. Measured:
+ *
+ *     compile --budget-wall-ms bad --budget-usd bad   → --budget-usd must be a positive number…
+ *     compile --budget-usd bad --budget-wall-ms bad   → --budget-usd must be a positive number…
  *
  * AFTER `refuseFlagsThisVerbDoesNotRead`, so a flag this verb does not read is answered as that
  * rather than by a value check the verb would never have run.
@@ -1086,6 +1119,52 @@ function extensionModulePaths(args: Args): readonly string[] | undefined {
       "the operator believes is extended and is not.",
   );
   return listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
+}
+
+/**
+ * FIVE VERB FLAGS THAT WERE READ INLINE IN A `case` BLOCK, and are named readers now.
+ *
+ * Same move as the four globals above and for the same reason: each was already a refusal decided
+ * from argv alone, written as an expression at its one call site, so `FLAGS`' derivation rule saw
+ * no `(args: Args)` function reading the flag and had to leave the entry `null` — which meant the
+ * refusal kept costing the caller `.loom/`, `graphs/` and `resources/`. Measured on `db49005d`,
+ * each in a fresh `mktemp -d`, all five `left=[.loom graphs resources]`:
+ *
+ *     serve --max-runs-in-flight     --max-runs-in-flight must be a whole number from 1 to 1024…
+ *     steer <id> --node              steer needs --node NODE_ID: the node whose route is being…
+ *     steer <id> --node n1 --take    --take needs one or more edge ids: the flag was given with…
+ *     promote c.json --baseline      --baseline needs a path: the flag was given with no value…
+ *     promote c.json --suite         --baseline needs a path, and none was given.
+ *
+ * NOT A SINGLE MESSAGE IS REWRITTEN — every one of these is the same call it was, moved. The
+ * refusals that mention a flag being ABSENT (`steerNode`, `promoteBaseline`, `promoteSuite`) still
+ * happen where they did, because the door calls a reader only for a flag argv actually carries.
+ *
+ * TWO FLAGS ON THE SAME VERB DID *NOT* GET ONE, and that is a measurement rather than a choice:
+ * `--reason` and `--reject` have no refusing shape at all. `cancel`/`pause`/`resume`/`steer` read
+ * `--reason` as `typeof raw === "string" && raw.trim() !== "" ? raw : "operator"` — a bare flag is
+ * DELIBERATELY the default, not a mistake — and `approve` reads a bare `--reject` as the reject
+ * reason "(no reason given)". Giving either a door reader would close nothing, and making either
+ * refuse is a behaviour change nobody asked for.
+ */
+function serveInFlight(args: Args): number {
+  return boundedCount(args.flags["max-runs-in-flight"], "--max-runs-in-flight", DEFAULT_MAX_RUNS_IN_FLIGHT, MAX_CONCURRENCY);
+}
+function steerNode(args: Args): string {
+  const nodeId = args.flags["node"];
+  if (typeof nodeId !== "string" || nodeId.trim() === "") {
+    throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
+  }
+  return nodeId;
+}
+function steerTake(args: Args): readonly string[] {
+  return listFlag(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE) ?? [];
+}
+function promoteBaseline(args: Args): string {
+  return requireFileFlag(args, "baseline");
+}
+function promoteSuite(args: Args): string {
+  return requireFileFlag(args, "suite");
 }
 
 /**
@@ -1739,13 +1818,21 @@ export function openWorkspace(
   // are functions of `args` alone. Their values are used where they always were.
   //
   // AND THEY ARE NO LONGER THE FIRST TO RUN — §H.12. `main`'s door decides every flag value
-  // `FLAGS` names a reader for, these four included, before this function is entered at all, so
-  // a caller who spells two of them wrong is now told about the one they typed FIRST rather than
-  // about whichever this block happened to read first. That is the claim §H.11 made here and it
-  // is superseded rather than broken: the refusals are the same functions with the same messages,
-  // and the order they are asked in is now one an operator can predict from their own command
-  // line. These calls stay because `openWorkspace` is exported and an embedder calls it directly,
-  // with a flag map they built themselves and no door in front of it.
+  // `FLAGS` names a reader for, these four included, before this function is entered at all. That
+  // is the claim §H.11 made here, superseded rather than broken: the refusals are the same
+  // functions with the same messages, and the order they are asked in is the order they appear on
+  // the command line rather than the order this block happens to read them.
+  //
+  // WITH ONE EXCEPTION, WHICH IS WHY THIS DOES NOT SAY "the one they typed first": a reader that
+  // decides SEVERAL flags still decides them in its own internal order, whichever came first on
+  // argv. Both multi-flag readers are here — `jailFor` (`--workspace`, `--data-dir`, `--egress`,
+  // `--allow-exec`, `--exec-env`) and `deploymentBudget` (`--budget-usd`, `--budget-tokens`,
+  // `--budget-wall-ms`). Measured: `compile --budget-wall-ms bad --budget-usd bad` and
+  // `compile --budget-usd bad --budget-wall-ms bad` both answer `--budget-usd`. Two bad flags
+  // belonging to DIFFERENT readers are named in argv order; two belonging to the same one are not.
+  //
+  // These calls stay because `openWorkspace` is exported and an embedder calls it directly, with
+  // a flag map they built themselves and no door in front of it.
   //
   // AND IT IS STRICTLY MORE THAN THE DIRECTORIES: `jailFor` used to run after `new
   // SqliteStateStore`, so a bad `--egress` was a refusal that had already opened a journal
@@ -8178,7 +8265,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       case "serve": {
         // Every refusal is spent before the socket exists: the plane's own, in its
         // constructor, and the clock's, the port's and the dispatcher's bound, here.
-        const inFlight = boundedCount(args.flags["max-runs-in-flight"], "--max-runs-in-flight", DEFAULT_MAX_RUNS_IN_FLIGHT, MAX_CONCURRENCY);
+        const inFlight = serveInFlight(args);
         // ONE DISPATCHER FOR BOTH DRIVERS, and that is the point of building it here rather
         // than inside either. `POST /runs` and the run clock are the two things in this
         // process that call `advance`, and a bound each would be two bounds — the box's real
@@ -8477,11 +8564,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // edge set it confines the operator to lives in the compiled artifact and there is
         // nothing else to check a route against.
         const runId = requirePositional(args, 0) as RunId;
-        const nodeId = args.flags["node"];
-        if (typeof nodeId !== "string" || nodeId.trim() === "") {
-          throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
-        }
-        const take = listFlag(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE) ?? [];
+        const nodeId = steerNode(args);
+        const take = steerTake(args);
         const raw = args.flags["reason"];
         const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
         // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
@@ -9221,9 +9305,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
               `Add --against-cohort <runId> to judge this candidate live, or drop --runs.`,
           );
         }
-        const baseline = loadGraph(ws, requireFileFlag(args, "baseline"), false);
+        const baseline = loadGraph(ws, promoteBaseline(args), false);
         const candidate = loadGraph(ws, candidateFile, false);
-        const suite = readSuite(requireFileFlag(args, "suite"));
+        const suite = readSuite(promoteSuite(args));
         const proposedBy = proposedByFlag(args);
         // `false`: neither graph is being introduced to the workspace. `loom promote` judges a
         // candidate, and a candidate is by definition not published — see the note above about
@@ -11560,8 +11644,9 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
  * `what` IS OPTIONAL BECAUSE `VERB_POSITIONALS` IS THE SOURCE. A verb body says
  * `requirePositional(args, 0)` and the words come from the row the door also walks, so the two
  * cannot describe the same argument differently. The parameter survives for the one argument that
- * is not in any row — `attestExam`'s exam graph file, required only when the subcommand is
- * `attest` — because a conditional argument is not something the door may demand.
+ * is not in any row — the exam graph file, asked for in `attestExam`, a top-level function the
+ * `exam` case calls only once position 0 has read `attest` — because a conditional argument is not
+ * something the door may demand.
  */
 function requirePositional(args: Args, i: number, what?: string): string {
   const v = args.positional[i];
