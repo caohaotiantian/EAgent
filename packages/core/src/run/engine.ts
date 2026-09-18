@@ -2005,14 +2005,18 @@ export class Engine {
    *   4. the undo's arguments are not reconstructible — `detailsOf` of the last live
    *      `effect.completed` for that key is `undefined`.
    *
-   * (4) IS WHY THIS IS NOT A WALL AN OPERATOR CANNOT CLEAR, and it is the whole difference from
-   * the two fix designs that were refuted by running them. A settled row is durable and `settled`
-   * is sticky, so a refusal keyed on "which blocker was recorded" is permanent by construction —
-   * whereas the `no_compensation` arm above reads the LIVE REGISTRY, and registering a version
-   * that declares a compensation clears it. Arguments that were never recorded are the one input
-   * that genuinely cannot change, so they are the honest thing to refuse on. The process- and
-   * trigger-dependent blockers now write `retryable: true` (see `#compensateOne`) and never
-   * reach (3) at all: they re-plan and get UNDONE instead of being walled off.
+   * (4) IS WHY THE RECOVERABLE SHAPES ARE NOT WALLED OFF, and it is the whole difference from the
+   * two fix designs that were refuted by running them. This arm's OWN wall is permanent by
+   * construction, and says so: arguments that were never recorded are never recorded, which is
+   * exactly why they are the honest thing to refuse on. A refusal keyed on anything else would be
+   * permanent WITHOUT being honest — a settled row is durable and `settled` is sticky, so "which
+   * blocker happened to be recorded" is a wall nothing an operator deploys can clear, unlike the
+   * `no_compensation` arm above, which reads the LIVE REGISTRY and clears by registering a
+   * version that declares a compensation. What (4) buys is that the process- and
+   * trigger-dependent blockers — an undo missing from this registry, a task outside this
+   * boundary's projection, the approval floor this trigger sat under — now write
+   * `retryable: true` (see `#compensateOne`) and never reach (3) at all: they re-plan and get
+   * UNDONE rather than being walled off by a refusal that could never be cleared.
    *
    * ANY-OCCURRENCE OVER THE RANGE, NEVER LATEST-WINS. `planCompensation`'s `settled` is a `Set`
    * that only grows, so "the last row for this seq wins" would disagree with the fold the moment
@@ -2042,7 +2046,15 @@ export class Engine {
     const children: RunId[] = [];
     const candidates: { readonly seq: number; readonly name: string; readonly irreversibility: string; readonly key: string }[] = [];
     // ANY-OCCURRENCE, both of them: a seq is compensated if ANY row says so, and settled if ANY
-    // row leaves `retryable` off. That is `planCompensation`'s `settled.add` read back.
+    // row leaves `retryable` off.
+    //
+    // `settling` IS `planCompensation`'s `settled.add` READ BACK — same predicate, same
+    // accumulate-only `Set`, so this method and the fold cannot disagree about which seqs the
+    // plan will drop. `compensated` has no counterpart there and is this method's own: the fold
+    // does not distinguish outcomes once a row settles a seq, because it only ever needs to know
+    // whether to re-plan. Here the outcome matters, because "nothing undid it" is half of what
+    // makes an effect worth refusing over, and a `compensated` row is the journal saying the
+    // opposite.
     const compensated = new Set<number>();
     const settling = new Set<number>();
     for await (const ev of log.read(fromSeq)) {
@@ -2076,9 +2088,20 @@ export class Engine {
     }
 
     // ONE suppression-aware pass for every key arm 2 could ask about, and none if it cannot fire.
-    // Keyed on the SEQ for the settled test and on the KEY for the arguments, because those are
-    // the two identities `run/compensation.ts` distinguishes: a rewind-then-redo appends a second
-    // `tool.called` under the same key, and only the seq tells the redo from what it replaced.
+    //
+    // THE SETTLED TEST IS KEYED ON THE SEQ AND THE ARGUMENTS ON THE EFFECT KEY, which are not the
+    // same identity and are each the right one for their question. `compensatesSeq` is the step
+    // identity (`run/compensation.ts`: the key is positional, and a rewind-then-redo appends a
+    // second `tool.called` under the SAME key), so only the seq can say which call a row settled.
+    // The arguments are a different question — "what would this undo be dispatched WITH" — and
+    // `#completedEffects` answers it the way the dispatcher does: last LIVE completion per key.
+    //
+    // SO A REDO'S `details` DO CLEAR THE REFUSAL FOR THE EARLIER SEQ THAT SHARES ITS KEY, and
+    // that is deliberate rather than a gap in the split above. `#compensateOne` builds this
+    // step's arguments from exactly the same read, so refusing here while the dispatcher would
+    // have had something to dispatch is the disagreement §A.37 is about. The refusal's question
+    // is "can an undo for this effect be built at all", and a live record under the key is the
+    // whole of the answer.
     const needArgs = new Set(candidates.filter((c) => !compensated.has(c.seq) && settling.has(c.seq)).map((c) => c.key));
     const recorded = needArgs.size === 0 ? new Map<string, unknown>() : await this.#completedEffects({ log }, (k) => needArgs.has(k));
 
@@ -5253,11 +5276,17 @@ export class Engine {
     const offending = await this.#uncompensatedIrreversible(ctx.log, (atSeq + 1) as Seq, runId, 0);
     if (offending !== undefined) {
       const where = offending.runId === runId ? "" : ` in child run ${offending.runId}`;
+      // BOTH WAYS THE ARGUMENTS CAN BE ABSENT, named rather than guessed between.
+      // `detailsOf(recorded.get(key))` is `undefined` when the call recorded no `details` AND when
+      // there is no live `effect.completed` under the key at all — an earlier rewind suppressed
+      // it. Asserting the first would be a false sentence half the time, and an operator reading
+      // "carries no `details`" about a record that is simply hidden looks in the wrong place.
       const why =
         offending.why === "no_compensation"
           ? "declares no compensation"
-          : `the arguments its undo "${String(offending.undo)}" needs were never recorded ` +
-            "(its `effect.completed` carries no `details`), so no rewind can undo it — the effect would stand with its record hidden";
+          : `this engine cannot build the arguments its undo "${String(offending.undo)}" needs — there is no live ` +
+            "`effect.completed` recording the `details` they come from, either because the call recorded none or because an " +
+            "earlier rewind suppressed the record, so no rewind can undo it and the effect would stand with its record hidden";
       throw err.conflict(
         CODES.E_RESTORE_ILLEGAL,
         `cannot rewind to ${atSeq}: "${offending.name}" ran at seq ${offending.seq}${where}, is ` + `${offending.irreversibility}, and ${why}`,
@@ -5445,21 +5474,40 @@ export class Engine {
     // never recorded, so there is no such escape here. Two guards, two rules; collapsing them
     // would either re-introduce the first defect or switch the other arm's guard off.
     //
-    // SCOPED TO `isHardToUndo`, like every other arm of this feature. A `reversible_write` whose
-    // `effect.completed` carried no `details` is still crossed and still journaled
-    // `not_attempted` — that is the three-states rule, and `undo-args-must-be-recorded.test.ts`
-    // is the test that holds it.
-    const noArguments = current.steps.filter(
-      (s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.undo !== undefined && s.argsDigest === undefined,
-    );
+    // AND IT DOES NOT ASK WHETHER AN `undo` IS NAMED, which was an over-narrow first cut and made
+    // the closure claim wider than the set. `planCompensation` STRIPS `undo` from a step it marks
+    // `unknown_tool` or `unknown_compensation`, so a hard-to-undo effect whose undo tool is gone
+    // from THIS registry AND whose arguments were never recorded arrived with the identical
+    // signature — `steps 1`, `dispatch 0`, `blocked 1`, nothing settled — and was crossed:
+    // measured, the charge hidden and the money gone. Neither arm of `#rewindRefusals` covers it
+    // either, because the registry arm reads the tool that RAN (which is registered and does
+    // declare a compensation) and the settled arm needs a non-retryable row, while
+    // `unknown_compensation` is written `retryable: true` on purpose. `argsDigest === undefined`
+    // already means "no undo this rewind will build", by `#rewindPlanOf`'s own rule that "this
+    // step shows an `argsDigest`" and "this step will be attempted" are one sentence — so the
+    // conjunct excluded cases rather than describing any.
+    //
+    // NOT A WALL THE OPERATOR CANNOT CLEAR, which is the test every arm of §A.37 has to pass.
+    // Deploying the missing undo is still a move: with it registered the step regains its `undo`,
+    // and — where the `effect.completed` DID record `details` — an `argsDigest`, and the rewind
+    // goes through. What stays refused is the case where the arguments are absent, and those are
+    // absent whatever the registry holds.
+    //
+    // SCOPED TO `isHardToUndo`. That is true of the two REFUSAL arms and of nothing else in this
+    // feature: `#compensateOne`'s arms and its approval-floor split apply to every class, and a
+    // `reversible_write` whose `effect.completed` carried no `details` is still crossed and still
+    // journaled `not_attempted`. That is the three-states rule, and
+    // `undo-args-must-be-recorded.test.ts` is the test that holds it.
+    const noArguments = current.steps.filter((s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.argsDigest === undefined);
     if (noArguments.length > 0) {
       throw err.conflict(
         CODES.E_RESTORE_ILLEGAL,
-        `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and declare a ` +
-          `compensation this engine cannot build the arguments for ` +
-          `(${[...new Set(noArguments.map((s) => `${s.tool}@${String(s.seq)} -> ${String(s.undo)}`))].join(", ")}) — ` +
-          "their `effect.completed` carries no `details`, which is the only place an undo's arguments come from, so no rewind " +
-          "can undo them. Rewinding would hide the record and leave the effects standing",
+        `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and this engine ` +
+          `cannot build an undo for them ` +
+          `(${[...new Set(noArguments.map((s) => `${s.tool}@${String(s.seq)} -> ${s.undo ?? `(${s.blocked ?? "blocked"})`}`))].join(", ")}) — ` +
+          "there is no live `effect.completed` recording the `details` an undo's arguments come from, either because the call " +
+          "recorded none or because an earlier rewind suppressed the record. Rewinding would hide the record and leave the " +
+          "effects standing",
         { details: { runId, atSeq, pending: noArguments.length } },
       );
     }

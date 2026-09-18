@@ -449,8 +449,8 @@ test("a run's own failure does not approve an undo that needs a human", async ()
   // `nodeApproved: true`, must be able to re-plan the seq rather than find it settled forever.
   // WHAT IS UNCHANGED IS THE CLAIM THIS TEST IS ABOUT: `world.purged` is still empty, so the
   // run's own failure still approved nothing.
-  assert.equal(recs[0]!.outcome, "not_attempted", "a run's own failure approved an irreversible undo");
-  assert.equal(recs[0]!.retryable, true, "the refusal settled a seq a rewind could still undo");
+  assert.equal(recs[0]!.outcome, "not_attempted", "`failed` would say the undo tool RAN — the approval floor stopped it before that");
+  assert.equal(recs[0]!.retryable, true, "and an absent `retryable` would settle a seq a rewind could still undo");
   assert.deepEqual(world.purged, [], "an irreversible undo ran with no human anywhere in the chain");
 
   // The refusal is in the journal, not only in a string handed back to a caller — an operator
