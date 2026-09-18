@@ -409,13 +409,18 @@ test("`attached` IS IN THE PLAN HASH, SO AN AUTHORIZATION TAKEN BEFORE A RESTART
   // `assert.notEqual(now.planHash, plan.planHash)` in the detached fully-delegated test above,
   // and §A.74 refuses that preview outright, so the comparison had nowhere to live.
   //
-  // WHAT IS AND IS NOT STILL OBSERVABLE, stated rather than quietly narrowed. The `unrunnable`
-  // arm IS "a step with an `undo` that this process cannot dispatch", so **a detached plan
-  // holding such a step is exactly the thing `planRewind` now refuses** — the per-step
-  // `undispatchable` contribution to the hash is unreachable through this verb by construction,
-  // and that is the price §A.74 was paid at. The RUN-level `attached` flag is not: a boundary
-  // ABOVE every recorded effect plans zero steps, no arm fires, and the two previews differ in
-  // the one bit this test is about.
+  // WHAT IS AND IS NOT STILL OBSERVABLE, stated rather than quietly narrowed — and the first
+  // draft of this paragraph overstated it, which a reviewer caught. The `unrunnable` arm is
+  // `undo !== undefined && undispatchable !== undefined && live === undefined`, so what §A.74
+  // made unreachable is the DETACHED plan holding such a step, and that only. A per-step
+  // `undispatchable` under a LIVE parent is still shown, and still asserted:
+  // `rewind-through-subgraph.test.ts`'s "A LIVE PARENT WHOSE CHILD'S GRAPH CANNOT BE REBUILT"
+  // reads `childStep.undispatchable !== undefined` off a returned plan — which is the case
+  // `compensation.recorded.retryable` exists for and must never be walled off.
+  //
+  // What THIS test needs is a run where neither arm fires at all, so that `forget` moves exactly
+  // one bit: a boundary ABOVE every recorded effect plans zero steps, and the two previews differ
+  // only in the run-level `attached` flag.
   const r = await ran("tool");
 
   // ABOVE THE CHARGE, so there is nothing to undo and nothing for either arm to refuse.

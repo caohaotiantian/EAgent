@@ -723,6 +723,62 @@ test("SHAPE 4 — a registry that changed is `retryable`, and registering the un
   }
 });
 
+test("SHAPE 2 ON THE ACT SIDE — `rewind` refuses it too, with no plan it could ever have been shown", async () => {
+  // THE PIN §A.74 TOOK AWAY WITHOUT MEANING TO, and a mutation found it: `rewindFromACoolEngine`
+  // returns at the `planRewind` catch now, so after the flip NO test in this file reached
+  // `engine.rewind` on a refusing shape at all. Commenting `#refusePlannedRewind` out of
+  // `#rewindSerially` reddened only `rewind-plan.test.ts`'s detached test — which exercises the
+  // OTHER arm, `unrunnable` — so the `noArguments` arm was pinned in `planRewind` and nowhere
+  // else. A later change could have deleted it from the act and this file would have stayed green
+  // while `rewind` went back to crossing the charge.
+  //
+  // WITH A HASH THE ENGINE NEVER ISSUED, because there is no other kind available: `planRewind`
+  // refuses this journal, so no operator can hold a real one. What makes that a test rather than a
+  // tautology is Decision 2's ordering — `#refusePlannedRewind` sits ABOVE the hash check, so what
+  // comes back is the journal fact and not "this engine has no record of plan <h>". Both are
+  // `E_RESTORE_ILLEGAL`, so the message is what discriminates, and it is asserted.
+  const dir = mkdtempSync(join(tmpdir(), "loom-a37-act-"));
+  try {
+    const path = join(dir, "run.db");
+    const world: World = { charges: [], refunds: [] };
+    const ran = await runIt(path, "pay.charge", false, world);
+    assert.equal(ran.status, "succeeded");
+    assert.deepEqual(world.charges, [42], "precondition: the charge is real");
+    assert.equal(records(ran.events).length, 0, "precondition: nothing is settled");
+    const atSeq = beforeTheCharge(ran.events, "pay.charge");
+
+    const store = new SqliteStateStore({ path, now: () => NOW });
+    try {
+      const engine = engineOn(store, world);
+      engine.attach(ran.runId, ran.graph);
+      const refused = await engine
+        .rewind(ran.runId, atSeq, "straight at the act, with no preview", OPERATOR, { planHash: "sha256:not-a-plan-this-engine-ever-issued" })
+        .then(() => undefined, (e: unknown) => e as Error & { code?: string; details?: { pending?: number } });
+      assert.ok(refused !== undefined, "`rewind` must refuse, not cross");
+      assert.equal(refused.code, CODES.E_RESTORE_ILLEGAL, "with the restore code");
+      assert.match(refused.message, /pay\.charge@\d+ -> pay\.refund/, "and the ARM's message — `tool@seq -> undo`, which the `unrunnable` arm does not print");
+      assert.match(refused.message, /no live `effect\.completed` recording the `details`/, "naming the arguments as the thing that is missing");
+      assert.doesNotMatch(refused.message, /no record of plan/, "and NOT the hash check's, which sits below it on purpose");
+      assert.equal(refused.details?.pending, 1, "one step");
+
+      // THE WORLD AND THE LOG, because a refusal that crossed would show here and nowhere else.
+      assert.deepEqual(world.charges, [42], "the money is still gone");
+      assert.deepEqual(world.refunds, [], "and nothing was undone");
+      const after = await journal(store, ran.runId);
+      assert.equal(records(after).length, 0, "nothing was attempted, so nothing is recorded");
+      assert.equal(
+        after.some((e) => e.type === "checkpoint.restored"),
+        false,
+        "and no restore marker was appended",
+      );
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("SHAPE 2's SECOND DOOR — the undo tool is gone AND the arguments were never recorded, and the rewind still refuses", async () => {
   // THE SET THE HEADER CLAIMS IS THE SET THE CODE REFUSES. Shape 2's signature is "a hard-to-undo
   // effect whose undo this rewind will not dispatch, with nothing settled" — and it arrives by two
