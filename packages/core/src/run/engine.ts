@@ -765,6 +765,34 @@ function detailsOf(result: unknown): Record<string, unknown> | undefined {
 }
 
 /**
+ * THE APPROVAL FLOOR'S OWN REFUSALS, BY IDENTITY — the one `ToolResult` a tool cannot forge.
+ *
+ * `#compensateOne` has to tell two things apart that arrive as the same `{isError: true}`: the
+ * undo that RAN and failed, and the undo the approval floor refused before it was reached. Only
+ * the second is a fact about the TRIGGER, and only the second may be recorded
+ * `not_attempted, retryable: true` — because a retryable row re-plans, and re-planning an undo
+ * that already ran DISPATCHES IT A SECOND TIME.
+ *
+ * READING A CODE OFF `ToolResult.error` CANNOT DO IT, and that was this file's own defect for one
+ * commit. `#invokeTool` returns whatever `tool.execute` produced, after a `postTool` REPLACE
+ * filter; `error` is caller-supplied, and `err` and `CODES` are public exports. So a tool that
+ * ran, took the money, and returned `err.policy(CODES.E_HUMAN_APPROVAL_REQUIRED, …)` was
+ * journaled `not_attempted, retryable: true` and dispatched AGAIN on the next rewind — measured
+ * on a `db.purge` that pushes before it answers: `world.purged` `[7]`, then `[7, 7]`.
+ *
+ * A `WeakSet` OF THE RESULT OBJECTS THIS MODULE CREATED, and the three properties that make it
+ * the right channel. It is UNFORGEABLE: membership is object identity and the only `add` is the
+ * gate arm below, on an object it constructs and returns without ever handing it to a hook or a
+ * tool (the arm refuses BEFORE `tool.execute` and before `postTool`, and the one consumer that
+ * lets a refusal reach a model pushes `result.content`, a string). It is TRAP-SAFE: `has` never
+ * calls a proxy trap and answers `false` for a non-object, which is the fail-closed direction —
+ * an unrecognised result is `failed`, the outcome that settles. And it holds NO DURABLE STATE:
+ * the entry is created and read inside one `await` chain in one process, so a restart that hands
+ * it back empty cannot switch a guard off — there is no result object left to ask about.
+ */
+const APPROVAL_FLOOR_REFUSALS = new WeakSet<object>();
+
+/**
  * What was thrown, as a string, when the point of the string is that the thrower cannot be trusted.
  *
  * AND, SINCE THE CROSS-RUN LANE, ANY VALUE A GUARD'S FAILURE PATH PRINTS THAT THIS PROCESS DID NOT
@@ -2662,17 +2690,20 @@ export class Engine {
       // never ran" is called — `failed` means the undo tool ran and did not work — and
       // `retryable: true` is what stops it settling the seq so a rewind can re-plan it.
       //
-      // ON THE CODE, NOT ON THE STRING, which is what `#invokeTool`'s gate arm now returns a
-      // typed `error` for. `loomCodeOf` is the trap-safe reader this file already uses; parsing
-      // the reason instead is the thing `run/compensation.ts:170` exists to avoid.
-      if (loomCodeOf(out.error) === CODES.E_HUMAN_APPROVAL_REQUIRED) {
-        // `out.content` UNWRAPPED — the same string as `out.error.message`, taken from here only
-        // to avoid a non-null assertion. NOT re-wrapped as `"X did not undo Y: …"`: that is a
-        // sentence about a tool that ran, and this one did not.
+      // BY IDENTITY, NOT BY A CODE ON THE RESULT. `out` is whatever `tool.execute` produced
+      // after a `postTool` REPLACE filter, `ToolResult.error` is caller-supplied, and `err` and
+      // `CODES` are public exports — so testing the code here let a tool that RAN claim this arm
+      // and be re-dispatched on the next rewind. `APPROVAL_FLOOR_REFUSALS` holds the objects
+      // `#invokeTool`'s gate arm constructed, which no tool can obtain; `has` answers `false` for
+      // anything else, and `false` is the settling direction.
+      if (APPROVAL_FLOOR_REFUSALS.has(out)) {
+        // `out.content` UNWRAPPED, NOT re-wrapped as `"X did not undo Y: …"`: that is a sentence
+        // about a tool that ran, and this one did not.
         return { outcome: "not_attempted", reason: out.content, retryable: true };
       }
-      // A policy DENY, or a genuine tool error: the undo ran, or was refused by a decision a
-      // rewind would make identically. `failed`, and `retryable` stays absent.
+      // THE UNDO RAN AND DID NOT WORK, or a decision a rewind would make identically refused it —
+      // a policy DENY, an argument that does not fit, a tool nobody registered. `failed`, and
+      // `retryable` stays absent, so the seq settles and nothing dispatches it twice.
       return { outcome: "failed", reason: `"${step.undo}" did not undo "${step.tool}": ${out.content}` };
     }
     return { outcome: "compensated" };
@@ -9896,15 +9927,23 @@ export class Engine {
             { taskId: task.taskId },
           ),
         );
-        // AND THE TYPED ERROR TRAVELS, for the same reason the `deny` arm one screen up carries
-        // one: "re-wrapping it as a string threw away the class". The class is what lets a
-        // CALLER tell "the tool ran and failed" from "the approval floor refused before it ran",
-        // without parsing this sentence — `#compensateOne` reads exactly that to decide between
-        // `failed` and `not_attempted, retryable: true`, because `nodeApproved` here is
-        // `trigger === "rewind"` and a rewind gets further than a `run_failed` rollback does.
-        // `content` is byte-identical to what it has always been, so nothing an agent sees moves.
+        // AND THE REFUSAL IS MARKED, BY IDENTITY — see `APPROVAL_FLOOR_REFUSALS`. `#compensateOne`
+        // has to tell this arm from an undo that RAN and failed, because only this one is a fact
+        // about the TRIGGER (`nodeApproved` here is `trigger === "rewind"`, and a rewind gets
+        // further than a `run_failed` rollback) and only this one may be recorded
+        // `not_attempted, retryable: true`. A typed `error` on the result CANNOT carry that: this
+        // method hands back whatever `tool.execute` produced, `error` is caller-supplied, and
+        // `err` and `CODES` are public exports — so a tool that ran and answered
+        // `E_HUMAN_APPROVAL_REQUIRED` would be re-dispatched on the next rewind. The object this
+        // arm returns never reaches a hook or a tool, so its identity is the honest channel.
+        //
+        // `content` IS BYTE-IDENTICAL to what it has always been, so nothing an agent sees moves,
+        // and it stays the only thing that leaves this arm: the agent-turn consumer pushes
+        // `result.content` and nothing else.
         const why = `"${tool.name}" is ${tool.irreversibility} and requires human approval this turn cannot request; put it on a tool node, which can suspend`;
-        return { content: why, isError: true, error: err.policy(CODES.E_HUMAN_APPROVAL_REQUIRED, why) };
+        const refusal: ToolResult = { content: why, isError: true };
+        APPROVAL_FLOOR_REFUSALS.add(refusal);
+        return refusal;
       }
       // Approved at the node. Fall through and run it.
     } else if (decision.holdMs > 0 && !nodeApproved && this.#replay === undefined) {
