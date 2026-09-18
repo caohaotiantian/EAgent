@@ -53,28 +53,32 @@
  * for "a bug in Loom" — for an operator who left out an argument, and answer `E_CONFIG_INVALID`
  * now.
  *
- * **WHAT IS STILL NOT COVERED IS FIVE FLAGS, AND THEY ARE DRIVEN BELOW**, one row each, with the
- * list derived from `FLAGS`' `null` rows rather than restated — so a flag that gains a reader
- * leaves this block on the day it gains one. The reason differs per flag and the first cut of
- * this header got it wrong for eight of twelve by offering only two reasons; there are three:
+ * **WHAT IS STILL NOT COVERED IS THREE FLAGS, AND ALL THREE ARE DRIVEN BELOW**, one row each,
+ * with the list derived from `FLAGS`' `null` rows rather than restated — so a flag that gains a
+ * reader leaves this block on the day it gains one. Two reasons, and they are the only two that
+ * have survived being checked:
  *
  *   - MORE READERS THAN ONE, so the sentence depends on the verb and the door must not guess:
  *     `--as` (`subjectFlag`, `submitterFlag`, `attesterFlag`) and `--cohort` (`examCohortFlag`,
  *     `suiteCohortFlag`).
- *   - NEEDS MORE THAN ARGV: `--graph` and `--identity-file` are read through a `(ws, args)`
- *     helper, and `--scope` needs the RUN ID the command named — `ceilingScope(args, runId)`
- *     refuses a scope naming a different run, which is the check that makes it more than a flag.
+ *   - NEEDS MORE THAN ARGV: `--scope`, and only `--scope`. `ceilingScope(args, runId)` refuses a
+ *     scope naming a different run than the command did, so the flag cannot be judged without the
+ *     RUN ID — which is a positional, not a workspace.
  *
  * Three further rows are `null` and are NOT in that set, because there is nothing there to
  * refuse: `--help` is answered before the door is reached, and `--reason` and `--reject` have no
  * bad shape at all — a bare `--reason` is deliberately the default `"operator"` and a bare
- * `--reject` is deliberately the reason "(no reason given)". Measured:
- * `cancel <id> --reason` and `approve <id> <g> --reject` both fail with `E_RUN_NOT_FOUND`,
- * never about the flag.
+ * `--reject` is deliberately the reason "(no reason given)". Both defaults are pinned in
+ * `operator-pause.test.ts` against the journal, because three docstrings asserting a default is
+ * not the same as one test reading it back.
  *
- * Seven flags that WERE in this paragraph are gone from it: `--baseline`, `--max-runs-in-flight`,
- * `--node`, `--suite` and `--take` were each read inline in a `case` block, which is not a reason
- * argv cannot decide them — they are named readers now and refuse at the door.
+ * **NINE FLAGS HAVE LEFT THIS PARAGRAPH, and each left for a reason that turned out not to be a
+ * reason.** `--baseline`, `--max-runs-in-flight`, `--node`, `--suite` and `--take` were read
+ * inline in a `case` block, which says where the code was written and nothing about what decides
+ * the flag. `--graph` and `--identity-file` were called "needs a `Workspace`" and did not:
+ * `pickIdentity(ws, args)` decides `--identity-file` with `requireFileFlag(args, …)` and uses
+ * `ws` for a different question, and all four reads of `--graph` are a `pathFlag` on argv. And
+ * `--reason`/`--reject` were listed here as litter when they are not refused at all.
  */
 
 import assert from "node:assert/strict";
@@ -113,7 +117,7 @@ function globalFlags(): readonly string[] {
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
   const m = /const GLOBAL_FLAGS: readonly string\[\] = \[([\s\S]*?)\];/.exec(src);
   assert.ok(m, "GLOBAL_FLAGS moved — this test reads it from the source on purpose");
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
+  return [...m[1]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!).sort();
 }
 
 /**
@@ -240,8 +244,6 @@ test("AN UNKNOWN VERB SAYS SO — even one whose name is a property of Object.pr
 const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly string[]; readonly says: RegExp }>> = {
   as: { argv: ["cancel", "01NOSUCHRUN", "--as"], says: /--as needs a subject/ },
   cohort: { argv: ["exam", "attest", "e.json", "--as", "alice", "--cohort"], says: /exam attest --cohort needs a runId/ },
-  graph: { argv: ["replay", "01NOSUCHRUN", "--graph"], says: /--graph needs a path/ },
-  "identity-file": { argv: ["serve", "--identity-file"], says: /--identity-file needs a path/ },
   scope: { argv: ["deescalate", "01NOSUCHRUN", "--scope"], says: /--scope must be run:01NOSUCHRUN/ },
 };
 
@@ -252,7 +254,7 @@ test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the tabl
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
   const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(src);
   assert.ok(m, "FLAGS moved — this test reads it from the source on purpose");
-  const nulls = [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?: null,$/gm)].map((x) => x[1]!).sort();
+  const nulls = [...m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: null,$/gm)].map((x) => x[1]!).sort();
   assert.deepEqual(
     nulls,
     [...Object.keys(STILL_OPENS_A_WORKSPACE), ...NOTHING_TO_REFUSE].sort(),

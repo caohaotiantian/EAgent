@@ -50,19 +50,19 @@ const SRC = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.u
 function declared(): readonly string[] {
   const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "FLAGS moved — this gate reads it from the source on purpose");
-  return [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?:/gm)].map((x) => x[1]!).sort();
+  return [...m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?:/gm)].map((x) => x[1]!).sort();
 }
 function advertised(): readonly string[] {
   const m = /const USAGE = `([\s\S]*?)`;/.exec(SRC);
   assert.ok(m, "USAGE moved");
-  return [...new Set([...m[1]!.matchAll(/--([a-z][a-z-]*)/g)].map((x) => x[1]!))].sort();
+  return [...new Set([...m[1]!.matchAll(/--([A-Za-z0-9_-]+)/g)].map((x) => x[1]!))].sort();
 }
 function read(): readonly string[] {
-  const direct = [...SRC.matchAll(/args\.flags\["([a-z-]+)"\]/g)].map((x) => x[1]!);
+  const direct = [...SRC.matchAll(/args\.flags\["([A-Za-z0-9_-]+)"\]/g)].map((x) => x[1]!);
   // Every accessor that reads a flag. A new one must be added here — which is not a chore but
   // the gate working: `listFlag` was introduced for `--egress`/`--allow-exec`/`--exec-env` and
   // this test went red the moment those three stopped being read through `args.flags[…]`.
-  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([a-z-]+)"/g)].map((x) => x[1]!);
+  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!);
   return [...new Set([...direct, ...viaHelper])].sort();
 }
 

@@ -31,10 +31,19 @@
  *   > excluded — that reads `f`, whether directly as `args.flags["f"]` or through a helper called
  *   > `helper(args, "f")`; and `null` when there is no such function or more than one.
  *
- * `(args: Args)` is the mechanical spelling of "argv alone decides it": a reader that takes a
- * `Workspace` is not one. More than one reader means the sentence depends on the verb — `--as`
- * has three — and the door does not guess. A flag that grows a reader and keeps `null` fails the
- * first test below; a flag whose entry names a function that does not read it fails it too.
+ * `(args: Args)` IS A SIGNATURE, NOT A VERDICT, and the difference has now cost two rounds of
+ * review. It says a reader cannot NEED the workspace, so calling it at the door is not calling it
+ * early; it says nothing about whether one that takes `ws` actually uses it. `--identity-file` and
+ * `--graph` sat behind `(ws, args)` helpers and were both written off as "argv cannot decide
+ * them" — falsely: `pickIdentity` decides `--identity-file` with `requireFileFlag(args, …)` and
+ * wants `ws` for a different question, and all four reads of `--graph` are a `pathFlag` on argv.
+ * Both have readers now. So the rule finds candidates mechanically; whether a `null` is a FACT
+ * about the flag or an accident of where somebody wrote the code is a question the rule cannot
+ * answer and a reader has to.
+ *
+ * More than one reader means the sentence depends on the verb — `--as` has three — and the door
+ * does not guess. A flag that grows a reader and keeps `null` fails the first test below; a flag
+ * whose entry names a function that does not read it fails it too.
  *
  * The same shape one level over for arguments: `VERB_POSITIONALS` holds the WORDS a missing
  * argument is named with, `requirePositional` looks them up there, and the door walks the row —
@@ -109,8 +118,8 @@ function flagsTable(): Map<string, string> {
   const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, string>();
-  for (const row of m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?: ([A-Za-z0-9_]+),$/gm)) out.set(row[1]!, row[2]!);
-  const keys = [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?:/gm)].map((x) => x[1]!);
+  for (const row of m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: ([A-Za-z0-9_]+),$/gm)) out.set(row[1]!, row[2]!);
+  const keys = [...m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?:/gm)].map((x) => x[1]!);
   assert.deepEqual(
     [...out.keys()].sort(),
     [...keys].sort(),
@@ -124,7 +133,7 @@ function positionalsTable(): Map<string, number> {
   const m = /const VERB_POSITIONALS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_POSITIONALS moved — this gate reads it from the source on purpose");
   const out = new Map<string, number>();
-  for (const row of m[1]!.matchAll(/^ {2}([a-z]+): \[([\s\S]*?)\],$/gm)) {
+  for (const row of m[1]!.matchAll(/^ {2}([A-Za-z0-9_]+): \[([\s\S]*?)\],$/gm)) {
     // A backtick string FIRST: one of the rows is a template literal containing double quotes,
     // and matching `"…"` first would count the quoted word inside it as a second argument.
     out.set(row[1]!, [...row[2]!.matchAll(/`[^`]*`|"[^"]*"/g)].length);
@@ -137,8 +146,8 @@ function verbFlags(): Map<string, readonly string[]> {
   const m = /const VERB_FLAGS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, readonly string[]>();
-  for (const row of m[1]!.matchAll(/^ {2}([a-z]+): \[([^\]]*)\],$/gm)) {
-    out.set(row[1]!, [...row[2]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!));
+  for (const row of m[1]!.matchAll(/^ {2}([A-Za-z0-9_]+): \[([^\]]*)\],$/gm)) {
+    out.set(row[1]!, [...row[2]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!));
   }
   return out;
 }
@@ -147,7 +156,7 @@ function verbFlags(): Map<string, readonly string[]> {
 function globalFlags(): readonly string[] {
   const m = /const GLOBAL_FLAGS: readonly string\[\] = \[([\s\S]*?)\];/.exec(SRC);
   assert.ok(m, "GLOBAL_FLAGS moved — this gate reads it from the source on purpose");
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!);
+  return [...m[1]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!);
 }
 
 // ── the tables, recomputed ──────────────────────────────────────────────────
@@ -165,7 +174,7 @@ test("THE ROWS THIS FILE PARSED ARE THE FLAGS THE BINARY RUNS WITH — not two r
   } finally {
     process.stdout.write = real;
   }
-  const advertised = [...new Set([...printed.matchAll(/--([a-z][a-z-]*)/g)].map((x) => x[1]!))].sort();
+  const advertised = [...new Set([...printed.matchAll(/--([A-Za-z0-9_-]+)/g)].map((x) => x[1]!))].sort();
   assert.deepEqual([...flagsTable().keys()].sort(), advertised, "a flag the binary advertises is not a row this file parsed, or vice versa");
 });
 
@@ -201,7 +210,7 @@ test("`VERB_POSITIONALS` IS WHAT EACH `case` BLOCK ASKS FOR — recomputed from 
   // The `case` labels of `main`'s switch, and the span of source each one owns.
   const cases: { verb: string; at: number }[] = [];
   for (let i = 0; i < LINES.length; i++) {
-    const m = /^ {6}case "([a-z]+)":/.exec(LINES[i]!);
+    const m = /^ {6}case "([A-Za-z0-9_-]+)":/.exec(LINES[i]!);
     if (m !== null) cases.push({ verb: m[1]!, at: i });
   }
   assert.ok(cases.length >= 15, `the scan found ${String(cases.length)} verbs — the regex broke, not the CLI`);

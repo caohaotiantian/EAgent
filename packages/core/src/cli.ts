@@ -642,11 +642,12 @@ export function resourceRefsIn(text: string): readonly string[] {
  *   - `(args: Args)` is the SIGNATURE the rule keys on. It is not a proof of purity — `jailFor`
  *     reads `process.cwd()` — and the claim it is used for is narrower: a function taking only
  *     `args` cannot need the workspace, so calling it at the door is not calling it early. What
- *     it buys, it buys by being MECHANICAL: it forced `serveToken` out of
- *     `controlPlaneOptions(ws, args)`, which needed a `Workspace` and never touched one, and it
- *     named nine readers that were expressions inline at a single call site — `channelsFile`,
- *     `modelsFile`, `mcpFile`, `maxParallelismFlag`, `extensionModulePaths`, `serveInFlight`,
- *     `steerNode`, `steerTake`, `promoteBaseline`/`promoteSuite`.
+ *     it buys, it buys by being MECHANICAL: it named TWELVE readers that were expressions inline
+ *     at a single call site — `channelsFile`, `modelsFile`, `mcpFile`, `maxParallelismFlag`,
+ *     `extensionModulePaths`, `serveInFlight`, `steerNode`, `steerTake`, `promoteBaseline`,
+ *     `promoteSuite`, `identityFile`, `graphFlag` — and it pulled `serveToken` out of
+ *     `controlPlaneOptions(ws, args)`, which took a `Workspace` to decide a flag and never
+ *     touched one.
  *   - MORE THAN ONE reader means the message depends on the verb — `--as` has three and
  *     `--cohort` two — and the door does not know which is right, so it does not guess.
  *   - NO EXCEPTION FOR A GLOBAL. §H.11 hoisted the globals' checks above `openWorkspace`'s first
@@ -655,20 +656,20 @@ export function resourceRefsIn(text: string): readonly string[] {
  *     calls to one function of `args`, so the two cannot disagree — the argument `jailFor`
  *     already makes for being called from both `main` and `openWorkspace`.
  *
- * **WHAT `null` MEANS, IN THREE KINDS — and it is NOT "this still opens a workspace".** Two of
- * the rows are `null` because there is nothing to refuse:
+ * **WHAT `null` MEANS, IN THREE KINDS — and it is NOT "this still opens a workspace".**
  *
- *   - `--reason` and `--reject` HAVE NO BAD SHAPE. `cancel`/`pause`/`resume`/`steer` read a bare
+ *   - NOTHING TO REFUSE: `--reason` and `--reject`. `cancel`/`pause`/`resume`/`steer` read a bare
  *     `--reason` as the default `"operator"` on purpose, and `approve` reads a bare `--reject` as
  *     the reason "(no reason given)". Neither is refused anywhere, so neither has a reader to
- *     name and neither costs a directory for being given with no value.
- *   - `--graph` and `--identity-file` need a `Workspace`, and `--scope` needs the runId the
- *     command named (`ceilingScope` checks the scope is THAT run's). Argv alone cannot decide
- *     them, and these three are what still opens a workspace before refusing, with —
- *   - `--as` and `--cohort`, which have more readers than one.
- *
- * `--help` is `null` for a fourth reason: `main` answers it and returns before the door is
- * reached. `refusals-leave-no-workspace.test.ts` drives all five of the open ones.
+ *     name and neither costs a directory for being given with no value. Both defaults are pinned
+ *     against the JOURNAL in `operator-pause.test.ts`, because this paragraph is the argument for
+ *     leaving them open and an argument nothing checks is how `String(true)` gets back in.
+ *   - ANSWERED BEFORE THE DOOR: `--help`. `main` prints the usage and returns above every check
+ *     here, so a reader would never be reached.
+ *   - ARGV GENUINELY CANNOT DECIDE IT: `--as` and `--cohort` (more readers than one), and
+ *     `--scope` — `ceilingScope(args, runId)` refuses a scope naming a different run than the
+ *     command did, so the RUN ID is needed and that is a positional. These THREE are what still
+ *     opens a workspace before refusing, and `refusals-leave-no-workspace.test.ts` drives each.
  */
 const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   "against-cohort": cohortAnchorFlag,
@@ -688,10 +689,10 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   "exec-env": jailFor,
   "extension-module": extensionModulePaths,
   grant: grantFlag,
-  graph: null,
+  graph: graphFlag,
   help: null,
   host: httpHost,
-  "identity-file": null,
+  "identity-file": identityFile,
   input: runInputs,
   "max-bytes": gateReadBound,
   "max-parallelism": maxParallelismFlag,
@@ -1016,16 +1017,18 @@ function refuseFlagsThisVerbDoesNotRead(args: Args): void {
  * CALLING A READER EARLY IS SAFE, AND NOT BECAUSE OF ITS SIGNATURE. `(args: Args)` says a reader
  * cannot need the workspace; it does not say the body is pure. What was checked is the narrower
  * thing this loop needs, and it was checked by SCANNING rather than argued from the signature:
- * over the transitive closure of top-level calls out of all TWENTY-NINE distinct readers this
+ * over the transitive closure of top-level calls out of all THIRTY-ONE distinct readers this
  * table names, none writes a file, touches `fs` at all, opens a store or a plane, writes to
  * `stdout`/`stderr`, reads `process.env`, reads a clock, spawns, or fetches. So running one
  * before `openWorkspace` observes nothing the verb body will not observe again, and changes
  * nothing either call can see. `process.cwd()`, in `jailFor` and nowhere else, is the one ambient
  * read, and it is the same value both times because nothing here calls `chdir`.
  *
- * A READER IS CALLED ONCE PER FLAG OF ITS OWN THAT ARGV CARRIES, plus once more by the verb body:
- * so twice for most, up to SEVEN times for `jailFor` (five flags, and `openWorkspace` calls it
- * too) and FOUR for `deploymentBudget`. Every call is a few string comparisons.
+ * A READER IS CALLED ONCE PER FLAG OF ITS OWN THAT ARGV CARRIES, plus once more by each place
+ * that uses what it returns: so twice for most, and up to SEVEN for `jailFor` — five from this
+ * loop when all five of its flags are on the line, plus `openWorkspace`'s call and `main`'s own
+ * `loadExtensionModules(extensionPaths, jailFor(args))`. `deploymentBudget` tops out at FOUR
+ * (three flags plus `openWorkspace`). Every call is a few string comparisons.
  *
  * ARGV ORDER, and that is a decision rather than an accident: on a line with TWO bad flags the
  * one the operator typed first is the one named. It used to be whichever the reader happened to
@@ -1136,9 +1139,17 @@ function extensionModulePaths(args: Args): readonly string[] | undefined {
  *     promote c.json --baseline      --baseline needs a path: the flag was given with no value…
  *     promote c.json --suite         --baseline needs a path, and none was given.
  *
- * NOT A SINGLE MESSAGE IS REWRITTEN — every one of these is the same call it was, moved. The
- * refusals that mention a flag being ABSENT (`steerNode`, `promoteBaseline`, `promoteSuite`) still
- * happen where they did, because the door calls a reader only for a flag argv actually carries.
+ * FOUR OF THE FIVE SENTENCES ARE THE SAME CALL, MOVED. The refusals that mention a flag being
+ * ABSENT (`steerNode`, `promoteBaseline`, `promoteSuite`) still happen where they did, because the
+ * door calls a reader only for a flag argv actually carries.
+ *
+ * THE FIFTH ROW ANSWERS A DIFFERENT FLAG NOW, AND THE OLD ANSWER WAS A BUG.
+ * `promote c.json --suite` — a bare `--suite`, no `--baseline` at all — used to answer
+ * `--baseline needs a path, and none was given`, because `promote`'s block read `--baseline`
+ * first and `--suite`'s own malformed value was never reached. That is a sentence about a flag
+ * the operator did not type, for a mistake in one they did. It answers
+ * `--suite needs a path: the flag was given with no value at all` now. Fixed rather than moved,
+ * and the only message §H.12 changed that was not simply reclassified.
  *
  * TWO FLAGS ON THE SAME VERB DID *NOT* GET ONE, and that is a measurement rather than a choice:
  * `--reason` and `--reject` have no refusing shape at all. `cancel`/`pause`/`resume`/`steer` read
@@ -1161,10 +1172,82 @@ function steerTake(args: Args): readonly string[] {
   return listFlag(args, "take", "one or more edge ids", NO_EDGE_CALLED_TRUE) ?? [];
 }
 function promoteBaseline(args: Args): string {
+  refuseAgainstCohortFlag(args, "baseline");
   return requireFileFlag(args, "baseline");
 }
 function promoteSuite(args: Args): string {
+  refuseAgainstCohortFlag(args, "suite");
   return requireFileFlag(args, "suite");
+}
+
+/** Why each of the two flags means nothing in the `--against-cohort` mode. ONE COPY of each. */
+const AGAINST_COHORT_CONFLICT: Readonly<Record<string, string>> = {
+  baseline:
+    "the baseline is the graph the cohort's own runs used, derived from the cohort key — naming another one would " +
+    "judge this candidate against a graph that produced none of the recordings",
+  suite: "this mode replays no recordings, so there is no suite to run; the exam is the cohort's INPUT distribution",
+};
+
+/**
+ * `--baseline` and `--suite` mean nothing with `--against-cohort`, and that is decided from argv.
+ *
+ * AHEAD OF THE VALUE CHECK, which is the whole of this function's placement. `promoteBaseline` is
+ * `--baseline`'s door reader, so once §H.12 hoisted it, `promote c.json --against-cohort R
+ * --baseline` answered `--baseline needs a path … Omit the flag entirely to run without one` —
+ * the right ACTION for a reason it does not give. An operator who takes that advice is told
+ * nothing about the mode; an operator who instead supplies a path meets
+ * `--baseline does not apply with --against-cohort` on the NEXT run, having spent one. Measured
+ * before this existed, both in a fresh `mktemp -d` against a candidate that compiles:
+ *
+ *     promote c.json --against-cohort 01R --baseline          --baseline needs a path…
+ *     promote c.json --against-cohort 01R --baseline b.json   --baseline does not apply with…
+ *
+ * Two answers to one mistake, and the less informative one reached first.
+ *
+ * `args.flags["against-cohort"] !== undefined` IS PRESENCE AND NOT A VALUE, which is why this can
+ * run at the door without deciding anything it is not entitled to. The mode is chosen by the flag
+ * being there at all — `promote`'s case block branches on exactly this test — so a malformed
+ * `--against-cohort` still selects the mode, and `cohortAnchorFlag` refuses its value separately.
+ *
+ * `(args: Args, flag: string)` and NOT `(args: Args)`, so `FLAGS`' derivation rule does not see a
+ * second reader for `--against-cohort`, `--baseline` or `--suite`. The rule wants one reader per
+ * flag; this is a clause inside two of them.
+ */
+function refuseAgainstCohortFlag(args: Args, flag: "baseline" | "suite"): void {
+  // BOTH FLAGS PRESENT, and the second half is not redundant even though the door calls this only
+  // for a flag argv carries: `promoteAgainstCohort` calls it for both names unconditionally, the
+  // way the loop it replaced did. Without this test `loom promote c.json --against-cohort R` —
+  // which names neither — answered "--baseline does not apply", a refusal about a flag nobody
+  // typed, in place of the provider refusal it should reach. Caught by driving the matrix, not by
+  // reading the diff.
+  if (args.flags["against-cohort"] === undefined || args.flags[flag] === undefined) return;
+  throw err.validation(CODES.E_CONFIG_INVALID, `--${flag} does not apply with --against-cohort: ${AGAINST_COHORT_CONFLICT[flag]!}.`);
+}
+
+/**
+ * `--identity-file` and `--graph`, the last two flags that were read only behind a `Workspace`.
+ *
+ * NEITHER EVER NEEDED ONE, which the round-2 review is what established. `pickIdentity(ws, args)`
+ * decides this flag with `requireFileFlag(args, "identity-file")` and uses `ws` for a different
+ * question entirely — whether an `--extension-module` ALSO established an identity source, which
+ * is a conflict between two configured things and not a judgement about the flag's value. All
+ * four reads of `--graph` are a `pathFlag`/`requireFileFlag` on argv; the `Workspace` in
+ * `recordedGraph(ws, args, runId, verb)` is for loading and hash-matching the file afterwards.
+ *
+ * So the signature was the only thing standing between these two and the door, and both callers
+ * keep asking exactly what they asked before — `pathFlag`, one call deeper.
+ *
+ * ONE MESSAGE MOVES, and it moves onto the flag the operator typed. `loom audit <id> --graph` and
+ * `loom score <id> --graph`, both bare, used to answer `no journal for run <id> in this
+ * workspace`, because those two verbs look the run up before they read the flag. They answer
+ * `--graph needs a path` now. `--graph <a path that does not exist>` is unchanged on every verb:
+ * `pathFlag` judges the VALUE and never the filesystem.
+ */
+function identityFile(args: Args): string | undefined {
+  return pathFlag(args, "identity-file");
+}
+function graphFlag(args: Args): string | undefined {
+  return pathFlag(args, "graph");
 }
 
 /**
@@ -6528,7 +6611,7 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
   const wanted = await ws.engine.compiledGraphHash(runId);
   const named = (g: RunGraph): string => `${g.spec.metadata.name} v${String(g.spec.metadata.version)} (${g.graphHash})`;
   if (args.flags["graph"] !== undefined) {
-    const file = requireFileFlag(args, "graph");
+    const file = graphFlag(args)!;
     // `false` for the same reason `graphsByHash` passes it: this graph is being re-attached to a
     // run that already exists, not introduced.
     const g = loadGraph(ws, file, false);
@@ -6657,7 +6740,7 @@ function discoverGraphs(ws: Workspace): Record<string, RunGraph> {
  * `--identity-file` subjects into their module, which is a source that can read a file.
  */
 function pickIdentity(ws: Workspace, args: Args): IdentitySource | undefined {
-  const fromFile = args.flags["identity-file"] === undefined ? undefined : readIdentities(requireFileFlag(args, "identity-file"));
+  const fromFile = args.flags["identity-file"] === undefined ? undefined : readIdentities(identityFile(args)!);
   const fromModule = ws.extensions?.identity;
   if (fromFile !== undefined && fromModule !== undefined) {
     throw err.validation(
@@ -8465,7 +8548,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // Attaching the WRONG graph is not a risk this lookup carries: `resolveGate` refuses any
         // graph that is not the one the run compiled, down to the resources its refs resolved to.
         if (args.flags["graph"] !== undefined) {
-          ws.engine.attach(runId, loadGraph(ws, requireFileFlag(args, "graph")));
+          ws.engine.attach(runId, loadGraph(ws, graphFlag(args)!));
         } else {
           const wanted = await ws.engine.compiledGraphHash(runId);
           if (wanted !== undefined) {
@@ -8857,7 +8940,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `undefined`, NOT `{}`. Passing an empty map made `edgeSource !== undefined` true, so
         // every lookup missed, nothing was examined, and the report claimed the rule had been
         // checked — the one rule that catches the gate bypass this module was built for.
-        const gf = pathFlag(args, "graph");
+        const gf = graphFlag(args);
         const loaded = gf === undefined ? undefined : loadGraph(ws, gf);
         const report = auditRun(
           events,
@@ -8945,7 +9028,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const namedGraph = args.flags["graph"];
         let graph = index.get(ranHash);
         if (namedGraph !== undefined) {
-          const g = loadGraph(ws, requireFileFlag(args, "graph"), false);
+          const g = loadGraph(ws, graphFlag(args)!, false);
           if (g.graphHash !== ranHash) {
             process.stderr.write(
               `--graph ${String(namedGraph)} compiles to ${g.graphHash}, and run ${runId} ran ${ranHash}. ` +
@@ -11241,19 +11324,14 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   const anchorId = cohortAnchorFlag(args);
   const cap = runsFlag(args);
 
-  // THE REPLAYED MODE'S FLAGS ARE REFUSED RATHER THAN IGNORED. `--baseline` is derivable here
-  // and must be derived: a cohort key pins ONE `graphHash`, so the baseline is the graph those
-  // recordings actually ran, and letting a caller name a different one would judge the candidate
-  // against a graph that produced none of the evidence. `--suite` has no meaning at all — this
-  // mode replays nothing.
-  for (const [flag, why] of [
-    ["baseline", "the baseline is the graph the cohort's own runs used, derived from the cohort key — naming another one would judge this candidate against a graph that produced none of the recordings"],
-    ["suite", "this mode replays no recordings, so there is no suite to run; the exam is the cohort's INPUT distribution"],
-  ] as const) {
-    if (args.flags[flag] !== undefined) {
-      throw err.validation(CODES.E_CONFIG_INVALID, `--${flag} does not apply with --against-cohort: ${why}.`);
-    }
-  }
+  // THE REPLAYED MODE'S FLAGS ARE REFUSED RATHER THAN IGNORED, and the refusal is
+  // `refuseAgainstCohortFlag` — said from here in the order this loop always used, and from
+  // `promoteBaseline`/`promoteSuite` at the door. Both arms are kept for the reason
+  // `refuseUnknownCommand`'s two callers are: the door reaches this first now, so these two calls
+  // are unreachable through `main`, and unreachable is not deleted — if a later edit takes
+  // `--baseline` off the door, the operator still gets the right sentence, one directory later.
+  refuseAgainstCohortFlag(args, "baseline");
+  refuseAgainstCohortFlag(args, "suite");
 
   // A "LIVE" JUDGEMENT WITH THE MOCK ADAPTER IS A LIE, and it is the easiest lie to tell here:
   // `MockModelAdapter` answers every agent node with "[mock] …", fabricates a cost, and the run
