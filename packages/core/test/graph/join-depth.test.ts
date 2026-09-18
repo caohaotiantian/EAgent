@@ -577,13 +577,23 @@ test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, an
   assert.equal(
     claimFix(spec),
     'keep one join over "a0": "jNone" must drop it from `branches` — the ENTRY alone, no edge running ' +
-      'from "a0" into it at all; `GRAPH008_BRANCH_NOT_CONNECTED` is refusing that entry in this same ' +
-      "compile, and adding the edge it asks for cements this refusal rather than clearing it, and take " +
+      'from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing ' +
+      "in this same compile, and dropping the entry answers that refusal too, and take " +
       '"jA"\'s result as an arm instead if it still needs those writes',
   );
 
-  // AND THE CLAIM IS RUN. Typing what the sibling asks for clears the sibling and leaves this
-  // refusal exactly where it was — which is what "cements" means, checked rather than asserted.
+  // AND THE ONE CLAIM IT MAKES IS RUN. `GRAPH008_BRANCH_NOT_CONNECTED` fires per `branches` ENTRY
+  // with no edge, so the drop this line already dictates answers it — one edit, not one per line.
+  const dropped = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", [])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone")],
+  );
+  assert.ok(!codes(dropped).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(dropped).join(", "));
+  assert.equal(claimRefusal(dropped), undefined, `and the collision with it: ${codes(dropped).join(", ")}`);
+
+  // AND THE CLAIM IT NO LONGER MAKES, with the reason. An earlier cut said "adding the edge it asks
+  // for cements this refusal rather than clearing it". That holds only while the edit leaves the
+  // forward graph acyclic — true here, and FALSE in the two shapes below.
   const withEdge = g(
     [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", ["a0"])],
     [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone"),
@@ -591,6 +601,72 @@ test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, an
   );
   assert.ok(!codes(withEdge).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(withEdge).join(", "));
   assert.ok(claimRefusal(withEdge) !== undefined, `the second claim survives the edit: ${codes(withEdge).join(", ")}`);
+});
+
+test("§A.73 ARM 3 CLAIMS NOTHING ABOUT ADDING THE EDGE — two shapes where that claim is false", () => {
+  // `dropClause` has no cycle guard and needs none, BECAUSE it makes no counterfactual claim. These
+  // are the two shapes that forced that: the dropper is the arm ITSELF, and the dropper is UPSTREAM
+  // of the arm. In both, typing what `GRAPH008_BRANCH_NOT_CONNECTED` asks for closes a cycle,
+  // `topoSort` returns `[]`, every `fanoutDepth` collapses to 0 and `claimedBy` counts nothing — so
+  // the refusal is CLEARED, under a `GRAPH006_UNMARKED_CYCLE`. A line promising it would be cemented
+  // is a line the compiler refutes.
+  const shapes = {
+    // `jUp` is upstream of the fan-out's source and still declares `a0`. It is listed AFTER `jA`
+    // so that `owners[0]` is the wired join and `jUp` is the DROPPER — the clause under test is the
+    // one written for `owners.slice(1)`.
+    upstream: g(
+      [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jUp", ["a0"])],
+      [seq("s0", "p", "jUp"), fanout("fanA", "jUp", "a0", "outers", "outerItem"), joins("e1", "a0", "jA")],
+    ),
+    // `a0` is itself a join declaring `a0`, so the dictated edge is a self-edge.
+    self: g(
+      [plan("p", ["outers"]), barrier("jA", ["a0"]), barrier("a0", ["a0"])],
+      [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA")],
+    ),
+  };
+  for (const [name, spec] of Object.entries(shapes)) {
+    const dropper = name === "upstream" ? "jUp" : "a0";
+    const keeper = "jA";
+    assert.ok(
+      codes(spec).includes("GRAPH008_BRANCH_NOT_CONNECTED"),
+      `${name}: the sibling must be in this compile: ${codes(spec).join(", ")}`,
+    );
+    assert.equal(
+      claimFix(spec),
+      `keep one join over "a0": "${dropper}" must drop it from \`branches\` — the ENTRY alone, no edge ` +
+        'running from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is ' +
+        "refusing in this same compile, and dropping the entry answers that refusal too, and take " +
+        `"${keeper}"'s result as an arm instead if it still needs those writes`,
+      name,
+    );
+    assert.doesNotMatch(claimFix(spec), /cements/, `${name}: no counterfactual about adding the edge`);
+  }
+
+  // AND THE REFUTATION, RUN. Adding the edge the sibling asks for on the SELF shape clears this
+  // refusal rather than cementing it.
+  const withSelfEdge = g(
+    [plan("p", ["outers"]), barrier("jA", ["a0"]), barrier("a0", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), joins("e2", "a0", "a0")],
+  );
+  const after = codes(withSelfEdge);
+  assert.ok(after.includes("GRAPH006_UNMARKED_CYCLE"), after.join(", "));
+  assert.equal(claimRefusal(withSelfEdge), undefined, `the refusal is CLEARED, not cemented: ${after.join(", ")}`);
+});
+
+test("§A.73 ARM 2 WITH SEVERAL KINDS — the list join is what makes the arm count three", () => {
+  // The comment claims `kinds` "reads the same for one kind or several", which is the reason there
+  // is no singular/plural fourth arm. Unpinned, that claim is a template nobody ran.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jTwo", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      seq("s", "a0", "jTwo"), loop("lp", "a0", "jTwo")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jTwo" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: seq`, `kind: loop`, which ' +
+      'carries its own meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
 });
 
 test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not seven", () => {
@@ -607,8 +683,8 @@ test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not s
     'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
       'edge running from "a0" into it to drop; what runs there is `kind: loop`, which carries its own ' +
       'meaning, and "jNone" must drop it from `branches` — the ENTRY alone, no edge running from "a0" ' +
-      'into it at all; `GRAPH008_BRANCH_NOT_CONNECTED` is refusing that entry in this same compile, ' +
-      "and adding the edge it asks for cements this refusal rather than clearing it, and take " +
+      'into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
+      "same compile, and dropping the entry answers that refusal too, and take " +
       '"jA"\'s result as an arm instead if it still needs those writes',
   );
 });
