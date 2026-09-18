@@ -257,7 +257,8 @@ test("A LIVE PARENT WHOSE CHILD'S GRAPH CANNOT BE REBUILT IS STILL REWOUND, AND 
   // `compensation.recorded.retryable` exists for. §A.37's change 3 is keyed on the ARGUMENTS
   // instead (`argsDigest === undefined`), which this child HAS, so nothing fires.
   //
-  // THE TWO ARMS IT DISCRIMINATES BETWEEN, both in `#rewindSerially`:
+  // THE TWO ARMS IT DISCRIMINATES BETWEEN, both in `#refusePlannedRewind` since §A.74,
+  // so `planRewind` runs them too:
   //   · the `unrunnable` arm — `undispatchable && live === undefined`. Does not fire: `live` is
   //     defined, because an undispatchable step under a live parent is one a later attach can run.
   //   · the `noArguments` arm — fires regardless of `live`, and must not fire here.

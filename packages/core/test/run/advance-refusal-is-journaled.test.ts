@@ -36,13 +36,16 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
-import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
+import type { ToolManifestLite } from "../../src/graph/validate.ts";
+import type { EdgeId, NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { OPERATOR, rewindWithPlan } from "./operator.ts";
 import { resolver, SKELETON_TENANT_CAPS } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -107,24 +110,111 @@ function gateSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-function engineWith(store: SqliteStateStore): Engine {
+/**
+ * The money `chargeThenGateSpec` moves, so §A.66's "nothing was compensated" is asserted on the
+ * WORLD and not on the journal — `#failRun` dispatches undos before it writes its terminal row.
+ */
+interface World {
+  readonly charges: number[];
+  readonly refunds: number[];
+}
+
+/** `irreversible` and compensable, which is the whole reason this pair exists — see §A.66 below. */
+const PAY_MANIFESTS: Record<string, ToolManifestLite> = {
+  "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: true, compensation: { tool: "pay.refund" } },
+  "pay.refund": { name: "pay.refund", version: "1.0", capabilities: ["pay"], irreversibility: "reversible_write", idempotent: true },
+};
+
+function engineWith(store: SqliteStateStore, world: World = { charges: [], refunds: [] }): Engine {
   const functions = new FunctionRegistry();
   functions.register("function/seed@stable", () => ({}));
   functions.register("function/work@stable", (view) => ({ writes: { seen: [view.get<{ id: string }>("item")?.id ?? "?"] } }));
   functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
+  // RETRYABLE, so the task is re-READIED rather than failed — the §A.66 shape below.
+  functions.register("function/blip@stable", () => {
+    throw err.unavailable(CODES.E_PROVIDER_TRANSPORT, "transient upstream reset");
+  });
   const models = new ModelRegistry();
   models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+  const tools = new ToolRegistry();
+  tools.register({
+    ...PAY_MANIFESTS["pay.charge"],
+    description: "Take money.",
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    // `details` IS WHAT AN UNDO'S ARGUMENTS COME FROM, so the compensation this test asserts
+    // nobody dispatched is one that genuinely COULD have been dispatched. Without it the arm
+    // §A.37 added would refuse first and the assertion would pass for the wrong reason.
+    execute: (args: Record<string, unknown>) => {
+      const row = Number(args["row"]);
+      world.charges.push(row);
+      return { content: "charged", details: { row }, writes: { out: { row } } };
+    },
+  } as ToolDefinition);
+  tools.register({
+    ...PAY_MANIFESTS["pay.refund"],
+    description: "Give it back.",
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    execute: (args: Record<string, unknown>) => {
+      const row = Number(args["row"]);
+      world.refunds.push(row);
+      const at = world.charges.indexOf(row);
+      if (at >= 0) world.charges.splice(at, 1);
+      return { content: "refunded" };
+    },
+  } as ToolDefinition);
   return new Engine({
     store,
     bus: new InProcessEventBus({ store }),
-    tools: new ToolRegistry(),
+    tools,
     functions,
     models,
     now: () => NOW,
     maxParallelism: 4,
     resolver: resolver(),
-    policy: { granted: SKELETON_TENANT_CAPS, budget: { runUsd: 5 } },
+    policy: { granted: [...SKELETON_TENANT_CAPS, "pay"], budget: { runUsd: 5 } },
   });
+}
+
+/** `blip --seq--> done`, where `blip` throws retryably: a run parked in its own backoff. */
+function retryingSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "advance-refusal-retry", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { ...CHANNELS, note: { type: "array", reduce: "append_ordered" } },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      // A BACKOFF LONGER THAN THE TEST, so `advance` returns with the task in `ready` and stays
+      // there. `sleep` is not stubbed here, so this must not be a number the run can outlast.
+      { id: n("blip"), type: "function", reads: ["items"], function: { ref: "function/blip@stable" }, retry: { maxAttempts: 3, backoff: "fixed", initialMs: 600_000 } },
+      { id: n("done"), type: "function", reads: ["items"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [{ id: e("b0"), from: n("blip"), to: n("done"), kind: "seq" }],
+  } as unknown as GraphSpec;
+}
+
+/** `charge (a tool) --seq--> hold (a human_gate) --seq--> done`: parked, with money standing. */
+function chargeThenGateSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "advance-refusal-charge-gate", project: "probe", version: 1 },
+    policy: { posture: "out", capabilities: ["pay"], expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { ...CHANNELS, note: { type: "array", reduce: "append_ordered" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: n("charge"), type: "tool", reads: ["items"], writes: ["out"], tool: { name: "pay.charge", version: "1.0", args: { row: 42 } }, retry: { maxAttempts: 1 } },
+      { id: n("hold"), type: "human_gate", reads: ["items"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: n("done"), type: "function", reads: ["items"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: e("c0"), from: n("charge"), to: n("hold"), kind: "seq" },
+      { id: e("s1"), from: n("hold"), to: n("done"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
 }
 
 /**
@@ -331,6 +421,399 @@ test("A FOREIGN UNREADABLE GRAPH REFUSES WITHOUT KILLING THE RUN — the ordinar
       }
     }
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * THE ATTACK, IN ONE PLACE: read `run.compiled`, wear its identity, bend one edge, advance.
+ *
+ * `graphHash` AND `resolutionManifest` are plain payload fields of a row any reader can see, and
+ * `RunGraph` is an exported interface whose fields a caller sets — so `#graphIdentityMismatch`
+ * answers `undefined` for a graph the run has never seen. Asserts that the forgery really is
+ * wearing the run's own identity, so a test cannot pass because the forgery failed to build.
+ */
+async function forgedAdvanceLeavesItAlone(
+  path: string,
+  runId: RunId,
+  real: RunGraph,
+  mangle: (g: RunGraph) => RunGraph,
+  what: string,
+  expected: string,
+): Promise<void> {
+  // A SECOND PROCESS, exactly as the attack is: nothing survives but the file. The caller never
+  // holds the run's `RunContext`, its graph or its registries.
+  const store = new SqliteStateStore({ path, now: () => NOW });
+  try {
+    const compiled = (await typesOf(store, runId)).find((ev) => ev.type === "run.compiled")!;
+    const identity = compiled.payload as unknown as { graphHash: string; resolutionManifest: unknown };
+    const built = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+    const forged = { ...built, graphHash: identity.graphHash, resolutionManifest: identity.resolutionManifest } as RunGraph;
+    assert.equal(forged.graphHash, real.graphHash, `${what}: the caller really is wearing the run's own identity`);
+
+    const engine = engineWith(store);
+    engine.attach(runId, forged);
+    await assert.rejects(
+      () => engine.advance(runId),
+      (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+      `${what}: the caller is refused`,
+    );
+    assert.equal(
+      (await typesOf(store, runId)).filter((ev) => ev.type === "run.failed").length,
+      0,
+      `${what}: and the run is not failed`,
+    );
+    assert.equal((await engine.projection(runId))?.status, expected, `${what}: it is exactly where it was`);
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * A SYNTHESISED IDENTITY IS NOT "THIS RUN'S OWN GRAPH". (§A.66.)
+ *
+ * The test above hands the door a foreign graph and the identity check refuses to fail the run.
+ * §A.66 is what happens when the caller does not bring a foreign identity — they READ the run's
+ * own out of the journal. `run.compiled` carries `graphHash` AND `resolutionManifest`, both
+ * plain payload fields of a row any reader can see, and `RunGraph` is an exported interface whose
+ * fields a caller sets. So the pair copies onto any graph at all, `#graphIdentityMismatch`
+ * returns `undefined`, and through `2b1698e8` a run was FAILED on a graph it never compiled.
+ *
+ * Measured there, on the parked `human_gate` run this test builds, driven by the script in
+ * `docs/handoff-2026-09-15.md` §Repros:
+ *
+ *     parked: awaiting_gate
+ *     threw: E_GRAPH_INVALID status: failed run.failed rows: 1 gates: ["cancelled"]
+ *     actor: {"component":"executor","kind":"system"}
+ *
+ * IT IS STRICTLY MORE THAN `cancel`, WHICH IS WHY THIS TEST CARRIES A TOOL. `#failRun` runs
+ * `#compensate` BEFORE the terminal row while `#cancelTree` compensates nothing, so the forged
+ * path could dispatch every undo the run had recorded — real money, on a graph the caller never
+ * saw. The gate graph below therefore charges before it parks, with `pay.refund` registered and
+ * a world the test reads: "nothing was compensated" is asserted on the MONEY and not on the
+ * journal. And the row landed from `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where
+ * a cancel writes `operator.command` attributed to its caller — so an auditor could not tell a
+ * caller's deliberate destruction from a build that genuinely could not read the graph.
+ *
+ * WHAT CLOSES IT IS PROGRESS, NOT A BETTER IDENTITY. `#assertBound` runs first on `advance` and
+ * on both gate doors, so a run bound to an unreadable graph is refused at its first advance and
+ * can never lease a task or open a gate — every genuine §A.63 run has executed NOTHING, which is
+ * that row's own pasted journal (`run.submitted, run.compiled, run.started, task.ready`). The
+ * run here has charged and parked. The two tests are the two halves of that one sentence, which
+ * is why they live in one file: the first still reads `failed / 1`, this one reads
+ * `awaiting_gate / 0 / ["open"]`.
+ */
+test("A SYNTHESISED IDENTITY REFUSES THE ADVANCE AND LEAVES THE RUN WHERE IT WAS", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-"));
+  try {
+    for (const { what, mangle } of FAULTS) {
+      const path = join(dir, `${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      const world: World = { charges: [], refunds: [] };
+      const good = compileOrThrow({
+        spec: chargeThenGateSpec(),
+        resolver: resolver(),
+        tools: PAY_MANIFESTS,
+        tenantCapabilities: [...SKELETON_TENANT_CAPS, "pay"],
+      });
+
+      // ── the process that charges and parks ─────────────────────────────────
+      const first = new SqliteStateStore({ path, now: () => NOW });
+      let runId: RunId;
+      try {
+        const engine = engineWith(first, world);
+        runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
+        let p = await engine.advance(runId);
+        // The charge is `irreversible`, so it suspends on its own gate first; approving it is
+        // what makes the money real, which is what the compensation assertion below is about.
+        for (let i = 0; i < 6 && p.status === "awaiting_gate" && world.charges.length === 0; i++) {
+          const open = Object.values(p.gates).find((g) => g.state === "open" && g.nodeId === n("charge"));
+          if (open === undefined) break;
+          await engine.resolveGate(runId, {
+            gateId: open.gateId,
+            decision: { kind: "approve" },
+            actor: { kind: "human", subject: "u:alice", via: "console" },
+            idempotencyKey: `k-${open.gateId}`,
+          });
+          p = await engine.advance(runId);
+        }
+        assert.equal(p.status, "awaiting_gate", `${what}: precondition — a parked run`);
+        assert.deepEqual(world.charges, [42], `${what}: precondition — with an undoable effect standing`);
+        assert.deepEqual(world.refunds, [], `${what}: and nothing has undone it`);
+      } finally {
+        first.close();
+      }
+
+      // ── a caller holding the runId and READ access, and nothing else ───────
+      const second = new SqliteStateStore({ path, now: () => NOW });
+      try {
+        // THE WHOLE ATTACK, and it reads one row. `graphHash` and `resolutionManifest` are copied
+        // off `run.compiled` onto a graph this run has never seen, with one edge kind bent.
+        const compiled = (await typesOf(second, runId)).find((ev) => ev.type === "run.compiled")!;
+        const identity = compiled.payload as unknown as { graphHash: string; resolutionManifest: unknown };
+        const built = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+        const forged = { ...built, graphHash: identity.graphHash, resolutionManifest: identity.resolutionManifest } as RunGraph;
+        assert.equal(forged.graphHash, good.graphHash, `${what}: the caller really is wearing the run's own identity`);
+
+        const engine = engineWith(second, world);
+        engine.attach(runId, forged);
+        await assert.rejects(
+          () => engine.advance(runId),
+          (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+          `${what}: the caller is refused`,
+        );
+
+        // AND THE RUN IS EXACTLY WHERE IT WAS — every fact the forged path used to change.
+        //
+        // THE MONEY FIRST, WHICH IS THE HALF A JOURNAL ASSERTION WOULD MISS AND THE HALF THAT
+        // CANNOT BE PUT BACK. `#failRun` compensates BEFORE it writes the terminal row, so on
+        // `2b1698e8` the forged advance dispatched `pay.refund` for real: re-run there with this
+        // order, `refunds` reads `[42]` and `charges` reads `[]` — one caller with journal read
+        // access moving somebody else's money on a graph they never saw.
+        assert.deepEqual(world.refunds, [], `${what}: NO compensation was dispatched`);
+        assert.deepEqual(world.charges, [42], `${what}: so the charge stands, untouched`);
+        assert.equal(
+          (await typesOf(second, runId)).filter((ev) => ev.type === "compensation.recorded").length,
+          0,
+          `${what}: and nothing even tried`,
+        );
+        assert.equal(
+          (await typesOf(second, runId)).filter((ev) => ev.type === "run.failed").length,
+          0,
+          `${what}: no terminal row`,
+        );
+        const after = await engine.projection(runId);
+        assert.equal(after?.status, "awaiting_gate", `${what}: still parked`);
+        // TWO GATES: the charge's, APPROVED on the way in, and the `hold` the run is parked on.
+        // The forged advance used to cancel the second — the question in somebody's queue.
+        assert.deepEqual(
+          Object.values(after!.gates).map((g) => g.state).sort(),
+          ["decided", "open"],
+          `${what}: the question in somebody's queue is still open, not cancelled`,
+        );
+      } finally {
+        second.close();
+      }
+
+      // ── and the operator holding the real graph still drives it home ───────
+      const third = new SqliteStateStore({ path, now: () => NOW });
+      try {
+        const engine = engineWith(third, world);
+        engine.attach(runId, good);
+        for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
+          await engine.resolveGate(runId, {
+            gateId: gate.gateId,
+            decision: { kind: "approve" },
+            actor: { kind: "human", subject: "u:alice", via: "console" },
+            idempotencyKey: `k2-${gate.gateId}`,
+          });
+        }
+        const p = await engine.advance(runId);
+        assert.equal(p.status, "succeeded", `${what}: the forged advance cost the run nothing`);
+        assert.deepEqual(p.channels["note"], ["done-ran"], `${what}: and the work behind the gate ran`);
+        assert.deepEqual(world.refunds, [], `${what}: with the charge never undone`);
+      } finally {
+        third.close();
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * TWO STATES A FOLD CALLS UNEXECUTED AND A JOURNAL DOES NOT. (§A.66, second cut.)
+ *
+ * The first cut of the conjunct above asked the PROJECTION — "no gate exists and every task is
+ * `pending` or `ready`". A reviewer drove two ordinary mechanisms that erase exactly that
+ * evidence, and the forged advance ended the run again in both. They are here because the bug was
+ * never in the idea; it was in reading a fold for a monotone question.
+ *
+ * (1) A RETRYABLE FAILURE RE-READIES THE TASK. `task.retry_scheduled` + `task.ready` fold the task
+ *     back to `ready` (`run/projection.ts`), so a run that had leased a task and run a body read
+ *     `tasks: [["blip","ready"]]  gates: []`. Measured on `29e6579a`, on the money version of this
+ *     shape: `run.failed rows: 1  compensation.recorded rows: 1  charges: []  refunds: [10]` — the
+ *     forged path took the money back. The window is up to `RETRY_AFTER_CEILING_MS` per deferral.
+ *
+ * (2) A REWIND SUPPRESSES THE RANGE. An ordinary operator rewinding their own parked run leaves a
+ *     journal that folds to `tasks: []  gates: []` — `.some()` over nothing is false — and the
+ *     same forged advance read `status: failed  run.failed rows: 1` on `29e6579a`.
+ *
+ * Both now read `run.failed rows: 0`, because the predicate reads `#store.read` — the unsuppressed
+ * log — and asks whether anything outside `submit`'s own four-name prefix was ever appended. That
+ * is monotone: a retry ADDS `task.retry_scheduled`, and a rewind hides what a run DID without
+ * unmaking the fact that a readable graph did it.
+ */
+test("A FOLD THAT FORGETS IS NOT A RUN THAT NEVER RAN — the retry window and the rewound run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-fold-"));
+  try {
+    for (const { what, mangle } of FAULTS) {
+      // ── (1) parked in its own retry backoff ────────────────────────────────
+      const retryPath = join(dir, `retry-${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      let retryRun: RunId;
+      const retryStore = new SqliteStateStore({ path: retryPath, now: () => NOW });
+      const retryGraph = compileOrThrow({ spec: retryingSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      try {
+        const engine = engineWith(retryStore);
+        retryRun = await engine.submit({ graph: retryGraph, inputs: { items: [{ id: "a" }] } });
+        const p = await engine.advance(retryRun);
+        assert.equal(p.status, "running", `${what}: precondition — the run is mid-flight`);
+        assert.deepEqual(
+          Object.values(p.tasks).map((t) => t.state),
+          ["ready"],
+          `${what}: precondition — and the FOLD calls its one task \`ready\`, which is what the first cut read`,
+        );
+        assert.deepEqual(Object.keys(p.gates), [], `${what}: with no gate to give it away either`);
+      } finally {
+        retryStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(retryPath, retryRun!, retryGraph, mangle, what, "running");
+
+      // ── (2) rewound by its own operator ───────────────────────────────────
+      const rewoundPath = join(dir, `rewound-${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      let rewoundRun: RunId;
+      const rewoundStore = new SqliteStateStore({ path: rewoundPath, now: () => NOW });
+      const rewoundGraph = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      try {
+        const engine = engineWith(rewoundStore);
+        rewoundRun = await engine.submit({ graph: rewoundGraph, inputs: { items: [{ id: "a" }] } });
+        assert.equal((await engine.advance(rewoundRun)).status, "awaiting_gate", `${what}: precondition — parked`);
+        await rewindWithPlan(engine, rewoundRun, 3 as Seq, "re-run it from the top", OPERATOR);
+        const p = (await engine.projection(rewoundRun))!;
+        assert.deepEqual(Object.keys(p.tasks), [], `${what}: precondition — the rewind suppressed every task record`);
+        assert.deepEqual(Object.keys(p.gates), [], `${what}: and the gate with them`);
+      } finally {
+        rewoundStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(rewoundPath, rewoundRun!, rewoundGraph, mangle, what, "running");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A PAUSE IS NOT A RUN THAT RAN, AND A REFUSAL IS NOT A RUN THAT DID NOT. (§A.66, third cut.)
+ *
+ * The second cut asked whether anything outside `submit`'s four names had ever been appended. That
+ * reads OPERATOR rows as execution, and `pause`/`resume` are exactly that: `#intervene` appends
+ * `operator.command` + `run.suspended`/`run.resumed` and runs no node code at all — `pause`'s own
+ * docstring says "NO GRAPH REQUIRED". So an operator who paused a run before its first advance
+ * bought it immunity from §A.63. Measured on `7e84e7c0`, `fanSpec` with the `conditionl` fault:
+ *
+ *     control (never advanced)   threw E_GRAPH_INVALID  status: failed       run.failed rows: 1
+ *     paused before first advance threw E_GRAPH_INVALID  status: interrupted  run.failed rows: 0
+ *     paused and resumed          threw E_GRAPH_INVALID  status: running      run.failed rows: 0
+ *
+ * WIDENING THE PREFIX WOULD HAVE BEEN THE TRAP, which is why the predicate was turned around
+ * instead: a REWOUND run's evidence is `operator.command` + `checkpoint.restored`, and the test
+ * above needs that to read as EXECUTED. The question is now asked as an allowlist — name a row
+ * only an executing run appends — and the answer is `task.leased`, with `gate.raised` carried
+ * beside it because a missing member costs a live run while a spare one costs only a refusal.
+ *
+ * THE FOURTH CASE IS THE CONTROL FOR THE OTHER DIRECTION: a run that EXECUTED and was then paused
+ * must still be refused, or the fix would have swapped one hole for another.
+ */
+test("A PAUSED RUN IS STILL FAILED IF ITS OWN GRAPH IS UNREADABLE, AND STILL SPARED IF IT RAN", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-pause-"));
+  try {
+    for (const { what, mangle, edge } of FAULTS) {
+      // ── (1) the three §A.63 shapes: nothing has ever executed, so all three FAIL ──────────
+      for (const how of ["control", "paused", "paused-and-resumed"] as const) {
+        const path = join(dir, `${how}-${what.slice(0, 10).replace(/\W+/g, "-")}.db`);
+        const store = new SqliteStateStore({ path, now: () => NOW });
+        try {
+          const engine = engineWith(store);
+          // `submit` records the hash of the graph it is handed, so this run really is bound to a
+          // graph nothing can read — §A.63's own shape, reached three ways.
+          const forged = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+          const runId = await engine.submit({ graph: forged, inputs: { items: [{ id: "a" }, { id: "b" }] } });
+          if (how !== "control") await engine.pause(runId);
+          if (how === "paused-and-resumed") await engine.resume(runId);
+
+          // THE PRECONDITION THAT MAKES THIS A TEST OF THE PREDICATE: the operator rows are on the
+          // log and NO lease is, which is exactly the state the second cut misread.
+          const before = (await typesOf(store, runId)).map((ev) => ev.type);
+          assert.equal(before.includes("task.leased"), false, `${what}/${how}: precondition — nothing has ever been leased`);
+          assert.equal(before.includes("operator.command"), how !== "control", `${what}/${how}: precondition — the operator rows are or are not there`);
+
+          await assert.rejects(
+            () => engine.advance(runId),
+            (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+            `${what}/${how}: the caller still hears the refusal`,
+          );
+          const failures = (await typesOf(store, runId)).filter((ev) => ev.type === "run.failed");
+          assert.equal(failures.length, 1, `${what}/${how}: and a run that can never progress is FAILED, pause or no pause`);
+          const err = (failures[0] as { payload: { error: { code: string; details?: unknown } } }).payload.error;
+          assert.equal(err.code, "E_GRAPH_INVALID", `${what}/${how}: carrying the code`);
+          assert.deepEqual(
+            (err.details as { edges?: { id: string }[] } | undefined)?.edges?.map((x) => x.id),
+            [edge],
+            `${what}/${how}: and the edge that stopped it`,
+          );
+        } finally {
+          store.close();
+        }
+      }
+
+      // ── (2) the other direction: a run that EXECUTED and was then paused is still spared ──
+      const ranPath = join(dir, `ran-then-paused-${what.slice(0, 10).replace(/\W+/g, "-")}.db`);
+      let ranRun: RunId;
+      const ranGraph = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      const ranStore = new SqliteStateStore({ path: ranPath, now: () => NOW });
+      try {
+        const engine = engineWith(ranStore);
+        ranRun = await engine.submit({ graph: ranGraph, inputs: { items: [{ id: "a" }] } });
+        assert.equal((await engine.advance(ranRun)).status, "awaiting_gate", `${what}: precondition — it ran and parked`);
+        await engine.pause(ranRun);
+        assert.equal(
+          (await typesOf(ranStore, ranRun)).some((ev) => ev.type === "task.leased"),
+          true,
+          `${what}: precondition — and the lease that proves it is on the log`,
+        );
+      } finally {
+        ranStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(ranPath, ranRun!, ranGraph, mangle, `${what} (ran, then paused)`, "interrupted");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * AND A PAUSE COSTS THE HONEST OPERATOR NOTHING. The row the review asked for by name.
+ *
+ * Every assertion above is about a run being FAILED or REFUSED, so on their own they would all
+ * still pass if `pause` had quietly broken `resume`. This is the ordinary half: pause a healthy
+ * run before its first advance, resume it, hand it its own graph, and it runs to the end.
+ */
+test("A RUN PAUSED BEFORE ITS FIRST ADVANCE STILL ADVANCES AFTER A RESUME", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-pause-ok-"));
+  const store = new SqliteStateStore({ path: join(dir, "run.db"), now: () => NOW });
+  try {
+    const engine = engineWith(store);
+    const good = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+    const runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
+
+    await engine.pause(runId);
+    assert.equal((await engine.projection(runId))?.status, "interrupted", "paused before it ever ran");
+    await engine.resume(runId);
+
+    const parked = await engine.advance(runId);
+    assert.equal(parked.status, "awaiting_gate", "and it advances to its gate as if nothing had happened");
+    for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
+      await engine.resolveGate(runId, {
+        gateId: gate.gateId,
+        decision: { kind: "approve" },
+        actor: { kind: "human", subject: "u:alice", via: "console" },
+        idempotencyKey: `k-${gate.gateId}`,
+      });
+    }
+    const done = await engine.advance(runId);
+    assert.equal(done.status, "succeeded", "and runs to the end");
+    assert.deepEqual(done.channels["note"], ["done-ran"], "with the work behind the gate done");
+  } finally {
+    store.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });
