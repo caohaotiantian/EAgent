@@ -1420,7 +1420,13 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
   // a DIFFERENT STRING — four `many ?` ternaries plus the multi-candidate `dictate` arm — and the
   // name-set and `match` assertions below never reach its tail, so appending " — and delete the
   // edges from \"read\" into them too", or dropping the destination in the plural arm alone, each
-  // left the whole file green at 426/426. Two arms means two byte pins; there is no third.
+  // left the whole file green at 426/426.
+  //
+  // THIS FIXTURE IS THE PLURAL *MIXED* ARM — §A.73 added the dimension, and this graph was already
+  // on the wrong side of it. `undo` is wired by a `compensation` edge; `spare` is wired by NOTHING,
+  // so the sentence's "whatever edge runs there now carries its own meaning" was false of half its
+  // own subject. The appendix names the half it is false of, and only that half. The three other
+  // arms are pinned in the three tests below; five in total, and there is no sixth.
   assert.equal(
     d.fix,
     'pick one of the joins "gather" or "sink" — not the node below, which is what it waits FOR — and ' +
@@ -1431,7 +1437,20 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
       'is the barrier for "read" and drop the `branches` ENTRY from the others — the entry alone, and ' +
       'NOT any edge: it is a `kind: join` edge from "read" INTO one of them that would have made this ' +
       "diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting it " +
-      "is a second change",
+      'is a second change. No edge runs from "read" into "spare" at all — that is what ' +
+      "`GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this same compile, and adding the edge it asks " +
+      "for cements `GRAPH008_JOIN_DEPTH` rather than clearing it",
+  );
+
+  // AND THE APPENDIX IS TRUE OF THIS GRAPH, checked rather than asserted: `spare` really has no
+  // inbound edge from `read`, `undo` really has one, and `GRAPH008_BRANCH_NOT_CONNECTED` really is
+  // in this compile naming `spare`. A clause naming the wrong half would pass the byte pin above
+  // only by being written wrong in both places, which these three lines make visible.
+  assert.ok(!s.edges.some((x) => x.from === n("read") && x.to === n("spare")), "`spare` is the unwired half");
+  assert.ok(s.edges.some((x) => x.from === n("read") && x.to === n("undo")), "`undo` is the wired half");
+  assert.ok(
+    first.some((x) => x.code === "GRAPH008_BRANCH_NOT_CONNECTED" && x.at?.nodeId === n("spare")),
+    `the sibling the appendix names is in this compile: ${first.map((x) => `${x.code}@${String(x.at?.nodeId)}`).join(", ")}`,
   );
 
   // BOTH claimants of `read` are named — the `compensation`-wired `undo` and the `seq`-wired
@@ -1460,6 +1479,241 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
   for (const j of claimedIn(d.fix ?? "")) {
     assert.ok(depth.message.includes(`"${j}"`), `the clause named "${j}" but the refusal does not: ${depth.message}`);
   }
+});
+
+/**
+ * The §A.69 clause with an UNWIRED claimer, three ways — §A.73.
+ *
+ * WHAT WAS WRONG. The tail said "whatever edge runs there now carries its own meaning and deleting
+ * it is a second change". The paragraph it rests on proves only that the edge is not a `kind: join`
+ * one; it does NOT prove that an edge is there. A claimer declared in `branches` with no inbound
+ * edge at all is `GRAPH008_BRANCH_NOT_CONNECTED`'s own case, and on that graph the two `fix:` lines
+ * in ONE compile said the opposite thing about the same absent edge — one "add an edge read -> again
+ * with kind: join", the other "drop the `branches` ENTRY … NOT any edge".
+ *
+ * WHICH ONE MOVED WAS DECIDED BY RUNNING BOTH, and the control below runs them again: following the
+ * sibling alone compiles CLEAN, following this clause leaves GRAPH021 still firing. So the sibling's
+ * line is the cheaper correct edit and this clause now names it as the other way out — in the
+ * SINGULAR arm only, because with two claimers `GRAPH008_JOIN_DEPTH` is already on screen and an
+ * added edge removes no `branches` entry.
+ *
+ * FIVE ARMS, FIVE BYTE PINS, and that count is the point rather than a formality: a message
+ * assembled from conditionals has one string per combination of conditions, a byte pin covers
+ * exactly one of them, and an unpinned arm is where this file has twice shipped a defect while
+ * staying green. Singular wired and plural mixed are pinned above; singular unwired, plural
+ * all-wired and plural all-unwired are the three here.
+ */
+
+/** Case (c)'s graph with the `loop` edge optional: the §A.73 fixture, both spellings. */
+function loopedClaimer(withBackEdge: boolean): GraphSpec {
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.inputs as string[]).push("failures");
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, reads: ["shard", "failures"], writes: ["raw", "failures"] } as NodeSpec;
+  (s.nodes as NodeSpec[]).push({
+    id: n("again"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  if (withBackEdge) {
+    (s.edges as EdgeSpec[]).push(
+      { id: e("back"), from: n("read"), to: n("again"), kind: "loop", until: "len(failures) > 0", maxIterations: 2 } as unknown as EdgeSpec,
+    );
+  }
+  (s.edges as EdgeSpec[]).push({ id: e("out"), from: n("again"), to: n("collate"), kind: "seq" } as EdgeSpec);
+  return s;
+}
+
+test("AN UNWIRED SINGLE CLAIMER: the clause names the sibling's edge as the OTHER way out", () => {
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //                   again(join, branches:["read"])  <-- NO edge from read into it
+  const s = loopedClaimer(false);
+  const first = errorsOf(s);
+  assert.deepEqual(
+    first.map((x) => `${x.code}@${String(x.at?.nodeId ?? x.at?.edgeId)}`).sort(),
+    ["GRAPH008_BRANCH_NOT_CONNECTED@again", "GRAPH021_FANOUT_WITHOUT_JOIN@fan"],
+    "the two sibling lines of §A.73 are in ONE compile, or this fixture is not the shape",
+  );
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")!;
+
+  // THE ARM, BYTE-FOR-BYTE. The two halves that must not drift are "there being NO edge … to
+  // delete" (the sentence that was false) and the naming of `GRAPH008_BRANCH_NOT_CONNECTED` (the
+  // sibling whose line this one used to contradict). A `match` on either decays with the prose.
+  assert.equal(
+    d.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+      "this fan-out's own target, so it is dictated whatever already folds it — but \"again\" already " +
+      "declares it among its `branches`, so with the barrier declaring it too `GRAPH008_JOIN_DEPTH` " +
+      'refuses "read" as held by more than one join. Decide which join is the barrier for "read": drop ' +
+      'the `branches` ENTRY from "again" — the entry alone, there being NO edge from "read" into it to ' +
+      'delete — or add the `kind: join` edge from "read" INTO "again" that ' +
+      "`GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile, which makes \"again\" wait on " +
+      '"read" and silences THIS diagnostic instead',
+  );
+
+  // AND BOTH WAYS OUT ARE RUN, which is the whole claim and the reason the sibling was left alone.
+  // Adding the edge it asks for compiles CLEAN in one compile; dropping the entry leaves GRAPH021
+  // still refusing, with the dictated half still owed. A clause that offered the worse of the two
+  // would pass the byte pin above and fail here.
+  const withEdge = clone(s) as unknown as GraphSpec;
+  (withEdge.edges as EdgeSpec[]).push({ id: e("bnc"), from: n("read"), to: n("again"), kind: "join" } as EdgeSpec);
+  assert.deepEqual(errorsOf(withEdge).map((x) => x.code), [], "the sibling's edge silences BOTH lines");
+
+  const dropped = clone(s) as unknown as GraphSpec;
+  const ag = dropped.nodes.findIndex((x) => x.id === n("again"));
+  (dropped.nodes as NodeSpec[])[ag] = {
+    ...dropped.nodes[ag]!, join: { ...(dropped.nodes[ag]! as NodeSpec).join!, branches: [] },
+  } as NodeSpec;
+  assert.deepEqual(
+    errorsOf(dropped).map((x) => x.code),
+    ["GRAPH021_FANOUT_WITHOUT_JOIN"],
+    "dropping the entry alone does not: the dictated half is still owed",
+  );
+});
+
+test("TWO CLAIMERS, BOTH WIRED: the tail §A.69 settled, unchanged, and no appendix", () => {
+  // The plural arm's all-wired spelling, which the mixed fixture above does not reach. `loop` and
+  // `compensation` are the ONLY kinds a claimer can be wired by while this diagnostic still fires —
+  // `idx.ancestors` walks every other kind, which would make `joined` true and the rule silent — so
+  // one of each is the whole of "both wired".
+  //
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //                       |--loop---------> again(join, branches:["read"])
+  //                       \--compensation-> undo(join, branches:["read"])
+  const s = loopedClaimer(true);
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  // A `compensation` edge must leave a tool node, so `read` becomes one; `unhandled` keeps
+  // GRAPH011's warning off, and the posture carries the capability the tool needs.
+  (s.nodes as NodeSpec[])[r] = {
+    ...s.nodes[r]!, type: "tool", tool: { name: "k8s.apply", args: {} }, unhandled: true, function: undefined,
+  } as unknown as NodeSpec;
+  (s.policy as Record<string, unknown>)["posture"] = "in";
+  (s.policy as Record<string, unknown>)["capabilities"] = ["k8s:write"];
+  (s.nodes as NodeSpec[]).push({
+    id: n("undo"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("comp"), from: n("read"), to: n("undo"), kind: "compensation", compensates: n("read") } as unknown as EdgeSpec,
+    { id: e("undoOut"), from: n("undo"), to: n("collate"), kind: "seq" } as EdgeSpec,
+  );
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")!;
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+  assert.ok(
+    !first.some((x) => x.code === "GRAPH008_BRANCH_NOT_CONNECTED"),
+    `both claimers are WIRED, so the sibling must be silent: ${first.map((x) => x.code).join(", ")}`,
+  );
+  assert.equal(
+    d.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+      "this fan-out's own target, so it is dictated whatever already folds it — but \"again\", \"undo\" " +
+      "already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses \"read\" as " +
+      'held by more than one join. Decide which join is the barrier for "read" and drop the `branches` ' +
+      "ENTRY from the others — the entry alone, and NOT any edge: it is a `kind: join` edge from " +
+      '"read" INTO one of them that would have made this diagnostic not fire, so whatever edge runs ' +
+      "there now carries its own meaning and deleting it is a second change",
+  );
+});
+
+test("TWO CLAIMERS, NEITHER WIRED: the tail drops and the appendix names both", () => {
+  // The plural arm's all-unwired spelling. The "carries its own meaning" half is about an edge, and
+  // here there is none to carry anything, so it is not emitted at all — a clause that kept it and
+  // merely appended would be half false on every graph of this shape.
+  //
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //     plan --seq--> again(join, branches:["read"])   <-- no edge from read
+  //     plan --seq--> undo (join, branches:["read"])   <-- no edge from read
+  const s = loopedClaimer(false);
+  (s.nodes as NodeSpec[]).push({
+    id: n("undo"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push({ id: e("undoOut"), from: n("undo"), to: n("collate"), kind: "seq" } as EdgeSpec);
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")!;
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+  assert.deepEqual(
+    first.filter((x) => x.code === "GRAPH008_BRANCH_NOT_CONNECTED").map((x) => String(x.at?.nodeId)).sort(),
+    ["again", "undo"],
+    "the appendix names both, and the sibling is refusing both in this same compile",
+  );
+  assert.equal(
+    d.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+      "this fan-out's own target, so it is dictated whatever already folds it — but \"again\", \"undo\" " +
+      "already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses \"read\" as " +
+      'held by more than one join. Decide which join is the barrier for "read" and drop the `branches` ' +
+      "ENTRY from the others — the entry alone, and NOT any edge: it is a `kind: join` edge from " +
+      '"read" INTO one of them that would have made this diagnostic not fire. No edge runs from "read" ' +
+      'into "again", "undo" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
+      "same compile, and adding the edge it asks for cements `GRAPH008_JOIN_DEPTH` rather than clearing it",
+  );
+
+  // AND THE APPENDIX'S CLAIM IS RUN: with two claimers, adding the sibling's edge does NOT clear the
+  // collision — `claimedBy` counts `branches` entries, and the edit removes none.
+  const withEdge = clone(s) as unknown as GraphSpec;
+  (withEdge.edges as EdgeSpec[]).push({ id: e("bnc"), from: n("read"), to: n("again"), kind: "join" } as EdgeSpec);
+  assert.deepEqual(
+    errorsOf(withEdge).map((x) => `${x.code}@${String(x.at?.nodeId)}`).sort(),
+    ["GRAPH008_BRANCH_NOT_CONNECTED@undo", "GRAPH008_JOIN_DEPTH@read"],
+    "the edge cements the refusal rather than clearing it, exactly as the appendix says",
+  );
+});
+
+test("THE SELF-CLAIMER TAKES NEITHER NEW SENTENCE — §A.73's NOTE, pinned rather than closed", () => {
+  // The shape §A.73 records as a NOTE and deliberately leaves: the fan-out's target is a join
+  // declaring ITSELF. Both sentences this change adds rest on premises it breaks, so both are
+  // withheld — and the reason is RUN below rather than argued.
+  //
+  //     plan --fan--> read(join, branches:["read"]) --seq--> classify --join--> gather(["classify"])
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = {
+    id: n("read"), type: "join", reads: ["shard"], writes: ["raw"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as unknown as NodeSpec;
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")!;
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+  assert.deepEqual(claimedIn(d.fix ?? ""), ["read"], `the self-claimer is still NAMED: ${d.fix}`);
+
+  // THE ARM, BYTE-FOR-BYTE. No offer, no appendix, and the "carries its own meaning" half is not
+  // emitted either — `wired` is empty, and asserting an edge's meaning over a graph with no edge is
+  // the falsehood this change removes. What is left is the counterfactual the NOTE is about, which
+  // this change does NOT repair and which stays wrong for this one shape.
+  assert.equal(
+    d.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+      "this fan-out's own target, so it is dictated whatever already folds it — but \"read\" already " +
+      "declares it among its `branches`, so with the barrier declaring it too `GRAPH008_JOIN_DEPTH` " +
+      'refuses "read" as held by more than one join. Decide which join is the barrier for "read" and ' +
+      "drop the `branches` ENTRY from the other — the entry alone, and NOT any edge: it is a " +
+      '`kind: join` edge from "read" INTO "read" that would have made this diagnostic not fire',
+  );
+
+  // AND THE MEASUREMENT THAT DECIDED IT. Typing the self-edge does NOT silence this diagnostic and
+  // produces no `GRAPH008_JOIN_DEPTH` — `topoSort` returns `[]` on a cycle, so `fanoutDepth`
+  // collapses and `claimedBy` counts nothing. Offering that edge, or promising that refusal, would
+  // have turned the NOTE's false description into a false instruction.
+  const withSelfEdge = clone(s) as unknown as GraphSpec;
+  (withSelfEdge.edges as EdgeSpec[]).push({ id: e("self"), from: n("read"), to: n("read"), kind: "join" } as EdgeSpec);
+  const after = errorsOf(withSelfEdge).map((x) => x.code).sort();
+  assert.ok(after.includes("GRAPH021_FANOUT_WITHOUT_JOIN"), `the self-edge silences nothing: ${after.join(", ")}`);
+  assert.ok(after.includes("GRAPH006_UNMARKED_CYCLE"), after.join(", "));
+  assert.ok(!after.includes("GRAPH008_JOIN_DEPTH"), `and no collision is refused: ${after.join(", ")}`);
 });
 
 test("THE SILENT `compensation` SHAPE: ONE diagnostic, and the clause is the only mention of it", () => {

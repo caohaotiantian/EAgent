@@ -2628,6 +2628,46 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       claimedBy.set(branch, owners);
     }
   }
+  // THE EDGE THIS LINE NAMES HAS TO BE THE EDGE THAT IS THERE — §A.73, and the second time in two
+  // waves that this file has paid for a `fix:` predicting a SIBLING `fix:` instead of the compiler
+  // (§A.65's lesson). `join.branches` is a NAME list and `GRAPH008_BRANCH_NOT_CONNECTED` accepts an
+  // inbound edge of ANY kind, so a claimer is wired one of three ways: by a `kind: join` edge, by an
+  // edge of some other kind carrying its own semantics, or by nothing at all. This line used to
+  // dictate deleting a `kind: join` edge in all three. Measured on the `eto` graph of
+  // `docs/handoff-2026-09-15b.md`: the only edge from "read" into "again" is `back`, a `loop` with
+  // its own `until` and `maxIterations`, and the line told the author to delete it. That is exactly
+  // the additive lesson GRAPH021 paid for at §A.69, one rule over and one release later.
+  //
+  // ONE CLAUSE PER DROPPER, AND THAT IS THE WHOLE REASON THE ARM COUNT IS THREE. Bucketing the
+  // droppers by shape and giving each bucket a sentence makes the STRING depend on which
+  // combination of shapes the graph holds — seven for three buckets — and a byte pin covers exactly
+  // one combination. Here no conditional reads more than one dropper, so composing them adds no
+  // arm, and `kinds` is rendered by a list join that reads the same for one kind or several, so
+  // there is no singular/plural arm either. The three are pinned byte-for-byte in
+  // `test/graph/join-depth.test.ts`; NOTHING pinned this line before this change — the only copy in
+  // the repository was a quotation in `docs/handoff-2026-09-15b.md`.
+  const dropClause = (branch: NodeId, o: NodeId): string => {
+    const kinds = [...new Set((idx.inbound.get(o) ?? []).filter((x) => x.from === branch).map((x) => x.kind))];
+    if (kinds.includes("join")) {
+      return `"${o}" must drop it from \`branches\` and drop the \`kind: join\` edge from "${branch}"`;
+    }
+    if (kinds.length === 0) {
+      // AND HERE THE TWO LINES WOULD OTHERWISE CONTRADICT EACH OTHER. `GRAPH008_BRANCH_NOT_CONNECTED`
+      // makes exactly this test, so it is refusing the same entry in the same compile — and its
+      // `fix:` says to ADD the edge. Following it removes no `branches` entry, and `claimedBy` above
+      // counts ENTRIES and not edges, so the second claim survives the edit and this refusal stays.
+      // Saying so is what keeps an author who follows either line out of a loop.
+      return (
+        `"${o}" must drop it from \`branches\` — the ENTRY alone, no edge running from "${branch}" into it at ` +
+        `all; \`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing that entry in this same compile, and adding the edge ` +
+        `it asks for cements this refusal rather than clearing it`
+      );
+    }
+    return (
+      `"${o}" must drop it from \`branches\` — the ENTRY alone, no \`kind: join\` edge running from "${branch}" ` +
+      `into it to drop; what runs there is ${kinds.map((k) => `\`kind: ${k}\``).join(", ")}, which carries its own meaning`
+    );
+  };
   for (const [branch, owners] of claimedBy) {
     if (owners.length < 2) continue;
     d.push({
@@ -2639,8 +2679,8 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
         `those same writes again`,
       at: { nodeId: branch },
       fix:
-        `keep one join over "${branch}": ${owners.slice(1).map((o) => `"${o}"`).join(", ")} must drop it from \`branches\` and drop the ` +
-        `\`kind: join\` edge from "${branch}", and take "${owners[0]!}"'s result as an arm instead if it still needs those writes`,
+        `keep one join over "${branch}": ${owners.slice(1).map((o) => dropClause(branch, o)).join(", and ")}, ` +
+        `and take "${owners[0]!}"'s result as an arm instead if it still needs those writes`,
     });
   }
 }
@@ -3001,8 +3041,74 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // always a candidate. A filter that can never fire is a filter that hides the day the proof
     // stops holding — if `named` ever COULD claim `e.to`, `joined` would be true and this whole
     // diagnostic would be silent, so the honest spelling is no filter at all.
+    // AND WHERE NO EDGE RUNS THERE AT ALL, THE TAIL WAS FALSE AND THE SIBLING LINE SAID THE
+    // OPPOSITE — §A.73. "whatever edge runs there now carries its own meaning" is a statement about
+    // an edge, and the paragraph above proves only that it is not a `kind: join` edge, NOT that one
+    // exists: a claimer may be wired by `loop` or `compensation` (the shapes §A.69 measured) or by
+    // NOTHING, and the third was asserted to be the first. Measured on the `eto` graph of
+    // `docs/handoff-2026-09-15b.md` with its `loop` edge deleted, on `2b1698e8`: one compile printed
+    // `GRAPH008_BRANCH_NOT_CONNECTED`'s "add an edge read -> again with kind: join" and this clause's
+    // "drop the `branches` ENTRY from the other", opposite edits over the same absent edge.
+    //
+    // WHICH OF THE TWO LINES IS WRONG WAS DECIDED BY RUNNING BOTH, not by reading them. Following
+    // the sibling ALONE — adding that one edge — compiles to `ok` in ONE compile; following this
+    // clause leaves GRAPH021 still firing with the dictated half still owed. So the sibling's line
+    // is not merely defensible there, it is the cheaper correct edit, and teaching it to hedge would
+    // have been the wrong repair. Its edge also never cements a claim that was not already refused
+    // in the same compile: `claimedBy` counts `branches` ENTRIES, so two claimers of `e.to` already
+    // print `GRAPH008_JOIN_DEPTH` BEFORE any edge is added, and with one claimer the edge makes
+    // `joined` true, silences this diagnostic, and leaves `claimedBy` counting one.
+    //
+    // SO THE SINGLE-CLAIMER ARM OFFERS THE SIBLING'S EDIT BY NAME, and the plural arm must not: with
+    // two claimers `GRAPH008_JOIN_DEPTH` is already on screen and adding an edge removes no entry,
+    // so there the edge cements the refusal instead of clearing it. `unwired` is
+    // `GRAPH008_BRANCH_NOT_CONNECTED`'s own test — the same `idx.inbound` scan, `from === e.to` —
+    // so the clause naming it cannot name a diagnostic that is not in this compile.
+    //
+    // AND THE SELF-CLAIMER IS EXCLUDED FROM BOTH NEW SENTENCES, because both rest on a premise it
+    // breaks. The offer rests on `joined` becoming true, which needs `e.to` in the CLAIMER's
+    // `idx.ancestors`; a self-edge cannot put it there. The appendix rests on `claimedBy` counting
+    // two after the edit; a self-edge makes `topoSort` return `[]`, `fanoutDepth` collapses to 0 and
+    // `claimedBy` skips every arm. MEASURED on the self-claim graph of §A.73's NOTE: adding the edge
+    // leaves `GRAPH021_FANOUT_WITHOUT_JOIN` on screen under a `GRAPH006_UNMARKED_CYCLE`, with no
+    // `GRAPH008_JOIN_DEPTH` at all — so an unguarded offer would have turned a false DESCRIPTION
+    // into a false INSTRUCTION, which is a worse thing than the NOTE §A.73 deliberately leaves.
+    // What the exclusion does to that NOTE: nothing it claims moves, and one clause that was false
+    // there stops being printed — `wired` is empty, so "whatever edge runs there now carries its own
+    // meaning" is not emitted over a graph where no edge runs there. The counterfactual the NOTE is
+    // actually about is untouched and still wrong for that shape.
+    //
+    // SIX NON-EMPTY ARMS, EACH PINNED BYTE-FOR-BYTE in `fanout-branch-diagnostic.test.ts`: singular
+    // wired and plural all-wired keep the bytes §A.69 settled; singular unwired, plural mixed and
+    // plural all-unwired are the three this change adds; and the self-claim arm is the sixth. A
+    // message assembled from conditionals has one string per combination of conditions and a byte
+    // pin covers exactly one of them, which is the finding this file drew twice in one wave.
     const alsoClaim = foldersOf(e.to);
     const many = alsoClaim.length > 1;
+    const hasEdgeFromTarget = (j: NodeId): boolean => (idx.inbound.get(j) ?? []).some((x) => x.from === e.to);
+    const wired = alsoClaim.filter(hasEdgeFromTarget);
+    const unwired = alsoClaim.filter((j) => j !== e.to && !hasEdgeFromTarget(j));
+    const decide =
+      !many && unwired.length === 1
+        ? `Decide which join is the barrier for "${e.to}": drop the \`branches\` ENTRY from "${alsoClaim[0]!}" — the ` +
+          `entry alone, there being NO edge from "${e.to}" into it to delete — or add the \`kind: join\` edge from ` +
+          `"${e.to}" INTO "${alsoClaim[0]!}" that \`GRAPH008_BRANCH_NOT_CONNECTED\` asks for in this same compile, ` +
+          `which makes "${alsoClaim[0]!}" wait on "${e.to}" and silences THIS diagnostic instead`
+        : `Decide which join is the barrier for "${e.to}" and drop the ` +
+          `\`branches\` ENTRY from the ${many ? "others" : "other"} — the entry alone, and NOT any edge: it is a ` +
+          // THE DESTINATION IS STATED. The proof is about an edge from `e.to` INTO THE CLAIMER;
+          // "an edge from `e.to`" alone is false the moment one runs from `e.to` to anything else,
+          // e.g. the `kind: join` edge into the barrier this very line dictates.
+          `\`kind: join\` edge from "${e.to}" INTO ${many ? "one of them" : `"${alsoClaim[0]!}"`} that would have ` +
+          `made this diagnostic not fire` +
+          (wired.length > 0
+            ? `, so whatever edge runs there now carries its own meaning and deleting it is a second change`
+            : "") +
+          (unwired.length > 0
+            ? `. No edge runs from "${e.to}" into ${unwired.map((j) => `"${j}"`).join(", ")} at all — that is what ` +
+              `\`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing in this same compile, and adding the edge it asks for ` +
+              `cements \`GRAPH008_JOIN_DEPTH\` rather than clearing it`
+            : "");
     const claimed =
       alsoClaim.length === 0
         ? ""
@@ -3013,14 +3119,7 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           // barrier, so promising it only "once the barrier declares it too" would describe the
           // output the author is already reading. One claimer is the genuinely future case.
           `${many ? "\`GRAPH008_JOIN_DEPTH\` ALREADY refuses" : "with the barrier declaring it too \`GRAPH008_JOIN_DEPTH\` refuses"} ` +
-          `"${e.to}" as held by more than one join. Decide which join is the barrier for "${e.to}" and drop the ` +
-          `\`branches\` ENTRY from the ${many ? "others" : "other"} — the entry alone, and NOT any edge: it is a ` +
-          // THE DESTINATION IS STATED. The proof is about an edge from `e.to` INTO THE CLAIMER;
-          // "an edge from `e.to`" alone is false the moment one runs from `e.to` to anything else,
-          // e.g. the `kind: join` edge into the barrier this very line dictates.
-          `\`kind: join\` edge from "${e.to}" INTO ${many ? "one of them" : `"${alsoClaim[0]!}"`} that would have ` +
-          `made this diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting ` +
-          `it is a second change`;
+          `"${e.to}" as held by more than one join. ${decide}`;
     const fix = dictate + claimed;
 
     d.push({

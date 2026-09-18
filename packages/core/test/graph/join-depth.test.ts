@@ -494,3 +494,121 @@ test("§A.64 AND AN ARM IN A DIFFERENT OUTER FAN IS REFUSED where the identity I
   );
   assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
 });
+
+// ── §A.73 · the `fix:` line names the edge that is THERE ─────────────────────
+//
+// The refusal above dictates dropping a `branches` entry AND a `kind: join` edge. `join.branches`
+// is a NAME list and `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind, so a
+// claimer is wired one of three ways — by a `kind: join` edge, by an edge of some other kind
+// carrying its own semantics, or by nothing at all — and the line used to dictate the same deletion
+// in all three. Measured on the `eto` graph of `docs/handoff-2026-09-15b.md`: the only edge from
+// "read" into "again" is `back`, a `loop`, and the line said to delete the `kind: join` edge.
+//
+// NOTHING PINNED THIS LINE BEFORE — the only copy in the repository was a quotation in that
+// handoff — so all three arms are new here, plus the composition. The arm count is three and not
+// seven because the clause is built PER DROPPER: no conditional reads more than one dropper, and
+// the kinds are rendered by a list join that reads the same for one kind or several.
+
+/** The `fix:` of the one refusal this section is about. */
+function claimFix(spec: GraphSpec): string {
+  const d = claimRefusal(spec);
+  assert.ok(d !== undefined, `no claim refusal: ${codes(spec).join(", ") || "(none)"}`);
+  return d.fix ?? "";
+}
+
+const loop = (id: string, from: string, to: string): unknown => ({
+  id: e(id), from: n(from), to: n(to), kind: "loop", maxIterations: 2,
+});
+
+test("§A.73 ARM 1 — a claimer wired `kind: join`: the deletion is dictated, as it always was", () => {
+  // The bytes §A.64 shipped, unchanged: this is the arm where "drop the `kind: join` edge" is true.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jB", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), joins("e2", "a0", "jB")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jB" must drop it from `branches` and drop the `kind: join` edge from ' +
+      '"a0", and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
+
+test("§A.73 ARM 2 — a claimer wired some OTHER kind: the entry alone, and the kind is read", () => {
+  // TWO FIXTURES FOR ONE ARM, because the kind is INTERPOLATED and a pin on one spelling cannot
+  // tell a read from a constant. `seq` and `loop` differ in the spec and must differ in the line.
+  const withSeq = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jSeq", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s", "a0", "jSeq")],
+  );
+  assert.equal(
+    claimFix(withSeq),
+    'keep one join over "a0": "jSeq" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: seq`, which carries its own ' +
+      'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // The `eto` shape of §A.73, in miniature: a `loop` edge carrying its own `maxIterations`, which
+  // the old line told the author to delete as though it were the barrier's own wiring.
+  const withLoop = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jLoop", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), loop("lp", "a0", "jLoop")],
+  );
+  assert.equal(
+    claimFix(withLoop),
+    'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: loop`, which carries its own ' +
+      'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
+
+test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, and contradicted no more", () => {
+  // `GRAPH008_BRANCH_NOT_CONNECTED` makes exactly this test, so it is refusing the same entry in
+  // this same compile — and its `fix:` says to ADD the edge. Following it removes no `branches`
+  // entry, and `claimedBy` counts entries, so this refusal survives the edit. The line says so
+  // rather than leaving two instructions on screen that point opposite ways.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone")],
+  );
+  assert.ok(
+    codes(spec).includes("GRAPH008_BRANCH_NOT_CONNECTED"),
+    `the sibling the line names must be in this compile: ${codes(spec).join(", ")}`,
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jNone" must drop it from `branches` — the ENTRY alone, no edge running ' +
+      'from "a0" into it at all; `GRAPH008_BRANCH_NOT_CONNECTED` is refusing that entry in this same ' +
+      "compile, and adding the edge it asks for cements this refusal rather than clearing it, and take " +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // AND THE CLAIM IS RUN. Typing what the sibling asks for clears the sibling and leaves this
+  // refusal exactly where it was — which is what "cements" means, checked rather than asserted.
+  const withEdge = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone"),
+      joins("e3", "a0", "jNone")],
+  );
+  assert.ok(!codes(withEdge).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(withEdge).join(", "));
+  assert.ok(claimRefusal(withEdge) !== undefined, `the second claim survives the edit: ${codes(withEdge).join(", ")}`);
+});
+
+test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not seven", () => {
+  // Three claimants of one arm, one of each shape. Bucketing them by shape would make the STRING
+  // depend on which combination the graph holds — seven strings for three buckets, of which a byte
+  // pin covers one. Per dropper, the line is the three arms above in series.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jLoop", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), loop("lp", "a0", "jLoop"),
+      seq("s2", "p", "jNone")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: loop`, which carries its own ' +
+      'meaning, and "jNone" must drop it from `branches` — the ENTRY alone, no edge running from "a0" ' +
+      'into it at all; `GRAPH008_BRANCH_NOT_CONNECTED` is refusing that entry in this same compile, ' +
+      "and adding the edge it asks for cements this refusal rather than clearing it, and take " +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
