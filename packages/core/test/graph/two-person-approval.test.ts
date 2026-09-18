@@ -24,7 +24,7 @@
  * "carol's gate closes" would be hiding the one thing a reader needs to know before copying the
  * file.
  *
- * ## §A.68 — AND A REJECTION THAT ARRIVES FIRST VETOES IT
+ * ## §A.68 — AND A REJECTION ARRIVING BEFORE THE SECOND APPROVAL VETOES IT
  *
  * The measurement above says what two approvals do. It said nothing about a REJECTION, and the
  * file's description said "two of three must approve" while `onBranchError: "fail"` made one
@@ -42,8 +42,9 @@
  * The barrier short-circuits on two approvals, `save` runs, and the gate the short-circuit left
  * open — the residue named above — is STILL ANSWERABLE. So the third vote fails a run whose
  * effect already happened. Two approvals are the point of no return; "any one of them can veto
- * it" would have been the second false description in this file, and the shipped `description`
- * says "a rejection that arrives FIRST" for that reason.
+ * it" would have been the second false description in this file, and so — more quietly — would
+ * "a rejection that arrives FIRST", since a rejection arriving SECOND also vetoes with nothing
+ * written (asserted below, over all six orderings). The shipped `description` gives the boundary.
  *
  * §A.68 offered two closures and said the decision is which behaviour the example is FOR. The
  * measurement took it: `onBranchError: "skip"` was REFUSED, on the same graph with only that
@@ -308,6 +309,11 @@ test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the
   assert.match(description, /VETO/i, `the description must state that one rejection fails the run: ${description}`);
   assert.match(description, /onBranchError/, "and name the field that does it");
   assert.match(description, /one rejection fails the whole run/i, description);
+  // NOT "arrives first" — a rejection arriving SECOND vetoes too, with nothing written, and the
+  // rule a copier needs is the boundary, not the position. Understating it in the description and
+  // stating it correctly only in a label further down would be this file's defect a second time.
+  assert.match(description, /before the second approval/i, `the description must give the boundary, not "first": ${description}`);
+  assert.match(description, /already landed/i, "and say what a rejection after it is worth");
   assert.ok(
     Object.values(labels).some((v) => /skip/.test(v) && /ONE approval/.test(v)),
     `a residue label must carry why "skip" was refused, so the arm cannot be taken later without re-running it: ${JSON.stringify(labels)}`,

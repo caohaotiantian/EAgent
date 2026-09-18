@@ -5,7 +5,7 @@
     "name": "two-person-approval",
     "project": "examples",
     "version": 1,
-    "description": "Two of three named people must approve before the write lands, and A REJECTION THAT ARRIVES FIRST VETOES IT: `onBranchError: \"fail\"` is read before `k` ever matters, so one rejection fails the whole run whatever the other two would have said. Copy this file for two-of-three-with-a-veto; it is NOT k-of-n tolerance of a dissenter. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted.",
+    "description": "Two of three named people must approve before the write lands, and A REJECTION ARRIVING BEFORE THE SECOND APPROVAL VETOES IT: `onBranchError: \"fail\"` is read before `k` ever matters, so one rejection fails the whole run whatever the other two would have said. Arriving after the second approval it still fails the run, but the write has already landed — see `labels.residue-late-veto`. Copy this file for two-of-three-with-a-veto; it is NOT k-of-n tolerance of a dissenter. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted.",
     "labels": {
       "reads-as": "quorum lives in `join`, not in `approval`",
       "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap",
