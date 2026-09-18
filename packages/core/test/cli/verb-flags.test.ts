@@ -177,14 +177,24 @@ test("GLOBAL_FLAGS ARE THE ONES READ BEFORE THE SWITCH DISPATCHES", () => {
   const closure = flagClosure();
   const fns = topLevelFunctions();
   const preSwitch = fns.get("main")!.split("switch (args.command)")[0]!;
-  // THE CLOSURE OF THE PRE-SWITCH BLOCK, not only its direct reads. `--mcp-file` and
-  // `--extension-module` are read through `mcpFile` and `extensionModulePaths` since TODO.md
-  // §H.12 gave every door-decided flag a `(args: Args)` reader of its own, and a scan that only
-  // saw `args.flags[…]` written literally in `main` would call two globals unread the day they
-  // were given a name — which is the test measuring the spelling instead of the fact.
+  // THE CLOSURE OF THE PRE-SWITCH BLOCK, not only its direct reads. `--extension-module` is read
+  // through `extensionModulePaths` since TODO.md §H.12 gave every door-decided flag a
+  // `(args: Args)` reader of its own, and a scan that only saw `args.flags[…]` written literally
+  // in `main` would call it unread the day it was given a name — the test measuring the spelling
+  // instead of the fact. It is ONE flag and not two: `--mcp-file` still appears literally in the
+  // pre-switch block, beside the `mcpFile(args)` that reads it.
+  //
+  // `c !== "main"` IS THE WHOLE OF THIS LOOP'S CORRECTNESS, and without it this test asserted
+  // nothing at all. `topLevelFunctions` includes the DECLARATION line in each body, so `preSwitch`
+  // contains the token `main(`; `fns.has("main")` is therefore true, and the union pulled in
+  // `closure.get("main")` — the flag closure of the entire CLI, every `case` block included. That
+  // made `reachedByMain` all 43 known flags, and `--why`, which only `loom deescalate` reads,
+  // could be added to `GLOBAL_FLAGS` with this test still green. Measured both ways below. The
+  // old single-line version had the same guard for the same reason, spelled `c !== n` inside
+  // `flagClosure`; it was lost when the loop was written out here.
   const reachedByMain = new Set([...closure.get("openWorkspace")!, ...flagsIn(preSwitch)]);
   for (const c of new Set([...preSwitch.matchAll(/\b([A-Za-z0-9_]+)\(/g)].map((m) => m[1]!))) {
-    if (fns.has(c)) for (const f of closure.get(c)!) reachedByMain.add(f);
+    if (fns.has(c) && c !== "main") for (const f of closure.get(c)!) reachedByMain.add(f);
   }
   for (const f of listNamed("GLOBAL_FLAGS")) {
     assert.ok(reachedByMain.has(f), `--${f} is called global and nothing before the switch reads it`);
