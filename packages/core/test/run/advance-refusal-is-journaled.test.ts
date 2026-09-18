@@ -36,14 +36,16 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES, err } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import type { ToolManifestLite } from "../../src/graph/validate.ts";
-import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
+import type { EdgeId, NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { OPERATOR, rewindWithPlan } from "./operator.ts";
 import { resolver, SKELETON_TENANT_CAPS } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -128,6 +130,10 @@ function engineWith(store: SqliteStateStore, world: World = { charges: [], refun
   functions.register("function/seed@stable", () => ({}));
   functions.register("function/work@stable", (view) => ({ writes: { seen: [view.get<{ id: string }>("item")?.id ?? "?"] } }));
   functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
+  // RETRYABLE, so the task is re-READIED rather than failed — the §A.66 shape below.
+  functions.register("function/blip@stable", () => {
+    throw err.unavailable(CODES.E_PROVIDER_TRANSPORT, "transient upstream reset");
+  });
   const models = new ModelRegistry();
   models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
   const tools = new ToolRegistry();
@@ -167,6 +173,26 @@ function engineWith(store: SqliteStateStore, world: World = { charges: [], refun
     resolver: resolver(),
     policy: { granted: [...SKELETON_TENANT_CAPS, "pay"], budget: { runUsd: 5 } },
   });
+}
+
+/** `blip --seq--> done`, where `blip` throws retryably: a run parked in its own backoff. */
+function retryingSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "advance-refusal-retry", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { ...CHANNELS, note: { type: "array", reduce: "append_ordered" } },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      // A BACKOFF LONGER THAN THE TEST, so `advance` returns with the task in `ready` and stays
+      // there. `sleep` is not stubbed here, so this must not be a number the run can outlast.
+      { id: n("blip"), type: "function", reads: ["items"], function: { ref: "function/blip@stable" }, retry: { maxAttempts: 3, backoff: "fixed", initialMs: 600_000 } },
+      { id: n("done"), type: "function", reads: ["items"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [{ id: e("b0"), from: n("blip"), to: n("done"), kind: "seq" }],
+  } as unknown as GraphSpec;
 }
 
 /** `charge (a tool) --seq--> hold (a human_gate) --seq--> done`: parked, with money standing. */
@@ -400,6 +426,50 @@ test("A FOREIGN UNREADABLE GRAPH REFUSES WITHOUT KILLING THE RUN — the ordinar
 });
 
 /**
+ * THE ATTACK, IN ONE PLACE: read `run.compiled`, wear its identity, bend one edge, advance.
+ *
+ * `graphHash` AND `resolutionManifest` are plain payload fields of a row any reader can see, and
+ * `RunGraph` is an exported interface whose fields a caller sets — so `#graphIdentityMismatch`
+ * answers `undefined` for a graph the run has never seen. Asserts that the forgery really is
+ * wearing the run's own identity, so a test cannot pass because the forgery failed to build.
+ */
+async function forgedAdvanceLeavesItAlone(
+  path: string,
+  runId: RunId,
+  real: RunGraph,
+  mangle: (g: RunGraph) => RunGraph,
+  what: string,
+  expected: string,
+): Promise<void> {
+  // A SECOND PROCESS, exactly as the attack is: nothing survives but the file. The caller never
+  // holds the run's `RunContext`, its graph or its registries.
+  const store = new SqliteStateStore({ path, now: () => NOW });
+  try {
+    const compiled = (await typesOf(store, runId)).find((ev) => ev.type === "run.compiled")!;
+    const identity = compiled.payload as unknown as { graphHash: string; resolutionManifest: unknown };
+    const built = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+    const forged = { ...built, graphHash: identity.graphHash, resolutionManifest: identity.resolutionManifest } as RunGraph;
+    assert.equal(forged.graphHash, real.graphHash, `${what}: the caller really is wearing the run's own identity`);
+
+    const engine = engineWith(store);
+    engine.attach(runId, forged);
+    await assert.rejects(
+      () => engine.advance(runId),
+      (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+      `${what}: the caller is refused`,
+    );
+    assert.equal(
+      (await typesOf(store, runId)).filter((ev) => ev.type === "run.failed").length,
+      0,
+      `${what}: and the run is not failed`,
+    );
+    assert.equal((await engine.projection(runId))?.status, expected, `${what}: it is exactly where it was`);
+  } finally {
+    store.close();
+  }
+}
+
+/**
  * A SYNTHESISED IDENTITY IS NOT "THIS RUN'S OWN GRAPH". (§A.66.)
  *
  * The test above hands the door a foreign graph and the identity check refuses to fail the run.
@@ -544,6 +614,77 @@ test("A SYNTHESISED IDENTITY REFUSES THE ADVANCE AND LEAVES THE RUN WHERE IT WAS
       } finally {
         third.close();
       }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * TWO STATES A FOLD CALLS UNEXECUTED AND A JOURNAL DOES NOT. (§A.66, second cut.)
+ *
+ * The first cut of the conjunct above asked the PROJECTION — "no gate exists and every task is
+ * `pending` or `ready`". A reviewer drove two ordinary mechanisms that erase exactly that
+ * evidence, and the forged advance ended the run again in both. They are here because the bug was
+ * never in the idea; it was in reading a fold for a monotone question.
+ *
+ * (1) A RETRYABLE FAILURE RE-READIES THE TASK. `task.retry_scheduled` + `task.ready` fold the task
+ *     back to `ready` (`run/projection.ts`), so a run that had leased a task and run a body read
+ *     `tasks: [["blip","ready"]]  gates: []`. Measured on `29e6579a`, on the money version of this
+ *     shape: `run.failed rows: 1  compensation.recorded rows: 1  charges: []  refunds: [10]` — the
+ *     forged path took the money back. The window is up to `RETRY_AFTER_CEILING_MS` per deferral.
+ *
+ * (2) A REWIND SUPPRESSES THE RANGE. An ordinary operator rewinding their own parked run leaves a
+ *     journal that folds to `tasks: []  gates: []` — `.some()` over nothing is false — and the
+ *     same forged advance read `status: failed  run.failed rows: 1` on `29e6579a`.
+ *
+ * Both now read `run.failed rows: 0`, because the predicate reads `#store.read` — the unsuppressed
+ * log — and asks whether anything outside `submit`'s own four-name prefix was ever appended. That
+ * is monotone: a retry ADDS `task.retry_scheduled`, and a rewind hides what a run DID without
+ * unmaking the fact that a readable graph did it.
+ */
+test("A FOLD THAT FORGETS IS NOT A RUN THAT NEVER RAN — the retry window and the rewound run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-fold-"));
+  try {
+    for (const { what, mangle } of FAULTS) {
+      // ── (1) parked in its own retry backoff ────────────────────────────────
+      const retryPath = join(dir, `retry-${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      let retryRun: RunId;
+      const retryStore = new SqliteStateStore({ path: retryPath, now: () => NOW });
+      const retryGraph = compileOrThrow({ spec: retryingSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      try {
+        const engine = engineWith(retryStore);
+        retryRun = await engine.submit({ graph: retryGraph, inputs: { items: [{ id: "a" }] } });
+        const p = await engine.advance(retryRun);
+        assert.equal(p.status, "running", `${what}: precondition — the run is mid-flight`);
+        assert.deepEqual(
+          Object.values(p.tasks).map((t) => t.state),
+          ["ready"],
+          `${what}: precondition — and the FOLD calls its one task \`ready\`, which is what the first cut read`,
+        );
+        assert.deepEqual(Object.keys(p.gates), [], `${what}: with no gate to give it away either`);
+      } finally {
+        retryStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(retryPath, retryRun!, retryGraph, mangle, what, "running");
+
+      // ── (2) rewound by its own operator ───────────────────────────────────
+      const rewoundPath = join(dir, `rewound-${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      let rewoundRun: RunId;
+      const rewoundStore = new SqliteStateStore({ path: rewoundPath, now: () => NOW });
+      const rewoundGraph = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      try {
+        const engine = engineWith(rewoundStore);
+        rewoundRun = await engine.submit({ graph: rewoundGraph, inputs: { items: [{ id: "a" }] } });
+        assert.equal((await engine.advance(rewoundRun)).status, "awaiting_gate", `${what}: precondition — parked`);
+        await rewindWithPlan(engine, rewoundRun, 3 as Seq, "re-run it from the top", OPERATOR);
+        const p = (await engine.projection(rewoundRun))!;
+        assert.deepEqual(Object.keys(p.tasks), [], `${what}: precondition — the rewind suppressed every task record`);
+        assert.deepEqual(Object.keys(p.gates), [], `${what}: and the gate with them`);
+      } finally {
+        rewoundStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(rewoundPath, rewoundRun!, rewoundGraph, mangle, what, "running");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

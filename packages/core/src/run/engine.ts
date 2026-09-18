@@ -5990,31 +5990,64 @@ export class Engine {
     // could not read the graph.
     //
     // THE FACT THAT SEPARATES THE TWO IS PROGRESS, NOT PROVENANCE. `#assertBound` runs FIRST on
-    // `advance` and on both gate doors, so a run bound to a graph this build cannot read is
-    // refused at its very first advance and can never lease a task or open a gate: `submit`
-    // appends `run.submitted, run.compiled, run.started, task.ready` and drives nothing, which is
-    // §A.63's own pasted journal. **Every genuine §A.63 run is therefore in the never-executed
-    // bucket, and a run that HAS executed proves a readable graph carried it** — so an unreadable
-    // graph presented to it now is a fact about THIS PROCESS or THIS CALLER and never about the
-    // run. That is verbatim the rule §A.37 settled for `compensation.recorded.retryable`: set
-    // when the blocker is a fact about this process or this trigger, absent when it is a fact
-    // about the journal. Failing the run would be a permanent answer to a temporary fact.
+    // `advance` and on both gate doors, so a run bound to a graph the build that SUBMITTED it
+    // cannot read is refused at its very first advance and never gets to append anything:
+    // `submit` appends `run.submitted`, `run.compiled`, `run.started` and one `task.ready` per
+    // entry node (this file, the `submit` append) and drives nothing, which is §A.63's own pasted
+    // journal. So **a journal that is exactly that prefix is a run nothing has ever executed**,
+    // and anything else in it is proof that a readable graph carried this run — which makes an
+    // unreadable graph presented to it now a fact about THIS PROCESS or THIS CALLER and never
+    // about the run. That is verbatim the rule §A.37 settled for
+    // `compensation.recorded.retryable`: set when the blocker is a fact about this process or
+    // this trigger, absent when it is a fact about the journal.
+    //
+    // THE RAW LOG, NOT THE PROJECTION, AND THAT IS THE WHOLE OF THE SECOND CUT. The first cut
+    // asked the FOLD — "no gate exists and every task is `pending` or `ready`" — and a reviewer
+    // drove two ordinary mechanisms that erase exactly that evidence, both measured on a real
+    // Engine over SQLite:
+    //
+    //  - A RETRYABLE FAILURE RE-READIES THE TASK. `task.retry_scheduled` + `task.ready` fold the
+    //    task back to `ready`, so a run that leased a task, called a model and CHARGED money read
+    //    `tasks: [["pay","ready"]]  gates: []` — and the forged advance failed it, compensated,
+    //    and moved the money back: `run.failed rows: 1  compensation.recorded rows: 1
+    //    charges: []  refunds: [10]`. The window is up to `RETRY_AFTER_CEILING_MS` per deferral.
+    //  - AN ORDINARY OPERATOR `rewind` SUPPRESSES THE RANGE. The parked `human_gate` run of the
+    //    row's own repro, rewound by its operator, folds to `tasks: []  gates: []` — `.some()`
+    //    over nothing is false — and the same forged advance failed it again.
+    //
+    // A fold is not monotone; a journal is. `#store.read` is the unsuppressed read (it is what
+    // `#compiledIdentity` uses), so a suppressed `task.leased` still counts as proof, which is
+    // the correct reading: a rewind hides what a run DID, it does not unmake the fact that a
+    // readable graph did it.
+    //
+    // THE SET IS NAMED AS THE SUBMIT PREFIX RATHER THAN AS EXECUTION VOCABULARY, so a new event
+    // type cannot quietly join the never-executed bucket: an unrecognised row reads as PROGRESS,
+    // which is the conservative answer. And the scan is cheaper than the fold it replaced — it
+    // stops at the first row outside the prefix, which for any run that has executed is row five.
     //
     // AND IT FAILS CLOSED IN THE DIRECTION `CLAUDE.md` NAMES. Failing the run is the destructive
     // answer and refusing the advance is the conservative one, so a conjunct that can only ever
-    // move a case from the first to the second cannot loosen anything. The honest operator whose
-    // binary dropped an edge kind under a live run is moved with it, and correctly: their run is
-    // left exactly as it was and the previous binary still advances it.
+    // move a case from the first to the second cannot loosen anything.
     //
-    // NOTHING IS JOURNALED ON THIS BRANCH, AND THAT IS NOT §A.63 COMING BACK. §A.63's run was
-    // left `running`, could NEVER progress, and held no word about why — a decision taken that
-    // the fold could not reconstruct. Here NO decision is taken about the run at all: it was
-    // parked (or running) before the call and is in that same state after it, the right graph
-    // still advances it, and the only thing that happened happened to the CALL, which the caller
-    // is told about by the throw that follows. There is also nobody to attribute a row to —
+    // NOTHING IS JOURNALED ON THIS BRANCH, AND ONE CASE OF THAT IS A NAMED RESIDUE. For the
+    // caller who brought a forged graph, no decision is taken about the run at all: it was parked
+    // (or running) before the call and is in that same state after it, the right graph still
+    // advances it, and the only thing that happened happened to the CALL, which the caller is
+    // told about by the throw that follows. There is also nobody to attribute a row to —
     // `advance` takes no actor — so an `operator.command` row here would assert a fact the engine
-    // cannot know.
-    const executed = Object.keys(p.gates).length > 0 || Object.values(p.tasks).some((t) => t.state !== "pending" && t.state !== "ready");
+    // cannot know. **The case this does narrow is the CROSS-BUILD one**: an operator whose new
+    // binary dropped an edge kind under a run that has already executed now gets a refusal and a
+    // run left `running` with nothing on the log saying why, which is §A.63's sentence. It is
+    // taken deliberately and it is not the same bargain: that run is recoverable by rolling the
+    // binary back, where §A.63's could never progress under any build, and killing a live run
+    // over a fact about the binary in front of it is the loosening dressed as a guard.
+    const SUBMIT_PREFIX = new Set(["run.submitted", "run.compiled", "run.started", "task.ready"]);
+    let executed = false;
+    for await (const ev of this.#store.read(ctx.runId, 1)) {
+      if (SUBMIT_PREFIX.has(ev.type)) continue;
+      executed = true;
+      break;
+    }
     if (executed) return;
     // `errorRecord` AND NOT A HAND-BUILT LITERAL, so the row carries the refusal's own
     // `details` — the edge ids and the unreadable values — and a fold can say WHICH edge
