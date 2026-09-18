@@ -31,8 +31,15 @@
  * AND THE COST THE ROW PRICED IS REAL: a wrapped line cannot be `grep`ed for as one string. That
  * is why the wrap is conditioned on the STREAM rather than turned on. On a TTY a human is reading
  * and there is no `grep`; in a pipe the bytes are what they were before. Both halves are pinned
- * below, and the pipe half is the one that keeps every other test in this tree honest — all of
- * them spawn the CLI with piped stderr.
+ * below.
+ *
+ * AND A TEST IS NOT AUTOMATICALLY A PIPE. Half this tree's CLI tests call `main` in process with
+ * `process.stderr.write` monkeypatched, inheriting the TEST process's stdio — under `node --test`
+ * a pipe, because the runner spawns each file as a child, but not for a developer running one
+ * file with stderr on their terminal. Forcing `stderr.isTTY` true in every child found 1 such
+ * assertion in 3941 (`examples-triage.test.ts`, `/unquoted: 24, not "24"/`, split by the wrap),
+ * and it now collapses whitespace first. The two `compileCapturing` tests below set `isTTY`
+ * themselves for exactly this reason: neither may depend on where it is run.
  *
  * `COLUMNS` is not read, deliberately, and there is no test for it here because there is nothing
  * to test: the width comes from the stream. A test asserting the env var is ignored would pin an

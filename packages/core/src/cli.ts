@@ -4972,8 +4972,17 @@ export function wrapDiagnostic(text: string, width: number, indent: number): str
  * BUT IT COSTS SOMETHING IN A PIPE, and that cost is why §H.14 was a row rather than an obvious
  * fix: a wrapped line cannot be `grep`ed for as one string. So the wrap is conditioned on the
  * STREAM. On a TTY a human is reading and there is no `grep`; in a pipe the bytes are exactly what
- * they were before this function existed. Every test in this tree spawns the CLI with piped
- * stderr, so none of them sees a wrap.
+ * they were before this function existed.
+ *
+ * AND A TEST IS NOT AUTOMATICALLY A PIPE, which is the trap this docstring first fell into. Half
+ * this tree's CLI tests call `main` IN PROCESS with `process.stderr.write` monkeypatched, so they
+ * inherit the TEST process's stdio rather than a pipe of their own. Under `node --test` that is
+ * still a pipe, because the runner spawns each file as a child — but a developer running one file
+ * directly, with stderr on their terminal, is not. Measured by forcing `stderr.isTTY` true in
+ * every test child: 1 of 3941 tests was reading a line break as if it were wording
+ * (`examples-triage.test.ts`, `/unquoted: 24, not "24"/`), and it now collapses whitespace first.
+ * THE LENS: a stream-conditioned behaviour makes every in-process assertion on that stream a
+ * determinism question.
  *
  * `COLUMNS` IS DELIBERATELY NOT READ. Honouring it would make the bytes a diagnostic writes depend
  * on the invoking shell even in a pipe — the grep cost above, reintroduced through a side door,
