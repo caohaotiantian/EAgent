@@ -481,8 +481,8 @@ test("THE CLASS THIS FILE ASSERTS ON IS THE CLASS `cli.ts` DECLARES — two copi
   const declared = /const SPOOFING_CLASS = ("[^"]+");/.exec(src);
   assert.ok(declared !== null, "cli.ts must still declare SPOOFING_CLASS as a single string literal");
   // `JSON.parse` on the whole literal, not the capture: the file holds SOURCE text (`\\u0000`) and
-  // this file's constant holds the RUNTIME value (` `). Comparing the two directly compares
-  // different levels of escaping and fails on a pair that agrees.
+  // this file's constant holds the RUNTIME value (a backslash then u0000). Comparing the two
+  // directly compares different levels of escaping and fails on a pair that agrees.
   assert.equal(
     JSON.parse(declared[1]!) as string,
     SPOOFING_CLASS,
