@@ -5389,6 +5389,49 @@ export class Engine {
         { details: { runId, atSeq, pending: unrunnable.length } },
       );
     }
+
+    // AND A SECOND ARM, BESIDE THAT ONE AND NOT MERGED WITH IT (§A.37).
+    //
+    // `#rewindRefusals` already refuses the hard-to-undo effect whose undo arguments were never
+    // recorded AND whose rollback is settled — the seq `planCompensation` drops. This is the
+    // other half of the same sentence: the step that is still IN the plan, carrying no
+    // `argsDigest`, which `RewindPlan.dispatch` has already counted as `blocked` and promised
+    // not to dispatch. The rewind crossed it anyway, which made the preview an operator
+    // authorized and the act they authorized two different things. Measured: `steps: 1`,
+    // `dispatch: 0`, `blocked: 1` — and the rewind ACCEPTED, the charge hidden, the money gone.
+    //
+    // IT IS THE ARGUMENTS FACT, NOT "NOT IN THE `dispatch` SET". That filter has three terms and
+    // the middle one, `undispatchable === undefined`, is about THIS PROCESS:
+    // `#planRollbackChildSteps` plans a child's steps with no `ctx` whenever the child's graph
+    // cannot be rebuilt — which happens while the parent is ATTACHED AND LIVE — and
+    // `#planRollback` marks them "attach it and rewind, or the effect stands" while KEEPING
+    // their `undo`. Refusing on the whole `dispatch` set would wall off exactly the case
+    // `compensation.recorded.retryable` exists for, and that case must re-plan.
+    //
+    // AND IT FIRES REGARDLESS OF `live`, which is the one thing that must NOT be shared with the
+    // arm above. That one carries `&& live === undefined` because an undispatchable step under a
+    // live parent is one a later attach can still run. Arguments that were never recorded are
+    // never recorded, so there is no such escape here. Two guards, two rules; collapsing them
+    // would either re-introduce the first defect or switch the other arm's guard off.
+    //
+    // SCOPED TO `isHardToUndo`, like every other arm of this feature. A `reversible_write` whose
+    // `effect.completed` carried no `details` is still crossed and still journaled
+    // `not_attempted` — that is the three-states rule, and `undo-args-must-be-recorded.test.ts`
+    // is the test that holds it.
+    const noArguments = current.steps.filter(
+      (s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.undo !== undefined && s.argsDigest === undefined,
+    );
+    if (noArguments.length > 0) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and declare a ` +
+          `compensation this engine cannot build the arguments for ` +
+          `(${[...new Set(noArguments.map((s) => `${s.tool}@${String(s.seq)} -> ${String(s.undo)}`))].join(", ")}) — ` +
+          "their `effect.completed` carries no `details`, which is the only place an undo's arguments come from, so no rewind " +
+          "can undo them. Rewinding would hide the record and leave the effects standing",
+        { details: { runId, atSeq, pending: noArguments.length } },
+      );
+    }
     // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES, once there is a context: a step nothing can
     // undo still has to be JOURNALED as `not_attempted`, or the three states collapse back to two
     // on this path while holding on the other. A rewind that crosses a `reversible_write` whose

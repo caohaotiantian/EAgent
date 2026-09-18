@@ -32,7 +32,7 @@ import type { RunId, Seq } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
-import { rewindWithPlan } from "./operator.ts";
+import { OPERATOR, rewindWithPlan } from "./operator.ts";
 
 /** Irreversible and UNCOMPENSATED — the two facts the refusal keys on. */
 const CHARGE: ToolManifestLite = { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: false };
@@ -244,4 +244,117 @@ test("A REWIND IS A HUMAN'S YES TO THIS UNDO — THE CHILD'S ROLLBACK RUNS AND T
   // above is refused for the reason it names and not because this tool cannot run.
   const approved = await runThenRewind("tool", "pay.refund");
   assert.deepEqual(approved.refunds, [21], "the identical tool DOES dispatch once a human approved it at the node");
+});
+
+test("A LIVE PARENT WHOSE CHILD'S GRAPH CANNOT BE REBUILT IS STILL REWOUND, AND THE STEP IS RE-PLANNED", async () => {
+  // THE FIXTURE §A.37's CHANGE 3 IS SHAPED BY, and nothing in the suite drove it before.
+  //
+  // `#planRollbackChildSteps` plans a child's steps with NO `ctx` whenever the child's graph
+  // cannot be rebuilt, and `#planRollback` then marks them `undispatchable: "…attach it and
+  // rewind, or the effect stands"` while KEEPING their `undo`. That happens WHILE THE PARENT IS
+  // ATTACHED AND LIVE, so such a step is hard-to-undo and outside `RewindPlan.dispatch`'s set —
+  // and a refusal keyed on "not in the dispatch set" would wall off exactly the case
+  // `compensation.recorded.retryable` exists for. §A.37's change 3 is keyed on the ARGUMENTS
+  // instead (`argsDigest === undefined`), which this child HAS, so nothing fires.
+  //
+  // THE TWO ARMS IT DISCRIMINATES BETWEEN, both in `#rewindSerially`:
+  //   · the `unrunnable` arm — `undispatchable && live === undefined`. Does not fire: `live` is
+  //     defined, because an undispatchable step under a live parent is one a later attach can run.
+  //   · the `noArguments` arm — fires regardless of `live`, and must not fire here.
+  //
+  // HOW THE CHILD IS MADE UNREBUILDABLE, and it is a deployment rather than a stub: the second
+  // engine holds NO `pay` grant, so `#compileChild` — which compiles the frozen child spec with
+  // `tenantCapabilities: this.#policyOpts.granted` — raises GRAPH017 on the child's own
+  // `capabilities: ["pay"]` and `#childContextFor` fails closed to `undefined`. The PARENT's
+  // graph is handed back through `attach` already compiled, so the parent stays live.
+  const charges: number[] = [];
+  const refunds: number[] = [];
+  const now = (): number => 1_700_000_000_000;
+  const store = new MemoryStateStore({ now });
+  const child = childSpec("pay.refundable");
+  const resolver = resolverWith(child);
+  const functions = new FunctionRegistry();
+  functions.register("function/double@stable", (view) => ({ writes: { doubled: (view.get<number>("amount") ?? 0) * 2 } }));
+
+  const toolsFor = (): ToolRegistry => {
+    const tools = new ToolRegistry();
+    tools.register({
+      ...REFUNDABLE,
+      description: "Take money.",
+      parameters: { type: "object", properties: { amount: { type: "number" } } },
+      execute: (args) => {
+        charges.push(Number(args["amount"]));
+        return { content: "charged", details: { amount: Number(args["amount"]) }, writes: { receipt: { ok: true } } };
+      },
+    } as ToolDefinition);
+    tools.register({
+      ...REFUND,
+      description: "Give it back.",
+      parameters: { type: "object", properties: { amount: { type: "number" } } },
+      execute: (args) => {
+        refunds.push(Number(args["amount"]));
+        return { content: "refunded" };
+      },
+    } as ToolDefinition);
+    return tools;
+  };
+
+  const engineWith = (granted: readonly string[]): Engine =>
+    new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: toolsFor(),
+      functions,
+      models: new ModelRegistry(),
+      now,
+      sleep: async () => {},
+      resolver,
+      policy: { granted: [...granted], systemFloor: "out", budget: { runUsd: 10 } },
+    });
+
+  const graph = compileOrThrow({ spec: parentSpec("subgraph", "pay.refundable"), resolver, tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  const first = engineWith(["pay"]);
+  const runId = await first.submit({ graph, inputs: { total: 21 } });
+  let p = await first.advance(runId);
+  for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    p = await first.resolveGate(runId, { gateId: open.gateId, decision: { kind: "approve" }, actor: OPERATOR, idempotencyKey: `k${String(i)}` });
+  }
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.deepEqual(charges, [42], "precondition: the child really charged");
+
+  // A SECOND ENGINE, with the parent ATTACHED and no `pay` grant to rebuild the child with.
+  const second = engineWith([]);
+  second.attach(runId, graph);
+
+  const plan = await second.planRewind(runId, 1 as Seq, OPERATOR);
+  const childStep = plan.steps.find((s) => s.runId !== String(runId));
+  assert.notEqual(childStep, undefined, "the child's step is in the plan the operator is shown");
+  assert.equal(childStep!.undo, "pay.refund", "with its undo KEPT — which is what puts it outside `dispatch` for a reason about the PROCESS");
+  assert.notEqual(childStep!.undispatchable, undefined, "and marked undispatchable, because the child's graph cannot be rebuilt here");
+  assert.notEqual(childStep!.argsDigest, undefined, "and its ARGUMENTS are recorded, which is the fact change 3 is keyed on");
+  assert.equal(plan.dispatch, 0, "so the preview promises no undo at all");
+
+  // ACCEPTED. A refusal here would be the wall `retryable` exists to prevent.
+  await second.rewind(runId, 1 as Seq, "operator asked to undo", OPERATOR, { planHash: plan.planHash });
+
+  // AND THE STEP IS RE-PLANNED RATHER THAN SETTLED — journaled in the CHILD's own log, with
+  // `retryable`, so the operator who follows the reason's advice gets a plan and not silence.
+  const childRunIds: RunId[] = [];
+  for await (const ev of store.read(runId, 1 as Seq)) {
+    if (ev.type === "subgraph.started") childRunIds.push(ev.payload.childRunId);
+  }
+  assert.equal(childRunIds.length, 1);
+  const rows: { outcome: string; retryable?: boolean; reason?: string; undo?: string }[] = [];
+  for await (const ev of store.read(childRunIds[0]!, 1 as Seq)) {
+    if (ev.type === "compensation.recorded") rows.push(ev.payload as never);
+  }
+  assert.equal(rows.length, 1, "the child's journal says what happened to its own effect");
+  assert.equal(rows[0]!.outcome, "not_attempted");
+  assert.equal(rows[0]!.undo, "pay.refund", "and names the undo it did not dispatch");
+  assert.equal(rows[0]!.retryable, true, "and does NOT settle the seq — attaching the child and rewinding is a move the operator has");
+  assert.match(rows[0]!.reason ?? "", /cannot be rebuilt|attach it and rewind/, "and the reason tells them so");
+  assert.deepEqual(refunds, [], "nothing was undone here — that is the point of the row above");
+  assert.deepEqual(charges, [42], "and the charge stands");
 });

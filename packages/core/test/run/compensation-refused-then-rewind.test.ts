@@ -1,46 +1,60 @@
 /**
- * THE ROLLBACK PLAN AND THE REWIND REFUSAL READ TWO DIFFERENT FACTS, AND THE OPERATOR PAYS.
+ * THE ROLLBACK PLAN AND THE REWIND REFUSAL READ TWO DIFFERENT FACTS, AND THE OPERATOR PAID.
  *
- * `TODO.md` §A.37. `Engine.#uncompensatedIrreversible` — the refusal that keeps a rewind from
- * hiding an effect nothing undid — asks **"does the TOOL declare a compensation?"**.
- * `planCompensation` and `RewindPlan.dispatch` ask **"is there a step that will actually dispatch
- * one?"**. Those are different questions, and every test in this file is a run where they give
- * different answers: the plan says nothing will be undone, the refusal says nothing is wrong, and
- * the rewind is ACCEPTED over an `irreversible` effect that is still in the world.
+ * `TODO.md` §A.37, DIAGNOSED here and CLOSED in `run/engine.ts`.
+ * `Engine.#uncompensatedIrreversible` — the refusal that keeps a rewind from hiding an effect
+ * nothing undid — asked **"does the TOOL declare a compensation?"**. `planCompensation` and
+ * `RewindPlan.dispatch` ask **"is there a step that will actually dispatch one?"**. Those are
+ * different questions, and every test in this file is a run where they gave different answers:
+ * the plan said nothing would be undone, the refusal said nothing was wrong, and the rewind was
+ * ACCEPTED over an `irreversible` effect that was still in the world.
  *
- * ── FOUR SHAPES, ONE CAUSE ───────────────────────────────────────────────────
+ * ── FOUR SHAPES, ONE CAUSE, AND TWO OPPOSITE ANSWERS ─────────────────────────
+ * The cause is one sentence: `run/compensation.ts:170` promises `retryable` "is written at the
+ * append rather than inferred here", and NO arm of `#compensateOne` wrote it. So
+ * `planCompensation`, a correct READER, settled every seq whose blocker was a fact about THIS
+ * PROCESS or THIS TRIGGER. The four shapes split two and two on what that costs, and **a fix
+ * that refuses all four is as wrong as the one that crossed all four**:
+ *
  * (1) SETTLED, ARGUMENTS ABSENT — §A.37 as written. `#compensateOne` refuses an undo whose
  *     arguments are not in the journal (the compensated call's `effect.completed` carries no
- *     `details`), journals `not_attempted` with no `retryable`, and `planCompensation` settles
- *     the seq. Plan: ZERO steps. That settling is CORRECT — a recorded result never grows a
- *     `details` on a later pass — and the rewind crossing it is not.
+ *     `details`) and journals `not_attempted`. That settling is CORRECT — a recorded result never
+ *     grows a `details` on a later pass — and the rewind crossing it was not.
+ *     **NOW REFUSED, by `planRewind` as well as `rewind`.**
  * (2) UNSETTLED, ARGUMENTS ABSENT — nothing has settled, so the step IS in the plan, carrying no
  *     `argsDigest`. `dispatch` reads 0 and `blocked` reads 1: **the plan already knows it cannot
- *     dispatch**, which is the seam §A.37 names. The rewind crosses it anyway.
+ *     dispatch**, which is the seam §A.37 names. The rewind crossed it anyway.
+ *     **NOW REFUSED, by `rewind` only — the arm is in `#rewindSerially`.**
  * (3) SETTLED BY A POLICY REFUSAL — the undo is itself hard-to-undo, so on the `run_failed` leg
- *     `#invokeTool` is called with `nodeApproved: false` (engine.ts:2559 passes
- *     `trigger === "rewind"`) and answers `gate`, which that path turns into a REFUSAL. It is
- *     journaled `failed`, with no `retryable`, and settles. **A rewind is exactly the trigger
+ *     `#invokeTool` is called with `nodeApproved: false` (`#compensateOne` passes
+ *     `trigger === "rewind"`) and answers `gate`, which that path turns into a REFUSAL. It was
+ *     journaled `failed` with no `retryable`, and settled. **A rewind is exactly the trigger
  *     that COULD have approved it** — shape (3)'s own control below proves the same tools undo
- *     cleanly under `rewind` — so settling it makes the recovery impossible.
+ *     cleanly under `rewind` — so settling it made the recovery impossible.
+ *     **NOW `not_attempted, retryable: true`, ACCEPTED, and the undo RUNS.**
  * (4) SETTLED BY A REGISTRY THAT CHANGED — the undo was not registered in the process that ran
- *     the rollback. `not_attempted`, no `retryable`, settled. Register it and rewind from the
- *     next process: still a zero-step plan.
+ *     the rollback. `not_attempted`, no `retryable`, settled. Registering it and rewinding from
+ *     the next process still gave a zero-step plan.
+ *     **NOW `retryable: true`, ACCEPTED, and the undo RUNS.**
  *
- * (3) and (4) are why this file is not only about §A.37's sentence. In (1) the effect stands for
- * a reason that is true on every future pass; in (2), (3) and (4) it stands for a reason about
- * THIS PROCESS or THIS TRIGGER, and those must come back and be UNDONE rather than be walled off.
- * A fix that refuses all four is as wrong as the one that crosses all four, in the other
- * direction — see the plan's FIX DESIGN.
+ * In (1) the effect stands for a reason that is true on every future pass; in (2), (3) and (4) it
+ * stood for a reason about THIS PROCESS or THIS TRIGGER. **The refusals are keyed on the
+ * ARGUMENTS and nothing else**, because those are the one input an operator cannot change — a
+ * wall derived from which blocker happened to be recorded would be permanent by construction,
+ * while the `no_compensation` wall in "THE DOOR THAT ALREADY HOLDS" reads the LIVE registry and
+ * clears by deploying.
  *
- * ── WHAT `TODAY:` MEANS ──────────────────────────────────────────────────────
- * Every assertion whose message starts `TODAY:` asserts the DEFECT and MUST INVERT when
- * `run/engine.ts` is fixed; the comment above each says what it becomes. This is the §A.55 / §D.9
- * convention (`join-all-branches-fail.test.ts`): the diagnosis lane leaves a green suite whose
- * green is the bug, so the fixing lane has a failing test to flip rather than a test to write.
- * An assertion WITHOUT that prefix holds before and after — including, deliberately, the
- * `world.charges` / `world.refunds` lines in the first two tests, where a refusal and a crossing
- * leave the world in the same state and only the journal differs.
+ * **"ACCEPTED" IS NOT THE BAR FOR (3) AND (4).** Both assert `world.refunds` and `world.charges`,
+ * because a rewind that is permitted and undoes nothing is the defect wearing the other mask.
+ *
+ * ── THE `TODAY:` MARKERS ARE GONE, AND THAT IS THE RECORD ────────────────────
+ * This file landed as a diagnosis: every assertion whose message started `TODAY:` asserted the
+ * DEFECT and was written to INVERT when `run/engine.ts` was fixed (the §A.55 / §D.9 convention,
+ * `join-all-branches-fail.test.ts`). All of them have inverted. The assertions that carried NO
+ * marker held before and after, deliberately — the `world.charges` / `world.refunds` lines in the
+ * first two tests, where a refusal and a crossing leave the world in the same state and only the
+ * journal differs, and shape (3)'s `/requires human approval this turn cannot request/`, which
+ * pinned that the split arm carries the refusal's own text UNWRAPPED.
  *
  * ── WHY SQLITE AND TWO ENGINES ───────────────────────────────────────────────
  * The facts a fix has to read are journal facts, so every rewind here is issued by a SECOND
@@ -55,11 +69,12 @@
  * `#rewindRefusals` reaches `planRewind` too, and one in `#rewindSerially` does not. A test that
  * could not tell them apart would pass for a fix that put an arm in the wrong verb.
  *
- * TODAY NOTHING REFUSES IN SHAPES 1 AND 2, so which verb SHOULD refuse is stated in the comment
- * above each `TODAY:` line and asserted nowhere — `assert.equal(out.refusedBy, undefined)` is the
- * only thing there is to assert while the defect stands. The one live assertion on the field is
- * in "THE DOOR THAT ALREADY HOLDS", which pins `"planRewind"` on the refusal that exists today;
- * it is there so the field is known to WORK before the fixer relies on it.
+ * AND THE TWO ARMS DID LAND IN DIFFERENT VERBS, which is why the field is asserted and not
+ * merely reported. Shape (1) reads `"planRewind"`: `#uncompensatedIrreversible` sits inside
+ * `#rewindRefusals`, which both verbs run, and a refusal only `rewind` raised would hand the
+ * operator a plan they can never use. Shape (2) reads `"rewind"`: its arm is in
+ * `#rewindSerially`, which `planRewind` does not call, matching the `unrunnable` arm beside it —
+ * that asymmetry predates §A.37 and is left as it was rather than widened silently.
  */
 
 import assert from "node:assert/strict";
@@ -321,7 +336,7 @@ async function rewindFromACoolEngine(
   }
 }
 
-test("SHAPE 1 — a settled `not_attempted` makes the operator's rewind a no-op that hides the effect", async () => {
+test("SHAPE 1 — a settled `not_attempted` whose arguments were never recorded REFUSES the rewind, in `planRewind` too", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-a37-settled-"));
   try {
     const path = join(dir, "run.db");
@@ -384,7 +399,7 @@ test("SHAPE 1 — a settled `not_attempted` makes the operator's rewind a no-op 
   }
 });
 
-test("SHAPE 2 — the plan already knows it cannot dispatch, and the rewind crosses anyway", async () => {
+test("SHAPE 2 — the plan already knows it cannot dispatch, and `rewind` no longer crosses it", async () => {
   // THE SEAM §A.37 NAMES. Nothing is settled here, so the step IS in the plan — with no
   // `argsDigest`, because there is no `details` to digest. `RewindPlan.dispatch` counts
   // `argsDigest !== undefined` and reports 0. The refusal beside it reads a different fact.
@@ -408,33 +423,40 @@ test("SHAPE 2 — the plan already knows it cannot dispatch, and the rewind cros
     assert.equal(out.dispatch, 0, "so the preview promises no undo at all");
     assert.equal(out.blocked, 1, "and counts it blocked");
 
-    // TODAY: and the rewind proceeds over it. AFTER THE FIX `refusedBy` must be `"rewind"` —
-    // `planRewind` shows the plan, `rewind` refuses to act on one whose hard-to-undo step it
-    // already knows it will not dispatch.
-    assert.equal(out.refusedBy, undefined, "TODAY: `rewind` crosses a hard-to-undo step its own plan will not dispatch");
+    // AND `rewind` REFUSES TO ACT ON IT — `planRewind` shows the plan, `rewind` declines to
+    // proceed over a hard-to-undo step its own plan already said it will not dispatch. The
+    // asymmetry with shape 1 is deliberate and matches the existing `unrunnable` arm: this one
+    // lives in `#rewindSerially`, which `planRewind` does not call.
+    assert.equal(out.refusedBy, "rewind", "`rewind` no longer crosses a hard-to-undo step its own plan will not dispatch");
+    assert.match(out.refusal!.message, /pay\.charge@\d+ -> pay\.refund/, "and the refusal names the effect and the undo it cannot build");
+    assert.match(out.refusal!.message, /carries no `details`/, "and says the arguments are the thing that is missing");
 
     // NOT `TODAY` — a refusal leaves the world exactly here too.
     assert.deepEqual(world.charges, [42], "the money is still gone — before the fix and after it");
     assert.deepEqual(world.refunds, [], "and nothing was undone");
 
-    // TODAY: the record of the charge is hidden. AFTER THE FIX: `false`.
+    // NOTHING IS HIDDEN. The record of the charge was inside the suppressed range before this.
     const call = ran.events.find((e) => e.type === "tool.called" && (e.payload as { name?: string }).name === "pay.charge")!;
-    assert.equal(hidden(out.events, call.seq), true, "TODAY: and the record of the charge is hidden");
+    assert.equal(hidden(out.events, call.seq), false, "and the record of the charge is still visible");
 
-    // TODAY: the one thing that is NOT silent — the crossing is journaled `not_attempted`, which
-    // is the three-states rule holding on this path. AFTER THE FIX the rewind never runs, so NO
-    // row is appended at all and this reads 0. Guarded rather than indexed, because
-    // `after[0]!.reason` would throw a TypeError the moment it inverts, and a test that dies with
-    // a TypeError does not tell the fixer what changed.
+    // AND NO ROW IS APPENDED AT ALL. The rewind used to cross and journal the crossing
+    // `not_attempted` — the three-states rule holding on a path that should not have been taken;
+    // now the dispatch never runs, so there is nothing to record. Guarded rather than indexed,
+    // because `after[0]!.reason` would throw a TypeError the moment this moves, and a test that
+    // dies with a TypeError does not say what changed.
     const after = records(out.events);
-    assert.equal(after.length, 1, "TODAY: the crossing is at least recorded");
-    assert.match(after[0]?.reason ?? "", /carries no `details`/, "TODAY: and the row says the arguments were missing");
+    assert.equal(after.length, 0, "nothing was attempted, so nothing is recorded");
+    assert.equal(
+      out.events.some((e) => e.type === "checkpoint.restored"),
+      false,
+      "and no restore marker was appended either",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("SHAPE 3 — a policy-refused undo settles, and the rewind that COULD have approved it is a no-op", async () => {
+test("SHAPE 3 — a policy-refused undo is `retryable`, and the rewind that CAN approve it performs it", async () => {
   // THE TRIGGER IS THE WHOLE FACT. `#compensateOne` dispatches through `#invokeTool` with
   // `nodeApproved: trigger === "rewind"` (engine.ts:2559): a `run_failed` rollback may not approve
   // itself, so an undo that is ITSELF hard-to-undo is answered `gate` and refused — journaled
@@ -510,7 +532,7 @@ test("SHAPE 3's CONTROL — the same two tools undo cleanly when the trigger is 
   }
 });
 
-test("SHAPE 4 — a registry that changed settles the seq, and registering the undo does not bring it back", async () => {
+test("SHAPE 4 — a registry that changed is `retryable`, and registering the undo brings it back", async () => {
   // THE OTHER PROCESS-DEPENDENT BLOCKER. `#compensateOne`'s own comment says the registry is
   // mutable and re-checks it at dispatch ("the registry is mutable and the plan was built before
   // the first step ran", engine.ts:2504-2508) — but the row it writes carries no `retryable`, so
