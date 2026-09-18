@@ -27,6 +27,8 @@ import { fileURLToPath } from "node:url";
 
 import { main } from "../src/cli.ts";
 import { isLoomError, toLoomError } from "../src/errors.ts";
+import { compile } from "../src/graph/compile.ts";
+import type { GraphSpec } from "../src/graph/spec.ts";
 
 const EXAMPLES = fileURLToPath(new URL("../../../examples/", import.meta.url));
 const GRAPH = "graphs/triage-failures.json";
@@ -513,16 +515,31 @@ test("a fan-out width that is not a NUMBER is refused BY THE COMPILER, before an
 
     const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
     assert.notEqual(r.code, 0, `a non-numeric width must refuse:\n${r.out}${r.err}`);
-    // WHITESPACE-COLLAPSED, and §H.14 is why. `loom` here runs IN PROCESS with stderr captured,
-    // so whether the diagnostic printer wraps depends on whether the TEST process's stderr is a
-    // terminal — under `node --test` it is a pipe, but a developer running this file with stderr
-    // attached saw `(unquoted:\n        24, not "24")` and a red test. An assertion about what a
-    // message SAYS must not also be an assertion about where its line breaks fall.
-    const said = `${r.out}${r.err}`.replace(/\s+/g, " ");
-    assert.match(said, /GRAPH007_BAD_MAX_WIDTH/, r.out + r.err);
-    assert.match(said, /not a positive integer/, r.out + r.err);
-    // And the message tells the author the one thing they need: the quotes.
-    assert.match(said, /unquoted: 24, not "24"/, r.out + r.err);
+    // THE CODE OFF STDERR, THE WORDING OFF THE COMPILER, and §H.14 is why they are split.
+    // `loom` here runs IN PROCESS with stderr captured, so whether the diagnostic printer wraps
+    // depends on whether the TEST process's stderr is a terminal — under `node --test` a pipe,
+    // but not for a developer running this file with stderr attached, who saw
+    // `(unquoted:\n        24, not "24")` and a red test. A code is one token and no wrap can
+    // split it, so it stays here, where it proves the REFUSAL reached the operator. The two
+    // prose assertions move to `compile()`'s own `d.message`, which is where
+    // `graph/fanout-branch-diagnostic.test.ts` already asserts diagnostic wording and where no
+    // renderer stands between the claim and the string.
+    assert.match(`${r.out}${r.err}`, /GRAPH007_BAD_MAX_WIDTH/, r.out + r.err);
+
+    const d = compile({
+      spec: JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as GraphSpec,
+      resolver: { resolve: (ref) => ({ ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" }) },
+      tools: {},
+      tenantCapabilities: [],
+    }).diagnostics.find((x) => x.code === "GRAPH007_BAD_MAX_WIDTH");
+    assert.ok(d !== undefined, "the compiler must be the one refusing this, not a body");
+    assert.match(d.message, /not a positive integer/, d.message);
+    // And the author is told the one thing they need — the quotes — in the `fix:`, not the
+    // message. Splitting the assertion is what showed that: matching the concatenated stdout and
+    // stderr could not tell the two fields apart, so this line silently asserted about whichever
+    // one happened to carry it.
+    assert.ok(d.fix !== undefined, "GRAPH007_BAD_MAX_WIDTH must still dictate an edit");
+    assert.match(d.fix, /unquoted: 24, not "24"/, d.fix);
   } finally {
     ws.dispose();
   }
