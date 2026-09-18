@@ -48,9 +48,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { main, wrapDiagnostic } from "../../src/cli.ts";
 import { compile } from "../../src/graph/compile.ts";
@@ -230,14 +232,53 @@ function workspace(): { dir: string; dispose: () => void } {
 }
 
 /**
+ * Run `loom compile` in a REAL CHILD PROCESS, so its stderr is a real pipe.
+ *
+ * THIS EXISTS BECAUSE THE IN-PROCESS PIPE ARM COULD NOT FAIL, and that hole shipped. The in-process
+ * helper set `isTTY` to the literal `false`; a real pipe has `isTTY === undefined`, with no own
+ * property at all, and `columns === undefined`. Two mutations proved the gap — deleting the stream
+ * condition outright, and `if (process.stderr.isTTY === undefined) return 80` (wrap in exactly the
+ * real-pipe case) — and the whole suite stayed GREEN under both. So `loom compile 2>&1 | grep`
+ * returning nothing could have shipped under a green gate, and "a pipe sees byte-identical output"
+ * — the entire justification for §H.14's TTY-only choice — rested on nothing.
+ *
+ * Spawned via `execFile` on the source entry point, the shape `product-lane-doors.test.ts` uses:
+ * it is also the door an operator goes through, and the exit code comes from the process.
+ */
+async function compileSpawned(dir: string): Promise<{ code: number; out: string; err: string }> {
+  const cli = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
+  return await new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      [cli, "compile", join(dir, "graphs", "eto.json"), "--workspace", dir],
+      { cwd: dirname(cli), timeout: 60_000 },
+      (err, stdout, stderr) => {
+        resolve({ code: err === null ? 0 : ((err as NodeJS.ErrnoException & { code?: number }).code ?? 1), out: stdout, err: stderr });
+      },
+    );
+  });
+}
+
+/**
  * Run `loom compile` in process with stderr captured, pretending to be a terminal or not.
  *
- * In process rather than spawned, because a spawned child's stderr IS a pipe and there is no
- * portable way to hand it a pty — the TTY arm would be untestable and therefore untested.
- * `isTTY` and `columns` are defined and deleted around the call so nothing leaks into the
- * sibling tests in this file.
+ * In process for the TTY arm, because a spawned child's stderr IS a pipe and there is no portable
+ * way to hand it a pty — that arm would otherwise be untestable and therefore untested. The pipe
+ * arm here is a SECOND witness only; `compileSpawned` above is the one that can fail.
+ *
+ * Three modes, and the distinctions are the ones that were being missed:
+ *   - `"pipe"` DELETES `isTTY` and gives `columns` a NUMBER. A real pipe has no own `isTTY` at
+ *     all, so the old `isTTY = false` tested a state that never occurs and left
+ *     `isTTY === undefined` unexamined; and with `columns` also undefined, the `columns` guard
+ *     rather than the `isTTY` guard could have been what carried the arm. A number there leaves
+ *     `isTTY` as the only thing that can decide it.
+ *   - a NUMBER is a terminal of that width.
+ *   - `"tty-without-columns"` is `isTTY` true with no `columns` — the conservative no-wrap case.
+ *
+ * `isTTY` and `columns` are restored in the `finally`, and defined INSIDE the `try` — outside it, a
+ * throw from `defineProperty` would leave both streams monkeypatched for the rest of the file.
  */
-async function compileCapturing(dir: string, tty: number | undefined): Promise<readonly string[]> {
+async function compileCapturing(dir: string, tty: number | "pipe" | "tty-without-columns"): Promise<readonly string[]> {
   const realErr = process.stderr.write.bind(process.stderr);
   const realOut = process.stdout.write.bind(process.stdout);
   const captured: string[] = [];
@@ -248,12 +289,14 @@ async function compileCapturing(dir: string, tty: number | undefined): Promise<r
     return true;
   }) as typeof process.stderr.write;
   process.stdout.write = (() => true) as typeof process.stdout.write;
-  Object.defineProperty(process.stderr, "isTTY", { value: tty !== undefined, configurable: true, writable: true });
-  Object.defineProperty(process.stderr, "columns", { value: tty, configurable: true, writable: true });
   // `compiled` rather than `assert.fail` inside the `try`: the AssertionError would be thrown INTO
   // the bare `catch` below and swallowed, leaving a guard that can never fire.
   let compiled = false;
   try {
+    if (tty === "pipe") delete (process.stderr as { isTTY?: boolean }).isTTY;
+    else Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true, writable: true });
+    if (tty === "tty-without-columns") delete (process.stderr as { columns?: number }).columns;
+    else Object.defineProperty(process.stderr, "columns", { value: tty === "pipe" ? 80 : tty, configurable: true, writable: true });
     await main(["compile", join(dir, "graphs", "eto.json"), "--workspace", dir]);
     compiled = true;
   } catch {
@@ -270,18 +313,61 @@ async function compileCapturing(dir: string, tty: number | undefined): Promise<r
   return captured.join("").split("\n").filter((l) => l !== "");
 }
 
-test("IN A PIPE THE fix: LINE IS STILL ONE LINE — this is the cost §H.14 priced, and it is not paid", async () => {
+/** THE CLAUSE AN OPERATOR GREPS FOR — one string, spanning a wrap point at every width tried. */
+const GREPPED = 'ADD to whatever "gather" already declares: one join can be the barrier for more than one fan-out';
+
+test("IN A REAL PIPE THE fix: LINE IS ONE LINE OF 852 BYTES — spawned, because this is the claim the row rests on", async () => {
+  // THE TEST THAT CAN FAIL. Its in-process sibling below is a second witness; this one runs the
+  // binary in a child process whose stderr is a real pipe — `isTTY` absent, `columns` absent —
+  // which is the state an operator's `2>&1 | grep` actually produces and the one an in-process
+  // `isTTY = false` never reproduced. Two mutations were green before it existed: deleting the
+  // stream condition, and `if (process.stderr.isTTY === undefined) return 80`.
   const w = workspace();
   try {
-    const lines = await compileCapturing(w.dir, undefined);
+    const r = await compileSpawned(w.dir);
+    assert.notEqual(r.code, 0, `the eto graph must not compile:\n${r.out}${r.err}`);
+    const fix = r.err.split("\n").filter((l) => l.startsWith("   fix: "));
+    assert.equal(fix.length, 1, `exactly one fix: line, unwrapped:\n${r.err}`);
+    assert.equal(Buffer.byteLength(fix[0]!, "utf8"), 852, `the measured length, unchanged by this row:\n${fix[0]}`);
+    // The whole point of not wrapping here: `grep` still finds the clause as ONE string.
+    assert.equal(
+      r.err.split("\n").filter((l) => l.includes(GREPPED)).length,
+      1,
+      `grep -c of the clause must be 1 — a wrapped line is not greppable, which is the cost §H.14 priced:\n${r.err}`,
+    );
+    const message = r.err.split("\n").filter((l) => l.startsWith("✗ "));
+    assert.equal(message.length, 1, "and the message line likewise");
+    assert.equal(Buffer.byteLength(message[0]!, "utf8"), 206);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("IN A PIPE THE fix: LINE IS STILL ONE LINE — the in-process witness, with `isTTY` absent and `columns` a number", async () => {
+  const w = workspace();
+  try {
+    const lines = await compileCapturing(w.dir, "pipe");
     const fix = lines.filter((l) => l.startsWith("   fix: "));
     assert.equal(fix.length, 1, `exactly one fix: line, unwrapped:\n${lines.join("\n")}`);
     assert.equal(Buffer.byteLength(fix[0]!, "utf8"), 852, "the measured length, unchanged by this row");
-    // The whole point of not wrapping here: an operator can still grep the clause as one string.
-    assert.ok(fix[0]!.includes("ADD to whatever \"gather\" already declares: one join can be the barrier for more than one fan-out"));
+    assert.ok(fix[0]!.includes(GREPPED));
     const message = lines.filter((l) => l.startsWith("✗ "));
     assert.equal(message.length, 1, "and the message line likewise");
     assert.equal(Buffer.byteLength(message[0]!, "utf8"), 206);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("A TERMINAL THAT CANNOT REPORT ITS WIDTH DOES NOT WRAP — the conservative arm, not an oversight", async () => {
+  // `isTTY` true, `columns` absent. Guessing 80 would hard-wrap a paragraph at a width nobody
+  // measured; not wrapping restores exactly what every release before §H.14 did.
+  const w = workspace();
+  try {
+    const lines = await compileCapturing(w.dir, "tty-without-columns");
+    const fix = lines.filter((l) => l.startsWith("   fix: "));
+    assert.equal(fix.length, 1, lines.join("\n"));
+    assert.equal(Buffer.byteLength(fix[0]!, "utf8"), 852, "unwrapped, exactly as in a pipe");
   } finally {
     w.dispose();
   }
@@ -322,6 +408,141 @@ test("A TERMINAL NARROWER THAN 60 OR WIDER THAN 120 IS CLAMPED — 60 fits this 
     const wide = await compileCapturing(w.dir, 400);
     for (const l of wide) assert.ok(l.length <= 120, `cap 120: ${l.length}: ${l}`);
     assert.ok(wide.filter((l) => l.startsWith("        ")).length > 0, "a 846-character line still wraps at 120");
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── the terminal is where a hostile string gets rendered ─────────────────────
+
+/** A workspace whose graph file is named by the caller — the operator-visible string a stranger picks. */
+function workspaceNamed(name: string): { dir: string; file: string; dispose: () => void } {
+  const w = workspace();
+  const file = join(w.dir, "graphs", name);
+  writeFileSync(file, JSON.stringify(ETO));
+  return { dir: w.dir, file, dispose: w.dispose };
+}
+
+/** `compileCapturing` for a named file, returning the raw stderr rather than split rows. */
+async function compileNamed(dir: string, file: string, tty: number | "pipe"): Promise<string> {
+  const realErr = process.stderr.write.bind(process.stderr);
+  const realOut = process.stdout.write.bind(process.stdout);
+  const captured: string[] = [];
+  const had = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+  const hadCols = Object.getOwnPropertyDescriptor(process.stderr, "columns");
+  process.stderr.write = ((chunk: string) => {
+    captured.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  try {
+    if (tty === "pipe") delete (process.stderr as { isTTY?: boolean }).isTTY;
+    else Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true, writable: true });
+    Object.defineProperty(process.stderr, "columns", { value: tty === "pipe" ? 80 : tty, configurable: true, writable: true });
+    await main(["compile", file, "--workspace", dir]);
+  } catch {
+    // E_GRAPH_INVALID — the diagnostics are the point, not the throw.
+  } finally {
+    process.stderr.write = realErr;
+    process.stdout.write = realOut;
+    if (had === undefined) delete (process.stderr as { isTTY?: boolean }).isTTY;
+    else Object.defineProperty(process.stderr, "isTTY", had);
+    if (hadCols === undefined) delete (process.stderr as { columns?: number }).columns;
+    else Object.defineProperty(process.stderr, "columns", hadCols);
+  }
+  return captured.join("");
+}
+
+/**
+ * THE SAME CLASS `cli.ts` DECLARES, read off its source rather than re-typed.
+ *
+ * Two copies of a character class drift, and the drift is silent in the direction that matters —
+ * a test that strips less than the code does passes while the code has stopped stripping. So the
+ * string is compared against `cli.ts`'s own `SPOOFING_CLASS` in the test below, and this file
+ * fails if the two ever part.
+ *
+ * Built by concatenation rather than written as a regex literal, because an escape written into
+ * this file becomes the CHARACTER it denotes — which is how an unterminated string constant got
+ * here once already.
+ */
+const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
+const SPOOFING_ANY = new RegExp("[" + SPOOFING_CLASS + "]");
+const SPOOFING_BUT_WHITESPACE = new RegExp("(?![\\t\\n])[" + SPOOFING_CLASS + "]");
+
+const CR = String.fromCharCode(0x0d);
+const ESC = String.fromCharCode(0x1b);
+const RLO = String.fromCharCode(0x202e);
+
+test("THE CLASS THIS FILE ASSERTS ON IS THE CLASS `cli.ts` DECLARES — two copies would drift silently", () => {
+  // A test that strips less than the code does passes while the code has stopped stripping, so the
+  // string above is checked against the source's own, read off disk rather than imported: the
+  // constants are module-private, and making them public to test them would be the wrong trade.
+  const src = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
+  const declared = /const SPOOFING_CLASS = ("[^"]+");/.exec(src);
+  assert.ok(declared !== null, "cli.ts must still declare SPOOFING_CLASS as a single string literal");
+  // `JSON.parse` on the whole literal, not the capture: the file holds SOURCE text (`\\u0000`) and
+  // this file's constant holds the RUNTIME value (` `). Comparing the two directly compares
+  // different levels of escaping and fails on a pair that agrees.
+  assert.equal(
+    JSON.parse(declared[1]!) as string,
+    SPOOFING_CLASS,
+    "the two copies have parted — reconcile before trusting the assertions below",
+  );
+});
+
+test("A CARRIAGE RETURN, AN ESCAPE OR A BIDI OVERRIDE IN A FILE NAME CANNOT FORGE A LINE ON THE TERMINAL", async () => {
+  // `loadGraph` interpolates the file name UNQUOTED, and a file name is chosen by whoever can
+  // write the directory. `legible()`'s docstring has named this threat for one caller since before
+  // the diagnostic printer had a terminal to render into — control characters "let a broken — or
+  // hostile — collector rewrite or hide that line with ANSI escapes". `writeDiagnostic` is now
+  // that place too, so the TTY path strips the same set less TAB and NEWLINE.
+  for (const [label, name] of [
+    ["carriage return", `a${CR}b.json`],
+    ["ANSI escape", `a${ESC}[2Kb.json`],
+    ["right-to-left override", `a${RLO}b.json`],
+  ] as const) {
+    const w = workspaceNamed(name);
+    try {
+      const rendered = await compileNamed(w.dir, w.file, 100);
+      assert.doesNotMatch(
+        rendered,
+        SPOOFING_BUT_WHITESPACE,
+        `${label} survived to the terminal: ${JSON.stringify(rendered.slice(0, 240))}`,
+      );
+      assert.ok(rendered.includes("GRAPH021_FANOUT_WITHOUT_JOIN"), "and the diagnostic is still the diagnostic");
+      // TAB AND NEWLINE ARE THE EXEMPTIONS, and they are exempt because the wrapper already owns
+      // them: it breaks at a tab and re-indents after a newline, so neither can start a row at
+      // column 0 and forge a `✗ `.
+      for (const row of rendered.split("\n").slice(1)) {
+        if (row !== "") assert.doesNotMatch(row, /^[✗!] /, `no continuation may look like a new diagnostic: ${JSON.stringify(row)}`);
+      }
+
+      // THE PIPE IS DELIBERATELY UNCHANGED — byte-identical to every release before §H.14, which
+      // is the claim the whole row rests on. This asserts the residue, so nobody reads the TTY
+      // arm above as having closed it.
+      const piped = await compileNamed(w.dir, w.file, "pipe");
+      assert.match(piped, SPOOFING_ANY, `the pipe keeps the bytes it always kept (${label})`);
+    } finally {
+      w.dispose();
+    }
+  }
+});
+
+test("ONE QUOTE IN A FILE NAME PAIRS WITH THE MESSAGE'S OWN NEXT QUOTE, and that OVERFLOWS rather than fails", async () => {
+  // The docstring says "AN unbalanced quote is an ordinary character", not "any number of them",
+  // and this is the measurement behind that word. Quotes PAIR: one `"` in a name closes against
+  // the message's next `"`, gluing everything between into a single token, which the wrapper then
+  // refuses to split. A row over the width is the DESIGNED answer — the alternative is cutting an
+  // identifier the author has to copy — so this is pinned as an OVERFLOW, not as a defect.
+  const w = workspaceNamed('a"b.json');
+  try {
+    const rows = (await compileNamed(w.dir, w.file, 60)).split("\n").filter((l) => l !== "");
+    const over = rows.filter((r) => r.length > 60);
+    assert.ok(over.length > 0, `the pairing must still produce an over-long row, or this stopped measuring anything:\n${rows.join("\n")}`);
+    for (const r of over) assert.ok(r.includes('"'), `every over-long row is one glued quoted span: ${JSON.stringify(r)}`);
+    // And nothing is lost: the diagnostic still says what it says, and the name is still whole.
+    assert.ok(rows.join(" ").includes("GRAPH021_FANOUT_WITHOUT_JOIN"));
+    assert.ok(rows.some((r) => r.includes('a"b.json')), `the file name is not split: ${rows.join("\n")}`);
   } finally {
     w.dispose();
   }
