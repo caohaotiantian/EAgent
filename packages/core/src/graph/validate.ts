@@ -3082,12 +3082,24 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // NOTE, and a claimer two `seq` edges upstream of the fan-out's source. An unguarded offer turns
     // a false DESCRIPTION into a false INSTRUCTION, which is worse than the residue it came from.
     //
-    // `wouldCycle` IS EXACT, AND IT IS SOUND BECAUSE OF ONE FACT: `computeFanoutStacks` walks
-    // `topoOrder`, which is `[]` on a cycle, so every `fanoutDepth` is 0 there — and `foldersOf`
-    // returns nothing below depth 1. So a NON-EMPTY `alsoClaim` proves the forward graph is acyclic
-    // and `idx.ancestors` is meaningful. The edit then makes a cycle exactly when `e.to` is already
-    // reachable from the claimer, which is `ancestors.get(e.to)!.has(j)`, plus the zero-length case
-    // `j === e.to`. Nothing here recomputes a traversal.
+    // `wouldCycle` IS EXACT, AND THE PREMISE IT NEEDS IS NARROWER THAN "THE GRAPH IS ACYCLIC" —
+    // stated carefully because the first spelling of this paragraph overclaimed, and a comment that
+    // replaces a false claim with a differently-false one is worse than the one it replaced.
+    // `computeFanoutStacks` initialises every node's stack to `[]` BEFORE its `topoOrder` loop, so a
+    // node that order never emits has `fanoutDepth` 0 rather than `undefined`, and `foldersOf`
+    // returns nothing below depth 1. So a non-empty `alsoClaim` proves exactly this: `e.to` WAS
+    // emitted. Kahn emits a node only after every one of its `dagEdges` predecessors, and
+    // `ancestors` accumulates in that same order, so `ancestors.get(e.to)` is complete and correct —
+    // whatever is true of the rest of the graph. The edit then closes a cycle exactly when `e.to` is
+    // already reachable from the claimer, plus the zero-length case `j === e.to`. Nothing here
+    // recomputes a traversal.
+    //
+    // AND THE COUPLING THAT KEEPS IT EXACT IS IN TWO OTHER FUNCTIONS: `dagEdges` and the `ancestors`
+    // walk each exclude `loop` and `compensation` and nothing else, so "`ancestors(e.to)` has `j`"
+    // and "a forward path runs j ⇝ e.to" are the same statement. That is why a claimer reachable
+    // from `e.to` only through a `loop` edge still gets the offer, and correctly: adding the edge
+    // there compiles. If either filter ever changes, this predicate stops being exact silently —
+    // the fixture that would notice is `THE OFFER IS WITHHELD WHERE THE EDGE WOULD CYCLE`.
     //
     // AND NOTHING PROMISES WHAT ADDING THE EDGE DOES WHERE THE OFFER IS WITHHELD. The appendix used
     // to say it "cements `GRAPH008_JOIN_DEPTH`", which fails on the same cyclic shapes for the same

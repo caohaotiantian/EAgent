@@ -31,7 +31,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { EdgeSpec, GraphSpec, NodeSpec } from "../../src/graph/spec.ts";
-import { validateGraph, type Diagnostic } from "../../src/graph/validate.ts";
+import { indexGraph, validateGraph, type Diagnostic } from "../../src/graph/validate.ts";
 import type { EdgeId, NodeId } from "../../src/ids.ts";
 import { TENANT_CAPABILITIES, TOOLS, clone, stubResolver } from "./fixtures.ts";
 
@@ -1780,6 +1780,56 @@ for (const shape of ["self", "upstream"] as const) {
     );
   });
 }
+
+test("AND IT DOES NOT OVER-REFUSE: an ancestor through a `loop` edge ONLY still gets the offer", () => {
+  // THE OTHER DIRECTION OF `wouldCycle`, and the reason it is `idx.ancestors` rather than a fresh
+  // "is there any path" walk. `again` reaches `read` — through a `loop` edge, which neither
+  // `dagEdges` nor the `ancestors` walk follows. So the added `kind: join` edge closes no FORWARD
+  // cycle, the offer is correct, and a naive reachability guard would have withheld it.
+  //
+  // THE COUPLING THIS PINS is in two other functions: `dagEdges` and the `ancestors` walk exclude
+  // `loop` and `compensation` and nothing else. Change either filter and `wouldCycle` stops being
+  // exact with nothing else to notice — this fixture and the cyclic one above are the two halves.
+  //
+  //     again --loop--> plan --fan--> read --seq--> classify --join--> gather(["classify"])
+  //       \--seq--> collate
+  //     again(join, branches:["read"])   <-- no edge from read into it
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.nodes as NodeSpec[]).push({
+    id: n("again"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("back"), from: n("again"), to: n("plan"), kind: "loop", until: "len(failures) > 0", maxIterations: 2 } as unknown as EdgeSpec,
+    { id: e("out"), from: n("again"), to: n("collate"), kind: "seq" } as EdgeSpec,
+  );
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN")!;
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+
+  // THE PRECONDITION, so the fixture cannot quietly stop being this shape: `again` really does
+  // reach `read`, and `idx.ancestors` really does not see it.
+  const idx = indexGraph(s);
+  assert.ok(!(idx.ancestors.get(n("read"))?.has(n("again")) ?? false), "the `loop` edge is invisible to `ancestors`");
+  assert.ok(
+    s.edges.some((x) => x.from === n("again") && x.kind === "loop"),
+    "the fixture's whole point is a claimer that reaches the target over a `loop` edge",
+  );
+
+  // THE OFFER IS MADE — this is the acyclic arm, byte-identical to `AN UNWIRED SINGLE CLAIMER`'s.
+  assert.match(
+    d.fix ?? "",
+    /or add the `kind: join` edge from "read" INTO "again" that `GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile, which makes "again" wait on "read" and silences THIS diagnostic instead$/,
+    `the offer must not be withheld here: ${d.fix}`,
+  );
+
+  // AND IT IS TRUE: following it compiles clean, with the `loop` edge left standing.
+  const withEdge = clone(s) as unknown as GraphSpec;
+  (withEdge.edges as EdgeSpec[]).push({ id: e("bnc"), from: n("read"), to: n("again"), kind: "join" } as EdgeSpec);
+  assert.deepEqual(errorsOf(withEdge).map((x) => x.code), [], "the offered edge closes no cycle and silences both");
+});
 
 test("THE SILENT `compensation` SHAPE: ONE diagnostic, and the clause is the only mention of it", () => {
   // The third spelling of the rule's silence, and the one that makes "all three are pinned" true.
