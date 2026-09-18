@@ -1562,7 +1562,7 @@ test("AN UNWIRED SINGLE CLAIMER: the clause names the sibling's edge as the OTHE
       "this fan-out's own target, so it is dictated whatever already folds it — but \"again\" already " +
       "declares it among its `branches`, so with the barrier declaring it too `GRAPH008_JOIN_DEPTH` " +
       'refuses "read" as held by more than one join. Decide which join is the barrier for "read": drop ' +
-      'the `branches` ENTRY from "again" — the entry alone, there being NO edge from "read" into it to ' +
+      'the `branches` ENTRY from "again" — every such entry, there being NO edge from "read" into it to ' +
       'delete — or add the `kind: join` edge from "read" INTO "again" that ' +
       "`GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile, which makes \"again\" wait on " +
       '"read" and silences THIS diagnostic instead',
@@ -1911,7 +1911,7 @@ const ARMS: readonly { readonly arm: string; readonly claimers: readonly Claimer
     clause:
       '"a" already declares it among its `branches`, so with the barrier declaring it too ' +
       '`GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join. Decide which join is the ' +
-      'barrier for "read": drop the `branches` ENTRY from "a" — the entry alone, there being NO edge ' +
+      'barrier for "read": drop the `branches` ENTRY from "a" — every such entry, there being NO edge ' +
       'from "read" into it to delete — or add the `kind: join` edge from "read" INTO "a" that ' +
       "`GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile, which makes \"a\" wait on " +
       '"read" and silences THIS diagnostic instead',

@@ -356,10 +356,11 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // `ToolDefinition.compensation` from the registry, and a graph with no compensation
   // edges at all rewinds — and now rolls back — exactly the same.
   // A READER OUTSIDE THIS FUNCTION DEPENDS ON THIS EXCLUSION LIST MATCHING `ancestors`' one below:
-  // `rule021FanoutHasJoin`'s `wouldCycle` decides whether to OFFER an edit by asking `ancestors`
-  // whether that edit would close a forward cycle, which is only the same question while both
-  // filters name the same two kinds. Widen or narrow one without the other and that offer becomes
-  // a false instruction with nothing local to notice (§A.73).
+  // `rule021FanoutHasJoin`'s `wouldCycle` asks `ancestors` whether adding an edge would close a
+  // forward cycle, which is only the same question while both filters name the same two kinds. It
+  // decides whether that rule OFFERS an edit AND whether it prints §A.69's counterfactual about one
+  // — four of its ten message arms turn on it. Widen or narrow one filter without the other and both
+  // become false statements, with nothing local to notice (§A.73).
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
 
@@ -379,9 +380,10 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
 
   const topoOrder = topoSort(spec.nodes.map((n) => n.id), dagEdges);
 
-  // Ancestors over forward edges only; used by GRAPH010's concurrency test — and, since §A.73, by
-  // `rule021FanoutHasJoin`'s `wouldCycle`, which reads this set as "a forward path exists". That
-  // reading holds only while this filter names the same two kinds as `dagEdges` above.
+  // Ancestors over forward edges only. Among its readers — GRAPH010's concurrency test is the one it
+  // was written for — is `rule021FanoutHasJoin`'s `wouldCycle` (§A.73), which reads this set as "a
+  // forward path exists" in order to decide whether an edit it is about to describe would close a
+  // cycle. That reading holds only while this filter names the same two kinds as `dagEdges` above.
   const ancestors = new Map<NodeId, Set<NodeId>>();
   for (const id of spec.nodes.map((n) => n.id)) ancestors.set(id, new Set());
   for (const id of topoOrder) {
@@ -2664,8 +2666,21 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   // `compile.ts`'s own `GRAPH003_UNKNOWN_EDGE_KIND` quotes the kind for the same reason — so a known
   // kind reads `\`kind: "loop"\`` here, quoted, matching the refusal printed beside it.
   //
-  // THE DEDUPE MOVED WITH IT, onto the RENDERED string, which is what bounds the output: two
-  // distinct objects both describe as "an object" and collapse to one.
+  // THE `kind: join` LITERAL A FEW LINES DOWN STAYS UNQUOTED, and the asymmetry is the point rather
+  // than an oversight: that one is THIS FILE naming the kind the author should type, while the
+  // quoted one is the author's own value echoed back. `compile.ts`'s `GRAPH003_UNKNOWN_EDGE_KIND`
+  // draws the same line in the same words. Quoting the literal too would read as a spelling the
+  // author must type and would break arm 1's byte-identity with the line `docs/handoff-2026-09-15b.md`
+  // quotes, which is the only copy of it that predates any pin.
+  //
+  // THE DEDUPE MOVED WITH IT, onto the RENDERED string. What that bounds is the COUNT of distinct
+  // renderings — two distinct objects both describe as "an object" and collapse to one — and NOT the
+  // length: `describeValue` has no cap, so three distinct 400-character STRING kinds are echoed at
+  // their own length and this clause is ~1500 characters. That is a §H.14 input, not a hole here.
+  //
+  // AND `JSON.stringify` DOES NOT ESCAPE U+2028 / U+2029. The result is still ONE line to a terminal
+  // and to `grep`, which is what the forged-`ok` repro was about; a consumer splitting on Unicode
+  // line terminators rather than on `\n` would see two.
   const dropClause = (branch: NodeId, o: NodeId): string => {
     const into = (idx.inbound.get(o) ?? []).filter((x) => x.from === branch);
     const kinds = [...new Set(into.map((x) => describeValue(x.kind)))];
@@ -2688,8 +2703,9 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       // which is why this clause makes one.
       // "EVERY SUCH ENTRY", because `branches` may name one node TWICE — nothing refuses that, and
       // `GRAPH008_BRANCH_NOT_CONNECTED` then fires once per occurrence while `claimedBy` dedupes by
-      // node. Dropping one of two leaves both refusals standing, so "the entry" was a count this
-      // line could not keep.
+      // node. Dropping one of two leaves the SIBLING refusal standing — measured: one
+      // `GRAPH008_BRANCH_NOT_CONNECTED` plus this `GRAPH008_JOIN_DEPTH`, the second entry still
+      // being there — so "the entry" was a count this line could not keep.
       return (
         `"${o}" must drop it from \`branches\` — the ENTRY alone, no edge running from "${branch}" into it at ` +
         `all; that missing edge is what \`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing in this same compile, and ` +
@@ -3127,9 +3143,12 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // walk each exclude `loop` and `compensation` and nothing else, so "`ancestors(e.to)` has `j`"
     // and "a forward path runs j ⇝ e.to" are the same statement. That is why a claimer reachable
     // from `e.to` only through a `loop` edge still gets the offer, and correctly: adding the edge
-    // there compiles. If either filter ever changes, this predicate stops being exact silently —
-    // the fixture that notices is `AND IT DOES NOT OVER-REFUSE`, which is the only one that fails
-    // when the walk stops excluding `loop`; both `THE OFFER IS WITHHELD` fixtures stay green.
+    // there compiles. If either filter ever changes, this predicate stops being exact — SEVERAL
+    // fixtures notice, and `AND IT DOES NOT OVER-REFUSE` is the one written for it. Both
+    // `THE OFFER IS WITHHELD` fixtures stay green, which is why that one exists. (An earlier
+    // spelling of this paragraph called it "the only one that fails" — a count nobody had run, and
+    // the third time on this row that a corrected sentence was corrected into a different false
+    // one. Re-measure before naming a number here.)
     //
     // AND THE COUNTERFACTUAL IS GATED IN EVERY ARM, not only in the offer — the repair the first two
     // cuts of this row both missed. "It is a `kind: join` edge from `e.to` INTO X that WOULD HAVE
@@ -3162,8 +3181,10 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // non-null assertion that is false is one refactor from printing the word "undefined".
     const decide = (): string =>
       !many && unwired.length === 1 && !wouldCycle(unwired[0]!)
-        ? `Decide which join is the barrier for "${e.to}": drop the \`branches\` ENTRY from "${alsoClaim[0]!}" — the ` +
-          `entry alone, there being NO edge from "${e.to}" into it to delete — or add the \`kind: join\` edge from ` +
+        ? // "EVERY SUCH ENTRY" HERE TOO — `branches` may name one node twice and nothing refuses it,
+          // so the singular was a count this arm could not keep any more than the other three could.
+          `Decide which join is the barrier for "${e.to}": drop the \`branches\` ENTRY from "${alsoClaim[0]!}" — ` +
+          `every such entry, there being NO edge from "${e.to}" into it to delete — or add the \`kind: join\` edge from ` +
           `"${e.to}" INTO "${alsoClaim[0]!}" that \`GRAPH008_BRANCH_NOT_CONNECTED\` asks for in this same compile, ` +
           `which makes "${alsoClaim[0]!}" wait on "${e.to}" and silences THIS diagnostic instead`
         : `Decide which join is the barrier for "${e.to}" and drop the ` +

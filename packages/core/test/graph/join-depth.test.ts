@@ -729,8 +729,9 @@ test("§A.73 A DUPLICATED `branches` ENTRY IS WHY THE LINE SAYS *EVERY* SUCH ENT
   // `join.branches` may name one node twice — nothing refuses it — and
   // `GRAPH008_BRANCH_NOT_CONNECTED` then fires ONCE PER OCCURRENCE while `claimedBy` dedupes by
   // node. "Drop the entry" was therefore a count this line could not keep: dropping one of two
-  // leaves both refusals standing. The word is the fix; the shape is measured here so it cannot
-  // regress to the singular.
+  // leaves the SIBLING refusal standing — one `GRAPH008_BRANCH_NOT_CONNECTED` for the entry that
+  // remains, alongside this rule's own refusal, which the second entry still earns. The word is the
+  // fix; both halves are measured below so it cannot regress to the singular.
   const spec = g(
     [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0", "a0"])],
     [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
@@ -747,7 +748,14 @@ test("§A.73 A DUPLICATED `branches` ENTRY IS WHY THE LINE SAYS *EVERY* SUCH ENT
     [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0"])],
     [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
   );
-  assert.ok(codes(droppedOne).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(droppedOne).join(", "));
+  // EXACTLY what it leaves, so the prose above cannot drift into "both refusals": ONE sibling
+  // refusal for the entry that remains, and this rule's own, which the surviving entry still earns.
+  assert.equal(
+    codes(droppedOne).filter((c) => c === "GRAPH008_BRANCH_NOT_CONNECTED").length,
+    1,
+    codes(droppedOne).join(", "),
+  );
+  assert.ok(claimRefusal(droppedOne) !== undefined, codes(droppedOne).join(", "));
   // …and dropping EVERY such entry answers both.
   const droppedAll = g(
     [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", [])],
