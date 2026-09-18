@@ -6062,13 +6062,34 @@ export class Engine {
     // A member missing from this set costs a LIVE RUN — the guard falls through to `#failRun`,
     // which is the destructive answer — while a member too many costs only a refusal. An open gate
     // is a question in a person's queue, so it is named explicitly rather than left to depend on
-    // the lease-before-raise ordering above continuing to hold. Two members, and both are written
-    // only by the executor on the advance path `#assertBound` guards.
+    // the lease-before-raise ordering above continuing to hold.
+    //
+    // AND IT IS HELD BY NO TEST, WHICH A LATER READER HAS TO BE TOLD IN BOTH DIRECTIONS. Removing
+    // it and running the whole suite changes no outcome — 3936/3936 either way — because the lease
+    // always precedes the raise, so nothing reaches this line on a `gate.raised` the lease did not
+    // already answer for. It is therefore NOT dead code to delete on that evidence: it stands on
+    // the direction-of-mistake argument above and on nothing else. Deleting it needs that argument
+    // rebutted, not a green suite; trusting it needs a pin that does not exist.
+    //
+    // TWO WRITERS, ONE WAVE. `task.leased` is appended by the executor here; `gate.raised` is
+    // appended by the gate broker (`run/gates.ts`, `SYSTEM_ACTOR("gate-broker")`), REACHED from
+    // the executor's wave rather than written by it. Both are downstream of the advance path
+    // `#assertBound` guards, which is the property this rests on — not a common author.
+    //
+    // WHAT THIS CUT GAVE UP, AND IT IS A REAL PROPERTY THE LAST ONE HAD. The prefix form was a
+    // COMPLEMENT, so an unrecognised row read as PROGRESS and a new `EVENT_TYPES` member could
+    // only ever make this guard more conservative. An ALLOWLIST inverts that: an unrecognised row
+    // now reads as NO progress, so a future event type meaning "this run executed" that can be
+    // appended BEFORE a lease would let `#failUnreadableGraph` fail a live run. The trade was
+    // forced — the complement was wrong twice, first on the fold and then on `pause`/`resume`, and
+    // a conservative default is worth nothing when the set it defaults over is the wrong set — but
+    // it is a trade, and the guard against it is this paragraph: **anything added to `EVENT_TYPES`
+    // that a run can append before its first `task.leased` belongs in `EXECUTED`.**
     //
     // COST: the scan stops at the first match. For a run that has executed that is early — the
-    // lease is the fifth row for a single entry node and `3 + N + 1` for N of them — and for
-    // §A.63's own run, which never matches, it is the whole journal, which for that run IS the
-    // `3 + N` submit prefix. No fold is built either way.
+    // lease is `3 + N + 1` rows in for N entry nodes. For a run that never matches it is the whole
+    // journal, which is short by construction: `3 + N` for §A.63's own control, `3 + N + 2` once an
+    // operator has paused it, `3 + N + 4` paused and resumed. No fold is built either way.
     //
     // AND IT FAILS CLOSED IN THE DIRECTION `CLAUDE.md` NAMES. Failing the run is the destructive
     // answer and refusing the advance is the conservative one, so a conjunct that can only ever
