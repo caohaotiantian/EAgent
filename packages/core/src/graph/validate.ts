@@ -2948,12 +2948,14 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // AND WHERE THE TARGET IS ALREADY CLAIMED, THE LINE SAYS SO — §A.69, and it is the one piece of
     // this rule's own residue it could always have disclosed. `e.to` is the single member dictated
     // despite being folded ELSEWHERE THAN THE NAMED BARRIER (the guard above), which makes it the
-    // single such member `foldedClauses` cannot reach: every other name folded elsewhere is dropped
-    // from `waitsFor` and named there, per name, with its folder. "Elsewhere" is the load-bearing
-    // word and a looser one was wrong here: `foldedElsewhereThan` excludes `named`, so a member the
-    // NAMED barrier alone folds stays in `waitsFor` and appears in neither clause — which is the
-    // F1 / `triage-failures.json` shape, where `gather` already declares `classify` and the
-    // sentence is byte-identical to the one it always printed. Without this clause the author types
+    // single such member `foldedClauses` cannot reach: every other name folded elsewhere AND
+    // reaching every candidate is dropped from `waitsFor` and named there, with its folder. BOTH
+    // qualifiers are load-bearing and a shorter sentence was false twice over. `foldedElsewhereThan`
+    // excludes `named`, so a member the NAMED barrier alone folds stays in `waitsFor` and appears in
+    // neither clause — the F1 / `triage-failures.json` shape, where `gather` already declares
+    // `classify`. And `foldedElsewhere` is `held.filter(reachesEveryCandidate)`, so a member dropped
+    // for BOTH reasons is reported under the first WITHOUT its folder, which the reporting-choice
+    // paragraph above already states. Without this clause the author types
     // the dictated line and the NEXT compile is the first thing that mentions the other claimer — a
     // `GRAPH008_JOIN_DEPTH` on `e.to` the compile before it had not printed.
     //
@@ -2980,7 +2982,10 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // `GRAPH008_BRANCH_NOT_CONNECTED` names the entry in the same output and still does; where it
     // is wired by a `loop` or `compensation` edge, that rule accepts an inbound edge of ANY kind
     // and stays silent, and this clause is then the only thing that names the claim. All three —
-    // no edge, `loop`, `compensation` — are pinned in `fanout-branch-diagnostic.test.ts`.
+    // no edge, `loop`, `compensation` — are pinned in `fanout-branch-diagnostic.test.ts`, the last
+    // of them by a fixture whose WHOLE diagnostic set is this one line, warnings included: a second
+    // claimer would have brought `GRAPH008_JOIN_DEPTH` into the same compile and the fixture would
+    // have demonstrated no silence at all.
     //
     // AND IT DICTATES NO EDGE DELETION, which the first cut got wrong. When this clause fires there
     // is provably NO `kind: join` edge from `e.to` to the claimer: such an edge would put `e.to` in
@@ -2990,18 +2995,32 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // AND the edge" told them to delete a retry loop the refusal never asked about — measured on
     // the §A.69 graph, dropping the `branches` entry ALONE compiles. Dictating a deletion is what
     // the additive lesson above is about; this one dictates the entry and says so.
-    const alsoClaim = foldersOf(e.to).filter((j) => j !== named?.id);
+    // NO `named` FILTER, AND THAT IS THE PROOF ABOVE BEING TAKEN SERIOUSLY. `foldedElsewhereThan`
+    // excludes `named` because a member the barrier itself folds is safe to dictate; here the same
+    // exclusion would be dead code, since a claimer of `e.to` cannot be a candidate and `named` is
+    // always a candidate. A filter that can never fire is a filter that hides the day the proof
+    // stops holding — if `named` ever COULD claim `e.to`, `joined` would be true and this whole
+    // diagnostic would be silent, so the honest spelling is no filter at all.
+    const alsoClaim = foldersOf(e.to);
+    const many = alsoClaim.length > 1;
     const claimed =
       alsoClaim.length === 0
         ? ""
         : `. NOTE "${e.to}" is this fan-out's own target, so it is dictated whatever already folds it — but ` +
           `${alsoClaim.map((j) => `"${j}"`).join(", ")} ` +
-          `${alsoClaim.length > 1 ? "already declare it among their" : "already declares it among its"} \`branches\`, ` +
-          `and with the barrier declaring it too \`GRAPH008_JOIN_DEPTH\` refuses "${e.to}" as held by more than one ` +
-          `join. Decide which join is the barrier for "${e.to}" and drop the \`branches\` ENTRY from the ` +
-          `${alsoClaim.length > 1 ? "others" : "other"} — the entry alone, and not any edge: a \`kind: join\` edge ` +
-          `from "${e.to}" would have made this diagnostic not fire, so whatever edge you see there carries its own ` +
-          `meaning and deleting it is a second change`;
+          `${many ? "already declare it among their" : "already declares it among its"} \`branches\`, so ` +
+          // TWO CLAIMERS ALREADY HAVE THE REFUSAL ON SCREEN. `claimedBy` counts them without the
+          // barrier, so promising it only "once the barrier declares it too" would describe the
+          // output the author is already reading. One claimer is the genuinely future case.
+          `${many ? "\`GRAPH008_JOIN_DEPTH\` ALREADY refuses" : "with the barrier declaring it too \`GRAPH008_JOIN_DEPTH\` refuses"} ` +
+          `"${e.to}" as held by more than one join. Decide which join is the barrier for "${e.to}" and drop the ` +
+          `\`branches\` ENTRY from the ${many ? "others" : "other"} — the entry alone, and NOT any edge: it is a ` +
+          // THE DESTINATION IS STATED. The proof is about an edge from `e.to` INTO THE CLAIMER;
+          // "an edge from `e.to`" alone is false the moment one runs from `e.to` to anything else,
+          // e.g. the `kind: join` edge into the barrier this very line dictates.
+          `\`kind: join\` edge from "${e.to}" INTO ${many ? "one of them" : `"${alsoClaim[0]!}"`} that would have ` +
+          `made this diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting ` +
+          `it is a second change`;
     const fix = dictate + claimed;
 
     d.push({
