@@ -1476,6 +1476,13 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
 /**
  * The characters that let a string somebody else chose forge or hide a line on a terminal — C0/C1,
  * DEL/C1, and the bidi controls. Spelled ONCE, and read by `legible()` and by `writeDiagnostic`.
+ *
+ * WHERE THE CLASS STOPS, ON PURPOSE. The zero-width characters — ZWSP, ZWNJ, ZWJ, WJ, SHY — and
+ * every homoglyph are OUTSIDE it, because the threat this list answers is forging or hiding a ROW,
+ * and none of them can: not one moves a cursor, starts a line, or erases one. What they do cost is
+ * a width unit each while rendering as nothing, so a name full of them wraps a little early — a
+ * cosmetic cost, not a forged diagnostic. A homoglyph is a different problem, one name looking
+ * like another, and deleting characters is not its answer.
  */
 const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
 const SPOOFING = new RegExp(`[${SPOOFING_CLASS}]`, "g");
@@ -5100,6 +5107,17 @@ function diagnosticWidth(): number | undefined {
  * in one rewinds the cursor and overprints the line; an ESC sequence colours or erases it; a
  * U+202E reverses it. Each forges a second diagnostic, or hides a real one. So the TTY path strips
  * `SPOOFING_BUT_WHITESPACE` before wrapping.
+ *
+ * AND THE PRICE, WHICH IS THE SAME SHAPE AS THE `bad  name.json` ARGUMENT AND IS PAID ANYWAY: ON A
+ * TERMINAL THE RENDERED FILE NAME IS NOT THE FILE NAME. `a<CR>b.json` renders as `a b.json`, which
+ * is a path that does not exist — exactly the defect that whitespace-collapsing caused and that
+ * `wrapDiagnostic` was fixed to stop. The difference is that here the real name is UNSHOWABLE: any
+ * faithful rendering of a CR on a terminal is the attack. So the substitution is deliberate, and
+ * two consequences come with it. A stripped character becomes a SPACE, so it is also a new break
+ * point the wrapper may split at. And only the ESCAPE CHARACTER is stripped, not the sequence it
+ * introduced — `a<ESC>[2Kb.json` renders `a [2Kb.json`, with `[2K` surviving as visible text,
+ * inert because nothing reads it as a command any more. An operator who needs the true bytes has
+ * the pipe, which is unchanged.
  *
  * THE PIPE PATH IS UNTOUCHED AND STAYS BYTE-IDENTICAL — deliberately, and it is the one claim this
  * whole row rests on. It is also, stated plainly, a residue rather than a fix: a control character
@@ -8958,12 +8976,18 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         });
         // NOT `writeDiagnostic`, and the reason is what the line IS. §H.14 gave the compile
         // diagnostic printer a wrap because its payload is a PARAGRAPH — prose an author reads
-        // once and acts on. This line's payload is two VALUES the operator compares character by
-        // character, and `expected`/`actual` are JSON documents. Re-flowing them at spaces would
-        // interleave two serialised objects across hanging indents and make the one thing the
-        // line exists for — spotting where they differ — harder, not easier. The `✗` is shared;
-        // the job is not. It is the only other `✗`-prefixed stderr writer in this file, so this
-        // comment is the whole census.
+        // once and acts on. The payloads here are VALUES an operator diffs, and naming the set
+        // rather than guessing at it: over `ReplayFrame`'s ten kinds, `expected`/`actual` are a
+        // graph id or a `ref=digest` drift list (`graph.bound`), an effect key (`effect.rebound`,
+        // `effect.unserved`), `taskId hash` or `N steps` (`state.hash`), a task state name
+        // (`task.committed`), sorted `state:decision` pairs like `open:approve,closed`
+        // (`gate.decided`), `failed:CODE` or a status word (`run.completed`/`run.failed`), ONE
+        // JSON document (`state.reduced`, `JSON.stringify(channels)`) and ONE prose sentence
+        // (`run.message`). Not a paragraph among them, and re-flowing a digest list or a
+        // serialised object at spaces makes the one thing the line exists for — spotting where
+        // the two differ — harder, not easier. One writer, one discipline, so the prose member
+        // does not get a rule of its own. The `✗` is shared; the job is not. This is the only
+        // other `✗`-prefixed stderr writer in the file, so this comment is the whole census.
         for (const f of report.frames.filter((x) => !x.match)) {
           process.stderr.write(`✗ ${f.kind} ${f.taskId ?? ""}: expected ${f.expected}, got ${f.actual}\n`);
         }
