@@ -351,9 +351,16 @@ test("A DETACHED REWIND OF A FULLY-DELEGATED RUN IS REFUSED RATHER THAN SILENTLY
   // `300bf222`: `attached: false`, one step, `dispatch: 0`, `undispatchable: "holds no context"`,
   // `undo: "pay.refund"` — three states rather than two, and then `rewind` declined it anyway.
   // That is the §A.74 shape exactly: the operator who reads first is shown a list they cannot
-  // authorize. `#refusePlannedRewind` now runs in both verbs, and the refusal carries everything
-  // the plan carried — the `tool -> undo` pair, the child run the effect was recorded in, and
-  // `attach(runId, graph)` as the move — so nothing was traded away for the symmetry.
+  // authorize. `#refusePlannedRewind` now runs in both verbs.
+  //
+  // AND IT IS A TRADE, NOT A FREE WIN — the first draft of this comment claimed the refusal
+  // "carries everything the plan carried", and a reviewer measured that false. What the operator
+  // gets instead of the plan is the `tool -> undo` pair DE-DUPLICATED, the child run the effect
+  // was recorded in, `attach(runId, graph)` as the move, and `details: {runId, atSeq, pending}`.
+  // What they lose is the per-step identity the plan carries and nothing else does: `seq`,
+  // `compensates`, `argsDigest`, `irreversibility` and `ok`. The trade is worth taking because a
+  // plan for a rewind that will be refused is a plan nobody can authorize — but it is stated as a
+  // trade, because a console rendering this screen can no longer show WHICH effect, at which seq.
   const previewed = await r.engine.planRewind(r.runId, 1 as Seq, OPERATOR).then(() => undefined, (e: unknown) => e);
   assert.ok(isLoomError(previewed) && previewed.code === CODES.E_RESTORE_ILLEGAL, `the preview is refused too: ${String(previewed)}`);
   assert.match(previewed.message, /pay\.refundable -> pay\.refund/, "and it names the undo the plan used to name");
@@ -390,6 +397,48 @@ test("A DETACHED REWIND OF A FULLY-DELEGATED RUN IS REFUSED RATHER THAN SILENTLY
   assert.equal(now.dispatch, 1, "attached, the same step is dispatchable");
   await r.engine.rewind(r.runId, 1 as Seq, "now it can", OPERATOR, { planHash: now.planHash });
   assert.equal((await records(r.store, r.runId)).length, 1, "and the child's journal finally says what happened");
+});
+
+test("`attached` IS IN THE PLAN HASH, SO AN AUTHORIZATION TAKEN BEFORE A RESTART IS REFUSED", async () => {
+  // THE PIN §A.74 NEARLY DELETED, MOVED TO THE ONLY RUN THAT CAN STILL CARRY IT.
+  //
+  // `engine.ts` claims `undispatchable` per step and `attached` for the run are in the hash
+  // header "because 'this engine can no longer run it' is a fact about the PROCESS rather than
+  // the journal, and a confirm after a restart has to be refused rather than silently becoming a
+  // no-op. No journal-derived hash can catch that." Its only pin was
+  // `assert.notEqual(now.planHash, plan.planHash)` in the detached fully-delegated test above,
+  // and §A.74 refuses that preview outright, so the comparison had nowhere to live.
+  //
+  // WHAT IS AND IS NOT STILL OBSERVABLE, stated rather than quietly narrowed. The `unrunnable`
+  // arm IS "a step with an `undo` that this process cannot dispatch", so **a detached plan
+  // holding such a step is exactly the thing `planRewind` now refuses** — the per-step
+  // `undispatchable` contribution to the hash is unreachable through this verb by construction,
+  // and that is the price §A.74 was paid at. The RUN-level `attached` flag is not: a boundary
+  // ABOVE every recorded effect plans zero steps, no arm fires, and the two previews differ in
+  // the one bit this test is about.
+  const r = await ran("tool");
+
+  // ABOVE THE CHARGE, so there is nothing to undo and nothing for either arm to refuse.
+  const head = (await journal(r.store, r.runId)).at(-1)!.seq;
+  const attached = await r.engine.planRewind(r.runId, head, OPERATOR);
+  assert.equal(attached.steps.length, 0, "precondition: a boundary above every effect plans nothing");
+  assert.equal(attached.attached, true, "attached: this engine could run whatever the plan held");
+
+  r.engine.forget(r.runId);
+  const detached = await r.engine.planRewind(r.runId, head, OPERATOR);
+  // `attached: false` IS REACHABLE AND IS ASSERTED, which nothing else in the suite does.
+  assert.equal(detached.attached, false, "detached: the plan knows this engine holds no context");
+  assert.equal(detached.steps.length, 0, "the same empty step list");
+  assert.notEqual(detached.planHash, attached.planHash, "and a DIFFERENT hash, because `attached` is in its header");
+
+  // WHAT THE HASH IS FOR. The authorization taken while attached is REFUSED after the context
+  // went, rather than silently becoming a no-op — the case the docstring names, and one no
+  // journal-derived hash could catch, because the journal did not move between the two calls.
+  const stale = await r.engine
+    .rewind(r.runId, head, "with an authorization from before the restart", OPERATOR, { planHash: attached.planHash })
+    .then(() => undefined, (e: unknown) => e);
+  assert.ok(isLoomError(stale) && stale.code === CODES.E_RESTORE_ILLEGAL, `it must be refused: ${String(stale)}`);
+  assert.match(stale.message, /not what a rewind to \d+ would dispatch now/, "and it is the hash that refuses it");
 });
 
 test("WHAT THE OPERATOR SAW IS ON THE RECORD, AND FOLDS BACK OUT OF IT", async () => {

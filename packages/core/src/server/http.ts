@@ -3962,6 +3962,16 @@ export class ControlPlane {
          * this route writes once and not once per poll, which is what keeps a GET honest enough
          * to stay a GET.
          *
+         * AND SINCE §A.74 IT ANSWERS 409 FOR A WIDER SET OF RUNS, which is a real change to what
+         * an existing caller observes and is recorded here rather than left to be discovered.
+         * `Engine.planRewind` now runs `#refusePlannedRewind` as well as `#rewindRefusals`, so a
+         * run holding a recorded effect this process cannot build an undo for — previously a 200
+         * carrying a plan whose `dispatch` was 0 — is an `err.conflict`, which `errors.ts` maps
+         * to 409. A console can no longer render WHICH effect is stuck at which seq; it gets the
+         * prose, the `tool -> undo` pair and the remedy. The trade is deliberate: the 200 it
+         * replaces carried a `planHash` the `rewind` command would have refused, so the screen
+         * was showing an authorization nobody could use.
+         *
          * A HUMAN, AND `ownsRun`. The engine refuses a non-human caller, so this is a 403 for a
          * service token exactly as the `rewind` command is: gating the act while publishing the
          * reconnaissance — here are the run's undoable real-world effects, keyed and named —

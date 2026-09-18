@@ -89,10 +89,23 @@
  * ASSERTED rather than deleted: a later change that moves an arm back into one verb has to make
  * this file say so.
  *
- * WHAT THE FLIP COST, AND WHERE IT WENT. A refused preview returns no plan, so `steps`,
- * `dispatch`, `blocked` and `argsDigests` read their `-1`/empty sentinels wherever §A.74 fires.
- * The fact those numbers were asserting — ONE step this rewind will not dispatch — is asserted as
- * `pending`, read off the refusal's own `details`.
+ * WHAT THE FLIP COST, AND WHERE IT WENT — NAMED, because `pending` is WEAKER than the four
+ * assertions it replaced and saying otherwise would be the third way of lying. A refused preview
+ * returns no plan, so `steps`, `dispatch`, `blocked` and `argsDigests` read their `-1`/empty
+ * sentinels wherever §A.74 fires. `out.pending` is the refusal's `details.pending`, which is the
+ * matching step COUNT and nothing more:
+ *
+ *  - it does NOT say the plan held exactly one step — a second, dispatchable step would leave it
+ *    at 1. What still discriminates that here is the fixture: one charge, one graph node;
+ *  - it does NOT say `dispatch 0 / blocked 1`. That arithmetic is `RewindPlan`'s and needs a plan
+ *    to be returned, which for an `isHardToUndo` step with no `argsDigest` is now unreachable
+ *    THROUGH THIS VERB BY CONSTRUCTION — refusing it is the fix. The rule itself
+ *    (`argsDigest === undefined` ⇒ counted `blocked`, never `dispatch`) stays pinned for the
+ *    classes that can still reach a plan, in `undo-args-must-be-recorded.test.ts`;
+ *  - it does NOT say WHICH arm fired — both write `details.pending`. What does, in every test
+ *    below, is the message regex: the `unrunnable` arm prints `tool -> undo` and this one prints
+ *    `tool@seq -> undo`. (And `rewindFromACoolEngine` `attach`es, so `live` is defined and the
+ *    `unrunnable` arm cannot fire in this file at all.)
  */
 
 import assert from "node:assert/strict";
