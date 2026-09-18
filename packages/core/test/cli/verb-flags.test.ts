@@ -143,7 +143,7 @@ function table(): Map<string, readonly string[]> {
   const m = /const VERB_FLAGS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, readonly string[]>();
-  for (const row of m[1]!.matchAll(/^ {2}([A-Za-z0-9_]+): \[([^\]]*)\],$/gm)) {
+  for (const row of m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: \[([^\]]*)\],$/gm)) {
     out.set(row[1]!, [...row[2]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!).sort());
   }
   return out;

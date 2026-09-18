@@ -642,12 +642,16 @@ export function resourceRefsIn(text: string): readonly string[] {
  *   - `(args: Args)` is the SIGNATURE the rule keys on. It is not a proof of purity — `jailFor`
  *     reads `process.cwd()` — and the claim it is used for is narrower: a function taking only
  *     `args` cannot need the workspace, so calling it at the door is not calling it early. What
- *     it buys, it buys by being MECHANICAL: it named TWELVE readers that were expressions inline
- *     at a single call site — `channelsFile`, `modelsFile`, `mcpFile`, `maxParallelismFlag`,
- *     `extensionModulePaths`, `serveInFlight`, `steerNode`, `steerTake`, `promoteBaseline`,
- *     `promoteSuite`, `identityFile`, `graphFlag` — and it pulled `serveToken` out of
- *     `controlPlaneOptions(ws, args)`, which took a `Workspace` to decide a flag and never
- *     touched one.
+ *     it buys, it buys by being MECHANICAL: it named TWELVE readers that were written out as
+ *     expressions wherever the flag happened to be read — `channelsFile`, `modelsFile`,
+ *     `mcpFile`, `maxParallelismFlag`, `extensionModulePaths`, `serveInFlight`, `steerNode`,
+ *     `steerTake`, `promoteBaseline`, `promoteSuite`, `identityFile`, `graphFlag` — and it pulled
+ *     `serveToken` out of `controlPlaneOptions(ws, args)`, which took a `Workspace` to decide a
+ *     flag and never touched one. ELEVEN of the twelve replaced a single call site; `graphFlag`
+ *     replaced FOUR, serving FIVE verbs — `recordedGraph` (which `replay` and `trace` share) and
+ *     the `approve`, `audit` and `score` blocks each spelled `requireFileFlag`/`pathFlag` on
+ *     `"graph"` for themselves. That is the drift this whole table is against, and it was sitting
+ *     inside one flag.
  *   - MORE THAN ONE reader means the message depends on the verb — `--as` has three and
  *     `--cohort` two — and the door does not know which is right, so it does not guess.
  *   - NO EXCEPTION FOR A GLOBAL. §H.11 hoisted the globals' checks above `openWorkspace`'s first
@@ -1225,17 +1229,20 @@ function refuseAgainstCohortFlag(args: Args, flag: "baseline" | "suite"): void {
 }
 
 /**
- * `--identity-file` and `--graph`, the last two flags that were read only behind a `Workspace`.
+ * `--identity-file` and `--graph`, the last two flags anything claimed a `Workspace` was needed for.
  *
- * NEITHER EVER NEEDED ONE, which the round-2 review is what established. `pickIdentity(ws, args)`
- * decides this flag with `requireFileFlag(args, "identity-file")` and uses `ws` for a different
- * question entirely — whether an `--extension-module` ALSO established an identity source, which
- * is a conflict between two configured things and not a judgement about the flag's value. All
- * four reads of `--graph` are a `pathFlag`/`requireFileFlag` on argv; the `Workspace` in
- * `recordedGraph(ws, args, runId, verb)` is for loading and hash-matching the file afterwards.
+ * NEITHER EVER NEEDED ONE, and the round-2 review is what established it. `pickIdentity(ws, args)`
+ * decides `--identity-file` with `requireFileFlag(args, "identity-file")` and uses `ws` for a
+ * different question entirely — whether an `--extension-module` ALSO established an identity
+ * source, which is a conflict between two configured things and not a judgement about the flag's
+ * value. All four reads of `--graph` are a `pathFlag`/`requireFileFlag` on argv, and only ONE of
+ * them sits in a function taking a workspace at all: the `ws` in
+ * `recordedGraph(ws, args, runId, verb)` is for loading and hash-matching the file afterwards, and
+ * the other three reads were written out inside `main`'s `approve`, `audit` and `score` blocks.
  *
- * So the signature was the only thing standing between these two and the door, and both callers
- * keep asking exactly what they asked before — `pathFlag`, one call deeper.
+ * So the signature was the only thing standing between these two flags and the door. All five call
+ * sites — one for `--identity-file`, four for `--graph` — ask exactly what they asked before, one
+ * call deeper.
  *
  * ONE MESSAGE MOVES, and it moves onto the flag the operator typed. `loom audit <id> --graph` and
  * `loom score <id> --graph`, both bare, used to answer `no journal for run <id> in this

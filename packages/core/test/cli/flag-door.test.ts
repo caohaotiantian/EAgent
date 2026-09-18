@@ -33,13 +33,21 @@
  *
  * `(args: Args)` IS A SIGNATURE, NOT A VERDICT, and the difference has now cost two rounds of
  * review. It says a reader cannot NEED the workspace, so calling it at the door is not calling it
- * early; it says nothing about whether one that takes `ws` actually uses it. `--identity-file` and
- * `--graph` sat behind `(ws, args)` helpers and were both written off as "argv cannot decide
- * them" — falsely: `pickIdentity` decides `--identity-file` with `requireFileFlag(args, …)` and
- * wants `ws` for a different question, and all four reads of `--graph` are a `pathFlag` on argv.
- * Both have readers now. So the rule finds candidates mechanically; whether a `null` is a FACT
- * about the flag or an accident of where somebody wrote the code is a question the rule cannot
- * answer and a reader has to.
+ * early; it says nothing about whether one that takes `ws` actually uses it, and nothing at all
+ * about a read that is not in a named function.
+ *
+ * `--identity-file` and `--graph` were both written off as "argv cannot decide them", and the two
+ * were not even wrong in the same way. `--identity-file` really did sit behind a `(ws, args)`
+ * helper, `pickIdentity` — which decides it with `requireFileFlag(args, …)` and wants `ws` for a
+ * different question. `--graph` has FOUR reads and only one of them is behind such a helper
+ * (`recordedGraph`, shared by `replay` and `trace`); the other three were written out inside
+ * `main`'s `approve`, `audit` and `score` blocks, where the rule ignores them because it ignores
+ * `main`. All four are a `pathFlag` on argv. Both flags have readers now.
+ *
+ * So the rule finds candidates mechanically, and it has exactly two ways of producing a `null`
+ * that is about the CODE rather than the flag: a read inside a function that takes more than
+ * `args`, and a read inside `main`. Whether a given `null` is a fact about the flag or an accident
+ * of where somebody wrote the read is a question the rule cannot answer and a reader has to.
  *
  * More than one reader means the sentence depends on the verb — `--as` has three — and the door
  * does not guess. A flag that grows a reader and keeps `null` fails the first test below; a flag
@@ -133,7 +141,7 @@ function positionalsTable(): Map<string, number> {
   const m = /const VERB_POSITIONALS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_POSITIONALS moved — this gate reads it from the source on purpose");
   const out = new Map<string, number>();
-  for (const row of m[1]!.matchAll(/^ {2}([A-Za-z0-9_]+): \[([\s\S]*?)\],$/gm)) {
+  for (const row of m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: \[([\s\S]*?)\],$/gm)) {
     // A backtick string FIRST: one of the rows is a template literal containing double quotes,
     // and matching `"…"` first would count the quoted word inside it as a second argument.
     out.set(row[1]!, [...row[2]!.matchAll(/`[^`]*`|"[^"]*"/g)].length);
@@ -146,7 +154,7 @@ function verbFlags(): Map<string, readonly string[]> {
   const m = /const VERB_FLAGS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, readonly string[]>();
-  for (const row of m[1]!.matchAll(/^ {2}([A-Za-z0-9_]+): \[([^\]]*)\],$/gm)) {
+  for (const row of m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: \[([^\]]*)\],$/gm)) {
     out.set(row[1]!, [...row[2]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!));
   }
   return out;
