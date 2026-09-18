@@ -623,22 +623,48 @@ export interface EventPayloads {
     readonly compensatesSeq: number;
     /** The tool that ran and is being undone. */
     readonly tool: string;
-    /** The tool that undid it. Absent iff `outcome` is `not_attempted`. */
+    /**
+     * The tool that WOULD undo it — present whenever the planned step named one, on EVERY
+     * outcome; absent only where nothing could be named.
+     *
+     * It said "absent iff `outcome` is `not_attempted`" and that was false at the writer:
+     * `compensationRecord` (`run/engine.ts`) writes this whenever `step.undo` is defined,
+     * whatever the outcome, so a `not_attempted` row carries it for every block that happens
+     * AFTER the undo was named — the task missing from the projection, the undo absent from
+     * this process's registry, the recorded result with no `details`, the approval floor this
+     * trigger sat under. The three blocks that leave it absent are the ones where no undo could
+     * be named at all: `unknown_tool`, `no_compensation`, `unknown_compensation`.
+     */
     readonly undo?: string;
     readonly outcome: "compensated" | "failed" | "not_attempted";
     /** Why. Required for everything except a plain success, where there is nothing to say. */
     readonly reason?: string;
     /**
      * Whether a LATER pass could get further — set only on `not_attempted`, whose reasons are
-     * two different things wearing one word.
+     * two different things wearing one word. THE LINE IS WHOSE FACT THE BLOCK IS.
      *
-     * A step blocked because the tool declares no compensation, or names an undo the registry
-     * does not carry, reads the same on every future pass: settling it is right, and re-planning
-     * it would loop. A step blocked because a child run's GRAPH could not be rebuilt in this
-     * process is transient, and its own reason string tells the operator to attach it and rewind.
-     * `planCompensation` settled both, so following that advice produced a zero-step plan and an
-     * effect that still stood — measured, `steps= 0  settled= [8]`. The guard recorded an effect
-     * as handled when nothing had handled it.
+     * SET when the block is a fact about THIS PROCESS or THIS TRIGGER, which something an
+     * operator does can change: the tool that ran is not in this registry, or the undo it names
+     * is not; the task that made the call is outside the projection THIS boundary folded (cleared
+     * by rewinding to another one, not by deploying); a child run's GRAPH could not be rebuilt
+     * here; or the approval floor refused, which a `run_failed` rollback sits under and a rewind
+     * does not.
+     *
+     * ABSENT when it is a fact about the JOURNAL or the MANIFEST, which reads the same on every
+     * future pass: the tool declares no compensation, no live `effect.completed` is recorded for
+     * the call, or the recorded result carries no `details` to build the undo's arguments from.
+     * Settling those is right and re-planning them would loop.
+     *
+     * `planCompensation` settled BOTH KINDS before this field existed, so following a row's own
+     * advice produced a zero-step plan and an effect that still stood — measured on the
+     * child-graph case, `steps= 0  settled= [8]`. The guard recorded an effect as handled when
+     * nothing had handled it.
+     *
+     * AND IT IS NOT SOMETHING A TOOL MAY AWARD ITSELF. `retryable: true` re-plans, and re-planning
+     * an undo that already RAN dispatches it a second time — measured, `[42]` then `[42, 42]`
+     * through a compensation tool that moved the money and then answered with the approval
+     * floor's own error code. The writer (`run/engine.ts`'s `#compensateOne`) therefore
+     * discriminates on facts the engine owns, never on anything read off a `ToolResult`.
      *
      * OPTIONAL, AND ABSENT MEANS NOT RETRYABLE. That is the fail-closed reading and it is what
      * every row written before this field says, so an old journal settles exactly as it always

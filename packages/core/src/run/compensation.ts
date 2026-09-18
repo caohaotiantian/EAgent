@@ -156,15 +156,22 @@ export function planCompensation(input: CompensationInput): CompensationPlan {
 
   for (const e of input.events) {
     if (e.type === "compensation.recorded") {
-      // OUTCOME-AWARE, because `not_attempted` is not one thing. `compensated` and a
-      // `not_attempted` whose reason is STRUCTURAL — no compensation declared, an unregistered
-      // tool — will read the same on every future pass, so settling them is right and re-planning
-      // them would loop. But `not_attempted` is also written when the block is TRANSIENT: a child
-      // run whose graph could not be rebuilt in this process, whose own reason string tells the
-      // operator to "attach it and rewind". Settling that seq made the advice impossible —
-      // measured, planning over the child journal after such a row gave
-      // `steps= 0  settled= [8]`, so the operator who did exactly what the row said got a
-      // zero-step plan and an effect that still stands.
+      // OUTCOME-AWARE, because `not_attempted` is not one thing. THE LINE IS WHOSE FACT IT IS.
+      //
+      // A block that is a fact about the JOURNAL or the MANIFEST reads the same on every future
+      // pass, so settling it is right and re-planning it would loop: `compensated`, "the tool
+      // declares no compensation", "no live `effect.completed` is recorded", "the recorded result
+      // carries no `details`". Nothing anyone deploys changes any of them.
+      //
+      // A block that is a fact about THIS PROCESS or THIS TRIGGER can be cleared, and settling it
+      // makes its own advice impossible: an undo the live registry does not carry, a tool the
+      // registry no longer carries at all, a task outside the projection this boundary folded, a
+      // child run whose graph could not be rebuilt here, and the approval floor a `run_failed`
+      // rollback sits under while a rewind does not. Measured on the child-graph one: planning
+      // over the child journal after such a row gave `steps= 0  settled= [8]`, so the operator who
+      // did exactly what the row's reason said — "attach it and rewind" — got a zero-step plan and
+      // an effect that still stands. `run/engine.ts`'s `#compensateOne` is the one writer and its
+      // arms are annotated with which side of this line each falls on.
       //
       // `retryable` is the discriminant and it is written at the append rather than inferred
       // here, so this fold does not have to parse a reason string. Absent means NOT retryable,
