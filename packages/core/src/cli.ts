@@ -4904,6 +4904,107 @@ export async function startMcp(servers: readonly McpServerConfig[]): Promise<rea
 }
 
 /**
+ * WRAP A DIAGNOSTIC AT SPACES, KEEPING QUOTED IDS AND BACKTICK SPANS WHOLE.
+ *
+ * Pure, and exported for its unit test — `cli.ts` is not on the barrel, so this adds no name to
+ * the pinned public surface.
+ *
+ * `text` is the WHOLE line, prefix included (`"   fix: give join …"`); `indent` is the column
+ * continuation lines start at. The first line keeps whatever leading spaces `text` already had,
+ * which is how `   fix: ` survives.
+ *
+ * WHY BREAKING AT SPACES IS NOT ENOUGH. A diagnostic's load-bearing tokens are `"read"` and
+ * `` `kind: join` `` — both contain spaces, and a break inside one turns an identifier the author
+ * is meant to copy into two halves on different lines. So a `"…"` or `` `…` `` run is one token.
+ * The opener is only honoured when a CLOSER exists later in the text; an unbalanced quote is an
+ * ordinary character, so a malformed message cannot glue the rest of the line into one token.
+ *
+ * TERMINATION AND TRUNCATION, both by construction: the loop is a `for` over a finite token list,
+ * and the only writes are appends — a token longer than `width` overflows its own line rather than
+ * being split or dropped, and a text with no spaces at all comes back byte-for-byte unchanged.
+ *
+ * WIDTH IS COUNTED IN UTF-16 UNITS, not bytes, because it is a DISPLAY width. The `fix:` line
+ * §H.14 measured is 852 bytes and 846 characters — three em dashes, three bytes each — and it is
+ * 846 columns that a terminal has to find room for.
+ */
+export function wrapDiagnostic(text: string, width: number, indent: number): string {
+  const lead = /^ */.exec(text)![0];
+  const tokens: string[] = [];
+  let cur = "";
+  let closer: string | undefined;
+  for (let i = lead.length; i < text.length; i++) {
+    const c = text[i]!;
+    if (closer === undefined && (c === '"' || c === "`") && text.indexOf(c, i + 1) !== -1) closer = c;
+    else if (closer !== undefined && c === closer) closer = undefined;
+    else if (c === " " && closer === undefined) {
+      if (cur !== "") tokens.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  if (cur !== "") tokens.push(cur);
+  if (tokens.length <= 1) return text;
+
+  const pad = " ".repeat(Math.max(0, indent));
+  const lines: string[] = [];
+  let line = lead + tokens[0]!;
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (line.length + 1 + t.length <= width) line += ` ${t}`;
+    else {
+      lines.push(line);
+      line = pad + t;
+    }
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
+/**
+ * THE WIDTH THE DIAGNOSTIC PRINTER WRAPS AT, or `undefined` for "do not wrap" — §H.14.
+ *
+ * MEASURED, NOT ASSUMED. GRAPH021's `fix:` line is 852 bytes on one line; a terminal soft-wraps
+ * it at the column boundary, which at 80 columns splits a token 6 times (`GRAPH008_JOIN_D` /
+ * `EPTH`) and starts all 11 continuation rows at column 0, where they are indistinguishable from
+ * a new diagnostic. Hard-wrapping at spaces with a hanging indent costs nothing there.
+ *
+ * BUT IT COSTS SOMETHING IN A PIPE, and that cost is why §H.14 was a row rather than an obvious
+ * fix: a wrapped line cannot be `grep`ed for as one string. So the wrap is conditioned on the
+ * STREAM. On a TTY a human is reading and there is no `grep`; in a pipe the bytes are exactly what
+ * they were before this function existed. Every test in this tree spawns the CLI with piped
+ * stderr, so none of them sees a wrap.
+ *
+ * `COLUMNS` IS DELIBERATELY NOT READ. Honouring it would make the bytes a diagnostic writes depend
+ * on the invoking shell even in a pipe — the grep cost above, reintroduced through a side door,
+ * for an operator who never asked to wrap. The width comes from the stream itself and nowhere
+ * else.
+ *
+ * FLOOR 60: the longest token in that `fix:` line is 21 characters and the deepest continuation
+ * indent is 8, so 60 always has room for a token and the overflow branch stays theoretical.
+ * CAP 120: past that a wrapped paragraph stops reading as a paragraph, and the soft wrap it
+ * replaces was no worse.
+ */
+function diagnosticWidth(): number | undefined {
+  if (process.stderr.isTTY !== true) return undefined;
+  const cols = process.stderr.columns;
+  if (typeof cols !== "number" || !Number.isFinite(cols)) return undefined;
+  return Math.min(120, Math.max(60, Math.floor(cols)));
+}
+
+/**
+ * Write one diagnostic line to stderr, wrapped if — and only if — stderr is a terminal.
+ *
+ * `indent` is the hanging indent for continuations: 2 for the `✗ <file>: <code>: <message>` line,
+ * putting them under the file name and past the marker; 8 for `   fix: `, putting them under the
+ * text. 2 < 3 on purpose, so a wrapped message is never mistaken for the `fix:` line below it.
+ */
+function writeDiagnostic(line: string, indent: number): void {
+  const width = diagnosticWidth();
+  process.stderr.write(`${width === undefined ? line : wrapDiagnostic(line, width, indent)}\n`);
+}
+
+/**
  * `introducing` — whether this graph is being brought INTO the deployment, or matched back to a
  * run that already exists.
  *
@@ -4946,12 +5047,12 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
   const where = basename(file);
   if (!result.ok) {
     for (const d of result.diagnostics) {
-      process.stderr.write(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}\n`);
-      if (d.fix !== undefined) process.stderr.write(`   fix: ${d.fix}\n`);
+      writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
+      if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
     }
     throw result.error;
   }
-  for (const d of result.diagnostics) process.stderr.write(`! ${where}: ${d.code}: ${d.message}\n`);
+  for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
