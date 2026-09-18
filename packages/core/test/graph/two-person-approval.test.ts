@@ -23,6 +23,58 @@
  * fix and it belongs in the join, not in the gate. An assertion that let this quietly become
  * "carol's gate closes" would be hiding the one thing a reader needs to know before copying the
  * file.
+ *
+ * ## §A.68 — AND A REJECTION ARRIVING BEFORE THE SECOND APPROVAL VETOES IT
+ *
+ * The measurement above says what two approvals do. It said nothing about a REJECTION, and the
+ * file's description said "two of three must approve" while `onBranchError: "fail"` made one
+ * rejection fail the run whatever the other two said. Driven on the shipped file:
+ *
+ *     alice approve, bob approve                 awaiting_gate  wrote ["ship it"]
+ *     alice REJECT,  bob approve, carol approve  failed         wrote []  E_HUMAN_APPROVAL_REQUIRED
+ *     alice approve, bob REJECT,  carol approve  failed         wrote []  E_HUMAN_APPROVAL_REQUIRED
+ *     alice REJECT,  bob REJECT,  carol REJECT   failed         wrote []  E_HUMAN_APPROVAL_REQUIRED
+ *
+ * AND THE ONE THE ROW DID NOT CARRY, which decides what the veto is worth:
+ *
+ *     alice approve, bob approve, carol REJECT   failed         wrote ["ship it"]
+ *
+ * The barrier short-circuits on two approvals, `save` runs, and the gate the short-circuit left
+ * open — the residue named above — is STILL ANSWERABLE. So the third vote fails a run whose
+ * effect already happened. Two approvals are the point of no return; "any one of them can veto
+ * it" would have been the second false description in this file, and so — more quietly — would
+ * "a rejection that arrives FIRST", since a rejection arriving SECOND also vetoes with nothing
+ * written (asserted below, over all six orderings). The shipped `description` gives the boundary.
+ *
+ * §A.68 offered two closures and said the decision is which behaviour the example is FOR. The
+ * measurement took it: `onBranchError: "skip"` was REFUSED, on the same graph with only that
+ * field changed —
+ *
+ *     alice REJECT,  bob approve, carol approve  succeeded  wrote ["ship it"]   ← wanted
+ *     alice REJECT,  bob REJECT,  carol REJECT   failed     E_QUORUM_UNREACHABLE ← wanted
+ *     alice REJECT,  bob REJECT,  carol approve  succeeded  wrote ["ship it"]   ← NOT WANTED
+ *
+ * — in all three orderings of one approval and two rejections. `#maybeFireJoin` fires `quorum` on
+ * `succeeded >= need || noMoreArrivals`, so once every member is terminal the barrier releases
+ * whatever `k` was; `#foldJoin` then holds only the `onBranchError === "fail" && skipped > 0` arm
+ * and §D.9's, and never re-checks `k`. Under `"fail"` the first arm masks it. Under `"skip"`
+ * nothing does, which is why three rejections still fail and two do not.
+ *
+ * §D.9'S ARM IS `succeededMembers === 0` FOR THIS GRAPH, not `succeededWork === 0`. The predicate
+ * is `workMembers > 0 ? succeededWork === 0 && terminalWork === workMembers : succeededMembers === 0`
+ * (`run/engine.ts`), and all three members here are `human_gate` nodes, so `workMembers` is 0 and
+ * the fallback is what fires. `engine.ts` names THIS FILE at that branch — "the EVIDENCE-ONLY
+ * BARRIER, which is `examples/graphs/two-person-approval.json`" — so quoting the work term here
+ * would have pointed a reader at the one arm this graph can never reach.
+ *
+ * So `"skip"` would replace a fail-CLOSED mismatch with a fail-OPEN one: an example saying "two
+ * of three" that lets one person land the write. *Refusing is always allowed; loosening never
+ * is.* The description was made honest instead, and the four cases are pinned below — including
+ * the `"skip"` measurement, so the arm cannot be taken later without re-running it.
+ *
+ * THAT `k` IS UNENFORCED ON THE `noMoreArrivals` RELEASE IS AN ENGINE DEFECT AND IS NOT FIXED
+ * HERE. `run/engine.ts` is another lane's file. When it is fixed, the last test in this file goes
+ * red and says so — at which point §A.68's `"skip"` arm becomes available for the first time.
  */
 
 import test from "node:test";
@@ -31,6 +83,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES } from "../../src/errors.ts";
 import { compile } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
@@ -170,4 +223,161 @@ test("AND THE PERSON A GATE DOES NOT NAME CANNOT ANSWER IT", async () => {
     /NOT_AUTHORIZED|not authorized|does not name/i,
   );
   assert.equal(h.wrote.length, 0);
+});
+
+// ── §A.68 · the veto, and why `onBranchError: "skip"` was refused ────────────
+
+/**
+ * Drive a spec through a real Engine, answering gates in the order given, and report what a
+ * reader of the example would see: did the write land, and how did the run end.
+ *
+ * `break` on a gate that is not open is deliberate — once the run has failed there is nothing
+ * left to answer, and a sequence that runs out is the honest shape of "the third person never
+ * got to vote".
+ */
+async function drive(
+  spec: GraphSpec,
+  decisions: readonly (readonly [string, "approve" | "reject"])[],
+): Promise<{ status: string; wrote: readonly string[]; error: string | undefined }> {
+  const h = harness();
+  const r = compile({ spec, resolver: RESOLVER, tools: { "fs.write": WRITE }, tenantCapabilities: ["fs:write"] });
+  assert.equal(r.ok, true, r.diagnostics.map((d) => `${d.severity}:${d.code} ${d.message}`).join(" | "));
+  const runId: RunId = await h.engine.submit({ graph: r.graph, inputs: { request: "ship it" } });
+  let p = await h.engine.advance(runId);
+  let i = 0;
+  for (const [who, how] of decisions) {
+    const g = openGates(p).find((x) => x.nodeId === (who as NodeId));
+    if (g === undefined) break;
+    p = await h.engine.resolveGate(runId, {
+      gateId: g.gateId,
+      decision: how === "approve" ? { kind: "approve" } : { kind: "reject", reason: "no" },
+      actor: human(`u:${who}`),
+      idempotencyKey: `k${i++}`,
+    });
+  }
+  return { status: p.status, wrote: h.wrote, error: (p as { error?: { code: string } }).error?.code };
+}
+
+test("§A.68 · ONE REJECTION FAILS THE RUN — the four cases on the shipped file, and the late one where the write already landed", async () => {
+  // Case 1 — two approvals: the barrier short-circuits and the write lands. The existing test
+  // above pins this step by step; it is repeated here so the four cases read as one table.
+  const twoApprovals = await drive(SPEC, [["alice", "approve"], ["bob", "approve"]]);
+  assert.deepEqual(twoApprovals.wrote, ["ship it"]);
+  assert.equal(twoApprovals.status, "awaiting_gate", "carol's gate is the residue above, still open");
+
+  // Case 2 — ONE rejection, arriving BEFORE the second approval. `k: 2` would be met on the two
+  // approvals and the write still does not land: `onBranchError: "fail"` is read before `k` ever
+  // matters to a losing arm. This is the case the old description promised and did not deliver.
+  // Every ordering in which the dissenter votes first or second is here, by WHO dissents and by
+  // WHERE their vote falls — the veto must not depend on which of the three it is.
+  for (const dissenter of ["alice", "bob", "carol"] as const) {
+    const others = (["alice", "bob", "carol"] as const).filter((w) => w !== dissenter);
+    for (const order of [
+      [[dissenter, "reject"], [others[0]!, "approve"], [others[1]!, "approve"]],
+      [[others[0]!, "approve"], [dissenter, "reject"], [others[1]!, "approve"]],
+    ] as readonly (readonly (readonly [string, "approve" | "reject"])[])[]) {
+      const r = await drive(SPEC, order);
+      assert.deepEqual(r.wrote, [], `${dissenter} rejecting before the quorum must stop the write, not be outvoted`);
+      assert.equal(r.status, "failed");
+      assert.equal(r.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
+    }
+  }
+
+  // Case 2b — THE SAME REJECTION, ARRIVING THIRD, AND THE WRITE HAS ALREADY HAPPENED. §A.68 asked
+  // whether one rejection fails the run; it does, but the residue at the top of this file decides
+  // WHAT THAT IS WORTH. The barrier short-circuits on two approvals, `save` runs, and the third
+  // gate is left open and still answerable — so the last vote fails a run whose effect already
+  // landed. Two approvals are the point of no return, and an example that read "any one of them
+  // can veto it" would have been the second false description in the same file.
+  const lateVeto = await drive(SPEC, [["alice", "approve"], ["bob", "approve"], ["carol", "reject"]]);
+  assert.equal(lateVeto.status, "failed");
+  assert.equal(lateVeto.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
+  assert.deepEqual(lateVeto.wrote, ["ship it"], "the run FAILS with the write standing — the veto arrived after the effect");
+
+  // Case 2c — THE VERDICT IS SETTLED, THE RUN IS NOT. One rejection with the other two silent
+  // parks `awaiting_gate`: the barrier still has members to hear from. "One rejection fails the
+  // whole run" is true of the outcome and not of the moment, which is why the description says
+  // "once the remaining gates are answered" rather than leaving a copier to wait for a failure
+  // that has not happened yet.
+  const loneReject = await drive(SPEC, [["alice", "reject"]]);
+  assert.equal(loneReject.status, "awaiting_gate");
+  assert.deepEqual(loneReject.wrote, []);
+  assert.equal(loneReject.error, undefined, "and no error yet — nothing has been decided against");
+
+  // Case 3 — all three reject.
+  const allReject = await drive(SPEC, [["alice", "reject"], ["bob", "reject"], ["carol", "reject"]]);
+  assert.deepEqual(allReject.wrote, []);
+  assert.equal(allReject.status, "failed");
+  assert.equal(allReject.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
+
+  // Case 4 — two reject, one approves. Fails for the same reason as case 2 and NOT because the
+  // quorum was short: under `"fail"` the first rejection already decided it.
+  const twoReject = await drive(SPEC, [["alice", "reject"], ["bob", "reject"], ["carol", "approve"]]);
+  assert.deepEqual(twoReject.wrote, []);
+  assert.equal(twoReject.status, "failed");
+  assert.equal(twoReject.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
+});
+
+test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the veto, and a `residue` label carries the refused arm", () => {
+  const description = String((SPEC.metadata as { description?: unknown }).description ?? "");
+  const labels = (SPEC.metadata as { labels?: Record<string, string> }).labels ?? {};
+  // The defect was a description and a behaviour disagreeing, so the description is what is
+  // asserted — not a comment in this file, which a reader copying the example never sees.
+  assert.match(description, /VETO/i, `the description must state that one rejection fails the run: ${description}`);
+  assert.match(description, /onBranchError/, "and name the field that does it");
+  assert.match(description, /one rejection fails the whole run/i, description);
+  // NOT "arrives first" — a rejection arriving SECOND vetoes too, with nothing written, and the
+  // rule a copier needs is the boundary, not the position. Understating it in the description and
+  // stating it correctly only in a label further down would be this file's defect a second time.
+  assert.match(description, /before the second approval/i, `the description must give the boundary, not "first": ${description}`);
+  assert.match(description, /already landed/i, "and say what a rejection after it is worth");
+  // AND THE MOMENT, not just the verdict: one rejection with the other two silent leaves the run
+  // `awaiting_gate`, which the fourth driven case below pins. "Fails the whole run" on its own
+  // reads as "fails now" and would send a copier looking for a failure that has not happened yet.
+  assert.match(description, /awaiting_gate|until the other people vote/i, `the description must say the run parks until the rest vote: ${description}`);
+  assert.ok(
+    Object.values(labels).some((v) => /skip/.test(v) && /ONE approval/.test(v)),
+    `a residue label must carry why "skip" was refused, so the arm cannot be taken later without re-running it: ${JSON.stringify(labels)}`,
+  );
+  // And the veto's own limit, which is the half a reader is likeliest to get wrong.
+  assert.ok(
+    Object.values(labels).some((v) => /already landed/i.test(v)),
+    `a residue label must say that a rejection arriving third fails a run whose write already happened: ${JSON.stringify(labels)}`,
+  );
+});
+
+test("§A.68 · WHY `onBranchError: \"skip\"` WAS REFUSED — measured, not asserted: it lets ONE approval land the write", async () => {
+  // The same shipped graph with ONE field changed. If this test ever goes red, the engine has
+  // learned to enforce `k` on the `noMoreArrivals` release — at which point §A.68's `"skip"` arm
+  // becomes available for the first time, the example can take it, and this test is deleted with
+  // its row. Until then it is the evidence the description arm was the honest one.
+  const skip = JSON.parse(JSON.stringify(SPEC)) as GraphSpec;
+  const quorum = skip.nodes.find((n) => n.id === ("quorum" as NodeId))!;
+  (quorum.join as { onBranchError: string }).onBranchError = "skip";
+
+  // Wanted, and delivered: two approvals over one rejection land the write.
+  const oneReject = await drive(skip, [["alice", "reject"], ["bob", "approve"], ["carol", "approve"]]);
+  assert.deepEqual(oneReject.wrote, ["ship it"]);
+  assert.equal(oneReject.status, "succeeded");
+
+  // Wanted, and delivered: all three rejecting fails, on §D.9's arm.
+  const allReject = await drive(skip, [["alice", "reject"], ["bob", "reject"], ["carol", "reject"]]);
+  assert.deepEqual(allReject.wrote, []);
+  assert.equal(allReject.status, "failed");
+  assert.equal(allReject.error, CODES.E_QUORUM_UNREACHABLE);
+
+  // NOT WANTED, and delivered anyway, in all three orderings: `k: 2` unmet and the write lands.
+  for (const approver of ["alice", "bob", "carol"] as const) {
+    const order = (["alice", "bob", "carol"] as const).map(
+      (who) => [who, who === approver ? "approve" : "reject"] as const,
+    );
+    const r = await drive(skip, order);
+    assert.deepEqual(
+      r.wrote,
+      ["ship it"],
+      `MEASURED, not wanted: with only ${approver} approving, k:2 is unmet and the write lands anyway. ` +
+        "If this line now fails, the engine enforces k on the noMoreArrivals release and §A.68's skip arm is open.",
+    );
+    assert.equal(r.status, "succeeded");
+  }
 });

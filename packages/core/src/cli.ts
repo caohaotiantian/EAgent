@@ -1474,21 +1474,52 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
 }
 
 /**
+ * The characters that let a string somebody else chose forge or hide a line on a terminal — C0/C1,
+ * DEL/C1, and the bidi controls. Spelled ONCE, and read by `legible()` and by `writeDiagnostic`.
+ *
+ * WHERE THE CLASS STOPS, ON PURPOSE. The zero-width characters — ZWSP, ZWNJ, ZWJ, WJ, SHY — and
+ * every homoglyph are OUTSIDE it, because the threat this list answers is forging or hiding a ROW,
+ * and none of them can: not one moves a cursor, starts a line, or erases one. What they do cost is
+ * a width unit each while rendering as nothing, so a name full of them wraps a little early — a
+ * cosmetic cost, not a forged diagnostic. A homoglyph is a different problem, one name looking
+ * like another, and deleting characters is not its answer.
+ */
+const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
+const SPOOFING = new RegExp(`[${SPOOFING_CLASS}]`, "g");
+/**
+ * The same set less TAB and NEWLINE, for the diagnostic printer.
+ *
+ * Those two are exempt because `wrapDiagnostic` ALREADY OWNS THEM and already answers the same
+ * threat: a tab is a gap it may break at, and a newline is a forced break it re-indents — so the
+ * row after one starts at the hanging indent, never at column 0, and cannot forge a `✗ ` of its
+ * own. Stripping them instead would make that branch unreachable from the CLI and buy nothing.
+ */
+const SPOOFING_BUT_WHITESPACE = new RegExp(`(?![\\t\\n])[${SPOOFING_CLASS}]`, "g");
+
+/**
  * Text a COLLECTOR chose, made safe to put in front of an operator.
  *
  * `detail` and `partialSuccess.errorMessage` are the two strings on this path that come from
  * outside the trust boundary, and both land on the line explaining a non-zero exit. Control
  * characters in one let a broken — or hostile — collector rewrite or hide that line with ANSI
  * escapes. The exporter has already masked both against the endpoint and the header values;
- * this is the rendering half of the same rule, and it belongs here because this is the only
- * caller that writes them to a terminal.
+ * this is the rendering half of the same rule.
+ *
+ * IT IS NO LONGER THE ONLY CALLER THAT WRITES SUCH A STRING TO A TERMINAL, and this sentence used
+ * to say it was. `writeDiagnostic` is the other: since §H.14 gave it a terminal to render into, a
+ * file name interpolated into a diagnostic is exactly this class of string. It strips
+ * `SPOOFING_BUT_WHITESPACE` rather than calling this function, because the `trim()` here would eat
+ * the `   fix: ` indent.
  */
 function legible(text: string): string {
   // C0/C1 AND THE BIDI CONTROLS. The docstring's threat is "rewrite or hide that line", and a
   // right-to-left override does exactly that without being an ANSI escape — driven, U+202E and
   // U+2028 both survived the C0/C1 class into the rendered `otlp:` line. U+2028/2029 are line
   // separators a terminal may break on, which forges a second line.
-  return text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, " ").trim();
+  //
+  // ONE LIST, TWO READERS: `SPOOFING_CLASS` is spelled once, beside `SPOOFING_BUT_WHITESPACE`,
+  // because a second copy would drift and the drift would be silent in the direction that matters.
+  return text.replace(SPOOFING, " ").trim();
 }
 
 /**
@@ -4904,6 +4935,206 @@ export async function startMcp(servers: readonly McpServerConfig[]): Promise<rea
 }
 
 /**
+ * WRAP A DIAGNOSTIC AT SPACES, KEEPING QUOTED IDS AND BACKTICK SPANS WHOLE.
+ *
+ * Pure, and exported for its unit test — `cli.ts` is not on the barrel, so this adds no name to
+ * the pinned public surface.
+ *
+ * `text` is the WHOLE line, prefix included (`"   fix: give join …"`); `indent` is the column
+ * continuation lines start at. The first line keeps whatever leading spaces `text` already had,
+ * which is how `   fix: ` survives.
+ *
+ * WHY BREAKING AT SPACES IS NOT ENOUGH. A diagnostic's load-bearing tokens are `"read"` and
+ * `` `kind: join` `` — both contain spaces, and a break inside one turns an identifier the author
+ * is meant to copy into two halves on different lines. So a `"…"` or `` `…` `` run is one token.
+ * The opener is only honoured when a CLOSER exists on the same line; AN unbalanced quote is then an
+ * ordinary character, so the remainder cannot all become one token.
+ *
+ * "AN", NOT "ANY" — and the difference is a measured overflow, not a quibble. Quotes PAIR. A file
+ * name carrying one `"` pairs with the message's own next `"`, and everything between them becomes
+ * a single token: at width 60 a one-quote name produced a row 64 characters over. That is the
+ * overflow branch behaving exactly as designed (a token is never split) and it is why the claim
+ * says an unbalanced quote rather than any number of them. `test/cli/diagnostic-wrap.test.ts` pins
+ * it as an OVERFLOW, not as a failure.
+ *
+ * THE GAPS ARE KEPT VERBATIM, and the first cut of this did not do that. It rebuilt every line by
+ * joining tokens with ONE space, so `bad  name.json` — two spaces, a real file name, interpolated
+ * unquoted by `loadGraph` — rendered on a terminal as `bad name.json`, a path that does not exist.
+ * A wrap may replace the whitespace AT A BREAK and must not touch any other. So the text between
+ * two tokens travels with them, and only the run where a line actually breaks becomes a newline
+ * plus the indent. Trailing whitespace rides the last line.
+ *
+ * AND A NEWLINE ALREADY IN THE TEXT IS A FORCED BREAK. `GRAPH003_BAD_ID` echoes the id it is
+ * refusing, and an id holding a newline is exactly what it refuses — left alone, that newline
+ * drops the rest of the line to COLUMN 0, which is the failure this whole function exists to
+ * remove. Each such segment is re-indented instead, which is also why a quoted span may not
+ * swallow one: the span scan stops at the end of its own line.
+ *
+ * TERMINATION AND TRUNCATION, both by construction: two `while`s over a strictly advancing index
+ * and then a `for` over a finite span list, with appends only — a token longer than `width`
+ * overflows its own line rather than being split or dropped, and a text with at most one token
+ * comes back byte-for-byte unchanged.
+ *
+ * WIDTH IS COUNTED IN UTF-16 UNITS, and that equals display columns for the text every diagnostic
+ * in this tree is built from — ASCII plus em dashes, which `graph/validate.ts` and
+ * `graph/compile.ts` are wholly made of. It is NOT a general equivalence: a combining mark is two
+ * units and one column, a CJK ideograph one unit and two, a tab one unit and up to eight. Those
+ * reach this function only inside a user-supplied id, and the cost is a row a few columns over —
+ * a rendering imperfection on a terminal, never a correctness one, because the pipe is unwrapped.
+ * The `fix:` line §H.14 measured is 852 bytes and 846 units, and it is 846 columns a terminal has
+ * to find room for.
+ */
+export function wrapDiagnostic(text: string, width: number, indent: number): string {
+  const pad = " ".repeat(Math.max(0, indent));
+  if (text.includes("\n")) {
+    return text
+      .split("\n")
+      .map((seg, i) => wrapOneLine(i === 0 ? seg : pad + seg.replace(/^[ \t]*/, ""), width, indent))
+      .join("\n");
+  }
+  return wrapOneLine(text, width, indent);
+}
+
+/** `wrapDiagnostic` for a segment with no newline in it. Whitespace runs are gaps, kept verbatim. */
+function wrapOneLine(text: string, width: number, indent: number): string {
+  const isGap = (c: string | undefined): boolean => c === " " || c === "\t";
+  // Half-open [start, end) ranges of the tokens. Everything outside them is a gap.
+  const spans: [number, number][] = [];
+  let i = 0;
+  while (i < text.length) {
+    while (isGap(text[i])) i++;
+    if (i >= text.length) break;
+    const start = i;
+    let closer: string | undefined;
+    while (i < text.length) {
+      const c = text[i]!;
+      if (closer === undefined && isGap(c)) break;
+      // A span opens only if it CLOSES on this line; an unbalanced quote is an ordinary
+      // character, so a malformed message cannot glue the remainder into one token.
+      if (closer === undefined && (c === '"' || c === "`") && text.indexOf(c, i + 1) !== -1) closer = c;
+      else if (closer !== undefined && c === closer) closer = undefined;
+      i++;
+    }
+    spans.push([start, i]);
+  }
+  if (spans.length <= 1) return text;
+
+  const pad = " ".repeat(Math.max(0, indent));
+  const lines: string[] = [];
+  let line = text.slice(0, spans[0]![1]);
+  for (let k = 1; k < spans.length; k++) {
+    const gap = text.slice(spans[k - 1]![1], spans[k]![0]);
+    const token = text.slice(spans[k]![0], spans[k]![1]);
+    if (line.length + gap.length + token.length <= width) line += gap + token;
+    else {
+      lines.push(line);
+      line = pad + token;
+    }
+  }
+  lines.push(line + text.slice(spans[spans.length - 1]![1]));
+  return lines.join("\n");
+}
+
+/**
+ * THE WIDTH THE DIAGNOSTIC PRINTER WRAPS AT, or `undefined` for "do not wrap" — §H.14.
+ *
+ * MEASURED, NOT ASSUMED. GRAPH021's `fix:` line is 852 bytes on one line; a terminal soft-wraps
+ * it at the column boundary, which at 80 columns splits a token 6 times (`GRAPH008_JOIN_D` /
+ * `EPTH`) and starts all 11 continuation rows at column 0, where they are indistinguishable from
+ * a new diagnostic. Hard-wrapping at spaces with a hanging indent costs nothing there.
+ *
+ * BUT IT COSTS SOMETHING IN A PIPE, and that cost is why §H.14 was a row rather than an obvious
+ * fix: a wrapped line cannot be `grep`ed for as one string. So the wrap is conditioned on the
+ * STREAM. On a TTY a human is reading and there is no `grep`; in a pipe the bytes are exactly what
+ * they were before this function existed.
+ *
+ * THE HALF THAT IS NOT FAVOURABLE, shipped here beside the other so nobody has to find it in a
+ * plan: `loom compile 2>&1 | less` is a PIPE, so the operator most likely to want the wrap — the
+ * one reaching for a pager because the line is 852 characters — does not get it. Symmetrically a
+ * pty-allocating CI runner is a TTY and does. No rule distinguishes `less` from `grep` at the file
+ * descriptor, and wrapping unconditionally would charge every piped consumer the grep cost to buy
+ * the pager case. That is the trade, taken deliberately and reversible in one predicate.
+ *
+ * AND A TEST IS NOT AUTOMATICALLY A PIPE, which is the trap this docstring first fell into. Half
+ * this tree's CLI tests call `main` IN PROCESS with `process.stderr.write` monkeypatched, so they
+ * inherit the TEST process's stdio rather than a pipe of their own. Under `node --test` that is
+ * still a pipe, because the runner spawns each file as a child — but a developer running one file
+ * directly, with stderr on their terminal, is not. Measured by forcing `stderr.isTTY` true in
+ * every test child: 1 of 3941 tests was reading a line break as if it were wording
+ * (`examples-triage.test.ts`, `/unquoted: 24, not "24"/`), and it now collapses whitespace first.
+ * THE LENS: a stream-conditioned behaviour makes every in-process assertion on that stream a
+ * determinism question.
+ *
+ * `COLUMNS` IS DELIBERATELY NOT READ. Honouring it would make the bytes a diagnostic writes depend
+ * on the invoking shell even in a pipe — the grep cost above, reintroduced through a side door,
+ * for an operator who never asked to wrap. The width comes from the stream itself and nowhere
+ * else.
+ *
+ * FLOOR 60: the longest token in that `fix:` line is 21 characters (`GRAPH008_JOIN_DEPTH` with its
+ * backticks) and the deepest continuation indent is 8, so 60 always has room for the vocabulary
+ * this tree's OWN diagnostics are written in. It does NOT make the overflow branch unreachable,
+ * and saying so would be the claim over-reaching: a `"…"` span is one token by construction and
+ * those spans carry user-supplied ids, so token length has no bound. Overflowing a row is the
+ * deliberate answer there — the alternative is cutting the identifier the author must copy.
+ * CAP 120: past that a wrapped paragraph stops reading as a paragraph, and the soft wrap it
+ * replaces was no worse.
+ *
+ * A TTY WITH NO `columns` DOES NOT WRAP, and that is the conservative answer rather than an
+ * oversight. `isTTY` true with `columns` undefined is rare and means the stream could not report a
+ * size; guessing 80 there would hard-wrap at a width nobody measured, and the failure mode of
+ * guessing wrong is a paragraph broken at the wrong place in a terminal that was wider. Not
+ * wrapping restores exactly the behaviour every release before §H.14 had. Pinned in
+ * `test/cli/diagnostic-wrap.test.ts`.
+ */
+function diagnosticWidth(): number | undefined {
+  if (process.stderr.isTTY !== true) return undefined;
+  const cols = process.stderr.columns;
+  if (typeof cols !== "number" || !Number.isFinite(cols)) return undefined;
+  return Math.min(120, Math.max(60, Math.floor(cols)));
+}
+
+/**
+ * Write one diagnostic line to stderr, wrapped if — and only if — stderr is a terminal.
+ *
+ * `indent` is the hanging indent for continuations: 2 for the `✗ <file>: <code>: <message>` line,
+ * putting them under the file name and past the marker; 8 for `   fix: `, putting them under the
+ * text. 2 < 3 on purpose, so a wrapped message is never mistaken for the `fix:` line below it.
+ *
+ * AND THE TERMINAL PATH IS WHERE A HOSTILE STRING GETS RENDERED, which `legible()`'s docstring has
+ * described for one caller since before this one existed: *"control characters … let a broken — or
+ * hostile — collector rewrite or hide that line with ANSI escapes"*. `loadGraph` interpolates a
+ * FILE NAME here, unquoted, and a file name is chosen by whoever can write the directory. A `\r`
+ * in one rewinds the cursor and overprints the line; an ESC sequence colours or erases it; a
+ * U+202E reverses it. Each forges a second diagnostic, or hides a real one. So the TTY path strips
+ * `SPOOFING_BUT_WHITESPACE` before wrapping.
+ *
+ * AND THE PRICE, WHICH IS THE SAME SHAPE AS THE `bad  name.json` ARGUMENT AND IS PAID ANYWAY: ON A
+ * TERMINAL THE RENDERED FILE NAME IS NOT THE FILE NAME. `a<CR>b.json` renders as `a b.json`, which
+ * is a path that does not exist — exactly the defect that whitespace-collapsing caused and that
+ * `wrapDiagnostic` was fixed to stop. The difference is that here the real name is UNSHOWABLE: any
+ * faithful rendering of a CR on a terminal is the attack. So the substitution is deliberate, and
+ * two consequences come with it. A stripped character becomes a SPACE, so it is also a new break
+ * point the wrapper may split at. And only the ESCAPE CHARACTER is stripped, not the sequence it
+ * introduced — `a<ESC>[2Kb.json` renders `a [2Kb.json`, with `[2K` surviving as visible text,
+ * inert because nothing reads it as a command any more. An operator who needs the true bytes has
+ * the pipe, which is unchanged.
+ *
+ * THE PIPE PATH IS UNTOUCHED AND STAYS BYTE-IDENTICAL — deliberately, and it is the one claim this
+ * whole row rests on. It is also, stated plainly, a residue rather than a fix: a control character
+ * in a file name still reaches a piped log exactly as it did before §H.14, and an operator who
+ * `cat`s that log is exposed exactly as much as they were. Closing THAT would change the bytes a
+ * pipe sees, which is the thing the row bought by not wrapping there.
+ */
+function writeDiagnostic(line: string, indent: number): void {
+  const width = diagnosticWidth();
+  if (width === undefined) {
+    process.stderr.write(`${line}\n`);
+    return;
+  }
+  process.stderr.write(`${wrapDiagnostic(line.replace(SPOOFING_BUT_WHITESPACE, " "), width, indent)}\n`);
+}
+
+/**
  * `introducing` — whether this graph is being brought INTO the deployment, or matched back to a
  * run that already exists.
  *
@@ -4946,12 +5177,12 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
   const where = basename(file);
   if (!result.ok) {
     for (const d of result.diagnostics) {
-      process.stderr.write(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}\n`);
-      if (d.fix !== undefined) process.stderr.write(`   fix: ${d.fix}\n`);
+      writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
+      if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
     }
     throw result.error;
   }
-  for (const d of result.diagnostics) process.stderr.write(`! ${where}: ${d.code}: ${d.message}\n`);
+  for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
@@ -8743,6 +8974,20 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             payloads: ws.payloads,
           },
         });
+        // NOT `writeDiagnostic`, and the reason is what the line IS. §H.14 gave the compile
+        // diagnostic printer a wrap because its payload is a PARAGRAPH — prose an author reads
+        // once and acts on. The payloads here are VALUES an operator diffs, and naming the set
+        // rather than guessing at it: over `ReplayFrame`'s ten kinds, `expected`/`actual` are a
+        // graph id or a `ref=digest` drift list (`graph.bound`), an effect key (`effect.rebound`,
+        // `effect.unserved`), `taskId hash` or `N steps` (`state.hash`), a task state name
+        // (`task.committed`), sorted `state:decision` pairs like `open:approve,closed`
+        // (`gate.decided`), `failed:CODE` or a status word (`run.completed`/`run.failed`), ONE
+        // JSON document (`state.reduced`, `JSON.stringify(channels)`) and ONE prose sentence
+        // (`run.message`). Not a paragraph among them, and re-flowing a digest list or a
+        // serialised object at spaces makes the one thing the line exists for — spotting where
+        // the two differ — harder, not easier. One writer, one discipline, so the prose member
+        // does not get a rule of its own. The `✗` is shared; the job is not. This is the only
+        // other `✗`-prefixed stderr writer in the file, so this comment is the whole census.
         for (const f of report.frames.filter((x) => !x.match)) {
           process.stderr.write(`✗ ${f.kind} ${f.taskId ?? ""}: expected ${f.expected}, got ${f.actual}\n`);
         }
