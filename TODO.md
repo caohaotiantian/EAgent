@@ -20,25 +20,25 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-15 on `a9214611`
+## State — one command each, re-run 2026-09-18 on `c3f5e60a`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,906 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,862 → 3,906) | `npm test` |
-| pinned exports | 542, **unmoved** — the 2026-09-15b wave added no exported name either: `dispatchesVerb` and `PRODUCES_NOTHING` are module-private, and the evidence/work split is two counters inside `#foldJoin` | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-15b wave's only kernel edits are `run/engine.ts` (`4700a03d`, `bfc45730`, `c9f8b1ec`, `bbe05c3e`, `0081c058`), all under `fix:` and owing no trailer. `cli.ts` and `graph/validate.ts`, the other two files it touched, are not on the pinned list | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files, unmoved — the 2026-09-15b wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **3,928 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,906 → 3,928) | `npm test` |
+| pinned exports | 542, **unmoved** — the 2026-09-18 wave added no exported name either: `FLAGS`, `KNOWN_FLAGS`, `VERB_POSITIONALS` and `APPROVAL_FLOOR_REFUSALS` are all module-private | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-18 wave's only kernel edits are `run/engine.ts` and `journal/events.ts` (`25ed5978`, `62335f93`, `c6f24b51`, `d6b23979`, `dee1bb7e`, `300bf222`), all under `fix:` and owing no trailer. `cli.ts` and `graph/validate.ts`, the other two files it touched, are not pinned — and `graph/validate.ts` is on `kernel.json`'s `notKernel` list BY NAME, with a written reason, which two documents and one lane got wrong this wave | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files, unmoved — the 2026-09-18 wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | 60 codes, unmoved — this wave's one new refusal reuses `E_QUORUM_UNREACHABLE`, the code the arm beside it already raised | `Object.keys(CODES).length` |
+| error vocabulary | 60 codes, unmoved — this wave added no code and RETIRED a misuse: §H.13 moved three refusals off `E_INTERNAL` onto the `E_CONFIG_INVALID` that already existed | `Object.keys(CODES).length` |
 
-The kernel guard also prints a commits-judged count (756 at `a9214611`). It is deliberately not a
+The kernel guard also prints a commits-judged count (775 at `c3f5e60a`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-15b.md` is the current handoff; `docs/handoff-2026-09-15.md` is the one before it.
+`docs/handoff-2026-09-18.md` is the current handoff; `docs/handoff-2026-09-15b.md` is the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -54,14 +54,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 71 | 48 | 23 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and four opened by the 2026-09-15b settlement (§A.69-§A.72). The open count rose by one: the wave closed three (§A.21, §A.65, §A.67) and opened four, three of them residues of what it closed |
+| §A | 73 | 50 | 23 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and two opened by the 2026-09-18 settlement (§A.73, §A.74). The open count did not move: this wave closed two (§A.37, §A.69) and opened two, BOTH residues of what it closed — the same shape as 2026-09-15b, one wave on |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 9 | 5 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 14 | 11 | 3 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and §H.12/§H.13 are the six cases §H.11's closure named as NOT in its set — a verb flag with no value, and a missing positional |
+| §H | 15 | 13 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding. §H.12 and §H.13 — the six cases §H.11's closure named as NOT in its set — closed on 2026-09-18, and §H.14 is the readability residue their door left: one `fix:` line is now 844 characters and nothing wraps it |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -336,67 +336,59 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   `d9a8173` — `runIdIn` decodes all NINE run-id captures in `server/http.ts` (the row said three),
   and `run/delivery.ts`'s `callbackFor` encodes, so emitter and route agree.
   `test/server/child-run-by-url.test.ts`.
-- **A.37 · The rewind refusal and the rollback plan read two different facts — FOUR shapes, and
-  two of them are recoveries the obvious fix would wall off.** *(DIAGNOSED this wave at
-  `e3041e8a`, `2b3407f3`, `9b26f8f4` — a test file and no `src/` change. The row stays OPEN.)*
-  File: `packages/core/src/run/engine.ts`. `#uncompensatedIrreversible` asks **"does the TOOL
-  declare a compensation?"**; `planCompensation` / `RewindPlan.dispatch` ask **"will a step
-  actually dispatch one?"** — and a rewind is permitted on the first answer while nothing is
-  undone according to the second.
+- ~~**A.37 · The rewind refusal and the rollback plan read two different facts — FOUR shapes, and
+  two of them are recoveries the obvious fix would wall off.**~~ CLOSED at `25ed5978`, `62335f93`,
+  `c6f24b51`, `d6b23979`, `dee1bb7e`, `300bf222`. Three changes, built in the order the design in
+  `docs/handoff-2026-09-15b.md` §Repros gave them, and each of the three moved under review.
+  **(1) `retryable` is written where `run/compensation.ts:170` already promised it was written.**
+  `#compensateOne` now returns `retryable: true` on its PROCESS- and TRIGGER-dependent arms
+  (`unknown_tool`, `unknown_compensation`, "the task is not in the projection", "compensation tool
+  X is not registered") and splits the `out.isError` arm, whose approval-floor half never ran the
+  undo and is recorded `not_attempted, retryable: true`. **The discriminant is NOT the typed error
+  the design specified.** A fresh reviewer proved the typed one forgeable — `#invokeTool` hands
+  back whatever `tool.execute` produced after a `postTool` REPLACE filter, and `err`/`CODES` are
+  public exports, so a compensation tool that RAN, moved the money and then answered
+  `E_HUMAN_APPROVAL_REQUIRED` was re-planned and dispatched a SECOND time (`refunds` `[42]` then
+  `[42, 42]`). It is `APPROVAL_FLOOR_REFUSALS`, a module-private `WeakSet` of the gate arm's own
+  result objects: unforgeable (identity, and the arm's object never reaches a hook or a tool),
+  trap-safe (`has` calls no proxy trap and answers `false` for a non-object, which is the settling
+  direction), and holding no durable state, so a restart that hands it back empty switches no guard
+  off. The typed `error` on the gate arm was DROPPED as dead. Pinned by `SHAPE 3's FORGERY`.
+  **(2) `#uncompensatedIrreversible` is a buffered pass** refusing a settled, in-range,
+  hard-to-undo row whose undo ARGUMENTS are not reconstructible, any-occurrence aggregation, so
+  `planRewind` refuses too. **(3) A SECOND `if` in `#rewindSerially`**, firing regardless of
+  `live`, keyed on `isHardToUndo(s.irreversibility) && s.argsDigest === undefined`.
+  **THREE DIVERGENCES FROM THE DESIGN, each measured rather than argued.**
+  (a) *"Change 1 needs ZERO existing tests updated" was WRONG* — it was derived by grepping four
+  reason strings, which do not cover the SPLIT of arm f, and
+  `compensation-fires.test.ts:441` asserts `failed` on exactly shape 3. It now asserts
+  `not_attempted` + `retryable: true`; the claim that test is ABOUT (`world.purged` is `[]`) is
+  untouched.
+  (b) *Change 3 DROPS the design's `s.undo !== undefined` conjunct, which TIGHTENS beyond the
+  design.* `planCompensation` strips `undo` from a step it marks `unknown_tool` or
+  `unknown_compensation`, so a hard-to-undo effect whose undo tool is missing from THIS registry
+  AND whose arguments were never recorded arrived with the identical `steps 1 / dispatch 0 /
+  blocked 1` signature and was CROSSED — at the base and at `c6f24b51` both. It is now refused.
+  The direction is the allowed one, and the refusal CLEARS: registering the undo accepts the same
+  journal, `dispatch 1`, `refunds [42]`, `charges []`. Pinned as `SHAPE 2's SECOND DOOR` and its
+  CONTROL.
+  (c) *`#rewindSerially`'s message branches on `undo === undefined`*, which the design did not
+  ask for and the second review required: `#rewindPlanOf` computes `argsDigest` as
+  `step.undo === undefined ? undefined : detailsOf(...)`, so ONE sentence about missing `details`
+  was false for the half with no `undo` at all — measured on a `pay.charge.kept` whose
+  `effect.completed` is live and carries `details: {row: 42}`. Two clauses now, and the
+  `undo === undefined` half names the registry tool to deploy.
+  Plus a doc-line correction the design demanded and TWO docstrings it did not: `journal/events.ts`
+  and `run/compensation.ts` both said what `retryable` means and neither matched the writers, and
+  both now state the one rule — **set when the blocker is a fact about THIS PROCESS or THIS
+  TRIGGER; absent when it is a fact about the JOURNAL or the MANIFEST.**
   ```
   $ node --test packages/core/test/run/compensation-refused-then-rewind.test.ts
-  ℹ tests 7   ℹ pass 7   ℹ fail 0                    # re-run on `a9214611`
+  ℹ tests 10   ℹ pass 10   ℹ fail 0      # 7 on `a9214611`; the shape titles were renamed
   ```
-  | # | how the seq got there | plan | rewind today | what the fix must do |
-  |---|---|---|---|---|
-  | 1 | `not_attempted`, no `details` recorded | 0 steps | accepted | **REFUSE**, in `planRewind` too — this row's original shape, and the `effect.completed` is hidden while the effect stands |
-  | 2 | nothing settled, no `details` recorded | 1 step, `dispatch 0`, `blocked 1` | accepted | **REFUSE**, in `rewind` only — the plan already says it cannot dispatch |
-  | 3 | `failed`: the undo is itself hard-to-undo, so the `run_failed` leg could not approve it | 0 steps | accepted | **ACCEPT, AND UNDO IT.** A rewind passes `nodeApproved: true` (engine.ts:2559), so the SAME undo works under rewind — the settled row walls off the recovery |
-  | 4 | `not_attempted`: the undo was absent from THAT process's registry | 0 steps | accepted | **ACCEPT, AND UNDO IT.** Registering it in process 2 does not bring it back |
-  **ROOT CAUSE, in one sentence.** `run/compensation.ts:170` says *"`retryable` is the
-  discriminant and it is written at the append rather than inferred here, so this fold does not
-  have to parse a reason string"* — and **it is written by no arm of `#compensateOne` at all**:
-  that method's return type (engine.ts:2493) does not carry the field, `compensationRecord` only
-  forwards it (:1007), and the sole producer is `#dispatchRollback`'s context-less arm (:2442). So
-  `planCompensation`, a correct READER, settles every seq whose blocker is a fact about this
-  PROCESS or this TRIGGER — which is exactly what makes shapes 3 and 4 permanent.
-  **Closes when** the fix below lands. It is written out in full, verbatim, in
-  `docs/handoff-2026-09-15b.md` §Repros, because `.agent/` is gitignored and the lane's worktree is
-  gone; condensed, it is three changes and change 1 is the one to build first — without it, 2 and
-  3 wall off shapes 3 and 4 instead of fixing them.
-  **(1) Write `retryable: true` at `#compensateOne`'s PROCESS- and TRIGGER-dependent arms**:
-  `unknown_tool`, `unknown_compensation` (shape 4), "the task is not in the projection",
-  "compensation tool X is not registered", and a SPLIT of the `out.isError` arm — whose
-  gate-refusal half never ran the undo at all and must record `not_attempted, retryable: true`
-  (shape 3). The split reads a typed `err.policy(E_HUMAN_APPROVAL_REQUIRED)` that `#invokeTool`'s
-  gate arm has to start returning the way its `deny` arm already does; no consumer depends on its
-  absence, which was checked rather than assumed. The arms that keep `retryable` ABSENT are the
-  invariant ones: "declares no compensation", "no live `effect.completed`", and "the recorded
-  result carries no `details`". `compensation.recorded` needs no vocabulary change — `retryable`
-  stays set only on `not_attempted`, which is what its own docstring in the kernel file
-  `journal/events.ts` says.
-  **(2) `#uncompensatedIrreversible` refuses only a settled, in-range, hard-to-undo row whose undo
-  ARGUMENTS are not reconstructible** (`detailsOf` of the last live `effect.completed` is
-  `undefined`) — ANY-OCCURRENCE aggregation over the range, never latest-wins, because
-  `planCompensation`'s `settled` is a `Set` that only grows. The arguments are the one input that
-  genuinely cannot change, which is why the wall is keyed on them and not on which blocker
-  happened to be recorded: the existing `no_compensation` wall reads the LIVE registry and an
-  operator can clear it by deploying, while a wall derived from a journal row is permanent.
-  **(3) A SECOND `if` in `#rewindSerially`, beside the existing `unrunnable` filter and NOT merged
-  with it.** The existing arm fires only `&& live === undefined`, because an undispatchable step
-  under a live parent is one a later attach can still run; arguments that were never recorded are
-  never recorded, so the new clause must fire regardless of `live`. Merging them re-introduces
-  refusing exactly the case `retryable` exists for.
-  **Zero existing tests need updating**: the four reason strings whose rows would gain `retryable`
-  were grepped across `packages/core/test/` and the only hit is `compensation-plan.test.ts:124`, a
-  READER test that journals no `compensation.recorded` at all. **And one doc line is false at HEAD,
-  to carry in the same commit**: `journal/events.ts:626` says `compensation.recorded.undo` is
-  *"Absent iff `outcome` is `not_attempted`"*, while `compensationRecord` (engine.ts:1004) writes
-  `undo` whenever `step.undo` is defined, on every outcome — which this lane's SHAPE 1 asserts
-  directly.
-  **Two fix designs were REFUTED by running them** — refuse-on-`failed`, and
-  `not_attempted`-only — because both convert shapes 3 and 4 from recoverable into permanent. So
-  would this row's own former closing sentence, *"reads the same fact the plan does"*.
+  **The verb asymmetry is NOT closed** — change 2 sits in `#rewindRefusals` so `planRewind` refuses
+  too, change 3 sits in `#rewindSerially`, which `planRewind` does not call, matching the
+  pre-existing `unrunnable` arm. It is §A.74.
 
 ### Two things that are NOT defects, written down so nobody "fixes" them
 
@@ -1573,34 +1565,47 @@ rather than taken from a lane report.
 Found while building or reviewing the fourth wave. Each was RE-RUN on `a9214611` by the settlement
 rather than taken from a lane report; where a number could not be re-run, the row says so.
 
-- **A.69 · GRAPH021 cannot dictate around a join that already claims `e.to`, and a `loop` or
-  `compensation` claimer is named by nothing.** *(§A.65's residue, disclosed in the rule's own
-  comment and pinned as case (c) of `fanout-branch-diagnostic.test.ts`'s no-empty-list test.)*
-  File: `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`'s `waitsFor`. The fan-out's
-  own target `e.to` is dictated whatever folds it — by an explicit guard, because a list without it
-  dictates an edit that does not clear the GRAPH021 it is attached to. So where another join
-  already claims `e.to`, following the line produces a `GRAPH008_JOIN_DEPTH` the first compile did
-  not print. When that claimer has no inbound edge at all the first compile is not silent — it
-  prints `GRAPH008_BRANCH_NOT_CONNECTED` on the bogus entry — but when the claimer is wired by a
-  `loop` or `compensation` edge it IS silent: that rule accepts an inbound edge of ANY kind and
-  `idx.ancestors` walks neither. Repro through the shipped binary on `a9214611`, on the `eto`
-  graph pasted in `docs/handoff-2026-09-15b.md` §Repros (`again` is a join declaring `read`,
-  reached from it by a `loop` edge):
+- ~~**A.69 · GRAPH021 cannot dictate around a join that already claims `e.to`, and a `loop` or
+  `compensation` claimer is named by nothing.**~~ CLOSED at `a27b8f33`, `4cef9f25`, `473202af` —
+  by option **(b)**, and appended to the `fix:` line rather than to the `message` (the `fix:` is
+  what the author acts on, and the message's existing disclosure clause is by construction about
+  names in the COUNT and not in the LIST, which `e.to` is in both of). **(a) was REFUSED on
+  measurement, not on cost**: it would settle the open §D.8 by side effect, and — emulated by
+  deleting the `loop` edge so `GRAPH008_BRANCH_NOT_CONNECTED` names the entry exactly as (a) would
+  — the dictated edit STILL introduces a `GRAPH008_JOIN_DEPTH` the first compile did not print. It
+  names the entry; it never names the collision. Its shipped-graph cost really is zero (all 9
+  committed `GraphSpec` files wire every `branches` entry `kind: join`), which removes one
+  objection and is not a reason.
+  **The closing claim, in the honest form the test asserts** — §A.65's lesson one row on:
+  GRAPH021's `fix:` line NAMES every join that already declares the fan-out's target and names the
+  refusal that follows, so **the collision is DISCLOSED BY THE FIRST COMPILE**, in the diagnostic
+  that dictates the edit. Acceptance does not move (9/9 shipped graphs compile identically, and a
+  20,000-graph base-vs-HEAD comparison found 0 diagnostic-shape diffs, every changed `fix:` a pure
+  suffix extension), and **the `GRAPH008_JOIN_DEPTH` the dictated edit produces is deliberately NOT
+  suppressed** — the graph is broken twice over and only the author can decide which join is the
+  barrier.
   ```
-  $ node packages/core/src/cli.ts compile graphs/eto.json
-  ✗ eto.json: GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" but no downstream join
-    waits on it; the branch it opens holds 2 nodes (read, classify) …
-     fix: give join "gather" an entry in its `branches` for each of read, classify …
-  E_GRAPH_INVALID: graph has 1 error(s): GRAPH021_FANOUT_WITHOUT_JOIN      # ONE line, naming no claim
-  $ node packages/core/src/cli.ts compile graphs/eto-dictated.json         # that edit, applied exactly
-  ✗ eto-dictated.json: GRAPH008_JOIN_DEPTH: node "read" is inside a fan-out … but 2 joins ("gather",
-    "again") declare it among their branches, and each of them folds those same writes again
+  $ node packages/core/src/cli.ts compile graphs/eto.json      # re-run for this settlement
+  ✗ eto.json: GRAPH021_FANOUT_WITHOUT_JOIN: fanout edge "fan" expands "read" …
+     fix: give join "gather" an entry … NOTE "read" is this fan-out's own target, so it is dictated
+     whatever already folds it — but "again" already declares it among its `branches`, so with the
+     barrier declaring it too `GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join.
+     Decide which join is the barrier for "read" and drop the `branches` ENTRY from the other — the
+     entry alone, and NOT any edge: it is a `kind: join` edge from "read" INTO "again" that would
+     have made this diagnostic not fire …
   ```
-  **Closes when** either (a) the blind spot is made visible — `GRAPH008_BRANCH_NOT_CONNECTED`
-  refuses a `branches` entry whose only connection is a `loop` or `compensation` edge, so the first
-  compile names it; or (b) GRAPH021 names the EXISTING claimer in its own message, so the author is
-  told which join to keep before making the edit. One of the two, and (a) is a new refusal whose
-  cost has to be measured against the 9 committed `GraphSpec` files first.
+  **What three review rounds cost, because each is a rule rather than an anecdote.** The clause
+  first read "drop it — the `branches` entry AND the edge", which dictates deleting the author's
+  own `loop` wiring: when this clause fires there is provably no `kind: join` edge from `e.to` to
+  the claimer (one would put `e.to` in its `idx.ancestors` and the diagnostic would be silent), so
+  "the edge" could only mean the retry/rollback edge, and dropping the ENTRY ALONE compiles.
+  Then the counterfactual dropped its destination — "a `kind: join` edge from "read"" is false
+  the moment any outbound join edge from `read` exists; it is an edge INTO the claimer. Then the
+  pin: `assert.doesNotMatch(/entry AND the edge/)` let the reviewer REINTRODUCE the defect worded
+  differently at 424/424 green, so both arms of the clause are now pinned BYTE-FOR-BYTE — and the
+  PLURAL arm was found unpinned a round later, with both earlier defects still reachable through
+  it. `node --test packages/core/test/graph/fanout-branch-diagnostic.test.ts` → **29 pass / 0
+  fail**; `test/graph` **426/426**. Residue → §A.73.
 
 - **A.70 · A nested join over an EMPTY fan is a WORK member that succeeded producing nothing, so it
   carries an outer barrier whose real work died.** *(§A.67's residue — §A.67's own shape with a join
@@ -1662,6 +1667,54 @@ rather than taken from a lane report; where a number could not be re-run, the ro
   needs a decision about what a released barrier means — or cancels its stragglers at release,
   which is `JoinNode`'s documented `drain` gap. Pinned as CURRENT behaviour in
   `packages/core/test/run/join-evidence-and-work.test.ts`, so it cannot move in silence.
+
+- **A.73 · GRAPH021's new clause sits one compile from two sibling `fix:` lines dictating the
+  OPPOSITE edit.** *(§A.69's residue, and the second time in two waves that closing a `fix:` line
+  has produced a row about a DIFFERENT `fix:` line. Files:
+  `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`'s clause and `rule008`.)* Measured
+  for this settlement on the merged tree, from a throwaway workspace holding the `eto` graph of
+  `docs/handoff-2026-09-15b.md` §Repros with its `back` edge deleted — **ONE compile, two `fix:`
+  lines, opposite instructions**:
+  ```
+  ✗ GRAPH008_BRANCH_NOT_CONNECTED: join "again" waits on "read", but no edge runs from "read" to "again"
+     fix: add an edge read -> again with kind: join
+  ✗ GRAPH021_FANOUT_WITHOUT_JOIN: …
+     fix: … drop the `branches` ENTRY from the other — the entry alone, and NOT any edge: it is a
+     `kind: join` edge from "read" INTO "again" that would have made this diagnostic not fire …
+  ```
+  One line says to ADD the edge that makes `again` a legitimate claimer; the other says `again` is
+  the claimer to drop. And on the `eto` graph WITH its `loop` edge, `rule008`'s own `JOIN_DEPTH`
+  fix names an edge that does not exist — *""again" must drop it from `branches` and drop the
+  `kind: join` edge from "read""*, while the only edge from `read` into `again` is `back`, a
+  `loop`. **A `fix:` line has to predict the compiler** (§A.65's lesson); these predict each other
+  wrongly. **NOTE, under this row rather than as its own** — the SELF-CLAIM shape: where the
+  fan-out's target is a join declaring ITSELF, the clause's counterfactual names an edge from
+  `read` INTO `read`, and adding it does not silence anything — `topoSort` returns `[]` on a
+  cycle, `fanoutDepth` collapses to 0, `foldersOf` empties and the clause DISAPPEARS under a
+  `GRAPH006_UNMARKED_CYCLE`. Re-run for this settlement, both halves. It is left deliberately: the
+  shape is already refused twice in the same output, and the one-line guard available
+  (`alsoClaim[0] === e.to`) would HIDE a true claimer where a node self-declares and another join
+  also claims it — a fifth ternary arm in the string whose fourth arm was a blocking finding.
+  **Closes when** a compile's `fix:` lines are consistent with each other on one graph: either
+  `rule008`'s two lines stop naming an edge kind they have not checked exists, or the rules that
+  can fire together agree on one edit. Not a message reword — the check is that following ANY ONE
+  line in an output does not contradict another line in the SAME output.
+
+- **A.74 · §A.37's two refusal arms answer to different verbs, and the asymmetry is inherited
+  rather than chosen.** *(§A.37's residue; the design said to note it or close it deliberately and
+  NOT to widen scope silently, and this row is that note made checkable.)* File:
+  `packages/core/src/run/engine.ts`. Change 2 sits in `#rewindRefusals`, so `planRewind` refuses
+  too and the test asserts `refusedBy === "planRewind"`. Change 3 sits in `#rewindSerially`, which
+  `planRewind` does not call, so the test asserts `refusedBy === "rewind"` — an operator who reads
+  the plan first is shown a plan and NO refusal (`steps 1`, `dispatch 0`, `blocked 1`) and is
+  refused only when they run it. The asymmetry
+  PREDATES §A.37: the existing `unrunnable` arm has exactly the same shape, which is why it was
+  matched rather than questioned. **Closes when** either `planRewind` reaches the second arm too —
+  it would have to build the same `current.steps` a `#rewindSerially` pass builds, which is the
+  work — or the asymmetry is written at BOTH sites as a decision with its reason, and a test pins
+  that `planRewind` accepts what `rewind` then refuses, so the gap cannot close by accident. Pinned
+  as CURRENT behaviour by `SHAPE 2` in
+  `packages/core/test/run/compensation-refused-then-rewind.test.ts`.
 
 ---
 
@@ -2340,9 +2393,21 @@ Each traces to a decision in `DESIGN.md`.
   littered** — `allow-exec`, `egress`, `exec-env`, `grant`, `max-parallelism` and the three
   `budget-*` — because `openWorkspace` mkdir'd right after the two path flags. The four late
   readers (`jailFor`, `grantFlag`, `boundedCount`, `deploymentBudget`) are pure over `args` and
-  were hoisted above the first `mkdirSync`, precedence unchanged (measured on six double-fault
-  lines), and `jailFor` now runs before `new SqliteStateStore`, so a bad `--egress` no longer opens
-  a journal handle.
+  were hoisted above the first `mkdirSync`, and `jailFor` now runs before `new SqliteStateStore`,
+  so a bad `--egress` no longer opens a journal handle.
+  **CORRECTION, 2026-09-18 — this row said "precedence unchanged (measured on six double-fault
+  lines)" and that is now FALSE.** §H.12's door decides EVERY flag with an argv-only reader,
+  globals included, so precedence between two bad flags in different readers is **argv order**.
+  Three of the six lines moved. Re-measured for the 2026-09-18 settlement:
+  ```
+  compile --grant --egress                 --egress  ->  --grant       # argv order
+  compile --egress --grant                 --egress  ->  --egress      # unchanged
+  compile --budget-usd --max-parallelism   --max-parallelism -> --budget-usd
+  compile --budget-wall-ms bad --budget-usd bad  --budget-usd -> --budget-usd  # ONE reader: unchanged
+  ```
+  The exception is two bad flags inside the SAME multi-flag reader — `jailFor` (5 flags) and
+  `deploymentBudget` (3) — which still answer in that reader's own order. The full eight-class
+  table is in `docs/handoff-2026-09-18.md` §2.
   Re-run on `a9214611`, and on the first cut `57dcbcfa` for the before:
   ```
   $ R=$PWD; D=$(mktemp -d); cd "$D"; node "$R/packages/core/src/cli.ts" nonsense 2>err; echo "exit $?"; ls -A
@@ -2357,36 +2422,80 @@ Each traces to a decision in `DESIGN.md`.
   value (`run --input`, `serve --port`, `serve --token`) and a missing positional (`compile`,
   `score`, `gates`) still open a workspace — §H.12, with §H.13 for what those last three answer.
 
-- **H.12 · A verb flag with no value, and a missing positional, still open a workspace.** *(The six
-  cases §H.11's set deliberately excludes, measured rather than asserted.)* File:
-  `packages/core/src/cli.ts` — the per-verb `case` blocks, which validate after `openWorkspace` has
-  already run. Repro on `a9214611`, each in a fresh `mktemp -d`:
+- ~~**H.12 · A verb flag with no value, and a missing positional, still open a workspace.**~~
+  CLOSED at `db49005d`, `3b527003`, `ee93918f`, `aadc4b68` (merge `609b68ef`), together with
+  §H.13. **The arity is DERIVED, which is what the row required.** `KNOWN_FLAGS` is now
+  `Object.keys(FLAGS)`, and `FLAGS` is one table of 43 rows whose value is **the function that
+  decides that flag's value from argv alone**, or `null`. The door calls the entry for every flag
+  PRESENT in argv; the verb body calls the same function later. The arity is stated nowhere, so it
+  cannot drift — there is one implementation of "does `--port` need a value" and it is `httpPort`,
+  which is also why not one message was rewritten. `VERB_POSITIONALS` is the same shape one level
+  up: one table the door and `requirePositional` both read, so the "what" string exists once.
+  `flag-door.test.ts` RECOMPUTES the reader column from the source by the shipped rule (*the unique
+  top-level `function name(args: Args)`, `main` excluded, that reads the flag; `null` when none or
+  more than one does*), parses the keys a second way and asserts the two agree, and cross-checks
+  both against the flags `main(["help"])` actually advertises — the one path of the three that goes
+  through the module rather than over its text.
   ```
-  [run --input]   exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --input was given with no value at all…
-  [serve --port]  exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --port was given with no value at all…
-  [serve --token] exit=1 left=[.loom err graphs resources]  E_CONFIG_INVALID: --token needs a non-empty value…
-  [compile]       exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: compile requires a graph file
-  [score]         exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: score requires a runId
-  [gates]         exit=1 left=[.loom err graphs resources]  E_INTERNAL: Error: gates requires a runId
+  [run --input]   exit=1 left=[] E_CONFIG_INVALID: --input was given with no value at all…
+  [serve --port]  exit=1 left=[] E_CONFIG_INVALID: --port was given with no value at all…
+  [serve --token] exit=1 left=[] E_CONFIG_INVALID: --token needs a non-empty value…
+  [compile]       exit=1 left=[] E_CONFIG_INVALID: loom compile requires a graph file as argument 1…
+  [score]         exit=1 left=[] E_CONFIG_INVALID: loom score requires a runId as argument 1…
+  [gates]         exit=1 left=[] E_CONFIG_INVALID: loom gates requires a runId as argument 1…
   ```
-  These are decided from ARGV alone too, so §H.11's argument covers them; what stopped them being
-  hoisted with the rest is that the door would need a flag-ARITY table — a SECOND list beside
-  `KNOWN_FLAGS` and `VERB_FLAGS`, which is the drift §H.10 was about. **Closes when** the arity is
-  DERIVED rather than hand-kept: one table the parse, the door and the verb bodies all read, with a
-  test recomputing it from the source the way `verb-flags.test.ts` recomputes the verb set.
+  re-run for this settlement, each in a fresh `mktemp -d`; the three flag messages are byte-equal
+  to `967128d8`'s. **THE OPEN SET IS NOW THREE, and it is derived rather than declared**: `--as`
+  and `--cohort` have more readers than one, so the message depends on the verb and the door does
+  not guess; `--scope` needs the runId, which is a positional. Each is driven in
+  `refusals-leave-no-workspace.test.ts` (**24 pass / 0 fail**, was 19). `--help`, `--reason` and
+  `--reject` are `null` and are NOT residue — `--help` is answered above the door, and a bare
+  `--reason` is deliberately `"operator"` and a bare `--reject` deliberately "(no reason given)".
+  Both defaults are now pinned against the JOURNAL in `operator-pause.test.ts`, because that
+  paragraph is the whole argument for leaving them open and `String(true)` passed the entire suite
+  without it. `test/cli` **335/335**.
+  **THE GLOBALS' EXCLUSION DID NOT SURVIVE CONTACT**, and it is the decision this row really made:
+  the first cut kept §H.11's globals inside `openWorkspace` and put the positional check at the
+  door, which made the positional beat every global and turned §H.11's sweep red on 13 of 15. Only
+  two orders exist — all flags then positionals, or positionals then all flags — and the second
+  breaks `run --input`'s message, which this row requires. So every flag with an argv-only reader
+  is decided at the door, globals included, and **precedence became argv order**: §H.11's row is
+  corrected above, and the eight-class measurement is `docs/handoff-2026-09-18.md` §2. One message
+  is a FIX rather than a move: `promote c.json --suite` bare used to answer *"--baseline needs a
+  path"*. Readability residue → §H.14.
 
-- **H.13 · A missing positional answers `E_INTERNAL` and a plain `Error`.** File:
-  `packages/core/src/cli.ts`, the `compile`, `score` and `gates` arms — the last three lines of
-  §H.12's block: `E_INTERNAL: Error: compile requires a graph file`, a bare `throw new Error(…)`
-  reaching the top-level handler, so an operator's omission is reported in the class reserved for
-  "a bug in Loom". **Closes when** all three raise
-  `err.validation(CODES.E_CONFIG_INVALID, …)` through one `requirePositional(args, verb, what)`
-  helper naming the verb and what it wanted, with a test asserting the CODE for each of the
-  three.
+- ~~**H.13 · A missing positional answers `E_INTERNAL` and a plain `Error`.**~~ CLOSED with §H.12,
+  same shas. `requirePositional(args, i)` raises
+  `err.validation(CODES.E_CONFIG_INVALID, "loom <verb> requires <what> as argument <n>, and none
+  was given. Run `loom help` for the usage line of every verb.")`, looking the "what" up in
+  `VERB_POSITIONALS`, and the door runs it before `openWorkspace`. It covers **all 17 verbs with a
+  positional, not the three the row named** — the row named the three that were reported, and the
+  same throw shape was on every one. The SENTENCE is kept so an operator's grep still matches; only
+  the class changes, which is a correction of a misclassification rather than a broken promise:
+  `E_INTERNAL` is this tree's word for "a bug in Loom", and `server/http.ts`'s `safeDecode` already
+  states the rule the old throw broke. `attestExam`'s positional stays late and explicit — it is
+  CONDITIONAL on `positional[0] === "attest"`, so the door must not demand it before the
+  subcommand is known.
 
+- **H.14 · A `fix:` line is 844 characters on one unwrapped line, and the CLI wraps nothing.**
+  *(§A.69's and §H.12's shared residue — the diagnostic got longer for a good reason and nothing
+  between it and the terminal has an opinion about width.)* File:
+  `packages/core/src/cli.ts`, the diagnostic printer. Measured for this settlement on the `eto`
+  graph of `docs/handoff-2026-09-15b.md` §Repros:
+  ```
+  $ node packages/core/src/cli.ts compile graphs/eto.json | /usr/bin/grep -a '   fix:' | awk '{print length($0)}'
+  852        # 844 of `fix:` text plus the 8-character "   fix: " prefix
+  ```
+  Every `fix:` line in the tree is one `console.error` of a single string; there is no wrap, no
+  width read and no `COLUMNS`. The author this clause was written FOR reads it as one soft-wrapped
+  paragraph in whatever their terminal does. **Closes when** the printer wraps at a width it can
+  defend — with the indent preserved, and with the same treatment for `message` — or when a
+  measurement shows wrapping is worse (a wrapped line cannot be `grep`ed for as one string, which
+  is a real cost and the reason this is a row rather than an obvious fix). Do NOT close it by
+  SHORTENING the clause: what it says is pinned byte-for-byte on both arms, on purpose.
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-15 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-18 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -2489,6 +2598,10 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.65 | `3dcaf728`, `e491162b`, `1f8adaf6` | GRAPH021 stops dictating a member another join already claims, by `rule008`'s own test — following the line prints no diagnostic the first compile did not. Residue → §A.69 |
 | A.67 | `4700a03d`, `d222e146`, `bfc45730`, `c9f8b1ec`, `bbe05c3e`, `0081c058` | a join asks its WORK members whether anything succeeded, needs quiescence before saying no, and reads a router as evidence — and NO `JoinSpec` field. Residues → §A.70, §A.72 |
 | H.11 | `57dcbcfa`, `cbc67bae` | the verb is decided before the workspace opens, all fifteen global flags refuse with nothing on disk, and an unknown verb no longer imports `--extension-module`. Residue → §H.12, §H.13 |
+| A.37 | `25ed5978`, `62335f93`, `c6f24b51`, `d6b23979`, `dee1bb7e`, `300bf222` | `retryable` is written where `run/compensation.ts` promised it was, a rewind refuses an effect whose undo ARGUMENTS were never recorded, and the approval-floor split keys on a module-private `WeakSet` — a tool cannot award itself `retryable`. Three divergences from the design are in the row. Residue → §A.74 |
+| A.69 | `a27b8f33`, `4cef9f25`, `473202af` | GRAPH021's `fix:` names the join that already claims the fan-out's target, so the collision is disclosed by the FIRST compile; acceptance unmoved and the `JOIN_DEPTH` that follows deliberately not suppressed. Option (a) refused on measurement. Residue → §A.73 |
+| H.12 | `db49005d`, `3b527003`, `ee93918f`, `aadc4b68` | one `FLAGS` table whose value is the flag's argv-only READER, `KNOWN_FLAGS` derived from its keys, `VERB_POSITIONALS` read by the door and by `requirePositional` — the arity is stated nowhere and cannot drift. Open set THREE. Residue → §H.14 |
+| H.13 | `db49005d`, `3b527003`, `ee93918f`, `aadc4b68` | a missing positional on all 17 verbs that take one answers `E_CONFIG_INVALID` with the same sentence, and `E_INTERNAL` is reserved for a bug in Loom again |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
