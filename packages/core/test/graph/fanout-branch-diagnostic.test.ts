@@ -1377,9 +1377,16 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
   // count/list disclosure; what it must never be is in the NOTE clause, which is about `read`.
   //
   //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
-  //         \--compensation--> undo(join, branches:["read"])
-  //         \--seq----------->  spare(join, branches:["read"])
-  //                             sink(join, branches:["classify"])   <-- claims something else
+  //                       |                    \--join--> sink(branches:["classify"])
+  //                       |--compensation--> undo(join, branches:["read"])
+  //     plan --seq------------------------>  spare(join, branches:["read"])
+  //
+  // AND `sink` MOVED THIS FIXTURE INTO THE MULTI-CANDIDATE ARM, which is worth saying because the
+  // diagram above once drew a single barrier. `sink` sits at the barrier level and is downstream of
+  // `read`, so `candidates` is now {gather, sink}, `named` is undefined, and the dictated half reads
+  // "pick one of the joins" rather than "give join gather". That is why the byte pin below opens
+  // with `pick one of the joins` — the control for §A.69's clause also became the only test that
+  // pins the plural clause ON TOP OF the multi-candidate dictate.
   const s = f1Step1();
   (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
   (s.inputs as string[]).push("failures");
@@ -1407,6 +1414,25 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
   const first = errorsOf(s);
   const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
   assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+
+  // THE PLURAL ARM IS PINNED BYTE-FOR-BYTE, exactly as the singular one is, and until it was the
+  // round that fixed the singular arm had left BOTH its defects reachable here. The plural text is
+  // a DIFFERENT STRING — four `many ?` ternaries plus the multi-candidate `dictate` arm — and the
+  // name-set and `match` assertions below never reach its tail, so appending " — and delete the
+  // edges from \"read\" into them too", or dropping the destination in the plural arm alone, each
+  // left the whole file green at 426/426. Two arms means two byte pins; there is no third.
+  assert.equal(
+    d.fix,
+    'pick one of the joins "gather" or "sink" — not the node below, which is what it waits FOR — and ' +
+      "give it an entry in its `branches` for read, plus a `kind: join` edge from read into it, added " +
+      'to whatever it already declares. NOTE "read" is this fan-out\'s own target, so it is dictated ' +
+      'whatever already folds it — but "undo", "spare" already declare it among their `branches`, so ' +
+      '`GRAPH008_JOIN_DEPTH` ALREADY refuses "read" as held by more than one join. Decide which join ' +
+      'is the barrier for "read" and drop the `branches` ENTRY from the others — the entry alone, and ' +
+      'NOT any edge: it is a `kind: join` edge from "read" INTO one of them that would have made this ' +
+      "diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting it " +
+      "is a second change",
+  );
 
   // BOTH claimants of `read` are named — the `compensation`-wired `undo` and the `seq`-wired
   // `spare`. Neither is silent on THIS graph: two claimers mean `claimedBy` already counts two, so
