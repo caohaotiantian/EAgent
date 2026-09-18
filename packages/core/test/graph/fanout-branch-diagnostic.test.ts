@@ -77,6 +77,45 @@ function namesIn(fix: string): readonly string[] {
   return names;
 }
 
+/**
+ * THE JOINS A `fix:` LINE DISCLOSES AS ALREADY CLAIMING THE FAN-OUT'S TARGET — §A.69.
+ *
+ * `namesIn` reads what the line DICTATES; this reads what it WARNS about, and the two are
+ * different sets that overlap in exactly one place. The fan-out's own target is in BOTH — dictated
+ * because nothing else clears the error, warned about because dictating it collides — and that
+ * single overlap is the whole of what §A.69 was.
+ *
+ * It reads the NAME SET for the same reason `namesIn` does, and it asserts the two halves of the
+ * clause TOGETHER: a clause that names joins but not the refusal they cause tells the author a
+ * fact without telling them what it costs, and a line that names the refusal without naming a join
+ * is the vacuous pass this file exists to prevent. Returns `[]` only where neither is present.
+ */
+function claimedIn(fix: string): readonly string[] {
+  const m = /NOTE "[^"]+" is this fan-out's own target.*? — but (.+?) already declares? it among/.exec(fix);
+  if (m === null) {
+    assert.doesNotMatch(
+      fix,
+      /GRAPH008_JOIN_DEPTH/,
+      `the line predicts a GRAPH008_JOIN_DEPTH but names no join that causes it:\n  ${fix}`,
+    );
+    return [];
+  }
+  const names = [...m[1]!.matchAll(/"([^"]+)"/g)].map((x) => x[1]!);
+  assert.ok(names.length > 0, `the claim clause names no join — has the sentence changed shape?\n  ${fix}`);
+  // TWO TENSES, AND THE CLAUSE MUST PICK THE TRUE ONE. With one existing claimer the refusal is
+  // future ("with the barrier declaring it too … refuses"); with two it is already in this compile
+  // ("ALREADY refuses"), because `claimedBy` counts them without the barrier. A pattern accepting
+  // only one of the two would have made the other arm's sentence unpinned.
+  assert.match(
+    fix,
+    names.length > 1
+      ? /`GRAPH008_JOIN_DEPTH` ALREADY refuses/
+      : /with the barrier declaring it too `GRAPH008_JOIN_DEPTH` refuses/,
+    `the clause's tense disagrees with ${names.length} claimer(s):\n  ${fix}`,
+  );
+  return names;
+}
+
 /** The join the fix line offers as the barrier: one name, several, or none ("add a join node"). */
 function offeredJoins(fix: string): readonly string[] {
   const one = /give join "([^"]+)" an entry/.exec(fix);
@@ -1093,6 +1132,14 @@ test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated wh
   // that leaves `e.to` out dictates an edit that does not clear the error it is attached to — and
   // a claimer satisfying only the first half does not clear it either, which is (b) and (c).
   //
+  // SO THE GUARD IS KEPT AND THE RESIDUE IS DISCLOSED — §A.69. (b) and (c) are the same residue
+  // and differed only in whether a SIBLING code happened to name the claimer, so the disclosure
+  // belongs in THIS rule's own `fix:` line, which fires for both. Tightening the sibling's
+  // acceptance condition instead — the row's option (a) — would have named the bogus ENTRY in (c)
+  // as it already does in (b), and in neither case the COLLISION: measured, the dictated edit still
+  // produced the same `GRAPH008_JOIN_DEPTH` the first compile had not printed. `claimedIn` reads
+  // the clause that does name it.
+  //
   // AN EARLIER CUT LEANED ON AN IMPLICATION INSTEAD, and it was false. It required a folder to be
   // DOWNSTREAM of its member, arguing that a join collecting `read` would satisfy `joined` and so
   // never reach the filter. `rule008`'s `claimedBy` counts a folder from `branches` membership
@@ -1118,10 +1165,12 @@ test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated wh
   //     AND THE RESIDUE IS PINNED, not described: following the line then DOES produce a
   //     `GRAPH008_JOIN_DEPTH` on `read`, because `off` is a claimant too. This rule cannot dictate
   //     around it — dropping `read` would dictate a non-fix — and the author has to decide which
-  //     join is the barrier. HERE the first compile is not silent: `off` has no inbound edge from
-  //     `read`, so `GRAPH008_BRANCH_NOT_CONNECTED` names the entry in the same output. THAT IS A
-  //     PROPERTY OF THIS SHAPE AND NOT OF THE RESIDUE — (c) is the same residue with nothing
-  //     naming it, and the pair is the whole disclosure.
+  //     join is the barrier. Since §A.69 the line SAYS SO, naming `off` and the refusal, so the
+  //     author reads it before making the edit; the edit's outcome is unchanged. Here the first
+  //     compile was never silent either — `off` has no inbound edge from `read`, so
+  //     `GRAPH008_BRANCH_NOT_CONNECTED` names the entry in the same output, and it still does.
+  //     THAT SIBLING CODE IS A PROPERTY OF THIS SHAPE AND NOT OF THE RESIDUE, which is why it was
+  //     never the disclosure: (c) is the same residue with that code absent.
   const off = f1Step1();
   (off.nodes as NodeSpec[]).push({
     id: n("off"),
@@ -1135,6 +1184,7 @@ test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated wh
   const [d] = firstOff.filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
   assert.ok(d !== undefined);
   assert.deepEqual(namesIn(d.fix ?? ""), ["read", "classify"], `the fan-out's target is dictated anyway: ${d.fix}`);
+  assert.deepEqual(claimedIn(d.fix ?? ""), ["off"], `and the line names the join that already claims it: ${d.fix}`);
   assert.deepEqual(
     firstOff.map((x) => x.code).sort(),
     // GRAPH010 arrives with `f1Step1`: dropping `collect-read` switches the branch-local exemption
@@ -1150,11 +1200,21 @@ test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated wh
     "THE RESIDUE: `read` now has two claimants, and this rule cannot dictate around it",
   );
 
-  // (c) THE SAME RESIDUE WITH NOTHING NAMING IT, which is why (b) alone would have been a
-  //     misleading disclosure. `again` declares `read` and is wired to it by a `loop` edge:
-  //     `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind, so it is silent,
-  //     while `idx.ancestors` walks no `loop` edge, so `joined` is false and GRAPH021 fires.
-  //     The first compile prints exactly ONE diagnostic and the dictated edit produces a second.
+  // (c) THE SAME RESIDUE WITH NO SIBLING CODE NAMING IT — the shape §A.69 closed, and the reason
+  //     (b) alone would have been a misleading disclosure. `again` declares `read` and is wired to
+  //     it by a `loop` edge: `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind,
+  //     so it is silent, while `idx.ancestors` walks no `loop` edge, so `joined` is false and
+  //     GRAPH021 fires. The first compile prints exactly ONE diagnostic — and until §A.69 nothing
+  //     in it named the claim on `read`, so the author learned of the collision only from the
+  //     compile AFTER typing what they were told to type.
+  //
+  //     WHAT FLIPPED, AND WHAT DELIBERATELY DID NOT. The `fix:` line now names `again` and the
+  //     `GRAPH008_JOIN_DEPTH` that follows. It still dictates `read` — dropping it would dictate an
+  //     edit that does not clear the error — and the dictated edit still produces that
+  //     `GRAPH008_JOIN_DEPTH`, asserted below exactly as before. The claim this closes on is
+  //     therefore NOT "converges in one compile" and NOT "introduces no new diagnostic": it is that
+  //     the collision is DISCLOSED BY THE FIRST COMPILE, in the diagnostic that dictates the edit.
+  //     The graph is broken twice over and only the author can say which join is the barrier.
   //
   //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
   //                       \--loop--> again(join, branches:["read"])
@@ -1176,15 +1236,309 @@ test("THE DICTATED LIST CAN NEVER EMPTY: the fan-out's own target is dictated wh
   assert.deepEqual(
     firstLoop.map((x) => x.code),
     ["GRAPH021_FANOUT_WITHOUT_JOIN"],
-    `ONE diagnostic, and nothing in it names the claim on "read": ${firstLoop.map((x) => x.message).join(" | ")}`,
+    `still ONE diagnostic — no sibling code names the claim: ${firstLoop.map((x) => x.message).join(" | ")}`,
   );
   const dl = firstLoop[0]!;
   assert.deepEqual(namesIn(dl.fix ?? ""), ["read", "classify"], `"read" is dictated anyway: ${dl.fix}`);
+
+  // THE PIN THAT FLIPPED. This used to assert that nothing in the one diagnostic named the claim.
+  assert.deepEqual(
+    claimedIn(dl.fix ?? ""),
+    ["again"],
+    `the one diagnostic names the join that already claims "read": ${dl.fix}`,
+  );
+
+  // AND WHAT IT COSTS IS UNCHANGED, which is the honest half. The dictated edit still produces the
+  // same single `GRAPH008_JOIN_DEPTH`; what moved is that the author was told about it first.
   assert.deepEqual(
     applyDictated(looped, dl, "gather").map((x) => `${x.code}@${String(x.at?.nodeId)}`),
     ["GRAPH008_JOIN_DEPTH@read"],
-    "and the edit produces a collision the first compile named under NO code",
+    "the edit still produces the collision — this rule discloses it, it does not dictate around it",
   );
+
+  // AND THE DISCLOSURE IS LOAD-BEARING, not decoration: the code it predicts is the code the edit
+  // produces, and the join it names is one of the two that code reports. A clause naming some
+  // other join, or some other code, would pass every assertion above.
+  const after = applyDictated(looped, dl, "gather");
+  assert.match(after[0]!.message, /2 joins \("gather", "again"\)/, after[0]!.message);
+  assert.ok(
+    claimedIn(dl.fix ?? "").every((j) => after[0]!.message.includes(`"${j}"`)),
+    `the line named a join the refusal does not: ${dl.fix}`,
+  );
+
+  // AND IT DICTATES THE ENTRY ALONE, NEVER THE EDGE — the defect the first cut of §A.69 shipped.
+  // The clause used to read "drop it — the `branches` entry AND the edge". When it fires there is
+  // provably no `kind: join` edge from `e.to` INTO THE CLAIMER (one would put `e.to` in the
+  // claimer's `idx.ancestors`, making `joined` true and this whole diagnostic silent), so "the
+  // edge" could only ever mean the `loop` or `compensation` edge that carries the author's OWN
+  // semantics — here `back`, with `until` and `maxIterations`. Following that literally deletes a
+  // retry loop the refusal never objected to, which is the additive lesson this rule paid for once.
+  //
+  // PINNED BYTE-FOR-BYTE, like the F1 sentence above, and the first cut's pin was a
+  // `doesNotMatch(/entry AND the edge/)`. A reviewer re-introduced the defect in different words —
+  // "and also delete the edge that runs from \"read\" into it" — and the whole file stayed green
+  // while the shipped line dictated deleting `back` again. That is this file's own documented
+  // failure mode: a pattern that matches PROSE decays with the prose. There is no NAME SET to read
+  // here, because what must not drift is an INSTRUCTION, so the bytes are the assertion.
+  assert.equal(
+    dl.fix,
+    'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+      'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+      '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+      "this fan-out's own target, so it is dictated whatever already folds it — but \"again\" already " +
+      "declares it among its `branches`, so with the barrier declaring it too `GRAPH008_JOIN_DEPTH` " +
+      'refuses "read" as held by more than one join. Decide which join is the barrier for "read" and ' +
+      "drop the `branches` ENTRY from the other — the entry alone, and NOT any edge: it is a " +
+      '`kind: join` edge from "read" INTO "again" that would have made this diagnostic not fire, so ' +
+      "whatever edge runs there now carries its own meaning and deleting it is a second change",
+  );
+  // The control is the WHOLE repair: the dictated edit, plus the one decision only the author can
+  // make. Both spellings of that decision must compile, and the graph is clean with `back` intact —
+  // so deleting it was never part of the fix.
+  const repaired = (dropEdge: boolean): readonly string[] => {
+    const s = clone(looped) as unknown as GraphSpec;
+    const g = s.nodes.findIndex((x) => x.id === n("gather"));
+    (s.nodes as NodeSpec[])[g] = {
+      ...s.nodes[g]!,
+      join: { ...(s.nodes[g]! as NodeSpec).join!, branches: [n("classify"), n("read")] },
+    } as NodeSpec;
+    (s.edges as EdgeSpec[]).push({ id: e("add-read-gather"), from: n("read"), to: n("gather"), kind: "join" } as EdgeSpec);
+    const ag = s.nodes.findIndex((x) => x.id === n("again"));
+    (s.nodes as NodeSpec[])[ag] = {
+      ...s.nodes[ag]!,
+      join: { ...(s.nodes[ag]! as NodeSpec).join!, branches: [] },
+    } as NodeSpec;
+    if (dropEdge) (s.edges as EdgeSpec[]).splice(s.edges.findIndex((x) => x.id === e("back")), 1);
+    assert.equal(
+      s.edges.some((x) => x.id === e("back") && x.kind === "loop"),
+      !dropEdge,
+      "the fixture must differ in exactly the `loop` edge",
+    );
+    return errorsOf(s).map((x) => x.code);
+  };
+  assert.deepEqual(repaired(false), [], "the ENTRY alone clears it, with the `loop` edge left standing");
+  assert.deepEqual(repaired(true), [], "and dropping the edge too is legal — which is why it must not be DICTATED");
+});
+
+test("`INTO <the claimer>` IS THE WHOLE SENTENCE: an outbound `kind: join` edge from the target exists", () => {
+  // B1. The clause's justification is that a `kind: join` edge from `e.to` INTO THE CLAIMER would
+  // have silenced this diagnostic. The first cut dropped the destination and said "a `kind: join`
+  // edge from \"read\" would have made this diagnostic not fire" — which is false the moment ANY
+  // such edge exists, and one always can: here `read --join--> gather`, a join that does NOT claim
+  // `read`. The author reads the sentence while looking at exactly the edge it says cannot exist.
+  //
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //                       |--join--> gather          <-- exists, and gather does NOT claim read
+  //                       \--loop--> again(join, branches:["read"])
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.inputs as string[]).push("failures");
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, reads: ["shard", "failures"], writes: ["raw", "failures"] } as NodeSpec;
+  (s.nodes as NodeSpec[]).push({
+    id: n("again"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("back"), from: n("read"), to: n("again"), kind: "loop", until: "len(failures) > 0", maxIterations: 2 } as unknown as EdgeSpec,
+    { id: e("out"), from: n("again"), to: n("collate"), kind: "seq" } as EdgeSpec,
+    // THE EDGE THE OLD SENTENCE DENIED. `gather` does not declare `read`, so `joined` stays false
+    // and GRAPH021 still fires — which is the point: the edge exists AND the diagnostic is here.
+    { id: e("read-gather"), from: n("read"), to: n("gather"), kind: "join" } as EdgeSpec,
+  );
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined, `the diagnostic must still fire: ${first.map((x) => x.code).join(", ")}`);
+  assert.ok(
+    s.edges.some((x) => x.from === n("read") && x.kind === "join"),
+    "the fixture's whole point is an outbound `kind: join` edge from the fan-out's target",
+  );
+  assert.deepEqual(claimedIn(d.fix ?? ""), ["again"], `only the claimer is named: ${d.fix}`);
+
+  // THE SENTENCE NAMES THE DESTINATION, so it stays true with that edge on the page.
+  assert.match(
+    d.fix ?? "",
+    /it is a `kind: join` edge from "read" INTO "again" that would have made this diagnostic not fire/,
+    `the clause omits the destination and is false on this graph: ${d.fix}`,
+  );
+});
+
+test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SECOND claimer", () => {
+  // §A.69's clause is pinned above on a `loop` edge. The rule's silence has two other spellings and
+  // this covers both: a `compensation` edge, which `idx.ancestors` also refuses to walk, and TWO
+  // claimers at once, which is the only thing that exercises the clause's plural wording. The
+  // plural matters because the singular arm reads "already declares it among its `branches`" and
+  // "from the other" — reverting the plural to it left the file green before this test existed.
+  //
+  // AND `sink` IS THE CONTROL: a join that claims something ELSE. Naming only the joins that
+  // declare `e.to` was unpinned until this — mutating `alsoClaim` to every join in the graph left
+  // the whole file green. `sink` claims `classify`, so it IS in this diagnostic, under the
+  // count/list disclosure; what it must never be is in the NOTE clause, which is about `read`.
+  //
+  //     plan --fan--> read --seq--> classify --join--> gather(branches:["classify"])
+  //                       |                    \--join--> sink(branches:["classify"])
+  //                       |--compensation--> undo(join, branches:["read"])
+  //     plan --seq------------------------>  spare(join, branches:["read"])
+  //
+  // AND `sink` MOVED THIS FIXTURE INTO THE MULTI-CANDIDATE ARM, which is worth saying because the
+  // diagram above once drew a single barrier. `sink` sits at the barrier level and is downstream of
+  // `read`, so `candidates` is now {gather, sink}, `named` is undefined, and the dictated half reads
+  // "pick one of the joins" rather than "give join gather". That is why the byte pin below opens
+  // with `pick one of the joins` — the control for §A.69's clause also became the only test that
+  // pins the plural clause ON TOP OF the multi-candidate dictate.
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.inputs as string[]).push("failures");
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, reads: ["shard", "failures"], writes: ["raw", "failures"] } as NodeSpec;
+  for (const id of ["undo", "spare"]) {
+    (s.nodes as NodeSpec[]).push({
+      id: n(id), type: "join", reads: ["failures"], writes: ["failures"],
+      join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+    } as NodeSpec);
+  }
+  (s.nodes as NodeSpec[]).push({
+    id: n("sink"), type: "join", reads: ["failures"], writes: ["failures"],
+    join: { branches: [n("classify")], mode: "all", onBranchError: "fail" },
+  } as NodeSpec);
+  (s.edges as EdgeSpec[]).push(
+    { id: e("comp"), from: n("read"), to: n("undo"), kind: "compensation" } as EdgeSpec,
+    { id: e("toSpare"), from: n("plan"), to: n("spare"), kind: "seq" } as EdgeSpec,
+    { id: e("undoOut"), from: n("undo"), to: n("collate"), kind: "seq" } as EdgeSpec,
+    { id: e("spareOut"), from: n("spare"), to: n("collate"), kind: "seq" } as EdgeSpec,
+    { id: e("toSink"), from: n("classify"), to: n("sink"), kind: "join" } as EdgeSpec,
+    { id: e("sinkOut"), from: n("sink"), to: n("collate"), kind: "seq" } as EdgeSpec,
+  );
+
+  const first = errorsOf(s);
+  const d = first.find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+  assert.ok(d !== undefined, first.map((x) => x.code).join(", "));
+
+  // THE PLURAL ARM IS PINNED BYTE-FOR-BYTE, exactly as the singular one is, and until it was the
+  // round that fixed the singular arm had left BOTH its defects reachable here. The plural text is
+  // a DIFFERENT STRING — four `many ?` ternaries plus the multi-candidate `dictate` arm — and the
+  // name-set and `match` assertions below never reach its tail, so appending " — and delete the
+  // edges from \"read\" into them too", or dropping the destination in the plural arm alone, each
+  // left the whole file green at 426/426. Two arms means two byte pins; there is no third.
+  assert.equal(
+    d.fix,
+    'pick one of the joins "gather" or "sink" — not the node below, which is what it waits FOR — and ' +
+      "give it an entry in its `branches` for read, plus a `kind: join` edge from read into it, added " +
+      'to whatever it already declares. NOTE "read" is this fan-out\'s own target, so it is dictated ' +
+      'whatever already folds it — but "undo", "spare" already declare it among their `branches`, so ' +
+      '`GRAPH008_JOIN_DEPTH` ALREADY refuses "read" as held by more than one join. Decide which join ' +
+      'is the barrier for "read" and drop the `branches` ENTRY from the others — the entry alone, and ' +
+      'NOT any edge: it is a `kind: join` edge from "read" INTO one of them that would have made this ' +
+      "diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting it " +
+      "is a second change",
+  );
+
+  // BOTH claimants of `read` are named — the `compensation`-wired `undo` and the `seq`-wired
+  // `spare`. Neither is silent on THIS graph: two claimers mean `claimedBy` already counts two, so
+  // `GRAPH008_JOIN_DEPTH` names them in this same compile, and `spare`'s bogus entry draws
+  // `GRAPH008_BRANCH_NOT_CONNECTED` besides. The genuinely SILENT compensation shape — one claimer,
+  // no sibling code — is the test below; this one is about the plural wording and the control.
+  assert.deepEqual(
+    [...claimedIn(d.fix ?? "")].sort(),
+    ["spare", "undo"],
+    `both claimants of "read" are named: ${d.fix}`,
+  );
+  assert.match(d.fix ?? "", /already declare it among their `branches`/, `plural form: ${d.fix}`);
+  assert.match(d.fix ?? "", /from the others/, `plural form: ${d.fix}`);
+
+  // THE CONTROL: `sink` claims `classify`, not `read`, so it is NOT in the clause — while being
+  // very much in the diagnostic, under the disclosure about names the list drops. A clause naming
+  // every join would satisfy every other assertion here and fail this one.
+  assert.ok(!claimedIn(d.fix ?? "").includes("sink"), `"sink" claims classify, not read: ${d.fix}`);
+  assert.match(d.message, /"classify" is already folded by .*"sink"/, `and it IS disclosed: ${d.message}`);
+
+  // And the prediction holds for both: the dictated edit names all three joins in ONE refusal.
+  const after = applyDictated(s, d, "gather");
+  const depth = after.find((x) => x.code === "GRAPH008_JOIN_DEPTH" && x.at?.nodeId === n("read"));
+  assert.ok(depth !== undefined, after.map((x) => `${x.code}@${String(x.at?.nodeId)}`).join(", "));
+  for (const j of claimedIn(d.fix ?? "")) {
+    assert.ok(depth.message.includes(`"${j}"`), `the clause named "${j}" but the refusal does not: ${depth.message}`);
+  }
+});
+
+test("THE SILENT `compensation` SHAPE: ONE diagnostic, and the clause is the only mention of it", () => {
+  // The third spelling of the rule's silence, and the one that makes "all three are pinned" true.
+  // The plural test above has TWO claimers, so `GRAPH008_JOIN_DEPTH` names them in that same
+  // compile — it does not exercise silence at all. Here there is ONE claimer wired by a
+  // `compensation` edge: `idx.ancestors` walks no such edge, so `joined` is false and GRAPH021
+  // fires; `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind, so it says nothing;
+  // and `claimedBy` counts one, so `GRAPH008_JOIN_DEPTH` says nothing either. Without §A.69's
+  // clause NOTHING in this output would name `again`.
+  //
+  // `read` is a `tool` node because a `compensation` edge must compensate one; `unhandled: true`
+  // takes GRAPH011's warning off the list so the ENTIRE diagnostic set is the one line below.
+  const spec = {
+    apiVersion: "loom.dev/v1", kind: "GraphSpec",
+    metadata: { name: "etoc", project: "probe", version: 1 },
+    policy: {
+      posture: "in", capabilities: ["k8s:write"],
+      expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 2 },
+    },
+    channels: {
+      items: { type: "array", reduce: "replace" },
+      shards: { type: "array", reduce: "replace" },
+      shard: { type: "string", reduce: "replace" },
+      raw: { type: "string", reduce: "append_ordered" },
+      failures: { type: "array", reduce: "append_ordered" },
+      report: { type: "object", reduce: "replace" },
+    },
+    inputs: ["items", "failures"], outputs: ["report"],
+    nodes: [
+      { id: n("plan"), type: "function", reads: ["items"], writes: ["shards"], function: { ref: "function/plan@stable" } },
+      { id: n("read"), type: "tool", reads: ["shard", "failures"], writes: ["raw", "failures"], tool: { name: "k8s.apply", args: {} }, unhandled: true },
+      { id: n("classify"), type: "function", reads: ["shard", "raw"], writes: ["failures"], function: { ref: "function/classify@stable" } },
+      { id: n("gather"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("classify")], mode: "all", onBranchError: "fail" } },
+      { id: n("collate"), type: "function", reads: ["failures"], writes: ["report"], function: { ref: "function/collate@stable" } },
+      { id: n("again"), type: "join", reads: ["failures"], writes: ["failures"], join: { branches: [n("read")], mode: "all", onBranchError: "fail" } },
+    ],
+    edges: [
+      { id: e("fan"), from: n("plan"), to: n("read"), kind: "fanout", over: "shards", as: "shard", maxWidth: 4 },
+      { id: e("sort"), from: n("read"), to: n("classify"), kind: "seq" },
+      { id: e("collect"), from: n("classify"), to: n("gather"), kind: "join" },
+      { id: e("fold"), from: n("gather"), to: n("collate"), kind: "seq" },
+      { id: e("back"), from: n("read"), to: n("again"), kind: "compensation", compensates: n("read") },
+      { id: e("out"), from: n("again"), to: n("collate"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+
+  // THE WHOLE SET, warnings included — a stray diagnostic must not be able to hide behind a filter
+  // and quietly become the thing that names `again`.
+  assert.deepEqual(
+    diagnose(spec).map((x) => `${x.severity}:${x.code}`),
+    ["error:GRAPH021_FANOUT_WITHOUT_JOIN"],
+    "exactly one diagnostic, or this fixture no longer demonstrates silence",
+  );
+  const [d] = diagnose(spec);
+  assert.deepEqual(claimedIn(d!.fix ?? ""), ["again"], `the clause is the only mention of it: ${d!.fix}`);
+  assert.ok(!d!.message.includes("again"), `the MESSAGE does not name it — only the fix: does: ${d!.message}`);
+
+  // And the prediction still holds: the dictated edit produces the collision, naming both joins.
+  const after = applyDictated(spec, d!, "gather");
+  assert.deepEqual(
+    after.map((x) => `${x.code}@${String(x.at?.nodeId)}`),
+    ["GRAPH008_JOIN_DEPTH@read"],
+    "the edit produces exactly the refusal the clause named",
+  );
+  assert.match(after[0]!.message, /2 joins \("gather", "again"\)/, after[0]!.message);
+});
+
+test("A LINE WITH NO CLAIMER CARRIES NO CLAUSE — `claimedIn` is not vacuous", () => {
+  // WHAT THIS ACTUALLY GUARDS, stated precisely, because the first cut over-claimed it. The
+  // `deepEqual` call sites above compare against NON-EMPTY arrays, so a clause that never fired
+  // turns those red on their own; it is the `.every(...)` in case (c) — vacuously true over `[]` —
+  // that needs a control. And the thing neither kind of call site can see is the OTHER direction:
+  // that a line with no claimer stays clean. The shipped F1 shape has no second claimer of `read`,
+  // so it must carry no NOTE at all.
+  const [d] = errorsOf(f1Step1()).filter((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN");
+  assert.ok(d !== undefined);
+  assert.deepEqual(claimedIn(d.fix ?? ""), [], `no claimer, so no clause: ${d.fix}`);
+  assert.doesNotMatch(d.fix ?? "", /NOTE/, `${d.fix}`);
 });
 
 /** `heldInner`-style helper: type the `fix:` line's `branches` entries and `kind: join` edges. */
