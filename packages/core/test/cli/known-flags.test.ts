@@ -38,11 +38,19 @@ import { CODES, isLoomError } from "../../src/errors.ts";
 
 const SRC = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
 
-/** Read from the SOURCE, so none of the three can be restated here and drift. */
+/**
+ * Read from the SOURCE, so none of the three can be restated here and drift.
+ *
+ * `KNOWN_FLAGS` is `Object.keys(FLAGS)` now — one list carrying the flag NAME and the reader that
+ * decides its VALUE (TODO.md §H.12) — so the names are read off that table's keys. A key is
+ * quoted when it contains a hyphen and bare when it does not, and both spellings are matched here
+ * rather than normalised in the source, because quoting every key would be a convention only this
+ * regex wanted.
+ */
 function declared(): readonly string[] {
-  const m = /const KNOWN_FLAGS: readonly string\[\] = \[([\s\S]*?)\];/.exec(SRC);
-  assert.ok(m, "KNOWN_FLAGS moved — this gate reads it from the source on purpose");
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
+  const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
+  assert.ok(m, "FLAGS moved — this gate reads it from the source on purpose");
+  return [...m[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?:/gm)].map((x) => x[1]!).sort();
 }
 function advertised(): readonly string[] {
   const m = /const USAGE = `([\s\S]*?)`;/.exec(SRC);

@@ -617,52 +617,100 @@ export function resourceRefsIn(text: string): readonly string[] {
  * the set `USAGE` advertises and the set the code reads, so a flag cannot be added to any one of
  * the three without the other two. A hand-kept list that drifts is how the refusal would start
  * rejecting a real flag.
+ *
+ * ## THE SECOND COLUMN, and why it is not an arity table — TODO.md §H.12
+ *
+ * `loom serve --port` with no value used to create `.loom/`, `graphs/` and `resources/` in the
+ * caller's cwd and only then refuse, because the refusal lives in `httpPort` and `httpPort` is
+ * called from inside a `case` block, which `main` reaches with the workspace already open.
+ * §H.11 hoisted every GLOBAL flag's check above the first `mkdirSync` and stopped there, for a
+ * stated reason: judging a verb flag at the door appeared to need a flag-ARITY table, and a
+ * second hand-kept list beside this one is exactly the drift §H.10 spent two files on.
+ *
+ * **So the arity is not written down at all.** The column is the FUNCTION that decides this
+ * flag's value from argv alone — the same function the verb body calls — and the door in `main`
+ * calls it for every flag PRESENT in argv. `--port needs a value` therefore has one
+ * implementation, `httpPort`, and the door and the case block cannot answer it differently
+ * because they are the same call. A `null` means argv alone cannot decide this flag here.
+ *
+ * **WHICH FLAGS GET A FUNCTION IS DERIVED, NOT CHOSEN.** `test/cli/flag-door.test.ts` recomputes
+ * the whole column out of this file and asserts it, the way `verb-flags.test.ts` recomputes the
+ * verb set: the entry is the UNIQUE top-level function whose parameter list is exactly
+ * `(args: Args)` and that reads this flag, ignoring `main`; and `null` when no such function
+ * exists, or when more than one does.
+ *
+ *   - `(args: Args)` is the mechanical spelling of "decidable from argv alone". A reader that
+ *     takes a `Workspace` is not one, and hoisting it would be a lie about what it needs. It is
+ *     also what forced `serveToken` out of `controlPlaneOptions` and gave `--channels-file`,
+ *     `--models-file`, `--mcp-file`, `--max-parallelism` and `--extension-module` names of their
+ *     own — the rule earning its keep rather than being satisfied.
+ *   - MORE THAN ONE reader means the message depends on the verb — `--as` has three and
+ *     `--cohort` two — and the door does not know which is right, so it does not guess.
+ *   - NO EXCEPTION FOR A GLOBAL. §H.11 hoisted the globals' checks above `openWorkspace`'s first
+ *     `mkdirSync`, which is one directory later than this; they are decided here now, by the same
+ *     rule as everything else, and `openWorkspace` reads them again where it always did. Two
+ *     calls to one pure function, so the two cannot disagree — the argument `jailFor` already
+ *     makes for being called from both `main` and `openWorkspace`.
+ *
+ * `null` is therefore also the list of what still opens a workspace before refusing: `--as`,
+ * `--baseline`, `--cohort`, `--graph`, `--identity-file`, `--max-runs-in-flight`, `--node`,
+ * `--reason`, `--reject`, `--scope`, `--suite` and `--take`. Named, not claimed away. (`--help`
+ * is `null` for a different reason: `main` answers it and returns before the door is reached.)
  */
-const KNOWN_FLAGS: readonly string[] = [
-  "against-cohort",
-  "allow-exec",
-  "as",
-  "baseline",
-  "bucket",
-  "budget",
-  "budget-tokens",
-  "budget-usd",
-  "budget-wall-ms",
-  "cases",
-  "channels-file",
-  "cohort",
-  "data-dir",
-  "egress",
-  "exec-env",
-  "extension-module",
-  "grant",
-  "graph",
-  "help",
-  "host",
-  "identity-file",
-  "input",
-  "max-bytes",
-  "max-parallelism",
-  "max-runs-in-flight",
-  "mcp-file",
-  "models-file",
-  "node",
-  "otlp",
-  "out",
-  "port",
-  "proposed-by",
-  "reason",
-  "reject",
-  "runs",
-  "scope",
-  "suite",
-  "sweep-ms",
-  "take",
-  "to",
-  "token",
-  "why",
-  "workspace",
-];
+const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
+  "against-cohort": cohortAnchorFlag,
+  "allow-exec": jailFor,
+  as: null,
+  baseline: null,
+  bucket: bucketFlag,
+  budget: budgetFlag,
+  "budget-tokens": deploymentBudget,
+  "budget-usd": deploymentBudget,
+  "budget-wall-ms": deploymentBudget,
+  cases: suiteCasesFlag,
+  "channels-file": channelsFile,
+  cohort: null,
+  "data-dir": jailFor,
+  egress: jailFor,
+  "exec-env": jailFor,
+  "extension-module": extensionModulePaths,
+  grant: grantFlag,
+  graph: null,
+  help: null,
+  host: httpHost,
+  "identity-file": null,
+  input: runInputs,
+  "max-bytes": gateReadBound,
+  "max-parallelism": maxParallelismFlag,
+  "max-runs-in-flight": null,
+  "mcp-file": mcpFile,
+  "models-file": modelsFile,
+  node: null,
+  otlp: otlpEndpoint,
+  out: suiteOutFlag,
+  port: httpPort,
+  "proposed-by": proposedByFlag,
+  reason: null,
+  reject: null,
+  runs: runsFlag,
+  scope: null,
+  suite: null,
+  "sweep-ms": gateClockInterval,
+  take: null,
+  to: postureFlag,
+  token: serveToken,
+  why: justificationFlag,
+  workspace: jailFor,
+};
+
+/**
+ * EVERY FLAG THIS BINARY UNDERSTANDS — the keys of the one table above, never a second list.
+ *
+ * Derived rather than restated so that `assertKnownFlags`, `refuseFlagsThisVerbDoesNotRead` and
+ * the door's value check all read the SAME set of names: a flag that exists is a row in `FLAGS`,
+ * and there is nowhere else to add one.
+ */
+const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
 
 /**
  * Refuse a flag this binary does not understand, naming the nearest one it does.
@@ -815,6 +863,48 @@ const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * WHAT EACH VERB NEEDS AFTER ITS NAME, and the words the refusal uses for it — TODO.md §H.12/§H.13.
+ *
+ * ONE TABLE, READ FROM BOTH ENDS. `requirePositional` looks its `what` string up here, so a verb
+ * body says `requirePositional(args, 0)` and the sentence an operator reads exists once; and the
+ * door in `main` walks this row before `openWorkspace`, so `loom compile` with no file refuses
+ * with nothing on disk. Before it existed, that refusal was `throw new Error("compile requires a
+ * graph file")` reaching the top-level handler — printed `E_INTERNAL`, this system's word for "a
+ * bug in Loom", for an operator leaving out an argument — after three directories had been
+ * created to reach it.
+ *
+ * ROWS ARE HELD TO THE SOURCE, not to memory: `test/cli/flag-door.test.ts` recomputes the INDICES
+ * each `case` block passes to `requirePositional` — fall-through included, because `pause` runs
+ * `resume`'s block — and asserts each row is exactly that long. A verb that grows an argument
+ * cannot keep a stale row, and a row cannot claim an argument the block never asks for.
+ *
+ * A CONDITIONAL POSITIONAL IS NOT A ROW. `attestExam` requires a second one, the exam graph file,
+ * and only when the first is `attest`; it keeps an explicit `what` and stays inside the case
+ * block, because a door that demanded it before the subcommand was known would answer
+ * `loom exam bogus` with the wrong sentence.
+ */
+const VERB_POSITIONALS: Readonly<Record<string, readonly string[]>> = {
+  compile: ["a graph file"],
+  serve: [],
+  run: ["a graph file"],
+  gates: ["a runId"],
+  approve: ["a runId", "a gateId"],
+  cancel: ["a runId"],
+  pause: ["a runId"],
+  resume: ["a runId"],
+  steer: ["a runId"],
+  deescalate: ["a runId"],
+  replay: ["a runId"],
+  trace: ["a runId"],
+  audit: ["a runId"],
+  score: ["a runId"],
+  cohort: ["a runId"],
+  suite: [`a subcommand — "freeze" is the only one`],
+  exam: [`a subcommand — "attest" is the only one`],
+  promote: ["a candidate graph file"],
+};
+
+/**
  * What a misplaced flag would have COST, for the flags where "nothing" understates it.
  *
  * Empty for almost every flag on purpose: the general consequence is that a value configured
@@ -894,6 +984,108 @@ function refuseFlagsThisVerbDoesNotRead(args: Args): void {
       )
       .join(" "),
   );
+}
+
+/**
+ * Refuse a flag whose VALUE argv alone can judge — at the door, before anything is on disk.
+ *
+ * TODO.md §H.12. Three of the six cases that row names are here (`run --input`, `serve --port`,
+ * `serve --token`); the other three are `refuseMissingPositionals`.
+ *
+ * NO ARITY IS CONSULTED. The loop calls the reader `FLAGS` names for each flag PRESENT in argv
+ * and throws away what it returns: a reader that accepts the value returns, and one that does not
+ * throws the sentence it would have thrown from inside the `case` block, character for character,
+ * because it is the same function. That is the whole reason the column is a function and not a
+ * `"takes a value"` boolean — a boolean would have forced the door to restate forty messages.
+ *
+ * THE READERS ARE PURE OVER `args` BY CONSTRUCTION — `FLAGS`' derivation rule admits only
+ * `(args: Args)` — so calling one early cannot observe or change anything, and the verb body's
+ * later call gets the same answer. It is called twice; both calls are a few string comparisons.
+ *
+ * ARGV ORDER, and that is a decision rather than an accident: on a line with TWO bad flags the
+ * one the operator typed first is the one named. It used to be whichever the reader happened to
+ * run first — the `case` block's order for a verb flag, and `openWorkspace`'s pre-flight order
+ * (channels, models, jail, grant, ceiling, budget) for a global — which is an order nothing
+ * states and nobody can predict from the outside. §H.11's hoist kept that internal order and
+ * said so; this replaces it with one an operator can. THE EXCEPTION IS INSIDE ONE READER:
+ * `jailFor` decides five flags, so two bad flags that are both its are still named in its order.
+ *
+ * AFTER `refuseFlagsThisVerbDoesNotRead`, so a flag this verb does not read is answered as that
+ * rather than by a value check the verb would never have run.
+ */
+function refuseUnusableFlagValues(args: Args): void {
+  for (const name of Object.keys(args.flags)) {
+    // `Object.hasOwn`, not a truthiness test on the lookup: `FLAGS` is an object literal, so
+    // `FLAGS["constructor"]` is a FUNCTION — the defect `dispatchesVerb` was written for, one
+    // table over. `parseArgs` builds a null-prototype bag, so the name can be anything.
+    const decide = Object.hasOwn(FLAGS, name) ? FLAGS[name] : null;
+    if (decide !== null && decide !== undefined) decide(args);
+  }
+}
+
+/**
+ * Refuse a verb missing an argument it always needs — at the door, before anything is on disk.
+ *
+ * TODO.md §H.12's other half and the whole of §H.13. `VERB_POSITIONALS` is the arity AND the
+ * words, so this is a walk over the row rather than a check per verb.
+ *
+ * AFTER the flag values, not before: `loom run --input` has to keep answering `--input was given
+ * with no value at all` — `run`'s case block reads the flag before it asks for the file — and
+ * `compile`, which has no verb flag at all, cannot tell the difference.
+ */
+function refuseMissingPositionals(args: Args): void {
+  const wanted = Object.hasOwn(VERB_POSITIONALS, args.command) ? VERB_POSITIONALS[args.command]! : [];
+  for (let i = 0; i < wanted.length; i++) requirePositional(args, i);
+}
+
+/**
+ * THE FOUR GLOBAL PATH AND COUNT FLAGS, each as the `(args: Args)` reader `FLAGS` needs.
+ *
+ * None of these four is new behaviour. `--channels-file`, `--models-file` and `--mcp-file` were
+ * read as `requireFileFlag(args, …)` inline at their one call site, and `--max-parallelism` as a
+ * `boundedCount` on `args.flags[…]`; the refusals are the same functions with the same messages.
+ * What they were missing is a NAME with the signature `(args: Args)`, which is how `FLAGS`'
+ * derivation rule states "argv alone decides this" — so the door can refuse them without the
+ * rule acquiring an exception for the flags that happened to be read inline.
+ *
+ * `pathFlag` AND NOT `requireFileFlag` for the three file flags, because absence is a different
+ * question and belongs to the caller: all three are optional, and each call site already asks
+ * `=== undefined` before it reads one. `requireFileFlag` is `pathFlag` plus "and it was given",
+ * and that second half is unreachable at every one of those sites.
+ */
+function channelsFile(args: Args): string | undefined {
+  return pathFlag(args, "channels-file");
+}
+function modelsFile(args: Args): string | undefined {
+  return pathFlag(args, "models-file");
+}
+function mcpFile(args: Args): string | undefined {
+  return pathFlag(args, "mcp-file");
+}
+function maxParallelismFlag(args: Args): number {
+  return boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
+}
+
+/**
+ * `--extension-module`, the whole argv question about it: not repeated, and not given bare.
+ *
+ * Both halves were inline in `main`, run after the MCP servers had been STARTED, so a repeated
+ * `--extension-module` was refused with child processes already spawned. They are one function
+ * now for `FLAGS`' reason — a flag's value is decided by ONE named `(args: Args)` reader — and
+ * the door calls it before anything at all has happened.
+ *
+ * THE TRUST ARGUMENT IS UNCHANGED AND IS THE REASON THIS STAYS A FLAG READ: the module path comes
+ * from argv and nowhere else. `loadExtensionModules` still does the importing, still only from
+ * `main`, and still only after the verb has been judged.
+ */
+function extensionModulePaths(args: Args): readonly string[] | undefined {
+  refuseRepeated(
+    args,
+    "extension-module",
+    "a module named on argv would not be loaded, and the plane would come up as a deployment " +
+      "the operator believes is extended and is not.",
+  );
+  return listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
 }
 
 /**
@@ -1504,7 +1696,7 @@ export function openWorkspace(
         // beside it would mean writing a JSON file with a webhook row in it to enable a
         // transport that is not a webhook.
         extensionDelivery(extensions)
-      : readChannels(requireFileFlag(args, "channels-file"), extensions?.channels ?? []);
+      : readChannels(channelsFile(args)!, extensions?.channels ?? []);
   // Same rule, same reason: a models file naming an env var that is not set is a refusal
   // to start, and it must happen before the journal is opened. `env` is a PARAMETER so a
   // test can hand this function a key without writing one into the process — the same
@@ -1513,7 +1705,7 @@ export function openWorkspace(
   const models =
     args.flags["models-file"] === undefined
       ? undefined
-      : readModels(requireFileFlag(args, "models-file"), env, fetchImpl, extensions?.adapters ?? new Map());
+      : readModels(modelsFile(args)!, env, fetchImpl, extensions?.adapters ?? new Map());
 
   // `pathFlag`, not `String(… ?? default)`. `String(true)` is `"true"`, so `--workspace`
   // with no value used to resolve to `./true` and `loom compile g.json --workspace` printed
@@ -1543,17 +1735,24 @@ export function openWorkspace(
   //
   // FOUR PURE READS, so this is an ordering change and not a second parse. `jailFor` recomputes
   // `root` and `dataDir` from the same flags rather than closing over these (see its body), so
-  // the two derivations cannot disagree; `grantFlag`, `deploymentBudget` and `boundedCount` are
-  // functions of `args` alone. Their values are used where they always were. The relative order
-  // of the refusals among themselves is unchanged — jail, then grant, then the ceiling, then the
-  // budget — so a caller who spells two of them wrong is told about the same one as before.
+  // the two derivations cannot disagree; `grantFlag`, `deploymentBudget` and `maxParallelismFlag`
+  // are functions of `args` alone. Their values are used where they always were.
+  //
+  // AND THEY ARE NO LONGER THE FIRST TO RUN — §H.12. `main`'s door decides every flag value
+  // `FLAGS` names a reader for, these four included, before this function is entered at all, so
+  // a caller who spells two of them wrong is now told about the one they typed FIRST rather than
+  // about whichever this block happened to read first. That is the claim §H.11 made here and it
+  // is superseded rather than broken: the refusals are the same functions with the same messages,
+  // and the order they are asked in is now one an operator can predict from their own command
+  // line. These calls stay because `openWorkspace` is exported and an embedder calls it directly,
+  // with a flag map they built themselves and no door in front of it.
   //
   // AND IT IS STRICTLY MORE THAN THE DIRECTORIES: `jailFor` used to run after `new
   // SqliteStateStore`, so a bad `--egress` was a refusal that had already opened a journal
   // handle, which is exactly what the paragraph at the top of this function refuses to do.
   const jail = jailFor(args);
   const grants = grantFlag(args);
-  const maxParallelism = boundedCount(args.flags["max-parallelism"], "--max-parallelism", DEFAULT_MAX_PARALLELISM, MAX_CONCURRENCY);
+  const maxParallelism = maxParallelismFlag(args);
   const budget = deploymentBudget(args);
 
   mkdirSync(dataDir, { recursive: true });
@@ -6385,20 +6584,29 @@ function pickIdentity(ws: Workspace, args: Args): IdentitySource | undefined {
   return fromFile ?? fromModule;
 }
 
-export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOptions {
-  const graphs = discoverGraphs(ws);
-  const identity = pickIdentity(ws, args);
-  // TWO WAYS THE FLAG ARRIVES EMPTY, and both used to become a shared secret.
-  //
-  //  - `--token "$LOOM_TOKEN"` with the variable unset hands the flag the empty
-  //    string, which `ControlPlane` refuses because it authenticated every caller.
-  //  - `--token` with no value at all — `loom serve --token --port 8787`, or a
-  //    trailing flag — is `true` from `parseArgs`, and `String(true)` quietly
-  //    installed the deployment's shared secret as the four letters "true".
-  //
-  // The plane refuses the first for the whole library; this refuses both with the
-  // FLAG'S name in the message, because "ControlPlaneOptions.token" is not a string
-  // any operator typed.
+/**
+ * `--token`, the control plane's shared secret — refused when it is not one.
+ *
+ * TWO WAYS THE FLAG ARRIVES EMPTY, and both used to become a shared secret.
+ *
+ *  - `--token "$LOOM_TOKEN"` with the variable unset hands the flag the empty
+ *    string, which `ControlPlane` refuses because it authenticated every caller.
+ *  - `--token` with no value at all — `loom serve --token --port 8787`, or a
+ *    trailing flag — is `true` from `parseArgs`, and `String(true)` quietly
+ *    installed the deployment's shared secret as the four letters "true".
+ *
+ * The plane refuses the first for the whole library; this refuses both with the
+ * FLAG'S name in the message, because "ControlPlaneOptions.token" is not a string
+ * any operator typed.
+ *
+ * ITS OWN FUNCTION, TAKING `args` AND NOTHING ELSE — TODO.md §H.12. The check was six lines
+ * inside `controlPlaneOptions(ws, args)`, which needs a `Workspace`, so `loom serve --token`
+ * created `.loom/`, `graphs/` and `resources/` in the caller's cwd before saying the token was
+ * empty. Nothing in the check ever read `ws`; its signature said it did. `FLAGS`' derivation rule
+ * admits a door check only when the signature is `(args: Args)`, which is what made the lie
+ * visible, and this is the same text at the same code — moved, not rewritten.
+ */
+function serveToken(args: Args): string | undefined {
   const tokenFlag = args.flags["token"];
   if (tokenFlag === true || tokenFlag === "") {
     throw err.validation(
@@ -6408,6 +6616,13 @@ export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOpti
         `Pass a real secret, or omit --token entirely to run an open plane on purpose.`,
     );
   }
+  return tokenFlag === undefined ? undefined : String(tokenFlag);
+}
+
+export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOptions {
+  const graphs = discoverGraphs(ws);
+  const identity = pickIdentity(ws, args);
+  const token = serveToken(args);
   return {
     engine: ws.engine,
     store: ws.store,
@@ -6419,7 +6634,7 @@ export function controlPlaneOptions(ws: Workspace, args: Args): ControlPlaneOpti
     // `graphs/` one line up, and compiling it again here would print every diagnostic in it twice
     // in the boot banner. See `ControlPlaneOptions.subgraphs` for why the two lists stay separate.
     subgraphs: [...indexGraphs(ws, subgraphDirs()).index.values()],
-    ...(tokenFlag === undefined ? {} : { token: String(tokenFlag) }),
+    ...(token === undefined ? {} : { token }),
     ...(identity === undefined ? {} : { identity }),
     // THE UNAUTHENTICATED ROUTE EXISTS ONLY IF SOMEBODY CAN ANSWER ON IT.
     //
@@ -7888,11 +8103,22 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // nothing. A flag a NON-EXISTENT verb does not read is a lecture instead of the mistake.
   if (!dispatchesVerb(args.command)) return refuseUnknownCommand(args.command);
   refuseFlagsThisVerbDoesNotRead(args);
+  // AND SO IS THE VALUE, AND SO ARE THE ARGUMENTS — TODO.md §H.12, §H.13. The three lines above
+  // decide the NAMES on argv; these two decide the things argv alone can also decide about what
+  // those names carry. §H.11 stopped short of them because a door for a verb flag looked like it
+  // needed an arity table, a second list beside `KNOWN_FLAGS` kept in step by hand; `FLAGS`
+  // carries the READER instead, so the door and the `case` block refuse through one function and
+  // no arity is written down anywhere to drift.
+  //
+  // FLAGS BEFORE POSITIONALS: `run`'s block reads `--input` before it asks for the graph file, so
+  // `loom run --input` has to keep answering about `--input`.
+  refuseUnusableFlagValues(args);
+  refuseMissingPositionals(args);
 
   // STARTED BEFORE THE WORKSPACE, because the grant list is derived inside it and a tool
   // registered afterwards is a tool whose capability nobody holds — see `openWorkspace`'s `mcp`
   // parameter.
-  const mcpServers = args.flags["mcp-file"] === undefined ? [] : readMcpServers(requireFileFlag(args, "mcp-file"));
+  const mcpServers = args.flags["mcp-file"] === undefined ? [] : readMcpServers(mcpFile(args)!);
   // BEFORE THE CONNECT, so an operator sees what they declared even when a server fails to start.
   for (const line of mcpLoweringWarnings(mcpServers)) process.stderr.write(line);
   const mcp = mcpServers.length === 0 ? [] : await startMcp(mcpServers);
@@ -7925,13 +8151,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
     // no directory scan — which is the entire trust argument at `loadExtensionModules`.
     //
     // AND A REPEAT IS REFUSED, not resolved last-wins: see `refuseRepeated` for the measurement.
-    refuseRepeated(
-      args,
-      "extension-module",
-      "a module named on argv would not be loaded, and the plane would come up as a deployment " +
-        "the operator believes is extended and is not.",
-    );
-    const extensionPaths = listFlag(args, "extension-module", "a module path", NO_MODULE_CALLED_TRUE);
+    // Both questions live in `extensionModulePaths`, which the door has already asked — this call
+    // is the answer being USED, and it is the same function, so the two cannot disagree.
+    const extensionPaths = extensionModulePaths(args);
     // THE SAME JAIL THE BUILT-INS GET, handed over so an outsider's fs or network tool can
     // apply the operator's own guards. `jailFor` is pure over `args`, so this and
     // `openWorkspace`'s call cannot disagree — which they would have to be for the boundary a
@@ -7946,7 +8168,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   try {
     switch (args.command) {
       case "compile": {
-        const compiled = loadGraph(ws, requirePositional(args, 0, "a graph file"));
+        const compiled = loadGraph(ws, requirePositional(args, 0));
         process.stdout.write("ok\n");
         printRetryPlan(compiled);
         printTimeoutPlan(compiled);
@@ -8011,7 +8233,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // BEFORE the graph is compiled: a typo in the flag should not cost a compile, and
         // more importantly it must not be diagnosed as something the graph did.
         const inputs = runInputs(args);
-        const graph = loadGraph(ws, requirePositional(args, 0, "a graph file"));
+        const graph = loadGraph(ws, requirePositional(args, 0));
         // AFTER the compile, because the declared set is what this checks against, and BEFORE
         // the submit, because a typo must not cost a journal row or a provider call. See
         // `assertDeclaredInputs`.
@@ -8101,7 +8323,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       }
 
       case "gates": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const p = await ws.engine.projection(runId);
         // `?? {}` HERE ANSWERED "THERE IS NO SUCH RUN" WITH "NOTHING IS WAITING ON YOU",
         // on the one command whose entire purpose is asking whether anything is. Measured
@@ -8143,8 +8365,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       }
 
       case "approve": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
-        const gateId = requirePositional(args, 1, "a gateId") as GateId;
+        const runId = requirePositional(args, 0) as RunId;
+        const gateId = requirePositional(args, 1) as GateId;
         const reject = args.flags["reject"];
         // THE GRAPH IS FOUND, NOT DEMANDED. `RunGraph` is not journaled — its hash is — so a
         // fresh process must be told which graph this run used, and it used to be told with a
@@ -8210,7 +8432,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // the graph the human was shown and `reject` binds too — a rejected gate runs the graph's
         // error edges — so an operator whose graph had drifted had nothing left, while the
         // refusal text told them to cancel a run through a command that did not exist.
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const raw = args.flags["reason"];
         // `String(true)` for a bare `--reason` would journal the four letters "true" as an
         // operator's stated reason — the same slip `--as` and `--token` already guard against.
@@ -8233,7 +8455,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // ONE CASE FOR BOTH, because the only difference is which method is called and every
         // other line — the runId, the `--reason` guard against a bare flag journaling the four
         // letters "true", the actor, the output — is a place the two could silently disagree.
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const raw = args.flags["reason"];
         const reason = typeof raw === "string" && raw.trim() !== "" ? raw : "operator";
         const actor = { kind: "human", subject: subjectFlag(args), via: "cli" } as const;
@@ -8254,7 +8476,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // it — `Engine.steer` refuses a run this process has not attached, because the declared
         // edge set it confines the operator to lives in the compiled artifact and there is
         // nothing else to check a route against.
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const nodeId = args.flags["node"];
         if (typeof nodeId !== "string" || nodeId.trim() === "") {
           throw err.validation(CODES.E_CONFIG_INVALID, "steer needs --node NODE_ID: the node whose route is being overridden");
@@ -8294,7 +8516,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // writes to the journal directly, so this command is as strong as shell access to the
         // host. Every refusal that decides anything on this path is the ENGINE's; this door
         // adds well-formedness checks and no authorization of its own.
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const scope = ceilingScope(args, runId);
         const to = postureFlag(args);
         const why = justificationFlag(args);
@@ -8311,7 +8533,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       }
 
       case "replay": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         // FOUND, NOT DEMANDED — see `recordedGraph`. `--graph` still wins and is still checked.
         const graph = await recordedGraph(ws, args, runId, "replay");
         const report = await replayRun({
@@ -8355,7 +8577,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       }
 
       case "trace": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         // BOTH RESOLVED BEFORE ANYTHING IS READ, so a mistyped endpoint or a malformed header
         // list costs a refusal rather than a graph lookup and a journal walk. The headers are
         // only consulted when an endpoint was given: an operator with `OTEL_EXPORTER_OTLP_HEADERS`
@@ -8539,7 +8761,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       // gate bypass — every id in the bypass was declared. `--graph` is optional and its absence
       // is REPORTED rather than assumed away, because the edge-ownership rule needs it.
       case "audit": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const events = [];
         for await (const e of ws.store.read(runId, 1)) events.push(e);
         // AN EMPTY READ IS NOT A HEALTHY RUN. Auditing a runId that does not exist printed `ok`
@@ -8585,7 +8807,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       // in the medians it is measured against, and leaving it out would score every run against
       // a ruler that excluded exactly one run — itself.
       case "score": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const events = await journalOf(ws, runId);
         // An empty read is not an unscoreable run, it is a run that is not here — `audit`'s
         // lesson, and `gates`'s before it.
@@ -8863,7 +9085,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       // because a reader that recomputes would answer with today's cohort and call it the
       // judgement, which is precisely the drift `weightsDigest` exists to catch.
       case "cohort": {
-        const runId = requirePositional(args, 0, "a runId") as RunId;
+        const runId = requirePositional(args, 0) as RunId;
         const events = await journalOf(ws, runId);
         if (events.length === 0) {
           process.stderr.write(`no journal for run ${runId} in this workspace (${ws.root})\n`);
@@ -8926,7 +9148,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
 
       // THE EXAM COMES OUT OF THE RUNS. See `freezeSuite` for what is selected and why.
       case "suite": {
-        const sub = requirePositional(args, 0, `a subcommand — "freeze" is the only one`);
+        const sub = requirePositional(args, 0);
         if (sub !== "freeze") {
           process.stderr.write(`unknown subcommand "suite ${sub}" — the only one is "freeze"\n\n${USAGE}`);
           return 2;
@@ -8936,7 +9158,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
 
       // THE GRADER THE CANDIDATE CANNOT WRITE. See `attestExam` and `evolution/exam.ts`.
       case "exam": {
-        const sub = requirePositional(args, 0, `a subcommand — "attest" is the only one`);
+        const sub = requirePositional(args, 0);
         if (sub !== "attest") {
           process.stderr.write(`unknown subcommand "exam ${sub}" — the only one is "attest"\n\n${USAGE}`);
           return 2;
@@ -8979,7 +9201,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
       // `EvalReport` carries no median so the stricter reading is not expressible; `7-safety`
       // greps case reasons for the substring `irreversible`.
       case "promote": {
-        const candidateFile = requirePositional(args, 0, "a candidate graph file");
+        const candidateFile = requirePositional(args, 0);
         // TWO MODES, AND THE FLAG THAT PICKS ONE IS READ FIRST. `--against-cohort` judges the
         // candidate by RUNNING it; the branch below judges it by replaying recordings against
         // it. They answer different questions and produce differently-shaped verdicts, which is
@@ -11324,10 +11546,35 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   return verdict.promote ? 0 : 1;
 }
 
-function requirePositional(args: Args, i: number, what: string): string {
+/**
+ * The i-th argument after the verb, or a refusal naming the verb and what it wanted.
+ *
+ * TODO.md §H.13. This threw `new Error("compile requires a graph file")`, which reaches `main`'s
+ * top-level handler with no code and is printed `E_INTERNAL` — this system's word for "a bug in
+ * Loom" — for an operator who left out an argument. `server/http.ts`'s `safeDecode` states the
+ * rule it broke: a caller sending nonsense is not an internal error and must not be reported as
+ * one. It is `E_CONFIG_INVALID` now, which is the class every other argv mistake on this CLI
+ * already answers with. The SENTENCE is kept, so a script grepping the old text still matches;
+ * only the class it is filed under changes.
+ *
+ * `what` IS OPTIONAL BECAUSE `VERB_POSITIONALS` IS THE SOURCE. A verb body says
+ * `requirePositional(args, 0)` and the words come from the row the door also walks, so the two
+ * cannot describe the same argument differently. The parameter survives for the one argument that
+ * is not in any row — `attestExam`'s exam graph file, required only when the subcommand is
+ * `attest` — because a conditional argument is not something the door may demand.
+ */
+function requirePositional(args: Args, i: number, what?: string): string {
   const v = args.positional[i];
-  if (v === undefined) throw new Error(`${args.command} requires ${what}`);
-  return v;
+  if (v !== undefined) return v;
+  const row = Object.hasOwn(VERB_POSITIONALS, args.command) ? VERB_POSITIONALS[args.command]! : [];
+  const wanted = what ?? row[i] ?? `an argument in position ${String(i + 1)}`;
+  const given = args.positional.length;
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    `loom ${args.command} requires ${wanted} as argument ${String(i + 1)}, and ` +
+      `${given === 0 ? "none was given" : `only ${String(given)} ${given === 1 ? "was" : "were"} given`}. ` +
+      `Run \`loom help\` for the usage line of every verb.`,
+  );
 }
 
 /**

@@ -212,11 +212,27 @@ setInterval(() => {}, 1 << 30);
     JSON.stringify({ servers: [{ name: "probe", command: process.execPath, args: [join(d.dir, "server.mjs")], envAllow: ["PATH", "HOME"] }] }),
   );
   try {
-    // `--max-parallelism 0` is one of `openWorkspace`'s eight refusals, and it fires AFTER the
-    // children are spawned. Any of the others would do; this one needs no filesystem setup.
-    const r = await run(["compile", join(d.dir, "graphs", "copy.json"), "--workspace", d.dir, "--mcp-file", join(d.dir, "mcp.json"), "--max-parallelism", "0"]);
+    // A MODELS FILE WHOSE CONTENT IS WRONG, and the choice of refusal is the whole setup here.
+    // This used to drive `--max-parallelism 0`, which was one of `openWorkspace`'s refusals and
+    // therefore fired after the children were spawned. TODO.md §H.12 moved every refusal a flag's
+    // VALUE can decide to the door, which runs before `startMcp` — so that argv now refuses with
+    // nothing spawned, and the test would have proved nothing while still passing its first two
+    // assertions. What remains after `startMcp` is the refusals that need a FILE READ or an
+    // `await import()`: `readChannels`, `readModels`, and `loadExtensionModules`. This is the
+    // second, and the door has already said the path itself is fine.
+    writeFileSync(join(d.dir, "models.json"), "{ not json");
+    const r = await run([
+      "compile",
+      join(d.dir, "graphs", "copy.json"),
+      "--workspace",
+      d.dir,
+      "--mcp-file",
+      join(d.dir, "mcp.json"),
+      "--models-file",
+      join(d.dir, "models.json"),
+    ]);
     assert.equal(r.code, 1, `the refusal itself is unchanged:\n${r.err}`);
-    assert.match(r.err, /E_CONFIG_INVALID: --max-parallelism/, r.err);
+    assert.match(r.err, /E_CONFIG_INVALID/, r.err);
     assert.equal(existsSync(pidFile), true, "the child must actually have been spawned, or this proves nothing");
     const pid = Number(readFileSync(pidFile, "utf8"));
     // An ABSOLUTE bound with an order-of-magnitude margin on a process that has already had its

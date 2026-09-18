@@ -120,8 +120,19 @@ function readsPerVerb(): Map<string, Set<string>> {
   return out;
 }
 
-/** A named `readonly string[]` in the source, read rather than restated here. */
+/**
+ * A named flag list in the source, read rather than restated here.
+ *
+ * `GLOBAL_FLAGS` is still a `readonly string[]`. `KNOWN_FLAGS` is `Object.keys(FLAGS)` since
+ * TODO.md §H.12 — one list carrying each flag's name AND the reader that decides its value — so
+ * it is read off that table's keys instead.
+ */
 function listNamed(name: string): readonly string[] {
+  if (name === "KNOWN_FLAGS") {
+    const t = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
+    assert.ok(t, "FLAGS moved — this gate reads it from the source on purpose");
+    return [...t[1]!.matchAll(/^ {2}"?([a-z][a-z-]*)"?:/gm)].map((x) => x[1]!).sort();
+  }
   const m = new RegExp(`const ${name}: readonly string\\[\\] = \\[([\\s\\S]*?)\\];`).exec(SRC);
   assert.ok(m, `${name} moved — this gate reads it from the source on purpose`);
   return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
@@ -164,7 +175,17 @@ test("GLOBAL_FLAGS ARE THE ONES READ BEFORE THE SWITCH DISPATCHES", () => {
   // `openWorkspace` or `main` itself reads, which is why every verb reads it. Anything else on
   // that list would be a flag exempted by assertion rather than by mechanism.
   const closure = flagClosure();
-  const reachedByMain = new Set([...closure.get("openWorkspace")!, ...flagsIn(topLevelFunctions().get("main")!.split('switch (args.command)')[0]!)]);
+  const fns = topLevelFunctions();
+  const preSwitch = fns.get("main")!.split("switch (args.command)")[0]!;
+  // THE CLOSURE OF THE PRE-SWITCH BLOCK, not only its direct reads. `--mcp-file` and
+  // `--extension-module` are read through `mcpFile` and `extensionModulePaths` since TODO.md
+  // §H.12 gave every door-decided flag a `(args: Args)` reader of its own, and a scan that only
+  // saw `args.flags[…]` written literally in `main` would call two globals unread the day they
+  // were given a name — which is the test measuring the spelling instead of the fact.
+  const reachedByMain = new Set([...closure.get("openWorkspace")!, ...flagsIn(preSwitch)]);
+  for (const c of new Set([...preSwitch.matchAll(/\b([A-Za-z0-9_]+)\(/g)].map((m) => m[1]!))) {
+    if (fns.has(c)) for (const f of closure.get(c)!) reachedByMain.add(f);
+  }
   for (const f of listNamed("GLOBAL_FLAGS")) {
     assert.ok(reachedByMain.has(f), `--${f} is called global and nothing before the switch reads it`);
   }
