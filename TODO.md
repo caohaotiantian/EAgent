@@ -20,25 +20,25 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-18 on `c3f5e60a`
+## State — one command each, re-run 2026-09-19 on `61b00d12`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **3,928 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,906 → 3,928) | `npm test` |
-| pinned exports | 542, **unmoved** — the 2026-09-18 wave added no exported name either: `FLAGS`, `KNOWN_FLAGS`, `VERB_POSITIONALS` and `APPROVAL_FLOOR_REFUSALS` are all module-private | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-18 wave's only kernel edits are `run/engine.ts` and `journal/events.ts` (`25ed5978`, `62335f93`, `c6f24b51`, `d6b23979`, `dee1bb7e`, `300bf222`), all under `fix:` and owing no trailer. `cli.ts` and `graph/validate.ts`, the other two files it touched, are not pinned — and `graph/validate.ts` is on `kernel.json`'s `notKernel` list BY NAME, with a written reason, which two documents and one lane got wrong this wave | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files, unmoved — the 2026-09-18 wave added no `src/` file | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **3,982 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,928 → 3,982) | `npm test` |
+| pinned exports | 542, **unmoved** — the 2026-09-19 wave added no exported name either: `wrapDiagnostic`, `diagnosticWidth`, `SPOOFING_CLASS`, `#refusePlannedRewind` and `EXECUTED` are all module-private | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-19 wave's only kernel edits are `run/engine.ts` (`da4156fa`, `29e6579a`, `7e84e7c0`, `8d7d013e`, `c0aa7f55`, `eb1d6d05`, `be578544`), all under `fix:` and owing no trailer. `cli.ts`, `graph/validate.ts` and `server/http.ts`, the other files it touched, are not pinned — and `graph/validate.ts` is on `kernel.json`'s `notKernel` list BY NAME, with a written reason | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files, unmoved — the 2026-09-19 wave added no `src/` file either; its two new files are both tests | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — the denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | 60 codes, unmoved — this wave added no code and RETIRED a misuse: §H.13 moved three refusals off `E_INTERNAL` onto the `E_CONFIG_INVALID` that already existed | `Object.keys(CODES).length` |
+| error vocabulary | 60 codes, unmoved — the 2026-09-19 wave added no code: §A.66's refusal keeps `E_GRAPH_INVALID`, which is true of the graph in hand, rather than inventing a mismatch code for a mismatch the engine never established | `Object.keys(CODES).length` |
 
-The kernel guard also prints a commits-judged count (775 at `c3f5e60a`). It is deliberately not a
+The kernel guard also prints a commits-judged count (806 at `61b00d12`). It is deliberately not a
 cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
 per lane — a merge that REPORTS merged is not evidence the work arrived.
-`docs/handoff-2026-09-18.md` is the current handoff; `docs/handoff-2026-09-15b.md` is the one before it.
+`docs/handoff-2026-09-19.md` is the current handoff; `docs/handoff-2026-09-18.md` is the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -54,14 +54,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 73 | 50 | 23 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and two opened by the 2026-09-18 settlement (§A.73, §A.74). The open count did not move: this wave closed two (§A.37, §A.69) and opened two, BOTH residues of what it closed — the same shape as 2026-09-15b, one wave on |
+| §A | 75 | 53 | 22 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the stranger's port (all six closed, F1 with them), and two opened by the 2026-09-19 settlement (§A.75, §A.76). The 2026-09-19 wave closed THREE (§A.68, §A.73, §A.74), re-scoped one it did not close (§A.66) and opened two, so open went 23 → 22. **Neither new row is a residue of what closed** — both were found by DRIVING a closed row's neighbour (§A.75 by measuring §A.68's `skip` arm, §A.76 by reviewing §A.74's plan path), which is the first wave in three where the new rows are not the old ones' shadows |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 9 | 5 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 15 | 13 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding. §H.12 and §H.13 — the six cases §H.11's closure named as NOT in its set — closed on 2026-09-18, and §H.14 is the readability residue their door left: one `fix:` line is now 844 characters and nothing wraps it |
+| §H | 15 | 14 | 1 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and is now the only open member. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -1368,6 +1368,18 @@ row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work be
   (`resolveGate`, `decideGateBatch`) still throw `E_GRAPH_INVALID` unjournaled — a typo'd `--graph`
   on an approve is not a dead run. **The residue is §A.66**: the identity pair is journaled, so
   journal READ access is enough to synthesise it.
+  **NARROWED ON 2026-09-19, and the subset it lost is named rather than implied.** §A.66's fix gave
+  `#failUnreadableGraph` a second, journal-derived conjunct — the run must also have EXECUTED
+  NOTHING, which is `#store.read` finding no unsuppressed `task.leased` or `gate.raised`. So the
+  CROSS-BUILD case is no longer covered: a run that really did execute, under a build that could
+  read its graph, and is presented now to a build that DROPPED an edge kind, is refused and left in
+  the state it was already in with **nothing journaled about why** — which is this row's own opening
+  sentence. Measured on `61b00d12` with `a66.mjs` (the parked, already-advanced shape):
+  `threw: E_GRAPH_INVALID  status: awaiting_gate  run.failed rows: 0  gates: ["open"]`. Taken
+  deliberately, and the trade is asymmetric: such a run is RECOVERABLE by rolling the binary back,
+  where this row's own never-executed run could progress under no build at all. The conjunct can
+  only ever move a case from the destructive answer to the conservative one, so it loosens nothing.
+  Written at `#failUnreadableGraph`'s own site, not only here.
 
 - ~~**A.64 · `GRAPH008_JOIN_DEPTH` compares `fanoutDepth` NUMBERS and never `fanoutEdgeStack`, so a
   held join collected by a SIBLING fan-out's barrier compiles clean.**~~ File:
@@ -1458,39 +1470,58 @@ rather than taken from a lane report.
   run at all; the compile half above was re-run.
   **The residue is §A.69**: this rule cannot dictate around a join that already claims `e.to`.
 
-- **A.66 · A caller with a runId and READ access to the journal can end a parked run through the
-  advance door.** File: `packages/core/src/run/engine.ts`, `#graphIdentityMismatch` and
-  `#failUnreadableGraph` (§A.63's mechanism). Identity is `graphHash` AND `resolutionManifest`,
-  and `run.compiled` journals BOTH; `manifestKey` normalises, the manifest is a NAME set, and two
-  ref-less graphs share the empty one. So the pair can be SYNTHESISED onto any graph at all.
-  **Repro:** the script is pasted whole in `docs/handoff-2026-09-15.md` §Repros (`a66.mjs`) —
-  `node /tmp/a66.mjs` from the repo root, on `015f3547`:
+- **A.66 · A caller with a runId and READ access to the journal can end a run through the advance
+  door — RE-SCOPED 2026-09-19 to the submit → first-advance window, and NOT closed.** File:
+  `packages/core/src/run/engine.ts`, `#graphIdentityMismatch` and `#failUnreadableGraph` (§A.63's
+  mechanism). Identity is `graphHash` AND `resolutionManifest`, and `run.compiled` journals BOTH;
+  `manifestKey` normalises, the manifest is a NAME set, and two ref-less graphs share the empty
+  one. So the pair can be SYNTHESISED onto any graph at all.
+  **What moved at `29e6579a`, `7e84e7c0`, `c0aa7f55`, `be578544`:** the destructive branch now
+  requires EVIDENCE OF EXECUTION as well as identity. `#failUnreadableGraph` fails the run only if
+  the run has executed nothing, asked of the JOURNAL (`#store.read`, the unsuppressed read) rather
+  than of the fold, as an ALLOWLIST — `task.leased` ∪ `gate.raised`. The row's own repro flips:
   ```
-  parked: awaiting_gate gates: ["open"]
-  read from the journal: sha256:9266cb9be…  manifest refs: ["function/done@stable",
-                                             "function/seed@stable","oversight/hold@stable"]
-  synthesised-from-journal advance threw: E_GRAPH_INVALID  status: failed
-                                          run.failed rows: 1  gates: ["cancelled"]
-  the row's actor: {"component":"executor","kind":"system"}  code: E_GRAPH_INVALID
+  $ node /tmp/a66.mjs            # docs/handoff-2026-09-15.md §Repros, unchanged
+  parked: awaiting_gate
+  threw: E_GRAPH_INVALID  status: awaiting_gate  run.failed rows: 0  gates: ["open"]  actor: undefined
   ```
-  It submits a `human_gate` graph and parks it, then in a second process reads `run.compiled`,
-  copies its two fields onto a two-node graph the run has never seen with one edge `kind` bent to
-  `"seql"`, `attach`es and `advance`s. **The caller never saw the run's own graph.**
-  **It is STRICTLY MORE than `cancel`, in two auditable ways**, which is why it is a row and not a
-  note: `#failRun` runs `#compensate` BEFORE the terminal row and `#cancelTree` compensates
-  nothing, so the forged path can dispatch every undo the run recorded; and the row lands as
-  `run.failed` from `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where a cancel writes
-  `operator.command` attributed to its caller — **an auditor cannot tell a caller's deliberate
-  destruction from a build that genuinely could not read the graph.** The check raises the bar from
-  "know the hash" (which `compiledGraphHash` and `RunProjection.graphHash` hand out) to "read one
-  journal row", and no further.
+  where it read `failed / 1 / ["cancelled"]` and a `run.failed` from `SYSTEM_ACTOR("executor")`.
+  **The COMPLEMENT was wrong twice and the allowlist is what replaced it**, which is the reusable
+  half: the first cut read the FOLD, and a retryable failure (`task.retry_scheduled` + `task.ready`)
+  or an ordinary `rewind` erases exactly that evidence, so a run that had charged money read
+  `tasks: [["pay","ready"]] gates: []` and the forged advance took it back. The second read "any row
+  outside `submit`'s four-name prefix", which counts OPERATOR rows as execution: `pause`/`resume`
+  append `operator.command` + `run.suspended`/`run.resumed` and run no node code, so pausing a run
+  before its first advance bought it immunity from §A.63 (measured: control `failed`/1, paused
+  `interrupted`/0, paused-and-resumed `running`/0).
+  **THE RESIDUE, AND IT IS WHY THIS ROW STAYS OPEN.** A victim that has executed nothing is a victim
+  §A.63 REQUIRES this door to be able to fail, and its journal is indistinguishable from a healthy
+  not-yet-started run's — the same four-name prefix. So a forged identity presented in the
+  submit → first-advance window still writes `run.failed` from the executor actor. Re-measured for
+  this settlement, `a66.mjs` with the `e1.advance(runId)` line deleted and nothing else changed:
+  ```
+  threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1  gates: []
+  the row's actor: {"component":"executor","kind":"system"}
+  ```
+  The window is PRODUCT-VISIBLE, not theoretical: `server/http.ts`'s submit route returns as soon as
+  the run is journaled and fires `advance` without awaiting it, and its own comment says the run
+  folds to `queued` in between. **The expensive half IS closed there** — a run that has executed
+  nothing has no recorded effect, so `#compensate` dispatches nothing and no money can move; the
+  attribution half is not.
+  **Both original facts still stand for that window**, which is why they are kept rather than
+  summarised away: `#failRun` runs `#compensate` BEFORE the terminal row and `#cancelTree`
+  compensates nothing, so the forged path can dispatch every undo the run recorded; and the row
+  lands as `run.failed` from `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where a cancel
+  writes `operator.command` attributed to its caller — **an auditor cannot tell a caller's
+  deliberate destruction from a build that genuinely could not read the graph.**
   **Not reachable from the shipped binary**: `compile` refuses both vocabulary faults before a run
-  exists and the plane binds only compiled graphs, so this is a LIBRARY door — which is also the
-  argument for leaving it, and the argument that has to be written down rather than assumed.
-  **Closes when** the door is unreachable with journal read access — a process boundary, or an
-  identity the journal does not publish — or with a recorded decision that an in-process `attach`
-  caller is trusted, stated BESIDE the compensate and attribution facts above rather than instead
-  of them.
+  exists and the plane binds only compiled graphs, so this is a LIBRARY door.
+  **The closing condition is UNCHANGED** — the door is unreachable with journal read access (a
+  process boundary, or an identity the journal does not publish), or a recorded decision that an
+  in-process `attach` caller is trusted, stated BESIDE the compensate and attribution facts rather
+  than instead of them. Narrowing the destructive branch is not that; it made forging the identity
+  worth less, not impossible. **And it cost §A.63 a subset** — the cross-build case, recorded in
+  that row.
 
 - ~~**A.67 · An APPROVED `human_gate` in `join.branches` disarms §D.9's zero-fold refusal, and the
   compiler requires it to be there.**~~ CLOSED at `4700a03d`, `d222e146`, `bfc45730`, `c9f8b1ec`,
@@ -1538,27 +1569,46 @@ rather than taken from a lane report.
   work member that succeeded producing nothing) and §A.72 (a short-circuit release folds final, so
   evidence whose work THEN dies still reports success in three of four modes).
 
-- **A.68 · The shipped `two-person-approval.json` fails the run on ONE rejection, whatever the
-  other two people say.** File: `examples/graphs/two-person-approval.json`, whose own
-  `metadata.description` reads *"Two of three named people must approve before the write lands"*.
-  Its join is `{mode: "quorum", k: 2, onBranchError: "fail"}`, and `"fail"` is read before `k` ever
-  matters to a losing arm. Driven on the shipped file through a real `Engine` — the script is in
-  `docs/handoff-2026-09-15.md` §Repros (`a68.mjs`), `node /tmp/a68.mjs` on `015f3547`:
+- ~~**A.68 · The shipped `two-person-approval.json` fails the run on ONE rejection, whatever the
+  other two people say.**~~ **CLOSED at `89e1927b`, `16d36c2d`, `eea73afe`, `583d6840` — by the
+  DESCRIPTION arm, and the graph's behaviour is byte-identical before and after** (only `metadata`
+  moved). File: `examples/graphs/two-person-approval.json`. Its `metadata.description` now states
+  the veto and its BOUNDARY: `onBranchError: "fail"` is read before `k` ever matters, so a rejection
+  arriving **before the second approval** fails the run whatever the other two would have said; the
+  VERDICT is settled by that rejection while the run itself stays `awaiting_gate` until the other
+  people vote, so a lone rejection and silence leaves it parked, not failed. `labels.residue-veto`
+  carries the measurement and `labels.residue-late-veto` the case the first honest draft missed —
+  a rejection arriving AFTER the second approval still fails the run, **with the write already
+  landed**, because the barrier short-circuited on two approvals and `save` ran. Re-measured for
+  this settlement on `61b00d12` through a real `Engine`, the row's own four lines plus two the row
+  did not carry (`.agent/cli-h14-a68/a68.mjs`, and the ordering matrix in `a68-order.mjs`):
   ```
-  [["alice","approve"],["bob","approve"]]                   status=awaiting_gate wrote=["ship it"]
-  [["alice","reject"],["bob","approve"],["carol","approve"]] status=failed wrote=[] error=E_HUMAN_APPROVAL_REQUIRED
-  [["alice","approve"],["bob","reject"],["carol","approve"]] status=failed wrote=[] error=E_HUMAN_APPROVAL_REQUIRED
-  [["alice","reject"]]                                      status=awaiting_gate wrote=[] error=none
+  [["alice","approve"],["bob","approve"]]                    awaiting_gate wrote=["ship it"]
+  [["alice","reject"],["bob","approve"],["carol","approve"]] failed wrote=[] E_HUMAN_APPROVAL_REQUIRED
+  [["alice","approve"],["bob","reject"],["carol","approve"]] failed wrote=[] E_HUMAN_APPROVAL_REQUIRED
+  [["alice","reject"]]                                       awaiting_gate wrote=[]  error=none
+  [["alice","approve"],["bob","approve"],["carol","reject"]] failed wrote=["ship it"]  ← the late veto
   ```
-  Two of three approved and the write did not land. **`k: 2` is not dead** — it is what
-  short-circuits the write on two approvals without waiting for the third, which
-  `test/graph/two-person-approval.test.ts` pins — but it buys no tolerance for a dissenter, which
-  is the whole of what k-of-n is for. **The example is the product's one demonstration that quorum
-  lives in `join` and not in `approval`**, so this is what a reader copies.
-  **Closes when** the example either declares `onBranchError: "skip"` — measure it: 1 reject + 2
-  approvals should then meet `k: 2` and land the write, while all three rejecting still fails on
-  §D.9's arm — or says in its own description and `labels.residue` that a single rejection fails
-  the run. One of the two, not both, and the decision is which behaviour the example is FOR.
+  **WHY THE OTHER ARM WAS REFUSED, THOUGH IT PASSES THIS ROW'S LITERAL CLOSING CONDITION.** The row
+  said to *measure* `onBranchError: "skip"` and expected 1 reject + 2 approvals to meet `k: 2` while
+  all three rejecting still failed on §D.9's arm. Both halves of that prediction hold. What the row
+  did not predict is the third line, and it is fail-OPEN:
+  ```
+  $ node .agent/cli-h14-a68/a68-skip.mjs        # the shipped file with "fail" → "skip"
+  [["alice","reject"],["bob","reject"],["carol","approve"]]  succeeded wrote=["ship it"]
+  [["alice","approve"],["bob","reject"],["carol","reject"]]  succeeded wrote=["ship it"]
+  [["alice","reject"],["bob","approve"],["carol","reject"]]  succeeded wrote=["ship it"]
+  ```
+  **ONE approval of three lands the write, in all three orderings** — `skip` would have replaced a
+  fail-CLOSED mismatch ("two of three" behaving as a veto) with a fail-OPEN one ("two of three"
+  behaving as ANY of three), and *refusing is always allowed; loosening never is*. The measurement
+  decided which behaviour the example is FOR, which is what the row asked for; it also uncovered the
+  engine defect underneath, now **§A.75**, and `skip` is not available as a behaviour until that
+  closes. Pinned NEGATIVELY by the last test in
+  `packages/core/test/graph/two-person-approval.test.ts` — the shipped graph refuses on the first
+  rejection, which is the behaviour that MASKS §A.75 — so the example cannot be switched to `skip`
+  without a red suite. `README.md`'s "Approval modes" row and `examples/README.md`'s row for this
+  graph both understated the veto and were corrected with it.
 
 ### Opened by the 2026-09-15b settlement
 
@@ -1668,53 +1718,178 @@ rather than taken from a lane report; where a number could not be re-run, the ro
   which is `JoinNode`'s documented `drain` gap. Pinned as CURRENT behaviour in
   `packages/core/test/run/join-evidence-and-work.test.ts`, so it cannot move in silence.
 
-- **A.73 · GRAPH021's new clause sits one compile from two sibling `fix:` lines dictating the
-  OPPOSITE edit.** *(§A.69's residue, and the second time in two waves that closing a `fix:` line
-  has produced a row about a DIFFERENT `fix:` line. Files:
-  `packages/core/src/graph/validate.ts`, `rule021FanoutHasJoin`'s clause and `rule008`.)* Measured
-  for this settlement on the merged tree, from a throwaway workspace holding the `eto` graph of
-  `docs/handoff-2026-09-15b.md` §Repros with its `back` edge deleted — **ONE compile, two `fix:`
-  lines, opposite instructions**:
+- ~~**A.73 · GRAPH021's new clause sits one compile from two sibling `fix:` lines dictating the
+  OPPOSITE edit.**~~ **CLOSED at `9e1c1f12`, `6165e6a2`, `b58bdb81`, `c749dbe5`, `418ae207`.** File:
+  `packages/core/src/graph/validate.ts`. `GRAPH008_BRANCH_NOT_CONNECTED` was **left alone by
+  measurement** — following its line alone on `eto-noedge` compiles clean in ONE compile (`ok`,
+  exit 0, re-run for this settlement), so it is the cheapest correct edit and teaching it to hedge
+  would be teaching it to hedge about the better instruction. What was false was GRAPH021's tail
+  ("whatever edge runs there now carries its own meaning") where nothing runs there, and `rule008`'s
+  `JOIN_DEPTH` naming a `kind: join` edge it had not checked existed. Both now read the graph in
+  hand — re-run on `61b00d12` from a throwaway workspace:
   ```
+  $ … compile graphs/eto-noedge.json
   ✗ GRAPH008_BRANCH_NOT_CONNECTED: join "again" waits on "read", but no edge runs from "read" to "again"
      fix: add an edge read -> again with kind: join
   ✗ GRAPH021_FANOUT_WITHOUT_JOIN: …
-     fix: … drop the `branches` ENTRY from the other — the entry alone, and NOT any edge: it is a
-     `kind: join` edge from "read" INTO "again" that would have made this diagnostic not fire …
+     fix: … drop the `branches` ENTRY from "again" — every such entry, there being NO edge from
+     "read" into it to delete — or add the `kind: join` edge from "read" INTO "again" that
+     `GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile …
+  $ … compile graphs/eto-dictated.json
+     fix: keep one join over "read": "again" must drop it from `branches` — the ENTRY alone, no
+     `kind: join` edge running from "read" into it to drop; what runs there is `kind: "loop"` …
   ```
-  One line says to ADD the edge that makes `again` a legitimate claimer; the other says `again` is
-  the claimer to drop. And on the `eto` graph WITH its `loop` edge, `rule008`'s own `JOIN_DEPTH`
-  fix names an edge that does not exist — *""again" must drop it from `branches` and drop the
-  `kind: join` edge from "read""*, while the only edge from `read` into `again` is `back`, a
-  `loop`. **A `fix:` line has to predict the compiler** (§A.65's lesson); these predict each other
-  wrongly. **NOTE, under this row rather than as its own** — the SELF-CLAIM shape: where the
-  fan-out's target is a join declaring ITSELF, the clause's counterfactual names an edge from
-  `read` INTO `read`, and adding it does not silence anything — `topoSort` returns `[]` on a
-  cycle, `fanoutDepth` collapses to 0, `foldersOf` empties and the clause DISAPPEARS under a
-  `GRAPH006_UNMARKED_CYCLE`. Re-run for this settlement, both halves. It is left deliberately: the
-  shape is already refused twice in the same output, and the one-line guard available
-  (`alsoClaim[0] === e.to`) would HIDE a true claimer where a node self-declares and another join
-  also claims it — a fifth ternary arm in the string whose fourth arm was a blocking finding.
-  **Closes when** a compile's `fix:` lines are consistent with each other on one graph: either
-  `rule008`'s two lines stop naming an edge kind they have not checked exists, or the rules that
-  can fire together agree on one edit. Not a message reword — the check is that following ANY ONE
-  line in an output does not contradict another line in the SAME output.
+  **TEN arms, not the six the design counted, and the count is the mechanism.** The clause is
+  assembled from ternaries and a byte pin covers exactly ONE combination, so the arms are enumerated
+  BY CONSTRUCTION in `fanout-branch-diagnostic.test.ts`'s `ARMS` table (O1, S1–S3, P1–P6), each
+  pinned byte-for-byte, **plus a test that the ten strings are DISTINCT** (two arms pinning one
+  string means a condition is inert) **and that the counterfactual appears exactly where no claimer
+  cycles**. §A.69's two settled strings are among the ten and are unchanged — the 852-byte `eto`
+  line is byte-identical to `docs/handoff-2026-09-15b.md`'s quotation. `rule008` is three arms, one
+  per dropper, joined by a list join so there is no plural fourth.
+  **AND THE `fix:` LINE STOPPED ECHOING AN UNVALIDATED STRING.** `GRAPH003_UNKNOWN_EDGE_KIND` is an
+  error but NOT fatal, so `rule008` still runs and interpolated the RAW `edge.kind`: a kind of
+  ``seq"\nok\n   fix: nothing to do here`` printed a **forged bare `ok` line and a forged `fix:`
+  line inside the compiler's own output**, and an object kind printed `[object Object]` once per
+  edge. It is rendered through `describeValue` now (the file's own untrusted-value renderer,
+  matching `compile.ts`'s quoting of the same field) with the dedupe moved onto the RENDERED string.
+  Re-driven through the shipped CLI for this settlement: the bent kind comes back as one JSON-quoted
+  escaped span on ONE line, and no `ok` line and no second `fix:` appear.
+  **NOTE, WIDENED — the residue is THREE shapes, not one.** The self-claim shape (the fan-out's
+  target is a join declaring ITSELF), the UPSTREAM-CLAIMER shape (the claimer is an ancestor of
+  `e.to`), and the PLURAL shape with a cyclic claimer among several. All three are the same fact:
+  the dictated edge closes a cycle, `topoSort` returns `[]`, `fanoutDepth` collapses and the
+  diagnostic the sentence predicts is CLEARED rather than cemented. They are now handled in one
+  place rather than excluded one at a time — the offer is gated on
+  `wouldCycle(j) = j === e.to || ancestors(e.to).has(j)`, and **every remaining counterfactual is
+  gated on `alsoClaim.every(j => !wouldCycle(j))`**, required of every claimer because the plural
+  spelling says "INTO one of them", which a reader takes as any of them. What survives when the
+  counterfactual is withheld is unconditional: the drop advice, the fact about the edge that IS
+  there, and `GRAPH008_BRANCH_NOT_CONNECTED`'s own line. **The offer's promise is narrow on
+  purpose** — it says following it "silences THIS diagnostic", not that the graph compiles.
+  **A SECOND NOTE, under this row rather than as its own, because nothing refuses it:** a DUPLICATED
+  `branches` entry is accepted silently. `{"branches": ["read","read"]}` compiles to two identical
+  `GRAPH008_BRANCH_NOT_CONNECTED` diagnostics — one per ENTRY, not per node — and
+  `E_GRAPH_INVALID: graph has 3 error(s)` naming the code twice. Measured on `61b00d12`. The wording
+  both new lines carry ("every such entry") is what stays TRUE of that graph; no rule refuses the
+  duplicate, and `claimedBy` counting entries rather than nodes is what makes the duplicate visible
+  at all. Pinned by `§A.73 A DUPLICATED `branches` ENTRY IS WHY THE LINE SAYS *EVERY* SUCH ENTRY` in
+  `join-depth.test.ts`.
+  **What closed it, against the row's own condition:** following ANY ONE line of these outputs no
+  longer contradicts another line in the SAME output, and `rule008` no longer names an edge kind it
+  has not checked exists. **Acceptance did not move** — all 9 committed `GraphSpec` files compile
+  identically to base.
 
-- **A.74 · §A.37's two refusal arms answer to different verbs, and the asymmetry is inherited
-  rather than chosen.** *(§A.37's residue; the design said to note it or close it deliberately and
-  NOT to widen scope silently, and this row is that note made checkable.)* File:
-  `packages/core/src/run/engine.ts`. Change 2 sits in `#rewindRefusals`, so `planRewind` refuses
-  too and the test asserts `refusedBy === "planRewind"`. Change 3 sits in `#rewindSerially`, which
-  `planRewind` does not call, so the test asserts `refusedBy === "rewind"` — an operator who reads
-  the plan first is shown a plan and NO refusal (`steps 1`, `dispatch 0`, `blocked 1`) and is
-  refused only when they run it. The asymmetry
-  PREDATES §A.37: the existing `unrunnable` arm has exactly the same shape, which is why it was
-  matched rather than questioned. **Closes when** either `planRewind` reaches the second arm too —
-  it would have to build the same `current.steps` a `#rewindSerially` pass builds, which is the
-  work — or the asymmetry is written at BOTH sites as a decision with its reason, and a test pins
-  that `planRewind` accepts what `rewind` then refuses, so the gap cannot close by accident. Pinned
-  as CURRENT behaviour by `SHAPE 2` in
-  `packages/core/test/run/compensation-refused-then-rewind.test.ts`.
+- ~~**A.74 · §A.37's two refusal arms answer to different verbs, and the asymmetry is inherited
+  rather than chosen.**~~ **CLOSED at `da4156fa`, `8d7d013e`, `eb1d6d05` (and `be578544` with
+  §A.66's, the lane being shared) — by the FIRST arm of its closing condition: `planRewind` reaches
+  the second arm too.** File: `packages/core/src/run/engine.ts`. Both post-plan refusals — the
+  `unrunnable` arm (which predates §A.37 and has the identical shape, which is why it was matched
+  rather than questioned) and §A.37's `noArguments` arm — moved into one `#refusePlannedRewind`,
+  called by `planRewind` (`engine.ts:4868`) and by `#rewindSerially` (`:5520`). Both callers hand it
+  the steps from the SAME `#rewindPlanOf` call, so "the list the operator authorized and the list
+  about to be dispatched are one function's output" still holds and nothing re-reads the journal.
+  `SHAPE 2`'s `refusedBy` now reads `"planRewind"` where it read `"rewind"`.
+  **AND IT SITS ABOVE THE `planHash` CHECK (`:5533`), which is the second decision and not a
+  detail.** Once `planRewind` refuses, no operator can ever HOLD a matching `planHash` for such a
+  journal — so with the arms below the check a direct `rewind` caller's diagnostic became *"this
+  engine has no record of plan <h>"*, a complaint about the authorization for a plan nobody can be
+  shown, in place of the journal fact that actually blocks them. `#rewindSerially`'s own comment
+  already ordered it this way: *a rewind that is going to be refused must undo NOTHING*.
+  **Exactly one existing test moved**, and nothing was traded away: `rewind-plan.test.ts`'s detached
+  fully-delegated run read a PLAN (`attached: false`, one step, `dispatch 0`) and `rewind` declined
+  it anyway — §A.74's shape verbatim. The refusal carries strictly more than the plan named for an
+  operator (the `tool -> undo` pair, the child run the effect was recorded in, and `attach` as the
+  move) and strictly LESS as data (`seq`, `compensates`, `argsDigest`, `irreversibility` and `ok`
+  are dropped) — recorded as a trade at the site rather than as "everything the plan carried", which
+  a reviewer measured false. `attached`/`undispatchable` stay in the hash header and are now pinned
+  by their own test on a boundary above every effect, verified non-vacuous by mutation.
+  **THE HTTP PLANE IS WHERE AN OPERATOR MEETS THIS, so the refusal is pinned there too.**
+  `GET /runs/:id/rewind-plan` returns `engine.planRewind` directly and `err.conflict` maps to 409,
+  so a route that returned **200 with a plan the act would decline now answers 409 with prose**, for
+  a wider set of runs than before. `test/server/rewind-plan-refusal.test.ts` holds it with its own
+  rig (the shared harness has no irreversible tool) — 409 + `E_RESTORE_ILLEGAL` + the arm's own
+  message, with a same-route same-boundary **200 control** one tool-field away; removing the arm
+  from `planRewind` turns that 409 back into a 200.
+  **One diagnostic consequence, recorded because it is a status code an operator's tooling reads:**
+  a `rewind` with an absent or empty `planHash` on a run whose arms fire now answers **409**
+  (`err.conflict`) where it answered **400** (`err.validation`). Both are `E_RESTORE_ILLEGAL`, both
+  refuse; it is the deliberate consequence of putting the arms above the hash check.
+
+### Opened by the 2026-09-19 settlement
+
+Found while building or reviewing the fifth wave. Each was RE-RUN on `61b00d12` by the settlement
+rather than taken from a lane report; where a claim could not be measured through a public surface,
+the row says so.
+
+- **A.75 · A `quorum` join's `k` is not enforced on the release path `onBranchError: "skip"` puts
+  the run on, so k-of-n is any-of-n once every member is terminal.** File:
+  `packages/core/src/run/engine.ts`, `#maybeFireJoin`'s `quorum` arm and `#foldJoin`.
+  `#maybeFireJoin` releases `quorum` on `succeeded >= need || noMoreArrivals`, where
+  `noMoreArrivals = quiescent && terminal >= expected` — the "no further arrival is possible"
+  answer every mode needs. `#foldJoin` then holds the `onBranchError === "fail" && skipped > 0` arm
+  and §D.9's zero-success arm, **and never re-checks `k`**. So a barrier that released because
+  nothing more can arrive folds as a SUCCESS with `succeeded < need`. Under `"fail"` the first arm
+  masks it — any loss fails the run before the count matters — which is why this has never been
+  visible in a shipped graph. Under `"skip"` nothing does.
+  **Repro, on the shipped `two-person-approval.json` with `"fail"` → `"skip"` and nothing else
+  changed** (`.agent/cli-h14-a68/a68-skip.mjs`, driven through a real `Engine` on `61b00d12`):
+  ```
+  [["alice","reject"],["bob","approve"],["carol","approve"]] succeeded wrote=["ship it"]   ← wanted
+  [["alice","reject"],["bob","reject"],["carol","reject"]]   failed    E_QUORUM_UNREACHABLE ← wanted
+  [["alice","reject"],["bob","reject"],["carol","approve"]]  succeeded wrote=["ship it"]   ← NOT wanted
+  [["alice","approve"],["bob","reject"],["carol","reject"]]  succeeded wrote=["ship it"]   ← NOT wanted
+  [["alice","reject"],["bob","approve"],["carol","reject"]]  succeeded wrote=["ship it"]   ← NOT wanted
+  ```
+  **ONE approval of three meets `k: 2`, in all three orderings.** Three rejections still fail, on
+  §D.9's arm — and for THIS graph §D.9's term is `succeededMembers === 0`, not `succeededWork === 0`,
+  because all three members are `human_gate` nodes so `workMembers` is 0 and the evidence-only
+  fallback fires. That is why the boundary sits between one approval and none rather than between
+  two and one.
+  **It is CONSEQUENTIAL rather than cosmetic**: `k` is the whole of what a quorum join declares, and
+  a graph that writes it is entitled to read it as a floor. It is also what makes §A.68's other arm
+  unavailable — the example cannot honestly declare `skip` until this closes.
+  **Pinned NEGATIVELY**, which is the most a non-engine lane could do: the last test in
+  `packages/core/test/graph/two-person-approval.test.ts` asserts the SHIPPED graph refuses on the
+  first rejection, the behaviour that masks this, so the example cannot be switched to `skip`
+  without a red suite.
+  **Closes when** a barrier released out of `noMoreArrivals` is folded against the mode's own
+  requirement — `quorum` needs `succeeded >= need` or it is `E_QUORUM_UNREACHABLE`, independent of
+  `onBranchError` — or when a recorded decision states that `k` is a short-circuit threshold and
+  never a floor, in which case `JoinSpec.k`'s docstring and `README.md`'s "Approval modes" row both
+  have to say so. Not a message reword: the check is the matrix above, and the three NOT-wanted
+  lines must move.
+
+- **A.76 · `planRewind` registers a CHILD context it never retires, and a later `attach` on that
+  child is a silent no-op.** File: `packages/core/src/run/engine.ts`, `#rewindPlanOf` →
+  `#planRollbackChildSteps` → `#childContextFor`, against `#contextFor` and `planRewind`'s `finally`.
+  `#childContextFor` builds a child's context through `#contextFor`, which REGISTERS it in `#runs`;
+  `planRewind`'s `finally` retires only the PARENT (`if (attachedHere) this.#retire(runId)`), by a
+  comment that is explicit about scope — *"only what THIS call attached: a run something else holds
+  on purpose is not this verb's to release"*. Nothing retires the children. And `#contextFor`'s
+  first line is `const existing = this.#runs.get(runId); if (existing !== undefined) return existing;`
+  — **the graph the caller passed is discarded when a context already exists**. So on the same
+  `Engine` instance, an operator who previews a rewind of a delegated run and then calls
+  `attach(childRunId, correctedGraph)` to fix the child's graph gets **no error and no effect**:
+  the stale context the preview installed is what the next verb reads.
+  **PRE-EXISTING, and this settlement is not claiming otherwise.** The registration happens inside
+  `#rewindPlanOf`, which BOTH verbs called before and after §A.74, so §A.74 changed nothing about
+  its frequency; the lane's first report said it "moves it to the common path" and withdrew that.
+  §A.74's own review names both in-memory writes that survive the planner's swallow (`seen` and this
+  registration) and argues neither is a defect *for the planner* — which is true, and orthogonal to
+  what a later `attach` then does.
+  **NOT MEASURABLE THROUGH A PUBLIC SURFACE YET, and that is stated rather than papered over.**
+  `#runs` has no public membership predicate and `attach` returns `void`, so there is no assertion a
+  test can make today that distinguishes "attached" from "silently ignored" — the difference only
+  shows up in a later verb's behaviour on a child whose graph the engine cannot otherwise rebuild.
+  The reviewer who found it could not measure it either. **Reached by reading**, and recorded on
+  that basis.
+  **Closes when** either `attach` is honest — it replaces the graph of an existing context, or it
+  REFUSES with a message naming the context that already holds the run (refusing is always allowed)
+  — or `planRewind` releases every context its plan installed, children included, which needs
+  `#rewindPlanOf` to report what it registered. Whichever is taken, the closure needs an OBSERVABLE:
+  a child run whose graph this build cannot rebuild, previewed, re-attached with a good graph, and
+  then rewound — succeeding where it fails today.
 
 ---
 
@@ -2477,25 +2652,61 @@ Each traces to a decision in `DESIGN.md`.
   CONDITIONAL on `positional[0] === "attest"`, so the door must not demand it before the
   subcommand is known.
 
-- **H.14 · A `fix:` line is 844 characters on one unwrapped line, and the CLI wraps nothing.**
-  *(§A.69's and §H.12's shared residue — the diagnostic got longer for a good reason and nothing
-  between it and the terminal has an opinion about width.)* File:
-  `packages/core/src/cli.ts`, the diagnostic printer. Measured for this settlement on the `eto`
-  graph of `docs/handoff-2026-09-15b.md` §Repros:
+- ~~**H.14 · A `fix:` line is 844 characters on one unwrapped line, and the CLI wraps nothing.**~~
+  **CLOSED at `ff925a28`, `b3d059f4`, `e719b85b`, `396d961a`, `a42d1fc7`, `d2b63498`, `ea929446`,
+  `e991cb13`, `2a8990aa` — by WRAPPING, and only on a TTY.** File:
+  `packages/core/src/cli.ts`, `writeDiagnostic` / `wrapDiagnostic` / `diagnosticWidth`.
+  **THE ROW'S OWN REPRO WAS WRONG AND IS CORRECTED HERE**, because it is the first thing anybody
+  re-runs: diagnostics go to **stderr**, so the pipe needs `2>&1`, and the writer is
+  `process.stderr.write`, not `console.error`. As written the row's command pipes stdout only, grep
+  reads an empty stream and `awk` prints NOTHING — it cannot have produced 852. Corrected, and
+  re-run on `61b00d12`:
   ```
-  $ node packages/core/src/cli.ts compile graphs/eto.json | /usr/bin/grep -a '   fix:' | awk '{print length($0)}'
-  852        # 844 of `fix:` text plus the 8-character "   fix: " prefix
+  $ node packages/core/src/cli.ts compile graphs/eto.json 2>&1 | /usr/bin/grep -a '   fix:' | awk '{print length($0)}'
+  852        # 844 of `fix:` text plus the 8-character "   fix: " prefix; 846 characters, 852 bytes
   ```
-  Every `fix:` line in the tree is one `console.error` of a single string; there is no wrap, no
-  width read and no `COLUMNS`. The author this clause was written FOR reads it as one soft-wrapped
-  paragraph in whatever their terminal does. **Closes when** the printer wraps at a width it can
-  defend — with the indent preserved, and with the same treatment for `message` — or when a
-  measurement shows wrapping is worse (a wrapped line cannot be `grep`ed for as one string, which
-  is a real cost and the reason this is a row rather than an obvious fix). Do NOT close it by
-  SHORTENING the clause: what it says is pinned byte-for-byte on both arms, on purpose.
+  **The PIPE is byte-identical to before, and that is the one claim the closure rests on.** The
+  width source is `process.stderr.columns`, read only when `process.stderr.isTTY === true`, clamped
+  to `[60, 120]`; a TTY with no `columns` does NOT wrap (conservative, and pinned). **`COLUMNS` is
+  deliberately not read** — honouring it would make the bytes a diagnostic writes depend on the
+  invoking shell's environment even in a pipe, which is the grep cost this row named, reintroduced
+  through a side door. Continuation indents are 2 for the `message` line and 8 for the `fix:` line,
+  2 < 3 so a wrapped message is never mistaken for the `fix:` below it. `wrapDiagnostic` is pure,
+  breaks at whitespace only (the longest token in the clause is 21 characters, so no token is split
+  at any width ≥ 60), treats a `"…"` or `` `…` `` span as one token, and preserves every gap it does
+  not break at — the first cut joined with one space and turned `bad  name.json` into
+  `bad name.json`, which is a path that does not exist.
+  **THE PIPE CLAIM IS PINNED BY A SPAWNED CLI, not by an in-process stub, and that distinction was a
+  blocking review finding.** The in-process capture set `isTTY` to the literal `false`; a real pipe
+  has **no own `isTTY` property at all**, so the pipe arm was testing a state that never occurs and
+  two mutations (always wrap; wrap at 80 when `isTTY === undefined`) were GREEN across the whole
+  suite. `diagnostic-wrap.test.ts` now drives `execFile` on the real binary — the `fix:` line is one
+  line of exactly 852 bytes and the clause matches exactly one line, `grep -c` == 1. Both mutations
+  are RED.
+  **TWO RESIDUES, both recorded rather than closed.** (1) `loom compile 2>&1 | less` is a PIPE and
+  gets the 852-byte line unwrapped, while a pty-allocating CI runner is a TTY and gets a wrap; no
+  rule distinguishes `less` from `grep` at the file descriptor, and wrapping always would pay this
+  row's named cost for every piped consumer to buy the `less` case. (2) The TTY path strips
+  `SPOOFING_BUT_WHITESPACE` (the class `legible()` already used, spelled ONCE and read by both)
+  because `loadGraph` interpolates a FILE NAME here unquoted and a `\r`, an ESC or a U+202E each
+  forges or hides a diagnostic — **so on a terminal the rendered file name is NOT the file name**
+  (`a<CR>b.json` renders `a b.json`), which is the same defect whitespace-collapsing caused, paid
+  deliberately because any faithful rendering of a CR on a terminal IS the attack. The PIPE is
+  unchanged and the test asserts that residue, so nobody reads the TTY arm as having closed it.
+  **`loom replay`'s `✗` frame writer is deliberately NOT routed through this printer**, with the
+  reason at the site: over `ReplayFrame`'s ten kinds its payloads are values an operator DIFFS — a
+  graph id or a `ref=digest` drift list, an effect key, `taskId hash`, a task state name, sorted
+  `state:decision` pairs, `failed:CODE` — plus exactly ONE JSON document and ONE prose sentence.
+  Re-flowing a digest list at spaces makes the one thing the line exists for harder.
+  **The clause was NOT shortened**, per the row's instruction: it is 852 bytes on `eto` still, and
+  byte-identical to `docs/handoff-2026-09-15b.md`'s quotation. §A.73's new arms made the OTHER arms
+  longer — 889 bytes for the unwired offer (852 at base) and 292 for `GRAPH008_JOIN_DEPTH` (191 at
+  base) — and `describeValue` has no cap, so three distinct 400-character edge kinds give a
+  **1,512-byte** line and each `GRAPH003_UNKNOWN_EDGE_KIND` above it 601. All measured on
+  `61b00d12`; the dedupe bounds the COUNT of distinct renderings, not the length.
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-18 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-19 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -2602,6 +2813,10 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.69 | `a27b8f33`, `4cef9f25`, `473202af` | GRAPH021's `fix:` names the join that already claims the fan-out's target, so the collision is disclosed by the FIRST compile; acceptance unmoved and the `JOIN_DEPTH` that follows deliberately not suppressed. Option (a) refused on measurement. Residue → §A.73 |
 | H.12 | `db49005d`, `3b527003`, `ee93918f`, `aadc4b68` | one `FLAGS` table whose value is the flag's argv-only READER, `KNOWN_FLAGS` derived from its keys, `VERB_POSITIONALS` read by the door and by `requirePositional` — the arity is stated nowhere and cannot drift. Open set THREE. Residue → §H.14 |
 | H.13 | `db49005d`, `3b527003`, `ee93918f`, `aadc4b68` | a missing positional on all 17 verbs that take one answers `E_CONFIG_INVALID` with the same sentence, and `E_INTERNAL` is reserved for a bug in Loom again |
+| A.73 | `9e1c1f12`, `6165e6a2`, `b58bdb81`, `c749dbe5`, `418ae207` | the sibling `fix:` lines predict the COMPILER and no longer each other: GRAPH021's clause offers `GRAPH008_BRANCH_NOT_CONNECTED`'s own edge by name where no edge is wired, `rule008` names the kind that IS there, and an echoed `edge.kind` is RENDERED rather than injected (a forged `ok` line and a forged `fix:` line were reachable through `GRAPH003_UNKNOWN_EDGE_KIND`, which is not fatal). Ten arms enumerated by construction, byte-pinned, and asserted distinct. `GRAPH008_BRANCH_NOT_CONNECTED` left alone by measurement. Notes kept under the row: the three cycling shapes, and a duplicated `branches` entry nothing refuses |
+| A.74 | `da4156fa`, `8d7d013e`, `eb1d6d05`, `be578544` | the preview refuses everything the act refuses — both post-plan arms in one `#refusePlannedRewind`, called by `planRewind` and by `#rewindSerially` ABOVE the `planHash` check, so the operator gets the journal fact and not a complaint about a plan nobody can be shown. Pinned at the HTTP plane too: `GET /runs/:id/rewind-plan` answers 409 with a 200 control one tool-field away |
+| H.14 | `ff925a28`, `b3d059f4`, `e719b85b`, `396d961a`, `a42d1fc7`, `d2b63498`, `ea929446`, `e991cb13`, `2a8990aa` | a diagnostic wraps for a TERMINAL at `stderr.columns` clamped `[60,120]` and never for a pipe, which stays byte-identical — pinned by a SPAWNED CLI, because a real pipe has no own `isTTY` and the in-process stub that set it `false` could not fail. `COLUMNS` deliberately unread. Residues recorded: `2>&1 \| less`, and control-character stripping on the TTY path only. The row's own repro was missing `2>&1` and named the wrong writer; corrected in the row |
+| A.68 | `89e1927b`, `16d36c2d`, `eea73afe`, `583d6840` | by the DESCRIPTION arm, behaviour byte-identical: the example states the veto and its boundary (before the second approval it fails the run; after it, the write has already landed). `onBranchError: "skip"` was MEASURED and refused although it passes the row's literal condition — under it 2 rejections + 1 approval land the write, which is fail-open, and loosening is never allowed. Residue → §A.75 |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
