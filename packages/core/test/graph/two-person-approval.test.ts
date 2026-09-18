@@ -24,7 +24,7 @@
  * "carol's gate closes" would be hiding the one thing a reader needs to know before copying the
  * file.
  *
- * ## §A.68 — AND ANY ONE OF THEM CAN VETO IT
+ * ## §A.68 — AND A REJECTION THAT ARRIVES FIRST VETOES IT
  *
  * The measurement above says what two approvals do. It said nothing about a REJECTION, and the
  * file's description said "two of three must approve" while `onBranchError: "fail"` made one
