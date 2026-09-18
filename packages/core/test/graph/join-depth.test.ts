@@ -543,7 +543,7 @@ test("§A.73 ARM 2 — a claimer wired some OTHER kind: the entry alone, and the
   assert.equal(
     claimFix(withSeq),
     'keep one join over "a0": "jSeq" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
-      'edge running from "a0" into it to drop; what runs there is `kind: seq`, which carries its own ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "seq"`, which carries its own ' +
       'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
   );
 
@@ -556,7 +556,7 @@ test("§A.73 ARM 2 — a claimer wired some OTHER kind: the entry alone, and the
   assert.equal(
     claimFix(withLoop),
     'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
-      'edge running from "a0" into it to drop; what runs there is `kind: loop`, which carries its own ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "loop"`, which carries its own ' +
       'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
   );
 });
@@ -578,7 +578,7 @@ test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, an
     claimFix(spec),
     'keep one join over "a0": "jNone" must drop it from `branches` — the ENTRY alone, no edge running ' +
       'from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing ' +
-      "in this same compile, and dropping the entry answers that refusal too, and take " +
+      "in this same compile, and dropping every such entry answers that refusal too, and take " +
       '"jA"\'s result as an arm instead if it still needs those writes',
   );
 
@@ -590,6 +590,18 @@ test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, an
   );
   assert.ok(!codes(dropped).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(dropped).join(", "));
   assert.equal(claimRefusal(dropped), undefined, `and the collision with it: ${codes(dropped).join(", ")}`);
+
+  // AND THE HONEST HALF, because `claimRefusal` and `codes` would both hide it otherwise: the drop
+  // answers both ERRORS and leaves a WARNING. A join stripped of its last `branches` entry still
+  // declares `writes`, and `GRAPH008_JOIN_WRITES_UNPRODUCED` says a barrier cannot produce what no
+  // branch wrote. The claim these lines make is "no new ERROR", never "compiles clean" — asserted on
+  // the WHOLE severity-tagged set so a new error cannot arrive unnoticed.
+  assert.deepEqual(
+    validateGraph({ spec: dropped, resolver: resolver(), tools: {}, tenantCapabilities: [] })
+      .map((x) => `${x.severity}:${x.code}`),
+    ["warning:GRAPH008_JOIN_WRITES_UNPRODUCED"],
+    "the dictated drop introduces no ERROR, and the one warning it does leave is named",
+  );
 
   // AND THE CLAIM IT NO LONGER MAKES, with the reason. An earlier cut said "adding the edge it asks
   // for cements this refusal rather than clearing it". That holds only while the edit leaves the
@@ -635,7 +647,7 @@ test("§A.73 ARM 3 CLAIMS NOTHING ABOUT ADDING THE EDGE — two shapes where tha
       claimFix(spec),
       `keep one join over "a0": "${dropper}" must drop it from \`branches\` — the ENTRY alone, no edge ` +
         'running from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is ' +
-        "refusing in this same compile, and dropping the entry answers that refusal too, and take " +
+        "refusing in this same compile, and dropping every such entry answers that refusal too, and take " +
         `"${keeper}"'s result as an arm instead if it still needs those writes`,
       name,
     );
@@ -664,9 +676,85 @@ test("§A.73 ARM 2 WITH SEVERAL KINDS — the list join is what makes the arm co
   assert.equal(
     claimFix(spec),
     'keep one join over "a0": "jTwo" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
-      'edge running from "a0" into it to drop; what runs there is `kind: seq`, `kind: loop`, which ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "seq"`, `kind: "loop"`, which ' +
       'carries its own meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
   );
+});
+
+test("§A.73 `kind` IS RENDERED, NEVER ECHOED — it is the only unvalidated string this line reaches", () => {
+  // `GRAPH003_UNKNOWN_EDGE_KIND` is an ERROR but NOT fatal, so `checkStructure` does not gate and
+  // this rule runs on an edge whose `kind` is whatever the JSON said. Reproduced through the shipped
+  // binary before the fix: a kind of `seq"\nok\n   fix: nothing to do here` printed a forged bare
+  // `ok` line and a forged `fix:` line INSIDE the compiler's own output. Node ids cannot do this —
+  // `GRAPH003_BAD_ID` is fatal and its charset is restricted — so `kind` is the whole exposure.
+  const evil = 'seq"\nok\n   fix: nothing to do here';
+  const withNewline = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jEvil", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      { id: e("x"), from: n("a0"), to: n("jEvil"), kind: evil }],
+  );
+  const fix = claimFix(withNewline);
+
+  // THE PROPERTY, not just the bytes: ONE line, and the payload is escaped rather than reproduced.
+  assert.equal(fix.split("\n").length, 1, `the fix: must be one line: ${JSON.stringify(fix)}`);
+  assert.ok(!fix.includes(evil), "the raw value must not appear");
+  assert.ok(fix.includes('`kind: "seq\\"\\nok\\n   fix: nothing to do here"`'), fix);
+  assert.equal(
+    fix,
+    'keep one join over "a0": "jEvil" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is ' +
+      '`kind: "seq\\"\\nok\\n   fix: nothing to do here"`, which carries its own meaning, and take ' +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // AND THE DEDUPE MOVED ONTO THE RENDERED STRING, which is what bounds the output: two DISTINCT
+  // objects are two distinct values, so a `Set` over raw kinds collapsed neither and the clause grew
+  // one `[object Object]` per edge.
+  const withObjects = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jObj", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      { id: e("o1"), from: n("a0"), to: n("jObj"), kind: { evil: 1 } },
+      { id: e("o2"), from: n("a0"), to: n("jObj"), kind: { evil: 2 } }],
+  );
+  const objFix = claimFix(withObjects);
+  assert.ok(!objFix.includes("[object Object]"), objFix);
+  assert.equal(
+    (objFix.match(/`kind: an object`/g) ?? []).length,
+    1,
+    `two objects must describe as one value, not two: ${objFix}`,
+  );
+});
+
+test("§A.73 A DUPLICATED `branches` ENTRY IS WHY THE LINE SAYS *EVERY* SUCH ENTRY", () => {
+  // `join.branches` may name one node twice — nothing refuses it — and
+  // `GRAPH008_BRANCH_NOT_CONNECTED` then fires ONCE PER OCCURRENCE while `claimedBy` dedupes by
+  // node. "Drop the entry" was therefore a count this line could not keep: dropping one of two
+  // leaves both refusals standing. The word is the fix; the shape is measured here so it cannot
+  // regress to the singular.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0", "a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  assert.equal(
+    codes(spec).filter((c) => c === "GRAPH008_BRANCH_NOT_CONNECTED").length,
+    2,
+    `the duplicate really does double the sibling refusal: ${codes(spec).join(", ")}`,
+  );
+  assert.match(claimFix(spec), /dropping every such entry answers that refusal too/, claimFix(spec));
+
+  // AND FOLLOWING IT ONCE IS NOT ENOUGH, which is exactly what the word warns about.
+  const droppedOne = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  assert.ok(codes(droppedOne).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(droppedOne).join(", "));
+  // …and dropping EVERY such entry answers both.
+  const droppedAll = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", [])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  assert.ok(!codes(droppedAll).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(droppedAll).join(", "));
+  assert.equal(claimRefusal(droppedAll), undefined, codes(droppedAll).join(", "));
 });
 
 test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not seven", () => {
@@ -681,10 +769,10 @@ test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not s
   assert.equal(
     claimFix(spec),
     'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
-      'edge running from "a0" into it to drop; what runs there is `kind: loop`, which carries its own ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "loop"`, which carries its own ' +
       'meaning, and "jNone" must drop it from `branches` — the ENTRY alone, no edge running from "a0" ' +
       'into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
-      "same compile, and dropping the entry answers that refusal too, and take " +
+      "same compile, and dropping every such entry answers that refusal too, and take " +
       '"jA"\'s result as an arm instead if it still needs those writes',
   );
 });

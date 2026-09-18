@@ -1438,8 +1438,8 @@ test("A `compensation`-WIRED CLAIMER OF THE TARGET IS NAMED TOO, and so is a SEC
       'NOT any edge: it is a `kind: join` edge from "read" INTO one of them that would have made this ' +
       "diagnostic not fire, so whatever edge runs there now carries its own meaning and deleting it " +
       'is a second change. No edge runs from "read" into "spare" at all — that is what ' +
-      "`GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this same compile, and dropping the `branches` " +
-      "ENTRY answers that refusal too",
+      "`GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this same compile, and dropping every such " +
+      "`branches` ENTRY answers that refusal too",
   );
 
   // AND THE APPENDIX'S ONE CLAIM IS RUN: the drop this line already dictates answers the sibling as
@@ -1670,7 +1670,7 @@ test("TWO CLAIMERS, NEITHER WIRED: the tail drops and the appendix names both", 
       "ENTRY from the others — the entry alone, and NOT any edge: it is a `kind: join` edge from " +
       '"read" INTO one of them that would have made this diagnostic not fire. No edge runs from "read" ' +
       'into "again", "undo" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
-      "same compile, and dropping the `branches` ENTRY answers that refusal too",
+      "same compile, and dropping every such `branches` ENTRY answers that refusal too",
   );
 
   // AND THE APPENDIX'S CLAIM IS RUN, on both names: dropping the entry answers the sibling's
@@ -1758,10 +1758,19 @@ for (const shape of ["self", "upstream"] as const) {
         `this fan-out's own target, so it is dictated whatever already folds it — but "${claimer}" already ` +
         "declares it among its `branches`, so with the barrier declaring it too `GRAPH008_JOIN_DEPTH` " +
         'refuses "read" as held by more than one join. Decide which join is the barrier for "read" and ' +
-        "drop the `branches` ENTRY from the other — the entry alone, and NOT any edge: it is a " +
-        `\`kind: join\` edge from "read" INTO "${claimer}" that would have made this diagnostic not fire. ` +
+        "drop the `branches` ENTRY from the other — the entry alone, and NOT any edge. " +
         `No edge runs from "read" into "${claimer}" at all — that is what \`GRAPH008_BRANCH_NOT_CONNECTED\` ` +
-        "is refusing in this same compile, and dropping the `branches` ENTRY answers that refusal too",
+        "is refusing in this same compile, and dropping every such `branches` ENTRY answers that refusal too",
+    );
+
+    // AND §A.69'S COUNTERFACTUAL GOES WITH THE OFFER, which is the repair the first two cuts missed.
+    // "…that would have made this diagnostic not fire" is the SAME prediction the offer makes, so it
+    // is false on the same shapes; withholding the offer while still printing the claim under it was
+    // a distinction with no difference to an author. The run above is what makes this checkable.
+    assert.doesNotMatch(
+      d.fix ?? "",
+      /would have made this diagnostic not fire/,
+      `the counterfactual is false here too: ${d.fix}`,
     );
 
     // AND THE ONE THING IT DOES CLAIM IS RUN: the drop answers the sibling's refusal.
@@ -1829,6 +1838,225 @@ test("AND IT DOES NOT OVER-REFUSE: an ancestor through a `loop` edge ONLY still 
   const withEdge = clone(s) as unknown as GraphSpec;
   (withEdge.edges as EdgeSpec[]).push({ id: e("bnc"), from: n("read"), to: n("again"), kind: "join" } as EdgeSpec);
   assert.deepEqual(errorsOf(withEdge).map((x) => x.code), [], "the offered edge closes no cycle and silences both");
+});
+
+/**
+ * ALL TEN ARMS OF THE CLAIM CLAUSE, BYTE-FOR-BYTE — the census, in one place.
+ *
+ * The clause is built from four independent conditions, and a byte pin covers exactly ONE
+ * combination of them. This file has twice shipped a defect in a combination nothing pinned, so the
+ * arms are enumerated here by CONSTRUCTION rather than counted by reading:
+ *
+ *   offer            !many && exactly one unwired claimer && adding its edge would not cycle
+ *   many             more than one join already declares the fan-out's target
+ *   safeCounterfactual   NO claimer is the target or upstream of it — §A.69's "would have made this
+ *                    diagnostic not fire" is a counterfactual, and it is false on the shapes where
+ *                    the edge it describes would close a cycle instead
+ *   wired / unwired  whether an edge runs from the target into the claimer
+ *
+ * Ten combinations are reachable. `singular + unwired + safe` is not among them because it IS the
+ * offer, and `wired empty && unwired empty` is not because `wired ∪ unwired = alsoClaim`, which is
+ * non-empty whenever this clause is emitted at all.
+ *
+ * Every fixture below is the same graph with claimers bolted on, so the DICTATE half is identical
+ * across all ten and the only thing that moves is the clause under test.
+ */
+
+/** A claimer of `read`, described by the two facts that decide its arm. */
+type Claimer = { readonly id: string; readonly wired: boolean; readonly cycles: boolean };
+
+/**
+ * `wired`  — a `loop` edge runs `read` -> claimer. `loop` and `compensation` are the only kinds a
+ *            claimer can be wired by while this diagnostic still fires; every other kind is walked
+ *            by `idx.ancestors`, which would make `joined` true and the rule silent.
+ * `cycles` — the claimer runs `seq` into `plan`, the fan-out's SOURCE, so it is already an ancestor
+ *            of `read` and the dictated edge would close a forward cycle.
+ */
+function withClaimers(list: readonly Claimer[]): GraphSpec {
+  const s = f1Step1();
+  (s.channels as Record<string, unknown>)["raw"] = { type: "string", reduce: "append_ordered" };
+  (s.inputs as string[]).push("failures");
+  const r = s.nodes.findIndex((x) => x.id === n("read"));
+  (s.nodes as NodeSpec[])[r] = { ...s.nodes[r]!, reads: ["shard", "failures"], writes: ["raw", "failures"] } as NodeSpec;
+  for (const c of list) {
+    (s.nodes as NodeSpec[]).push({
+      id: n(c.id), type: "join", reads: ["failures"], writes: ["failures"],
+      join: { branches: [n("read")], mode: "all", onBranchError: "fail" },
+    } as NodeSpec);
+    if (c.wired) {
+      (s.edges as EdgeSpec[]).push({
+        id: e(`w-${c.id}`), from: n("read"), to: n(c.id), kind: "loop", until: "len(failures) > 0", maxIterations: 2,
+      } as unknown as EdgeSpec);
+    }
+    if (c.cycles) {
+      (s.edges as EdgeSpec[]).push({ id: e(`c-${c.id}`), from: n(c.id), to: n("plan"), kind: "seq" } as EdgeSpec);
+    } else {
+      (s.edges as EdgeSpec[]).push({ id: e(`o-${c.id}`), from: n(c.id), to: n("collate"), kind: "seq" } as EdgeSpec);
+      if (!c.wired) (s.edges as EdgeSpec[]).push({ id: e(`i-${c.id}`), from: n("plan"), to: n(c.id), kind: "seq" } as EdgeSpec);
+    }
+  }
+  return s;
+}
+
+const DICTATE =
+  'give join "gather" an entry in its `branches` for each of read, classify, and a `kind: join` edge ' +
+  'from each of them into "gather" — every node inside a fan-out branch needs both. ADD to whatever ' +
+  '"gather" already declares: one join can be the barrier for more than one fan-out. NOTE "read" is ' +
+  "this fan-out's own target, so it is dictated whatever already folds it — but ";
+
+const ARMS: readonly { readonly arm: string; readonly claimers: readonly Claimer[]; readonly clause: string }[] = [
+  {
+    arm: "O1 · the offer — one unwired claimer, and its edge closes no cycle",
+    claimers: [{ id: "a", wired: false, cycles: false }],
+    clause:
+      '"a" already declares it among its `branches`, so with the barrier declaring it too ' +
+      '`GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join. Decide which join is the ' +
+      'barrier for "read": drop the `branches` ENTRY from "a" — the entry alone, there being NO edge ' +
+      'from "read" into it to delete — or add the `kind: join` edge from "read" INTO "a" that ' +
+      "`GRAPH008_BRANCH_NOT_CONNECTED` asks for in this same compile, which makes \"a\" wait on " +
+      '"read" and silences THIS diagnostic instead',
+  },
+  {
+    arm: "S1 · singular, wired, safe — the bytes §A.69 settled, unchanged",
+    claimers: [{ id: "a", wired: true, cycles: false }],
+    clause:
+      '"a" already declares it among its `branches`, so with the barrier declaring it too ' +
+      '`GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join. Decide which join is the ' +
+      'barrier for "read" and drop the `branches` ENTRY from the other — the entry alone, and NOT ' +
+      'any edge: it is a `kind: join` edge from "read" INTO "a" that would have made this diagnostic ' +
+      "not fire, so whatever edge runs there now carries its own meaning and deleting it is a second change",
+  },
+  {
+    arm: "S2 · singular, wired, CYCLING — the counterfactual is withheld, the edge fact is not",
+    claimers: [{ id: "a", wired: true, cycles: true }],
+    clause:
+      '"a" already declares it among its `branches`, so with the barrier declaring it too ' +
+      '`GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join. Decide which join is the ' +
+      'barrier for "read" and drop the `branches` ENTRY from the other — the entry alone, and NOT ' +
+      "any edge, so whatever edge runs there now carries its own meaning and deleting it is a second change",
+  },
+  {
+    arm: "S3 · singular, unwired, CYCLING — no offer, no counterfactual, appendix only",
+    claimers: [{ id: "a", wired: false, cycles: true }],
+    clause:
+      '"a" already declares it among its `branches`, so with the barrier declaring it too ' +
+      '`GRAPH008_JOIN_DEPTH` refuses "read" as held by more than one join. Decide which join is the ' +
+      'barrier for "read" and drop the `branches` ENTRY from the other — the entry alone, and NOT ' +
+      'any edge. No edge runs from "read" into "a" at all — that is what ' +
+      "`GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this same compile, and dropping every such " +
+      "`branches` ENTRY answers that refusal too",
+  },
+  {
+    arm: "P1 · plural, all wired, safe — the plural bytes §A.69 settled, unchanged",
+    claimers: [{ id: "a", wired: true, cycles: false }, { id: "b", wired: true, cycles: false }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge: it is a " +
+      '`kind: join` edge from "read" INTO one of them that would have made this diagnostic not fire, ' +
+      "so whatever edge runs there now carries its own meaning and deleting it is a second change",
+  },
+  {
+    arm: "P2 · plural, all wired, one CYCLING — the counterfactual goes, for all of them",
+    claimers: [{ id: "a", wired: true, cycles: false }, { id: "b", wired: true, cycles: true }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge, so whatever edge " +
+      "runs there now carries its own meaning and deleting it is a second change",
+  },
+  {
+    arm: "P3 · plural, mixed, safe",
+    claimers: [{ id: "a", wired: true, cycles: false }, { id: "b", wired: false, cycles: false }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge: it is a " +
+      '`kind: join` edge from "read" INTO one of them that would have made this diagnostic not fire, ' +
+      "so whatever edge runs there now carries its own meaning and deleting it is a second change. " +
+      'No edge runs from "read" into "b" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` is ' +
+      "refusing in this same compile, and dropping every such `branches` ENTRY answers that refusal too",
+  },
+  {
+    arm: "P4 · plural, mixed, one CYCLING",
+    claimers: [{ id: "a", wired: true, cycles: false }, { id: "b", wired: false, cycles: true }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge, so whatever edge " +
+      "runs there now carries its own meaning and deleting it is a second change. No edge runs from " +
+      '"read" into "b" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
+      "same compile, and dropping every such `branches` ENTRY answers that refusal too",
+  },
+  {
+    arm: "P5 · plural, none wired, safe",
+    claimers: [{ id: "a", wired: false, cycles: false }, { id: "b", wired: false, cycles: false }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge: it is a " +
+      '`kind: join` edge from "read" INTO one of them that would have made this diagnostic not fire. ' +
+      'No edge runs from "read" into "a", "b" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` ' +
+      "is refusing in this same compile, and dropping every such `branches` ENTRY answers that refusal too",
+  },
+  {
+    arm: "P6 · plural, none wired, one CYCLING",
+    claimers: [{ id: "a", wired: false, cycles: false }, { id: "b", wired: false, cycles: true }],
+    clause:
+      '"a", "b" already declare it among their `branches`, so `GRAPH008_JOIN_DEPTH` ALREADY refuses ' +
+      '"read" as held by more than one join. Decide which join is the barrier for "read" and drop ' +
+      "the `branches` ENTRY from the others — the entry alone, and NOT any edge. No edge runs from " +
+      '"read" into "a", "b" at all — that is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in ' +
+      "this same compile, and dropping every such `branches` ENTRY answers that refusal too",
+  },
+];
+
+for (const { arm, claimers, clause } of ARMS) {
+  test(`§A.73 ARM ${arm}`, () => {
+    const s = withClaimers(claimers);
+    const d = errorsOf(s).find((x) => x.code === "GRAPH021_FANOUT_WITHOUT_JOIN" && x.at?.edgeId === e("fan"));
+    assert.ok(d !== undefined, `${arm}: the diagnostic must fire: ${errorsOf(s).map((x) => x.code).join(", ")}`);
+    assert.equal(d.fix, DICTATE + clause, arm);
+  });
+}
+
+test("§A.73 THE TEN ARMS ARE TEN DISTINCT STRINGS, and the counterfactual tracks the cycle", () => {
+  // THE CENSUS IS ONLY A CENSUS IF THE ROWS DIFFER. Ten equal strings would satisfy every pin above
+  // while proving the conditions do nothing, which is the shape of a vacuous byte pin.
+  const seen = new Set(ARMS.map((a) => a.clause));
+  assert.equal(seen.size, ARMS.length, "two arms pin the same string, so one condition is inert");
+
+  // AND THE ONE CONDITION THIS ROUND ADDED IS READ OFF THE ROWS: every arm whose claimers include a
+  // cycling one withholds §A.69's counterfactual, and every arm whose claimers do not, prints it.
+  for (const { arm, claimers, clause } of ARMS) {
+    if (arm.startsWith("O1")) continue; // the offer is its own sentence and makes the claim itself
+    assert.equal(
+      /would have made this diagnostic not fire/.test(clause),
+      !claimers.some((c) => c.cycles),
+      `${arm}: the counterfactual must be printed exactly where it is true`,
+    );
+  }
+});
+
+test("§A.73 AND THE WITHHELD COUNTERFACTUAL IS WITHHELD BECAUSE IT IS FALSE — run, not argued", () => {
+  // The claim the gate rests on, on the four cycling arms: typing the `kind: join` edge §A.69's
+  // sentence describes does NOT make this diagnostic not fire. It closes a cycle instead.
+  for (const cyc of [
+    [{ id: "a", wired: true, cycles: true }],
+    [{ id: "a", wired: false, cycles: true }],
+    [{ id: "a", wired: true, cycles: false }, { id: "b", wired: true, cycles: true }],
+    [{ id: "a", wired: false, cycles: false }, { id: "b", wired: false, cycles: true }],
+  ] as const) {
+    const s = withClaimers(cyc);
+    const target = cyc.find((c) => c.cycles)!.id;
+    const withEdge = clone(s) as unknown as GraphSpec;
+    (withEdge.edges as EdgeSpec[]).push({ id: e("cf"), from: n("read"), to: n(target), kind: "join" } as EdgeSpec);
+    const after = errorsOf(withEdge).map((x) => x.code);
+    assert.ok(
+      after.includes("GRAPH021_FANOUT_WITHOUT_JOIN") && after.includes("GRAPH006_UNMARKED_CYCLE"),
+      `the counterfactual is false for "${target}": ${after.join(", ")}`,
+    );
+  }
 });
 
 test("THE SILENT `compensation` SHAPE: ONE diagnostic, and the clause is the only mention of it", () => {

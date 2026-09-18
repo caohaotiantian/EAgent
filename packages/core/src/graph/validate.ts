@@ -355,6 +355,11 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // It is still NOT what lets `rewind` cross an effect: `rewind` reads
   // `ToolDefinition.compensation` from the registry, and a graph with no compensation
   // edges at all rewinds — and now rolls back — exactly the same.
+  // A READER OUTSIDE THIS FUNCTION DEPENDS ON THIS EXCLUSION LIST MATCHING `ancestors`' one below:
+  // `rule021FanoutHasJoin`'s `wouldCycle` decides whether to OFFER an edit by asking `ancestors`
+  // whether that edit would close a forward cycle, which is only the same question while both
+  // filters name the same two kinds. Widen or narrow one without the other and that offer becomes
+  // a false instruction with nothing local to notice (§A.73).
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
 
@@ -374,7 +379,9 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
 
   const topoOrder = topoSort(spec.nodes.map((n) => n.id), dagEdges);
 
-  // Ancestors over forward edges only; used by GRAPH010's concurrency test.
+  // Ancestors over forward edges only; used by GRAPH010's concurrency test — and, since §A.73, by
+  // `rule021FanoutHasJoin`'s `wouldCycle`, which reads this set as "a forward path exists". That
+  // reading holds only while this filter names the same two kinds as `dagEdges` above.
   const ancestors = new Map<NodeId, Set<NodeId>>();
   for (const id of spec.nodes.map((n) => n.id)) ancestors.set(id, new Set());
   for (const id of topoOrder) {
@@ -2646,9 +2653,23 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   // there is no singular/plural arm either. The three are pinned byte-for-byte in
   // `test/graph/join-depth.test.ts`; NOTHING pinned this line before this change — the only copy in
   // the repository was a quotation in `docs/handoff-2026-09-15b.md`.
+  // AND `kind` IS RENDERED, NEVER ECHOED. It is the only unvalidated string this line reaches for:
+  // `GRAPH003_UNKNOWN_EDGE_KIND` is an ERROR but not FATAL, so `checkStructure` does not gate and
+  // this rule runs on an edge whose `kind` is whatever the JSON said. Reproduced through the shipped
+  // binary: a kind of `seq"\nok\n   fix: nothing to do here` printed a forged bare `ok` line AND a
+  // forged `fix:` line inside the compiler's own output, and an OBJECT kind rendered
+  // `[object Object]` — once per edge, because a `Set` over raw values dedupes nothing when every
+  // value is a distinct object. Node ids cannot do this: `GRAPH003_BAD_ID` is fatal and its charset
+  // is restricted. `describeValue` is what this file already uses for a value it does not trust, and
+  // `compile.ts`'s own `GRAPH003_UNKNOWN_EDGE_KIND` quotes the kind for the same reason — so a known
+  // kind reads `\`kind: "loop"\`` here, quoted, matching the refusal printed beside it.
+  //
+  // THE DEDUPE MOVED WITH IT, onto the RENDERED string, which is what bounds the output: two
+  // distinct objects both describe as "an object" and collapse to one.
   const dropClause = (branch: NodeId, o: NodeId): string => {
-    const kinds = [...new Set((idx.inbound.get(o) ?? []).filter((x) => x.from === branch).map((x) => x.kind))];
-    if (kinds.includes("join")) {
+    const into = (idx.inbound.get(o) ?? []).filter((x) => x.from === branch);
+    const kinds = [...new Set(into.map((x) => describeValue(x.kind)))];
+    if (into.some((x) => x.kind === "join")) {
       return `"${o}" must drop it from \`branches\` and drop the \`kind: join\` edge from "${branch}"`;
     }
     if (kinds.length === 0) {
@@ -2665,10 +2686,14 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
       // so the refusal is CLEARED, under a `GRAPH006_UNMARKED_CYCLE`. Both shapes are pinned in
       // `join-depth.test.ts`. A claim about the current graph needs no such reasoning to stay true,
       // which is why this clause makes one.
+      // "EVERY SUCH ENTRY", because `branches` may name one node TWICE — nothing refuses that, and
+      // `GRAPH008_BRANCH_NOT_CONNECTED` then fires once per occurrence while `claimedBy` dedupes by
+      // node. Dropping one of two leaves both refusals standing, so "the entry" was a count this
+      // line could not keep.
       return (
         `"${o}" must drop it from \`branches\` — the ENTRY alone, no edge running from "${branch}" into it at ` +
         `all; that missing edge is what \`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing in this same compile, and ` +
-        `dropping the entry answers that refusal too`
+        `dropping every such entry answers that refusal too`
       );
     }
     return (
@@ -3069,7 +3094,10 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     //
     // SO THE SINGLE-CLAIMER ARM OFFERS THE SIBLING'S EDIT BY NAME, and the plural arm must not: with
     // two claimers `GRAPH008_JOIN_DEPTH` is already on screen and adding an edge removes no entry,
-    // so there the edge cements the refusal instead of clearing it. `unwired` is
+    // so the edge does not clear it. THAT REASONING IS WHY THE OFFER IS SINGULAR; it is NOT printed
+    // anywhere, because it holds only while the edit leaves the graph acyclic — on a cycling shape
+    // the collapse takes `claimedBy` with it and the refusal goes. An earlier cut printed it as
+    // "cements `GRAPH008_JOIN_DEPTH`" and was wrong for exactly that reason. `unwired` is
     // `GRAPH008_BRANCH_NOT_CONNECTED`'s own test — the same `idx.inbound` scan, `from === e.to` —
     // so the clause naming it cannot name a diagnostic that is not in this compile.
     //
@@ -3082,47 +3110,56 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // NOTE, and a claimer two `seq` edges upstream of the fan-out's source. An unguarded offer turns
     // a false DESCRIPTION into a false INSTRUCTION, which is worse than the residue it came from.
     //
-    // `wouldCycle` IS EXACT, AND THE PREMISE IT NEEDS IS NARROWER THAN "THE GRAPH IS ACYCLIC" —
-    // stated carefully because the first spelling of this paragraph overclaimed, and a comment that
-    // replaces a false claim with a differently-false one is worse than the one it replaced.
-    // `computeFanoutStacks` initialises every node's stack to `[]` BEFORE its `topoOrder` loop, so a
-    // node that order never emits has `fanoutDepth` 0 rather than `undefined`, and `foldersOf`
-    // returns nothing below depth 1. So a non-empty `alsoClaim` proves exactly this: `e.to` WAS
-    // emitted. Kahn emits a node only after every one of its `dagEdges` predecessors, and
-    // `ancestors` accumulates in that same order, so `ancestors.get(e.to)` is complete and correct —
-    // whatever is true of the rest of the graph. The edit then closes a cycle exactly when `e.to` is
-    // already reachable from the claimer, plus the zero-length case `j === e.to`. Nothing here
-    // recomputes a traversal.
+    // `wouldCycle` IS EXACT, AND THE PREMISE IS THE PLAIN ONE — written twice wrongly before this,
+    // which is the whole reason it is spelled out. `topoSort` is ALL-OR-NOTHING: it returns its
+    // order only when `out.length === ids.length` and `[]` otherwise, so there is no such thing as
+    // "a node the order never emitted" while the order is non-empty. A non-empty `alsoClaim` needs
+    // `fanoutDepth(e.to) >= 1`, which needs a non-empty `topoOrder`, which means THE WHOLE FORWARD
+    // GRAPH IS ACYCLIC and `idx.ancestors` is complete.
+    //
+    // WHAT KEEPS THAT TRUE IS A FATAL ELSEWHERE, and it is the load-bearing part: `topoSort` counts
+    // against `spec.nodes.length` WITH duplicates, so a duplicated id could balance the count over a
+    // cycle and hand back a non-empty, wrong order. `GRAPH003_DUPLICATE_ID` sets `fatal`, and
+    // `validateGraph` returns on `checkStructure` before this rule runs, so that graph never reaches
+    // here. If duplicate ids ever stop being fatal, this predicate is the thing that breaks.
     //
     // AND THE COUPLING THAT KEEPS IT EXACT IS IN TWO OTHER FUNCTIONS: `dagEdges` and the `ancestors`
     // walk each exclude `loop` and `compensation` and nothing else, so "`ancestors(e.to)` has `j`"
     // and "a forward path runs j ⇝ e.to" are the same statement. That is why a claimer reachable
     // from `e.to` only through a `loop` edge still gets the offer, and correctly: adding the edge
     // there compiles. If either filter ever changes, this predicate stops being exact silently —
-    // the fixture that would notice is `THE OFFER IS WITHHELD WHERE THE EDGE WOULD CYCLE`.
+    // the fixture that notices is `AND IT DOES NOT OVER-REFUSE`, which is the only one that fails
+    // when the walk stops excluding `loop`; both `THE OFFER IS WITHHELD` fixtures stay green.
     //
-    // AND NOTHING PROMISES WHAT ADDING THE EDGE DOES WHERE THE OFFER IS WITHHELD. The appendix used
-    // to say it "cements `GRAPH008_JOIN_DEPTH`", which fails on the same cyclic shapes for the same
-    // reason — the collapse takes `claimedBy` with it. What it says instead is true of the graph in
-    // hand and of the DROP this line dictates: `GRAPH008_BRANCH_NOT_CONNECTED` fires per `branches`
-    // ENTRY with no edge, so dropping the entry answers it as well, and the author needs ONE edit
-    // rather than one from each line.
+    // AND THE COUNTERFACTUAL IS GATED IN EVERY ARM, not only in the offer — the repair the first two
+    // cuts of this row both missed. "It is a `kind: join` edge from `e.to` INTO X that WOULD HAVE
+    // MADE THIS DIAGNOSTIC NOT FIRE" is §A.69's sentence and it is the same counterfactual the offer
+    // makes, so it is false on the same shapes: where X is `e.to` or upstream of it, that edge would
+    // have produced a `GRAPH006_UNMARKED_CYCLE` and left this diagnostic exactly where it is.
+    // Withholding the OFFER while still printing the CLAIM underneath it was a distinction with no
+    // difference to an author. `safeCounterfactual` requires it of EVERY claimer, not merely of one,
+    // because the plural spelling says "INTO one of them" and a reader takes that as any of them.
     //
-    // SIX NON-EMPTY ARMS, EACH PINNED BYTE-FOR-BYTE in `fanout-branch-diagnostic.test.ts`: singular
-    // wired and plural all-wired keep the bytes §A.69 settled; the singular offer, plural mixed,
-    // plural all-unwired and the singular appendix-only arm — which is where the self-claimer and
-    // the upstream claimer both land — are the rest. A message assembled from conditionals has one
-    // string per combination of conditions and a byte pin covers exactly one of them, which is the
-    // finding this file drew twice in one wave.
+    // WHAT REMAINS WHEN IT IS WITHHELD IS UNCONDITIONAL. "Drop the entry, and NOT any edge" is
+    // advice about what to change and needs no counterfactual; "whatever edge runs there now carries
+    // its own meaning" is about the edge that IS there; and the appendix is `GRAPH008_BRANCH_NOT_CONNECTED`'s
+    // own test plus the fact that the dictated drop answers it. None of the three predicts an edit.
+    //
+    // TEN NON-EMPTY ARMS, EACH PINNED BYTE-FOR-BYTE in `fanout-branch-diagnostic.test.ts` — the
+    // count rose from six when this gate was added, and it is listed there rather than argued here.
+    // The bytes §A.69 settled are two of the ten and are unchanged: a message assembled from
+    // conditionals has one string per combination of conditions, a byte pin covers exactly one of
+    // them, and this file has now shipped a defect in an unpinned arm twice.
     const alsoClaim = foldersOf(e.to);
     const many = alsoClaim.length > 1;
     const hasEdgeFromTarget = (j: NodeId): boolean => (idx.inbound.get(j) ?? []).some((x) => x.from === e.to);
     const wouldCycle = (j: NodeId): boolean => j === e.to || (idx.ancestors.get(e.to)?.has(j) ?? false);
     const wired = alsoClaim.filter(hasEdgeFromTarget);
     const unwired = alsoClaim.filter((j) => !hasEdgeFromTarget(j));
-    // A FUNCTION, SO IT IS NOT EVALUATED WITH NO CLAIMER. Every arm interpolates `alsoClaim[0]!`,
-    // which is `undefined` when the list is empty — the string was discarded, but a non-null
-    // assertion that is false is one refactor from printing the word "undefined" to an author.
+    const safeCounterfactual = alsoClaim.every((j) => !wouldCycle(j));
+    // A FUNCTION, SO IT IS NOT EVALUATED WITH NO CLAIMER. The two SINGULAR arms interpolate
+    // `alsoClaim[0]!`, which is `undefined` when the list is empty — the string was discarded, but a
+    // non-null assertion that is false is one refactor from printing the word "undefined".
     const decide = (): string =>
       !many && unwired.length === 1 && !wouldCycle(unwired[0]!)
         ? `Decide which join is the barrier for "${e.to}": drop the \`branches\` ENTRY from "${alsoClaim[0]!}" — the ` +
@@ -3130,19 +3167,21 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           `"${e.to}" INTO "${alsoClaim[0]!}" that \`GRAPH008_BRANCH_NOT_CONNECTED\` asks for in this same compile, ` +
           `which makes "${alsoClaim[0]!}" wait on "${e.to}" and silences THIS diagnostic instead`
         : `Decide which join is the barrier for "${e.to}" and drop the ` +
-          `\`branches\` ENTRY from the ${many ? "others" : "other"} — the entry alone, and NOT any edge: it is a ` +
-          // THE DESTINATION IS STATED. The proof is about an edge from `e.to` INTO THE CLAIMER;
-          // "an edge from `e.to`" alone is false the moment one runs from `e.to` to anything else,
-          // e.g. the `kind: join` edge into the barrier this very line dictates.
-          `\`kind: join\` edge from "${e.to}" INTO ${many ? "one of them" : `"${alsoClaim[0]!}"`} that would have ` +
-          `made this diagnostic not fire` +
+          `\`branches\` ENTRY from the ${many ? "others" : "other"} — the entry alone, and NOT any edge` +
+          (safeCounterfactual
+            ? // THE DESTINATION IS STATED. The proof is about an edge from `e.to` INTO THE CLAIMER;
+              // "an edge from `e.to`" alone is false the moment one runs from `e.to` to anything
+              // else, e.g. the `kind: join` edge into the barrier this very line dictates.
+              `: it is a \`kind: join\` edge from "${e.to}" INTO ${many ? "one of them" : `"${alsoClaim[0]!}"`} ` +
+              `that would have made this diagnostic not fire`
+            : "") +
           (wired.length > 0
             ? `, so whatever edge runs there now carries its own meaning and deleting it is a second change`
             : "") +
           (unwired.length > 0
             ? `. No edge runs from "${e.to}" into ${unwired.map((j) => `"${j}"`).join(", ")} at all — that is what ` +
-              `\`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing in this same compile, and dropping the \`branches\` ` +
-              `ENTRY answers that refusal too`
+              `\`GRAPH008_BRANCH_NOT_CONNECTED\` is refusing in this same compile, and dropping every such ` +
+              `\`branches\` ENTRY answers that refusal too`
             : "");
     const claimed =
       alsoClaim.length === 0
