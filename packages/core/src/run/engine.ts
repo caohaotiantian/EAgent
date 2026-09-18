@@ -4861,6 +4861,11 @@ export class Engine {
     const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
     try {
       const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+      // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE PLAN IS SHOWN OR JOURNALED (§A.74).
+      // This is the second half of the paragraph above: `#rewindRefusals` is everything `rewind`
+      // refuses BEFORE it plans, and `#refusePlannedRewind` is everything it refuses AFTER.
+      // Running only the first handed the operator a plan `rewind` would decline.
+      this.#refusePlannedRewind(runId, atSeq, plan.steps, live);
       await this.#journalPlanShown(ctx, plan, by);
       return plan;
     } finally {
@@ -5305,6 +5310,167 @@ export class Engine {
   }
 
   /**
+   * The two refusals a rewind's own PLAN decides, run by `rewind` and by `planRewind` alike.
+   *
+   * §A.74. Both arms below read nothing but `current.steps`, `live` and this process's tool
+   * registry — no journal read, no append, no dispatch — so there is no cost to asking them of
+   * the preview, and there was never a reason beyond inheritance not to. `#uncompensatedIrreversible`
+   * already sits inside `#rewindRefusals`, which both verbs run; these two sat in
+   * `#rewindSerially`, which `planRewind` does not call, so an operator who read the plan first
+   * was shown `steps 1, dispatch 0, blocked 1` and NO refusal, and was declined only when they
+   * ran it. §A.37 matched the older `unrunnable` arm rather than questioning it; this closes
+   * both, because they are one shape.
+   *
+   * `planRewind`'S OWN CONTRACT IS WHAT DECIDES IT, not a preference: "IT RUNS EVERY REFUSAL
+   * `rewind` RUNS … a preview of a rewind that will be refused anyway is a plan the operator can
+   * never use, and handing them one is a different way of lying to them." That sentence was true
+   * of `#rewindRefusals` and false of these two, which is the whole of the row.
+   *
+   * THE PREVIEW STILL JOURNALS NOTHING WHEN IT REFUSES. `planRewind` calls this BEFORE
+   * `#journalPlanShown`, so a refused preview leaves no `rewind.plan` row claiming an operator
+   * was shown a list they were not.
+   *
+   * IT TAKES THE STEPS RATHER THAN RE-PLANNING. Both callers already hold the output of one
+   * `#rewindPlanOf` call, and "the list the operator authorized and the list about to be
+   * dispatched are one function's output" is a property `rewind` depends on; re-deriving it here
+   * would be a second reading of the same journal and a second thing that can drift.
+   */
+  #refusePlannedRewind(runId: RunId, atSeq: Seq, steps: readonly RewindPlanStep[], live: RunContext | undefined): void {
+    // A DETACHED RUN CANNOT DISPATCH, SO IT IS REFUSED RATHER THAN CROSSED. `rewind` deliberately
+    // works with no `RunContext` — "the runs most worth rewinding are the FINISHED ones" — but a
+    // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
+    // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
+    // and the message says so.
+    //
+    // AND THE QUESTION IS "IS THERE ANYTHING TO UNDO ANYWHERE UNDER THIS RUN", NOT "DOES THE
+    // PARENT HAVE A STEP OF ITS OWN". This refusal read `planCompensation` over the parent's OWN
+    // events, and a parent whose only work was DELEGATED has zero steps of its own — so a
+    // detached rewind of a fully-delegated run walked straight past it. Measured on
+    // `rewind-through-subgraph`'s delegated leg with `forget(runId)` first: the rewind was
+    // ACCEPTED, `charges` stood at `[42]`, and there was no `compensation.recorded` in the
+    // parent's journal or the child's saying so. "Nothing to undo" and "an effect stands and
+    // nobody will try" were the same answer, which is exactly the silence `b90b137`'s fifth
+    // decision forbids — and it is the same asymmetry `#uncompensatedIrreversible` closed for the
+    // REFUSAL half one screen above, arriving a third time in the same feature.
+    //
+    // `steps` IS THE TREE, so the fix is to read the walk this method already computed
+    // rather than to grow a second descent here. `#planRollback` resolves a context per run, so a
+    // step it marks `undispatchable` under a detached parent is one no journal anywhere will
+    // record — which is the precise condition for refusing.
+    const unrunnable = steps.filter((s) => s.undo !== undefined && s.undispatchable !== undefined);
+    if (unrunnable.length > 0 && live === undefined) {
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(unrunnable.length)} recorded effect(s) after it declare a ` +
+          `compensation (${[...new Set(unrunnable.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}${
+            unrunnable.some((s) => s.runId !== String(runId)) ? `, including in child run(s) ${[...new Set(unrunnable.filter((s) => s.runId !== String(runId)).map((s) => s.runId))].join(", ")}` : ""
+          }), and ` +
+          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
+          `rewinding without them would hide the record and leave the effects standing`,
+        { details: { runId, atSeq, pending: unrunnable.length } },
+      );
+    }
+
+    // AND A SECOND ARM, BESIDE THAT ONE AND NOT MERGED WITH IT (§A.37).
+    //
+    // `#rewindRefusals` already refuses the hard-to-undo effect whose undo arguments were never
+    // recorded AND whose rollback is settled — the seq `planCompensation` drops. This is the
+    // other half of the same sentence: the step that is still IN the plan, carrying no
+    // `argsDigest`, which `RewindPlan.dispatch` has already counted as `blocked` and promised
+    // not to dispatch. The rewind crossed it anyway, which made the preview an operator
+    // authorized and the act they authorized two different things. Measured: `steps: 1`,
+    // `dispatch: 0`, `blocked: 1` — and the rewind ACCEPTED, the charge hidden, the money gone.
+    //
+    // IT IS THE ARGUMENTS FACT, NOT "NOT IN THE `dispatch` SET". That filter has three terms and
+    // the middle one, `undispatchable === undefined`, is about THIS PROCESS:
+    // `#planRollbackChildSteps` plans a child's steps with no `ctx` whenever the child's graph
+    // cannot be rebuilt — which happens while the parent is ATTACHED AND LIVE — and
+    // `#planRollback` marks them "attach it and rewind, or the effect stands" while KEEPING
+    // their `undo`. Refusing on the whole `dispatch` set would wall off exactly the case
+    // `compensation.recorded.retryable` exists for, and that case must re-plan.
+    //
+    // AND IT FIRES REGARDLESS OF `live`, which is the one thing that must NOT be shared with the
+    // arm above. That one carries `&& live === undefined` because an undispatchable step under a
+    // live parent is one a later attach can still run. Arguments that were never recorded are
+    // never recorded, so there is no such escape here. Two guards, two rules; collapsing them
+    // would either re-introduce the first defect or switch the other arm's guard off.
+    //
+    // AND IT DOES NOT ASK WHETHER AN `undo` IS NAMED, which was an over-narrow first cut and made
+    // the closure claim wider than the set. `planCompensation` STRIPS `undo` from a step it marks
+    // `unknown_tool` or `unknown_compensation`, so a hard-to-undo effect whose undo tool is gone
+    // from THIS registry AND whose arguments were never recorded arrived with the identical
+    // signature — `steps 1`, `dispatch 0`, `blocked 1`, nothing settled — and was crossed:
+    // measured, the charge hidden and the money gone. Neither arm of `#rewindRefusals` covers it
+    // either, because the registry arm reads the tool that RAN (which is registered and does
+    // declare a compensation) and the settled arm needs a non-retryable row, while
+    // `unknown_compensation` is written `retryable: true` on purpose. `argsDigest === undefined`
+    // already means "no undo this rewind will build", by `#rewindPlanOf`'s own rule that "this
+    // step shows an `argsDigest`" and "this step will be attempted" are one sentence — so the
+    // conjunct excluded cases rather than describing any.
+    //
+    // NOT A WALL THE OPERATOR CANNOT CLEAR, which is the test every arm of §A.37 has to pass.
+    // Deploying the missing undo is still a move: with it registered the step regains its `undo`,
+    // and — where the `effect.completed` DID record `details` — an `argsDigest`, and the rewind
+    // goes through. What stays refused is the case where the arguments are absent, and those are
+    // absent whatever the registry holds.
+    //
+    // SCOPED TO `isHardToUndo`. That is true of the two REFUSAL arms and of nothing else in this
+    // feature: `#compensateOne`'s arms and its approval-floor split apply to every class, and a
+    // `reversible_write` whose `effect.completed` carried no `details` is still crossed and still
+    // journaled `not_attempted`. That is the three-states rule, and
+    // `undo-args-must-be-recorded.test.ts` is the test that holds it.
+    const noArguments = steps.filter((s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.argsDigest === undefined);
+    if (noArguments.length > 0) {
+      // TWO POPULATIONS UNDER ONE PREDICATE, AND THE OPERATOR'S MOVE IS OPPOSITE FOR EACH — so
+      // the message has to split even though the refusal does not.
+      //
+      // `#rewindPlanOf` computes `argsDigest` as `step.undo === undefined ? undefined :
+      // detailsOf(item.result)`, so a step with NO `undo` has none WHATEVER THE JOURNAL HOLDS.
+      // One sentence about missing `details` therefore described the wrong half: measured on a
+      // `pay.charge.kept` whose `effect.completed` is LIVE and carries `details: {row: 42}`, with
+      // its undo unregistered, the refusal read "there is no live `effect.completed` recording
+      // the `details`" — both stated causes false, and the operator's one real move, registering
+      // `pay.refund`, named nowhere.
+      //
+      // THE `undo === undefined` HALF IS ALWAYS `unknown_compensation`, which is why the branch
+      // can name the tool instead of printing a `blocked` word. The other two blocks are
+      // pre-empted: `#uncompensatedIrreversible` refuses first, in `#rewindRefusals`, whenever
+      // `this.tools.get(called.name)?.compensation === undefined` — which covers `unknown_tool`
+      // (the tool is not registered, so the optional chain is `undefined`) and `no_compensation`
+      // (it is registered and declares none). Only "registered, declares one, and THAT tool is
+      // missing" survives to here, and both arms scan the same `isHardToUndo` population over the
+      // same run tree. The declared name comes from the registry, which is the same read
+      // `planCompensation` made to reach `unknown_compensation` in the first place.
+      const unregistered = noArguments.filter((s) => s.undo === undefined);
+      const unrecoverable = noArguments.filter((s) => s.undo !== undefined);
+      const pair = (s: RewindPlanStep, undo: string | undefined): string => `${s.tool}@${String(s.seq)} -> ${undo ?? "the compensation it declares"}`;
+      // CHILD STEPS REACH THIS ARM. `steps` is the whole tree — `#planRollback` splices
+      // each child's plan into the parent's — so this says WHICH JOURNAL, exactly as the
+      // `unrunnable` arm above does, because that is the one thing an operator cannot guess.
+      const inChildren = [...new Set(noArguments.filter((s) => s.runId !== String(runId)).map((s) => s.runId))];
+      const clauses = [
+        unregistered.length === 0
+          ? undefined
+          : `${String(unregistered.length)} name a compensation this process does not carry ` +
+            `(${[...new Set(unregistered.map((s) => pair(s, this.tools.get(s.tool)?.compensation?.tool)))].join(", ")}) — ` +
+            "register it and rewind again",
+        unrecoverable.length === 0
+          ? undefined
+          : `${String(unrecoverable.length)} have no live \`effect.completed\` recording the \`details\` an undo's arguments come from ` +
+            `(${[...new Set(unrecoverable.map((s) => pair(s, s.undo)))].join(", ")}), either because the call recorded none or ` +
+            "because an earlier rewind suppressed the record — no rewind can undo those",
+      ].filter((c) => c !== undefined);
+      throw err.conflict(
+        CODES.E_RESTORE_ILLEGAL,
+        `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and this engine ` +
+          `cannot build an undo for them${inChildren.length === 0 ? "" : `, including in child run(s) ${inChildren.join(", ")}`}. ` +
+          `${clauses.join("; and ")}. Rewinding would hide the record and leave the effects standing`,
+        { details: { runId, atSeq, pending: noArguments.length } },
+      );
+    }
+  }
+
+  /**
    * The rewind itself, once the chain in `rewind` has this run to itself.
    *
    * Split from `rewind` for the same reason `#advanceSerially` is split from `advance`: the
@@ -5340,6 +5506,18 @@ export class Engine {
     // tool`. The audit artifact this design exists for was describing a dispatch that did not
     // happen. Threading the hashed walk through makes the claim literal instead of nearly true.
     const { plan: current, walk } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+
+    // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE AUTHORIZATION IS LOOKED AT (§A.74).
+    //
+    // ABOVE THE HASH CHECK, WHICH IS A MOVE AND NOT AN ACCIDENT. `planRewind` now runs this same
+    // method, so no operator can ever be shown — and therefore hold the `planHash` of — a plan
+    // these arms refuse. Left below, the only `rewind` caller who can still reach them is one
+    // passing a hash from somewhere else, and what they would be told is "this engine has no
+    // record of plan <h>" — a complaint about the authorization for a plan nobody can be shown,
+    // in place of the journal fact that actually blocks them. The order this method already
+    // states for `#rewindRefusals` is the order: a rewind that is going to be refused must undo
+    // nothing, and must say why it is refused.
+    this.#refusePlannedRewind(runId, atSeq, current.steps, live);
 
     // THE PLAN THE OPERATOR SAW, OR NOTHING HAPPENS.
     //
@@ -5415,138 +5593,9 @@ export class Engine {
     // `planCompensation` reads `compensation.recorded` WITHOUT suppression — a record of an undo
     // is not a thing to be undone, and suppressing it would make the next pass do it all again.
     //
-    // A DETACHED RUN CANNOT DISPATCH, SO IT IS REFUSED RATHER THAN CROSSED. `rewind` deliberately
-    // works with no `RunContext` — "the runs most worth rewinding are the FINISHED ones" — but a
-    // tool call needs the graph, which is not in the journal, only its hash. Rewinding anyway
-    // would be the loosening: suppressing effects nothing is going to undo. `attach` is the fix
-    // and the message says so.
-    //
-    // AND THE QUESTION IS "IS THERE ANYTHING TO UNDO ANYWHERE UNDER THIS RUN", NOT "DOES THE
-    // PARENT HAVE A STEP OF ITS OWN". This refusal read `planCompensation` over the parent's OWN
-    // events, and a parent whose only work was DELEGATED has zero steps of its own — so a
-    // detached rewind of a fully-delegated run walked straight past it. Measured on
-    // `rewind-through-subgraph`'s delegated leg with `forget(runId)` first: the rewind was
-    // ACCEPTED, `charges` stood at `[42]`, and there was no `compensation.recorded` in the
-    // parent's journal or the child's saying so. "Nothing to undo" and "an effect stands and
-    // nobody will try" were the same answer, which is exactly the silence `b90b137`'s fifth
-    // decision forbids — and it is the same asymmetry `#uncompensatedIrreversible` closed for the
-    // REFUSAL half one screen above, arriving a third time in the same feature.
-    //
-    // `current.steps` IS THE TREE, so the fix is to read the walk this method already computed
-    // rather than to grow a second descent here. `#planRollback` resolves a context per run, so a
-    // step it marks `undispatchable` under a detached parent is one no journal anywhere will
-    // record — which is the precise condition for refusing.
-    const unrunnable = current.steps.filter((s) => s.undo !== undefined && s.undispatchable !== undefined);
-    if (unrunnable.length > 0 && live === undefined) {
-      throw err.conflict(
-        CODES.E_RESTORE_ILLEGAL,
-        `cannot rewind to ${atSeq}: ${String(unrunnable.length)} recorded effect(s) after it declare a ` +
-          `compensation (${[...new Set(unrunnable.map((s) => `${s.tool} -> ${String(s.undo)}`))].join(", ")}${
-            unrunnable.some((s) => s.runId !== String(runId)) ? `, including in child run(s) ${[...new Set(unrunnable.filter((s) => s.runId !== String(runId)).map((s) => s.runId))].join(", ")}` : ""
-          }), and ` +
-          `this engine holds no context for run ${runId}, so it cannot run them. Call \`attach(runId, graph)\` first — ` +
-          `rewinding without them would hide the record and leave the effects standing`,
-        { details: { runId, atSeq, pending: unrunnable.length } },
-      );
-    }
+    // THE TWO REFUSALS THE PLAN ITSELF DECIDES HAVE MOVED UP, into `#refusePlannedRewind` and
+    // above the hash check — see that method for why both verbs now run them (§A.74).
 
-    // AND A SECOND ARM, BESIDE THAT ONE AND NOT MERGED WITH IT (§A.37).
-    //
-    // `#rewindRefusals` already refuses the hard-to-undo effect whose undo arguments were never
-    // recorded AND whose rollback is settled — the seq `planCompensation` drops. This is the
-    // other half of the same sentence: the step that is still IN the plan, carrying no
-    // `argsDigest`, which `RewindPlan.dispatch` has already counted as `blocked` and promised
-    // not to dispatch. The rewind crossed it anyway, which made the preview an operator
-    // authorized and the act they authorized two different things. Measured: `steps: 1`,
-    // `dispatch: 0`, `blocked: 1` — and the rewind ACCEPTED, the charge hidden, the money gone.
-    //
-    // IT IS THE ARGUMENTS FACT, NOT "NOT IN THE `dispatch` SET". That filter has three terms and
-    // the middle one, `undispatchable === undefined`, is about THIS PROCESS:
-    // `#planRollbackChildSteps` plans a child's steps with no `ctx` whenever the child's graph
-    // cannot be rebuilt — which happens while the parent is ATTACHED AND LIVE — and
-    // `#planRollback` marks them "attach it and rewind, or the effect stands" while KEEPING
-    // their `undo`. Refusing on the whole `dispatch` set would wall off exactly the case
-    // `compensation.recorded.retryable` exists for, and that case must re-plan.
-    //
-    // AND IT FIRES REGARDLESS OF `live`, which is the one thing that must NOT be shared with the
-    // arm above. That one carries `&& live === undefined` because an undispatchable step under a
-    // live parent is one a later attach can still run. Arguments that were never recorded are
-    // never recorded, so there is no such escape here. Two guards, two rules; collapsing them
-    // would either re-introduce the first defect or switch the other arm's guard off.
-    //
-    // AND IT DOES NOT ASK WHETHER AN `undo` IS NAMED, which was an over-narrow first cut and made
-    // the closure claim wider than the set. `planCompensation` STRIPS `undo` from a step it marks
-    // `unknown_tool` or `unknown_compensation`, so a hard-to-undo effect whose undo tool is gone
-    // from THIS registry AND whose arguments were never recorded arrived with the identical
-    // signature — `steps 1`, `dispatch 0`, `blocked 1`, nothing settled — and was crossed:
-    // measured, the charge hidden and the money gone. Neither arm of `#rewindRefusals` covers it
-    // either, because the registry arm reads the tool that RAN (which is registered and does
-    // declare a compensation) and the settled arm needs a non-retryable row, while
-    // `unknown_compensation` is written `retryable: true` on purpose. `argsDigest === undefined`
-    // already means "no undo this rewind will build", by `#rewindPlanOf`'s own rule that "this
-    // step shows an `argsDigest`" and "this step will be attempted" are one sentence — so the
-    // conjunct excluded cases rather than describing any.
-    //
-    // NOT A WALL THE OPERATOR CANNOT CLEAR, which is the test every arm of §A.37 has to pass.
-    // Deploying the missing undo is still a move: with it registered the step regains its `undo`,
-    // and — where the `effect.completed` DID record `details` — an `argsDigest`, and the rewind
-    // goes through. What stays refused is the case where the arguments are absent, and those are
-    // absent whatever the registry holds.
-    //
-    // SCOPED TO `isHardToUndo`. That is true of the two REFUSAL arms and of nothing else in this
-    // feature: `#compensateOne`'s arms and its approval-floor split apply to every class, and a
-    // `reversible_write` whose `effect.completed` carried no `details` is still crossed and still
-    // journaled `not_attempted`. That is the three-states rule, and
-    // `undo-args-must-be-recorded.test.ts` is the test that holds it.
-    const noArguments = current.steps.filter((s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.argsDigest === undefined);
-    if (noArguments.length > 0) {
-      // TWO POPULATIONS UNDER ONE PREDICATE, AND THE OPERATOR'S MOVE IS OPPOSITE FOR EACH — so
-      // the message has to split even though the refusal does not.
-      //
-      // `#rewindPlanOf` computes `argsDigest` as `step.undo === undefined ? undefined :
-      // detailsOf(item.result)`, so a step with NO `undo` has none WHATEVER THE JOURNAL HOLDS.
-      // One sentence about missing `details` therefore described the wrong half: measured on a
-      // `pay.charge.kept` whose `effect.completed` is LIVE and carries `details: {row: 42}`, with
-      // its undo unregistered, the refusal read "there is no live `effect.completed` recording
-      // the `details`" — both stated causes false, and the operator's one real move, registering
-      // `pay.refund`, named nowhere.
-      //
-      // THE `undo === undefined` HALF IS ALWAYS `unknown_compensation`, which is why the branch
-      // can name the tool instead of printing a `blocked` word. The other two blocks are
-      // pre-empted: `#uncompensatedIrreversible` refuses first, in `#rewindRefusals`, whenever
-      // `this.tools.get(called.name)?.compensation === undefined` — which covers `unknown_tool`
-      // (the tool is not registered, so the optional chain is `undefined`) and `no_compensation`
-      // (it is registered and declares none). Only "registered, declares one, and THAT tool is
-      // missing" survives to here, and both arms scan the same `isHardToUndo` population over the
-      // same run tree. The declared name comes from the registry, which is the same read
-      // `planCompensation` made to reach `unknown_compensation` in the first place.
-      const unregistered = noArguments.filter((s) => s.undo === undefined);
-      const unrecoverable = noArguments.filter((s) => s.undo !== undefined);
-      const pair = (s: RewindPlanStep, undo: string | undefined): string => `${s.tool}@${String(s.seq)} -> ${undo ?? "the compensation it declares"}`;
-      // CHILD STEPS REACH THIS ARM. `current.steps` is the whole tree — `#planRollback` splices
-      // each child's plan into the parent's — so this says WHICH JOURNAL, exactly as the
-      // `unrunnable` arm above does, because that is the one thing an operator cannot guess.
-      const inChildren = [...new Set(noArguments.filter((s) => s.runId !== String(runId)).map((s) => s.runId))];
-      const clauses = [
-        unregistered.length === 0
-          ? undefined
-          : `${String(unregistered.length)} name a compensation this process does not carry ` +
-            `(${[...new Set(unregistered.map((s) => pair(s, this.tools.get(s.tool)?.compensation?.tool)))].join(", ")}) — ` +
-            "register it and rewind again",
-        unrecoverable.length === 0
-          ? undefined
-          : `${String(unrecoverable.length)} have no live \`effect.completed\` recording the \`details\` an undo's arguments come from ` +
-            `(${[...new Set(unrecoverable.map((s) => pair(s, s.undo)))].join(", ")}), either because the call recorded none or ` +
-            "because an earlier rewind suppressed the record — no rewind can undo those",
-      ].filter((c) => c !== undefined);
-      throw err.conflict(
-        CODES.E_RESTORE_ILLEGAL,
-        `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and this engine ` +
-          `cannot build an undo for them${inChildren.length === 0 ? "" : `, including in child run(s) ${inChildren.join(", ")}`}. ` +
-          `${clauses.join("; and ")}. Rewinding would hide the record and leave the effects standing`,
-        { details: { runId, atSeq, pending: noArguments.length } },
-      );
-    }
     // EVERY STEP, NOT ONLY THE DISPATCHABLE ONES, once there is a context: a step nothing can
     // undo still has to be JOURNALED as `not_attempted`, or the three states collapse back to two
     // on this path while holding on the other. A rewind that crosses a `reversible_write` whose

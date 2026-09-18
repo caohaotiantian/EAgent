@@ -24,7 +24,7 @@
  * (2) UNSETTLED, ARGUMENTS ABSENT — nothing has settled, so the step IS in the plan, carrying no
  *     `argsDigest`. `dispatch` reads 0 and `blocked` reads 1: **the plan already knows it cannot
  *     dispatch**, which is the seam §A.37 names. The rewind crossed it anyway.
- *     **NOW REFUSED, by `rewind` only — the arm is in `#rewindSerially`.** It arrives by TWO
+ *     **NOW REFUSED, by `planRewind` as well as `rewind` (§A.74).** It arrives by TWO
  *     doors and both are pinned: with the undo NAMED and its arguments missing, and with the undo
  *     tool gone from this process too, where `planCompensation` strips `undo` from the step
  *     (`blocked: "unknown_compensation"`). The first cut refused only the first door, because its
@@ -73,18 +73,26 @@
  * further and gives the two processes DIFFERENT tool registries, because that is the fact it is
  * about.
  *
- * ── WHICH VERB REFUSED ───────────────────────────────────────────────────────
+ * ── WHICH VERB REFUSED, AND WHY THAT FIELD STAYS ─────────────────────────────
  * `rewindFromACoolEngine` reports `refusedBy: "planRewind" | "rewind"` rather than a single
- * boolean, because the two arms of the fix land in different places: a refusal in
- * `#rewindRefusals` reaches `planRewind` too, and one in `#rewindSerially` does not. A test that
- * could not tell them apart would pass for a fix that put an arm in the wrong verb.
+ * boolean, because §A.37's two arms landed in different verbs: a refusal in `#rewindRefusals`
+ * reaches `planRewind` too, and one in `#rewindSerially` did not. A test that could not tell them
+ * apart would pass for a fix that put an arm in the wrong verb.
  *
- * AND THE TWO ARMS DID LAND IN DIFFERENT VERBS, which is why the field is asserted and not
- * merely reported. Shape (1) reads `"planRewind"`: `#uncompensatedIrreversible` sits inside
- * `#rewindRefusals`, which both verbs run, and a refusal only `rewind` raised would hand the
- * operator a plan they can never use. Shape (2) reads `"rewind"`: its arm is in
- * `#rewindSerially`, which `planRewind` does not call, matching the `unrunnable` arm beside it —
- * that asymmetry predates §A.37 and is left as it was rather than widened silently.
+ * **EVERY SHAPE HERE NOW READS `"planRewind"`, AND THAT IS §A.74's PIN FLIPPING.** Shape (1)
+ * always did: `#uncompensatedIrreversible` sits inside `#rewindRefusals`, which both verbs run.
+ * Shape (2) read `"rewind"` through `300bf222`, because §A.37's arm sat in `#rewindSerially` and
+ * matched the older `unrunnable` arm beside it — so an operator who read the plan first was shown
+ * `steps 1 / dispatch 0 / blocked 1` and NO refusal, and was declined only when they ran it. Both
+ * post-plan arms are now `#refusePlannedRewind`, which `planRewind` runs BEFORE it journals or
+ * returns anything, so the two verbs cannot disagree about a plan again. The field is kept
+ * ASSERTED rather than deleted: a later change that moves an arm back into one verb has to make
+ * this file say so.
+ *
+ * WHAT THE FLIP COST, AND WHERE IT WENT. A refused preview returns no plan, so `steps`,
+ * `dispatch`, `blocked` and `argsDigests` read their `-1`/empty sentinels wherever §A.74 fires.
+ * The fact those numbers were asserting — ONE step this rewind will not dispatch — is asserted as
+ * `pending`, read off the refusal's own `details`.
  */
 
 import assert from "node:assert/strict";
@@ -335,9 +343,19 @@ interface ColdRewind {
   readonly dispatch: number;
   readonly blocked: number;
   readonly argsDigests: readonly (string | undefined)[];
-  /** WHICH verb refused, because the fix's two arms live in different ones. */
+  /** WHICH verb refused. Since §A.74 both arms live in ONE place and both verbs run it. */
   readonly refusedBy?: "planRewind" | "rewind";
   readonly refusal?: Error;
+  /**
+   * `details.pending` off the refusal — how many steps it counted.
+   *
+   * IT IS WHAT SURVIVES OF THE PLAN'S OWN NUMBERS. Before §A.74 these tests read `steps 1 /
+   * dispatch 0 / blocked 1` off a plan `planRewind` returned and `rewind` then declined; now
+   * `planRewind` declines first, so there is no plan to read and `steps` reads the `-1` sentinel.
+   * The fact those three numbers were asserting — ONE step this rewind will not dispatch — is on
+   * the refusal itself, so it stays measured rather than becoming prose.
+   */
+  readonly pending?: number;
   readonly events: readonly JournalEvent[];
 }
 
@@ -366,17 +384,21 @@ async function rewindFromACoolEngine(
     const engine = engineOn(store, world, omit);
     engine.attach(runId, graph);
     const empty = { steps: -1, dispatch: -1, blocked: -1, argsDigests: [] as readonly (string | undefined)[] };
+    const pendingOf = (e: unknown): { pending?: number } => {
+      const n = (e as { details?: { pending?: number } }).details?.pending;
+      return n === undefined ? {} : { pending: n };
+    };
     let plan;
     try {
       plan = await engine.planRewind(runId, atSeq, OPERATOR);
     } catch (e) {
-      return { ...empty, refusedBy: "planRewind", refusal: e as Error, events: await journal(store, runId) };
+      return { ...empty, refusedBy: "planRewind", refusal: e as Error, ...pendingOf(e), events: await journal(store, runId) };
     }
     const shown = { steps: plan.steps.length, dispatch: plan.dispatch, blocked: plan.blocked, argsDigests: plan.steps.map((s) => s.argsDigest) };
     try {
       await engine.rewind(runId, atSeq, "the reason said to put it right", OPERATOR, { planHash: plan.planHash });
     } catch (e) {
-      return { ...shown, refusedBy: "rewind", refusal: e as Error, events: await journal(store, runId) };
+      return { ...shown, refusedBy: "rewind", refusal: e as Error, ...pendingOf(e), events: await journal(store, runId) };
     }
     return { ...shown, events: await journal(store, runId) };
   } finally {
@@ -467,19 +489,19 @@ test("SHAPE 2 — the plan already knows it cannot dispatch, and `rewind` no lon
     const atSeq = beforeTheCharge(ran.events, "pay.charge");
     const out = await rewindFromACoolEngine(path, ran.runId, ran.graph, atSeq, world);
 
-    // The plan is honest about the step — this half is already right and must stay right. AFTER
-    // THE FIX these still hold: the arm belongs in `#rewindSerially`, after the plan is computed,
-    // so `planRewind` still returns this plan and `refusedBy` becomes `"rewind"`.
-    assert.equal(out.steps, 1, "the step is in the plan");
-    assert.deepEqual(out.argsDigests, [undefined], "with no `argsDigest`, because the journal carries no arguments");
-    assert.equal(out.dispatch, 0, "so the preview promises no undo at all");
-    assert.equal(out.blocked, 1, "and counts it blocked");
-
-    // AND `rewind` REFUSES TO ACT ON IT — `planRewind` shows the plan, `rewind` declines to
-    // proceed over a hard-to-undo step its own plan already said it will not dispatch. The
-    // asymmetry with shape 1 is deliberate and matches the existing `unrunnable` arm: this one
-    // lives in `#rewindSerially`, which `planRewind` does not call.
-    assert.equal(out.refusedBy, "rewind", "`rewind` no longer crosses a hard-to-undo step its own plan will not dispatch");
+    // THE PREVIEW IS REFUSED TOO, WHICH IS §A.74 AND IS THE PIN THAT FLIPPED. Between `300bf222`
+    // and here, `planRewind` RETURNED this plan — `steps 1`, `argsDigests [undefined]`,
+    // `dispatch 0`, `blocked 1` — and `rewind` then declined it, because §A.37's arm landed in
+    // `#rewindSerially` and matched the older `unrunnable` arm beside it. An operator who read
+    // the plan first was shown a list they could never act on. Both arms are now
+    // `#refusePlannedRewind`, which both verbs run, so there is no plan to read and `steps`
+    // reads the `-1` sentinel.
+    assert.equal(out.refusedBy, "planRewind", "the READ half refuses it, so no operator is shown a plan `rewind` would decline");
+    assert.equal(out.steps, -1, "and is shown no plan at all — the sentinel, not a plan with zero steps");
+    assert.deepEqual(out.argsDigests, [], "so there are no digests to read either");
+    // THE NUMBER THE THREE ABOVE WERE ABOUT, still asserted and now off the refusal: one recorded
+    // effect this rewind is hard-refusing rather than dispatching.
+    assert.equal(out.pending, 1, "one step, counted by the refusal that replaced the plan");
     assert.match(out.refusal!.message, /pay\.charge@\d+ -> pay\.refund/, "and the refusal names the effect and the undo it cannot build");
     // BOTH CAUSES, not one. `argsDigest === undefined` is equally true when the call recorded no
     // `details` and when an earlier rewind suppressed the `effect.completed` that carried them,
@@ -506,6 +528,14 @@ test("SHAPE 2 — the plan already knows it cannot dispatch, and `rewind` no lon
       out.events.some((e) => e.type === "checkpoint.restored"),
       false,
       "and no restore marker was appended either",
+    );
+    // AND NO `rewind.plan` ROW, which is §A.74's own half of "nothing is appended".
+    // `#refusePlannedRewind` runs BEFORE `#journalPlanShown`, so a refused preview leaves no row
+    // claiming an operator was shown a list they were not.
+    assert.equal(
+      out.events.some((e) => e.type === "operator.command" && (e.payload as { kind?: string }).kind === "rewind.plan"),
+      false,
+      "and the refused preview journaled no plan",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -712,10 +742,11 @@ test("SHAPE 2's SECOND DOOR — the undo tool is gone AND the arguments were nev
     // Process 2 does not carry `pay.refund`, so the step loses its `undo` as well as its arguments.
     const out = await rewindFromACoolEngine(path, ran.runId, ran.graph, beforeTheCharge(ran.events, "pay.charge"), world, ["pay.refund"]);
 
-    assert.equal(out.steps, 1, "the step is in the plan");
-    assert.deepEqual(out.argsDigests, [undefined], "with no `argsDigest`, because the journal carries no arguments");
-    assert.equal(out.dispatch, 0, "so the preview promises no undo");
-    assert.equal(out.refusedBy, "rewind", "and `rewind` refuses, exactly as it does when the undo IS named");
+    // §A.74: the READ half refuses this door too, so there is no plan. Before it, this read
+    // `steps 1 / argsDigests [undefined] / dispatch 0` and `refusedBy: "rewind"`.
+    assert.equal(out.refusedBy, "planRewind", "and both verbs refuse, exactly as they do when the undo IS named");
+    assert.equal(out.steps, -1, "with no plan shown");
+    assert.equal(out.pending, 1, "one step, counted by the refusal");
     // THE MESSAGE MUST BE THIS BRANCH'S, not the other's, so the regexes are exclusive. Both
     // populations refuse under one predicate and the operator's move is opposite for each: here
     // it is "register `pay.refund`", and the missing-`details` sentence would send them to look
@@ -737,7 +768,7 @@ test("SHAPE 2's SECOND DOOR — the undo tool is gone AND the arguments were nev
     // honest answer to it. The CONTROL below is the same two moves on a charge that DID record
     // `details`, where the second rewind goes through.
     const deployed = await rewindFromACoolEngine(path, ran.runId, ran.graph, beforeTheCharge(ran.events, "pay.charge"), world);
-    assert.equal(deployed.refusedBy, "rewind", "still refused, now for the fact that was invisible while the undo was unnamed");
+    assert.equal(deployed.refusedBy, "planRewind", "still refused, now for the fact that was invisible while the undo was unnamed");
     assert.match(deployed.refusal!.message, /no live `effect\.completed` recording the `details`/, "and NOW the message is the other branch's");
     assert.doesNotMatch(deployed.refusal!.message, /register it and rewind again/, "the registry is no longer what is wrong");
     assert.deepEqual(world.charges, [42], "and nothing was undone on the way to either refusal");
@@ -765,7 +796,7 @@ test("SHAPE 2's SECOND DOOR, THE CONTROL — with the ARGUMENTS recorded, deploy
     const atSeq = beforeTheCharge(ran.events, "pay.charge.kept");
 
     const without = await rewindFromACoolEngine(path, ran.runId, ran.graph, atSeq, world, ["pay.refund"]);
-    assert.equal(without.refusedBy, "rewind", "with the undo unregistered there is nothing this engine can dispatch");
+    assert.equal(without.refusedBy, "planRewind", "with the undo unregistered there is nothing this engine can dispatch");
     // AND THE MESSAGE SAYS THE TRUE THING, which is the whole reason this run is asserted on:
     // its `effect.completed` is LIVE and carries `details: {row: 42}`. The refusal used to read
     // "there is no live `effect.completed` recording the `details`" here — both of its stated

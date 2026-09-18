@@ -347,17 +347,30 @@ test("A DETACHED REWIND OF A FULLY-DELEGATED RUN IS REFUSED RATHER THAN SILENTLY
   const r = await ran("subgraph");
   r.engine.forget(r.runId);
 
-  // THE PREVIEW SAYS SO FIRST, in three states rather than two: the step is there, it names its
-  // undo, and it carries the reason nothing will run it.
-  const plan = await r.engine.planRewind(r.runId, 1 as Seq, OPERATOR);
-  assert.equal(plan.attached, false, "the plan knows this engine holds no context");
-  assert.equal(plan.steps.length, 1, "the delegated charge is still in the plan");
-  assert.equal(plan.dispatch, 0, "and nothing will dispatch it");
-  assert.match(plan.steps[0]!.undispatchable ?? "", /holds no context/, "the third state says why");
-  assert.equal(plan.steps[0]!.undo, "pay.refund", "while still naming the undo that would have run");
+  // THE PREVIEW SAYS SO FIRST — AND SINCE §A.74 IT SAYS IT BY REFUSING. This read a PLAN through
+  // `300bf222`: `attached: false`, one step, `dispatch: 0`, `undispatchable: "holds no context"`,
+  // `undo: "pay.refund"` — three states rather than two, and then `rewind` declined it anyway.
+  // That is the §A.74 shape exactly: the operator who reads first is shown a list they cannot
+  // authorize. `#refusePlannedRewind` now runs in both verbs, and the refusal carries everything
+  // the plan carried — the `tool -> undo` pair, the child run the effect was recorded in, and
+  // `attach(runId, graph)` as the move — so nothing was traded away for the symmetry.
+  const previewed = await r.engine.planRewind(r.runId, 1 as Seq, OPERATOR).then(() => undefined, (e: unknown) => e);
+  assert.ok(isLoomError(previewed) && previewed.code === CODES.E_RESTORE_ILLEGAL, `the preview is refused too: ${String(previewed)}`);
+  assert.match(previewed.message, /pay\.refundable -> pay\.refund/, "and it names the undo the plan used to name");
+  assert.match(previewed.message, /holds no context/, "and the reason nothing will run it");
+  assert.equal(
+    (await journal(r.store, r.runId)).filter((e) => e.type === "operator.command" && (e.payload as { kind: string }).kind === "rewind.plan").length,
+    0,
+    "and a refused preview journals no `rewind.plan` row claiming an operator was shown one",
+  );
 
+  // AND `rewind` REFUSES IT TOO, WITH NO USABLE HASH TO OFFER IT. There is no plan to authorize
+  // any more, so this passes a hash the engine has never issued — and still gets the journal fact
+  // rather than "no record of plan <h>", because `#refusePlannedRewind` sits ABOVE the hash check
+  // in `#rewindSerially`. That ordering is what keeps this pin, and the operator's diagnostic,
+  // alive after §A.74.
   const refused = await r.engine
-    .rewind(r.runId, 1 as Seq, "from a process that forgot it", OPERATOR, { planHash: plan.planHash })
+    .rewind(r.runId, 1 as Seq, "from a process that forgot it", OPERATOR, { planHash: "sha256:not-a-plan-this-engine-ever-issued" })
     .then(() => undefined, (e: unknown) => e);
   assert.ok(isLoomError(refused) && refused.code === CODES.E_RESTORE_ILLEGAL, `it must be refused: ${String(refused)}`);
   assert.match(refused.message, /holds no context/, "the message names the reason");
@@ -370,8 +383,11 @@ test("A DETACHED REWIND OF A FULLY-DELEGATED RUN IS REFUSED RATHER THAN SILENTLY
   // policy, so it must lift the moment the capability is back.
   r.engine.attach(r.runId, r.graph);
   const now = await r.engine.planRewind(r.runId, 1 as Seq, OPERATOR);
+  assert.equal(now.attached, true, "attached, there IS a plan again");
+  assert.equal(now.steps.length, 1, "holding the delegated charge");
+  assert.equal(now.steps[0]!.undo, "pay.refund", "naming the undo that will run");
+  assert.equal(now.steps[0]!.undispatchable, undefined, "with the third state gone");
   assert.equal(now.dispatch, 1, "attached, the same step is dispatchable");
-  assert.notEqual(now.planHash, plan.planHash, "and it is a DIFFERENT plan, because dispatchability is in the hash");
   await r.engine.rewind(r.runId, 1 as Seq, "now it can", OPERATOR, { planHash: now.planHash });
   assert.equal((await records(r.store, r.runId)).length, 1, "and the child's journal finally says what happened");
 });
@@ -424,6 +440,13 @@ test("THE PREVIEW REFUSES EVERYTHING THE REWIND REFUSES", async () => {
   // A PLAN FOR A REWIND THAT WILL BE REFUSED ANYWAY IS A PLAN THE OPERATOR CANNOT USE, and
   // handing them one is a different way of lying to them. `#rewindRefusals` is shared so the two
   // cannot drift — "a rule enforced by convention at each call site is not a rule".
+  //
+  // "EVERYTHING" IS TWO SHARED METHODS SINCE §A.74, NOT ONE. `#rewindRefusals` is what `rewind`
+  // refuses BEFORE it plans, and the two arms it refuses AFTER — a detached run whose steps this
+  // engine cannot dispatch, and a hard-to-undo effect whose undo arguments were never recorded —
+  // are `#refusePlannedRewind`, which both verbs now run too. The first is pinned by the detached
+  // test above, the second by `compensation-refused-then-rewind.test.ts`'s SHAPE 2. This test
+  // holds the pre-plan half, which is the half that was already true.
   const r = await ran("tool");
 
   const below = await r.engine.planRewind(r.runId, 0 as Seq, OPERATOR).then(() => undefined, (e: unknown) => e);
