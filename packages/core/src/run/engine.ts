@@ -5879,29 +5879,32 @@ export class Engine {
    * the only shape that can reach the vocabulary refusals at all (the compiler stamps the field
    * and refuses both faults, so a compiled graph has neither).
    *
-   * THE RESIDUE, AT ITS REAL WIDTH — and it is wider than "you must hold the run's own graph",
-   * which is what this paragraph used to say. Neither fact is secret. `run.compiled` carries
-   * BOTH `graphHash` and `resolutionManifest`, and `manifestKey` normalises the second, so a
-   * caller who knows the runId and can READ the journal synthesises a matching identity from
-   * scratch: build any graph, copy the two recorded values onto it, bend an edge. Measured, on a
-   * parked `human_gate` run whose graph the caller never saw — `synthesised-from-journal advance
-   * threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1  gates: ["cancelled"]`. The
-   * manifest is a NAME set too, so any foreign graph naming the same refs passes it, and two
-   * graphs that name no resources at all share the empty manifest. So this check raises the bar
-   * from "know the hash" — which `compiledGraphHash` and `RunProjection.graphHash` hand out
-   * anyway — to "read one journal row", and no further. It is a guard against a caller who
-   * brings the WRONG graph by accident, not against one who wants the run dead.
+   * THIS PAIR IS NOT A SECRET, AND NOTHING DESTRUCTIVE MAY REST ON IT ALONE (§A.66).
+   * `run.compiled` carries BOTH `graphHash` and `resolutionManifest`, and `manifestKey`
+   * normalises the second, so a caller who knows the runId and can READ the journal synthesises a
+   * matching identity from scratch: build any graph, copy the two recorded values onto it, bend
+   * an edge. The manifest is a NAME set too, so any foreign graph naming the same refs passes it,
+   * and two graphs that name no resources at all share the empty manifest. So this check raises
+   * the bar from "know the hash" — which `compiledGraphHash` and `RunProjection.graphHash` hand
+   * out anyway — to "read one journal row", and no further. **It is a guard against a caller who
+   * brings the WRONG graph by accident, and it is sound for that and only that.**
    *
-   * AND WHAT SUCH A CALLER GETS IS NOT `cancel`, which this paragraph also used to claim. Two
-   * differences, both auditable facts about the journal: `#failRun` runs `#compensate` BEFORE the
-   * terminal row, so the forged path can dispatch every compensation the run has recorded, while
-   * `#cancelTree` compensates nothing; and the row lands as `run.failed` from
-   * `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where a cancel writes
-   * `operator.command` attributed to the caller. So an auditor reading the log cannot tell a
+   * WHICH IS WHY ITS ONE DESTRUCTIVE CONSUMER NO LONGER RELIES ON IT ALONE. Measured on
+   * `2b1698e8`, on a parked `human_gate` run whose graph the caller never saw:
+   * `synthesised-from-journal advance threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1
+   * gates: ["cancelled"]`. That was STRICTLY MORE than `cancel`, in two auditable ways —
+   * `#failRun` runs `#compensate` BEFORE the terminal row, so the forged path could dispatch
+   * every compensation the run had recorded, while `#cancelTree` compensates nothing; and the row
+   * landed as `run.failed` from `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where a
+   * cancel writes `operator.command` attributed to its caller, so an auditor could not tell a
    * caller's deliberate destruction from a build that genuinely could not read the graph.
-   * Narrowing it needs a door that is not reachable with journal read access — a process
-   * boundary, or an identity the journal does not publish. Recorded as a residual row rather
-   * than closed here.
+   * `#failUnreadableGraph` now conjoins a fact a caller cannot synthesise — whether the run has
+   * ever EXECUTED — and the same script reads `awaiting_gate  0  ["open"]`.
+   *
+   * IDENTITY STILL CARRIES THE NON-DESTRUCTIVE HALF, unchanged: `#assertBound` refuses a graph
+   * that is not the run's, which is a refusal and therefore always allowed. Making the pair
+   * itself unforgeable needs a door that is not reachable with journal read access — a process
+   * boundary, or an identity the journal does not publish — and that is not what this closes.
    */
   #graphIdentityMismatch(
     ctx: RunContext,
@@ -5948,10 +5951,14 @@ export class Engine {
    * advances it. And `resolveGate`/`decideGateBatch` keep throwing without failing anything: a
    * human's approve call carrying the wrong `--graph` is a typo, not a dead run.
    *
-   * "THIS RUN'S OWN" IS `#graphIdentityMismatch`, THE WHOLE OF IT — see that method. This
-   * compared the spec HASH alone in its first cut, which is one of the two facts that identity
-   * rests on, and a FOREIGN broken graph wearing the run's `graphHash` was therefore taken for
-   * the run's own and killed a healthy parked run.
+   * "THIS RUN'S OWN" IS `#graphIdentityMismatch` **AND A RUN THAT HAS NEVER EXECUTED** — two
+   * conjuncts, and the second is §A.66. The identity check compared the spec HASH alone in its
+   * first cut, which is one of the two facts identity rests on, and a FOREIGN broken graph
+   * wearing the run's `graphHash` was therefore taken for the run's own and killed a healthy
+   * parked run. The pair that replaced it is journaled on `run.compiled`, so a caller with
+   * journal READ access synthesises it onto any graph and lands in the same place; the
+   * never-executed conjunct at the call site is the fact such a caller cannot manufacture, and
+   * the argument that it is exactly §A.63's own set is written there.
    *
    * REPEATING. Nothing is appended twice, and the `isTerminal` return BELOW is what does that —
    * not the terminal short-circuit inside `advance`, which for an ATTACHED run sits under this
@@ -5969,6 +5976,46 @@ export class Engine {
     if (p === undefined || isTerminal(p.status)) return;
     if (recorded === undefined) return;
     if (this.#graphIdentityMismatch(ctx, recorded, p.graphHash) !== undefined) return;
+    // AND THE RUN HAS NEVER EXECUTED, WHICH IS THE OTHER HALF OF "THIS RUN'S OWN" (§A.66).
+    //
+    // IDENTITY ALONE CANNOT CARRY THIS, and the reason is written at `#graphIdentityMismatch`:
+    // `run.compiled` journals BOTH `graphHash` and `resolutionManifest`, `manifestKey` normalises
+    // the second, and neither is secret — so a caller holding the runId and READ access to the
+    // journal copies the pair onto any graph at all, bends one edge `kind`, `attach`es and
+    // `advance`s. Measured on `2b1698e8`, on a `human_gate` run parked in another process whose
+    // graph the caller never saw: `threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1
+    // gates: ["cancelled"]`. `#failRun` runs `#compensate` BEFORE the terminal row, so that path
+    // could dispatch every undo the run recorded, and the row landed as `run.failed` from
+    // `SYSTEM_ACTOR("executor")` — indistinguishable, to an auditor, from a build that genuinely
+    // could not read the graph.
+    //
+    // THE FACT THAT SEPARATES THE TWO IS PROGRESS, NOT PROVENANCE. `#assertBound` runs FIRST on
+    // `advance` and on both gate doors, so a run bound to a graph this build cannot read is
+    // refused at its very first advance and can never lease a task or open a gate: `submit`
+    // appends `run.submitted, run.compiled, run.started, task.ready` and drives nothing, which is
+    // §A.63's own pasted journal. **Every genuine §A.63 run is therefore in the never-executed
+    // bucket, and a run that HAS executed proves a readable graph carried it** — so an unreadable
+    // graph presented to it now is a fact about THIS PROCESS or THIS CALLER and never about the
+    // run. That is verbatim the rule §A.37 settled for `compensation.recorded.retryable`: set
+    // when the blocker is a fact about this process or this trigger, absent when it is a fact
+    // about the journal. Failing the run would be a permanent answer to a temporary fact.
+    //
+    // AND IT FAILS CLOSED IN THE DIRECTION `CLAUDE.md` NAMES. Failing the run is the destructive
+    // answer and refusing the advance is the conservative one, so a conjunct that can only ever
+    // move a case from the first to the second cannot loosen anything. The honest operator whose
+    // binary dropped an edge kind under a live run is moved with it, and correctly: their run is
+    // left exactly as it was and the previous binary still advances it.
+    //
+    // NOTHING IS JOURNALED ON THIS BRANCH, AND THAT IS NOT §A.63 COMING BACK. §A.63's run was
+    // left `running`, could NEVER progress, and held no word about why — a decision taken that
+    // the fold could not reconstruct. Here NO decision is taken about the run at all: it was
+    // parked (or running) before the call and is in that same state after it, the right graph
+    // still advances it, and the only thing that happened happened to the CALL, which the caller
+    // is told about by the throw that follows. There is also nobody to attribute a row to —
+    // `advance` takes no actor — so an `operator.command` row here would assert a fact the engine
+    // cannot know.
+    const executed = Object.keys(p.gates).length > 0 || Object.values(p.tasks).some((t) => t.state !== "pending" && t.state !== "ready");
+    if (executed) return;
     // `errorRecord` AND NOT A HAND-BUILT LITERAL, so the row carries the refusal's own
     // `details` — the edge ids and the unreadable values — and a fold can say WHICH edge
     // stopped the run rather than only that one did.

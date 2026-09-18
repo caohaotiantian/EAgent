@@ -38,11 +38,12 @@ import test from "node:test";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
+import type { ToolManifestLite } from "../../src/graph/validate.ts";
 import type { EdgeId, NodeId, RunId } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { resolver, SKELETON_TENANT_CAPS } from "./skeleton.ts";
 
 const n = (id: string): NodeId => id as NodeId;
@@ -107,24 +108,87 @@ function gateSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-function engineWith(store: SqliteStateStore): Engine {
+/**
+ * The money `chargeThenGateSpec` moves, so §A.66's "nothing was compensated" is asserted on the
+ * WORLD and not on the journal — `#failRun` dispatches undos before it writes its terminal row.
+ */
+interface World {
+  readonly charges: number[];
+  readonly refunds: number[];
+}
+
+/** `irreversible` and compensable, which is the whole reason this pair exists — see §A.66 below. */
+const PAY_MANIFESTS: Record<string, ToolManifestLite> = {
+  "pay.charge": { name: "pay.charge", version: "1.0", capabilities: ["pay"], irreversibility: "irreversible", idempotent: true, compensation: { tool: "pay.refund" } },
+  "pay.refund": { name: "pay.refund", version: "1.0", capabilities: ["pay"], irreversibility: "reversible_write", idempotent: true },
+};
+
+function engineWith(store: SqliteStateStore, world: World = { charges: [], refunds: [] }): Engine {
   const functions = new FunctionRegistry();
   functions.register("function/seed@stable", () => ({}));
   functions.register("function/work@stable", (view) => ({ writes: { seen: [view.get<{ id: string }>("item")?.id ?? "?"] } }));
   functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
   const models = new ModelRegistry();
   models.register(new MockModelAdapter({ script: () => ({ text: "{}", finishReason: "stop" }) }), true);
+  const tools = new ToolRegistry();
+  tools.register({
+    ...PAY_MANIFESTS["pay.charge"],
+    description: "Take money.",
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    // `details` IS WHAT AN UNDO'S ARGUMENTS COME FROM, so the compensation this test asserts
+    // nobody dispatched is one that genuinely COULD have been dispatched. Without it the arm
+    // §A.37 added would refuse first and the assertion would pass for the wrong reason.
+    execute: (args: Record<string, unknown>) => {
+      const row = Number(args["row"]);
+      world.charges.push(row);
+      return { content: "charged", details: { row }, writes: { out: { row } } };
+    },
+  } as ToolDefinition);
+  tools.register({
+    ...PAY_MANIFESTS["pay.refund"],
+    description: "Give it back.",
+    parameters: { type: "object", properties: { row: { type: "number" } }, required: ["row"] },
+    execute: (args: Record<string, unknown>) => {
+      const row = Number(args["row"]);
+      world.refunds.push(row);
+      const at = world.charges.indexOf(row);
+      if (at >= 0) world.charges.splice(at, 1);
+      return { content: "refunded" };
+    },
+  } as ToolDefinition);
   return new Engine({
     store,
     bus: new InProcessEventBus({ store }),
-    tools: new ToolRegistry(),
+    tools,
     functions,
     models,
     now: () => NOW,
     maxParallelism: 4,
     resolver: resolver(),
-    policy: { granted: SKELETON_TENANT_CAPS, budget: { runUsd: 5 } },
+    policy: { granted: [...SKELETON_TENANT_CAPS, "pay"], budget: { runUsd: 5 } },
   });
+}
+
+/** `charge (a tool) --seq--> hold (a human_gate) --seq--> done`: parked, with money standing. */
+function chargeThenGateSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "advance-refusal-charge-gate", project: "probe", version: 1 },
+    policy: { posture: "out", capabilities: ["pay"], expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { ...CHANNELS, note: { type: "array", reduce: "append_ordered" }, out: { type: "object", reduce: "replace" } },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: n("charge"), type: "tool", reads: ["items"], writes: ["out"], tool: { name: "pay.charge", version: "1.0", args: { row: 42 } }, retry: { maxAttempts: 1 } },
+      { id: n("hold"), type: "human_gate", reads: ["items"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: n("done"), type: "function", reads: ["items"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: e("c0"), from: n("charge"), to: n("hold"), kind: "seq" },
+      { id: e("s1"), from: n("hold"), to: n("done"), kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
 }
 
 /**
@@ -328,6 +392,157 @@ test("A FOREIGN UNREADABLE GRAPH REFUSES WITHOUT KILLING THE RUN — the ordinar
         } finally {
           third.close();
         }
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A SYNTHESISED IDENTITY IS NOT "THIS RUN'S OWN GRAPH". (§A.66.)
+ *
+ * The test above hands the door a foreign graph and the identity check refuses to fail the run.
+ * §A.66 is what happens when the caller does not bring a foreign identity — they READ the run's
+ * own out of the journal. `run.compiled` carries `graphHash` AND `resolutionManifest`, both
+ * plain payload fields of a row any reader can see, and `RunGraph` is an exported interface whose
+ * fields a caller sets. So the pair copies onto any graph at all, `#graphIdentityMismatch`
+ * returns `undefined`, and through `2b1698e8` a run was FAILED on a graph it never compiled.
+ *
+ * Measured there, on the parked `human_gate` run this test builds, driven by the script in
+ * `docs/handoff-2026-09-15.md` §Repros:
+ *
+ *     parked: awaiting_gate
+ *     threw: E_GRAPH_INVALID status: failed run.failed rows: 1 gates: ["cancelled"]
+ *     actor: {"component":"executor","kind":"system"}
+ *
+ * IT IS STRICTLY MORE THAN `cancel`, WHICH IS WHY THIS TEST CARRIES A TOOL. `#failRun` runs
+ * `#compensate` BEFORE the terminal row while `#cancelTree` compensates nothing, so the forged
+ * path could dispatch every undo the run had recorded — real money, on a graph the caller never
+ * saw. The gate graph below therefore charges before it parks, with `pay.refund` registered and
+ * a world the test reads: "nothing was compensated" is asserted on the MONEY and not on the
+ * journal. And the row landed from `SYSTEM_ACTOR("executor")` carrying `E_GRAPH_INVALID`, where
+ * a cancel writes `operator.command` attributed to its caller — so an auditor could not tell a
+ * caller's deliberate destruction from a build that genuinely could not read the graph.
+ *
+ * WHAT CLOSES IT IS PROGRESS, NOT A BETTER IDENTITY. `#assertBound` runs first on `advance` and
+ * on both gate doors, so a run bound to an unreadable graph is refused at its first advance and
+ * can never lease a task or open a gate — every genuine §A.63 run has executed NOTHING, which is
+ * that row's own pasted journal (`run.submitted, run.compiled, run.started, task.ready`). The
+ * run here has charged and parked. The two tests are the two halves of that one sentence, which
+ * is why they live in one file: the first still reads `failed / 1`, this one reads
+ * `awaiting_gate / 0 / ["open"]`.
+ */
+test("A SYNTHESISED IDENTITY REFUSES THE ADVANCE AND LEAVES THE RUN WHERE IT WAS", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-"));
+  try {
+    for (const { what, mangle } of FAULTS) {
+      const path = join(dir, `${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
+      const world: World = { charges: [], refunds: [] };
+      const good = compileOrThrow({
+        spec: chargeThenGateSpec(),
+        resolver: resolver(),
+        tools: PAY_MANIFESTS,
+        tenantCapabilities: [...SKELETON_TENANT_CAPS, "pay"],
+      });
+
+      // ── the process that charges and parks ─────────────────────────────────
+      const first = new SqliteStateStore({ path, now: () => NOW });
+      let runId: RunId;
+      try {
+        const engine = engineWith(first, world);
+        runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
+        let p = await engine.advance(runId);
+        // The charge is `irreversible`, so it suspends on its own gate first; approving it is
+        // what makes the money real, which is what the compensation assertion below is about.
+        for (let i = 0; i < 6 && p.status === "awaiting_gate" && world.charges.length === 0; i++) {
+          const open = Object.values(p.gates).find((g) => g.state === "open" && g.nodeId === n("charge"));
+          if (open === undefined) break;
+          await engine.resolveGate(runId, {
+            gateId: open.gateId,
+            decision: { kind: "approve" },
+            actor: { kind: "human", subject: "u:alice", via: "console" },
+            idempotencyKey: `k-${open.gateId}`,
+          });
+          p = await engine.advance(runId);
+        }
+        assert.equal(p.status, "awaiting_gate", `${what}: precondition — a parked run`);
+        assert.deepEqual(world.charges, [42], `${what}: precondition — with an undoable effect standing`);
+        assert.deepEqual(world.refunds, [], `${what}: and nothing has undone it`);
+      } finally {
+        first.close();
+      }
+
+      // ── a caller holding the runId and READ access, and nothing else ───────
+      const second = new SqliteStateStore({ path, now: () => NOW });
+      try {
+        // THE WHOLE ATTACK, and it reads one row. `graphHash` and `resolutionManifest` are copied
+        // off `run.compiled` onto a graph this run has never seen, with one edge kind bent.
+        const compiled = (await typesOf(second, runId)).find((ev) => ev.type === "run.compiled")!;
+        const identity = compiled.payload as unknown as { graphHash: string; resolutionManifest: unknown };
+        const built = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+        const forged = { ...built, graphHash: identity.graphHash, resolutionManifest: identity.resolutionManifest } as RunGraph;
+        assert.equal(forged.graphHash, good.graphHash, `${what}: the caller really is wearing the run's own identity`);
+
+        const engine = engineWith(second, world);
+        engine.attach(runId, forged);
+        await assert.rejects(
+          () => engine.advance(runId),
+          (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+          `${what}: the caller is refused`,
+        );
+
+        // AND THE RUN IS EXACTLY WHERE IT WAS — every fact the forged path used to change.
+        //
+        // THE MONEY FIRST, WHICH IS THE HALF A JOURNAL ASSERTION WOULD MISS AND THE HALF THAT
+        // CANNOT BE PUT BACK. `#failRun` compensates BEFORE it writes the terminal row, so on
+        // `2b1698e8` the forged advance dispatched `pay.refund` for real: re-run there with this
+        // order, `refunds` reads `[42]` and `charges` reads `[]` — one caller with journal read
+        // access moving somebody else's money on a graph they never saw.
+        assert.deepEqual(world.refunds, [], `${what}: NO compensation was dispatched`);
+        assert.deepEqual(world.charges, [42], `${what}: so the charge stands, untouched`);
+        assert.equal(
+          (await typesOf(second, runId)).filter((ev) => ev.type === "compensation.recorded").length,
+          0,
+          `${what}: and nothing even tried`,
+        );
+        assert.equal(
+          (await typesOf(second, runId)).filter((ev) => ev.type === "run.failed").length,
+          0,
+          `${what}: no terminal row`,
+        );
+        const after = await engine.projection(runId);
+        assert.equal(after?.status, "awaiting_gate", `${what}: still parked`);
+        // TWO GATES: the charge's, APPROVED on the way in, and the `hold` the run is parked on.
+        // The forged advance used to cancel the second — the question in somebody's queue.
+        assert.deepEqual(
+          Object.values(after!.gates).map((g) => g.state).sort(),
+          ["decided", "open"],
+          `${what}: the question in somebody's queue is still open, not cancelled`,
+        );
+      } finally {
+        second.close();
+      }
+
+      // ── and the operator holding the real graph still drives it home ───────
+      const third = new SqliteStateStore({ path, now: () => NOW });
+      try {
+        const engine = engineWith(third, world);
+        engine.attach(runId, good);
+        for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
+          await engine.resolveGate(runId, {
+            gateId: gate.gateId,
+            decision: { kind: "approve" },
+            actor: { kind: "human", subject: "u:alice", via: "console" },
+            idempotencyKey: `k2-${gate.gateId}`,
+          });
+        }
+        const p = await engine.advance(runId);
+        assert.equal(p.status, "succeeded", `${what}: the forged advance cost the run nothing`);
+        assert.deepEqual(p.channels["note"], ["done-ran"], `${what}: and the work behind the gate ran`);
+        assert.deepEqual(world.refunds, [], `${what}: with the charge never undone`);
+      } finally {
+        third.close();
       }
     }
   } finally {
