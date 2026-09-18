@@ -513,10 +513,16 @@ test("a fan-out width that is not a NUMBER is refused BY THE COMPILER, before an
 
     const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
     assert.notEqual(r.code, 0, `a non-numeric width must refuse:\n${r.out}${r.err}`);
-    assert.match(`${r.out}${r.err}`, /GRAPH007_BAD_MAX_WIDTH/, r.out + r.err);
-    assert.match(`${r.out}${r.err}`, /not a positive integer/, r.out + r.err);
+    // WHITESPACE-COLLAPSED, and §H.14 is why. `loom` here runs IN PROCESS with stderr captured,
+    // so whether the diagnostic printer wraps depends on whether the TEST process's stderr is a
+    // terminal — under `node --test` it is a pipe, but a developer running this file with stderr
+    // attached saw `(unquoted:\n        24, not "24")` and a red test. An assertion about what a
+    // message SAYS must not also be an assertion about where its line breaks fall.
+    const said = `${r.out}${r.err}`.replace(/\s+/g, " ");
+    assert.match(said, /GRAPH007_BAD_MAX_WIDTH/, r.out + r.err);
+    assert.match(said, /not a positive integer/, r.out + r.err);
     // And the message tells the author the one thing they need: the quotes.
-    assert.match(`${r.out}${r.err}`, /unquoted: 24, not "24"/, r.out + r.err);
+    assert.match(said, /unquoted: 24, not "24"/, r.out + r.err);
   } finally {
     ws.dispose();
   }
