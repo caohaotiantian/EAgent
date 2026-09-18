@@ -423,7 +423,16 @@ function workspaceNamed(name: string): { dir: string; file: string; dispose: () 
   return { dir: w.dir, file, dispose: w.dispose };
 }
 
-/** `compileCapturing` for a named file, returning the raw stderr rather than split rows. */
+/**
+ * `compileCapturing` for a named file, returning the raw stderr rather than split rows.
+ *
+ * The `catch` is bare and does NOT re-assert that the compile failed, unlike its sibling: every
+ * caller below asserts `GRAPH021_FANOUT_WITHOUT_JOIN` is in what came back, and that string can
+ * only be there because the compile refused. A graph that started compiling would produce no
+ * diagnostics and fail those assertions with the whole captured output in the message. The guard
+ * is added anyway rather than argued for in a comment — the argument is one indirection long, and
+ * the next person to add a caller here should not have to reconstruct it.
+ */
 async function compileNamed(dir: string, file: string, tty: number | "pipe"): Promise<string> {
   const realErr = process.stderr.write.bind(process.stderr);
   const realOut = process.stdout.write.bind(process.stdout);
@@ -435,11 +444,13 @@ async function compileNamed(dir: string, file: string, tty: number | "pipe"): Pr
     return true;
   }) as typeof process.stderr.write;
   process.stdout.write = (() => true) as typeof process.stdout.write;
+  let compiled = false;
   try {
     if (tty === "pipe") delete (process.stderr as { isTTY?: boolean }).isTTY;
     else Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true, writable: true });
     Object.defineProperty(process.stderr, "columns", { value: tty === "pipe" ? 80 : tty, configurable: true, writable: true });
     await main(["compile", file, "--workspace", dir]);
+    compiled = true;
   } catch {
     // E_GRAPH_INVALID — the diagnostics are the point, not the throw.
   } finally {
@@ -450,6 +461,7 @@ async function compileNamed(dir: string, file: string, tty: number | "pipe"): Pr
     if (hadCols === undefined) delete (process.stderr as { columns?: number }).columns;
     else Object.defineProperty(process.stderr, "columns", hadCols);
   }
+  assert.equal(compiled, false, "the eto graph must not compile — if it does, there are no diagnostics to measure");
   return captured.join("");
 }
 
@@ -488,6 +500,15 @@ test("THE CLASS THIS FILE ASSERTS ON IS THE CLASS `cli.ts` DECLARES — two copi
     SPOOFING_CLASS,
     "the two copies have parted — reconcile before trusting the assertions below",
   );
+
+  // AND THE EXEMPTION LIST, which is the half that can go wrong QUIETLY. Pinning only the class
+  // leaves `(?![\t\n])` free to become `(?![\t\n\r])` — or to disappear — with every assertion in
+  // this file still green: the class test above would pass, the CR test below would pass on a
+  // narrowed exemption, and a WIDENED one would simply stop stripping something. The exemption is
+  // the security-relevant half, so it is pinned as text.
+  const exempt = /const SPOOFING_BUT_WHITESPACE = new RegExp\(`\(\?!\[([^\]]*)\]\)\[\$\{SPOOFING_CLASS\}\]`, "g"\);/.exec(src);
+  assert.ok(exempt !== null, "cli.ts must still build SPOOFING_BUT_WHITESPACE as a lookahead over SPOOFING_CLASS");
+  assert.equal(exempt[1], "\\\\t\\\\n", "only TAB and NEWLINE are exempt — the wrapper owns those two and no others");
 });
 
 test("A CARRIAGE RETURN, AN ESCAPE OR A BIDI OVERRIDE IN A FILE NAME CANNOT FORGE A LINE ON THE TERMINAL", async () => {
