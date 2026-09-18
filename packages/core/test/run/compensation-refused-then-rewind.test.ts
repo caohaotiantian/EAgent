@@ -450,32 +450,31 @@ test("SHAPE 3 — a policy-refused undo settles, and the rewind that COULD have 
 
     const recs = records(ran.events);
     assert.equal(recs.length, 1);
-    // TODAY: recorded `failed` — the outcome that means "the undo tool ran and did not work" —
-    // over a dispatch that was refused before the tool was reached. AFTER THE FIX:
-    // `"not_attempted"`, which is what "nothing was attempted" is called.
-    assert.equal(recs[0]!.outcome, "failed", "TODAY: `failed`, though the undo tool never ran — AFTER: `not_attempted`");
-    // NOT `TODAY`, and the fix design is what makes that true: the split arm is specified to carry
-    // the refusal's own text through UNWRAPPED (`reason: out.content`, the same string as
-    // `out.error.message`) rather than re-wrapping it as `"X did not undo Y: …"`. If the fixer
-    // wraps it instead this line flips too, which is why the design writes the string down.
+    // `not_attempted`, which is what "nothing was attempted" is called. It read `failed` — the
+    // outcome that means "the undo tool ran and did not work" — over a dispatch the approval
+    // floor refused before the tool was reached.
+    assert.equal(recs[0]!.outcome, "not_attempted", "the undo tool never ran, and the row now says so");
+    // The split arm carries the refusal's own text through UNWRAPPED (`reason: out.content`, the
+    // same string as `out.error.message`) rather than re-wrapping it as `"X did not undo Y: …"`,
+    // which is a sentence about a tool that ran. Held before the fix and after it.
     assert.match(recs[0]!.reason ?? "", /requires human approval this turn cannot request/, "the reason is about the TRIGGER, not about the undo");
-    // TODAY: and it settles, because nothing writes `retryable` on this arm. AFTER THE FIX this
-    // must be `true` — it is a fact about the `run_failed` trigger, not about the step — which is
-    // what lets `planCompensation` re-plan it for the rewind below.
-    assert.equal(recs[0]!.retryable, undefined, "TODAY: no `retryable`, so `planCompensation` settles a recoverable refusal");
+    // AND IT DOES NOT SETTLE. It is a fact about the `run_failed` trigger, not about the step —
+    // which is what lets `planCompensation` re-plan it for the rewind below.
+    assert.equal(recs[0]!.retryable, true, "`retryable`, so `planCompensation` leaves a recoverable refusal open");
 
     const atSeq = beforeTheCharge(ran.events, "pay.charge.gated");
     const out = await rewindFromACoolEngine(path, ran.runId, ran.graph, atSeq, world);
 
-    // TODAY: a zero-step plan and an accepted rewind. AFTER THE FIX this shape joins the ORDINARY
-    // HALF: it must be ACCEPTED STILL — `refusedBy` stays `undefined` — with `steps: 1`,
-    // `dispatch: 1`, and the undo actually RUN. A fix that refuses here has walled off the
-    // recovery instead of performing it.
+    // THIS SHAPE IS PART OF THE ORDINARY HALF NOW: accepted — `refusedBy` stays `undefined` —
+    // with `steps: 1`, `dispatch: 1`, and the undo actually RUN. A fix that refused here would
+    // have walled off the recovery instead of performing it, which is what two refuted designs
+    // did. "Accepted" alone is not the bar; `world.refunds` is.
     assert.equal(out.refusedBy, undefined, "the rewind is accepted — before the fix and after it");
-    assert.equal(out.steps, 0, "TODAY: the settled seq is dropped, so there is nothing to show");
-    assert.equal(out.dispatch, 0, "TODAY: and nothing to dispatch — AFTER THE FIX, 1");
-    assert.deepEqual(world.refunds, [], "TODAY: the refund never runs — AFTER THE FIX, [42]");
-    assert.deepEqual(world.charges, [42], "TODAY: the money is still gone — AFTER THE FIX, []");
+    assert.equal(out.steps, 1, "the seq is re-planned rather than settled");
+    assert.equal(out.dispatch, 1, "and the preview promises the undo");
+    assert.deepEqual(world.refunds, [42], "the refund really ran, under the trigger that could approve it");
+    assert.deepEqual(world.charges, [], "and the money came back");
+    assert.equal(records(out.events).at(-1)?.outcome, "compensated", "the last word on the seq is that it was undone");
     const call = ran.events.find((e) => e.type === "tool.called" && (e.payload as { name?: string }).name === "pay.charge.gated")!;
     assert.equal(hidden(out.events, call.seq), true, "the charge's record is hidden either way — the fix changes whether the money came back with it");
   } finally {
@@ -528,22 +527,23 @@ test("SHAPE 4 — a registry that changed settles the seq, and registering the u
     assert.equal(recs.length, 1);
     assert.equal(recs[0]!.outcome, "not_attempted");
     assert.match(recs[0]!.reason ?? "", /names a compensation that is not a registered tool/, "the blocker is the registry, not the step");
-    // TODAY: and it settles. AFTER THE FIX this must be `true` — a registry that changed is a fact
-    // about this process, and `compensation.ts` already promises `retryable` is "written at the
-    // append rather than inferred here".
-    assert.equal(recs[0]!.retryable, undefined, "TODAY: no `retryable`, so a deployment fix cannot be applied");
+    // AND IT NO LONGER SETTLES — a registry that changed is a fact about this process, and
+    // `compensation.ts` already promised `retryable` is "written at the append rather than
+    // inferred here". It is now written there.
+    assert.equal(recs[0]!.retryable, true, "`retryable`, so a deployment fix can be applied");
 
     // Process 2 HAS the undo — the operator deployed it and came back.
     const out = await rewindFromACoolEngine(path, ran.runId, ran.graph, beforeTheCharge(ran.events, "pay.charge.kept"), world);
 
-    // TODAY: still nothing. AFTER THE FIX this shape is also part of the ORDINARY HALF: accepted,
-    // `dispatch: 1`, the refund RUN. It must not be refused — the wall would be one nothing can
-    // ever clear, over an effect whose undo is sitting registered in front of it.
+    // THIS SHAPE IS PART OF THE ORDINARY HALF NOW: accepted, `dispatch: 1`, the refund RUN. It
+    // must not be refused — the wall would be one nothing can ever clear, over an effect whose
+    // undo is sitting registered in front of it.
     assert.equal(out.refusedBy, undefined, "the rewind is accepted — before the fix and after it");
-    assert.equal(out.steps, 0, "TODAY: the settled seq is dropped");
-    assert.equal(out.dispatch, 0, "TODAY: and nothing dispatches — AFTER THE FIX, 1");
-    assert.deepEqual(world.refunds, [], "TODAY: the undo the operator just deployed is never called — AFTER THE FIX, [42]");
-    assert.deepEqual(world.charges, [42], "TODAY: the money is still gone — AFTER THE FIX, []");
+    assert.equal(out.steps, 1, "the seq is re-planned rather than settled");
+    assert.equal(out.dispatch, 1, "and one undo dispatches");
+    assert.deepEqual(world.refunds, [42], "the undo the operator just deployed really is called");
+    assert.deepEqual(world.charges, [], "and the money came back");
+    assert.equal(records(out.events).at(-1)?.outcome, "compensated", "the last word on the seq is that it was undone");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

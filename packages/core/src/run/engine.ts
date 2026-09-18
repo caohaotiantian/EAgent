@@ -2490,21 +2490,49 @@ export class Engine {
     step: CompensationStep,
     result: unknown,
     trigger: "run_failed" | "rewind",
-  ): Promise<{ readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string }> {
-    if (step.undo === undefined) return { outcome: "not_attempted", reason: BLOCK_REASON[step.blocked ?? "no_compensation"](step) };
+  ): Promise<{ readonly outcome: "compensated" | "failed" | "not_attempted"; readonly reason?: string; readonly retryable?: boolean }> {
+    // `retryable` IS WRITTEN HERE, AND IT WAS WRITTEN NOWHERE. `run/compensation.ts:170` says
+    // "`retryable` is the discriminant and it is written at the append rather than inferred here,
+    // so this fold does not have to parse a reason string" — and until this change no arm of this
+    // method produced the field at all, so `planCompensation`, a correct READER, settled every
+    // seq whose blocker was a fact about THIS PROCESS or THIS TRIGGER. The rule, per arm below:
+    // a blocker the OPERATOR CAN CLEAR — the live registry, the projection this boundary folded,
+    // the approval floor this trigger sat under — is `retryable: true`; a blocker that reads the
+    // same on every future pass — "declares no compensation", "no live `effect.completed`", "the
+    // recorded result carries no `details`" — leaves it ABSENT, which is what settles the seq.
+    // The cost, stated: a blocker that never clears appends one row per rollback pass instead of
+    // one ever. Bounded, and it is the price of the advice those rows give being followable.
+    if (step.undo === undefined) {
+      // `unknown_tool` and `unknown_compensation` are reads of the LIVE registry and clear by
+      // deploying; `no_compensation` is the manifest's own statement about the tool that ran.
+      const blocked = step.blocked ?? "no_compensation";
+      return {
+        outcome: "not_attempted",
+        reason: BLOCK_REASON[blocked](step),
+        ...(blocked === "no_compensation" ? {} : { retryable: true }),
+      };
+    }
 
     const task = step.taskId === undefined ? undefined : p.tasks[step.taskId];
     if (task === undefined) {
+      // RETRYABLE, BUT THE RECOVERY IS A DIFFERENT REWIND — not a deployment, unlike the three
+      // other `true` rows. Suppression only grows, so a task this boundary's projection does not
+      // hold will not appear at THIS boundary later; what can differ is the projection folded for
+      // another `atSeq`. The row must still not settle the seq, or the operator who rewinds
+      // somewhere else gets a zero-step plan over an effect that stands.
       return {
         outcome: "not_attempted",
         reason: `the task that called "${step.tool}" is not in the projection, so the undo has no task to run under`,
+        retryable: true,
       };
     }
     const undo = this.tools.get(step.undo);
     if (undo === undefined) {
       // Re-checked here and not merely in the planner: the registry is mutable and the plan was
       // built before the first step ran. Fail closed rather than `require`, which throws.
-      return { outcome: "not_attempted", reason: `compensation tool "${step.undo}" is not registered` };
+      // And `retryable`, for the same reason it is re-checked: a registry that changed is a fact
+      // about this process, and registering the undo is a move the operator has.
+      return { outcome: "not_attempted", reason: `compensation tool "${step.undo}" is not registered`, retryable: true };
     }
 
     if (result === undefined) {
@@ -2558,6 +2586,25 @@ export class Engine {
     // `GRAPH012_COMPENSATION_VISIBLE` warns about at compile time.
     const out = await this.#invokeTool(ctx, p, task, undo, args, step.seq, trigger === "rewind", "compensate");
     if (out.isError === true) {
+      // TWO DIFFERENT FACTS WORE ONE OUTCOME, AND THE SPLIT IS THE WHOLE OF §A.37's SHAPE 3.
+      //
+      // NOTHING WAS ATTEMPTED. `nodeApproved` is `trigger === "rewind"`, so the approval floor
+      // refusing here is a fact about the TRIGGER: a rewind gets further, and the control on the
+      // same two tools proves it undoes cleanly under one. `not_attempted` is what "the tool
+      // never ran" is called — `failed` means the undo tool ran and did not work — and
+      // `retryable: true` is what stops it settling the seq so a rewind can re-plan it.
+      //
+      // ON THE CODE, NOT ON THE STRING, which is what `#invokeTool`'s gate arm now returns a
+      // typed `error` for. `loomCodeOf` is the trap-safe reader this file already uses; parsing
+      // the reason instead is the thing `run/compensation.ts:170` exists to avoid.
+      if (loomCodeOf(out.error) === CODES.E_HUMAN_APPROVAL_REQUIRED) {
+        // `out.content` UNWRAPPED — the same string as `out.error.message`, taken from here only
+        // to avoid a non-null assertion. NOT re-wrapped as `"X did not undo Y: …"`: that is a
+        // sentence about a tool that ran, and this one did not.
+        return { outcome: "not_attempted", reason: out.content, retryable: true };
+      }
+      // A policy DENY, or a genuine tool error: the undo ran, or was refused by a decision a
+      // rewind would make identically. `failed`, and `retryable` stays absent.
       return { outcome: "failed", reason: `"${step.undo}" did not undo "${step.tool}": ${out.content}` };
     }
     return { outcome: "compensated" };
@@ -9727,10 +9774,15 @@ export class Engine {
             { taskId: task.taskId },
           ),
         );
-        return {
-          content: `"${tool.name}" is ${tool.irreversibility} and requires human approval this turn cannot request; put it on a tool node, which can suspend`,
-          isError: true,
-        };
+        // AND THE TYPED ERROR TRAVELS, for the same reason the `deny` arm one screen up carries
+        // one: "re-wrapping it as a string threw away the class". The class is what lets a
+        // CALLER tell "the tool ran and failed" from "the approval floor refused before it ran",
+        // without parsing this sentence — `#compensateOne` reads exactly that to decide between
+        // `failed` and `not_attempted, retryable: true`, because `nodeApproved` here is
+        // `trigger === "rewind"` and a rewind gets further than a `run_failed` rollback does.
+        // `content` is byte-identical to what it has always been, so nothing an agent sees moves.
+        const why = `"${tool.name}" is ${tool.irreversibility} and requires human approval this turn cannot request; put it on a tool node, which can suspend`;
+        return { content: why, isError: true, error: err.policy(CODES.E_HUMAN_APPROVAL_REQUIRED, why) };
       }
       // Approved at the node. Fall through and run it.
     } else if (decision.holdMs > 0 && !nodeApproved && this.#replay === undefined) {

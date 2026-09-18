@@ -623,7 +623,18 @@ export interface EventPayloads {
     readonly compensatesSeq: number;
     /** The tool that ran and is being undone. */
     readonly tool: string;
-    /** The tool that undid it. Absent iff `outcome` is `not_attempted`. */
+    /**
+     * The tool that WOULD undo it — present whenever the planned step named one, on EVERY
+     * outcome; absent only where nothing could be named.
+     *
+     * It said "absent iff `outcome` is `not_attempted`" and that was false at the writer:
+     * `compensationRecord` (`run/engine.ts`) writes this whenever `step.undo` is defined,
+     * whatever the outcome, so a `not_attempted` row carries it for every block that happens
+     * AFTER the undo was named — the task missing from the projection, the undo absent from
+     * this process's registry, the recorded result with no `details`, the approval floor this
+     * trigger sat under. The three blocks that leave it absent are the ones where no undo could
+     * be named at all: `unknown_tool`, `no_compensation`, `unknown_compensation`.
+     */
     readonly undo?: string;
     readonly outcome: "compensated" | "failed" | "not_attempted";
     /** Why. Required for everything except a plain success, where there is nothing to say. */
