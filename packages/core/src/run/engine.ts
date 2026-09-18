@@ -5500,14 +5500,50 @@ export class Engine {
     // `undo-args-must-be-recorded.test.ts` is the test that holds it.
     const noArguments = current.steps.filter((s) => isHardToUndo(s.irreversibility as IrreversibilityClass) && s.argsDigest === undefined);
     if (noArguments.length > 0) {
+      // TWO POPULATIONS UNDER ONE PREDICATE, AND THE OPERATOR'S MOVE IS OPPOSITE FOR EACH — so
+      // the message has to split even though the refusal does not.
+      //
+      // `#rewindPlanOf` computes `argsDigest` as `step.undo === undefined ? undefined :
+      // detailsOf(item.result)`, so a step with NO `undo` has none WHATEVER THE JOURNAL HOLDS.
+      // One sentence about missing `details` therefore described the wrong half: measured on a
+      // `pay.charge.kept` whose `effect.completed` is LIVE and carries `details: {row: 42}`, with
+      // its undo unregistered, the refusal read "there is no live `effect.completed` recording
+      // the `details`" — both stated causes false, and the operator's one real move, registering
+      // `pay.refund`, named nowhere.
+      //
+      // THE `undo === undefined` HALF IS ALWAYS `unknown_compensation`, which is why the branch
+      // can name the tool instead of printing a `blocked` word. The other two blocks are
+      // pre-empted: `#uncompensatedIrreversible` refuses first, in `#rewindRefusals`, whenever
+      // `this.tools.get(called.name)?.compensation === undefined` — which covers `unknown_tool`
+      // (the tool is not registered, so the optional chain is `undefined`) and `no_compensation`
+      // (it is registered and declares none). Only "registered, declares one, and THAT tool is
+      // missing" survives to here, and both arms scan the same `isHardToUndo` population over the
+      // same run tree. The declared name comes from the registry, which is the same read
+      // `planCompensation` made to reach `unknown_compensation` in the first place.
+      const unregistered = noArguments.filter((s) => s.undo === undefined);
+      const unrecoverable = noArguments.filter((s) => s.undo !== undefined);
+      const pair = (s: RewindPlanStep, undo: string | undefined): string => `${s.tool}@${String(s.seq)} -> ${undo ?? "the compensation it declares"}`;
+      // CHILD STEPS REACH THIS ARM. `current.steps` is the whole tree — `#planRollback` splices
+      // each child's plan into the parent's — so this says WHICH JOURNAL, exactly as the
+      // `unrunnable` arm above does, because that is the one thing an operator cannot guess.
+      const inChildren = [...new Set(noArguments.filter((s) => s.runId !== String(runId)).map((s) => s.runId))];
+      const clauses = [
+        unregistered.length === 0
+          ? undefined
+          : `${String(unregistered.length)} name a compensation this process does not carry ` +
+            `(${[...new Set(unregistered.map((s) => pair(s, this.tools.get(s.tool)?.compensation?.tool)))].join(", ")}) — ` +
+            "register it and rewind again",
+        unrecoverable.length === 0
+          ? undefined
+          : `${String(unrecoverable.length)} have no live \`effect.completed\` recording the \`details\` an undo's arguments come from ` +
+            `(${[...new Set(unrecoverable.map((s) => pair(s, s.undo)))].join(", ")}), either because the call recorded none or ` +
+            "because an earlier rewind suppressed the record — no rewind can undo those",
+      ].filter((c) => c !== undefined);
       throw err.conflict(
         CODES.E_RESTORE_ILLEGAL,
         `cannot rewind to ${atSeq}: ${String(noArguments.length)} recorded effect(s) after it are hard to undo and this engine ` +
-          `cannot build an undo for them ` +
-          `(${[...new Set(noArguments.map((s) => `${s.tool}@${String(s.seq)} -> ${s.undo ?? `(${s.blocked ?? "blocked"})`}`))].join(", ")}) — ` +
-          "there is no live `effect.completed` recording the `details` an undo's arguments come from, either because the call " +
-          "recorded none or because an earlier rewind suppressed the record. Rewinding would hide the record and leave the " +
-          "effects standing",
+          `cannot build an undo for them${inChildren.length === 0 ? "" : `, including in child run(s) ${inChildren.join(", ")}`}. ` +
+          `${clauses.join("; and ")}. Rewinding would hide the record and leave the effects standing`,
         { details: { runId, atSeq, pending: noArguments.length } },
       );
     }

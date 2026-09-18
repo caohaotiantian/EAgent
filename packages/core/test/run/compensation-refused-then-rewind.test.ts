@@ -30,6 +30,11 @@
  *     (`blocked: "unknown_compensation"`). The first cut refused only the first door, because its
  *     predicate carried an `s.undo !== undefined` conjunct; the second door crossed with the
  *     identical `steps 1 / dispatch 0 / blocked 1` signature.
+ *     **THAT SECOND DOOR IS A DIVERGENCE FROM §A.37's WRITTEN DESIGN, and settlement should carry
+ *     it as one:** the design's change 3 spells the predicate with `s.undo !== undefined`, and
+ *     dropping it newly REFUSES a rewind that was accepted at base and at `c6f24b51` — the
+ *     tightening direction, cleared by registering the undo, and measured both ways by this
+ *     file's SECOND DOOR pair.
  * (3) SETTLED BY A POLICY REFUSAL — the undo is itself hard-to-undo, so on the `run_failed` leg
  *     `#invokeTool` is called with `nodeApproved: false` (`#compensateOne` passes
  *     `trigger === "rewind"`) and answers `gate`, which that path turns into a REFUSAL. It was
@@ -689,10 +694,12 @@ test("SHAPE 2's SECOND DOOR — the undo tool is gone AND the arguments were nev
   // whatever the registry holds, so deploying `pay.refund` would not make this undo dispatchable.
   //
   // AND THE OTHER ARM CANNOT COVER IT, which is why the header's claim was over-wide rather than
-  // merely unproven: `#uncompensatedIrreversible`'s registry arm reads the tool that RAN
-  // (`pay.charge` is registered and declares a compensation), and its settled arm needs a
-  // non-retryable row — while `unknown_compensation` is now written `retryable: true`, exactly so
-  // that deploying the undo can still rescue the case where the arguments ARE recorded.
+  // merely unproven. `#uncompensatedIrreversible`'s registry arm reads the tool that RAN, and
+  // `pay.charge` IS registered and DOES declare a compensation, so it does not fire. Its settled
+  // arm needs a `compensation.recorded` row that leaves `retryable` off, and this run has NO
+  // `compensation.recorded` rows at all — it succeeded, so no rollback ever ran, which the
+  // precondition below asserts directly. (Had one run, `unknown_compensation` is written
+  // `retryable: true` on purpose, so it would not have settled the seq either.)
   const dir = mkdtempSync(join(tmpdir(), "loom-a37-door2-"));
   try {
     const path = join(dir, "run.db");
@@ -709,13 +716,31 @@ test("SHAPE 2's SECOND DOOR — the undo tool is gone AND the arguments were nev
     assert.deepEqual(out.argsDigests, [undefined], "with no `argsDigest`, because the journal carries no arguments");
     assert.equal(out.dispatch, 0, "so the preview promises no undo");
     assert.equal(out.refusedBy, "rewind", "and `rewind` refuses, exactly as it does when the undo IS named");
-    assert.match(out.refusal!.message, /pay\.charge@\d+/, "the refusal names the effect and the seq");
-    assert.match(out.refusal!.message, /carries no `details`|no live `effect\.completed`/, "and says the arguments are what is missing");
+    // THE MESSAGE MUST BE THIS BRANCH'S, not the other's, so the regexes are exclusive. Both
+    // populations refuse under one predicate and the operator's move is opposite for each: here
+    // it is "register `pay.refund`", and the missing-`details` sentence would send them to look
+    // for a record that is simply not the problem.
+    assert.match(out.refusal!.message, /name a compensation this process does not carry \(pay\.charge@\d+ -> pay\.refund\)/, "names the effect, the seq and the undo it cannot find");
+    assert.match(out.refusal!.message, /register it and rewind again/, "and the move that clears it");
+    assert.doesNotMatch(out.refusal!.message, /no live `effect\.completed`/, "and NOT the other branch — that clause is about a different fact");
 
     assert.deepEqual(world.charges, [42], "the money is still gone");
     assert.deepEqual(world.refunds, [], "and nothing was undone");
     const call = ran.events.find((e) => e.type === "tool.called" && (e.payload as { name?: string }).name === "pay.charge")!;
     assert.equal(hidden(out.events, call.seq), false, "and the record of the charge is still visible");
+
+    // AND FOLLOWING THAT ADVICE REVEALS THE SECOND PROBLEM RATHER THAN CLEARING IT, on THIS run,
+    // because `pay.charge` records no `details`. That is not the message over-promising: the
+    // engine genuinely cannot see the arguments until an undo is named — `#rewindPlanOf` computes
+    // `argsDigest` as `step.undo === undefined ? undefined : detailsOf(item.result)` — so
+    // "register it and rewind again" is the correct NEXT step and the second refusal is the
+    // honest answer to it. The CONTROL below is the same two moves on a charge that DID record
+    // `details`, where the second rewind goes through.
+    const deployed = await rewindFromACoolEngine(path, ran.runId, ran.graph, beforeTheCharge(ran.events, "pay.charge"), world);
+    assert.equal(deployed.refusedBy, "rewind", "still refused, now for the fact that was invisible while the undo was unnamed");
+    assert.match(deployed.refusal!.message, /no live `effect\.completed` recording the `details`/, "and NOW the message is the other branch's");
+    assert.doesNotMatch(deployed.refusal!.message, /register it and rewind again/, "the registry is no longer what is wrong");
+    assert.deepEqual(world.charges, [42], "and nothing was undone on the way to either refusal");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -741,6 +766,17 @@ test("SHAPE 2's SECOND DOOR, THE CONTROL — with the ARGUMENTS recorded, deploy
 
     const without = await rewindFromACoolEngine(path, ran.runId, ran.graph, atSeq, world, ["pay.refund"]);
     assert.equal(without.refusedBy, "rewind", "with the undo unregistered there is nothing this engine can dispatch");
+    // AND THE MESSAGE SAYS THE TRUE THING, which is the whole reason this run is asserted on:
+    // its `effect.completed` is LIVE and carries `details: {row: 42}`. The refusal used to read
+    // "there is no live `effect.completed` recording the `details`" here — both of its stated
+    // causes false, and the one move that clears it named nowhere — because `argsDigest` is not
+    // computed at all for a step with no `undo`, so a single sentence about missing `details`
+    // described the other population.
+    assert.match(without.refusal!.message, /name a compensation this process does not carry \(pay\.charge\.kept@\d+ -> pay\.refund\)/, "it names the tool the operator has to register");
+    assert.match(without.refusal!.message, /register it and rewind again/, "and the move");
+    assert.doesNotMatch(without.refusal!.message, /no live `effect\.completed`/, "and does not claim a record is missing when one is right there");
+    const liveDetails = ran.events.filter((e) => e.type === "effect.completed").map((e) => (e.payload as never as { result?: { details?: unknown } }).result?.details);
+    assert.deepEqual(liveDetails, [{ row: 42 }], "the control on that: the `details` really are in the journal, live");
     assert.deepEqual(world.charges, [42], "so nothing is hidden and nothing is undone");
     assert.deepEqual(world.refunds, []);
 
