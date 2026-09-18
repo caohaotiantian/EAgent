@@ -5312,7 +5312,7 @@ export class Engine {
   /**
    * The two refusals a rewind's own PLAN decides, run by `rewind` and by `planRewind` alike.
    *
-   * §A.74. Both arms below read nothing but `current.steps`, `live` and this process's tool
+   * §A.74. Both arms below read nothing but `steps`, `live` and this process's tool
    * registry — no journal read, no append, no dispatch — so there is no cost to asking them of
    * the preview, and there was never a reason beyond inheritance not to. `#uncompensatedIrreversible`
    * already sits inside `#rewindRefusals`, which both verbs run; these two sat in
@@ -5889,8 +5889,9 @@ export class Engine {
    * out anyway — to "read one journal row", and no further. **It is a guard against a caller who
    * brings the WRONG graph by accident, and it is sound for that and only that.**
    *
-   * WHICH IS WHY ITS ONE DESTRUCTIVE CONSUMER NO LONGER RELIES ON IT ALONE. Measured on
-   * `2b1698e8`, on a parked `human_gate` run whose graph the caller never saw:
+   * WHICH IS WHY ITS ONE DESTRUCTIVE CONSUMER NO LONGER RELIES ON IT ALONE — FOR A RUN THAT HAS
+   * EXECUTED. Measured on `2b1698e8`, on a parked `human_gate` run whose graph the caller never
+   * saw:
    * `synthesised-from-journal advance threw: E_GRAPH_INVALID  status: failed  run.failed rows: 1
    * gates: ["cancelled"]`. That was STRICTLY MORE than `cancel`, in two auditable ways —
    * `#failRun` runs `#compensate` BEFORE the terminal row, so the forged path could dispatch
@@ -5901,10 +5902,21 @@ export class Engine {
    * `#failUnreadableGraph` now conjoins a fact a caller cannot synthesise — whether the run has
    * ever EXECUTED — and the same script reads `awaiting_gate  0  ["open"]`.
    *
+   * THE DOOR IS STILL OPEN IN THE SUBMIT-TO-FIRST-ADVANCE WINDOW, AND THAT IS THE HONEST SCOPE.
+   * A victim that has executed nothing is a victim `#failUnreadableGraph` must still be able to
+   * fail — that is §A.63, and it cannot be told apart from a healthy run that has merely not
+   * started yet, because the two journals are the same four-name prefix. So a forged identity
+   * presented in that window still writes `run.failed` from `SYSTEM_ACTOR("executor")`. The
+   * window is PRODUCT-VISIBLE: `server/http.ts`'s submit route returns as soon as the run is
+   * journaled and fires `advance` without awaiting it, and says so — the run folds to `queued`
+   * in between. What IS closed there is the expensive half: a run that has executed nothing has
+   * no recorded effect, so `#compensate` dispatches nothing and no money moves.
+   *
    * IDENTITY STILL CARRIES THE NON-DESTRUCTIVE HALF, unchanged: `#assertBound` refuses a graph
-   * that is not the run's, which is a refusal and therefore always allowed. Making the pair
-   * itself unforgeable needs a door that is not reachable with journal read access — a process
-   * boundary, or an identity the journal does not publish — and that is not what this closes.
+   * that is not the run's, which is a refusal and therefore always allowed. Closing the window
+   * needs a door that is not reachable with journal read access — a process boundary, or an
+   * identity the journal does not publish — and that is not what this closes. §A.66 stays open,
+   * re-scoped to it.
    */
   #graphIdentityMismatch(
     ctx: RunContext,
@@ -6020,10 +6032,43 @@ export class Engine {
     // the correct reading: a rewind hides what a run DID, it does not unmake the fact that a
     // readable graph did it.
     //
-    // THE SET IS NAMED AS THE SUBMIT PREFIX RATHER THAN AS EXECUTION VOCABULARY, so a new event
-    // type cannot quietly join the never-executed bucket: an unrecognised row reads as PROGRESS,
-    // which is the conservative answer. And the scan is cheaper than the fold it replaced — it
-    // stops at the first row outside the prefix, which for any run that has executed is row five.
+    // AND THE SET IS WHAT EXECUTION PRODUCES, NOT WHAT `submit` DOES — the third cut, and the
+    // second thing this predicate got wrong. Asking "is anything here outside `submit`'s four
+    // names?" reads OPERATOR rows as execution, and `pause`/`resume` are exactly that: `#intervene`
+    // appends `operator.command` + `run.suspended` / `run.resumed` and runs no node code at all
+    // ("NO GRAPH REQUIRED", `pause`'s own docstring). Measured on the `fanSpec` + `conditionl`
+    // fault: control (never advanced) `failed`, `run.failed rows: 1`; PAUSED before its first
+    // advance `interrupted`, rows 0; paused and RESUMED `running`, rows 0 — §A.63 silently lost
+    // for any run an operator paused before it ever ran. Widening the prefix would have been the
+    // trap: a REWOUND run's evidence is `operator.command` + `checkpoint.restored`, and it must
+    // read as executed.
+    //
+    // SO THE QUESTION IS ASKED THE OTHER WAY ROUND — name a row only an EXECUTING run appends.
+    // `task.leased` is that row, and it is unavoidable: a node cannot run, decide a policy, raise
+    // a gate or start an effect until its task is leased. Measured over the earliest-possible
+    // shapes, one advance each:
+    //
+    //   entry-is-a-gate      task.leased, policy.decided, gate.raised, run.suspended
+    //   function-then-gate   task.leased, …, task.committed, task.ready, task.leased, gate.raised
+    //   paused-before-advance   operator.command, run.suspended          — no lease
+    //   paused-and-resumed      operator.command, run.suspended, operator.command, run.resumed
+    //   executed-then-paused    task.leased … gate.raised … operator.command, run.suspended
+    //   rewound                 task.leased … checkpoint.restored, operator.command
+    //
+    // Even a run whose ENTRY NODE IS THE GATE leases before it raises it, so the lease really does
+    // come first on every path.
+    //
+    // `gate.raised` IS CARRIED BESIDE IT ANYWAY, and the reason is the direction of the mistake.
+    // A member missing from this set costs a LIVE RUN — the guard falls through to `#failRun`,
+    // which is the destructive answer — while a member too many costs only a refusal. An open gate
+    // is a question in a person's queue, so it is named explicitly rather than left to depend on
+    // the lease-before-raise ordering above continuing to hold. Two members, and both are written
+    // only by the executor on the advance path `#assertBound` guards.
+    //
+    // COST: the scan stops at the first match. For a run that has executed that is early — the
+    // lease is the fifth row for a single entry node and `3 + N + 1` for N of them — and for
+    // §A.63's own run, which never matches, it is the whole journal, which for that run IS the
+    // `3 + N` submit prefix. No fold is built either way.
     //
     // AND IT FAILS CLOSED IN THE DIRECTION `CLAUDE.md` NAMES. Failing the run is the destructive
     // answer and refusing the advance is the conservative one, so a conjunct that can only ever
@@ -6041,10 +6086,10 @@ export class Engine {
     // taken deliberately and it is not the same bargain: that run is recoverable by rolling the
     // binary back, where §A.63's could never progress under any build, and killing a live run
     // over a fact about the binary in front of it is the loosening dressed as a guard.
-    const SUBMIT_PREFIX = new Set(["run.submitted", "run.compiled", "run.started", "task.ready"]);
+    const EXECUTED = new Set(["task.leased", "gate.raised"]);
     let executed = false;
     for await (const ev of this.#store.read(ctx.runId, 1)) {
-      if (SUBMIT_PREFIX.has(ev.type)) continue;
+      if (!EXECUTED.has(ev.type)) continue;
       executed = true;
       break;
     }

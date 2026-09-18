@@ -690,3 +690,130 @@ test("A FOLD THAT FORGETS IS NOT A RUN THAT NEVER RAN — the retry window and t
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A PAUSE IS NOT A RUN THAT RAN, AND A REFUSAL IS NOT A RUN THAT DID NOT. (§A.66, third cut.)
+ *
+ * The second cut asked whether anything outside `submit`'s four names had ever been appended. That
+ * reads OPERATOR rows as execution, and `pause`/`resume` are exactly that: `#intervene` appends
+ * `operator.command` + `run.suspended`/`run.resumed` and runs no node code at all — `pause`'s own
+ * docstring says "NO GRAPH REQUIRED". So an operator who paused a run before its first advance
+ * bought it immunity from §A.63. Measured on `7e84e7c0`, `fanSpec` with the `conditionl` fault:
+ *
+ *     control (never advanced)   threw E_GRAPH_INVALID  status: failed       run.failed rows: 1
+ *     paused before first advance threw E_GRAPH_INVALID  status: interrupted  run.failed rows: 0
+ *     paused and resumed          threw E_GRAPH_INVALID  status: running      run.failed rows: 0
+ *
+ * WIDENING THE PREFIX WOULD HAVE BEEN THE TRAP, which is why the predicate was turned around
+ * instead: a REWOUND run's evidence is `operator.command` + `checkpoint.restored`, and the test
+ * above needs that to read as EXECUTED. The question is now asked as an allowlist — name a row
+ * only an executing run appends — and the answer is `task.leased`, with `gate.raised` carried
+ * beside it because a missing member costs a live run while a spare one costs only a refusal.
+ *
+ * THE FOURTH CASE IS THE CONTROL FOR THE OTHER DIRECTION: a run that EXECUTED and was then paused
+ * must still be refused, or the fix would have swapped one hole for another.
+ */
+test("A PAUSED RUN IS STILL FAILED IF ITS OWN GRAPH IS UNREADABLE, AND STILL SPARED IF IT RAN", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-pause-"));
+  try {
+    for (const { what, mangle, edge } of FAULTS) {
+      // ── (1) the three §A.63 shapes: nothing has ever executed, so all three FAIL ──────────
+      for (const how of ["control", "paused", "paused-and-resumed"] as const) {
+        const path = join(dir, `${how}-${what.slice(0, 10).replace(/\W+/g, "-")}.db`);
+        const store = new SqliteStateStore({ path, now: () => NOW });
+        try {
+          const engine = engineWith(store);
+          // `submit` records the hash of the graph it is handed, so this run really is bound to a
+          // graph nothing can read — §A.63's own shape, reached three ways.
+          const forged = mangle(compileOrThrow({ spec: fanSpec(), resolver: resolver(), tools: {}, tenantCapabilities: [] }));
+          const runId = await engine.submit({ graph: forged, inputs: { items: [{ id: "a" }, { id: "b" }] } });
+          if (how !== "control") await engine.pause(runId);
+          if (how === "paused-and-resumed") await engine.resume(runId);
+
+          // THE PRECONDITION THAT MAKES THIS A TEST OF THE PREDICATE: the operator rows are on the
+          // log and NO lease is, which is exactly the state the second cut misread.
+          const before = (await typesOf(store, runId)).map((ev) => ev.type);
+          assert.equal(before.includes("task.leased"), false, `${what}/${how}: precondition — nothing has ever been leased`);
+          assert.equal(before.includes("operator.command"), how !== "control", `${what}/${how}: precondition — the operator rows are or are not there`);
+
+          await assert.rejects(
+            () => engine.advance(runId),
+            (thrown: { code?: unknown }) => thrown.code === "E_GRAPH_INVALID",
+            `${what}/${how}: the caller still hears the refusal`,
+          );
+          const failures = (await typesOf(store, runId)).filter((ev) => ev.type === "run.failed");
+          assert.equal(failures.length, 1, `${what}/${how}: and a run that can never progress is FAILED, pause or no pause`);
+          const err = (failures[0] as { payload: { error: { code: string; details?: unknown } } }).payload.error;
+          assert.equal(err.code, "E_GRAPH_INVALID", `${what}/${how}: carrying the code`);
+          assert.deepEqual(
+            (err.details as { edges?: { id: string }[] } | undefined)?.edges?.map((x) => x.id),
+            [edge],
+            `${what}/${how}: and the edge that stopped it`,
+          );
+        } finally {
+          store.close();
+        }
+      }
+
+      // ── (2) the other direction: a run that EXECUTED and was then paused is still spared ──
+      const ranPath = join(dir, `ran-then-paused-${what.slice(0, 10).replace(/\W+/g, "-")}.db`);
+      let ranRun: RunId;
+      const ranGraph = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+      const ranStore = new SqliteStateStore({ path: ranPath, now: () => NOW });
+      try {
+        const engine = engineWith(ranStore);
+        ranRun = await engine.submit({ graph: ranGraph, inputs: { items: [{ id: "a" }] } });
+        assert.equal((await engine.advance(ranRun)).status, "awaiting_gate", `${what}: precondition — it ran and parked`);
+        await engine.pause(ranRun);
+        assert.equal(
+          (await typesOf(ranStore, ranRun)).some((ev) => ev.type === "task.leased"),
+          true,
+          `${what}: precondition — and the lease that proves it is on the log`,
+        );
+      } finally {
+        ranStore.close();
+      }
+      await forgedAdvanceLeavesItAlone(ranPath, ranRun!, ranGraph, mangle, `${what} (ran, then paused)`, "interrupted");
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * AND A PAUSE COSTS THE HONEST OPERATOR NOTHING. The row the review asked for by name.
+ *
+ * Every assertion above is about a run being FAILED or REFUSED, so on their own they would all
+ * still pass if `pause` had quietly broken `resume`. This is the ordinary half: pause a healthy
+ * run before its first advance, resume it, hand it its own graph, and it runs to the end.
+ */
+test("A RUN PAUSED BEFORE ITS FIRST ADVANCE STILL ADVANCES AFTER A RESUME", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "loom-a66-pause-ok-"));
+  const store = new SqliteStateStore({ path: join(dir, "run.db"), now: () => NOW });
+  try {
+    const engine = engineWith(store);
+    const good = compileOrThrow({ spec: gateSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+    const runId = await engine.submit({ graph: good, inputs: { items: [{ id: "a" }] } });
+
+    await engine.pause(runId);
+    assert.equal((await engine.projection(runId))?.status, "interrupted", "paused before it ever ran");
+    await engine.resume(runId);
+
+    const parked = await engine.advance(runId);
+    assert.equal(parked.status, "awaiting_gate", "and it advances to its gate as if nothing had happened");
+    for (const gate of (await engine.openGates(runId)).filter((g) => g.state === "open")) {
+      await engine.resolveGate(runId, {
+        gateId: gate.gateId,
+        decision: { kind: "approve" },
+        actor: { kind: "human", subject: "u:alice", via: "console" },
+        idempotencyKey: `k-${gate.gateId}`,
+      });
+    }
+    const done = await engine.advance(runId);
+    assert.equal(done.status, "succeeded", "and runs to the end");
+    assert.deepEqual(done.channels["note"], ["done-ran"], "with the work behind the gate done");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
