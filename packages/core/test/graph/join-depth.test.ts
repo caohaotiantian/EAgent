@@ -494,3 +494,293 @@ test("§A.64 AND AN ARM IN A DIFFERENT OUTER FAN IS REFUSED where the identity I
   );
   assert.equal(found.length, 1, found.map((x) => x.message).join(" | ") || "(none)");
 });
+
+// ── §A.73 · the `fix:` line names the edge that is THERE ─────────────────────
+//
+// The refusal above dictates dropping a `branches` entry AND a `kind: join` edge. `join.branches`
+// is a NAME list and `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind, so a
+// claimer is wired one of three ways — by a `kind: join` edge, by an edge of some other kind
+// carrying its own semantics, or by nothing at all — and the line used to dictate the same deletion
+// in all three. Measured on the `eto` graph of `docs/handoff-2026-09-15b.md`: the only edge from
+// "read" into "again" is `back`, a `loop`, and the line said to delete the `kind: join` edge.
+//
+// NOTHING PINNED THIS LINE BEFORE — the only copy in the repository was a quotation in that
+// handoff — so all three arms are new here, plus the composition. The arm count is three and not
+// seven because the clause is built PER DROPPER: no conditional reads more than one dropper, and
+// the kinds are rendered by a list join that reads the same for one kind or several.
+
+/** The `fix:` of the one refusal this section is about. */
+function claimFix(spec: GraphSpec): string {
+  const d = claimRefusal(spec);
+  assert.ok(d !== undefined, `no claim refusal: ${codes(spec).join(", ") || "(none)"}`);
+  return d.fix ?? "";
+}
+
+const loop = (id: string, from: string, to: string): unknown => ({
+  id: e(id), from: n(from), to: n(to), kind: "loop", maxIterations: 2,
+});
+
+test("§A.73 ARM 1 — a claimer wired `kind: join`: the deletion is dictated, as it always was", () => {
+  // The bytes §A.64 shipped, unchanged: this is the arm where "drop the `kind: join` edge" is true.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jB", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), joins("e2", "a0", "jB")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jB" must drop it from `branches` and drop the `kind: join` edge from ' +
+      '"a0", and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
+
+test("§A.73 ARM 2 — a claimer wired some OTHER kind: the entry alone, and the kind is read", () => {
+  // TWO FIXTURES FOR ONE ARM, because the kind is INTERPOLATED and a pin on one spelling cannot
+  // tell a read from a constant. `seq` and `loop` differ in the spec and must differ in the line.
+  const withSeq = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jSeq", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s", "a0", "jSeq")],
+  );
+  assert.equal(
+    claimFix(withSeq),
+    'keep one join over "a0": "jSeq" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "seq"`, which carries its own ' +
+      'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // The `eto` shape of §A.73, in miniature: a `loop` edge carrying its own `maxIterations`, which
+  // the old line told the author to delete as though it were the barrier's own wiring.
+  const withLoop = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jLoop", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), loop("lp", "a0", "jLoop")],
+  );
+  assert.equal(
+    claimFix(withLoop),
+    'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "loop"`, which carries its own ' +
+      'meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
+
+test("§A.73 ARM 3 — a claimer wired by NOTHING: the sibling line is named, and contradicted no more", () => {
+  // `GRAPH008_BRANCH_NOT_CONNECTED` makes exactly this test, so it is refusing the same entry in
+  // this same compile — and its `fix:` says to ADD the edge. Following it removes no `branches`
+  // entry, and `claimedBy` counts entries, so this refusal survives the edit. The line says so
+  // rather than leaving two instructions on screen that point opposite ways.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone")],
+  );
+  assert.ok(
+    codes(spec).includes("GRAPH008_BRANCH_NOT_CONNECTED"),
+    `the sibling the line names must be in this compile: ${codes(spec).join(", ")}`,
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jNone" must drop it from `branches` — the ENTRY alone, no edge running ' +
+      'from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing ' +
+      "in this same compile, and dropping every such entry answers that refusal too, and take " +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // AND THE ONE CLAIM IT MAKES IS RUN. `GRAPH008_BRANCH_NOT_CONNECTED` fires per `branches` ENTRY
+  // with no edge, so the drop this line already dictates answers it — one edit, not one per line.
+  const dropped = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", [])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone")],
+  );
+  assert.ok(!codes(dropped).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(dropped).join(", "));
+  assert.equal(claimRefusal(dropped), undefined, `and the collision with it: ${codes(dropped).join(", ")}`);
+
+  // AND THE HONEST HALF, because `claimRefusal` and `codes` would both hide it otherwise: the drop
+  // answers both ERRORS and leaves a WARNING. A join stripped of its last `branches` entry still
+  // declares `writes`, and `GRAPH008_JOIN_WRITES_UNPRODUCED` says a barrier cannot produce what no
+  // branch wrote. The claim these lines make is "no new ERROR", never "compiles clean" — asserted on
+  // the WHOLE severity-tagged set so a new error cannot arrive unnoticed.
+  assert.deepEqual(
+    validateGraph({ spec: dropped, resolver: resolver(), tools: {}, tenantCapabilities: [] })
+      .map((x) => `${x.severity}:${x.code}`),
+    ["warning:GRAPH008_JOIN_WRITES_UNPRODUCED"],
+    "the dictated drop introduces no ERROR, and the one warning it does leave is named",
+  );
+
+  // AND THE CLAIM IT NO LONGER MAKES, with the reason. An earlier cut said "adding the edge it asks
+  // for cements this refusal rather than clearing it". That holds only while the edit leaves the
+  // forward graph acyclic — true here, and FALSE in the two shapes below.
+  const withEdge = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jNone"),
+      joins("e3", "a0", "jNone")],
+  );
+  assert.ok(!codes(withEdge).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(withEdge).join(", "));
+  assert.ok(claimRefusal(withEdge) !== undefined, `the second claim survives the edit: ${codes(withEdge).join(", ")}`);
+});
+
+test("§A.73 ARM 3 CLAIMS NOTHING ABOUT ADDING THE EDGE — two shapes where that claim is false", () => {
+  // `dropClause` has no cycle guard and needs none, BECAUSE it makes no counterfactual claim. These
+  // are the two shapes that forced that: the dropper is the arm ITSELF, and the dropper is UPSTREAM
+  // of the arm. In both, typing what `GRAPH008_BRANCH_NOT_CONNECTED` asks for closes a cycle,
+  // `topoSort` returns `[]`, every `fanoutDepth` collapses to 0 and `claimedBy` counts nothing — so
+  // the refusal is CLEARED, under a `GRAPH006_UNMARKED_CYCLE`. A line promising it would be cemented
+  // is a line the compiler refutes.
+  const shapes = {
+    // `jUp` is upstream of the fan-out's source and still declares `a0`. It is listed AFTER `jA`
+    // so that `owners[0]` is the wired join and `jUp` is the DROPPER — the clause under test is the
+    // one written for `owners.slice(1)`.
+    upstream: g(
+      [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jUp", ["a0"])],
+      [seq("s0", "p", "jUp"), fanout("fanA", "jUp", "a0", "outers", "outerItem"), joins("e1", "a0", "jA")],
+    ),
+    // `a0` is itself a join declaring `a0`, so the dictated edge is a self-edge.
+    self: g(
+      [plan("p", ["outers"]), barrier("jA", ["a0"]), barrier("a0", ["a0"])],
+      [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA")],
+    ),
+  };
+  for (const [name, spec] of Object.entries(shapes)) {
+    const dropper = name === "upstream" ? "jUp" : "a0";
+    const keeper = "jA";
+    assert.ok(
+      codes(spec).includes("GRAPH008_BRANCH_NOT_CONNECTED"),
+      `${name}: the sibling must be in this compile: ${codes(spec).join(", ")}`,
+    );
+    assert.equal(
+      claimFix(spec),
+      `keep one join over "a0": "${dropper}" must drop it from \`branches\` — the ENTRY alone, no edge ` +
+        'running from "a0" into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is ' +
+        "refusing in this same compile, and dropping every such entry answers that refusal too, and take " +
+        `"${keeper}"'s result as an arm instead if it still needs those writes`,
+      name,
+    );
+    assert.doesNotMatch(claimFix(spec), /cements/, `${name}: no counterfactual about adding the edge`);
+  }
+
+  // AND THE REFUTATION, RUN. Adding the edge the sibling asks for on the SELF shape clears this
+  // refusal rather than cementing it.
+  const withSelfEdge = g(
+    [plan("p", ["outers"]), barrier("jA", ["a0"]), barrier("a0", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), joins("e2", "a0", "a0")],
+  );
+  const after = codes(withSelfEdge);
+  assert.ok(after.includes("GRAPH006_UNMARKED_CYCLE"), after.join(", "));
+  assert.equal(claimRefusal(withSelfEdge), undefined, `the refusal is CLEARED, not cemented: ${after.join(", ")}`);
+});
+
+test("§A.73 ARM 2 WITH SEVERAL KINDS — the list join is what makes the arm count three", () => {
+  // The comment claims `kinds` "reads the same for one kind or several", which is the reason there
+  // is no singular/plural fourth arm. Unpinned, that claim is a template nobody ran.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jTwo", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      seq("s", "a0", "jTwo"), loop("lp", "a0", "jTwo")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jTwo" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "seq"`, `kind: "loop"`, which ' +
+      'carries its own meaning, and take "jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
+
+test("§A.73 `kind` IS RENDERED, NEVER ECHOED — it is the only unvalidated string this line reaches", () => {
+  // `GRAPH003_UNKNOWN_EDGE_KIND` is an ERROR but NOT fatal, so `checkStructure` does not gate and
+  // this rule runs on an edge whose `kind` is whatever the JSON said. Reproduced through the shipped
+  // binary before the fix: a kind of `seq"\nok\n   fix: nothing to do here` printed a forged bare
+  // `ok` line and a forged `fix:` line INSIDE the compiler's own output. Node ids cannot do this —
+  // `GRAPH003_BAD_ID` is fatal and its charset is restricted — so `kind` is the whole exposure.
+  const evil = 'seq"\nok\n   fix: nothing to do here';
+  const withNewline = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jEvil", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      { id: e("x"), from: n("a0"), to: n("jEvil"), kind: evil }],
+  );
+  const fix = claimFix(withNewline);
+
+  // THE PROPERTY, not just the bytes: ONE line, and the payload is escaped rather than reproduced.
+  assert.equal(fix.split("\n").length, 1, `the fix: must be one line: ${JSON.stringify(fix)}`);
+  assert.ok(!fix.includes(evil), "the raw value must not appear");
+  assert.ok(fix.includes('`kind: "seq\\"\\nok\\n   fix: nothing to do here"`'), fix);
+  assert.equal(
+    fix,
+    'keep one join over "a0": "jEvil" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is ' +
+      '`kind: "seq\\"\\nok\\n   fix: nothing to do here"`, which carries its own meaning, and take ' +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+
+  // AND THE DEDUPE MOVED ONTO THE RENDERED STRING, which is what bounds the output: two DISTINCT
+  // objects are two distinct values, so a `Set` over raw kinds collapsed neither and the clause grew
+  // one `[object Object]` per edge.
+  const withObjects = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jObj", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"),
+      { id: e("o1"), from: n("a0"), to: n("jObj"), kind: { evil: 1 } },
+      { id: e("o2"), from: n("a0"), to: n("jObj"), kind: { evil: 2 } }],
+  );
+  const objFix = claimFix(withObjects);
+  assert.ok(!objFix.includes("[object Object]"), objFix);
+  assert.equal(
+    (objFix.match(/`kind: an object`/g) ?? []).length,
+    1,
+    `two objects must describe as one value, not two: ${objFix}`,
+  );
+});
+
+test("§A.73 A DUPLICATED `branches` ENTRY IS WHY THE LINE SAYS *EVERY* SUCH ENTRY", () => {
+  // `join.branches` may name one node twice — nothing refuses it — and
+  // `GRAPH008_BRANCH_NOT_CONNECTED` then fires ONCE PER OCCURRENCE while `claimedBy` dedupes by
+  // node. "Drop the entry" was therefore a count this line could not keep: dropping one of two
+  // leaves the SIBLING refusal standing — one `GRAPH008_BRANCH_NOT_CONNECTED` for the entry that
+  // remains, alongside this rule's own refusal, which the second entry still earns. The word is the
+  // fix; both halves are measured below so it cannot regress to the singular.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0", "a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  assert.equal(
+    codes(spec).filter((c) => c === "GRAPH008_BRANCH_NOT_CONNECTED").length,
+    2,
+    `the duplicate really does double the sibling refusal: ${codes(spec).join(", ")}`,
+  );
+  assert.match(claimFix(spec), /dropping every such entry answers that refusal too/, claimFix(spec));
+
+  // AND FOLLOWING IT ONCE IS NOT ENOUGH, which is exactly what the word warns about.
+  const droppedOne = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  // EXACTLY what it leaves, so the prose above cannot drift into "both refusals": ONE sibling
+  // refusal for the entry that remains, and this rule's own, which the surviving entry still earns.
+  assert.equal(
+    codes(droppedOne).filter((c) => c === "GRAPH008_BRANCH_NOT_CONNECTED").length,
+    1,
+    codes(droppedOne).join(", "),
+  );
+  assert.ok(claimRefusal(droppedOne) !== undefined, codes(droppedOne).join(", "));
+  // …and dropping EVERY such entry answers both.
+  const droppedAll = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jDup", [])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), seq("s2", "p", "jDup")],
+  );
+  assert.ok(!codes(droppedAll).includes("GRAPH008_BRANCH_NOT_CONNECTED"), codes(droppedAll).join(", "));
+  assert.equal(claimRefusal(droppedAll), undefined, codes(droppedAll).join(", "));
+});
+
+test("§A.73 THE ARMS COMPOSE, and that is why there are three of them and not seven", () => {
+  // Three claimants of one arm, one of each shape. Bucketing them by shape would make the STRING
+  // depend on which combination the graph holds — seven strings for three buckets, of which a byte
+  // pin covers one. Per dropper, the line is the three arms above in series.
+  const spec = g(
+    [plan("p", ["outers"]), work("a0", "outerItem"), barrier("jA", ["a0"]), barrier("jLoop", ["a0"]), barrier("jNone", ["a0"])],
+    [fanout("fanA", "p", "a0", "outers", "outerItem"), joins("e1", "a0", "jA"), loop("lp", "a0", "jLoop"),
+      seq("s2", "p", "jNone")],
+  );
+  assert.equal(
+    claimFix(spec),
+    'keep one join over "a0": "jLoop" must drop it from `branches` — the ENTRY alone, no `kind: join` ' +
+      'edge running from "a0" into it to drop; what runs there is `kind: "loop"`, which carries its own ' +
+      'meaning, and "jNone" must drop it from `branches` — the ENTRY alone, no edge running from "a0" ' +
+      'into it at all; that missing edge is what `GRAPH008_BRANCH_NOT_CONNECTED` is refusing in this ' +
+      "same compile, and dropping every such entry answers that refusal too, and take " +
+      '"jA"\'s result as an arm instead if it still needs those writes',
+  );
+});
