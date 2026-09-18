@@ -4919,45 +4919,81 @@ export async function startMcp(servers: readonly McpServerConfig[]): Promise<rea
  * The opener is only honoured when a CLOSER exists later in the text; an unbalanced quote is an
  * ordinary character, so a malformed message cannot glue the rest of the line into one token.
  *
- * TERMINATION AND TRUNCATION, both by construction: the loop is a `for` over a finite token list,
- * and the only writes are appends — a token longer than `width` overflows its own line rather than
- * being split or dropped, and a text with no spaces at all comes back byte-for-byte unchanged.
+ * THE GAPS ARE KEPT VERBATIM, and the first cut of this did not do that. It rebuilt every line by
+ * joining tokens with ONE space, so `bad  name.json` — two spaces, a real file name, interpolated
+ * unquoted by `loadGraph` — rendered on a terminal as `bad name.json`, a path that does not exist.
+ * A wrap may replace the whitespace AT A BREAK and must not touch any other. So the text between
+ * two tokens travels with them, and only the run where a line actually breaks becomes a newline
+ * plus the indent. Trailing whitespace rides the last line.
  *
- * WIDTH IS COUNTED IN UTF-16 UNITS, not bytes, because it is a DISPLAY width. The `fix:` line
- * §H.14 measured is 852 bytes and 846 characters — three em dashes, three bytes each — and it is
- * 846 columns that a terminal has to find room for.
+ * AND A NEWLINE ALREADY IN THE TEXT IS A FORCED BREAK. `GRAPH003_BAD_ID` echoes the id it is
+ * refusing, and an id holding a newline is exactly what it refuses — left alone, that newline
+ * drops the rest of the line to COLUMN 0, which is the failure this whole function exists to
+ * remove. Each such segment is re-indented instead, which is also why a quoted span may not
+ * swallow one: the span scan stops at the end of its own line.
+ *
+ * TERMINATION AND TRUNCATION, both by construction: two `while`s over a strictly advancing index
+ * and then a `for` over a finite span list, with appends only — a token longer than `width`
+ * overflows its own line rather than being split or dropped, and a text with at most one token
+ * comes back byte-for-byte unchanged.
+ *
+ * WIDTH IS COUNTED IN UTF-16 UNITS, and that equals display columns for the text every diagnostic
+ * in this tree is built from — ASCII plus em dashes, which `graph/validate.ts` and
+ * `graph/compile.ts` are wholly made of. It is NOT a general equivalence: a combining mark is two
+ * units and one column, a CJK ideograph one unit and two, a tab one unit and up to eight. Those
+ * reach this function only inside a user-supplied id, and the cost is a row a few columns over —
+ * a rendering imperfection on a terminal, never a correctness one, because the pipe is unwrapped.
+ * The `fix:` line §H.14 measured is 852 bytes and 846 units, and it is 846 columns a terminal has
+ * to find room for.
  */
 export function wrapDiagnostic(text: string, width: number, indent: number): string {
-  const lead = /^ */.exec(text)![0];
-  const tokens: string[] = [];
-  let cur = "";
-  let closer: string | undefined;
-  for (let i = lead.length; i < text.length; i++) {
-    const c = text[i]!;
-    if (closer === undefined && (c === '"' || c === "`") && text.indexOf(c, i + 1) !== -1) closer = c;
-    else if (closer !== undefined && c === closer) closer = undefined;
-    else if (c === " " && closer === undefined) {
-      if (cur !== "") tokens.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += c;
+  const pad = " ".repeat(Math.max(0, indent));
+  if (text.includes("\n")) {
+    return text
+      .split("\n")
+      .map((seg, i) => wrapOneLine(i === 0 ? seg : pad + seg.replace(/^[ \t]*/, ""), width, indent))
+      .join("\n");
   }
-  if (cur !== "") tokens.push(cur);
-  if (tokens.length <= 1) return text;
+  return wrapOneLine(text, width, indent);
+}
+
+/** `wrapDiagnostic` for a segment with no newline in it. Whitespace runs are gaps, kept verbatim. */
+function wrapOneLine(text: string, width: number, indent: number): string {
+  const isGap = (c: string | undefined): boolean => c === " " || c === "\t";
+  // Half-open [start, end) ranges of the tokens. Everything outside them is a gap.
+  const spans: [number, number][] = [];
+  let i = 0;
+  while (i < text.length) {
+    while (isGap(text[i])) i++;
+    if (i >= text.length) break;
+    const start = i;
+    let closer: string | undefined;
+    while (i < text.length) {
+      const c = text[i]!;
+      if (closer === undefined && isGap(c)) break;
+      // A span opens only if it CLOSES on this line; an unbalanced quote is an ordinary
+      // character, so a malformed message cannot glue the remainder into one token.
+      if (closer === undefined && (c === '"' || c === "`") && text.indexOf(c, i + 1) !== -1) closer = c;
+      else if (closer !== undefined && c === closer) closer = undefined;
+      i++;
+    }
+    spans.push([start, i]);
+  }
+  if (spans.length <= 1) return text;
 
   const pad = " ".repeat(Math.max(0, indent));
   const lines: string[] = [];
-  let line = lead + tokens[0]!;
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!;
-    if (line.length + 1 + t.length <= width) line += ` ${t}`;
+  let line = text.slice(0, spans[0]![1]);
+  for (let k = 1; k < spans.length; k++) {
+    const gap = text.slice(spans[k - 1]![1], spans[k]![0]);
+    const token = text.slice(spans[k]![0], spans[k]![1]);
+    if (line.length + gap.length + token.length <= width) line += gap + token;
     else {
       lines.push(line);
-      line = pad + t;
+      line = pad + token;
     }
   }
-  lines.push(line);
+  lines.push(line + text.slice(spans[spans.length - 1]![1]));
   return lines.join("\n");
 }
 
@@ -4989,8 +5025,12 @@ export function wrapDiagnostic(text: string, width: number, indent: number): str
  * for an operator who never asked to wrap. The width comes from the stream itself and nowhere
  * else.
  *
- * FLOOR 60: the longest token in that `fix:` line is 21 characters and the deepest continuation
- * indent is 8, so 60 always has room for a token and the overflow branch stays theoretical.
+ * FLOOR 60: the longest token in that `fix:` line is 21 characters (`GRAPH008_JOIN_DEPTH` with its
+ * backticks) and the deepest continuation indent is 8, so 60 always has room for the vocabulary
+ * this tree's OWN diagnostics are written in. It does NOT make the overflow branch unreachable,
+ * and saying so would be the claim over-reaching: a `"…"` span is one token by construction and
+ * those spans carry user-supplied ids, so token length has no bound. Overflowing a row is the
+ * deliberate answer there — the alternative is cutting the identifier the author must copy.
  * CAP 120: past that a wrapped paragraph stops reading as a paragraph, and the soft wrap it
  * replaces was no worse.
  */

@@ -131,6 +131,43 @@ test("NOTHING IS LOST AND NOTHING IS REORDERED — unwrapping reproduces the lin
   }
 });
 
+test("A WRAP MAY REPLACE THE WHITESPACE AT A BREAK AND NO OTHER — `bad  name.json` is a path, not prose", () => {
+  // THE FIRST CUT OF THIS FUNCTION FAILED HERE. It rebuilt each line by joining tokens with ONE
+  // space, so every run of two spaces collapsed and trailing space vanished — silently, and even
+  // when the line already fitted. `loadGraph` interpolates the file name UNQUOTED (`basename`),
+  // so a file really called `bad  name.json` was rendered on a terminal as `bad name.json`: an
+  // operator shown a path that does not exist, by the code that exists to help them.
+  for (const [text, indent] of [
+    ["   fix: alpha  beta gamma", 8],
+    ["   fix: alpha beta ", 8],
+    ["✗ bad  name.json: CODE: message here", 2],
+    ["   fix: alpha\tbeta gamma", 8],
+    ["  ", 2],
+    ["", 2],
+  ] as const) {
+    assert.equal(wrapDiagnostic(text, 200, indent), text, `a line that fits must come back byte-identical: ${JSON.stringify(text)}`);
+  }
+  // And when it DOES wrap, the untouched gaps are still verbatim.
+  const wide = `✗ bad  name.json: CODE: ${"word ".repeat(40)}end`;
+  const rows = wrapDiagnostic(wide, 60, 2).split("\n");
+  assert.ok(rows.length > 1, "this one must wrap");
+  assert.ok(rows[0]!.startsWith("✗ bad  name.json: CODE:"), `the two spaces survive the wrap: ${rows[0]}`);
+});
+
+test("A NEWLINE ALREADY IN THE TEXT IS A FORCED BREAK, re-indented — not a row dropped to column 0", () => {
+  // `GRAPH003_BAD_ID` echoes the id it refuses, and an id holding a newline is what it refuses.
+  // Left alone that newline puts the rest of the line at column 0 — the exact failure this
+  // function exists to remove, rebuilt inside the fix. A quoted span therefore may not swallow
+  // one either: the span scan stops at the end of its own line.
+  const line = '✗ x.json: GRAPH003_BAD_ID: channel name "a\nb" is not a usable id, and filler to force a wrap';
+  const rows = wrapDiagnostic(line, 60, 2).split("\n");
+  assert.ok(rows.length > 1);
+  for (const row of rows.slice(1)) assert.match(row, /^ {2}\S/, `every row after the first hangs at 2: ${JSON.stringify(row)}`);
+  assert.ok(rows.some((r) => r.includes('"a')), "the id's first half is still there");
+  assert.ok(rows.some((r) => r.includes('b"')), "and its second half");
+  assert.equal(wrapDiagnostic("a\nb", 200, 4), "a\n    b", "even when both halves fit");
+});
+
 test("NO BREAK LANDS INSIDE A QUOTED ID OR A BACKTICK SPAN — which breaking at spaces alone does not give you", () => {
   // The soft wrap this replaces splits `GRAPH008_JOIN_DEPTH` and `classify`; a naive
   // space-splitter instead splits `"kind: join"`-shaped spans, which contain spaces. Balanced
@@ -213,9 +250,12 @@ async function compileCapturing(dir: string, tty: number | undefined): Promise<r
   process.stdout.write = (() => true) as typeof process.stdout.write;
   Object.defineProperty(process.stderr, "isTTY", { value: tty !== undefined, configurable: true, writable: true });
   Object.defineProperty(process.stderr, "columns", { value: tty, configurable: true, writable: true });
+  // `compiled` rather than `assert.fail` inside the `try`: the AssertionError would be thrown INTO
+  // the bare `catch` below and swallowed, leaving a guard that can never fire.
+  let compiled = false;
   try {
     await main(["compile", join(dir, "graphs", "eto.json"), "--workspace", dir]);
-    assert.fail("the eto graph must not compile");
+    compiled = true;
   } catch {
     // E_GRAPH_INVALID — the diagnostics are the point, not the throw.
   } finally {
@@ -226,6 +266,7 @@ async function compileCapturing(dir: string, tty: number | undefined): Promise<r
     if (hadCols === undefined) delete (process.stderr as { columns?: number }).columns;
     else Object.defineProperty(process.stderr, "columns", hadCols);
   }
+  assert.equal(compiled, false, "the eto graph must not compile — if it does, there are no diagnostics to measure");
   return captured.join("").split("\n").filter((l) => l !== "");
 }
 
@@ -271,7 +312,7 @@ test("ON A TERMINAL THE SAME TWO LINES WRAP — message at indent 2, fix: at ind
   }
 });
 
-test("A TERMINAL NARROWER THAN 60 OR WIDER THAN 120 IS CLAMPED, so a token always fits and a paragraph stays one", async () => {
+test("A TERMINAL NARROWER THAN 60 OR WIDER THAN 120 IS CLAMPED — 60 fits this tree's own vocabulary, 120 keeps a paragraph one", async () => {
   const w = workspace();
   try {
     const narrow = await compileCapturing(w.dir, 20);
