@@ -5,10 +5,12 @@
     "name": "two-person-approval",
     "project": "examples",
     "version": 1,
-    "description": "Two of three named people must approve before the write lands. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted.",
+    "description": "Two of three named people must approve before the write lands, and A REJECTION THAT ARRIVES FIRST VETOES IT: `onBranchError: \"fail\"` is read before `k` ever matters, so one rejection fails the whole run whatever the other two would have said. Copy this file for two-of-three-with-a-veto; it is NOT k-of-n tolerance of a dissenter. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted.",
     "labels": {
       "reads-as": "quorum lives in `join`, not in `approval`",
-      "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap"
+      "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap",
+      "residue-veto": "ONE rejection fails the run, so `k: 2` buys no tolerance for a dissenter: it only short-circuits the wait for the third person. `onBranchError: \"skip\"` is NOT the fix — measured on this graph, it lets ONE approval out of three land the write, because a quorum barrier releases on `noMoreArrivals` once every member is terminal and the fold never re-checks `k`. A veto is the conservative reading and it is the one this example ships.",
+      "residue-late-veto": "THE VETO IS NOT UNCONDITIONAL, because the gate the short-circuit left open is still answerable. Measured: alice approve, bob approve, carol REJECT ends `status=failed` with the write ALREADY LANDED — the barrier released on two approvals, `save` ran, and carol's rejection then failed a run whose effect had happened. Two approvals are the point of no return; a third person who intends to veto must do it before the second approval."
     }
   },
   "policy": { "posture": "out", "capabilities": ["fs:write"] },
