@@ -38,23 +38,31 @@ import { CODES, isLoomError } from "../../src/errors.ts";
 
 const SRC = readFileSync(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)), "utf8");
 
-/** Read from the SOURCE, so none of the three can be restated here and drift. */
+/**
+ * Read from the SOURCE, so none of the three can be restated here and drift.
+ *
+ * `KNOWN_FLAGS` is `Object.keys(FLAGS)` now — one list carrying the flag NAME and the reader that
+ * decides its VALUE (TODO.md §H.12) — so the names are read off that table's keys. A key is
+ * quoted when it contains a hyphen and bare when it does not, and both spellings are matched here
+ * rather than normalised in the source, because quoting every key would be a convention only this
+ * regex wanted.
+ */
 function declared(): readonly string[] {
-  const m = /const KNOWN_FLAGS: readonly string\[\] = \[([\s\S]*?)\];/.exec(SRC);
-  assert.ok(m, "KNOWN_FLAGS moved — this gate reads it from the source on purpose");
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
+  const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(SRC);
+  assert.ok(m, "FLAGS moved — this gate reads it from the source on purpose");
+  return [...m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?:/gm)].map((x) => x[1]!).sort();
 }
 function advertised(): readonly string[] {
   const m = /const USAGE = `([\s\S]*?)`;/.exec(SRC);
   assert.ok(m, "USAGE moved");
-  return [...new Set([...m[1]!.matchAll(/--([a-z][a-z-]*)/g)].map((x) => x[1]!))].sort();
+  return [...new Set([...m[1]!.matchAll(/--([A-Za-z0-9_-]+)/g)].map((x) => x[1]!))].sort();
 }
 function read(): readonly string[] {
-  const direct = [...SRC.matchAll(/args\.flags\["([a-z-]+)"\]/g)].map((x) => x[1]!);
+  const direct = [...SRC.matchAll(/args\.flags\["([A-Za-z0-9_-]+)"\]/g)].map((x) => x[1]!);
   // Every accessor that reads a flag. A new one must be added here — which is not a chore but
   // the gate working: `listFlag` was introduced for `--egress`/`--allow-exec`/`--exec-env` and
   // this test went red the moment those three stopped being read through `args.flags[…]`.
-  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([a-z-]+)"/g)].map((x) => x[1]!);
+  const viaHelper = [...SRC.matchAll(/(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!);
   return [...new Set([...direct, ...viaHelper])].sort();
 }
 

@@ -25,7 +25,12 @@
  *   5. a repeated `--extension-module` (`refuseRepeated`);
  *   6. **EVERY** global flag given with no value — all thirteen, plus `--help` and `--mcp-file`,
  *      iterated out of `GLOBAL_FLAGS` in the source rather than listed here, so a global added
- *      later is covered on the day it is added.
+ *      later is covered on the day it is added;
+ *   7. a VERB flag given with no value, and a MISSING POSITIONAL — TODO.md §H.12 and §H.13, the
+ *      two families this file used to pin as the boundary of the set. `run --input`,
+ *      `serve --port`, `serve --token`, `compile`, `score` and `gates` are the six that row
+ *      measured; `flag-door.test.ts` drives the whole of both families and recomputes which
+ *      flags belong to the first out of the source.
  *
  * (2) was open, and so was most of (6): measured on the parent commit, SEVEN of the fifteen
  * refused with nothing on disk — `--workspace`, `--data-dir`, `--channels-file`, `--models-file`
@@ -37,17 +42,43 @@
  * rest of the set already held, and each holds for a DIFFERENT reason — orderings a later edit can
  * reverse one at a time without touching the one §H.11 named.
  *
- * **AND THE SET THAT IS NOT COVERED**, pinned below as what it is rather than described. Two
- * families, both refused inside a `case` block with the workspace already open, both measured
- * leaving `.loom/`, `graphs/` and `resources/`:
+ * **(7) WAS THE BOUNDARY, AND THE BOUNDARY MOVED.** This file used to pin those six as what the
+ * set deliberately excluded, on the ground that judging a verb flag at the door needs a flag
+ * ARITY table — a second list beside `KNOWN_FLAGS`, kept in step by hand, which is the drift
+ * §H.10 spent two files on — and a positional a per-verb one beside that. Neither list exists:
+ * `KNOWN_FLAGS` became `Object.keys(FLAGS)`, ONE table whose second column is the FUNCTION that
+ * decides a flag's value, so no arity is written down to drift; and `VERB_POSITIONALS` is the
+ * words a missing argument is named with, read by `requirePositional` and by the door alike.
+ * §H.13 came with it: `compile`, `score` and `gates` answered `E_INTERNAL` — this system's word
+ * for "a bug in Loom" — for an operator who left out an argument, and answer `E_CONFIG_INVALID`
+ * now.
  *
- *   - a VERB flag given with no value — `run --input`, `serve --port`, `serve --token`;
- *   - a missing POSITIONAL — `compile`, `score`, `gates`, each with none.
+ * **WHAT IS STILL NOT COVERED IS THREE FLAGS, AND ALL THREE ARE DRIVEN BELOW**, one row each,
+ * with the list derived from `FLAGS`' `null` rows rather than restated — so a flag that gains a
+ * reader leaves this block on the day it gains one. Two reasons, and they are the only two that
+ * have survived being checked:
  *
- * Neither is an ordering: a verb flag needs a flag-ARITY table to be judged at the door (a second
- * list beside `KNOWN_FLAGS`, kept in step by hand, which is the drift §H.10 spent two files on),
- * and a positional needs a per-verb arity table beside it. So the boundary of the set is asserted,
- * and the day either table exists these rows move up.
+ *   - MORE READERS THAN ONE, so the sentence depends on the verb and the door must not guess:
+ *     `--as` (`subjectFlag`, `submitterFlag`, `attesterFlag`) and `--cohort` (`examCohortFlag`,
+ *     `suiteCohortFlag`).
+ *   - NEEDS MORE THAN ARGV: `--scope`, and only `--scope`. `ceilingScope(args, runId)` refuses a
+ *     scope naming a different run than the command did, so the flag cannot be judged without the
+ *     RUN ID — which is a positional, not a workspace.
+ *
+ * Three further rows are `null` and are NOT in that set, because there is nothing there to
+ * refuse: `--help` is answered before the door is reached, and `--reason` and `--reject` have no
+ * bad shape at all — a bare `--reason` is deliberately the default `"operator"` and a bare
+ * `--reject` is deliberately the reason "(no reason given)". Both defaults are pinned in
+ * `operator-pause.test.ts` against the journal, because three docstrings asserting a default is
+ * not the same as one test reading it back.
+ *
+ * **NINE FLAGS HAVE LEFT THIS PARAGRAPH, and each left for a reason that turned out not to be a
+ * reason.** `--baseline`, `--max-runs-in-flight`, `--node`, `--suite` and `--take` were read
+ * inline in a `case` block, which says where the code was written and nothing about what decides
+ * the flag. `--graph` and `--identity-file` were called "needs a `Workspace`" and did not:
+ * `pickIdentity(ws, args)` decides `--identity-file` with `requireFileFlag(args, …)` and uses
+ * `ws` for a different question, and all four reads of `--graph` are a `pathFlag` on argv. And
+ * `--reason`/`--reject` were listed here as litter when they are not refused at all.
  */
 
 import assert from "node:assert/strict";
@@ -86,11 +117,24 @@ function globalFlags(): readonly string[] {
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
   const m = /const GLOBAL_FLAGS: readonly string\[\] = \[([\s\S]*?)\];/.exec(src);
   assert.ok(m, "GLOBAL_FLAGS moved — this test reads it from the source on purpose");
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
+  return [...m[1]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!).sort();
 }
 
-/** The set above, one row each: what a stranger types, and the exit code they get for it. */
-const LEAVES_NOTHING: readonly { readonly what: string; readonly argv: readonly string[]; readonly code: number }[] = [
+/**
+ * The set above, one row each: what a stranger types, and the exit code they get for it.
+ *
+ * `says` is on the six that came from §H.12/§H.13 and on no other row, for a reason: those six
+ * moved here from a block that asserted their MESSAGES, and dropping the message when the row
+ * moved would have traded a stronger assertion for a weaker one on the day the defect closed.
+ * The three flag messages are byte-for-byte the ones measured on `967128d8`, because the door
+ * calls the same reader the `case` block did.
+ */
+const LEAVES_NOTHING: readonly {
+  readonly what: string;
+  readonly argv: readonly string[];
+  readonly code: number;
+  readonly says?: RegExp;
+}[] = [
   { what: "no verb at all", argv: [], code: 0 },
   { what: "the `help` verb", argv: ["help"], code: 0 },
   { what: "`--help` with no verb", argv: ["--help"], code: 0 },
@@ -101,6 +145,15 @@ const LEAVES_NOTHING: readonly { readonly what: string; readonly argv: readonly 
   { what: "an unknown flag", argv: ["run", "--bogus", "x"], code: 1 },
   { what: "a known flag this verb does not read", argv: ["score", "--suite", "x"], code: 1 },
   { what: "a repeated --extension-module", argv: ["compile", "--extension-module", "a", "--extension-module", "b"], code: 1 },
+  // §H.12 — a VERB flag with no value. The message is the reader's own, unchanged.
+  { what: "a verb flag with no value", argv: ["run", "--input"], code: 1, says: /--input was given with no value/ },
+  { what: "a verb flag with no value", argv: ["serve", "--port"], code: 1, says: /--port was given with no value/ },
+  { what: "a verb flag with no value", argv: ["serve", "--token"], code: 1, says: /--token needs a non-empty value/ },
+  // §H.12 and §H.13 — a missing POSITIONAL. `E_CONFIG_INVALID` is the half §H.13 is about, and
+  // the regex asserts the code as well as the sentence for exactly that reason.
+  { what: "a missing positional", argv: ["compile"], code: 1, says: /E_CONFIG_INVALID: loom compile requires a graph file/ },
+  { what: "a missing positional", argv: ["score"], code: 1, says: /E_CONFIG_INVALID: loom score requires a runId/ },
+  { what: "a missing positional", argv: ["gates"], code: 1, says: /E_CONFIG_INVALID: loom gates requires a runId/ },
 ];
 
 for (const row of LEAVES_NOTHING) {
@@ -112,6 +165,7 @@ for (const row of LEAVES_NOTHING) {
     // command that printed nothing at all would produce, and the usage goes to STDOUT — so this
     // is the assertion that tells the two apart, and the reason `refusing` returns `out`.
     if (row.code === 0) assert.match(out, /loom — graph-native/, `\`loom ${row.argv.join(" ")}\` printed no usage`);
+    if (row.says !== undefined) assert.match(err, row.says, `the refusal no longer says what it said before the door existed:\n${err}`);
   });
 }
 
@@ -173,30 +227,60 @@ test("AN UNKNOWN VERB SAYS SO — even one whose name is a property of Object.pr
 });
 
 /**
- * THE BOUNDARY, ASSERTED — the refusals that still cost three directories, and are not in the set.
+ * THE BOUNDARY, STILL ASSERTED — EVERY flag `FLAGS` gives no reader, each still costing three
+ * directories, and the list read out of that table rather than written here.
  *
- * A RECORD, NOT A WISH. Each of these throws from inside a `case` block, which `main` reaches only
- * with `ws` already built. Neither family is an ordering: a verb flag with no value can only be
- * judged at the door against a flag-ARITY table, and a missing positional against a per-verb arity
- * table — second and third lists beside `KNOWN_FLAGS`, kept in step by hand, which is the drift
- * §H.10 spent two files on. The day either table exists, these rows move into `LEAVES_NOTHING`
- * and this block shrinks; until then this is what stops the set's boundary from being a sentence
- * nobody checks.
+ * A RECORD, NOT A WISH, and the reason this block did not simply disappear when §H.12 closed: a
+ * set whose boundary is only described is a set nobody has checked. Driving ONE member and calling
+ * it "the shape of the rest" is the same failure one step in — only that member closing would turn
+ * it red — so every member is driven, and the membership itself is asserted against `FLAGS`'
+ * `null` rows. Adding a reader for `--graph` therefore fails this file until its row is removed,
+ * and removing a row for a flag that still litters fails it too.
+ *
+ * The ARGV is written per flag and cannot be derived: each needs its verb's positionals supplied,
+ * because a missing positional is now refused at the door and would leave the directory empty for
+ * a reason that has nothing to do with the flag.
  */
-const STILL_OPENS_A_WORKSPACE: readonly { readonly what: string; readonly argv: readonly string[]; readonly says: RegExp }[] = [
-  { what: "a verb flag with no value", argv: ["run", "--input"], says: /--input was given with no value/ },
-  { what: "a verb flag with no value", argv: ["serve", "--port"], says: /--port was given with no value/ },
-  { what: "a verb flag with no value", argv: ["serve", "--token"], says: /--token needs a non-empty value/ },
-  { what: "a missing positional", argv: ["compile"], says: /compile requires a graph file/ },
-  { what: "a missing positional", argv: ["score"], says: /score requires a runId/ },
-  { what: "a missing positional", argv: ["gates"], says: /gates requires a runId/ },
-];
+const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly string[]; readonly says: RegExp }>> = {
+  as: { argv: ["cancel", "01NOSUCHRUN", "--as"], says: /--as needs a subject/ },
+  cohort: { argv: ["exam", "attest", "e.json", "--as", "alice", "--cohort"], says: /exam attest --cohort needs a runId/ },
+  scope: { argv: ["deescalate", "01NOSUCHRUN", "--scope"], says: /--scope must be run:01NOSUCHRUN/ },
+};
 
-for (const row of STILL_OPENS_A_WORKSPACE) {
-  test(`NOT IN THE SET · ${row.what} — \`loom ${row.argv.join(" ")}\` still opens a workspace first`, async () => {
+/** `null` rows that are not in the set above, each because there is nothing to refuse. */
+const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject"];
+
+test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the table, not with this file", () => {
+  const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
+  const m = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(src);
+  assert.ok(m, "FLAGS moved — this test reads it from the source on purpose");
+  const nulls = [...m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: null,$/gm)].map((x) => x[1]!).sort();
+  assert.deepEqual(
+    nulls,
+    [...Object.keys(STILL_OPENS_A_WORKSPACE), ...NOTHING_TO_REFUSE].sort(),
+    "a flag gained or lost a door reader and this file still claims the old boundary",
+  );
+});
+
+for (const [flag, row] of Object.entries(STILL_OPENS_A_WORKSPACE)) {
+  test(`NOT IN THE SET · --${flag} — \`loom ${row.argv.join(" ")}\` still opens a workspace first`, async () => {
     const { code, err, left } = await inAnEmptyDirectory(() => row.argv);
     assert.equal(code, 1, err);
     assert.match(err, row.says);
-    assert.deepEqual(left, [".loom", "graphs", "resources"], `\`loom ${row.argv.join(" ")}\` no longer opens a workspace — good: move it into LEAVES_NOTHING`);
+    assert.deepEqual(left, [".loom", "graphs", "resources"], `\`loom ${row.argv.join(" ")}\` no longer opens a workspace — good: give --${flag} a reader row and move it`);
   });
 }
+
+test("A `null` ROW WITH NOTHING TO REFUSE REFUSES NOTHING — measured, not assumed", async () => {
+  // `--reason` and `--reject` are `null` for a reason unlike the five above, and the difference
+  // is worth a measurement rather than a sentence: neither flag has a shape it rejects. A bare
+  // `--reason` becomes the default "operator" on purpose and a bare `--reject` becomes the reason
+  // "(no reason given)", so giving either a door reader would close nothing. If that ever changes
+  // — if someone decides a bare `--reason` should refuse — this test says so instead of the
+  // change landing silently.
+  for (const argv of [["cancel", "01NOSUCHRUN", "--reason"], ["approve", "01NOSUCHRUN", "g1", "--reject"]]) {
+    const { err } = await inAnEmptyDirectory(() => argv);
+    assert.match(err, /E_RUN_NOT_FOUND/, `\`loom ${argv.join(" ")}\` no longer fails on the run — did the flag start refusing?\n${err}`);
+    assert.doesNotMatch(err, /E_CONFIG_INVALID/, `\`loom ${argv.join(" ")}\` now refuses the flag, which is a behaviour change:\n${err}`);
+  }
+});

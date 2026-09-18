@@ -212,11 +212,35 @@ setInterval(() => {}, 1 << 30);
     JSON.stringify({ servers: [{ name: "probe", command: process.execPath, args: [join(d.dir, "server.mjs")], envAllow: ["PATH", "HOME"] }] }),
   );
   try {
-    // `--max-parallelism 0` is one of `openWorkspace`'s eight refusals, and it fires AFTER the
-    // children are spawned. Any of the others would do; this one needs no filesystem setup.
-    const r = await run(["compile", join(d.dir, "graphs", "copy.json"), "--workspace", d.dir, "--mcp-file", join(d.dir, "mcp.json"), "--max-parallelism", "0"]);
+    // A MODELS FILE WHOSE CONTENT IS WRONG, and the choice of refusal is the whole setup here.
+    // This used to drive `--max-parallelism 0`, which was one of `openWorkspace`'s refusals and
+    // therefore fired after the children were spawned. TODO.md §H.12 moved every refusal a flag's
+    // VALUE can decide to the door, which runs before `startMcp` — so that argv now refuses with
+    // nothing spawned, and the test would have proved nothing while still passing its first two
+    // assertions.
+    //
+    // WHAT STILL REFUSES AFTER `startMcp` is everything in `main`'s try block that is not a flag
+    // value: `loadExtensionModules`' `await import()`, and inside `openWorkspace` the two content
+    // reads (`readChannels`, `readModels`), the three `mkdirSync`s, `new SqliteStateStore`, and
+    // every construction after it. This drives the second, because it is the cheapest one to make
+    // fail on purpose — and the door has already agreed the PATH is well formed, so the refusal
+    // is provably past it.
+    writeFileSync(join(d.dir, "models.json"), "{ not json");
+    const r = await run([
+      "compile",
+      join(d.dir, "graphs", "copy.json"),
+      "--workspace",
+      d.dir,
+      "--mcp-file",
+      join(d.dir, "mcp.json"),
+      "--models-file",
+      join(d.dir, "models.json"),
+    ]);
     assert.equal(r.code, 1, `the refusal itself is unchanged:\n${r.err}`);
-    assert.match(r.err, /E_CONFIG_INVALID: --max-parallelism/, r.err);
+    // THE SPECIFIC REFUSAL, not any `E_CONFIG_INVALID`. A bare code would be satisfied by the
+    // door refusing one of the flags on this line — which is precisely the thing that would make
+    // this test stop spawning a child and stop proving anything.
+    assert.match(r.err, /E_CONFIG_INVALID: --models-file .*models\.json: .*JSON/, r.err);
     assert.equal(existsSync(pidFile), true, "the child must actually have been spawned, or this proves nothing");
     const pid = Number(readFileSync(pidFile, "utf8"));
     // An ABSOLUTE bound with an order-of-magnitude margin on a process that has already had its

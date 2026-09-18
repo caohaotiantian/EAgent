@@ -43,26 +43,26 @@ const LINES = SRC.split("\n");
 
 /** Every `args.flags["x"]` and every `helper(args, "x")` in a chunk of source. */
 function flagsIn(text: string): Set<string> {
-  const re = /args\.flags\["([a-z-]+)"\]|(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([a-z-]+)"/g;
+  const re = /args\.flags\["([A-Za-z0-9_-]+)"\]|(?:pathFlag|requireFileFlag|numberFlag|stringFlag|listFlag)\(args, "([A-Za-z0-9_-]+)"/g;
   return new Set([...text.matchAll(re)].map((m) => m[1] ?? m[2]!));
 }
 
 /** Top-level `function name(…)` bodies, keyed by name. A body ends at the first `}` in column 0. */
-function topLevelFunctions(): Map<string, string> {
+function topLevelFunctions(lines: readonly string[] = LINES): Map<string, string> {
   const out = new Map<string, string>();
-  for (let i = 0; i < LINES.length; i++) {
-    const m = /^(?:export )?(?:async )?function ([A-Za-z0-9_]+)\s*[(<]/.exec(LINES[i]!);
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(?:export )?(?:async )?function ([A-Za-z0-9_]+)\s*[(<]/.exec(lines[i]!);
     if (m === null) continue;
     let j = i + 1;
-    while (j < LINES.length && !LINES[j]!.startsWith("}")) j++;
-    out.set(m[1]!, LINES.slice(i, j).join("\n"));
+    while (j < lines.length && !lines[j]!.startsWith("}")) j++;
+    out.set(m[1]!, lines.slice(i, j).join("\n"));
   }
   return out;
 }
 
 /** name → every flag that calling it can reach, following calls to other top-level functions. */
-function flagClosure(): Map<string, Set<string>> {
-  const fns = topLevelFunctions();
+function flagClosure(lines: readonly string[] = LINES): Map<string, Set<string>> {
+  const fns = topLevelFunctions(lines);
   const closure = new Map([...fns].map(([n, b]) => [n, flagsIn(b)]));
   const callsOf = new Map(
     [...fns].map(([n, b]) => [n, new Set([...b.matchAll(/\b([A-Za-z0-9_]+)\(/g)].map((m) => m[1]!).filter((c) => fns.has(c) && c !== n))]),
@@ -92,7 +92,7 @@ function readsPerVerb(): Map<string, Set<string>> {
   const fns = topLevelFunctions();
   const cases: { verb: string; at: number }[] = [];
   for (let i = 0; i < LINES.length; i++) {
-    const m = /^ {6}case "([a-z]+)":/.exec(LINES[i]!);
+    const m = /^ {6}case "([A-Za-z0-9_-]+)":/.exec(LINES[i]!);
     if (m !== null) cases.push({ verb: m[1]!, at: i });
   }
   assert.ok(cases.length >= 15, `the scan found ${cases.length} verbs — the regex broke, not the CLI`);
@@ -120,11 +120,22 @@ function readsPerVerb(): Map<string, Set<string>> {
   return out;
 }
 
-/** A named `readonly string[]` in the source, read rather than restated here. */
-function listNamed(name: string): readonly string[] {
-  const m = new RegExp(`const ${name}: readonly string\\[\\] = \\[([\\s\\S]*?)\\];`).exec(SRC);
+/**
+ * A named flag list in the source, read rather than restated here.
+ *
+ * `GLOBAL_FLAGS` is still a `readonly string[]`. `KNOWN_FLAGS` is `Object.keys(FLAGS)` since
+ * TODO.md §H.12 — one list carrying each flag's name AND the reader that decides its value — so
+ * it is read off that table's keys instead.
+ */
+function listNamed(name: string, src: string = SRC): readonly string[] {
+  if (name === "KNOWN_FLAGS") {
+    const t = /const FLAGS: Readonly<Record<string, \(\(args: Args\) => unknown\) \| null>> = \{([\s\S]*?)\n\};/.exec(src);
+    assert.ok(t, "FLAGS moved — this gate reads it from the source on purpose");
+    return [...t[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?:/gm)].map((x) => x[1]!).sort();
+  }
+  const m = new RegExp(`const ${name}: readonly string\\[\\] = \\[([\\s\\S]*?)\\];`).exec(src);
   assert.ok(m, `${name} moved — this gate reads it from the source on purpose`);
-  return [...m[1]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort();
+  return [...m[1]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!).sort();
 }
 
 /** `VERB_FLAGS`, parsed out of the source. */
@@ -132,8 +143,8 @@ function table(): Map<string, readonly string[]> {
   const m = /const VERB_FLAGS: Readonly<Record<string, readonly string\[\]>> = \{([\s\S]*?)\n\};/.exec(SRC);
   assert.ok(m, "VERB_FLAGS moved — this gate reads it from the source on purpose");
   const out = new Map<string, readonly string[]>();
-  for (const row of m[1]!.matchAll(/^ {2}([a-z]+): \[([^\]]*)\],$/gm)) {
-    out.set(row[1]!, [...row[2]!.matchAll(/"([a-z][a-z-]*)"/g)].map((x) => x[1]!).sort());
+  for (const row of m[1]!.matchAll(/^ {2}"?([A-Za-z0-9_-]+)"?: \[([^\]]*)\],$/gm)) {
+    out.set(row[1]!, [...row[2]!.matchAll(/"([A-Za-z0-9_-]+)"/g)].map((x) => x[1]!).sort());
   }
   return out;
 }
@@ -159,15 +170,60 @@ test("EVERY KNOWN FLAG IS PLACED: the global list and the rows together are KNOW
   assert.deepEqual([...placed].sort(), listNamed("KNOWN_FLAGS"), "a known flag belongs to no verb, or a row names a flag nothing knows");
 });
 
+/**
+ * The globals a given source text calls global and nothing before the switch reads — [] when the
+ * rule holds.
+ *
+ * TAKES THE SOURCE so the test below can run it against a PATCHED COPY. That is not a convenience:
+ * the assertion this backs was vacuous once already, and the only way to show a scan can fail is
+ * to hand it a source where it must.
+ *
+ * THE CLOSURE OF THE PRE-SWITCH BLOCK, not only its direct reads. `--extension-module` is read
+ * through `extensionModulePaths` since TODO.md §H.12 gave every door-decided flag a `(args: Args)`
+ * reader of its own, and a scan that only saw `args.flags[…]` written literally in `main` would
+ * call it unread the day it was given a name — the test measuring the spelling instead of the
+ * fact. It is ONE flag and not two: `--mcp-file` still appears literally in the pre-switch block,
+ * beside the `mcpFile(args)` that reads it.
+ *
+ * `c !== "main"` IS THE WHOLE OF THIS FUNCTION'S CORRECTNESS, and without it it returns [] for
+ * every input. `topLevelFunctions` includes the DECLARATION line in each body, so `preSwitch`
+ * contains the token `main(`; `fns.has("main")` is therefore true, and the union pulled in
+ * `closure.get("main")` — the flag closure of the entire CLI, every `case` block included. The
+ * old single-line version had the same guard for the same reason, spelled `c !== n` inside
+ * `flagClosure`; it was lost when the loop was written out here.
+ */
+function globalsNothingReads(src: string): readonly string[] {
+  const lines = src.split("\n");
+  const closure = flagClosure(lines);
+  const fns = topLevelFunctions(lines);
+  const preSwitch = fns.get("main")!.split("switch (args.command)")[0]!;
+  const reachedByMain = new Set([...closure.get("openWorkspace")!, ...flagsIn(preSwitch)]);
+  for (const c of new Set([...preSwitch.matchAll(/\b([A-Za-z0-9_]+)\(/g)].map((m) => m[1]!))) {
+    if (fns.has(c) && c !== "main") for (const f of closure.get(c)!) reachedByMain.add(f);
+  }
+  return listNamed("GLOBAL_FLAGS", src).filter((f) => !reachedByMain.has(f));
+}
+
 test("GLOBAL_FLAGS ARE THE ONES READ BEFORE THE SWITCH DISPATCHES", () => {
   // The membership rule stated in that list's own docstring, checked: a global flag is one
   // `openWorkspace` or `main` itself reads, which is why every verb reads it. Anything else on
   // that list would be a flag exempted by assertion rather than by mechanism.
-  const closure = flagClosure();
-  const reachedByMain = new Set([...closure.get("openWorkspace")!, ...flagsIn(topLevelFunctions().get("main")!.split('switch (args.command)')[0]!)]);
-  for (const f of listNamed("GLOBAL_FLAGS")) {
-    assert.ok(reachedByMain.has(f), `--${f} is called global and nothing before the switch reads it`);
-  }
+  assert.deepEqual(globalsNothingReads(SRC), [], "a flag is called global and nothing before the switch reads it");
+});
+
+test("...AND THAT SCAN CAN FAIL — the same rule run against a source where a global is a lie", () => {
+  // THE TEST ABOVE WAS VACUOUS ONCE, and a green scan is not evidence that a scan works. `--why`
+  // is read by `justificationFlag` and reached only from `loom deescalate`'s case block, so a
+  // source that calls it global is a source the rule must reject. The patch is applied to a COPY
+  // of the text — nothing on disk changes — which is what makes this a test and not a procedure
+  // somebody has to remember to run.
+  //
+  // Driven against the loop WITHOUT its `c !== "main"` guard, this injection produced [] and the
+  // assertion above passed; that is the defect this file shipped at `db49005d` and closed at
+  // `3b527003`.
+  const mutated = SRC.replace(/(const GLOBAL_FLAGS: readonly string\[\] = \[\n)/, '$1  "why",\n');
+  assert.notEqual(mutated, SRC, "the GLOBAL_FLAGS literal moved — this mutation could not be applied");
+  assert.deepEqual(globalsNothingReads(mutated), ["why"], "a flag no verb-independent reader touches was accepted as global");
 });
 
 // ── the refusal ─────────────────────────────────────────────────────────────
