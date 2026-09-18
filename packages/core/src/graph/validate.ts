@@ -2856,15 +2856,19 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // by construction, so a list that leaves `e.to` out dictates an edit that does not clear the
     // error it is attached to.
     //
-    // THE RESIDUE, NAMED: a join satisfying only the FIRST half — declares `e.to`, not downstream
-    // of it — leaves `joined` false, so this diagnostic fires and dictates `e.to`, and the edit
-    // then produces `GRAPH008_JOIN_DEPTH` on `e.to`. The author has to decide which join is the
-    // barrier; the graph is broken twice over and the second break is the one this rule cannot
-    // dictate around. WHETHER THE FIRST COMPILE SAYS SO DEPENDS ON THE EDGE:
-    // `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind while `idx.ancestors`
-    // walks neither `loop` nor `compensation`, so a claimer with NO edge at all is named there in
-    // the same compile and a claimer wired by one of those two is named by nothing. Both are
-    // pinned in `fanout-branch-diagnostic.test.ts`.
+    // THE RESIDUE, AND WHO NAMES IT — §A.69 moved the second half of this paragraph. A join
+    // satisfying only the FIRST half — declares `e.to`, not downstream of it — leaves `joined`
+    // false, so this diagnostic fires and dictates `e.to`, and the edit then produces
+    // `GRAPH008_JOIN_DEPTH` on `e.to`. The author has to decide which join is the barrier; the
+    // graph is broken twice over and the second break is the one this rule cannot dictate around.
+    // WHAT IT CAN DO IS SAY SO, and since §A.69 the `fix:` line does: the `claimed` clause below
+    // names every such claimer and the refusal that follows, in this compile. It used to depend on
+    // the edge — `GRAPH008_BRANCH_NOT_CONNECTED` accepts an inbound edge of ANY kind while
+    // `idx.ancestors` walks neither `loop` nor `compensation`, so a claimer with NO edge at all was
+    // named there in the same compile and a claimer wired by one of those two was named by NOTHING.
+    // The sibling code still fires where it always did; what changed is that the `loop` and
+    // `compensation` case is no longer silent. Both shapes are pinned in
+    // `fanout-branch-diagnostic.test.ts`.
     const foldedElsewhereThan = (id: NodeId): readonly NodeId[] =>
       id === e.to ? [] : foldersOf(id).filter((j) => j !== named?.id);
 
@@ -2920,7 +2924,7 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
     // keeps the F1 / `triage-failures.json` and §A.57 sentences (two names each) where they are.
     const each = waitsFor.join(", ");
     const one = waitsFor.length === 1;
-    const fix =
+    const dictate =
       named !== undefined
         ? (one
             ? `give join "${named.id}" an entry in its \`branches\` for ${each}, and a \`kind: join\` edge from ` +
@@ -2940,6 +2944,65 @@ function rule021FanoutHasJoin(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[])
           : `add a join node downstream of "${e.to}", with an entry in its \`branches\` for every node you leave ` +
             `inside the branch and a \`kind: join\` edge from each — as drawn that is ${each}, and a join placed ` +
             `earlier shortens it`;
+
+    // AND WHERE THE TARGET IS ALREADY CLAIMED, THE LINE SAYS SO — §A.69, and it is the one piece of
+    // this rule's own residue it could always have disclosed. `e.to` is the single member dictated
+    // despite being folded ELSEWHERE THAN THE NAMED BARRIER (the guard above), which makes it the
+    // single such member `foldedClauses` cannot reach: every other name folded elsewhere is dropped
+    // from `waitsFor` and named there, per name, with its folder. "Elsewhere" is the load-bearing
+    // word and a looser one was wrong here: `foldedElsewhereThan` excludes `named`, so a member the
+    // NAMED barrier alone folds stays in `waitsFor` and appears in neither clause — which is the
+    // F1 / `triage-failures.json` shape, where `gather` already declares `classify` and the
+    // sentence is byte-identical to the one it always printed. Without this clause the author types
+    // the dictated line and the NEXT compile is the first thing that mentions the other claimer — a
+    // `GRAPH008_JOIN_DEPTH` on `e.to` the compile before it had not printed.
+    //
+    // THE PREDICTION IS EXACT, NOT A HEDGE, and that is why it names the code and not just the
+    // join. `joined` is false here — that is what fired this diagnostic — so NO join both declares
+    // `e.to` and is an `idx.ancestors` descendant of it, while every candidate IS such a descendant
+    // by construction. So a claimer of `e.to` is never a candidate, hence never `named`, hence
+    // still a claimer after the author picks ANY barrier; `claimedBy` then counts two and refuses.
+    // `foldersOf` already makes `claimedBy`'s own test, so the two agree by construction.
+    //
+    // THE CLAUSE THEREFORE STATES A STATE, NOT A PROPHECY — "with the barrier declaring it too",
+    // not "once". Where `e.to` already has TWO claimers, `GRAPH008_JOIN_DEPTH` is printed in this
+    // same compile, and a sentence promising it only afterwards would be describing the output the
+    // author is already looking at.
+    //
+    // IT DOES NOT SUPPRESS THAT REFUSAL, AND MUST NOT. Dropping `e.to` from the dictated list would
+    // dictate an edit that does not clear the error it is attached to, and picking the barrier for
+    // the author is the "name a candidate" mistake that cost this rule four review rounds. The
+    // graph is broken twice over and only the author can say which join is the barrier. What moves
+    // is WHEN they are told: this clause carries the second break into the FIRST compile, in the
+    // diagnostic that dictates the edit, rather than leaving it to the compile after.
+    //
+    // IT REPLACES NO SIBLING DIAGNOSTIC. Where the claimer has no inbound edge at all,
+    // `GRAPH008_BRANCH_NOT_CONNECTED` names the entry in the same output and still does; where it
+    // is wired by a `loop` or `compensation` edge, that rule accepts an inbound edge of ANY kind
+    // and stays silent, and this clause is then the only thing that names the claim. All three —
+    // no edge, `loop`, `compensation` — are pinned in `fanout-branch-diagnostic.test.ts`.
+    //
+    // AND IT DICTATES NO EDGE DELETION, which the first cut got wrong. When this clause fires there
+    // is provably NO `kind: join` edge from `e.to` to the claimer: such an edge would put `e.to` in
+    // the claimer's `idx.ancestors` (which skips only `loop` and `compensation`), making `joined`
+    // true and this diagnostic silent. So the edge the author would find there is either absent or
+    // a `loop`/`compensation` edge carrying its own `until`/`maxIterations`, and "drop the entry
+    // AND the edge" told them to delete a retry loop the refusal never asked about — measured on
+    // the §A.69 graph, dropping the `branches` entry ALONE compiles. Dictating a deletion is what
+    // the additive lesson above is about; this one dictates the entry and says so.
+    const alsoClaim = foldersOf(e.to).filter((j) => j !== named?.id);
+    const claimed =
+      alsoClaim.length === 0
+        ? ""
+        : `. NOTE "${e.to}" is this fan-out's own target, so it is dictated whatever already folds it — but ` +
+          `${alsoClaim.map((j) => `"${j}"`).join(", ")} ` +
+          `${alsoClaim.length > 1 ? "already declare it among their" : "already declares it among its"} \`branches\`, ` +
+          `and with the barrier declaring it too \`GRAPH008_JOIN_DEPTH\` refuses "${e.to}" as held by more than one ` +
+          `join. Decide which join is the barrier for "${e.to}" and drop the \`branches\` ENTRY from the ` +
+          `${alsoClaim.length > 1 ? "others" : "other"} — the entry alone, and not any edge: a \`kind: join\` edge ` +
+          `from "${e.to}" would have made this diagnostic not fire, so whatever edge you see there carries its own ` +
+          `meaning and deleting it is a second change`;
+    const fix = dictate + claimed;
 
     d.push({
       severity: "error",
