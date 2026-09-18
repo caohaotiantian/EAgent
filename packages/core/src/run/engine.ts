@@ -1961,22 +1961,75 @@ export class Engine {
    *
    * Depth-bounded and visited-checked, on `COMPENSATION_MAX_DEPTH` — shared with `#compensate`,
    * which walks the same tree to actually run the undos this refuses to skip.
+   *
+   * ── AND A SECOND ARM, WHICH READS THE ARGUMENTS RATHER THAN THE CATEGORY (§A.37) ─────────────
+   * Declaring a compensation is not the same fact as having one that can run, and this method
+   * asked only the first while `planCompensation` and `RewindPlan.dispatch` answer the second.
+   * Measured: `pay.charge` declares `pay.refund`, its `effect.completed` recorded no `details`,
+   * `#compensateOne` refused for exactly that reason and journaled `not_attempted`, the seq
+   * settled — and the rewind was ACCEPTED over a zero-step plan with the money still gone and
+   * the record of the charge suppressed. The refusal now fires when all four of these hold:
+   *
+   *   1. the call is in range and `isHardToUndo` — as before;
+   *   2. the live registry says no compensation — TODAY'S ARM, unchanged; **or**
+   *   3. nothing `compensated` that seq and at least one row SETTLES it (`retryable !== true`),
+   *      i.e. `planCompensation` will drop the step and nothing undid it; **and**
+   *   4. the undo's arguments are not reconstructible — `detailsOf` of the last live
+   *      `effect.completed` for that key is `undefined`.
+   *
+   * (4) IS WHY THIS IS NOT A WALL AN OPERATOR CANNOT CLEAR, and it is the whole difference from
+   * the two fix designs that were refuted by running them. A settled row is durable and `settled`
+   * is sticky, so a refusal keyed on "which blocker was recorded" is permanent by construction —
+   * whereas the `no_compensation` arm above reads the LIVE REGISTRY, and registering a version
+   * that declares a compensation clears it. Arguments that were never recorded are the one input
+   * that genuinely cannot change, so they are the honest thing to refuse on. The process- and
+   * trigger-dependent blockers now write `retryable: true` (see `#compensateOne`) and never
+   * reach (3) at all: they re-plan and get UNDONE instead of being walled off.
+   *
+   * ANY-OCCURRENCE OVER THE RANGE, NEVER LATEST-WINS. `planCompensation`'s `settled` is a `Set`
+   * that only grows, so "the last row for this seq wins" would disagree with the fold the moment
+   * a seq carries more than one row — which it does as soon as a retryable blocker is re-planned.
+   *
+   * BUFFERED, not early-returning, because (4) needs a SECOND pass: the undo's arguments come
+   * from `#completedEffects`, the same suppression-aware reader `#planRollback` and the
+   * dispatcher use, and asking it per candidate would be one walk of the journal per candidate.
+   * A row for seq `S` is always appended after `S`, so no candidate can be decided mid-stream
+   * anyway. The decision loop then runs in ASCENDING seq, so the first hit is the lowest.
+   *
+   * IT TAKES A `RunLog` AND A `fromSeq` RATHER THAN THE EVENTS, for that second reader:
+   * `RunLog.read(from)` is `store.read(runId, from)` verbatim (`run/log.ts`), so the recursion's
+   * `this.#store.read(child, 1)` is unchanged in what it reads.
    */
   async #uncompensatedIrreversible(
-    events: AsyncIterable<JournalEvent>,
+    log: RunLog,
+    fromSeq: Seq,
     runId: RunId,
     depth: number,
     seen: Set<RunId> = new Set([runId]),
-  ): Promise<{ name: string; seq: number; irreversibility: string; runId: RunId } | undefined> {
+  ): Promise<
+    | { name: string; seq: number; irreversibility: string; runId: RunId; why: "no_compensation" | "no_arguments"; undo?: string }
+    | undefined
+  > {
     if (depth > COMPENSATION_MAX_DEPTH) return undefined;
     const children: RunId[] = [];
-    for await (const ev of events) {
+    const candidates: { readonly seq: number; readonly name: string; readonly irreversibility: string; readonly key: string }[] = [];
+    // ANY-OCCURRENCE, both of them: a seq is compensated if ANY row says so, and settled if ANY
+    // row leaves `retryable` off. That is `planCompensation`'s `settled.add` read back.
+    const compensated = new Set<number>();
+    const settling = new Set<number>();
+    for await (const ev of log.read(fromSeq)) {
       if (ev.type === "subgraph.started") {
         const child = ev.payload.childRunId;
         if (!seen.has(child)) {
           seen.add(child);
           children.push(child);
         }
+        continue;
+      }
+      if (ev.type === "compensation.recorded") {
+        const row = ev.payload;
+        if (row.outcome === "compensated") compensated.add(row.compensatesSeq);
+        if (row.retryable !== true) settling.add(row.compensatesSeq);
         continue;
       }
       if (ev.type !== "tool.called") continue;
@@ -1991,15 +2044,30 @@ export class Engine {
       // form — an unreadable class is hard to undo — and `#applyGateDecision` closed the
       // byte-identical hazard for `gate.decision`.
       if (!isHardToUndo(called.irreversibility as IrreversibilityClass)) continue;
+      candidates.push({ seq: ev.seq, name: called.name, irreversibility: called.irreversibility, key: called.key });
+    }
+
+    // ONE suppression-aware pass for every key arm 2 could ask about, and none if it cannot fire.
+    // Keyed on the SEQ for the settled test and on the KEY for the arguments, because those are
+    // the two identities `run/compensation.ts` distinguishes: a rewind-then-redo appends a second
+    // `tool.called` under the same key, and only the seq tells the redo from what it replaced.
+    const needArgs = new Set(candidates.filter((c) => !compensated.has(c.seq) && settling.has(c.seq)).map((c) => c.key));
+    const recorded = needArgs.size === 0 ? new Map<string, unknown>() : await this.#completedEffects({ log }, (k) => needArgs.has(k));
+
+    for (const c of candidates) {
       // Fail closed: a tool the registry no longer carries cannot be shown to compensate.
-      if (this.tools.get(called.name)?.compensation === undefined) {
-        return { name: called.name, seq: ev.seq, irreversibility: called.irreversibility, runId };
+      const undo = this.tools.get(c.name)?.compensation?.tool;
+      if (undo === undefined) {
+        return { name: c.name, seq: c.seq, irreversibility: c.irreversibility, runId, why: "no_compensation" };
       }
+      if (compensated.has(c.seq) || !settling.has(c.seq)) continue;
+      if (detailsOf(recorded.get(c.key)) !== undefined) continue;
+      return { name: c.name, seq: c.seq, irreversibility: c.irreversibility, runId, why: "no_arguments", undo };
     }
     // The child ran ENTIRELY inside the window the parent is suppressing — its `subgraph.started`
     // is in that range — so its own log is scanned from the beginning, not from `atSeq`.
     for (const child of children) {
-      const hit = await this.#uncompensatedIrreversible(this.#store.read(child, 1 as Seq), child, depth + 1, seen);
+      const hit = await this.#uncompensatedIrreversible(this.#logFor(child), 1 as Seq, child, depth + 1, seen);
       if (hit !== undefined) return hit;
     }
     return undefined;
@@ -5144,13 +5212,24 @@ export class Engine {
     // the parent's own log answers nothing about what a child did. Measured, on the same
     // irreversible uncompensated tool: run it in the parent and the rewind is refused; delegate
     // it to a subgraph and the rewind is ALLOWED, with the money already gone.
-    const offending = await this.#uncompensatedIrreversible(ctx.log.read((atSeq + 1) as Seq), runId, 0);
+    //
+    // AND THE SAME REFUSAL FOR AN EFFECT WHOSE UNDO IS DECLARED AND CANNOT BE BUILT (§A.37).
+    // "Declares a compensation" and "something will actually dispatch one" are two facts, and
+    // this door asked only the first while the plan answered the second. The second arm is keyed
+    // on the ARGUMENTS — the one input an operator cannot change by deploying — so the message
+    // has to say which of the two fired, because they send them to different places: one is a
+    // manifest to fix, the other is a rewind that can never undo this effect.
+    const offending = await this.#uncompensatedIrreversible(ctx.log, (atSeq + 1) as Seq, runId, 0);
     if (offending !== undefined) {
       const where = offending.runId === runId ? "" : ` in child run ${offending.runId}`;
+      const why =
+        offending.why === "no_compensation"
+          ? "declares no compensation"
+          : `the arguments its undo "${String(offending.undo)}" needs were never recorded ` +
+            "(its `effect.completed` carries no `details`), so no rewind can undo it — the effect would stand with its record hidden";
       throw err.conflict(
         CODES.E_RESTORE_ILLEGAL,
-        `cannot rewind to ${atSeq}: "${offending.name}" ran at seq ${offending.seq}${where}, is ` +
-          `${offending.irreversibility}, and declares no compensation`,
+        `cannot rewind to ${atSeq}: "${offending.name}" ran at seq ${offending.seq}${where}, is ` + `${offending.irreversibility}, and ${why}`,
         { details: { runId, atSeq, seq: offending.seq, tool: offending.name, ranIn: offending.runId } },
       );
     }

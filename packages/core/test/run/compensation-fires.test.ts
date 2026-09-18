@@ -179,6 +179,7 @@ function records(events: readonly JournalEvent[]): {
   outcome: string;
   undo?: string;
   reason?: string;
+  retryable?: boolean;
   trigger: string;
 }[] {
   return events
@@ -189,6 +190,7 @@ function records(events: readonly JournalEvent[]): {
         outcome: string;
         undo?: string;
         reason?: string;
+        retryable?: boolean;
         trigger: string;
       };
       return p;

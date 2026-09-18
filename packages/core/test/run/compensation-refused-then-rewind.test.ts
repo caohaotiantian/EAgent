@@ -346,35 +346,39 @@ test("SHAPE 1 — a settled `not_attempted` makes the operator's rewind a no-op 
     const atSeq = beforeTheCharge(ran.events, "pay.charge");
     const out = await rewindFromACoolEngine(path, ran.runId, ran.graph, atSeq, world);
 
-    // TODAY: the rewind is ACCEPTED. AFTER THE FIX `refusedBy` must be `"planRewind"` — the arm
-    // belongs in `#uncompensatedIrreversible`, inside `#rewindRefusals`, which `planRewind` runs
-    // too; a refusal only `rewind` raises would hand the operator a plan they can never use.
-    assert.equal(out.refusedBy, undefined, "TODAY: `rewind` crosses a settled, un-undone irreversible effect");
+    // REFUSED BY `planRewind`, not only by `rewind` — the arm lives in
+    // `#uncompensatedIrreversible`, inside `#rewindRefusals`, which `planRewind` runs too. A
+    // refusal only `rewind` raised would hand the operator a plan they can never use.
+    assert.equal(out.refusedBy, "planRewind", "`rewind` no longer crosses a settled, un-undone irreversible effect");
 
-    // TODAY: and the plan an operator was shown says there is nothing to undo, because
-    // `planCompensation` dropped the settled seq. AFTER THE FIX these three are unreachable —
-    // `planRewind` threw — so they are replaced by assertions on the refusal's message, which must
-    // name "pay.charge", the seq it ran at, and that its rollback is settled.
-    assert.equal(out.steps, 0, "TODAY: a ZERO-STEP plan over an effect that is still in the world");
-    assert.equal(out.dispatch, 0, "TODAY: nothing to dispatch");
-    assert.equal(out.blocked, 0, "TODAY: and nothing reported blocked either — the step is simply gone");
+    // AND THE MESSAGE SAYS WHICH FACT REFUSED. Two arms reach this throw site and they send an
+    // operator to different places: "declares no compensation" is a manifest to fix, and this one
+    // is an undo that can never be built because its arguments were never written down.
+    const call = ran.events.find((e) => e.type === "tool.called" && (e.payload as { name?: string }).name === "pay.charge")!;
+    assert.match(out.refusal!.message, /pay\.charge/, "names the tool that ran");
+    assert.match(out.refusal!.message, new RegExp(`ran at seq ${String(call.seq)}\\b`), "and the seq it ran at");
+    assert.match(out.refusal!.message, /arguments its undo "pay\.refund" needs were never recorded/, "and why no rewind can undo it");
+    assert.doesNotMatch(out.refusal!.message, /declares no compensation/, "and NOT the other arm's reason — `pay.charge` declares one");
 
-    // NOT `TODAY`. A refusal undoes nothing either, so the world reads the same both sides of the
-    // fix; what changes is whether the journal still says so. Keeping these unmarked is the point
-    // — they are the control on the two `hidden` assertions below, not a claim about the defect.
+    // NOT `TODAY`, and unchanged across the fix. A refusal undoes nothing either, so the world
+    // reads the same both sides; what changes is whether the journal still says so. These are the
+    // control on the three `hidden` assertions below, not a claim about the defect.
     assert.deepEqual(world.charges, [42], "the money is still gone — before the fix and after it");
     assert.deepEqual(world.refunds, [], "and no undo ran at any point");
 
-    // TODAY: the effect's record is now hidden — the `tool.called`, the `effect.completed` the
-    // undo's arguments would have come from, and the row that said the effect stands are all
-    // inside the suppressed range. AFTER THE FIX all three become `false`: the rewind never
-    // happened, so nothing is suppressed and the journal still says a charge stands.
-    const call = ran.events.find((e) => e.type === "tool.called" && (e.payload as { name?: string }).name === "pay.charge")!;
-    assert.equal(hidden(out.events, call.seq), true, "TODAY: the `tool.called` for the charge is suppressed");
+    // NOTHING IS HIDDEN, which is the whole point of refusing. The `tool.called`, the
+    // `effect.completed` the undo's arguments would have come from, and the row that said the
+    // effect stands were all inside the suppressed range before this fix.
+    assert.equal(hidden(out.events, call.seq), false, "the `tool.called` for the charge is still visible");
     const completed = ran.events.find((e) => e.type === "effect.completed")!;
-    assert.equal(hidden(out.events, completed.seq), true, "TODAY: and so is the `effect.completed` the undo's arguments would have come from");
+    assert.equal(hidden(out.events, completed.seq), false, "and so is the `effect.completed` the undo's arguments would have come from");
     const row = ran.events.find((e) => e.type === "compensation.recorded")!;
-    assert.equal(hidden(out.events, row.seq), true, "TODAY: and so is the record that said the effect stands");
+    assert.equal(hidden(out.events, row.seq), false, "and so is the record that says the effect stands");
+    assert.equal(
+      out.events.some((e) => e.type === "checkpoint.restored"),
+      false,
+      "and no restore marker was appended at all",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
