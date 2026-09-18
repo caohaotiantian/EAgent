@@ -57,8 +57,15 @@
  * — in all three orderings of one approval and two rejections. `#maybeFireJoin` fires `quorum` on
  * `succeeded >= need || noMoreArrivals`, so once every member is terminal the barrier releases
  * whatever `k` was; `#foldJoin` then holds only the `onBranchError === "fail" && skipped > 0` arm
- * and §D.9's `succeededWork === 0` arm, and never re-checks `k`. Under `"fail"` the first arm
- * masks it. Under `"skip"` nothing does, which is why three rejections still fail and two do not.
+ * and §D.9's, and never re-checks `k`. Under `"fail"` the first arm masks it. Under `"skip"`
+ * nothing does, which is why three rejections still fail and two do not.
+ *
+ * §D.9'S ARM IS `succeededMembers === 0` FOR THIS GRAPH, not `succeededWork === 0`. The predicate
+ * is `workMembers > 0 ? succeededWork === 0 && terminalWork === workMembers : succeededMembers === 0`
+ * (`run/engine.ts`), and all three members here are `human_gate` nodes, so `workMembers` is 0 and
+ * the fallback is what fires. `engine.ts` names THIS FILE at that branch — "the EVIDENCE-ONLY
+ * BARRIER, which is `examples/graphs/two-person-approval.json`" — so quoting the work term here
+ * would have pointed a reader at the one arm this graph can never reach.
  *
  * So `"skip"` would replace a fail-CLOSED mismatch with a fail-OPEN one: an example saying "two
  * of three" that lets one person land the write. *Refusing is always allowed; loosening never
@@ -287,6 +294,16 @@ test("§A.68 · ONE REJECTION FAILS THE RUN — the four cases on the shipped fi
   assert.equal(lateVeto.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
   assert.deepEqual(lateVeto.wrote, ["ship it"], "the run FAILS with the write standing — the veto arrived after the effect");
 
+  // Case 2c — THE VERDICT IS SETTLED, THE RUN IS NOT. One rejection with the other two silent
+  // parks `awaiting_gate`: the barrier still has members to hear from. "One rejection fails the
+  // whole run" is true of the outcome and not of the moment, which is why the description says
+  // "once the remaining gates are answered" rather than leaving a copier to wait for a failure
+  // that has not happened yet.
+  const loneReject = await drive(SPEC, [["alice", "reject"]]);
+  assert.equal(loneReject.status, "awaiting_gate");
+  assert.deepEqual(loneReject.wrote, []);
+  assert.equal(loneReject.error, undefined, "and no error yet — nothing has been decided against");
+
   // Case 3 — all three reject.
   const allReject = await drive(SPEC, [["alice", "reject"], ["bob", "reject"], ["carol", "reject"]]);
   assert.deepEqual(allReject.wrote, []);
@@ -314,6 +331,10 @@ test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the
   // stating it correctly only in a label further down would be this file's defect a second time.
   assert.match(description, /before the second approval/i, `the description must give the boundary, not "first": ${description}`);
   assert.match(description, /already landed/i, "and say what a rejection after it is worth");
+  // AND THE MOMENT, not just the verdict: one rejection with the other two silent leaves the run
+  // `awaiting_gate`, which the fourth driven case below pins. "Fails the whole run" on its own
+  // reads as "fails now" and would send a copier looking for a failure that has not happened yet.
+  assert.match(description, /awaiting_gate|until the other people vote/i, `the description must say the run parks until the rest vote: ${description}`);
   assert.ok(
     Object.values(labels).some((v) => /skip/.test(v) && /ONE approval/.test(v)),
     `a residue label must carry why "skip" was refused, so the arm cannot be taken later without re-running it: ${JSON.stringify(labels)}`,
