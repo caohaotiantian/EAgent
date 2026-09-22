@@ -46,7 +46,6 @@ import {
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
-  type BlockFieldType,
   type EdgeKind,
   type EdgeSpec,
   type ExpansionBudget,
@@ -1542,6 +1541,22 @@ function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: numb
   }
   return bad;
 }
+
+/**
+ * The tag union, DERIVED from the table rather than imported as a name.
+ *
+ * `graph/spec.ts` declares it module-private on purpose — `scripts/check-surface.mjs` pins the
+ * exported NAME set, and a new name on the public contract arriving under a `fix:` subject is the
+ * ledger-watch case `CLAUDE.md` names, not something to answer with `--write`. `EDGE_FIELDS` set
+ * the precedent by writing its own tag union inline for the same reason.
+ *
+ * An indexed access and not a re-declaration: a second spelling of this union in a second file is
+ * exactly how two enumerations come to disagree, which is the argument `REQUIRED_FIELDS` and
+ * `ALLOWED_FIELDS` both make for living beside the interfaces they describe. `POLICY_FIELDS` is
+ * ANNOTATED with the union (it is not `as const`), so this reads the declared type and not the
+ * five tags its own rows happen to use — `NESTED_FIELDS` would give the identical answer.
+ */
+type BlockFieldType = (typeof POLICY_FIELDS)[keyof typeof POLICY_FIELDS][string];
 
 /**
  * One predicate per tag of `POLICY_FIELDS`/`NESTED_FIELDS` — the type half of the block schema.

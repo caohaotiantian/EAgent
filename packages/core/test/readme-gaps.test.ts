@@ -222,7 +222,20 @@ const ROWS: readonly { readonly row: string; readonly claims: string; readonly p
       // THE FIELDS MUST STAY OUT OF THE SCHEMA, which is what makes the row true. A `mode` back
       // in `ApprovalSpec` would be accepted by `NESTED_FIELDS.approval` and the generic refusal
       // would stop firing — the row would read the same and mean the opposite.
-      assert.match(SRC("graph/spec.ts"), /approval: \["approvers", "separationOfDuties"\]/, "NESTED_FIELDS.approval moved");
+      // THE SAME CLAIM, RE-PINNED AGAINST THE SHAPE THE TABLE NOW HAS. `NESTED_FIELDS` grew a
+      // TYPE per field at §A.81(a) — `approval: ["approvers", "separationOfDuties"]` became
+      // `approval: { approvers: "stringArray", separationOfDuties: "boolean" }` — so the old
+      // literal stopped matching a row that still says exactly what the README says. The claim is
+      // about the two field NAMES and about nothing else being there, which is what this reads:
+      // the tag values are deliberately left loose, because the README row does not mention them
+      // and a probe that pins more than its row does goes red for a change the row survives.
+      const approvalRow = /\n  approval: \{([^}]*)\}/.exec(SRC("graph/spec.ts"));
+      assert.ok(approvalRow, "NESTED_FIELDS.approval moved");
+      assert.deepEqual(
+        [...approvalRow[1]!.matchAll(/(\w+):/g)].map((m) => m[1]).sort(),
+        ["approvers", "separationOfDuties"].sort(),
+        "NESTED_FIELDS.approval moved",
+      );
       const iface = /export interface ApprovalSpec\b[\s\S]*?\n}/.exec(SRC("graph/spec.ts"));
       assert.ok(iface, "ApprovalSpec's declaration moved — this probe reads it by shape");
       for (const gone of ["mode", "k", "delegation"]) {

@@ -781,8 +781,16 @@ export const DEFAULT_EXPANSION: ExpansionBudget = {
  *     unknown       CHECKED BY NOBODY ON PURPOSE. `channel.initial` is a channel's seed value
  *                   and its type is the channel's `type`, not a fixed one; a tag here would
  *                   refuse the valid `initial: 0` on a `number` channel.
+ *
+ * NOT EXPORTED, and that is the whole of what this name costs. `scripts/check-surface.mjs` pins
+ * the exported NAME set, so exporting it would be a new name on the public contract under a `fix:`
+ * subject — capability arriving as a fix, which is the case `CLAUDE.md`'s kernel-stability section
+ * says to watch the ledger for and which the guard by itself cannot see. `EDGE_FIELDS` sets the
+ * precedent one table up: its tag union is written INLINE precisely so that change added no
+ * exported type either. The one reader outside this file, `graph/validate.ts`, DERIVES the union
+ * from the const it already imports, so the two cannot drift and neither has to be published.
  */
-export type BlockFieldType =
+type BlockFieldType =
   | "string"
   | "count"
   | "number"
