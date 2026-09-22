@@ -76,14 +76,34 @@ interface Result {
   readonly err: string;
 }
 
-/** `bin/loom <argv> --workspace <dir>`, in-process, with the streams captured. */
+/**
+ * `bin/loom <argv> --workspace <dir>`, in-process, with the streams captured.
+ *
+ * **STRINGS ARE OURS, BUFFERS ARE THE TEST RUNNER'S**, and that distinction is load-bearing rather
+ * than decorative. `node --test` serializes its own event stream (`test:enqueue`, `test:pass`, …) to
+ * `process.stdout` as Buffers, from the same process, whenever the event loop turns. Hijacking
+ * `write` unconditionally therefore swallows the runner's events for every test that flushes inside
+ * the window — measured, on the first test here whose window was long enough (a quarter-megabyte
+ * manifest): the outer reporter printed `tests 1` for a file holding nineteen, and the stolen event
+ * stream turned up inside an assertion message as "stdout is not one JSON object".
+ *
+ * The CLI writes strings and only strings; the runner writes Buffers. So forward anything that is
+ * not a string and capture the rest, which keeps `summary()`'s "stdout is EXACTLY one JSON object"
+ * assertion honest — it still sees everything the binary wrote, and nothing it did not.
+ */
 async function loom(dir: string, argv: readonly string[]): Promise<Result> {
   const out: string[] = [];
   const errOut: string[] = [];
   const realOut = process.stdout.write.bind(process.stdout);
   const realErr = process.stderr.write.bind(process.stderr);
-  process.stdout.write = ((c: string) => (out.push(String(c)), true)) as typeof process.stdout.write;
-  process.stderr.write = ((c: string) => (errOut.push(String(c)), true)) as typeof process.stderr.write;
+  process.stdout.write = ((c: unknown, ...rest: unknown[]) =>
+    typeof c === "string"
+      ? (out.push(c), true)
+      : (realOut as (...a: unknown[]) => boolean)(c, ...rest)) as typeof process.stdout.write;
+  process.stderr.write = ((c: unknown, ...rest: unknown[]) =>
+    typeof c === "string"
+      ? (errOut.push(c), true)
+      : (realErr as (...a: unknown[]) => boolean)(c, ...rest)) as typeof process.stderr.write;
   try {
     const code = await main([...argv, "--workspace", dir]);
     return { code, out: out.join(""), err: errOut.join("") };
@@ -116,6 +136,8 @@ interface Applied {
   readonly pass: number;
   readonly rule: string;
   readonly at: string;
+  /** Carried so a cascade is compared by finding IDENTITY, not by rule name (F14's third instance). */
+  readonly detail: string;
   readonly cascadeOf: string | null;
   readonly was: unknown;
   readonly now: unknown;
@@ -262,7 +284,15 @@ test("every cascade is applied AFTER the fix that created it, in one stated orde
     // And the pair on each entry is the diff a person is approving: `was` is what the file said.
     assert.equal(report.applied[0]!.was, "registry.internal/orders-api:latest");
     assert.equal(report.applied[0]!.now, "registry.internal/orders-api:1.8.3");
-    assert.equal(report.applied[4]!.was, "hunter2", "the plaintext credential is shown, because the approver has to see what left the file");
+    // THE CREDENTIAL'S BYTES DO NOT REACH THE APPROVER, and this assertion used to say the exact
+    // opposite — "the plaintext credential is shown, because the approver has to see what left the
+    // file". That was wrong twice over. The runtime's own gate projection already redacts
+    // `hardened.env.DB_PASSWORD` to `[secret]` on the key NAME, so `applied[].was` was the one path
+    // by which `hunter2` still reached `loom gates`, the approver, and `out/harden-report.md` — a
+    // file that goes back into the repository the manifest came from. And an approver does not need
+    // the bytes to judge the change; they need to recognise it. (F13.)
+    assert.deepEqual(report.applied[4]!.was, { redacted: "string", chars: 7 }, JSON.stringify(report.applied[4]));
+    assert.deepEqual(report.applied[4]!.now, { secretRef: "db-password" }, "`now` is NOT redacted — hiding it would hide the repair");
   } finally {
     ws.dispose();
   }
@@ -463,7 +493,7 @@ test("the budget is whatever the GRAPH says — move it and the run stops with t
   // THE DRIFT TEST, behavioural on purpose, and the same shape as the first port's `maxWidth` one.
   // `len(applied) >= 12` is written on the `repair` edge's `when` and on the `done` edge's `when`,
   // and a body cannot read either (`ctx.node.out` carries `maxIterations`, not `until` or `when` —
-  // F4 of the port doc). So the only way to know the bodies do not carry their own copy is to move
+  // F6 of the port doc). So the only way to know the bodies do not carry their own copy is to move
   // the number in the graph alone and require the run to obey it.
   const ws = workspace();
   try {
@@ -568,7 +598,7 @@ test("the finished run replays with zero effects re-executed", async () => {
 
     // No `--graph`: the journal records the graph's HASH and a fresh process finds it in `graphs/`.
     // `hermetic` is what says the `fs.read`, both `fs.write`s and the human's decision were served
-    // from the record — and across a run of seventeen `function` tasks, that the seeded PRNG draw
+    // from the record — and across a run of nineteen `function` tasks, that the seeded PRNG draw
     // the engine journals per task replayed in the same order.
     const replay = await loom(ws.dir, ["replay", runId]);
     assert.equal(replay.code, 0, `${replay.out}${replay.err}`);
@@ -616,6 +646,191 @@ test("RESIDUE — a `done` edge narrower than the loop's exit strands the run, a
       /\bloop\b|\baudit\b|\brepair\b|\bdone\b/,
       "if the message learns to name the loop, the edge, or the node that took no edge, this residue is closed — update this test rather than restoring it",
     );
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a credential whose value is not a string is REPORTED, not silently skipped", async () => {
+  // THE WORST THING THIS WORKFLOW COULD DO, and the rule's first draft did it: it read
+  // `if (typeof env[key] !== "string") continue;`, so `"DB_PASSWORD": 90210` and
+  // `"API_TOKEN": ["sk-live-1"]` produced ZERO findings and a report saying the manifest "already
+  // satisfied every rule this tool can repair". A credential scanner that stays quiet because
+  // somebody wrote the value unquoted is worse than no scanner: it converts "nobody looked" into
+  // "somebody looked and it is fine".
+  //
+  // The key NAME is the whole evidence this rule has and it does not get weaker with the value's
+  // type. What changes is whether a repair exists — `secretRef` substitutes for a string — so a
+  // non-string is reported `autofixable: false` with a remedy naming what a person must do.
+  const ws = workspace();
+  try {
+    const { report } = await runToGate(ws.dir, "unquoted-credentials.json");
+    assert.equal(report.passes, 0, "nothing here is auto-fixable, so the loop never runs a pass");
+    assert.equal(report.stoppedBy, "settled");
+    assert.equal(report.open.length, 2, JSON.stringify(report.open));
+    assert.deepEqual(
+      report.open.map((f) => f.at).sort(),
+      ["env.API_TOKEN", "env.DB_PASSWORD"],
+      JSON.stringify(report.open),
+    );
+    assert.equal(report.open.every((f) => f.rule === "plaintext-secret"), true, JSON.stringify(report.open));
+    assert.equal(report.open.every((f) => f.autofixable === false), true, JSON.stringify(report.open));
+    assert.match(report.open.find((f) => f.at === "env.DB_PASSWORD")!.remedy, /the value is a number/);
+    assert.match(report.open.find((f) => f.at === "env.API_TOKEN")!.remedy, /the value is an array of 1/);
+    // AND THE VALUE'S BYTES ARE NOT IN THE FINDING — only its shape. A finding about a credential
+    // that quotes the credential has moved the leak rather than closed it (F13).
+    const asText = JSON.stringify(report.open);
+    assert.doesNotMatch(asText, /90210/, asText);
+    assert.doesNotMatch(asText, /sk-live-1/, asText);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a cascade is identified by the FINDING, not by the rule name", async () => {
+  // THE THIRD INSTANCE of the class F14 names, and it survived the fix for the second one. Keying
+  // `startedWith` on the rule NAME hides a cascade whenever that rule is already in the baseline for
+  // a DIFFERENT subject. `mixed-secrets.json` is the smallest manifest that shows it: one plaintext
+  // `A_PASSWORD`, and a `B_TOKEN` that already holds an undeclared secretRef. So the first audit
+  // holds `plaintext-secret` (A) and `secret-not-declared` (B) — and the `secret-not-declared` that
+  // pass 1 CREATES, about `a-password`, has a rule name that was already there.
+  //
+  //   before: passes 3, cascades 0   ← the run's whole point, suppressed
+  //   after:  passes 3, cascades 1   ← pass 2 only; pass 3 closes the one that started open
+  //
+  // `secret-not-declared` reports `at: "secrets"` for every secret there is, so `rule` and `at`
+  // together are still not enough — `detail`, which names the env key and the ref, is what tells two
+  // of them apart, and the applied entry carries it for exactly this comparison.
+  const ws = workspace();
+  try {
+    const { report } = await runToGate(ws.dir, "mixed-secrets.json");
+    assert.equal(report.passes, 3, JSON.stringify(report.applied));
+    assert.equal(report.startedWith, 2, JSON.stringify(report));
+    assert.equal(report.cascades, 1, JSON.stringify(report.applied));
+
+    assert.deepEqual(
+      report.applied.map((a) => `${String(a.pass)}:${a.rule}`),
+      ["1:plaintext-secret", "2:secret-not-declared", "3:secret-not-declared"],
+      JSON.stringify(report.applied),
+    );
+    // The two `secret-not-declared` entries share a rule AND an `at`, and differ only in `detail` —
+    // which is the whole reason identity needs all three.
+    assert.equal(report.applied[1]!.at, report.applied[2]!.at, "both land on `secrets`");
+    assert.notEqual(report.applied[1]!.detail, report.applied[2]!.detail, "…and only `detail` separates them");
+    assert.match(report.applied[1]!.detail, /A_PASSWORD/);
+    assert.match(report.applied[2]!.detail, /B_TOKEN/);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("two manifests that used to reach the unreachable refusal now report instead", async () => {
+  // The doc and `examples/README.md` §9 both claim `harden-fix.js`'s no-change refusal is the one
+  // you should never reach. Two ORDINARY manifests reached it, and both arrived wearing a message
+  // that blamed "the rule's detector and its repair" — a sentence that was false in both cases.
+  // Either the claim goes or the manifests do; these are the fixes that keep the claim.
+  const ws = workspace();
+  try {
+    // (a) `release: "latest"`. The auditor accepted a FLOATING release as a pin target, so the
+    // repair rewrote `svc:latest` to `svc:latest` and the byte-identical result tripped the
+    // no-change guard. The detector was right; it had handed the repair something that is not a pin.
+    const floating = await runToGate(ws.dir, "floating-release.json");
+    assert.equal(floating.report.passes, 0, JSON.stringify(floating.report.applied));
+    assert.equal(floating.report.open.length, 1, JSON.stringify(floating.report.open));
+    assert.equal(floating.report.open[0]!.rule, "floating-image-tag");
+    assert.equal(floating.report.open[0]!.autofixable, false);
+    assert.match(floating.report.open[0]!.remedy, /"release" is itself "latest", which is a moving target/);
+
+    // (b) an env key containing a dot. Every `at` is a PATH that the fixer assigns to and the
+    // auditor folds back, both splitting on ".", so `env.APP.DB_PASSWORD` addressed a nested object
+    // that does not exist: the repair wrote a spurious `env.APP.DB_PASSWORD` and left the real key
+    // untouched. The path language cannot name the key, so the honest answer is to say so.
+    const dotted = await runToGate(ws.dir, "dotted-env-key.json");
+    assert.equal(dotted.report.passes, 0, JSON.stringify(dotted.report.applied));
+    assert.equal(dotted.report.open.length, 1, JSON.stringify(dotted.report.open));
+    assert.equal(dotted.report.open[0]!.at, "env.APP.DB_PASSWORD");
+    assert.equal(dotted.report.open[0]!.autofixable, false);
+    assert.match(dotted.report.open[0]!.remedy, /contains a "\.", which this tool's path language reads as object nesting/);
+    // The real key is untouched and no phantom nesting was invented.
+    const env = dotted.report.hardened["env"] as Record<string, unknown>;
+    assert.deepEqual(Object.keys(env), ["APP.DB_PASSWORD"], JSON.stringify(env));
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a manifest read back TRUNCATED refuses, instead of being reported as invalid JSON", async () => {
+  // `fs.read` caps its output — 200,000 characters unless the node says otherwise — and appends its
+  // marker INSIDE the content rather than beside it. So a large manifest arrived as valid JSON plus
+  // `…[truncated N chars]`, and `harden-parse.js` blamed a "Bad control character at position
+  // 200000": a report of a SYNTAX error on a file whose syntax is fine. Auditing the part that fits
+  // reports the absences of the part that is missing as compliance, which is this workflow's whole
+  // defect class. (F12.)
+  //
+  // Two halves, and the second is the one that survives somebody's manifest being bigger than
+  // whatever number is in the graph: the shipped `load` node now passes an explicit `maxBytes`, AND
+  // the parse body recognises the marker and says what actually happened.
+  const ws = workspace();
+  try {
+    // A COMPLIANT manifest, padded past the cap. Compliant on purpose: this test is about the READ,
+    // and a dirty one would spend eight passes folding a quarter-megabyte object nine times for no
+    // extra assurance — slow enough that `loom()`'s stdout capture starts racing the test runner's
+    // own reporter, which is a flaw in the harness rather than a finding about the product.
+    const big: Record<string, unknown> = {
+      name: "huge",
+      stage: "prod",
+      release: "9.9.9",
+      image: "registry.internal/huge:9.9.9",
+      pullPolicy: "IfNotPresent",
+      user: "app",
+      workdir: "/srv/app",
+      ports: [8080],
+      healthcheck: { httpGet: { path: "/healthz", port: 8080 } },
+      env: { LOG_LEVEL: "info" },
+      secrets: [],
+    };
+    const notes: Record<string, string> = {};
+    for (let i = 0; i < 6000; i += 1) notes[`note-${String(i).padStart(5, "0")}`] = "x".repeat(40);
+    big["annotations"] = notes;
+    const huge = JSON.stringify(big, null, 2);
+    assert.ok(huge.length > 200_000, `the fixture must exceed the default cap, got ${String(huge.length)}`);
+    writeFileSync(join(ws.dir, "manifests", "huge.json"), huge);
+
+    // With the shipped graph's explicit maxBytes, it simply works — asserted THROUGH THE DISK rather
+    // than through `loom gates`, because a quarter-megabyte report exceeds the gate listing's own
+    // 64 KiB cap and comes back as `{"$truncated":…}` with the channel named in `readsTruncated`
+    // (documented in `examples/README.md` §8; `--max-bytes` is the dial). That is the door working as
+    // designed and is a different door from the one this test is about.
+    const started = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", input("huge.json")]);
+    assert.equal(started.code, 0, `${started.out}${started.err}`);
+    const s = summary(started);
+    assert.equal(s["status"], "awaiting_gate", started.out);
+    const gates = JSON.parse((await loom(ws.dir, ["gates", String(s["runId"])])).out) as Gate[];
+    const approved = await loom(ws.dir, ["approve", String(s["runId"]), gates[0]!.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const round = JSON.parse(readFileSync(join(ws.dir, HARDENED), "utf8")) as Record<string, unknown>;
+    assert.equal(round["name"], "huge", "the whole manifest went through, annotations and all");
+    assert.equal(Object.keys(round["annotations"] as Record<string, unknown>).length, 6000);
+    assert.match(readFileSync(join(ws.dir, REPORT), "utf8"), /Nothing\. The manifest already satisfied every rule/);
+
+    // Drop `maxBytes` — the pre-fix graph — and the default cap truncates. The refusal must name
+    // TRUNCATION, not JSON.
+    const path = join(ws.dir, GRAPH);
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { nodes: { id: string; tool?: { args: Record<string, unknown> } }[] };
+    const load = raw.nodes.find((n) => n.id === "load")!;
+    assert.equal(load.tool!.args["maxBytes"], 4_000_000, "the shipped cap moved; update this test");
+    delete load.tool!.args["maxBytes"];
+    writeFileSync(path, JSON.stringify(raw, null, 2));
+
+    const r = await loom(ws.dir, ["run", path, "--input", input("huge.json")]);
+    assert.equal(r.code, 1, `${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.equal(error["class"], "validation", r.out);
+    assert.match(String(error["message"]), /was read back TRUNCATED/, r.out);
+    assert.match(String(error["message"]), /more were dropped/, r.out);
+    // The old, false diagnosis must be gone.
+    assert.doesNotMatch(String(error["message"]), /is not JSON/, r.out);
   } finally {
     ws.dispose();
   }
