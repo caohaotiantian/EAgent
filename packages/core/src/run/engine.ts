@@ -6051,16 +6051,31 @@ export class Engine {
   /**
    * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
    *
-   * §A.63. `#assertBound`'s two VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, and a
-   * `maxWidth` outside `readableFanoutWidth`, three lines apart — both `throw` before anything is
-   * appended. The caller got `E_GRAPH_INVALID` and the journal, which is the only authoritative
-   * state, held `run.submitted, run.compiled, run.started, task.ready` and not one word about the
-   * width; a second process attaching later saw a `running` run with no reason and no terminal
-   * row. A decision was taken and the fold could not reconstruct it.
+   * §A.63. `#assertBound`'s THREE VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
+   * `maxWidth` outside `readableFanoutWidth`, and a loop `maxIterations` outside
+   * `readableLoopBound` (§A.81) — all `throw` before anything is appended. The caller got
+   * `E_GRAPH_INVALID` and the journal, which is the only authoritative state, held
+   * `run.submitted, run.compiled, run.started, task.ready` and not one word about the width; a
+   * second process attaching later saw a `running` run with no reason and no terminal row. A
+   * decision was taken and the fold could not reconstruct it.
    *
-   * BOTH CHECKS BY CONSTRUCTION, and that is why this keys on the CODE rather than on either
-   * arm. `0dd0a524` closed a three-lines-apart asymmetry between those two checks; answering one
-   * of them here and not the other would put it straight back.
+   * EVERY CHECK BY CONSTRUCTION, and that is why this keys on the CODE rather than on any arm.
+   * `0dd0a524` closed a three-lines-apart asymmetry between the first two; answering some of them
+   * here and not the others would put it straight back. **A fourth check added to `#assertBound`
+   * under `E_GRAPH_INVALID` joins this automatically and must also join `FAULTS` in
+   * `test/run/advance-refusal-is-journaled.test.ts`**, which is the census that makes the claim
+   * checkable rather than asserted — §A.81's own check was added to it for exactly that reason.
+   *
+   * THE FOURTH ONE THAT IS OWED, NAMED SO THE NEXT READER DOES NOT HAVE TO FIND IT. `when` and
+   * `until` are not checked here for string-ness, so a bent `RunGraph` reaches `#expr` →
+   * `parseExpr` at RUN TIME, mid-commit: measured on this build, `when: [null]` / `{}` / `42` each
+   * throw `E_EXPR_INVALID` out of the first `advance`, leave the run `running` with no terminal
+   * row, and answer a second `advance` with `running`. **Such a check must cover EDGES AND ROUTER
+   * CASES** — `#expr` has three call sites, `e.when` and `e.until` on edges and
+   * `router.cases[].when` on a NODE (`#runRouter`) — which is the same three `graph/validate.ts`
+   * already walks through `checkExpr`. Scoping it to `ctx.graph.spec.edges`, as the three checks
+   * above are, would close two sites of three and leave the asymmetry this paragraph exists to
+   * prevent one node type over.
    *
    * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
    * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
@@ -6292,6 +6307,55 @@ export class Engine {
           `the width is sliced off the fanned channel and multiplied into every downstream node's parallel width, ` +
           `and an unreadable one fans out zero branches in silence`,
         { details: { runId: ctx.runId, edges: unreadableWidth.map((edge) => ({ id: edge.id, maxWidth: describeWidth(edge.maxWidth) })) } },
+      );
+    }
+    // AND A LOOP BOUND THIS EXECUTOR CANNOT READ REFUSES THE RUN — §A.81, and the argument is the
+    // one directly above with the word `maxWidth` changed. The asymmetry was the defect: the width
+    // was re-checked here with a written reason and `maxIterations` was not, one edge kind over, so
+    // `#loopMayContinue`'s `w.task.iteration + 1 < (e.maxIterations ?? 1)` met the raw value. `{}`
+    // makes that comparison `NaN`, `NaN` is false, and the loop stops after ONE pass — the
+    // `until` never gets another chance, the complementary `conditional` exit never fires, and the
+    // run reports **`succeeded`** having done a seventh of its work. Measured at `be29cb43` on one
+    // compiled loop graph (`maxIterations: 6`, `until: "len(n) >= 5"`) with the bound mutated on the
+    // `RunGraph`: `maxIterations={}  advance=status=succeeded n=["s","x"]` against
+    // `maxIterations=6  advance=status=succeeded n=["s","x","x","x","x","x","x"]`.
+    //
+    // FAILING OPEN IS WHAT SEPARATES IT FROM THE WIDTH. An unreadable width fans out zero branches
+    // and the run visibly does nothing; an unreadable bound produces a run that LOOKS finished. A
+    // wrong answer wearing `succeeded` is the worse of the two, which is why the missing half was
+    // the half that costs a live run.
+    //
+    // A NUMERIC STRING IS NOT READABLE, deliberately, and it is a tightening of today's behaviour:
+    // `"6"` currently RUNS — `1 < "6"` coerces — and is pinned here as a refusal. Two reasons and
+    // they agree. `readableFanoutWidth` refuses a string for its own readers ("`0` is refused for
+    // the same reason a string is"), and the COMPILER already refuses `maxIterations: "6"` with
+    // `GRAPH006_BAD_MAX_ITERATIONS` (`EDGE_FIELD_IS.count` is `Number.isSafeInteger`), so no graph
+    // that passed this build's compiler can carry one. ABSENT is refused for the same pair: `?? 1`
+    // runs the loop exactly once in silence, and the compiler calls it `GRAPH006_UNBOUNDED_LOOP`.
+    //
+    // THE READABILITY TEST AND NOT THE CEILING, verbatim the paragraph above: `rule006Cycles` also
+    // refuses a bound over `expansion.maxLoopIterations`, and re-deriving that here would be a
+    // second implementation of a budget that refuses graphs the compiler accepted, including runs
+    // already in flight.
+    //
+    // `loop` ALONE, because `#loopMayContinue` is reached from `#edgesToTake` only under
+    // `e.kind === "loop"` (both entrances — the `switch` arm and the router's `take` filter). An
+    // edge of another kind carrying a `maxIterations` has no reader, and refusing a run over a
+    // field nothing reads would be a guard inventing its own scope.
+    const unreadableIterations = ctx.graph.spec.edges.filter((edge) => edge.kind === "loop" && !readableLoopBound(edge.maxIterations));
+    if (unreadableIterations.length > 0) {
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `the graph supplied for ${why} has ${unreadableIterations.length === 1 ? "a loop edge" : "loop edges"} whose maxIterations this build cannot read: ` +
+          `${unreadableIterations.map((edge) => `"${edge.id}" (maxIterations ${describeWidth(edge.maxIterations)})`).join(", ")} — ` +
+          `the bound is compared against the iteration counter to decide whether the loop may run again, ` +
+          `and an unreadable one stops the loop after one pass whatever bound was declared, and reports the run succeeded`,
+        {
+          details: {
+            runId: ctx.runId,
+            edges: unreadableIterations.map((edge) => ({ id: edge.id, maxIterations: describeWidth(edge.maxIterations) })),
+          },
+        },
       );
     }
     const recorded = await this.#compiledIdentity(ctx.runId);
@@ -14471,6 +14535,43 @@ const EDGE_KINDS: ReadonlySet<string> = new Set(["seq", "conditional", "fanout",
  * is: a fan-out of nothing is silent.
  */
 function readableFanoutWidth(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+}
+
+/**
+ * A loop bound the executor's own reader can use — `#assertBound`'s copy for `maxIterations`
+ * (§A.81), and the same rule `readableFanoutWidth` is above it.
+ *
+ * A SECOND NAME FOR ONE RULE, ON PURPOSE. The two are the same predicate today and they are not
+ * the same QUESTION: each refusal has to say what ITS reader does with the value, and the two
+ * consequences are different in the way that matters — an unreadable width fans out zero branches,
+ * which is silent, while an unreadable bound stops the loop after one pass WHATEVER BOUND THE
+ * GRAPH DECLARED and the run reports `succeeded`. (One pass is not itself the harm: it is what
+ * `maxIterations: 1` legally asks for. The harm is that the declared bound is silently not the
+ * one honoured.) Folding them into one call site would put the sentence "fans out zero branches" on
+ * a loop edge. **They must move together**: if either rule changes, ask the same question of the
+ * other, because the only thing keeping them in step is this paragraph.
+ *
+ * IT HAS TWO READERS, NOT ONE, and the second is the one a first cut of this docstring missed.
+ *
+ *   `#loopMayContinue`'s `w.task.iteration + 1 < (e.maxIterations ?? 1)` — the scheduler's.
+ *   `nodeShapeOf` (this file), which copies `maxIterations` onto `ctx.node.out` for EVERY function
+ *   body (`run/registry.ts` names it as clause (i), "the outgoing-edge fields that bound what this
+ *   node's own output can produce"). `examples/resources/function/harden-fix.js`, `plan.js` and
+ *   `triage-plan.js` all read that shape, which is `c2360be`'s whole point: a bound is spelled
+ *   once, in the graph, and the body reads it rather than hard-coding it.
+ *
+ * THE SECOND READER STRENGTHENS THE CASE for refusing at the door rather than weakening it. A body
+ * handed `maxIterations: {}` does arithmetic on it and gets `NaN` — the bound the graph declared
+ * reaches the body as a value it cannot use, in a body whose reason for reading it is to avoid
+ * hard-coding one. Refusing the graph is the only answer that keeps both readers honest.
+ *
+ * `>= 1` rather than `Number.isSafeInteger` alone, matching `rule006Cycles`' own bound
+ * (`e.maxIterations === undefined || e.maxIterations < 1` ⇒ `GRAPH006_UNBOUNDED_LOOP`): `0` and
+ * absent both make the scheduler's comparison false at the first iteration, which is a loop that
+ * never loops.
+ */
+function readableLoopBound(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 }
 
