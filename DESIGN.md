@@ -259,7 +259,7 @@ admitting it turns the rule into a counterexample generator.
 | 21 | A.36 | **done `d9a8173`** — a child run was LISTED by `GET /runs` and 404'd on every by-id route; a child id always contains a `#` |
 | 22 | B.1 | **reclassified, not work** — `TODO.md` §B.1: `LeasedScheduler` is a pinned public type a library embedder already reaches, so "wire it or delete it" is a false dichotomy |
 | 23 | A.13 | **done `96a03bf`** — `loom run` counted its own laps instead of the run's progress |
-| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29 |
+| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29. **RE-SEQUENCED 2026-09-22b, keeping its number rather than being reopened as a new item.** The FACT that moved: "a second input shape for the self-improvement corpus" was deferred below on the cost of a second port, and ports 2 and 3 have since happened, so the shapes exist and what is left is live spend against them. The 2026-09-22b assessment's judgement — not a measurement — is that this makes the money decision smaller. **What closes it is the behaviour §A.29's title names** — a candidate the graph's OWN verifier certifies, refused by `1-must-pass` and reported as a 33.3pp regression, must stop being refused. **That behaviour is NOT currently reproduced by a command:** §A.29 carries only a grep the row itself disowns (it counts prose about a deletion), so producing a repro for the refusal is the item's own first task. Closing it needs a fold that can answer *"what did channel C hold when task T read it"*, a per-task ordering `RunProjection` does not carry — **or** property 3's claim re-scoped to what the exam actually establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. This item and item 18 are the only OPEN items in 1–28; 8 and 13 are HALF, and their remainders are real — D5's version pin, and `TODO.md` §E.2's coordinator |
 | 25 | D.1 | **done** — `readMcpServers` silently dropped every key it did not know, so a per-server `irreversibility` vanished. `TODO.md` §D.1 |
 | 26 | H.4 | **done `96a03bf`** — three flags accepted and ignored on a verb reading none of them |
 | 27 | H.3 | **done `e8c2fb5`** |
@@ -277,7 +277,148 @@ measures is the failure `CLAUDE.md` §3 names.
 Thirteen survey rows are blocked on a named thing and sixteen are refused with a measurement.
 **The two blockers that recur are design questions rather than work:** a durable fact the journal
 has no vocabulary for (A.11, C.1, C.3, E.2), and a decision only the maintainer can make (D.3,
-D.5, G.1). **Neither becomes an item by being wanted.**
+D.5, G.1). **Neither becomes an item by being wanted.** *PART of one of the two has since become an
+item, and by the rule rather than around it:* item 31 below is the journal vocabulary **§C** is
+blocked on, and it is an item because §C.2's own repro FAILS — eight of eleven documented span
+attributes are not derivable. It does NOT cover A.11 or E.2, which are the same KIND of blocker and
+have no failing command of their own; they stay here. The maintainer's decisions are still not
+items at all, and the list of them after item 31 says so in its own heading.
+
+### Items 29–31 — opened 2026-09-22b by the settlement's assessment
+
+**Standing, and the set is NAMED because a count of it was wrong once already.** Of items 1–28:
+**two are still OPEN — 18** (G.5(a): after a MUTATION the successor carries no recorded manifest,
+so a gate decision on it never checks the resources behind its refs) **and 24** (A.29) — **two are
+half**, 8's version pin and 13's second half, **22 was reclassified**, and the other **twenty-three
+are done**. Re-derive it from the three tables above, never from this sentence. No item had been
+opened since 2026-09-02, when items 15–28 were.
+
+**What that leaves is not code.** Three workflows are ported with zero changes under
+`packages/core/src`; `npm run check` is green (the handoff's §1 carries the wave's counts, which
+move with every commit and are deliberately not repeated here); and the surface guard was seen
+refusing a real commit this wave — `check-surface.mjs` printed `added: BlockFieldType`, and the
+union was made module-private. The open-row count ROSE across three settlements — **46 → 51 → 56**,
+counted with `TODO.md`'s own census command at `bde693e2`, `0a9483c0` and `279b5c73` — because
+strangers drove the binary, not because anything decayed. **What is not started is the product.**
+These three items are what a maintainer does next, and **the owed-decision list after item 31 is
+what the THREE wait on** — items 18 and 24 wait on none of it; each closes on the terms written in
+its own row and cell.
+
+**29 · Distribution — a published binary and a stranger-facing install.** *Moved here out of
+"Deliberately not sequenced", and TWO conditions are being retired, which is not the same act.* The
+SUPERSEDED one ("revisit when item 4 lands") was met and the answer did not change, and this file
+already called it the wrong condition: porting a workflow is evidence about the runtime, not about
+who else wants it. The STANDING one — *"somebody who is not the maintainer asking to run this"* —
+was never called wrong and is **ABANDONED here rather than met**, because it cannot be met: nobody
+who is not the maintainer can ask to run a thing they cannot obtain, so a condition waiting on a
+stranger is waiting on the very step it gates. **What replaces it is the goal's own first verb.**
+`CLAUDE.md` opens *"Install it, describe what they want done, have it run against a real provider,
+watch it, stop it, and trust what it did"* — **six verbs, and the receipts are not evenly spread.**
+Item 4 is the receipt for four of them in one run: a real workflow DESCRIBED as a graph, RUN
+against a live GLM-5.2, STOPPED at the gate, and TRUSTED by a replay with no key
+(`match: true, hermetic: true`, the side effect not repeated). **WATCH has the weakest** — the
+console and `GET /runs` exist, and `TODO.md` §C's header says *"a richer operator surface over a
+plane that is not emitting is a better view of nothing"*, which item 31 below is about. **INSTALL has none at all**, and it is the only one of the
+six no item has ever been written for. Two commands fail today, the second more quietly than the
+first:
+
+```
+$ cd "$(mktemp -d)" && npx --yes @loom/core --version
+npm error code E404
+npm error 404 Not Found - GET https://registry.npmjs.org/@loom%2fcore - Not found
+```
+```
+$ cd <repo>/packages/core && npm publish --dry-run >/tmp/pub.txt 2>&1; echo "exit=$?"; tail -1 /tmp/pub.txt
+exit=0
+npm warn publish Skipping workspace @loom/core, marked as private
+```
+
+`README.md`:69–72 already states the second in full — *"`@loom/core` is `private: true`, and
+`npm publish` does not REFUSE — it exits 0 and quietly does nothing, which a CI step checking only
+the exit code would report as a successful release."* **Closes when** somebody who has not cloned
+this repository can install and run `loom`. **Making `npm publish` refuse is NOT part of that** —
+it is a guard over a silence that stops mattering the moment the package is publishable, and
+`TODO.md` §H.15 says so on its own row. **What this reopens by its own text**, named here so it is
+not discovered later: `TODO.md` §H.1 says verbatim *"Reopens on more than one operator, or a
+published binary"*. §D's single-operator framing is not disturbed by publishing as such — of the
+things that rest on it, the one that names a published artifact is §H.1, and the permanent
+admission refusal rests on the run RATE rather than on who can obtain the binary.
+
+**30 · The channel-shape decision: what a channel carries when a tool fails, truncates, or holds a
+secret.** §A.82, §A.83 and §A.90 are **one unanswered question**, which is the whole reason this is
+an item rather than three. §A.90 is the one to answer first — it is the only row in `TODO.md` that
+ends in destroyed data with exit code 0, and the command that shows it is **pasted once, on §A.90's
+own row**, re-run for this settlement on `29c8b9ec` against the shipped `grant-access.json` with
+its defence in place: `chmod 333` the output directory and the run exits **0**, reports
+`succeeded`, rebuilds its ledger from `historySource: "none"`, and `u:sam`'s grant is gone. Read it
+there; a second copy is the copy that rots.
+
+**Closes when** a tool failure, a truncation and a classification are FACTS on a channel an `error`
+arm may declare in `reads` — answered ONCE for all three rows, not three times. The shape is the
+decision: §A.90 needs the failure's code and message projected; §A.83 needs *this read was
+truncated* out of the content string and onto the channel, at all three of its sites (`fs.read`,
+`proc.exec`, `net.fetch`); §A.82 needs a per-key classification in both directions. A wider regex is
+not §A.82's closure and a bigger `maxBytes` is not §A.83's — each of those moves the gap. The
+`KNOWN HAZARD` test in `packages/core/test/examples-grant.test.ts` asserts today's LOSS, so when
+this lands that test FAILS and is deleted along with the `look` node rather than loosened.
+`TODO.md` §D.10 carries the options.
+
+**31 · The journal vocabulary §C is blocked on.** §C gates the UI direction, and it is blocked on
+facts the journal has no words for, not on a view. Eight of eleven documented span attributes are
+NOT DERIVABLE, and the repro counts the three that are:
+
+```
+$ /usr/bin/grep -aoE '"(gate\.batched|tool\.attempt)"|(^|[^.\w"])capability\s*:' packages/core/src/telemetry/spans.ts | /usr/bin/grep -ac .
+3
+$ /usr/bin/grep -anc 'name: "loom\.' packages/core/src/telemetry/spans.ts
+7        # and it UNDERCOUNTS by two: `loom.model` and `loom.tool` are one ternary, so nine exist
+```
+
+Six designed span names have no producer and each names the event it would need (`TODO.md` §C.1);
+the eight underivable attributes each state theirs (§C.2). **This item covers §C and only §C** —
+A.11 and E.2 are the same kind of blocker with no failing command, and stay in "What is left over"
+above. **Closes name by name, two or three events at a time** — every one is a
+`journal/events.ts` change and therefore a `Kernel-seam:` trailer, which is exactly what the kernel gate exists to make visible. **It does not close by
+emitting them**: §C.2's own text says so. Do not start the UI ahead of it — a richer operator
+surface over a plane that is not emitting is a better view of nothing.
+
+**The owed decisions are NOT an item, and that is the rule working rather than an omission.** A
+decision cannot name a command that fails, so it gets cut rather than reworded — but the SITTING is
+the highest-value unit of work in this project right now, and the list is here so it is not carried
+in a chat. Four of these are owed for the FIFTH wave running. Enumerated:
+
+- **§A.68 — `skip` vs `fail` on the shipped `two-person-approval.json`.** *Still the decision the
+  settlement most wants answered*, and it is one word in a shipped example. Both modes now refuse a
+  run below `k` (§A.75 closed); they differ in WHEN. The row is struck — the graph's behaviour is
+  documented and correct — and the decision lives in its 2026-09-22 addendum.
+- **§A.77** — whether `validate.ts` should refuse `k > branches.length` for a barrier whose every
+  member is static and unfanned. No lane has taken it.
+- **The exported-constant shape-break policy** — `EDGE_FIELDS`, and now `POLICY_FIELDS` and
+  `NESTED_FIELDS`, changed from ARRAYS to RECORDS and kept their names, so `check-surface.mjs` reads
+  "unchanged". Whether that guard should pin SHAPE, and whether such a change may land under `fix:`.
+  `TODO.md` §D.11.
+- **Whether `attach` should be honest** (§A.76's residue), now with a measured cost: it is the
+  reason neither `#assertBound` vocabulary check can see a graph attached to a run this process
+  already holds.
+- **§A.71** (does a budget/fatal floor cascade to a subgraph child), **§D.8** (must a join's inbound
+  edge be `kind: "join"`), **§A.70** and **§A.72** — four owed into a fifth wave.
+- **§A.87** — `metadata.version`: a number or a semver STRING.
+- **§A.86** — whether `GRAPH002`'s reachability should be *realisable* rather than *reachable*, or
+  whether a warning may over-approximate and say so at the rule.
+- **The per-run-ledger alternative to port 3's F5** — a per-run ledger file cannot lose an entry to
+  a failed read, and converts a silent loss into a spurious gate, which is the direction a guard is
+  allowed to fail in. It is a structural alternative to item 30, not a substitute for it.
+
+**And the ordering argument, which is the only thing that makes this a list rather than a
+preference: A DECISION AND AN INSTALL PATH OUTRANK A NINTH WAVE OF INVARIANTS.** Item 30 first,
+with the sitting above riding on it; then 29; then the two that were already open — **24** (A.29,
+re-sequenced on its own row above) and **18** (G.5(a)) — which are the two open items on property
+3's own path: 24 is the promotion half, and 18 is the MUTATION half, a mutated run's successor
+carrying no recorded manifest for `#assertBound` to compare, on the same verb self-improvement
+would have to use. Then 31. A FOURTH workflow port is worth
+as much as the first three — that claim is unchanged — and comes after 29 and 30, because a port's
+value is the friction it logs, and friction met by a stranger who could not install this is
+friction nobody logs.
 
 ---
 
@@ -287,10 +428,14 @@ Governs the whole Sequence. **Leaving something out is a choice, and an item tha
 being mentioned is indistinguishable from one nobody thought of.** Each entry says what would put
 it back.
 
-**Distribution** — publishing and a stranger-facing install. *What would sequence it:* somebody who
-is not the maintainer asking to run this. The old condition ("revisit when item 4 lands") was met
-and the answer did not change, which means it was the wrong condition: porting a workflow is
-evidence about the runtime, not about who else wants it.
+**Distribution left this list on 2026-09-22b and is now item 29** — named here rather than quietly
+dropped, because that is this section's own rule. **Its entry carried two conditions and they were
+retired differently.** The superseded one ("revisit when item 4 lands") was met and the answer did
+not change, and the entry itself called it the wrong condition. The standing one — *"somebody who
+is not the maintainer asking to run this"* — was **never called wrong; it is ABANDONED**, because
+it cannot be met: nobody who is not the maintainer can ask to run a thing they cannot obtain, so
+the condition waits on the step it gates. What sequences it instead is the goal's FIRST VERB. Item
+29 states both retirements.
 
 **Admission control's successor.** The door was refused PERMANENTLY — under one tenant the right
 answer to "too much work" is to make it wait, never to say no — and ceilings were built instead:
@@ -318,7 +463,14 @@ compatibility table with no entries. *Re-argue it on the seam, not on the count.
 runs at ONE input shape, and a corpus of one input shape is not a corpus of many. The fix is more
 live spend, so it is a decision about money. *What would sequence it:* a second workflow ported,
 which produces the second shape as a by-product — the same argument item 4 made, and the reason
-porting workflows keeps outranking proving invariants.
+porting workflows keeps outranking proving invariants. **THE PORT CONDITION IS MET, 2026-09-22b, and the
+2026-09-22b settlement's assessment is that the money decision is now SMALLER than when this was
+written** — the sizing is the assessment's, not a measurement: two more workflows have been ported
+since, `examples/graphs/harden-config.json` and `examples/graphs/grant-access.json`, overlapping
+the first in `seq` alone and in six mechanisms respectively, so the shapes exist. What is left is
+the live spend against them, which is still a decision about money and still only the maintainer's.
+It stays here rather than becoming an item because no command fails: nothing in the tree refuses a
+second shape, there simply is no run at one. **Item 24's amended cell is where this now bears.**
 
 **A file-level `// loom:surface <version>` directive** was proposed under item 8 and REJECTED on a
 control: its justification was that such a directive on a hook body disarms the `no-secrets` hook,

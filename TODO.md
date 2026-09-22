@@ -18,6 +18,12 @@ Convention: a row struck through (`- ~~**A.N …**~~`) is CLOSED and must not be
 are stable — other files cite them — so a closed row keeps its id rather than being renumbered
 away. `§Z` is the register of closures with the sha that carries each argument.
 
+**Direction, 2026-09-22b — this file is the list, not the order.** What to do next is
+`DESIGN.md`'s Sequence **items 29–31** (distribution; the one channel-shape decision behind §A.82,
+§A.83 and §A.90; the journal vocabulary §C is blocked on) plus the two items already open there —
+**24** (§A.29) and **18** (§G.5's residue) — and the owed-decision list that follows them, with the
+argument in `docs/handoff-2026-09-22b.md` §6.
+
 ---
 
 ## State — one command each, re-run 2026-09-22b on the settlement HEAD
@@ -54,6 +60,16 @@ it.
 /usr/bin/grep -acE '^[0-9]+\. \*\*' TODO.md                   # §F, a numbered list, counted its own way
 ```
 
+**Do not carry those three numbers here** — they are counts of THIS file and move with every edit
+to it, this sentence's own included (rule 3). Run the commands. What IS fixed enough to write down
+is the settlement-to-settlement series, because each term is pinned to a commit: **46 → 51 → 56**
+at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above. The 2026-09-22b
+assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
+new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
+were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
+row, by §A.62's own closing clause and by §State's two LEDGER WATCH cells; and **§H.15** names an
+absence `README.md`:55 and :69–72 already document.
+
 "Rows present" and "rows still open" are different facts; a table stating only their difference can
 be wrong without being falsifiable, which is why there are three columns.
 
@@ -63,11 +79,11 @@ be wrong without being falsifiable, which is why there are three columns.
 | §A | 93 | 61 | 32 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 9 | 5 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so |
+| §D | 11 | 5 | 6 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 15 | 14 | 1 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and is now the only open member. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
+| §H | 16 | 14 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the other, opened 2026-09-22b and closing with `DESIGN.md` item 29**. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -1356,8 +1372,11 @@ row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work be
   **LEDGER WATCH, for whoever reads the next diff:** `graph/spec.ts` is one of the ten kernel files
   and it gained enforcement vocabulary under `fix:`, which `check-kernel.mjs` cannot see and
   `check-surface.mjs` calls unchanged. Related: `EDGE_FIELDS` went from an ARRAY to a RECORD, so any
-  out-of-tree reader doing `EDGE_FIELDS.includes(f)` breaks silently at the same "unchanged" —
-  whether that is a shape break the project owes a policy on is on the owed list.
+  out-of-tree reader breaks at the same "unchanged" — **and NOT silently, which this clause had
+  backwards until it was measured on 2026-09-22b**: `EDGE_FIELDS.includes(f)` THROWS
+  (`v.includes is not a function`), while `EDGE_FIELDS.length` is `undefined`, so it is the
+  LENGTH reader that fails silently and validates nothing. The owed list that this clause pointed
+  at is now a row: **§D.11**, which carries the measurement and the options.
   **NOTE ADDED 2026-09-22b: "closes at TWO" is now "closes at TWO, TWICE."** §A.81(b) added
   `readableLoopBound` beside `readableFanoutWidth` in `run/engine.ts`, by this row's own argument —
   the executor must not depend on having been the compiler's caller — so there are two hand-written
@@ -2664,7 +2683,9 @@ a better view of nothing.
   when** each of the eight gains the journal event it needs — a `journal/events.ts` change and
   therefore a seam, every one — or is struck from the set. **It does not close by emitting them.**
 - **C.3 · No scheduler-tick telemetry, and there is no tick loop to instrument.** Repro:
-  `/usr/bin/grep -anc 'tick' packages/core/src/run/scheduler.ts` → 1. A design gap, not a wiring gap.
+  `/usr/bin/grep -anc 'tick' packages/core/src/run/scheduler.ts` → **0** (the row said 1; re-run
+  2026-09-22b, and the word is gone from the file entirely, which makes the row MORE true rather
+  than less). A design gap, not a wiring gap.
   Per-task queue wait is already measurable — `task.ready` and `task.leased` are journaled and
   `spans.ts` attaches the latter as a span event, so the p99 is a fold over what is already emitted.
   **Closes when** there is scheduler-level behaviour to instrument.
@@ -2819,6 +2840,81 @@ a decision's argument is the thing a future reader needs.
   a barrier has none. What that closure leaves is §A.70 (a nested join over an empty fan is a work
   member that produced nothing) and §A.72 (the fold is final at a short-circuit release).
 
+- **D.10 · What a channel carries when a tool fails, truncates, or holds a secret — ONE decision for
+  §A.82, §A.83 and §A.90.** Three rows, one question, and answering it three times is how a channel
+  shape becomes three shapes. **§A.90 is the one to answer first**: it is the only row in this file
+  that ends in destroyed data with exit code 0. **Its repro lives on §A.90's own row and is not
+  copied here** — a second copy is the copy that rots (`DESIGN.md`'s own rule above its Sequence
+  tables). Re-run for this settlement on `29c8b9ec`, it still ends `exit=0`,
+  `{"status":"succeeded","historySource":"none"}`, and the ledger holding `["u:ravi"]` where it held
+  `["u:sam"]`.
+  **What each row needs, so the shape is chosen against all three and not against the loudest.**
+  §A.90: the failure's CODE and MESSAGE as a projection an `error` arm may declare in `reads` —
+  three different outcomes (absent, unreadable, refused by the sandbox) currently wear
+  `E_TOOL_SOURCE_UNAVAILABLE` alone and the `content` that would tell them apart reaches no channel.
+  §A.83: *this read was truncated* OUT of the content string and onto the channel — `builtin/tools.ts:370`
+  is where the cap is applied and `:385` is where the marker is appended INTO the returned text,
+  while the `{bytes, truncated}` beside it reaches no `function` body — **and at all THREE sites,
+  not just `fs.read`**: `:305` is `proc.exec` and `:1179` is `net.fetch` (default `100_000`), which
+  is the reason to take this decision once rather than per tool. §A.82: a per-key classification in
+  BOTH directions — *this key's value is a credential*, and *this key's value is not, whatever it is
+  called* — because `security/redact.ts` reads NAMES and is both narrower and wider than a
+  workflow's own predicate.
+  **The options, and none of them is "widen the regex" or "raise `maxBytes`":** those move the gap
+  rather than close it, and §A.82 says so in its own text.
+  **(a)** One reserved ERROR PROJECTION per node, declarable in an arm's `reads` — closes §A.90
+  directly, and §A.83's truncation becomes a non-fatal member of it. Cost: a new channel shape in
+  `graph/spec.ts` and a `validate.ts` rule, and it is the kernel.
+  **(b)** A per-channel DESCRIPTOR carrying classification and completeness beside the value — one
+  mechanism for all three, and the largest change: every reducer and every projection learns it.
+  **(c)** Refuse instead of truncating and instead of guessing: a read fails when the cap is hit and
+  the caller did not ask for truncation, at all three sites, and a failed tool's typed error reaches
+  the arm. Fails CLOSED, which is the allowed direction, and is the cheapest of the three.
+  **(d)** The structural alternative for §A.90 alone — a per-run ledger file, which cannot lose an
+  entry to a failed read and converts a silent loss into a spurious gate. It does not answer §A.82
+  or §A.83 and is not a substitute for the decision.
+  **Closes when** the maintainer picks one and it is written beside the shape it chose. When (a),
+  (b) or (c) lands, the `KNOWN HAZARD` test in `packages/core/test/examples-grant.test.ts` — which
+  asserts today's LOSS — must go RED and be DELETED along with the port's `look` node, rather than
+  loosened. `DESIGN.md` Sequence item 30 is the roadmap entry.
+
+- **D.11 · The shape-break policy for exported kernel constants — `EDGE_FIELDS`, `POLICY_FIELDS`,
+  `NESTED_FIELDS` — which `check-surface.mjs` cannot see.** *(Raised by §A.62's own closing clause —
+  "whether that is a shape break the project owes a policy on is on the owed list" — and by the two
+  LEDGER WATCH cells in §State, which is where §A.81(a)'s repeat of it is recorded. This row is
+  where the owed list actually says it.)* `check-surface.mjs` pins the exported NAME SET, so a
+  constant whose TYPE changes from an ARRAY to a RECORD is "unchanged" to it. It has now happened
+  twice: `EDGE_FIELDS` in the 2026-09-22 wave and `POLICY_FIELDS`/`NESTED_FIELDS` in the 2026-09-22b
+  one, both under `fix:`, both in `graph/spec.ts`, which IS on `scripts/kernel.json` — so
+  `check-kernel.mjs` did not ask for a trailer either, `fix` being free to touch the kernel. Repro,
+  the guard agreeing that nothing moved, and then what an out-of-tree reader gets:
+  ```
+  $ node scripts/check-surface.mjs
+  surface guard ok: 542 public exports, unchanged
+  $ node -e "import('./packages/core/src/index.ts').then(m=>{for(const n of ['EDGE_FIELDS','POLICY_FIELDS','NESTED_FIELDS']){
+      const v=m[n];let inc;try{inc=String(v.includes('kind'))}catch(e){inc='THROWS: '+e.message}
+      console.log(n,'array?',Array.isArray(v),'| .includes ->',inc,'| .length ->',String(v.length))}})"
+  EDGE_FIELDS array? false | .includes -> THROWS: v.includes is not a function | .length -> undefined
+  POLICY_FIELDS array? false | .includes -> THROWS: v.includes is not a function | .length -> undefined
+  NESTED_FIELDS array? false | .includes -> THROWS: v.includes is not a function | .length -> undefined
+  ```
+  **The break is worse in one direction, and the measurement above is what makes it a decision
+  rather than a style note**: a `.includes(…)` or spread reader THROWS, so it is discovered on the
+  first run; a `.length` reader gets `undefined`, so `for (let i = 0; i < v.length; i++)` runs ZERO
+  times and the reader validates nothing while reporting that it did. That is property 2's failure
+  mode — an extension author outside this tree, with no way to learn.
+  **The options. (a)** Teach `check-surface.mjs` to pin the SHAPE of an exported const (array vs
+  record, and the key set) as well as the name; it is `scripts/`, not the kernel, and the cost is a
+  second snapshot file that moves whenever a field is added. **(b)** Leave the guard alone and make
+  it a COMMIT rule: a shape change to an exported const is `feat:` and owes a `Kernel-seam:`
+  trailer, whatever else the commit does — which is the ledger-watch paragraph in `CLAUDE.md` §1
+  turned into a requirement, and is unenforceable by any script. **(c)** Argue that these three
+  constants are not part of the surface a stranger may read, and export a function instead of the
+  data — which changes `graph/spec.ts` and is the only option that makes the question go away.
+  **Closes when** the maintainer picks one and the argument is written where the next reader of
+  `check-surface.mjs` reaches it. Until then the guard reads "unchanged" and the reason it does is
+  here rather than nowhere. Cross-refs: §A.62's closing clause, §State's two LEDGER WATCH cells,
+  `docs/handoff-2026-09-22b.md` §4, and `DESIGN.md`'s owed-decision list after item 31.
 ---
 
 ## E · Deferred on purpose, with the reason — do not silently revive
@@ -3364,6 +3460,39 @@ Each traces to a decision in `DESIGN.md`.
   base) — and `describeValue` has no cap, so three distinct 400-character edge kinds give a
   **1,512-byte** line and each `GRAPH003_UNKNOWN_EDGE_KIND` above it 601. All measured on
   `61b00d12`; the dedupe bounds the COUNT of distinct renderings, not the length.
+
+- **H.15 · There is no stranger-facing install: `@loom/core` is unpublished, and `npm publish` exits
+  0 doing nothing.** *(Opened 2026-09-22b by the settlement's assessment. The goal's FIRST VERB is
+  "install it", and it is the one step only the maintainer can take.)* Repro on `29c8b9ec`:
+  ```
+  $ cd "$(mktemp -d)" && npx --yes @loom/core --version
+  npm error code E404
+  npm error 404 Not Found - GET https://registry.npmjs.org/@loom%2fcore - Not found
+  ```
+  ```
+  $ cd <repo>/packages/core && npm publish --dry-run >/tmp/pub.txt 2>&1; echo "exit=$?"; tail -1 /tmp/pub.txt
+  exit=0
+  npm warn publish Skipping workspace @loom/core, marked as private
+  ```
+  **`README.md`:69–72 already states the second half and nothing in the tree acts on it** — *"`@loom/core`
+  is `private: true`, and `npm publish` does not REFUSE — it exits 0 and quietly does nothing, which
+  a CI step checking only the exit code would report as a successful release."* Line 55 states the
+  first: *"`loom` is not published; the binary IS the install."* So today a stranger must clone this
+  repository and run `npm install && npm run build:binary`, and `npm pack packages/core` plus a tgz
+  install is the documented substitute (README:71–72). **This is housekeeping only in that nothing
+  is broken**; what it blocks is the bar `CLAUDE.md` sets.
+  **Closes with `DESIGN.md` Sequence item 29** — when a stranger who has not cloned this repository
+  can install and run `loom`. **It is NOT closed by making `npm publish` refuse**: that is a guard
+  over a silence which stops mattering the moment the package is publishable. Item 29 states the
+  same closing condition in the same words, so the two cannot drift apart.
+  **What it reopens by its own text**, named here so nobody rediscovers it: **§H.1**, which says
+  verbatim *"Reopens on more than one operator, or a published binary"* — and it is the only row in
+  this file naming a published artifact as a reopening condition. §D's single-operator framing is
+  NOT disturbed by publishing as such: of what rests on that framing, the permanent admission
+  refusal rests on the run RATE (§Z, and `DESIGN.md`'s "Deliberately not sequenced") and §E.1 on
+  team size, and a registry entry moves neither. §H.0 does not rest on it at all — it is a
+  delegation-gate decision the maintainer already took.
+
 ---
 
 ## Z · Closed 2026-08-25 → 2026-09-22b — do not re-fix these

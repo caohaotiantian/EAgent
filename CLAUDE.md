@@ -70,6 +70,14 @@ distinguishes*: two renewal guards could be DELETED with the suite green, and MU
 where reading had not. **A FOURTH port is worth as much again**, and nothing
 has replaced these three.
 
+**The 2026-09-22b settlement's assessment qualifies the ranking above** — *a port beats an
+invariant* — **and does not overturn it: between those two it still holds, but a maintainer's
+DECISION and an INSTALL PATH now outrank both.** Same argument as the port's: a runtime nobody can
+install has no strangers to exercise it, and the goal's first verb is *install it*. The decisions
+are owed, not blocked; the one most wanted is a single word in a shipped example (§A.68, a STRUCK
+row — the decision lives in its 2026-09-22 addendum). **The Sequence's items 29–31, its still-open
+18 and 24, and `docs/handoff-2026-09-22b.md` §6 say what comes next.**
+
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
 ### 1 · Kernel stability
