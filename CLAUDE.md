@@ -215,7 +215,7 @@ docs/              dated records w/ repros. START: handoff-2026-09-22.md, audit-
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-15b wave is merged into `loom`; the handoff says what each lane
+Every branch through the 2026-09-22 wave is merged into `loom`; the handoff says what each lane
 did and left open, and which of its lanes' claims did not survive being re-run.
 
 ## Commands
