@@ -127,6 +127,8 @@ interface Report {
   readonly passes: number;
   readonly stoppedBy: string;
   readonly cascades: number;
+  /** How many findings the FIRST audit held — what `cascades` is measured against (F12). */
+  readonly startedWith: number;
   readonly applied: readonly Applied[];
   readonly open: readonly { rule: string; at: string; autofixable?: boolean; remedy: string }[];
   readonly hardened: Record<string, unknown>;
@@ -333,8 +335,19 @@ test("a manifest dirtier than the pass budget says so, rather than claiming to b
     const { runId, gate, report } = await runToGate(ws.dir, "legacy-gateway.json");
     assert.equal(report.passes, 12, JSON.stringify(report.applied));
     assert.equal(report.stoppedBy, "budget");
-    assert.ok(report.open.length > 0, "a budget stop leaves auto-fixable work on the table");
-    assert.equal(report.open.some((f) => f.autofixable === true), true, JSON.stringify(report.open));
+    // EXACTLY TWO, not "more than none", and that number is the defect this assertion exists for.
+    // `legacy-gateway.json` carries seven inline credentials; twelve passes move all seven behind a
+    // secretRef and declare five of them, leaving TWO undeclared. The auditor's first draft reported
+    // only the first undeclared ref per pass, so the gate said "Still open — 1" — a person adds that
+    // one secret, ships, and the deploy still fails at admission on the other. An `open.length > 0`
+    // assertion passes on both the right answer and that one.
+    assert.equal(report.open.length, 2, JSON.stringify(report.open));
+    assert.deepEqual(
+      report.open.map((f) => f.rule),
+      ["secret-not-declared", "secret-not-declared"],
+      JSON.stringify(report.open),
+    );
+    assert.equal(report.open.every((f) => f.autofixable === true), true, JSON.stringify(report.open));
 
     // AND THE REPORT SAYS IT IN WORDS, because the person reading it is the one who has to decide
     // whether a better-but-not-done manifest may ship. A run that exhausted its budget exits 0 and
@@ -343,6 +356,104 @@ test("a manifest dirtier than the pass budget says so, rather than claiming to b
     assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
     const md = readFileSync(join(ws.dir, REPORT), "utf8");
     assert.match(md, /\*\*the pass budget ran out with auto-fixable findings still open\*\* — this manifest is better, not done\./);
+    assert.match(md, /^## Still open — 2$/m, md);
+    // Both secrets NAMED, so a person can act on the list rather than on its length.
+    assert.match(md, /stripe-token/, md);
+    assert.match(md, /upstream-token/, md);
+
+    // THE COMPLETENESS CHECK, and it is the one that does not depend on knowing the number. Harden
+    // the graph's OWN output: it must need exactly as many passes as there were open auto-fixable
+    // findings, and then settle with nothing open. An `open` list that undercounts fails here with
+    // no test having to state what the right count was.
+    cpSync(join(ws.dir, HARDENED), join(ws.dir, "manifests", "legacy-round-two.json"));
+    const again = await runToGate(ws.dir, "legacy-round-two.json");
+    assert.equal(again.report.passes, report.open.length, JSON.stringify(again.report.applied));
+    assert.equal(again.report.stoppedBy, "settled");
+    assert.deepEqual([...again.report.open], []);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a cascade is MEASURED against the first audit, not read off the rule table", async () => {
+  // THE DEFECT A FRESH REVIEWER FOUND, and the shape of it is why it is worth a test of its own:
+  // `cascadeOf` on a finding is a STATIC property of the rule ("this cannot fire until that is
+  // repaired"), and the report's headline sentence — "closed a finding that DID NOT EXIST when the
+  // run started" — is a claim about THIS RUN. Counting the former and printing the latter is false
+  // on any manifest whose FIRST audit already reports a cascade-rule finding.
+  //
+  // The graph's own output is such a manifest, which is what makes this reachable rather than
+  // theoretical: a budget stop on `legacy-gateway.json` leaves `secret-not-declared` — a rule that
+  // declares `cascadeOf: "plaintext-secret"` — open, so re-hardening that file fixes two findings
+  // that were both in the first audit. The old code reported "2 of those 2 fix(es) closed a finding
+  // that DID NOT EXIST when the run started".
+  const ws = workspace();
+  try {
+    const first = await runToGate(ws.dir, "legacy-gateway.json");
+    const approved = await loom(ws.dir, ["approve", first.runId, first.gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    cpSync(join(ws.dir, HARDENED), join(ws.dir, "manifests", "budget-stopped.json"));
+
+    const second = await runToGate(ws.dir, "budget-stopped.json");
+    // Every fix here closes a finding the FIRST audit already held, so none of them is a cascade …
+    assert.equal(second.report.passes, 2, JSON.stringify(second.report.applied));
+    assert.equal(second.report.startedWith, 2, JSON.stringify(second.report));
+    assert.equal(second.report.cascades, 0, JSON.stringify(second.report.applied));
+    // … even though both entries carry a static `cascadeOf`, which is exactly what made the old
+    // count wrong. The annotation stays; only the COUNT is measured.
+    assert.equal(second.report.applied.every((a) => a.cascadeOf === "plaintext-secret"), true, JSON.stringify(second.report.applied));
+
+    const secondApproved = await loom(ws.dir, ["approve", second.runId, second.gate.gateId, "--as", "u:you"]);
+    assert.equal(secondApproved.code, 0, `${secondApproved.out}${secondApproved.err}`);
+    const md = readFileSync(join(ws.dir, REPORT), "utf8");
+    assert.doesNotMatch(md, /DID NOT EXIST/, `the cascade sentence must not appear when nothing cascaded:\n${md}`);
+
+    // And the claim still fires where it is TRUE, so this test cannot be satisfied by deleting it.
+    const control = await runToGate(ws.dir, "orders-api.json");
+    assert.equal(control.report.startedWith, 5, JSON.stringify(control.report));
+    assert.equal(control.report.cascades, 3, JSON.stringify(control.report.applied));
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("RESIDUE — maxIterations is a THIRD home for the bound, and lowering it to the budget strands the run", async () => {
+  // F5 of the port doc says the stop rule has two homes. It has three: `repair`'s `when`, `done`'s
+  // `when`, and the `recheck` edge's `maxIterations`, which the engine enforces independently. The
+  // shipped graph escapes only because 16 > 12. "Tidying" it to match the budget compiles at exit 0
+  // and then strands any manifest that actually needs the budget — with the same message F5 names,
+  // which mentions neither the loop nor the bound that stopped it.
+  //
+  // Pinned so that the day the compiler refuses this, or the message names the bound, somebody is
+  // told. If it starts failing for that reason, that is the improvement — update it.
+  const ws = workspace();
+  try {
+    const path = join(ws.dir, GRAPH);
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { edges: { id: string; maxIterations?: number }[] };
+    const recheck = raw.edges.find((e) => e.id === "recheck")!;
+    assert.equal(recheck.maxIterations, 16, "the shipped backstop moved; update this test");
+    recheck.maxIterations = 12; // "the same as the budget", which is the plausible tidy-up
+    writeFileSync(path, JSON.stringify(raw, null, 2));
+
+    const compiled = await loom(ws.dir, ["compile", path]);
+    assert.equal(compiled.code, 0, `the mismatch compiles clean, which is the finding:\n${compiled.out}${compiled.err}`);
+
+    // `orders-api` needs 8 passes and is unaffected — which is why this is easy to ship.
+    const ok = await loom(ws.dir, ["run", path, "--input", input("orders-api.json")]);
+    assert.equal(ok.code, 0, `${ok.out}${ok.err}`);
+    assert.equal(summary(ok)["status"], "awaiting_gate");
+
+    // `legacy-gateway` needs all twelve, and the engine bound now cuts the last back-edge.
+    const r = await loom(ws.dir, ["run", path, "--input", input("legacy-gateway.json")]);
+    assert.equal(r.code, 1, `${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_OUTPUT_MISSING", r.out);
+    assert.equal(error["class"], "internal", r.out);
+    assert.doesNotMatch(
+      String(error["message"]),
+      /\bmaxIterations\b|\brecheck\b|\bloop\b/,
+      "if the message learns to name the bound that stopped the run, this residue is closed",
+    );
   } finally {
     ws.dispose();
   }
