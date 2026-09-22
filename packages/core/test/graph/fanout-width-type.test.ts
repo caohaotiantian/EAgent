@@ -3,8 +3,11 @@
  *
  * `rule007Fanout` tested for PRESENCE — `if (e.maxWidth === undefined)` — and then compared the
  * value with a bare `>`. JSON carries whatever the author typed, and `graph/spec.ts`'s
- * `EDGE_FIELDS` is a NAME allowlist, so nothing between the file and the rule asked what type it
- * was. Coercion did the rest:
+ * `EDGE_FIELDS` WAS a NAME allowlist — it is a table of types since §A.62, and `edgeFieldTypes`
+ * in `checkStructure` is what refuses these now; the two rules kept only the bound. Every
+ * assertion below still holds, and the codes are unchanged, which is the point of that change
+ * having been a relocation. Before it, nothing between the file and the rule asked what type the
+ * value was, and coercion did the rest:
  *
  *     "24"        `"24" > 25` is false            -> compiles, GRAPH010 reads 24
  *     "banana"    `NaN > 25` is false             -> compiles, GRAPH010 reads NaN and switches OFF
@@ -149,17 +152,34 @@ test("...and a valid maxIterations still compiles", () => {
 
 // ── the shape of the check itself ────────────────────────────────────────────
 
-test("the check reads the EDGE KIND, so a stray field on another kind is not invented into an error", () => {
-  // `EDGE_FIELDS` allows `maxWidth` on any edge and no rule reads it off a `seq` one. Refusing
-  // it here would be this rule deciding what an unread field means, which is a different
-  // change from the one this file is about. Stated so the next reader knows it was seen.
+test("THE RULE READS THE EDGE KIND; THE PARSE DOES NOT — and §A.62 moved the type half to the parse", () => {
+  // THIS TEST CHANGED SIDES. It used to assert that `maxWidth: "banana"` on a `seq` edge was NOT
+  // refused, on the argument that "refusing it here would be this RULE deciding what an unread
+  // field means". That argument was about `rule007Fanout`, and it still holds for it: the rule
+  // below is entered only for `kind: "fanout"`.
+  //
+  // It does not carry to the parse, and it cannot: `edgeFieldTypes` walks `EDGE_FIELDS` and knows
+  // nothing about kinds, because a type is a property of a VALUE and not of the rule that will
+  // read it. Two things settled it against leaving the hole open. A MISSPELLED field on a seq
+  // edge was already fatal — `maxWidthh` is `GRAPH020_UNKNOWN_FIELD` — so a wrong-typed one
+  // compiling clean was the asymmetry, not the refusal. And `Number.NaN` or `Infinity` in an
+  // inert edge field reached `digest(spec)` and threw `CanonicalizationError: non-finite number
+  // NaN at edges[...]` OUT of `compile`, which is a crash where a diagnostic belonged; measured
+  // on `6fb2e618`, 60 rows of `.agent/spec-a62/before.txt`.
   const s = clone(incidentTriage());
   const i = s.edges.findIndex((x) => x.id === ("e3" as EdgeId)); // correlate -> hypothesise, kind seq
   s.edges[i] = { ...s.edges[i]!, maxWidth: "banana" } as unknown as EdgeSpec;
-  assert.deepEqual(
-    errorsOf(s as GraphSpec).filter((d) => d.code === "GRAPH007_BAD_MAX_WIDTH").map((d) => d.code),
-    [],
-  );
+  const bad = errorsOf(s as GraphSpec);
+  assert.deepEqual(bad.map((d) => d.code), ["GRAPH007_BAD_MAX_WIDTH"]);
+  assert.match(bad[0]!.message, /^edge "e3" declares maxWidth "banana", which is not a positive integer/);
+
+  // AND THE HALF THAT DID NOT CHANGE: a WELL-TYPED stray field on another kind still compiles.
+  // The parse refuses a wrong type, never an unread field — that is still the rule's business,
+  // and no rule reads `maxWidth` off a `seq` edge.
+  const inert = clone(incidentTriage());
+  const j = inert.edges.findIndex((x) => x.id === ("e3" as EdgeId));
+  inert.edges[j] = { ...inert.edges[j]!, maxWidth: 4 } as unknown as EdgeSpec;
+  assert.deepEqual(errorsOf(inert as GraphSpec).map((d) => d.code), []);
 });
 
 test("A HOSTILE VALUE REFUSES; IT DOES NOT THROW — the guard must survive what it is refusing", () => {

@@ -186,7 +186,10 @@ test("EVERY FIELD THE THREE INTERFACES DECLARE IS ALLOWED — the guard must not
   // that has fallen behind its interface refuses correct graphs, which is worse than the hole.
   assert.deepEqual([...NODE_FIELDS].sort(), membersOf("NodeSpec"), "NODE_FIELDS and NodeSpec disagree");
   assert.deepEqual([...SPEC_FIELDS].sort(), membersOf("GraphSpec"), "SPEC_FIELDS and GraphSpec disagree");
-  assert.deepEqual([...EDGE_FIELDS].sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
+  // `Object.keys`, because `EDGE_FIELDS` is keyed now: it carries a TYPE per field, not just the
+  // name (§A.62). The cross-check is the same one — every field `EdgeSpec` declares has a row —
+  // and the row's type is checked by `edge-field-types.test.ts`, against the same `EdgeSpec`.
+  assert.deepEqual(Object.keys(EDGE_FIELDS).sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
 });
 
 test("EVERY FIELD THE POLICY INTERFACES DECLARE IS ALLOWED — the same, one level in", () => {
