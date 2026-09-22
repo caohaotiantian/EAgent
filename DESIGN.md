@@ -166,6 +166,108 @@ prompt edit is exactly the candidate kind D6 defines self-improvement as produci
 DIFFERENT RESOURCES IS REFUSED" (5/5). *Residue:* a MUTATED run's successor carries no recorded
 manifest — `TODO.md` §G.5(a).
 
+### D8 · A channel carries a FACT about its value, on one reserved projection
+
+A channel carries a VALUE and nothing about that value, which is why an `error` arm is handed no
+reason, a truncation is written into the content string, and a classification is guessed from a key
+name. **The value stays the payload; beside it sits ONE reserved ERROR PROJECTION per node**, which
+an `error` arm and a `function` body may both name in `reads`:
+
+```
+{
+  ok: boolean,
+  code?: string,          // missing / unreadable / sandbox-refused / truncated — MUST be distinct codes
+  message?: string,
+  truncated?: boolean,    // §A.83: the fact leaves the string and enters the projection
+  bytes?: number,
+  classification?: "untrusted" | "secret" | "plain"   // §A.82: reserved; this phase may ship no producer
+}
+```
+
+**Phase one ships the FAILURE projection only**, which is enough to close `TODO.md` §A.90.
+Truncation (§A.83) and classification (§A.82) are OPTIONAL FIELDS OF THE SAME ENVELOPE, never a
+second shape — which is the whole reason to decide it once: those three rows were each waiting on
+the same missing thing, and three answers would have been three shapes. **The reserved fields exist
+because of this option's own risk, which the maintainer named when choosing it: *once the shape is
+written it is frozen.*** Declaring `truncated`, `bytes` and `classification` now, with no producer
+behind them, is what buys the freeze — a second kind of channel metadata is then never invented,
+because there is already a slot for it.
+
+**The constraints, each of which can fail on its own:**
+- **Missing ≠ unreadable ≠ path-refused.** Those three collapsing into `E_TOOL_SOURCE_UNAVAILABLE`
+  IS §A.90's root cause, so a projection that still says only that code does **not** close Sequence
+  item 30.
+- **Unannotated defaults to `untrusted`** — D4's existing axis — and **"no projection" is never read
+  as "success"**.
+- **A truncation marker is never again written into `content`.** A marker inside the string makes a
+  downstream `JSON.parse` fail and reads as a corrupt FILE rather than as a short read.
+
+**Why (a), in the maintainer's own terms — the other three options and what each costs:**
+- **(b), a per-channel DESCRIPTOR beside every value** — closes all three rows, and does three
+  things at once: every reducer and every projection must learn it, so classification, completeness
+  and conflict policy get tangled into `merge_object` / `append_ordered` / `replace`. `run/engine.ts`
+  is 13k lines; widening the metadata surface now is premature. Its fields become extension slots of
+  THIS envelope instead, so a second kind of metadata is not invented in six months.
+- **(c), refuse instead of truncating and instead of guessing** — looks like this project's taste
+  (*refusing is always allowed; loosening never is*) and is wrong as the main answer: it turns
+  truncation from an observable FACT into a hard failure, answers §A.82 not at all, and answers
+  §A.90 only half, because a typed error on the arm still needs a DECLARABLE read port or
+  `grant-access`'s `first-grant` is still guessing.
+- **(d), a per-run ledger file** — turns a silent loss into a spurious gate, which is the direction a
+  guard is allowed to fail in, but fixes only `grant-access`'s one ledger; the next *"a failed read
+  means nothing is there"* workflow writes `look` again. Allowed LATER as product hardening of that
+  ledger; it **cannot close this decision**, and the owed-decision list after item 31 says so.
+
+**Closes when** a tool failure is a fact an `error` arm declares in `reads` and `grant-access`'s arm
+branches on the CODE — no file → `first-grant`; unreadable, or a parent the sandbox will not list →
+fail and write no ledger — at which point the `KNOWN HAZARD` test
+(`packages/core/test/examples-grant.test.ts`:995), which asserts today's loss, goes **RED and is
+DELETED together with the `look` node** rather than loosened. **`look` is a node in a SHIPPED GRAPH,
+not a test fixture** — `examples/graphs/grant-access.json`:54, wired by the edges `then-look` and
+`then-ledger` at :136–137 — so deleting it edits that graph and re-points one edge, and the test
+deletion is the second half of the same change. **Why deletion and not loosening — the maintainer's
+inversion, which is the argument for the whole decision:** if workflows keep defending themselves
+(`look`, plus `historySource: "none"`), every new graph copies the hole and its tests PIN the hole,
+and that teaches the wrong shape. Sequence item 30 is the roadmap entry, and its closing condition
+is the envelope plus this failure producer; `TODO.md` §A.90, §A.83 and §A.82 each keep their own
+half.
+*Enforced by nothing yet — no `packages/core/src` file implements this.* **Decided by the maintainer
+2026-09-22**; `TODO.md` §D.10 (not to be read as `TODO.md` §D.8, a different row one dot away) is
+struck with this answer and carries the options it was chosen from.
+
+### D9 · The shipped approval example teaches QUORUM, and veto is a second file
+
+`examples/graphs/two-person-approval.json` becomes `onBranchError: "skip"`. Its FILENAME, its
+`k: 2`, its own description's first CLAUSE (*"Two of three named people must approve"* — the sentence
+goes on to state the veto, which is the collision) and `README.md`'s "two-of-three" all mean QUORUM;
+since §A.75 both modes refuse a run below `k` and they differ only in WHEN — `fail` at the first
+rejection, `skip` at the barrier with `E_QUORUM_UNREACHABLE`. **Why:** `fail` is not a clean
+two-person rule. Measured on the shipped graph (`TODO.md` §A.68), alice approve + bob approve +
+carol reject ends `status=failed` with `save` **already written** — before commit one vote vetoes,
+and after commit a veto can only mark the run failed while the effect stays. Veto is legitimate and
+keeps its OWN file (e.g. `two-person-veto.json`), whose description states that the first reject
+decides and that a late reject, after a short-circuited irreversible write, cannot recover the
+effect. **One file must not teach two products:** today the filename says quorum, the word says veto
+and a label explains the difference, which guarantees the next port copies it wrong.
+
+**Both modes are legitimate and the dialectic is the maintainer's:** `fail` is closer to the
+traditional two-man rule (one objection stops it), `skip` closer to a k-of-n gate — *what is not
+legitimate is one shipped file and one filename meaning both.* **The rejected second-best, recorded
+because it is the fallback if the canonical file ever keeps `fail`:** rename the file and rewrite its
+first sentence, since *"name says quorum, word says fail, label explains"* guarantees the next port
+copies it wrong; and in that case the late veto goes into the example as a stated PRODUCT LIMIT
+rather than a residue label.
+
+**What this does NOT decide**, named so it is not read in: short-circuit plus write-to-disk is
+unchanged by it — whether an irreversible effect may short-circuit, and whether the stragglers are
+cancelled, is a different question and stays open. Nor may it be absorbed on the way past by §A.77
+(`k > branches.length`) or `TODO.md` §D.8 (a join's inbound edge kind — a TODO row, not this file's
+D8 one dot away): those are compile tightenings, not the product word.
+*Enforced by nothing yet — the graph still declares `"fail"`.* **Decided by the maintainer
+2026-09-22**; the record is `TODO.md` §A.68's addendum, and the change lands with the implementation,
+which updates `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING assertions rather
+than re-testing the engine.
+
 ---
 
 ## What we deliberately do not build
@@ -300,9 +402,10 @@ refusing a real commit this wave — `check-surface.mjs` printed `added: BlockFi
 union was made module-private. The open-row count ROSE across three settlements — **46 → 51 → 56**,
 counted with `TODO.md`'s own census command at `bde693e2`, `0a9483c0` and `279b5c73` — because
 strangers drove the binary, not because anything decayed. **What is not started is the product.**
-These three items are what a maintainer does next, and **the owed-decision list after item 31 is
-what the THREE wait on** — items 18 and 24 wait on none of it; each closes on the terms written in
-its own row and cell.
+These three items are what a maintainer does next. **Items 29 and 31 wait on the owed-decision list
+after item 31; item 30 no longer does — it was DECIDED on 2026-09-22 as D8 above and now waits on
+its BUILD.** Items 18 and 24 wait on none of it; each closes on the terms written in its own row and
+cell.
 
 **29 · Distribution — a published binary and a stranger-facing install.** *Moved here out of
 "Deliberately not sequenced", and TWO conditions are being retired, which is not the same act.* The
@@ -345,23 +448,45 @@ things that rest on it, the one that names a published artifact is §H.1, and th
 admission refusal rests on the run RATE rather than on who can obtain the binary.
 
 **30 · The channel-shape decision: what a channel carries when a tool fails, truncates, or holds a
-secret.** §A.82, §A.83 and §A.90 are **one unanswered question**, which is the whole reason this is
-an item rather than three. §A.90 is the one to answer first — it is the only row in `TODO.md` that
+secret — DECIDED 2026-09-22 as D8, and the item is now its IMPLEMENTATION.** §A.82, §A.83 and §A.90
+WERE **one unanswered question**, which is the whole reason this is an item rather than three, and
+one answer settled all three of them. **§A.90 was the one to answer first, on this project's own
+priority rule — *silent-and-wrong outranks loud-and-missing*:** it is the only row in `TODO.md` that
 ends in destroyed data with exit code 0, and the command that shows it is **pasted once, on §A.90's
 own row**, re-run for this settlement on `29c8b9ec` against the shipped `grant-access.json` with
 its defence in place: `chmod 333` the output directory and the run exits **0**, reports
 `succeeded`, rebuilds its ledger from `historySource: "none"`, and `u:sam`'s grant is gone. Read it
 there; a second copy is the copy that rots.
 
-**Closes when** a tool failure, a truncation and a classification are FACTS on a channel an `error`
-arm may declare in `reads` — answered ONCE for all three rows, not three times. The shape is the
-decision: §A.90 needs the failure's code and message projected; §A.83 needs *this read was
-truncated* out of the content string and onto the channel, at all three of its sites (`fs.read`,
-`proc.exec`, `net.fetch`); §A.82 needs a per-key classification in both directions. A wider regex is
-not §A.82's closure and a bigger `maxBytes` is not §A.83's — each of those moves the gap. The
-`KNOWN HAZARD` test in `packages/core/test/examples-grant.test.ts` asserts today's LOSS, so when
-this lands that test FAILS and is deleted along with the `look` node rather than loosened.
-`TODO.md` §D.10 carries the options.
+**THE SHAPE IS DECIDED — D8 above, by the maintainer on 2026-09-22 — and what is left of this item
+is the IMPLEMENTATION.** One reserved error projection per node, readable from an `error` arm and a
+`function` body; phase one ships the failure half only; truncation and classification are optional
+fields of the same envelope. The three options it was chosen over, and the reason each was refused,
+are in D8; `TODO.md` §D.10 is struck with the answer and carries them at length.
+
+**Closes when TWO things are true together.** (i) D8's envelope EXISTS — declared in
+`graph/spec.ts` and checked by `graph/validate.ts`, with **all six fields** (`ok`, `code`, `message`,
+`truncated`, `bytes`, `classification`) declared, the last three reserved and possibly unpopulated.
+(ii) The **FAILURE producer** has landed, which closes §A.90 on that row's own terms: absent,
+unreadable and sandbox-refused wearing **distinct** codes — a projection that still says only
+`E_TOOL_SOURCE_UNAVAILABLE` closes nothing — and `grant-access`'s `error` arm branching on them (no
+file → `first-grant`; unreadable, or a parent the sandbox will not list → fail and write no ledger),
+at which point the `KNOWN HAZARD` test, which asserts today's LOSS, goes RED and is deleted with the
+`look` node rather than loosened.
+
+**§A.83 and §A.82 stay OPEN rows after this item closes**, and that is deliberate: their producers
+populate the reserved `truncated`/`bytes` and `classification` fields of the SAME envelope later —
+§A.83 needs *this read was truncated* out of the content string at all three of its sites
+(`fs.read`, `proc.exec`, `net.fetch`), §A.82 the per-key classification in both directions. **A fix
+that only touches `grant-access`'s arm, without the envelope, does NOT close this item**, and
+neither does a per-run ledger alone (D8's option (d)), a wider regex (§A.82's own text) or a bigger
+`maxBytes` (§A.83's) — each of those moves the gap.
+
+*That phasing — **the envelope plus the failure producer closes the ITEM**, with §A.83 and §A.82
+closing later on their own rows — **is the orchestrator's READING of the maintainer's four-step
+order, not his words.** His sentence is: "phase one lands only the failure projection, which is
+enough to close §A.90." **Flagged for the maintainer to confirm**, because it decides whether item
+30 closes once or three times.*
 
 **31 · The journal vocabulary §C is blocked on.** §C gates the UI direction, and it is blocked on
 facts the journal has no words for, not on a view. Eight of eleven documented span attributes are
@@ -387,10 +512,6 @@ decision cannot name a command that fails, so it gets cut rather than reworded �
 the highest-value unit of work in this project right now, and the list is here so it is not carried
 in a chat. Four of these are owed for the FIFTH wave running. Enumerated:
 
-- **§A.68 — `skip` vs `fail` on the shipped `two-person-approval.json`.** *Still the decision the
-  settlement most wants answered*, and it is one word in a shipped example. Both modes now refuse a
-  run below `k` (§A.75 closed); they differ in WHEN. The row is struck — the graph's behaviour is
-  documented and correct — and the decision lives in its 2026-09-22 addendum.
 - **§A.77** — whether `validate.ts` should refuse `k > branches.length` for a barrier whose every
   member is static and unfanned. No lane has taken it.
 - **The exported-constant shape-break policy** — `EDGE_FIELDS`, and now `POLICY_FIELDS` and
@@ -400,14 +521,25 @@ in a chat. Four of these are owed for the FIFTH wave running. Enumerated:
 - **Whether `attach` should be honest** (§A.76's residue), now with a measured cost: it is the
   reason neither `#assertBound` vocabulary check can see a graph attached to a run this process
   already holds.
-- **§A.71** (does a budget/fatal floor cascade to a subgraph child), **§D.8** (must a join's inbound
-  edge be `kind: "join"`), **§A.70** and **§A.72** — four owed into a fifth wave.
+- **§A.71** (does a budget/fatal floor cascade to a subgraph child), **`TODO.md` §D.8** (must a
+  join's inbound edge be `kind: "join"` — a TODO row, one dot away from this file's D8), **§A.70**
+  and **§A.72** — four owed into a fifth wave.
 - **§A.87** — `metadata.version`: a number or a semver STRING.
 - **§A.86** — whether `GRAPH002`'s reachability should be *realisable* rather than *reachable*, or
   whether a warning may over-approximate and say so at the rule.
 - **The per-run-ledger alternative to port 3's F5** — a per-run ledger file cannot lose an entry to
   a failed read, and converts a silent loss into a spurious gate, which is the direction a guard is
-  allowed to fail in. It is a structural alternative to item 30, not a substitute for it.
+  allowed to fail in. **It is NOT a closure of D.10 and the maintainer said so in deciding it**: it
+  is allowed later as product hardening of `grant-access`'s ledger, it answers neither §A.82 nor
+  §A.83, and item 30 does not close on it.
+
+**DECIDED 2026-09-22, and off this list: §A.68 and the channel shape (§A.82, §A.83, §A.90).** The
+channel shape is **`DESIGN.md` D8** — one reserved error projection per node, phase one the failure
+half only, truncation and classification optional fields of the same envelope; `TODO.md` §D.10 is
+struck with it. §A.68 is **`DESIGN.md` D9** — the canonical `two-person-approval.json` teaches QUORUM
+(`onBranchError: "skip"`) and veto moves to a second file; the record is that row's own 2026-09-22
+addendum. Both are now IMPLEMENTATION, and neither graph nor source has changed yet. **Four of the rows above are still
+owed into a fifth wave** (§A.71, `TODO.md` §D.8, §A.70, §A.72).
 
 **And the ordering argument, which is the only thing that makes this a list rather than a
 preference: A DECISION AND AN INSTALL PATH OUTRANK A NINTH WAVE OF INVARIANTS.** Item 30 first,
@@ -419,6 +551,29 @@ would have to use. Then 31. A FOURTH workflow port is worth
 as much as the first three — that claim is unchanged — and comes after 29 and 30, because a port's
 value is the friction it logs, and friction met by a stranger who could not install this is
 friction nobody logs.
+
+**The ORDER inside item 30, decided with D8 on 2026-09-22** — the two decisions above are the first
+two units of work, in this sequence and not in parallel:
+
+1. **Record D.10 in `DESIGN.md`** — done here, as D8.
+2. **Implement the projection**, and make `grant-access`'s `error` arm branch by CODE (no file →
+   `first-grant`; unreadable or an unlistable parent → fail, no ledger write). **Delete the `look`
+   NODE and the `KNOWN HAZARD` TEST together** — they are in two different files: `look` is a node
+   in the shipped `examples/graphs/grant-access.json`:54, reached by the edges `then-look` and
+   `then-ledger` at :136–137 (so removing it edits a shipped graph and its two edges), and the test
+   is `packages/core/test/examples-grant.test.ts`:995.
+3. **Change §A.68's one word and split the examples** — the canonical file to `skip`, veto into its
+   own graph — and update `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING
+   assertions rather than re-testing the engine.
+4. **Only then** items 29, 18/24, and 31.
+
+**And the do-not-do-in-parallel list, which is part of the decision rather than advice:** do not
+split D.10 back into three rows fixed a little each; do not add only a per-run ledger for §A.90 and
+declare this item closed; do not *"port a fourth graph with a `human_gate` before
+skip/fail is DECIDED (the friction log would copy the undecided lesson again)"* — his wording, and
+**that one is now SATISFIED by D9**, though the reason he gave still bites while the shipped file
+says `fail`, which is an observation here and not his constraint; and do not absorb §A.68 "on the
+way" through §A.77 or `TODO.md` §D.8 — those are compile tightenings, not the product word.
 
 ---
 

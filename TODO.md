@@ -19,10 +19,17 @@ are stable — other files cite them — so a closed row keeps its id rather tha
 away. `§Z` is the register of closures with the sha that carries each argument.
 
 **Direction, 2026-09-22b — this file is the list, not the order.** What to do next is
-`DESIGN.md`'s Sequence **items 29–31** (distribution; the one channel-shape decision behind §A.82,
+`DESIGN.md`'s Sequence **items 29–31** (distribution; the one channel-shape question behind §A.82,
 §A.83 and §A.90; the journal vocabulary §C is blocked on) plus the two items already open there —
 **24** (§A.29) and **18** (§G.5's residue) — and the owed-decision list that follows them, with the
-argument in `docs/handoff-2026-09-22b.md` §6.
+argument in `docs/handoff-2026-09-22b.md` §6. **Amended 2026-09-22: TWO of those decisions are now
+TAKEN and item 30 is IMPLEMENTATION, not a question.** The channel shape is `DESIGN.md` **D8** (one
+reserved error projection per node — §D.10 is struck with it) and the shipped approval example is
+`DESIGN.md` **D9** (`skip`, with veto as a second file — §A.68's addendum); both are that file's
+Decisions section, and `TODO.md` §D.8 / §D.9 are different rows one dot away. The decided ORDER is:
+the projection and `grant-access`'s `error` arm branching by code, deleting `look` and the
+`KNOWN HAZARD` test → then §A.68's word and the example split → then items 29, 18/24, 31. Nothing in
+`packages/` or `examples/` has moved yet.
 
 ---
 
@@ -70,16 +77,26 @@ were each waiting on separately; **§D.11** is where a question already raised t
 row, by §A.62's own closing clause and by §State's two LEDGER WATCH cells; and **§H.15** names an
 absence `README.md`:55 and :69–72 already document.
 
+**And the open count moves for reasons that are not work, in BOTH directions — which is why the
+series above is pinned to commits and not carried.** Two instances, one each way: the three rows the
+assessment ADDED (§D.10, §D.11, §H.15) land in `369eb4f6`, after `279b5c73`, so the open count stood
+three above the 56 pinned there — **59 at `369eb4f6`** — before this file was touched again, and
+none of the three was new work; and §D.10 was then ANSWERED by the maintainer on 2026-09-22 (option
+(a), `DESIGN.md` D8), which struck a row with nothing FIXED — §D's struck column moved 5 → 6 and its
+open column 6 → 5 while its row count stayed 11. Re-run the commands rather than subtracting. The
+three §A rows §D.10 unblocks (§A.82, §A.83, §A.90) stay OPEN, because what is left of them is the
+implementation.
+
 "Rows present" and "rows still open" are different facts; a table stating only their difference can
 be wrong without being falsifiable, which is why there are three columns.
 
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 93 | 61 | 32 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 93 | 61 | 32 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two, with §A.90, now wait on an IMPLEMENTATION rather than on a shape, §D.10 having been answered) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
-| §D | 11 | 5 | 6 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
+| §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
@@ -1691,13 +1708,41 @@ rather than taken from a lane report.
   and which after the second approval still fails the run with the write already landed. `skip`
   waits for quiescence and refuses at the barrier, so a single dissenter no longer vetoes and
   two-of-three means two-of-three. **Which one the example should teach is a MAINTAINER DECISION
-  nobody has been asked for**, and it is the whole of what the file demonstrates, so the settlement
+  nobody has been asked for** *(read as of the 2026-09-22b settlement — **SUPERSEDED by the
+  addendum below, which records the answer given later the same day**; kept because the record of a
+  decision being owed is what explains the ordering argument that produced it)*, and it is the whole
+  of what the file demonstrates, so the settlement
   did not take it: the graph still declares `"fail"` and its `metadata` still describes the veto. The
   negative pin in `test/graph/two-person-approval.test.ts` was flipped by the engine lane (it is that
   lane's file for this wave) and now asserts the refusal rather than the mask; the graph is
   byte-identical apart from the residue label, whose `graphHash` therefore moved.
   `README.md`'s "Approval modes" row said *"the fold never re-checks `k`"* and was FALSE from
   `c966fad9`; corrected in this settlement's docs commit.
+  **DECIDED 2026-09-22 by the maintainer — `skip`, and the veto gets its own file.** The canonical
+  `examples/graphs/two-person-approval.json` becomes `"onBranchError": "skip"`: its FILENAME, its
+  `k: 2`, its own description's first CLAUSE (*"Two of three named people must approve"* — the
+  sentence goes on to state the veto, which is the collision) and `README.md`'s "two-of-three" all
+  mean QUORUM, and `fail` is not a clean two-person rule — before commit one vote vetoes, and after
+  commit (the late veto measured above) a veto can only mark the run failed while the write stays.
+  Veto stays legitimate and moves to a SEPARATE graph (e.g. `two-person-veto.json`) keeping `fail`,
+  whose `description` must state both halves: the first reject decides, and **a late reject arriving
+  after a short-circuited irreversible write cannot recover the effect** — that product limit goes
+  into the veto example's own description, not into a residue label. **One file must not teach two
+  products.** Explicitly NOT decided here: short-circuit plus write-to-disk is unchanged —
+  straggler cancellation, and whether an irreversible effect may short-circuit at all, is a separate
+  question. Nor may this be absorbed through §A.77 or `TODO.md` §D.8, which are compile tightenings
+  and not the product word. His do-not-in-parallel item was worded *"port a fourth graph with a
+  `human_gate` before skip/fail is DECIDED (the friction log would copy the undecided lesson
+  again)"* — **now SATISFIED by the decision itself**, though the reason he gave still bites while
+  the shipped file says `fail`, which is an observation here and not his constraint. `DESIGN.md`
+  **D9** (that file's Decisions section, not this file's §D.9) carries the decision; the change
+  lands with the implementation (after the §D.10 projection, by the decided order), which also
+  updates the TEACHING assertions in `packages/core/test/graph/two-person-approval.test.ts` rather
+  than re-testing the engine. **The graph, `README.md` and `examples/README.md` still describe
+  `fail`, because that is what ships today.** Two further things the IMPLEMENTATION wave updates and
+  this docs lane deliberately did not: the graph's own `labels.residue-veto`, which still says
+  *"This example ships `fail` until a maintainer picks between them"*, and `examples/README.md`
+  §10's dissection of the `look` node, which the §D.10 build deletes.
 
 ### Opened by the 2026-09-15b settlement
 
@@ -2225,6 +2270,17 @@ nobody took (§A.77).
   when something warns that a payload carries a key a workflow called a credential and the redactor
   did not. A wider regex is NOT the closure: widening moves the gap, and the over-redaction half gets
   worse.
+  **The SHAPE is decided, 2026-09-22 (`DESIGN.md` D8 — that file's Decisions section, not this
+  file's §D.8 — from §D.10):** the per-key classification is the reserved
+  `classification?: "untrusted" | "secret" | "plain"` field of the ONE error projection, not a
+  second mechanism — and **its producer may come later**, since phase one ships the failure half
+  only, so this row does NOT close with §A.90. **Both arms of the closing condition above survive**,
+  and the decision fixed the SHAPE of the first without retiring the second: (i) a graph SETS that
+  reserved field in both directions and the redactor reads it instead of the key name, unannotated
+  staying `untrusted` (D4's axis); or (ii), short of that, **something WARNS that a payload carries
+  a key a workflow called a credential and the redactor did not** — still valid, and an allowed
+  interim producer, because the decision reserved a FIELD rather than forbidding a warning. A wider
+  regex is still not the closure in either arm.
 
 - **A.83 · `fs.read` appends its truncation marker INTO the returned content, so a big document
   reads back as a syntax error in the FILE.** *(From the second port's F12.)* File:
@@ -2248,6 +2304,15 @@ nobody took (§A.77).
   content: the marker out of the string and the fact on the channel a body can read, or a refusal
   when the cap is hit and the caller did not ask for truncation. Either is a change to what a `tool`
   node puts in a channel, so it needs a decision about that shape and not just an edit here.
+  **That decision is taken, 2026-09-22 (`DESIGN.md` D8 — that file's Decisions section, not this
+  file's §D.8 — from §D.10), and it is the FIRST of the two arms, not the refusal**:
+  `truncated?: boolean` and `bytes?: number` are optional fields of the one reserved error
+  projection — the same envelope §A.90 gets, never a second shape — and the marker comes OUT of the
+  content string at **all three sites** (`builtin/tools.ts:385` for `fs.read`, `:305` for
+  `proc.exec`, `:1179` for `net.fetch`). Option (c), refusing instead of truncating, was refused: it
+  turns an observable FACT into a hard failure. **This row does NOT close with §A.90**: phase one
+  DECLARES `truncated`/`bytes` on the envelope, and the producer that populates them at the three
+  sites is this row's own work.
 
 - ~~**A.84 · A `loop` edge is an edge to the scheduler and not to the compiler, so every DAG
   analysis is wrong about a graph with one in it.**~~ **CLOSED at `731eca44`, `79cab047`
@@ -2424,8 +2489,10 @@ exit code 0.
   history and exits 0 — SILENT DATA LOSS.** *(From the third port's F5 —
   `docs/workflow-port-2026-09-22b.md`. **The priority row of this settlement.**)* Files:
   `packages/core/src/builtin/tools.ts` (one `try` around the open, returning
-  `{content: "cannot read …", isError: true}`) and `packages/core/src/run/engine.ts:8462`, which
-  turns any `isError` without a typed error into
+  `{content: "cannot read …", isError: true}`) and **`Engine.#runToolNode`** in
+  `packages/core/src/run/engine.ts` — cite the SYMBOL, because the line moves: it was `:8462` when
+  this row was written and is **`:8533` at `369eb4f6`** — which turns any `isError` without a typed
+  error into
   `err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, result.content)`. **Three different outcomes —
   the file is absent, the file is there and unreadable, the path is one the sandbox refuses — are
   ONE code**, so `codes: ["E_TOOL_SOURCE_UNAVAILABLE"]` on the arm narrows none of them apart; and
@@ -2465,6 +2532,24 @@ exit code 0.
   `look` node rather than loosened. **A structural alternative is on the owed list**: a per-run
   ledger file cannot lose an entry to a failed read, and converts a silent loss into a spurious
   gate.
+  **The shape is decided, 2026-09-22 (`DESIGN.md` D8 — that file's Decisions section, not this
+  file's §D.8 one dot away — from §D.10), and this row is PHASE ONE of it**: one reserved ERROR
+  PROJECTION per node, `{ok, code?, message?, truncated?, bytes?, classification?}`, which an
+  `error` arm and a `function` body may both declare in `reads`. Restated in D8's terms, this row
+  closes when the envelope is DECLARED with all six fields and the **failure producer** has landed:
+  **the three outcomes wear DISTINCT codes** — file absent, file present and unreadable, path
+  refused by the sandbox; a projection that still answers only `E_TOOL_SOURCE_UNAVAILABLE` does NOT
+  close it — and `grant-access`'s `error` arm branches on the code (no file → `first-grant`;
+  unreadable or an unlistable parent → FAIL, no ledger write), **at which point the KNOWN HAZARD
+  test at `packages/core/test/examples-grant.test.ts`:995 goes RED and is deleted together with the
+  `look` node, which is a node in the SHIPPED `examples/graphs/grant-access.json`:54 with its two
+  edges at :136–137 — two files, one change.** "No projection" is never read as "success". The
+  per-run ledger is allowed later as product hardening and is **not** a closure of this row or of
+  `DESIGN.md` item 30. **§A.83 and §A.82 do NOT close with this row**: their producers populate the
+  reserved `truncated`/`bytes` and `classification` fields of the same envelope later. *That
+  phasing is the ORCHESTRATOR'S READING of the maintainer's four-step order — his own sentence is
+  "phase one lands only the failure projection, which is enough to close §A.90" — and it is flagged
+  for him to confirm.*
 
 - **A.91 · A by-hash graph lookup COMPILES every graph in `graphs/` and prints the others'
   diagnostics on stderr.** *(From the third port's F2.)* Files: the graph-by-hash resolution behind
@@ -2840,10 +2925,24 @@ a decision's argument is the thing a future reader needs.
   a barrier has none. What that closure leaves is §A.70 (a nested join over an empty fan is a work
   member that produced nothing) and §A.72 (the fold is final at a short-circuit release).
 
-- **D.10 · What a channel carries when a tool fails, truncates, or holds a secret — ONE decision for
-  §A.82, §A.83 and §A.90.** Three rows, one question, and answering it three times is how a channel
-  shape becomes three shapes. **§A.90 is the one to answer first**: it is the only row in this file
-  that ends in destroyed data with exit code 0. **Its repro lives on §A.90's own row and is not
+- ~~**D.10 · What a channel carries when a tool fails, truncates, or holds a secret — ONE decision
+  for §A.82, §A.83 and §A.90.**~~ **ANSWERED 2026-09-22 by the maintainer: option (a)** — ONE
+  reserved ERROR PROJECTION per node, which an `error` arm and a `function` body may both declare in
+  `reads`, shaped `{ok, code?, message?, truncated?, bytes?, classification?}`. **Phase one ships
+  the FAILURE projection only**, which is enough to close §A.90; **truncation (§A.83) and
+  classification (§A.82) are OPTIONAL FIELDS OF THE SAME ENVELOPE, never a second shape** — the
+  reserved fields are what buys option (a)'s own named risk, *once the shape is written it is
+  frozen*. Constraints: missing ≠ unreadable ≠ path-refused must be DISTINCT codes (a projection
+  still saying only `E_TOOL_SOURCE_UNAVAILABLE` does not close `DESIGN.md` item 30); unannotated
+  defaults to `untrusted` (D4's axis) and "no projection" is never read as "success"; the truncation
+  marker never again goes into `content`. (b), (c) and (d) were refused with reasons — (d) a per-run
+  ledger is allowed LATER as product hardening and **cannot close this row**. The shape and the
+  three refusals are `DESIGN.md` **D8** — that file's Decisions section, not this file's §D.8 one
+  dot away; the options as they were put to the maintainer are kept below, because a decision's
+  argument is the thing a future reader needs. Three rows, one question, and answering it three
+  times is how a channel shape becomes three shapes. **§A.90 is the one to answer first** — the
+  project's own priority rule, *silent-and-wrong outranks loud-and-missing*: it is the only row in
+  this file that ends in destroyed data with exit code 0. **Its repro lives on §A.90's own row and is not
   copied here** — a second copy is the copy that rots (`DESIGN.md`'s own rule above its Sequence
   tables). Re-run for this settlement on `29c8b9ec`, it still ends `exit=0`,
   `{"status":"succeeded","historySource":"none"}`, and the ledger holding `["u:ravi"]` where it held
@@ -2873,10 +2972,20 @@ a decision's argument is the thing a future reader needs.
   **(d)** The structural alternative for §A.90 alone — a per-run ledger file, which cannot lose an
   entry to a failed read and converts a silent loss into a spurious gate. It does not answer §A.82
   or §A.83 and is not a substitute for the decision.
-  **Closes when** the maintainer picks one and it is written beside the shape it chose. When (a),
-  (b) or (c) lands, the `KNOWN HAZARD` test in `packages/core/test/examples-grant.test.ts` — which
-  asserts today's LOSS — must go RED and be DELETED along with the port's `look` node, rather than
-  loosened. `DESIGN.md` Sequence item 30 is the roadmap entry.
+  **Closed when** the maintainer picked one and it was written beside the shape it chose — (a), on
+  2026-09-22, at `DESIGN.md` D8. **What remains is IMPLEMENTATION and it is not this row**: §A.90,
+  §A.83 and §A.82 each keep their own half of the closing condition, and the `KNOWN HAZARD` test at
+  `packages/core/test/examples-grant.test.ts`:995 — which asserts today's LOSS — must go RED and be
+  DELETED along with the port's `look` node (`examples/graphs/grant-access.json`:54 and its edges at
+  :136–137), rather than loosened. `DESIGN.md` Sequence item 30 is the roadmap entry and now says
+  the shape is decided; **it closes on the ENVELOPE (all six fields declared) plus the FAILURE
+  producer, and §A.83 and §A.82 stay open rows after it** — *that phasing is the orchestrator's
+  reading of the maintainer's four-step order, whose own sentence is "phase one lands only the
+  failure projection, which is enough to close §A.90", and it is flagged for him to confirm.*
+  **The decided ORDER**: record the shape (done) → implement the projection and branch
+  `grant-access`'s `error` arm by code → delete `look` and the hazard test → then §A.68's word.
+  **Not in parallel**: splitting this back into three rows, or a per-run ledger alone declared to
+  close item 30.
 
 - **D.11 · The shape-break policy for exported kernel constants — `EDGE_FIELDS`, `POLICY_FIELDS`,
   `NESTED_FIELDS` — which `check-surface.mjs` cannot see.** *(Raised by §A.62's own closing clause —

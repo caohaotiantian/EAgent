@@ -73,10 +73,10 @@ has replaced these three.
 **The 2026-09-22b settlement's assessment qualifies the ranking above** — *a port beats an
 invariant* — **and does not overturn it: between those two it still holds, but a maintainer's
 DECISION and an INSTALL PATH now outrank both.** Same argument as the port's: a runtime nobody can
-install has no strangers to exercise it, and the goal's first verb is *install it*. The decisions
-are owed, not blocked; the one most wanted is a single word in a shipped example (§A.68, a STRUCK
-row — the decision lives in its 2026-09-22 addendum). **The Sequence's items 29–31, its still-open
-18 and 24, and `docs/handoff-2026-09-22b.md` §6 say what comes next.**
+install has no strangers to exercise it, and the goal's first verb is *install it*. **TWO are now
+DECIDED (2026-09-22) and are BUILDS: `DESIGN.md` D8** — a channel carries a FACT on one reserved
+error projection — **and D9** — the example teaches QUORUM, veto is a second file. The rest stay
+owed (list after Sequence item 31); items 29–31, 18, 24 and the handoff §6 say what comes next.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
