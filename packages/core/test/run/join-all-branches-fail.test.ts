@@ -693,10 +693,17 @@ test("A STATIC SIBLING JOIN LOSING SOME ARMS STILL FOLDS — the refusal counts 
   for (const mode of MODES) {
     // Every arm is at the ROOT coordinate, so `contributing` holds at most ONE entry and any
     // loss empties it. The rows that must FOLD are the ones a coordinate count gets wrong.
+    //
+    // AND THE THIRD ROW IS `quorum`'S ONLY, BY §A.75. `staticSpec` writes `k: 0.5` over three
+    // arms, so a quorum barrier needs TWO of them; one surviving arm is the defect that row
+    // names — `#foldJoin` released on "nothing more can arrive" and never re-checked `k`, so
+    // one-of-three met `k: 2`. It now refuses, and `join-quorum-k-is-a-floor.test.ts` holds the
+    // whole matrix. Every other mode is unchanged: `any` and `firstSuccess` want one success and
+    // `all` wants every arrival, and none of the three declares a count.
     const survives: readonly (readonly [readonly string[], unknown, unknown])[] = [
       [[], ["a", "b", "c"], 3],
       [["a"], ["b", "c"], 2],
-      [["a", "b"], ["c"], 1],
+      ...(mode === "quorum" ? [] : [[["a", "b"], ["c"], 1] as const]),
     ];
     for (const [losers, found, total] of survives) {
       const r = await runArms(staticSpec(mode), { seed: "s" }, losers);
@@ -705,6 +712,19 @@ test("A STATIC SIBLING JOIN LOSING SOME ARMS STILL FOLDS — the refusal counts 
       assert.deepEqual(r.found, found, `${where}: and its writes are in the channel`);
       assert.equal(r.total, total, `${where}: under both reducers`);
       assert.equal(r.joinError, undefined, `${where}: with no refusal`);
+    }
+
+    // The row §A.75 moved, asserted rather than merely omitted above: under `quorum` one
+    // surviving arm of three is a refusal, and it names the barrier.
+    if (mode === "quorum") {
+      const short = await runArms(staticSpec(mode), { seed: "s" }, ["a", "b"]);
+      assert.equal(short.status, "failed", "mode=quorum: one arm of three does not meet k: 0.5 of 3");
+      assert.equal(short.joinError, "E_QUORUM_UNREACHABLE", "mode=quorum: named by the barrier");
+      // The surviving arm's OWN write is in the channel either way and that is not this arm's
+      // doing: every member of a static sibling join sits at the ROOT coordinate, so
+      // `writesHeldForJoin` is false and it applied its own writes at commit. What the refusal
+      // stops is the FOLD and everything behind the barrier.
+      assert.deepEqual(short.found, ["c"], "mode=quorum: the arm applied its own write at commit");
     }
 
     // And the one row that must REFUSE: not one arm succeeded.

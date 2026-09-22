@@ -61,7 +61,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
 import { carriesOversight, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
-import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
+import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, JoinNode, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
 import { InProcessScheduler, type Scheduler } from "./scheduler.ts";
@@ -8159,6 +8159,73 @@ export class Engine {
       };
     }
 
+    // AND A `quorum` BARRIER IS FOLDED AGAINST ITS OWN `k`. §A.75.
+    //
+    // `#maybeFireJoin` releases every mode once no further arrival is possible — that is §A.55's
+    // answer and it is right, because a barrier nothing can still reach must not hang. But a
+    // release taken on "nothing more can arrive" carries no claim that the mode's requirement was
+    // MET, and this method held two arms that could notice — `onBranchError === "fail" && skipped
+    // > 0`, and §D.9's "not one of them succeeded" — and neither of them reads `k`. So under
+    // `onBranchError: "fail"` any loss failed the run before the count mattered, which masked it
+    // in every shipped graph, and under `"skip"` nothing did: measured on
+    // `examples/graphs/two-person-approval.json` with that one word changed, ONE approval of
+    // three met `k: 2`, in all three orderings. k-of-n was any-of-n.
+    //
+    // `k` IS A FLOOR AND NOT MERELY A SHORT-CIRCUIT THRESHOLD, which is the judgement this arm
+    // takes: `k` is the whole of what a quorum join declares, and a graph that writes it is
+    // entitled to read it as the number of branches that have to come through. The alternative —
+    // "`k` means release early, and what you get is whatever arrived" — makes `quorum` and `any`
+    // the same node under `skip`, and leaves an author no way to say "two of these three".
+    //
+    // `need` AND THE COUNT IT IS COMPARED TO COME FROM `#joinArrivals` AND `quorumNeed`, so the
+    // fold cannot disagree with the release about either. `expected` is the fan-out PLAN's width
+    // (or, for static sibling arms, the member count), and `k <= 1` is a FRACTION of it — neither
+    // is re-derived here.
+    //
+    // AND THE COUNT IS `contributed`, NOT `succeeded`, WHICH IS THE ONE JUDGEMENT IN THIS ARM.
+    // `succeeded` is arrivals AT the barrier: `#maybeFireJoin` excludes a member that handed off
+    // inside the branch set, so a branch whose earlier member wrote and whose later member then
+    // threw counts zero. Requiring `k` of THOSE refuses three shapes this runtime decided to fold
+    // — a degraded fan branch (`join-all-branches-fail.test.ts`), a `human_gate` answered `edit`
+    // whose worker then died (`join-evidence-and-work.test.ts`), and any partial loss
+    // `onBranchError: "skip"` exists to absorb — and it would refuse them with the humans' own
+    // writes already in the fold. Measured: all three flip to `failed E_QUORUM_UNREACHABLE` on
+    // `succeeded`, and none of them on `contributed`. So the floor this arm enforces is "at least
+    // `need` of the branches I waited on PRODUCED something", which is `skip`'s own reading of a
+    // degraded branch and is still exactly `k` for every branch that is one node — the shipped
+    // `two-person-approval` shape, where the count is the number of approvals.
+    //
+    // NO QUIESCENCE CONJUNCT, unlike §A.67's arm directly above. That one makes an ABSENCE claim
+    // ("not one of them succeeded") which a still-live member could falsify; this one reads a
+    // count that only ever grows and compares it to a floor, so a release that short-circuited on
+    // `succeeded >= need` satisfies it by construction, whoever is still running.
+    //
+    // INDEPENDENT OF `onBranchError`, deliberately and for the reason §D.9 already gives: `skip`
+    // says what to do with a branch that DIED, not that the barrier's own declaration is
+    // advisory. It still absorbs every loss the quorum can survive — `k: 2` of three with one
+    // rejection folds exactly as before.
+    //
+    // `E_QUORUM_UNREACHABLE`, the code this door already raises for the other way a release can
+    // carry no usable result; the difference is carried by the message, as it is between the two
+    // arms above. A new `CODES` member would be new error vocabulary in the kernel for a
+    // distinction nothing branches on.
+    if (join.mode === "quorum") {
+      const { contributed, expected } = this.#joinArrivals(ctx, p, join, w.task.branch);
+      const need = quorumNeed(join, expected);
+      if (contributed < need) {
+        return {
+          status: "failed",
+          writes: {},
+          usage: { ...ZERO_USAGE },
+          error: err.validation(
+            CODES.E_QUORUM_UNREACHABLE,
+            `join "${w.node.id}": mode "quorum" requires ${need} of ${expected} branch(es) to succeed and ${contributed} did — ` +
+              `the barrier released because no further arrival is possible, which is not the same as its \`k\` being met`,
+          ),
+        };
+      }
+    }
+
     const wave: Record<string, readonly Contribution[]> = {};
     for (const [channel, list] of byChannel) wave[channel] = list;
 
@@ -11895,6 +11962,101 @@ export class Engine {
   }
 
   /**
+   * THE ARRIVAL ARITHMETIC A BARRIER'S MODE IS DECIDED ON — one function, two consumers.
+   *
+   * `#maybeFireJoin` asks it to decide WHEN a barrier releases; `#foldJoin` asks it to decide
+   * whether the mode's own requirement was actually met by what arrived. §A.75 is what happens
+   * when only the first asks: `quorum` released on `succeeded >= need || noMoreArrivals` and the
+   * fold never re-checked `k`, so a barrier that released because nothing more could arrive
+   * folded as a SUCCESS with `succeeded < need`. Under `onBranchError: "fail"` the fold's first
+   * arm masked it; under `"skip"` nothing did, and ONE approval of three met `k: 2`.
+   *
+   * A SECOND COPY OF THIS ARITHMETIC IS THE DRIFT HAZARD, NOT THE FIX — the same sentence
+   * `#planRollback` already carries for `rewind` and `planRewind`. `expected` is not a sibling
+   * count and `succeeded` is not "how many member tasks say succeeded", and a fold re-deriving
+   * either by eye would answer a different question from the one the release was taken on. So the
+   * two read the same function and "they agree" is true by construction.
+   *
+   * `self` IS THE COMMITTING TASK'S OUTCOME, which `p` predates: `#maybeFireJoin` passes it so
+   * the arriving task is counted once rather than once as still-running and once as finished.
+   * `#foldJoin` passes none — by the time the barrier's own Task runs, every member it is
+   * counting has committed.
+   *
+   * TWO SUCCESS COUNTS, AND THE DIFFERENCE BETWEEN THEM IS A DECISION AND NOT AN OVERSIGHT.
+   * `succeeded` is ARRIVALS — a member that handed off inside the branch set is excluded, because
+   * its branch is still being handled and firing on it discards the recovery. `contributed` is
+   * BRANCHES THAT PRODUCED SOMETHING, in the unit `expected` is denominated in: coordinates where
+   * the members are fanned out, member tasks where they are static sibling arms, which is
+   * `expected`'s own rule. `#maybeFireJoin` needs the first — it is deciding whether another
+   * arrival could still change the answer. `#foldJoin` reads the second, and the reason is
+   * `onBranchError: "skip"`: a branch whose earlier member wrote and whose later member then died
+   * is a branch `skip` folds ON PURPOSE (§A.67, §D.9), so counting it as nothing at the fold would
+   * refuse a barrier holding real writes — including a human's own `edit` answer. Both are named
+   * here, in one function, so the choice is visible at the site instead of being a second unit
+   * somebody re-derived.
+   */
+  #joinArrivals(
+    ctx: RunContext,
+    p: RunProjection,
+    join: JoinNode,
+    parent: BranchCoordinate,
+    self?: { readonly taskId: TaskId; readonly status: "succeeded" | "failed"; readonly take: readonly EdgeId[] },
+  ): { readonly succeeded: number; readonly contributed: number; readonly terminal: number; readonly expected: number } {
+    // Members are the DECLARED branch nodes under or at this instance's coordinate — the
+    // same set `#foldJoin` folds. Counting one set and folding another is the shape
+    // invariant 6 forbids for tools, reproduced one subsystem over.
+    //
+    // ONE PASS OVER THE SNAPSHOT'S INDEX, NO STRINGS — see `#topUpFanout`. `members` is a `Set`
+    // because `join.branches` was asked `includes` once per task per commit, and
+    // `isAtOrUnderBranch` replaces an `encodeBranch` per task with a segment walk over the record
+    // the fold already decoded. `all` is the index's one materialised task list, so this scan
+    // shares it instead of allocating `Object.values(p.tasks)`.
+    const members = new Set<string>(join.branches);
+    const siblings = branchIndexOf(p).all.filter((t) => members.has(t.nodeId) && isAtOrUnderBranch(t.branch, parent));
+
+    // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
+    // materialisation a sibling count is "how many have started", so using it would
+    // fire the barrier as soon as the first wave finished — silently dropping every
+    // branch that had not been created yet.
+    const parentPath = encodeBranch(parent);
+    const planned = Object.entries(p.fanouts)
+      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && members.has(plan.nodeId))
+      .reduce((a, [, plan]) => a + plan.width, 0);
+    const expected = planned > 0 ? planned : siblings.length;
+
+    // A Task that HANDED OFF within the join's own branch set has not terminated its
+    // branch: an investigation that failed onto an error edge is still being handled by
+    // the quarantine node behind it. Counting it as terminal fires the barrier before
+    // the handler has run, and the recovery it exists for is silently discarded.
+    //
+    // `join.branches` already carries this: an edge to a node NOT in that set is an
+    // arrival at the join; an edge to a node inside it is a continuation.
+    //
+    // This Task's own hand-off is not in `p` yet, so read it from `self.take`.
+    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
+      (t.taskId === self?.taskId ? self.take : t.take).some((id) => {
+        const to = ctx.index.edgeById.get(id as EdgeId)?.to;
+        return to !== undefined && members.has(to);
+      });
+
+    const producedAt = new Set<string>();
+    let succeededTasks = 0;
+    let succeeded = 0;
+    let terminal = 0;
+    for (const t of siblings) {
+      const state = t.taskId === self?.taskId ? self.status : t.state;
+      if (state === "succeeded") {
+        producedAt.add(encodeBranch(t.branch));
+        succeededTasks++;
+      }
+      if (continuesInBranch(t)) continue;
+      if (state === "succeeded") succeeded++;
+      if (isTerminalTaskState(state)) terminal++;
+    }
+    return { succeeded, contributed: planned > 0 ? producedAt.size : succeededTasks, terminal, expected };
+  }
+
+  /**
    * Decide whether a join's barrier is satisfied. The join Task is created at the
    * PARENT branch — that is what "a join collapses branches back to one instance"
    * means concretely.
@@ -11903,7 +12065,7 @@ export class Engine {
    * routes every `seq`, `conditional` and `error` edge whose target is a join node here too, so
    * that an ordinary edge cannot mint the barrier's Task behind its back. Such a caller is asking
    * "is the barrier satisfiable right now?", not announcing an arrival — it contributes nothing
-   * to `siblings`, `expected` or `terminal`, and the answer is almost always `undefined`, because
+   * to the counts `#joinArrivals` returns, and the answer is almost always `undefined`, because
    * the member edges have already fired the barrier by the time it gets here. `edge` is read for
    * `edge.to` (the join node) and for `edgesIn` on the row; nothing else about its kind is used,
    * which is what makes the extra callers safe.
@@ -11933,43 +12095,15 @@ export class Engine {
     const joinTaskId = makeTaskId(edge.to, parent, 0);
     if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
 
-    // Members are the DECLARED branch nodes under or at this instance's coordinate — the
-    // same set `#foldJoin` folds. Counting one set and folding another is the shape
-    // invariant 6 forbids for tools, reproduced one subsystem over.
-    //
-    // ONE PASS OVER THE SNAPSHOT'S INDEX, NO STRINGS — see `#topUpFanout`. `members` is a `Set`
-    // because `join.branches` was asked `includes` once per task per commit, and
-    // `isAtOrUnderBranch` replaces an `encodeBranch` per task with a segment walk over the record
-    // the fold already decoded. `all` is the index's one materialised task list, so the two scans
-    // below share it instead of each allocating `Object.values(p.tasks)`.
-    const members = new Set<string>(join.branches);
+    // THE ARRIVAL COUNTS, AND THEY ARE `#foldJoin`'S TOO — see `#joinArrivals`. `p` predates
+    // this Task's own commit, so its outcome is substituted there rather than counted twice,
+    // once as still-running and once as finished.
+    const { succeeded, terminal, expected } = this.#joinArrivals(ctx, p, join, parent, {
+      taskId: w.task.taskId,
+      status: selfStatus,
+      take,
+    });
     const all = branchIndexOf(p).all;
-    const siblings = all.filter((t) => members.has(t.nodeId) && isAtOrUnderBranch(t.branch, parent));
-
-    // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
-    // materialisation a sibling count is "how many have started", so using it would
-    // fire the barrier as soon as the first wave finished — silently dropping every
-    // branch that had not been created yet.
-    const planned = Object.entries(p.fanouts)
-      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && members.has(plan.nodeId))
-      .reduce((a, [, plan]) => a + plan.width, 0);
-    const expected = planned > 0 ? planned : siblings.length;
-
-    // `p` predates this Task's own commit, so substitute its outcome rather than
-    // counting it twice — once as still-running and once as finished.
-
-    // A Task that HANDED OFF within the join's own branch set has not terminated its
-    // branch: an investigation that failed onto an error edge is still being handled by
-    // the quarantine node behind it. Counting it as terminal fires the barrier before
-    // the handler has run, and the recovery it exists for is silently discarded.
-    //
-    // `join.branches` already carries this: an edge to a node NOT in that set is an
-    // arrival at the join; an edge to a node inside it is a continuation.
-    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
-      (t.taskId === w.task.taskId ? take : t.take).some((id) => {
-        const to = ctx.index.edgeById.get(id as EdgeId)?.to;
-        return to !== undefined && members.has(to);
-      });
 
     // QUIESCENCE: a barrier may not fire while an arrival is still possible.
     //
@@ -12002,15 +12136,6 @@ export class Engine {
       return reachesMember(t.nodeId);
     });
     const quiescent = !handingOff && !stillLive;
-
-    let succeeded = 0;
-    let terminal = 0;
-    for (const t of siblings) {
-      const state = t.taskId === w.task.taskId ? selfStatus : t.state;
-      if (continuesInBranch(t)) continue;
-      if (state === "succeeded") succeeded++;
-      if (isTerminalTaskState(state)) terminal++;
-    }
 
     // QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
     //
@@ -12070,11 +12195,8 @@ export class Engine {
         case "any":
         case "firstSuccess":
           return succeeded >= 1 || noMoreArrivals;
-        case "quorum": {
-          const k = join.k ?? 1;
-          const need = k <= 1 ? Math.ceil(k * expected) : k;
-          return succeeded >= need || noMoreArrivals;
-        }
+        case "quorum":
+          return succeeded >= quorumNeed(join, expected) || noMoreArrivals;
       }
     })();
 
@@ -12516,6 +12638,21 @@ const VERDICT_SCHEMA: JSONSchema = {
   },
   required: ["pass", "score"],
 };
+
+/**
+ * How many branches a `quorum` join needs, from `k` and the width it was planned over.
+ *
+ * THE ONE PREDICATE, ASKED FROM BOTH SIDES — the same rule `writesHeldForJoin` lives on, and
+ * §A.75 is the bill for not having had it here. `#maybeFireJoin` asks "may this barrier release?"
+ * and `#foldJoin` asks "did what arrived meet the requirement it released under?", and a `need`
+ * computed twice is a `need` that can be computed differently: `k <= 1` is a FRACTION of the
+ * width and anything above it is an absolute count, and nothing about that is obvious enough to
+ * be re-derived by eye in a second method.
+ */
+function quorumNeed(join: JoinNode, expected: number): number {
+  const k = join.k ?? 1;
+  return k <= 1 ? Math.ceil(k * expected) : k;
+}
 
 function pick(obj: Readonly<Record<string, unknown>>, keys: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
