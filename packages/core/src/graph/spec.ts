@@ -284,11 +284,12 @@ export interface JoinNode {
    * `quorum` only: `k <= 1` is a FRACTION of the branch width and `k > 1` an integer count —
    * `#maybeFireJoin` computes `need = k <= 1 ? Math.ceil(k * expected) : k`, so `k: 1` asks for
    * EVERY branch and not for one, which is this field's most confusable value.
-   * It is a FLOOR and not only a short-circuit threshold: a quorum whose `need` the successes
-   * cannot reach never fires early, so the barrier falls through to quiescence, and a release
-   * that then carries no successful work is `E_QUORUM_UNREACHABLE` whatever `onBranchError` says
-   * (driven both ways over one graph by `test/run/join-evidence-and-work.test.ts`'s P1: `k: 0.5`
-   * over two members short-circuits and succeeds, `k: 1` over the same two fails).
+   * It is a FLOOR and not only a short-circuit threshold: a quorum barrier released because no
+   * further arrival is possible refuses with `E_QUORUM_UNREACHABLE` when FEWER THAN `need`
+   * branches contributed — not merely when none did — whatever `onBranchError` says, so 1 of 2
+   * with `need` 2 under `skip` FAILS rather than folding the one that arrived, and the refusal
+   * names `need`, the branch width and how many contributed
+   * (`test/run/join-quorum-k-is-a-floor.test.ts`).
    */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
