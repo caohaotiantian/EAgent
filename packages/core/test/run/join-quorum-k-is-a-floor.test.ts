@@ -330,3 +330,75 @@ test("§A.75 — `k` below 1 is a FRACTION of the width, and the floor is read t
   assert.equal(whole.status, "failed", "ceil(1 * 3) is 3, so two of three is short");
   assert.equal(whole.error, "E_QUORUM_UNREACHABLE", "refused");
 });
+
+/**
+ * §A.47's EMPTY FAN, WITH AN ABSOLUTE `k` — the boundary the fraction hides.
+ *
+ * A fan-out over an EMPTY channel is a legitimate shape and must fold nothing and SUCCEED: it
+ * materialises no member Task at all, so the barrier has nothing to have succeeded, and that is
+ * what `members.length > 0` separates from "the fan materialised two and lost both" in §D.9's arm.
+ * The new `k` floor needs the same guard and for the same reason, and `k: 0.5` cannot show it —
+ * `ceil(0.5 * 0)` is 0, so a fractional quorum is satisfied by an empty fan by accident. An
+ * ABSOLUTE `k` is not: `k: 2` over a width of nothing is `need: 2`, and without the guard the
+ * empty fan fails `E_QUORUM_UNREACHABLE` where §A.47 requires it to succeed. `#fireEmptyJoin`
+ * releases that barrier on its own path and the mode's predicate is never consulted, so a fold
+ * enforcing `k` there would be enforcing a requirement the release never claimed.
+ */
+function emptyFanSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-empty-fan", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 2, maxFanout: 16, maxLoopIterations: 1 } },
+    channels: {
+      items: { type: "array", reduce: "replace" },
+      item: { type: "object", reduce: "replace" },
+      seen: { type: "array", reduce: "append_ordered" },
+      note: { type: "array", reduce: "append_ordered" },
+    },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: "start", type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: "b0", type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/work@stable" } },
+      {
+        id: "J",
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: ["b0"], mode: "quorum", k, onBranchError: "skip" },
+      },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "fo", from: "start", to: "b0", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "jn0", from: "b0", to: "J", kind: "join", branches: ["b0"] },
+      { id: "sq", from: "J", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("§A.75 — an EMPTY fan still folds and succeeds, at an absolute `k` as well as a fractional one", async () => {
+  for (const k of [0.5, 2]) {
+    const store = new MemoryStateStore({ now: () => NOW });
+    const functions = new FunctionRegistry();
+    functions.register("function/seed@stable", () => ({ writes: {} }));
+    functions.register("function/work@stable", (view) => ({ writes: { seen: [String((view.get<{ id?: string }>("item") ?? {}).id)] } }));
+    functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools: new ToolRegistry(),
+      functions,
+      models: new ModelRegistry(),
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: [], budget: { runUsd: 1 } },
+    });
+    const graph = compileOrThrow({ spec: emptyFanSpec(k), resolver, tools: {}, tenantCapabilities: [] });
+    const runId: RunId = await engine.submit({ graph, inputs: { items: [] } });
+    const p = await engine.advance(runId);
+    assert.equal(p.status, "succeeded", `k=${k}: an empty fan is a legitimate shape — ${JSON.stringify(p.error ?? {})}`);
+    assert.deepEqual(p.channels["note"], ["done-ran"], `k=${k}: and the node behind the barrier runs`);
+  }
+});

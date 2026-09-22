@@ -8274,11 +8274,20 @@ export class Engine {
     // advisory. It still absorbs every loss the quorum can survive — `k: 2` of three with one
     // rejection folds exactly as before.
     //
+    // `members.length > 0` FOR THE SAME REASON THE ARM ABOVE CARRIES IT, and a fractional `k`
+    // hides the need for it. §A.47 requires a fan-out over an EMPTY channel to fold nothing and
+    // SUCCEED — it materialises no member Task, and `#fireEmptyJoin` releases that barrier on its
+    // own path, so the mode's predicate is never consulted and there is no requirement for the
+    // fold to hold it to. `ceil(0.5 * 0)` is 0, so a fractional quorum is satisfied by an empty fan
+    // by accident; an ABSOLUTE `k: 2` is `need: 2` over a width of nothing and was measured failing
+    // `E_QUORUM_UNREACHABLE` before this conjunct existed. "The fan materialised nothing" and "the
+    // fan materialised three and two lost" are different runs and only the second is this arm's.
+    //
     // `E_QUORUM_UNREACHABLE`, the code this door already raises for the other way a release can
     // carry no usable result; the difference is carried by the message, as it is between the two
     // arms above. A new `CODES` member would be new error vocabulary in the kernel for a
     // distinction nothing branches on.
-    if (join.mode === "quorum") {
+    if (join.mode === "quorum" && members.length > 0) {
       const { contributed, expected } = this.#joinArrivals(ctx, p, join, w.task.branch);
       const need = quorumNeed(join, expected);
       if (contributed < need) {
