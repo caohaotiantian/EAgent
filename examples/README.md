@@ -556,9 +556,9 @@ granted automatically, signed by a person first, or denied with the policy rule 
 appends what it did to an access ledger.
 
 ```
-  read-request ─seq─▶ read-policy ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
-                                              │                             ├─▶ weigh ─seq─▶ route
-                                              └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
+  read-request ─seq─▶ read-policy ─seq─▶ look ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
+                                                          │                             ├─▶ weigh ─seq─▶ route
+                                                          └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
                                                                                                 │
   route ─conditional(ceremony == "auto")───────────────────────────▶ record ─┬─seq─▶ write-grant
   route ─conditional(ceremony == "review")─▶ sign (human gate) ─seq─▶ ───────┘   └─seq─▶ write-ledger
@@ -580,7 +580,12 @@ loom replay  <runId>       # {"match": true, "hermetic": true}
 ```
 
 **This is the only graph here with a `router` in it, and the only one with a `kind: "error"` edge.**
-It is also the only one that uses a reducer other than `replace` and `append_ordered`.
+It is also the only one that uses a reducer other than `replace` and `append_ordered` — six of the
+eight ship unexercised, and it uses `merge_object` because the compiler makes it, not by choice.
+
+**The router has TWO `cases[]` and one `fallbackEdge`**, which is three destinations and not three
+cases — a distinction that matters when you write one, because a case you forget falls through to
+the fallback silently, and here the fallback is the arm that REFUSES.
 
 **The three parts of a router that have to agree**, which is the step that costs people compiles:
 `router.cases[].when` is an expression over the node's own `reads`; `cases[].take` and
@@ -624,13 +629,35 @@ alone.
   byte-identical to before the failed run. A `compensation` edge is a DECLARATION the compiler
   proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
 
-**The hazard this example ships with, and why it is not fixed here.** An error arm is handed no
-reason: the failed node writes nothing, no channel carries the code or the message, and `codes`
-narrows by class where every `fs.read` failure is the one code. So `first-grant` cannot tell "there
-is no ledger yet" from "the ledger is there and I could not read it". With
-`chmod 222 out/access-ledger.json` the run reports `succeeded` and the ledger is REPLACED — a prior
-grant destroyed. No hook and no body can close it: neither can reach the filesystem. It is pinned
-as a RESIDUE test in `packages/core/test/examples-grant.test.ts` and written up as F5.
+**An error arm is handed NO REASON, and `look` is what this example pays to survive it.** The failed
+node writes nothing, no channel carries the code or the message, and `codes` narrows by class where
+a missing file, an unreadable file AND a path the sandbox refuses are all
+`E_TOOL_SOURCE_UNAVAILABLE`. So `first-grant` cannot tell "there is no ledger yet" from "the ledger
+is there and I could not read it" — and undefended, `chmod 222 out/access-ledger.json` made the run
+report `succeeded` and REPLACE the ledger, destroying a prior grant.
+
+**The defence is a second tool asking the same question.** `fs.glob` lists a file `fs.read` cannot
+open, so the `look` node runs it over the ledger's path and `weigh` refuses when the listing is
+non-empty and the history came from the error arm. It is **narrow, not a closure**, and the three
+limits are the point: it works only because this failing read has a PATH another read-only tool can
+ask about (an arm over `net.fetch` or `proc.exec` has no second opinion); it has a TOCTOU window,
+which loses in the failing-CLOSED direction; and it answers "does the file exist", not "why did the
+read fail". F5 of `docs/workflow-port-2026-09-22b.md` has the measurements, and both directions are
+pinned in `packages/core/test/examples-grant.test.ts` — a defence that also fired on the ordinary
+first run would make the command's first use impossible.
+
+**A renewal skips the person, so it is bounded three ways**, all in `grant-weigh.js`'s
+`findRenewal`, and each has its own test with a control: only a `decidedByKind: "human"` grant
+starts a window (an auto-renewal must not restart the clock, or one approval becomes indefinite
+access); a renewal may widen neither the level nor the hours (a human who approved `write/4h` has
+not approved `write/24h`, and 24h is inside the policy's cap so the cap does not catch it); and it
+must be inside the window measured from the prior grant's own `grantedAt`.
+
+**`policy.levels`' ARRAY ORDER is the privilege lattice and nothing validates it.** A level is
+ranked by its index, so that array is what says `read < write < admin`. Reordering it to
+`["admin","read","write"]` does not reorder a list — it makes a prior `read` outrank a requested
+`admin`, and an auto-renewal could widen into admin. `access/policy.json`'s own `note` says so,
+because it is a privilege decision that does not look like one.
 
 **Why this is a `function` body and not an `agent` node**, the same argument §8 and §9 make: every
 term is read off rather than inferred — the tier is a lookup, the cap is a lookup, the level is an
@@ -638,8 +665,12 @@ index into a declared list, and a renewal is a date comparison. The judgement wo
 whether the stated REASON justifies the access, and this graph deliberately does not pretend to do
 it: it puts the reason in front of the person at the gate.
 
-`access/policy.json` holds three resources at three tiers, and `access/requests/` holds ten files —
-nine JSON requests, one per arm of the decision, and one that is not JSON at all. Two of the ten the
-graph REFUSES rather than denies, because "we decided, and the answer is no" and "we could not
-decide" are different sentences to a requester.
+`access/policy.json` holds three resources at three tiers, and `access/requests/` holds thirteen
+files — twelve JSON requests, one per arm of the decision and per refusal, and one that is not JSON
+at all. **Three of the thirteen the graph REFUSES rather than denies**, because "we decided, and the
+answer is no" and "we could not decide" are different sentences to a requester — and they are
+different CLASSES too, which a script wrapping this needs: a denial and a refusal are both
+`validation`/`E_FUNCTION_REFUSED` and differ only by the node named in the message (F7), while a
+request file that is not there is `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE` at the tool, because
+only `read-ledger` has an error arm.
 `packages/core/test/examples-grant.test.ts` drives all of them.

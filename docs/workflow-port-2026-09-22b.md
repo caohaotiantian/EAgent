@@ -24,14 +24,24 @@ the graph. F5: the reason a node failed is data, and an `error` arm is handed no
 the one to read**: it is not an inconvenience, it is a measured destruction of the workflow's own
 record, and it is reachable with one `chmod`.
 
-**F6 is a fourteenth-style entry of its own kind**, and this port has one member rather than eight:
-**a defect in THIS PORT'S OWN suite, found by mutation and not by review** — the round-trip test
-passed against a body that published a ledger holding one person's grants and nobody else's. It is
-recorded in §4 with the mutation that found it, because the METHOD is the transferable part and this
-port had no review round at the time of writing.
+**§4 is the entry to read, and it is this port's F14.** **Seven defects in THIS PORT'S OWN workflow
+and this document** — one found by the author's own mutation sweep and **six by one review round**,
+of which **four were blocking**. The four are worth the summary, because they are one sentence:
+*a guard nothing distinguishes is a guard nobody has*.
 
-**Nothing in F1–F7 is fixed here — it is recorded.** §5 is reserved for what a review round finds in
-this document and this workflow, and is empty on purpose.
+- **Two bounds on a renewal were untested**, and deleting either kept the suite 16/16 green. The
+  only renewal the suite exercised was a minutes-old, same-level, same-hours repeat of an
+  approval — a fixture that satisfies every guard at once and therefore distinguishes none.
+- **A renewal could WIDEN what a person approved.** A human said yes to `write/4h`; the graph then
+  granted `write/24h` and called it a renewal. And the window was measured from any entry's
+  `grantedAt`, so each auto-renewal restarted the clock and one approval became indefinite access.
+- **F5's "not closable from this side" was never established.** A `tool` node is neither a function
+  nor a hook, and `fs.glob` lists a file `fs.read` cannot open. The defence is now BUILT.
+- **F5's own paragraph made a false claim about `codes`** — a path the sandbox refuses carries the
+  same code as a missing file, so the narrowing does not separate the cases that matter.
+
+**Nothing in F1–F7 is fixed here — the product entries are recorded, not closed.** Everything in §4
+is this port's own and IS fixed, each with a mutation or a measurement that fails without its fix.
 
 ---
 
@@ -50,12 +60,12 @@ decided by who is online rather than by what is being asked for.**
 The three answers are not the same kind of thing, and that is the whole shape:
 
 ```
-  read-request ─seq─▶ read-policy ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
-                                              │                             ├─▶ weigh ─seq─▶ route
-                                              └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
-                                                                                                │
-  route ─conditional(ceremony == "auto")───────────────────────────▶ record ─┬─seq─▶ write-grant
-  route ─conditional(ceremony == "review")─▶ sign (human gate) ─seq─▶ ───────┘   └─seq─▶ write-ledger
+  read-request ─seq─▶ read-policy ─seq─▶ look ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
+                                                          │                             ├─▶ weigh ─seq─▶ route
+                                                          └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
+                                                                                                            │
+  route ─conditional(ceremony == "auto")───────────────────────────────────────▶ record ─┬─seq─▶ write-grant
+  route ─conditional(ceremony == "review")─▶ sign (human gate) ─seq─▶ ───────────────────┘   └─seq─▶ write-ledger
   route ─fallbackEdge──────────────────────▶ deny (refuses)
 ```
 
@@ -63,11 +73,12 @@ The three answers are not the same kind of thing, and that is the whole shape:
 |---|---|---|
 | `read-request` | `tool` (`fs.read`) | the request the `requestPath` input names |
 | `read-policy` | `tool` (`fs.read`) | `access/policy.json` — the tiers, the levels, the caps |
+| `look` | `tool` (`fs.glob`) | **is there a ledger at all?** — the second opinion F5's defence rests on |
 | `read-ledger` | `tool` (`fs.read`) | `out/access-ledger.json`, **which need not exist** |
 | `prior` | `function` | parses the ledger; **refuses if it cannot** |
 | `first-grant` | `function` | the ERROR arm: no ledger yet, so nobody has a history |
 | `weigh` | `function` | tier × level × hours × history → the ceremony; **refuses on a document it cannot read** |
-| `route` | `router` | three arms and a fallback |
+| `route` | `router` | two `cases[]` and a `fallbackEdge` — three destinations |
 | `sign` | `human_gate` | a person sees the request, the reason, the rule and the prior grants |
 | `record` | `function` | builds the grant and the next ledger |
 | `deny` | `function` | **refuses**, naming the policy rule that said no |
@@ -81,7 +92,7 @@ input directory:
 examples/graphs/grant-access.json
 examples/resources/function/grant-{prior,none,weigh,record,deny}.js
 examples/access/policy.json                    # the input, not workspace files
-examples/access/requests/*.json                # nine requests, one per arm
+examples/access/requests/*.json                # twelve requests, one per arm and per refusal
 examples/access/requests/not-a-request.txt     # and one that is not JSON at all
 ```
 
@@ -93,11 +104,17 @@ measured rather than recalled — `node -e` over every file in `examples/graphs/
 
 | | `triage-failures` | `harden-config` | **`grant-access`** |
 |---|---|---|---|
-| nodes | 8 | 8 | **12** |
+| nodes | 8 | 8 | **13** |
 | node types | function, human_gate, join, tool | function, human_gate, tool | function, human_gate, **router**, tool |
 | edge kinds | fanout, join, seq | conditional, loop, seq | conditional, **error**, seq |
-| reducers | append_ordered, replace | append_ordered, replace | append_ordered, **merge_object**, replace |
-| tools | fs.glob, fs.read, fs.write | fs.read, fs.write | fs.read, fs.write |
+| reducers | append_ordered, replace | append_ordered, replace | **merge_object**, replace |
+| tools | fs.glob, fs.read, fs.write | fs.read, fs.write | fs.glob, fs.read, fs.write |
+
+**That row said `append_ordered` in an earlier draft and this graph has NONE** — `/usr/bin/grep -c
+append_ordered graphs/grant-access.json` → `0`. Nothing in this workflow accumulates across a run:
+the ledger grows on DISK, one entry per run, and every channel holds one value. The census had been
+carried from the plan instead of re-read from the file, which is the same defect as a number
+carried from an earlier run.
 
 **Four things here are held by no other graph in this workspace**, and each was checked by grepping
 the directory rather than by remembering:
@@ -111,14 +128,20 @@ the directory rather than by remembering:
    in the file that they are not going to.** `GRAPH011`'s `fix:` line has been offering `add an
    edge from "<id>" with kind: error` to every author since it was written, and no shipped example
    took it until this one.
-3. **A reducer other than `replace` and `append_ordered`.** Five of the eight ship unexercised
-   (`merge_object`, `sum`, `max`, `min`, `union_set`); this uses `merge_object`, and F1 is why.
+3. **A reducer other than `replace` and `append_ordered`.** **SIX** of the eight ship unexercised —
+   `merge_object`, `sum`, `max`, `min`, `union_set` and `last_write_wins_by_ts`, which an earlier
+   draft's count of five omitted. This uses `merge_object`, and F1 is why.
 4. **A node reached by two mutually exclusive paths.** `record` sits behind both `granted` (straight
    from the router) and `signed` (from the gate); `weigh` sits behind both `prior` and
    `first-grant`. Nothing demonstrated that, and it is the shape every router tree needs.
 
-Overlap with port 1 is `human_gate`, `function`, `tool`, `fs.read`, `fs.write`, `seq`, `replace`,
-`append_ordered`; with port 2, add `conditional`. **That is more overlap than the first two had with
+**The router has TWO `cases[]` and one `fallbackEdge`, which is three destinations and not "three
+arms"** — a phrase this document and the suite both used until a reviewer counted. The distinction
+matters when you write one: a case you forget falls through to the fallback, silently, and the
+fallback here is the arm that REFUSES.
+
+Overlap with port 1 is `human_gate`, `function`, `tool`, `fs.glob`, `fs.read`, `fs.write`, `seq` and
+`replace`; with port 2, add `conditional`. **That is more overlap than the first two had with
 each other, and it is not avoidable**: every one of those is what a workflow a person would actually
 want run is made of, and a graph that avoided them to score better on a table would be a feature
 demo. The DISTINCTIVE set is disjoint, and that is the claim.
@@ -198,6 +221,7 @@ loom compile graphs/grant-access.json
 ok
   deadline read-request (default): timeoutMs=600000
   deadline read-policy (default): timeoutMs=600000
+  deadline look (default): timeoutMs=600000
   deadline read-ledger (default): timeoutMs=600000
   deadline prior (default): timeoutMs=600000
   deadline first-grant (default): timeoutMs=600000
@@ -210,9 +234,9 @@ ok
 exit 0. **No diagnostic at all**, which is worth one sentence because a draft of this graph's own
 `labels` claimed otherwise: `deny` is terminal and writes no declared output, and
 `GRAPH002_DEAD_END` still does not fire on it, because `decision` IS a declared output and `weigh`
-writes it on the same path. Ten deadlines and not twelve: `route` and `sign` run no body that could
-time out. `packages/core/test/examples-grant.test.ts` asserts the diagnostic set is EMPTY rather
-than counting it, so a compiler change that starts warning here fails loudly.
+writes it on the same path. Eleven deadlines and not thirteen: `route` and `sign` run no body that
+could time out. `packages/core/test/examples-grant.test.ts` asserts the diagnostic set is EMPTY
+rather than counting it, so a compiler change that starts warning here fails loudly.
 
 **Run it.** It stops at the gate, and nothing has been written.
 
@@ -222,9 +246,9 @@ ls out                                   # ls: out: No such file or directory
 ```
 
 ```
-run 01M341ECAWT32N8KKKVB9PD738 — inspect it with: loom trace 01M341ECAWT32N8KKKVB9PD738   ← stderr
+run 01M3449BA979HS28KEJYKT8YME — inspect it with: loom trace 01M3449BA979HS28KEJYKT8YME   ← stderr
 {
-  "runId": "01M341ECAWT32N8KKKVB9PD738",
+  "runId": "01M3449BA979HS28KEJYKT8YME",
   "status": "awaiting_gate",
   "outputs": {},
   "usage": {
@@ -234,7 +258,7 @@ run 01M341ECAWT32N8KKKVB9PD738 — inspect it with: loom trace 01M341ECAWT32N8KK
     "wallMs": 0
   }
 }
-gate gate_01M341ECBF4KZCKBM2AG2TP9WJ on node sign — loom approve 01M341ECAWT32N8KKKVB9PD738 gate_01M341ECBF4KZCKBM2AG2TP9WJ --as YOUR_ID   ← stderr
+gate gate_01M3449BASFPMYM2RCE928S9YV on node sign — loom approve 01M3449BA979HS28KEJYKT8YME gate_01M3449BASFPMYM2RCE928S9YV --as YOUR_ID   ← stderr
 ```
 exit 0. **Stdout is the JSON object and nothing else**, which is the first port's F4 holding on a
 third graph.
@@ -256,21 +280,53 @@ loom trace "$RUN" 2>/dev/null
 ```
 
 ```
-loom.run [unset] 18ms
-  loom.task read-request root [ok] 7ms
-  loom.task read-policy root [ok] 2ms
+loom.run [unset] 17ms
+  loom.task read-request root [ok] 6ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 1ms
+    loom.state.reduce [ok] 0ms
+  loom.task read-policy root [ok] 1ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 0ms
+    loom.state.reduce [ok] 0ms
+  loom.task look root [ok] 3ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 1ms
+    loom.state.reduce [ok] 0ms
   loom.task read-ledger root [error] 1ms
-  loom.task first-grant root [ok] 3ms
-  loom.task weigh root [ok] 2ms
-  loom.task route root [ok] 2ms
-  loom.task sign root [unset] 1ms
+    loom.policy [ok] 0ms
+    loom.tool [ok] 1ms
+  loom.task first-grant root [ok] 2ms
+    loom.policy [ok] 0ms
+    loom.effect (random) [ok] 0ms
+    loom.state.reduce [ok] 0ms
+  loom.task weigh root [ok] 1ms
+    loom.policy [ok] 0ms
+    loom.effect (random) [ok] 0ms
+    loom.state.reduce [ok] 0ms
+  loom.task route root [ok] 1ms
+    loom.policy [ok] 0ms
+  loom.task sign root [unset] 2ms
+    loom.policy [ok] 0ms
+    loom.gate sign [unset] 0ms
+
+conformance: ok
 ```
 
+**That is the whole of stdout, unelided.** An earlier draft showed the `loom.task` lines only and
+said two child kinds were being dropped; there are FIVE (`loom.policy`, `loom.tool`,
+`loom.state.reduce`, `loom.effect (random)`, `loom.gate`), and `conformance: ok` is on STDOUT, not
+stderr. Only the `trace:` header naming the graph hash goes to stderr. A paste that elides without
+saying exactly what is a paste a reader cannot check, which is the thing §2 cannot afford.
+
 **`read-ledger [error]` inside a run whose own status is `[ok]`.** The ledger does not exist yet, so
-the `fs.read` failed, the `error` edge carried control to `first-grant`, and the run carried on. Two
-nodes are ABSENT from that list and their absence is the assertion: `prior` (the success arm) never
-ran, and neither did `deny`. Each `loom.policy` and `loom.effect (random)` child is elided above;
-the `trace:` header naming the graph hash goes to stderr.
+the `fs.read` failed, the `error` edge carried control to `first-grant`, and the run carried on.
+**Two nodes are ABSENT and their absence is the assertion**: `prior`, the success arm, never ran,
+and neither did `deny`. Note also `read-ledger`'s own children — it has a `loom.policy` and a
+`loom.tool` and NO `loom.state.reduce`, because a failed task applies no writes.
+
+**`look` is the defence F5 cost**, and it runs before the read on every path. Here it finds nothing
+and the run proceeds; §3's F5 has the case where it finds something and `weigh` refuses.
 
 **See what you are being asked to approve.**
 
@@ -281,26 +337,26 @@ loom gates "$RUN" 2>/dev/null
 ```json
 [
   {
-    "gateId": "gate_01M341ECBF4KZCKBM2AG2TP9WJ",
+    "gateId": "gate_01M3449BASFPMYM2RCE928S9YV",
     "taskId": "sign@root#0",
     "nodeId": "sign",
     "policyRef": "oversight/access@stable",
-    "contentDigest": "sha256:eb3a0da4c31b8d347a8a4e421f59777ac37386d4e6e8e16be2b157ede84acd84",
-    "raisedAtSeq": 49,
-    "raisedAtTs": 1790063358319,
+    "contentDigest": "sha256:0805ccbab4a690b6d654533bb4754c0ff6287cc065e23b4d10c6b953919b190b",
+    "raisedAtSeq": 57,
+    "raisedAtTs": 1790066339162,
     "state": "open",
     "tier": 0,
     "approvers": [
       "u:you"
     ],
     "allowEdit": [],
-    "runId": "01M341ECAWT32N8KKKVB9PD738",
+    "runId": "01M3449BA979HS28KEJYKT8YME",
     "onTimeout": "fail",
     "reads": {
       "decision": {
         "cap": 24,
         "ceremony": "review",
-        "decidedAt": 1790063358314,
+        "decidedAt": 1790066339158,
         "historySource": "none",
         "hours": 4,
         "level": "write",
@@ -344,21 +400,21 @@ merged them would be a gate lying by omission.
 loom approve "$RUN" "$GATE" --as u:you
 ```
 
-47 lines of JSON on stdout, the finished run, ending in
+48 lines of JSON on stdout, the finished run, ending in
 
 ```json
     "wroteGrant": {
-      "bytes": 388,
+      "bytes": 416,
       "path": "out/grant.json"
     },
     "wroteLedger": {
-      "bytes": 580,
+      "bytes": 612,
       "path": "out/access-ledger.json"
     }
 ```
 
-and **three lines on STDERR that have nothing to do with this run** — that is F2, and you will see
-them on `approve`, `replay` and `trace` (but NOT on `audit`):
+and **lines on STDERR about a graph you did not name** — that is F2. On the tree this was measured
+on, three of them, about `harden-config.json`:
 
 ```
 ! harden-config.json: GRAPH002_DEAD_END: terminal node "fix" ends a path on which no declared output is ever written
@@ -366,10 +422,15 @@ them on `approve`, `replay` and `trace` (but NOT on `audit`):
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: node "collate" reads "applied", which no upstream node writes and which is not a graph input
 ```
 
-(`bytes` is a UTF-16 code-unit count and `wc -c` counts BYTES, so `wc -c` says **390** against
-`"bytes": 388` and **582** against **580** — a difference of two in each, contributed by **one**
+**Do not read that three as the finding** — another lane in this wave closes §A.84, after which
+`harden-config.json` compiles clean and this count becomes ZERO while the mechanism is unchanged.
+F2's own repro is written so it does not depend on which graphs happen to warn.
+
+(`bytes` is a UTF-16 code-unit count and `wc -c` counts BYTES, so `wc -c` says **418** against
+`"bytes": 416` and **614** against **612** — a difference of two in each, contributed by **one**
 em-dash at three bytes where UTF-16 counts one, in `decidedBy`. The arithmetic is `1 × (3 − 1) = 2`.
-Same phenomenon both earlier ports record; re-derived from the files rather than carried.)
+Same phenomenon both earlier ports record; re-derived from the files rather than carried — the
+numbers moved when `decidedByKind` was added, which is exactly how a stale pair gets into a doc.)
 
 ```bash
 cat out/grant.json
@@ -383,10 +444,11 @@ cat out/grant.json
   "tier": "restricted",
   "level": "write",
   "hours": 4,
-  "grantedAt": 1790063375796,
-  "expiresAt": 1790077775796,
+  "grantedAt": 1790066366704,
+  "expiresAt": 1790080766704,
   "ceremony": "review",
   "decidedBy": "a person, at the \"sign\" gate — see `loom gates` for who",
+  "decidedByKind": "human",
   "reason": "backfill the 2026-08 shipping rows the import job dropped",
   "renewalOf": null
 }
@@ -400,6 +462,12 @@ what a person agreed to.
 sees `view` and `ctx`, and neither carries the approver's subject. Writing `"approved by u:you"`
 here would be the document asserting something the code did not establish, which is the whole
 subject of port 2's F14. Who answered the gate is in the journal, under the gate.
+
+**`decidedByKind` is the same fact in a form a GUARD can read**, and it is load-bearing rather than
+decorative: `grant-weigh.js` renews only off an entry whose kind is `"human"`, so an auto-renewal
+cannot restart the renewal window. Two fields rather than one because a guard that greps prose
+breaks the first time the prose is edited for readability — and this prose is written to be read.
+See §4 for the measurement that put it here.
 
 **Run it AGAIN, and this is the workflow.**
 
@@ -417,7 +485,7 @@ loom run graphs/grant-access.json \
   "status": "succeeded",
   "ceremony": "auto",
   "historySource": "ledger",
-  "why": "u:dana was already granted write on orders-db 0 hours ago, within the policy's 720-hour renewal window, so this is a renewal and not a new grant",
+  "why": "a person granted u:dana write/4h on orders-db 0 hours ago, inside the policy's 720-hour window; this asks for write/4h, which is no wider, so it renews that decision rather than making a new one",
   "decidedBy": "automatically, as a renewal of an existing grant"
 }
 ```
@@ -427,6 +495,13 @@ same input, a different ending — because the ledger the first run wrote is now
 `read-ledger` succeeded, `prior` ran instead of `first-grant`, and `weigh` found a grant inside the
 policy's renewal window. **That is both arms of the error edge, driven by running one command
 twice**, and it is why this workflow has an error edge rather than having one bolted on.
+
+**`why` NAMES BOTH WIDTHS — `write/4h` approved, `write/4h` asked — and that is not decoration.**
+A renewal skips the person, so it is bounded three ways (only a HUMAN-decided grant starts a window;
+it may widen neither the level nor the hours; it must be inside the window), and the sentence is
+what makes the bound auditable in the record rather than only in the code. An earlier version
+printed the prior level and the age alone and said *"this is a renewal and not a new grant"* — over
+a 24h grant renewing a 4h approval. §4 has that measurement.
 
 **The ledger is append-only, and it comes back with two key orders in one file** — F6:
 
@@ -440,8 +515,8 @@ node -e 'const l=JSON.parse(require("fs").readFileSync("out/access-ledger.json",
 ```
 
 ```
-entry 1: ceremony,decidedBy,expiresAt,grantedAt,hours,level,reason,renewalOf,requestId,resource,tier,who
-entry 2: requestId,who,resource,tier,level,hours,grantedAt,expiresAt,ceremony,decidedBy,reason,renewalOf
+entry 1: ceremony,decidedBy,decidedByKind,expiresAt,grantedAt,hours,level,reason,renewalOf,requestId,resource,tier,who
+entry 2: requestId,who,resource,tier,level,hours,grantedAt,expiresAt,ceremony,decidedBy,decidedByKind,reason,renewalOf
 ```
 
 **Trust what it did.**
@@ -459,40 +534,75 @@ failure is evidence like any other.**
 **Every arm, on its own input.** The ceremony is checkable by hand: read `access/policy.json` and
 the request, and say which arm is right before you run it.
 
+**`rm -rf out .loom` BEFORE EACH ROW, not once at the top.** The ledger is this workflow's memory,
+so a sweep that keeps it measures each row against whatever the rows above it granted. An earlier
+draft cleared once and its `docs-site-read-ravi` row read `historySource: "ledger"` — true of that
+sweep and of nothing a reader would reproduce.
+
 ```bash
-rm -rf out .loom
-for r in docs-site-read docs-site-admin docs-site-read-ravi payments-kms-admin \
-         orders-db-too-long unknown-resource bad-level no-level; do
-  printf '%-24s ' "$r"
+for r in docs-site-read docs-site-admin orders-db-backfill payments-kms-admin \
+         orders-db-too-long unknown-resource bad-level no-level hours-not-finite; do
+  rm -rf out .loom
+  printf '%-22s ' "$r"
   loom run graphs/grant-access.json --input "{\"requestPath\":\"access/requests/$r.json\"}" 2>/dev/null \
     | jq -c 'if .status=="failed"
-             then {status, node: (.error.message|capture("on node \"(?<n>[^\"]+)\"").n)}
-             else {status, ceremony: .outputs.decision.ceremony,
-                   historySource: .outputs.decision.historySource} end'
+             then {status, node: (.error.message|capture("on node \"(?<n>[^\"]+)\"").n), code: .error.code}
+             else {status, ceremony: .outputs.decision.ceremony} end'
 done
+rm -rf out .loom
+printf '%-22s ' not-a-request.txt
 loom run graphs/grant-access.json --input '{"requestPath":"access/requests/not-a-request.txt"}' 2>/dev/null \
-  | jq -c '{status, node: (.error.message|capture("on node \"(?<n>[^\"]+)\"").n)}'
+  | jq -c '{status, node: (.error.message|capture("on node \"(?<n>[^\"]+)\"").n), code: .error.code}'
+rm -rf out .loom
+printf '%-22s ' no-such-request
+loom run graphs/grant-access.json --input '{"requestPath":"access/requests/no-such-request.json"}' 2>/dev/null \
+  | jq -c '{status, code: .error.code, class: .error.class}'
 ```
 
 ```
-docs-site-read           {"status":"succeeded","ceremony":"auto","historySource":"none"}
-docs-site-admin          {"status":"awaiting_gate"}
-docs-site-read-ravi      {"status":"succeeded","ceremony":"auto","historySource":"ledger"}
-payments-kms-admin       {"status":"failed","node":"deny"}
-orders-db-too-long       {"status":"failed","node":"deny"}
-unknown-resource         {"status":"failed","node":"deny"}
-bad-level                {"status":"failed","node":"deny"}
-no-level                 {"status":"failed","node":"weigh"}
-{"status":"failed","node":"weigh"}
+docs-site-read         {"status":"succeeded","ceremony":"auto"}
+docs-site-admin        {"status":"awaiting_gate","ceremony":null}
+orders-db-backfill     {"status":"awaiting_gate","ceremony":null}
+payments-kms-admin     {"status":"failed","node":"deny","code":"E_FUNCTION_REFUSED"}
+orders-db-too-long     {"status":"failed","node":"deny","code":"E_FUNCTION_REFUSED"}
+unknown-resource       {"status":"failed","node":"deny","code":"E_FUNCTION_REFUSED"}
+bad-level              {"status":"failed","node":"deny","code":"E_FUNCTION_REFUSED"}
+no-level               {"status":"failed","node":"weigh","code":"E_FUNCTION_REFUSED"}
+hours-not-finite       {"status":"failed","node":"weigh","code":"E_FUNCTION_REFUSED"}
+not-a-request.txt      {"status":"failed","node":"weigh","code":"E_FUNCTION_REFUSED"}
+no-such-request        {"status":"failed","code":"E_TOOL_SOURCE_UNAVAILABLE","class":"unavailable"}
 ```
 
-**Read that as three endings and one distinction.** `succeeded` with no gate, `awaiting_gate`, and
-`failed` — and the failures split between two NODES. `deny` is *we decided, and the answer is no*;
-`weigh` is *we could not decide*. **The first two rows are the pair worth staring at**:
-`docs-site-read` and `docs-site-admin` differ in ONE field and go to different arms, which is the
-check that the ceremony is read off both the tier and the level rather than off the tier alone.
+**`"ceremony": null` on the parked rows is the real output and not a shortening.** A run that is
+`awaiting_gate` has produced no `outputs` yet, so `.outputs.decision.ceremony` is absent and `jq`
+prints `null`. An earlier draft pasted `{"status":"awaiting_gate"}` for that row — tidier, and not
+what the command prints.
 
-Taking the two failure kinds in turn:
+**Read that as three endings and FOUR failure kinds.** `succeeded` with no gate, `awaiting_gate`,
+and `failed` — and `failed` is where a caller needs the detail, because a script wrapping an
+access-request workflow has to tell "no" from "we could not tell":
+
+| kind | class / code | where | means |
+|---|---|---|---|
+| a DENIAL | `validation` / `E_FUNCTION_REFUSED` | node `deny` | we decided, and the answer is no |
+| a REFUSAL | `validation` / `E_FUNCTION_REFUSED` | node `weigh` (or `prior`) | we could not decide |
+| an INPUT that is not there | `unavailable` / `E_TOOL_SOURCE_UNAVAILABLE` | node `read-request` | the workflow never started |
+| a value the JOURNAL rejects | `validation` / `E_RESOURCE_INVALID` | node `weigh` | **fixed — see below** |
+
+**The third row is why only `read-ledger` has an error arm.** A ledger may legitimately not exist;
+a request the caller named and did not provide is the caller's bug, and giving it a recovery arm
+would invent an empty request rather than say so. The first two share a code, which is F7.
+
+**The fourth row was a defect in this workflow and is fixed.** `"hours": 1e309` parses to
+`Infinity`, which IS a number, so the field check passed it; `firstDenial` then denied it for not
+being a whole number — and the run failed at `validation`/`E_RESOURCE_INVALID`, *"non-finite number
+Infinity at hours"*, because `decision` carries the raw value and the journal will not record one.
+**A denial nobody can journal is a denial nobody can read.** `hours-not-finite.json` is the fixture
+and it now refuses at `weigh`, naming the value: *"found the non-finite number Infinity"* — which
+itself took a second correction, because `JSON.stringify(Infinity)` is the string `"null"` and the
+obvious formatter reported it as `number null`, reading as a field that was not there.
+
+Taking the two main failure kinds in turn:
 
 ```bash
 loom run graphs/grant-access.json --input '{"requestPath":"access/requests/payments-kms-admin.json"}'
@@ -526,21 +636,22 @@ without its members:
 1. **the bytes are not JSON** — the block above;
 2. **the JSON parses but is not an OBJECT** — every rule is a property lookup and every lookup on a
    non-object is `undefined`, so the whole table abstains;
-3. **a required field is missing or the wrong type** — `who`, `resource`, `level`, `hours`
-   (`no-level.json` reproduces it), because defaulting one would grant or deny on a value nobody
-   wrote;
+3. **a required field is missing, the wrong type, or NOT FINITE** — `who`, `resource`, `level`,
+   `hours` (`no-level.json` and `hours-not-finite.json` reproduce the two halves), because
+   defaulting one would grant or deny on a value nobody wrote, and `Infinity` passes a `typeof`
+   check;
 4. **the POLICY is not a policy** — no `resources`, `levels` or `maxHours`, so every request falls
    through to the same answer, and a policy that says the same thing about everything is not one;
 5. **either document came back TRUNCATED** — §A.83, `fs.read` putting its marker inside the content.
    A prefix of a policy is a policy with rules missing, and every missing rule reads as *no such
    rule*, which is the permissive direction.
 
-`grant-prior.js` refuses twice more, on a ledger it cannot parse: a ledger read as an empty history
-would not merely re-review a renewal, it would be REPLACED by a document built from nothing.
-**That defence has a hole and the hole is F5**, which is the next block.
+`grant-prior.js` refuses twice more, on a ledger it cannot PARSE. But a ledger it cannot READ is a
+different case and its own body cannot see it — **that is F5, and the `look` node is what this
+workflow pays to survive it.**
 
-**The hazard, measured.** It is in this document rather than hidden because a port's job is to
-measure the product as it is:
+**The hazard, and the defence, measured.** Both are in this document rather than hidden, because a
+port's job is to measure the product as it is and then say what it cost to live with:
 
 ```bash
 rm -rf out .loom
@@ -550,21 +661,36 @@ jq -c '[.grants[].who]' out/access-ledger.json          # → ["u:sam"]
 chmod 222 out/access-ledger.json                        # readable by nobody, writable by all
 loom run graphs/grant-access.json \
   --input '{"requestPath":"access/requests/docs-site-read-ravi.json"}' 2>/dev/null \
-  | jq -c '{status, historySource: .outputs.decision.historySource}'
+  | jq -c '{status, code: .error.code}'
 chmod 644 out/access-ledger.json
 jq -c '[.grants[].who]' out/access-ledger.json
 ```
 
 ```
-{"status":"succeeded","historySource":"none"}
-["u:ravi"]
+{"status":"failed","code":"E_FUNCTION_REFUSED"}
+["u:sam"]
 ```
 
-**`u:sam`'s grant is gone, and the run exited 0.** The `fs.read` failed for a reason that is not
-"there is no ledger", the error arm cannot see reasons, and `first-grant` therefore reported a fact
-that was false. F5.
+with, on the message:
 
-**Tidy up.**
+```
+function "function/grant-weigh@stable" on node "weigh" refused: "out/access-ledger.json" IS on disk
+— fs.glob lists it as "out/access-ledger.json" — but the run reached here on the error arm, which
+means fs.read could not open it and this graph was told only that it failed. Granting now would
+publish a ledger rebuilt from an empty history and destroy every grant the file already holds. Fix
+the file's permissions, or move it aside deliberately if you mean to start a new ledger.
+```
+
+**Before the `look` node this block read `{"status":"succeeded","historySource":"none"}` and
+`["u:ravi"]` — `u:sam`'s grant gone, exit 0, nothing said.** The `fs.read` failed for a reason that
+is not "there is no ledger", the error arm cannot see reasons, and `first-grant` reported a fact
+that was false. **The arm is still blind: F5 is a PRODUCT entry and is not closed.** What changed
+is that this workflow now asks a second, read-only tool whether the file exists, and refuses when
+the two disagree. §3's F5 has what that costs and where it does not reach.
+
+**Tidy up — LAST, because `out/` holds the journal `$RUN` names.** F2's and F3's repros below use
+`$RUN` and `$GATE`; running this line before them is `E_RUN_NOT_FOUND` for anybody reading straight
+through, which is how an earlier draft ordered it.
 
 ```bash
 rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
@@ -576,13 +702,13 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-grant.test.ts    # 16 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-grant.test.ts    # 25 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 23 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-**Sixteen tests, and what they pin is different from either earlier port because the shape is.**
+**Twenty-five tests, and what they pin is different from either earlier port because the shape is.**
 Port 1's risk is branch ORDER under a fan-out; port 2's is CONVERGENCE of a loop. This graph has
 neither. **Its risk is that control went the wrong way — and a graph that routed wrong still exits
 0, still writes a grant, and looks exactly like one that routed right.** So the arms are read off
@@ -604,14 +730,23 @@ neither. **Its risk is that control went the wrong way — and a graph that rout
   ALONE and the outcome must follow. The same test port 1's `maxWidth` one is, and the only way to
   know the bodies hold no constant of their own. The renewal one carries a CONTROL run first,
   because without it it would pass against a graph that never renews at all.
+- **THE THREE BOUNDS ON A RENEWAL, one test each, each with its own control**, and they are the
+  reason this file grew from sixteen tests to twenty-five. §4 has what they cost to learn.
+- **the failure TAXONOMY**, all four kinds, asserted on `class` and `code` rather than on prose,
+  plus a hostile sweep asserting that every malformed or out-of-policy request leaves `record`
+  undispatched and nothing on disk.
 - **the compiler's whole diagnostic set, asserted EMPTY**, so a compiler change that starts warning
   about this graph is read rather than absorbed.
 
-**Two are labelled RESIDUE** and pin product behaviour rather than the workflow's, so that the day
-either changes somebody is told: **F5** (the ledger a run cannot read but can write is replaced —
-the test asserts today's LOSS, so closing F5 fails it loudly) and **the compensation** (a failed
+**Two pin PRODUCT behaviour rather than the workflow's**, so that the day either changes somebody is
+told: **F5's defence in both directions** (a ledger that cannot be read but can be written must be
+REFUSED, and the ordinary first run — where there really is no ledger — must still proceed; a
+defence that fired on the second would be worse than none), and **the compensation** (a failed
 run's already-landed `fs.write` is rolled back, and `out/grant.json` is asserted BYTE-IDENTICAL to
 before the failed run).
+
+**EVERY GUARD IN THIS WORKFLOW WAS DELETED ONE AT A TIME AND THE SUITE RE-RUN**, which is the only
+evidence that a guard's test tests the guard rather than its neighbours. The table is in §4.
 
 `examples-run.test.ts` picks the new graph up without being edited — its set is the directory — so
 the compile and resource-reachability halves were covered before this suite existed.
@@ -690,6 +825,17 @@ the DAG, `prior` and `first-grant` both have `read-ledger` as an ancestor, neith
 the other, and the concurrency rule concludes they overlap. **The edge is visible and its EXCLUSIVITY
 is not.** Closing §A.84 by adding kinds to that filter would not touch this.
 
+**The closest relative is §A.40, and it is CLOSED — which is the argument for this entry.** That was
+port 1's F2: `GRAPH010` refusing a channel that is provably branch-local, with the workaround leaking
+into the body as a `join("\n")` over a one-element array. It closed at `77c245a`, when
+`rule010ConcurrentWriters` learned an exemption for a channel that never leaves one fan-out branch,
+and `triage-classify.js` deleted the distortion. **This is the same shape one edge kind over**: a
+concurrency rule refusing a pair the graph can prove exclusive, and an author reaching for a reducer
+they do not mean. §A.48 already records what §A.40's exemption does NOT cover; an exclusivity
+exemption for a `seq`/`error` pair would be a second one, and narrower — the pair's exclusivity is
+structural rather than dataflow-dependent, since `#errorEdges` is reached only from a failure and
+`#edgesToTake` only from a success.
+
 **Neither half of the `fix:` line is what this graph wants, and that was measured rather than
 reasoned about.** *Sequence them* is the one thing that cannot be done: putting an edge between the
 two arms is asking for the recovery to run after the success. *Change to a multi-writer-safe
@@ -721,6 +867,41 @@ loom approve "$RUN" "$GATE" --as u:you
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: node "audit" reads "applied", which no upstream node writes and which is not a graph input
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: node "collate" reads "applied", which no upstream node writes and which is not a graph input
 ```
+
+**THOSE THREE LINES ARE NOT THE FINDING, AND THIS REPRO DOES NOT DEPEND ON THEM.** They were
+measured at `be29cb43`, where `harden-config.json` warns three times. **Another lane in this wave
+closes §A.84, after which that graph compiles clean and this count is ZERO — with the mechanism
+completely unchanged.** A repro that counts `harden-config` lines would then read as "fixed" and it
+would not be. So the repro DROPS ITS OWN noisy graph in and counts whatever names a file the
+operator did not ask about:
+
+```bash
+cd "$REPO/examples"
+cat > graphs/zz-noisy.json <<'JSON'
+{ "apiVersion": "loom.dev/v1", "kind": "GraphSpec",
+  "metadata": { "name": "zz-noisy", "project": "examples", "version": 1 },
+  "policy": { "posture": "out" },
+  "channels": { "a": { "type": "string", "reduce": "replace" },
+                "b": { "type": "string", "reduce": "replace" } },
+  "inputs": [], "outputs": ["b"],
+  "nodes": [ { "id": "n", "type": "function", "reads": ["a"], "writes": ["b"],
+               "function": { "ref": "function/count@stable" } } ],
+  "edges": [] }
+JSON
+loom compile graphs/zz-noisy.json 2>&1 | head -1
+loom replay "$RUN" 2>&1 >/dev/null \
+  | /usr/bin/grep -a -E '^! ' | /usr/bin/grep -av 'grant-access' | sed 's/:.*//' | sort | uniq -c
+rm -f graphs/zz-noisy.json
+```
+
+```
+! zz-noisy.json: GRAPH005_UNPRODUCED_READ: node "n" reads "a", which no upstream node writes and which is not a graph input
+   3 ! harden-config.json
+   1 ! zz-noisy.json
+```
+
+**`zz-noisy.json` is not the graph being replayed and its warning is on `loom replay`'s stderr
+anyway.** That is the mechanism, and the `1` survives §A.84 closing while the `3` does not.
 
 **On THREE verbs and not on a fourth, measured one at a time** — and the fourth is why this block
 counts rather than asserts. An earlier draft of this entry said "four verbs, `approve`, `replay`,
@@ -818,12 +999,20 @@ enforced one, and it is in the graph's `labels.residue-static-approvers` for tha
 **Tried.** Write the error arm from the documentation, as a stranger would.
 
 ```bash
+git stash list >/dev/null; git -c advice.detachedHead=false checkout -q be29cb43   # THE BASE
 /usr/bin/grep -a -n -i 'error edge\|kind: *"error"' README.md examples/README.md   # no output
 /usr/bin/grep -al '"error"' examples/graphs/*.json                                  # no output
 loom compile --help 2>&1 | /usr/bin/grep -a -i -c 'error edge'                      # 0
 ```
 
-**Happened.** That is all of it: three commands, nothing. `README.md` does not mention the kind.
+**MEASURED AT `be29cb43`, WHICH IS THIS LANE'S BASE, AND ALL THREE NOW MATCH.** Run on the final
+tree they hit `examples/README.md` (§10, added by this port), `examples/graphs/grant-access.json`
+(the graph this port added) and nothing in `--help`. Stating the sha rather than the command's
+output today is the only way an "it is not documented anywhere" claim stays checkable after the
+thing gets documented — and §10 of `examples/README.md` exists precisely because of this entry, so
+the greps invalidating themselves is the entry working rather than the entry being wrong.
+
+**Happened.** That is all of it at the base: three commands, nothing. `README.md` does not mention the kind.
 `examples/README.md` has a dedicated paragraph for the fan-out's three parts and one for the
 `function` body's verdicts, and nothing for an error edge. No graph in `examples/graphs/` contained
 one before this port. Every one of the following had to be read out of `packages/core/src`, and each
@@ -915,21 +1104,90 @@ writes will be a body asserting the reason it was built to handle.** The dangero
 always the same one — a workflow that searches for ABSENCES reads a failed read as "nothing is
 there", which is port 2's F12 one layer up.
 
-**Neither is a closure, and both were checked:**
+#### What `codes` buys, re-measured — an earlier draft of this entry was WRONG about it
 
-- **`codes` narrowing.** Already applied, and it does buy something real — `E_CAP_DENIED` and
-  `E_TOOL_NOT_FOUND` carry typed errors and are excluded, so a capability denial no longer reads as
-  an empty ledger. It does not separate the two filesystem failures, because they are one code.
-- **A `preTool` hook.** A hook sees `{tool, args}` and may only NARROW; it cannot read the disk (same
-  sandbox, no `fs`), so it cannot tell the cases apart either. Nothing in `{function, hook}` can.
+That draft said the narrowing *"does buy something real — `E_CAP_DENIED` and `E_TOOL_NOT_FOUND`
+carry typed errors and are excluded, so a capability denial no longer reads as an empty ledger."*
+It was reasoned from the code rather than run, and **the case that matters most is not excluded**:
 
-**What would close it** is a projection of the failure — the code and the message — into a channel
-the error arm may declare in `reads`. That is a new channel shape, not a new field, and it needs the
-answer to *what does an arm see when the failure is not a tool's* before it is designed.
+```bash
+# point read-ledger at a path OUTSIDE the workspace; everything else unchanged
+sed -i.bak 's#"path": "out/access-ledger.json"#"path": "../secrets/../../etc/hosts"#' graphs/grant-access.json
+rm -rf out .loom
+loom run graphs/grant-access.json --input '{"requestPath":"access/requests/docs-site-read.json"}' 2>/dev/null \
+  | jq -c '{status, historySource: .outputs.decision.historySource}'
+mv graphs/grant-access.json.bak graphs/grant-access.json
+```
 
-**Cost.** Found by a chmod, not by review, and only because the ledger round-trip made "what if the
-read fails for another reason" a natural question. It is pinned as a RESIDUE test asserting today's
-LOSS, so the day an arm can see its reason, the suite fails loudly.
+```
+{"status":"succeeded","historySource":"none"}
+```
+
+**A path the sandbox REFUSES takes the arm and reads as "there is no ledger yet".** With the arm
+deleted entirely, the code it carries is visible:
+
+```
+{"status":"failed","class":"unavailable","code":"E_TOOL_SOURCE_UNAVAILABLE",
+ "message":"path \"../secrets/../../etc/hosts\" escapes the sandbox root"}
+```
+
+— the same code as a missing file, so it matches the shipped `codes` list. **Three different
+outcomes — the file is not there, the file is there and unreadable, the path is one the sandbox will
+not serve — are one code**, and the last is a security refusal being read as an empty history. The
+corrected claim: `codes` excludes failures that carry a TYPED error, and every `fs.read` failure that
+goes through the tool's own `catch` does not, so the narrowing separates none of the three cases an
+author of this arm actually cares about.
+
+#### The DEFENCE, which is what this port did instead — and its cost
+
+The draft also said this was **"NOT CLOSABLE FROM THIS SIDE"**, and named `{function, hook}` as the
+whole of what an author has. **That was not established: a `tool` node is neither.** `fs.glob` is a
+shipped, read-only tool, and it lists a file `fs.read` cannot open:
+
+```bash
+chmod 222 out/access-ledger.json
+# an fs.glob node over the same path, in a throwaway graph
+# → content: "out/access-ledger.json"      the file fs.read has just failed on
+```
+
+So the graph gained a `look` node — `fs.glob` over `out/access-ledger.json`, upstream of
+`read-ledger` — and `weigh` refuses when **the listing is non-empty AND the history came from the
+error arm**, which is exactly the case the arm cannot distinguish and `look` can. Measured on the
+defended graph, the same `chmod 222` as above:
+
+```
+{"status":"failed","code":"E_FUNCTION_REFUSED"}
+["u:sam"]
+```
+
+**`u:sam`'s grant survives.** The two-directions test is in the suite, because a defence that also
+fired on the ordinary first run — where there really is no ledger — would make the command's first
+use impossible.
+
+**F5 STAYS A PRODUCT ENTRY, and the defence is its cost rather than its closure.** Three reasons,
+each a limit of the workaround and not of the workflow:
+
+1. **It works only because this failing read has a PATH another read-only tool can ask about.** An
+   error arm over `net.fetch`, `proc.exec`, or any tool without a listable namespace has no second
+   opinion available. The arm is still handed nothing.
+2. **It has a TOCTOU window.** The file can appear or vanish between `look` and `read-ledger`. The
+   race loses in the failing-CLOSED direction — a spurious refusal, never a spurious grant — which
+   is why the shape is acceptable, but it is a race.
+3. **It answers "does the file exist", not "why did the read fail".** The sandbox-escape case above
+   is not covered by it at all: `look`'s pattern is a different literal, so `ledgerOnDisk` is false
+   and the run proceeds. A defence built on a second tool can only re-ask the question the second
+   tool answers.
+
+**What would actually close it** is a projection of the failure — the code and the message — into a
+channel the error arm may declare in `reads`. That is a new channel shape, not a new field, and it
+needs the answer to *what does an arm see when the failure is not a tool's* before it is designed.
+
+**Also checked and not a closure:** a `preTool` hook sees `{tool, args}` and may only NARROW; it
+cannot reach the disk (same sandbox, no `fs`), so it cannot tell the cases apart either.
+
+**Cost.** Found by a `chmod`, not by review — and the defence was found by a REVIEWER, after this
+entry had already asserted there was none. Two nodes' worth of graph, one refusal, three tests, and
+a `fs.glob` call on every run of a workflow that does not otherwise need one.
 
 ---
 
@@ -947,8 +1205,8 @@ node -e 'const l=JSON.parse(require("fs").readFileSync("out/access-ledger.json",
          console.log("entry 2:", Object.keys(l.grants[1]).join(","))'
 ```
 ```
-entry 1: ceremony,decidedBy,expiresAt,grantedAt,hours,level,reason,renewalOf,requestId,resource,tier,who
-entry 2: requestId,who,resource,tier,level,hours,grantedAt,expiresAt,ceremony,decidedBy,reason,renewalOf
+entry 1: ceremony,decidedBy,decidedByKind,expiresAt,grantedAt,hours,level,reason,renewalOf,requestId,resource,tier,who
+entry 2: requestId,who,resource,tier,level,hours,grantedAt,expiresAt,ceremony,decidedBy,decidedByKind,reason,renewalOf
 ```
 
 **Expected.** One key order in one file.
@@ -1004,19 +1262,38 @@ which arm ran has to scrape a node id out of a message string, which is the thin
 the field you expect them in* — applied here because there is no field.
 
 ---
+## 4 · Defects in this port's OWN workflow, and what found each one
 
-## 4 · A defect in this port's OWN suite, found by mutation
+Port 2's F14 is eight defects in its own workflow, found by four review rounds, every one of them
+*the report asserting something the run had not established*. **This port has seven, and they are a
+different class**: five of them are *a guard nothing distinguishes*. Recorded in the same log
+because the METHOD is the transferable part.
 
-Port 2's F14 is eight defects in its own workflow, found by four review rounds. **This port had no
-review round at the time of writing, so it has one member and a different method**, recorded because
-the method is the transferable part.
+**One was found by the author's own mutation sweep, six by ONE review round, four of those
+blocking.** Nothing here was found by reading.
 
-**The defect.** `grant-prior.js` writes two lists into `history`: `grants`, this requester's history
-on this resource — what decides a renewal and what the gate shows — and `ledger`, every entry the
-file holds, which exists only because `grant-record.js` REWRITES the whole document. Appending to the
+| # | defect | found by |
+|---|---|---|
+| **#1** | the ledger append used the FILTERED grant list | the author's mutation sweep |
+| **#2** | two of `findRenewal`'s guards were untested — deleting either kept the suite green | review, blocking |
+| **#3** | a renewal could WIDEN the level or the hours a person approved | review, blocking |
+| **#4** | the renewal window restarted on every auto-renewal, so one approval never expired | review, blocking |
+| **#5** | F5's "not closable from this side" was never established — a `tool` node is neither a function nor a hook | review, blocking |
+| **#6** | F5's `codes` paragraph claimed a narrowing it does not do | review |
+| **#7** | a non-finite `hours` produced a denial the journal would not record | review |
+
+Plus six documentation corrections, each a claim measured and found false: F2's verb count, the
+census's `append_ordered` row and its "five of eight" reducers, "three arms" for a router with two
+cases, the sweep's tidied `awaiting_gate` row, and the trace's "two child kinds" elision.
+
+---
+
+### #1 · The ledger append used the filtered list — found by MUTATION, not by reading
+
+`grant-prior.js` writes two lists into `history`: `grants`, this requester's history on this
+resource — what decides a renewal and what the gate shows — and `ledger`, every entry the file
+holds, which exists only because `grant-record.js` REWRITES the whole document. Appending to the
 filtered one publishes a ledger holding one person's grants and nobody else's.
-
-**How it was found.** Not by reading. The body was mutated and the suite re-run:
 
 ```bash
 cp examples/resources/function/grant-record.js /tmp/rec.bak
@@ -1026,46 +1303,169 @@ node --test --test-timeout=120000 packages/core/test/examples-grant.test.ts
 ```
 
 **All sixteen passed.** The round-trip test approved a grant for `u:dana` and renewed it for
-`u:dana`, so `history.grants` and `history.ledger` were the SAME LIST and the mutation was invisible.
-**A suite that never puts a second person in the ledger cannot tell the two apart** — and the test's
-own comment claimed it was checking that earlier entries were carried forward.
+`u:dana`, so `history.grants` and `history.ledger` were the SAME LIST and the mutation was
+invisible. The test's own comment claimed it was checking that earlier entries were carried forward.
 
-**The fix, and the confirmation.** The round-trip test now seeds `u:sam`'s `docs-site` grant first
-and asserts the final ledger is `["u:sam","u:dana","u:dana"]`, plus that `weigh` still saw exactly
-ONE prior grant — the filtered list must NOT have grown. Re-applying the same mutation:
-
-```
-✖ the ledger ROUND-TRIPS: what run one wrote, run two reads back and renews off
-ℹ pass 15
-ℹ fail 1
-```
-
-**The lesson is the one `docs/handoff-2026-09-22.md` §5 already states in another costume**:
-*coverage of the guard is not coverage of the gap.* A test that exercises a filtered list and an
-unfiltered one with the same contents has covered one line of code and neither of its two meanings.
-**Ask what the fixture makes indistinguishable**, and then make it distinguishable — here, by adding
-a second person, which cost one extra `loom run` in one test.
+**The fix** seeds `u:sam`'s `docs-site` grant first and asserts the final ledger is
+`["u:sam","u:dana","u:dana"]`, plus that `weigh` still saw exactly ONE prior grant — the filtered
+list must not have grown. **Ask what the fixture makes indistinguishable**, and then make it
+distinguishable; here that cost one extra `loom run` in one test.
 
 ---
 
-## 5 · What a review round found
+### #2–#4 · The renewal bounds — one fixture hid three defects at once
 
-*Empty on purpose. This section is filled by the review round; F1–F7 are the port's findings about
-the product and §4 is the one defect its own mutation sweep found. A builder's own green suite is not
-evidence, and neither is a builder's own friction log — port 2's F14 is eight defects in a document
-whose author believed it was finished.*
+**This is the entry to read, and it is one sentence: the only renewal the suite exercised was a
+minutes-old, same-level, same-hours repeat of an approval.** That single fixture satisfies every
+guard simultaneously, so it distinguishes none of them — and the two guards that existed could each
+be deleted with the suite staying **16/16 green**.
+
+**#2, measured by the reviewer.** Deleting `grant-weigh.js`'s level guard: a 1h READ grant for
+`u:sam` plus a request for WRITE/24h went from `awaiting_gate` (shipped) to `auto` (mutated) — with
+the suite green. Deleting the window guard: a 719h-old grant against a 1h window went to `auto`,
+suite green. **The drift test that claimed to pin the window set `renewalWithinHours` to 0**, which
+exits `findRenewal` at its `windowMs <= 0` guard and never reaches the comparison at all.
+
+**#3, a renewal could WIDEN what a person approved.** Measured before the fix, on the shipped graph:
+
+```
+approve orders-db-backfill  (write, 4h)   → a person says yes
+run     orders-db-long-write (write, 24h) → {"status":"succeeded","ceremony":"auto","hours":24,
+   "why":"u:dana was already granted write on orders-db 0 hours ago, … so this is a renewal
+          and not a new grant"}
+```
+
+**24h is inside the policy's 24h cap, so `firstDenial` let it past**, and nothing else looked at
+width. A human who approved four hours had authorised a day, and the record said "renewal".
+
+**#4, the window restarted on every renewal.** It was measured from `grantedAt` on ANY entry, and
+each auto-renewal writes a fresh `grantedAt` — so one approval chains indefinitely at the cap. A
+grant expired 718 hours earlier still renewed `auto`.
+
+**The decision, recorded as problem → options → choice**, because it is a policy question and not a
+bug fix:
+
+> **Problem.** A renewal skips the person. What may it cover?
+> **Option A — renewals only for an IDENTICAL request.** Safe, and wrong in a way that matters:
+> somebody trusted with `admin` yesterday would need a second person to be handed `read` today,
+> while the wider grant sailed through. It sends the NARROWER request to a human.
+> **Option B — any prior grant inside the window** (what shipped). Measured above: widening.
+> **Option C, CHOSEN — a renewal may not WIDEN, and only a HUMAN decision starts a window.**
+> Same level or higher, same hours or fewer, inside the window measured from the prior grant's own
+> `grantedAt`, and the prior grant must be `decidedByKind: "human"`. Narrowing still renews;
+> widening is a new decision and goes to a person; a chain of renewals cannot outlive the window
+> that the one approval at its root opened.
+
+`grant-record.js` writes `decidedByKind` beside the prose `decidedBy` — **two fields rather than
+one, because a guard that greps prose breaks the first time the prose is edited**, and this prose is
+written to be read by a person at a gate.
+
+**The comment at `grant-weigh.js:56` was ALSO false and is fixed.** It said the denial-before-renewal
+ORDER stopped somebody widening an expired grant by re-asking. The ordering enforces the cap and
+nothing else; the bounds live in `findRenewal` and the comment now says so.
+
+**`why` now names both widths** — `a person granted u:dana write/4h … this asks for write/4h, which
+is no wider` — so a decision record cannot describe a wider grant as a renewal. That is the fix for
+the half of #3 that survives the code being right: a record nobody can audit is a record.
+
+**Four tests, each with a control run**, because a bound test with no control passes against a
+`findRenewal` that renews nothing. They seed the ledger BY HAND with explicit ages rather than
+building it by approving gates — a history built that way is always seconds old and exactly as wide
+as what was asked for, which is the fixture that hid all three defects.
 
 ---
 
+### #5–#6 · F5's two false claims
+
+**#5. "NOT CLOSABLE FROM THIS SIDE" was never established.** The sentence named `{function, hook}`
+as the whole of what an author has, and **a `tool` node is neither**. `fs.glob` — already used by
+`triage-failures` — lists a file `fs.read` cannot open. The defence is now built, measured, and
+pinned in both directions; F3 of §3 has it, and F5 keeps its PRODUCT status with the defence
+recorded as a cost with three named limits.
+
+**#6. The `codes` paragraph claimed a narrowing that does not happen.** Re-measured in F5: a path the
+sandbox refuses carries `E_TOOL_SOURCE_UNAVAILABLE`, matches the shipped list, takes the arm, and
+reads as an empty history. Both claims were written from the code rather than from a run, which is
+`CLAUDE.md`'s *reproduce by running, not by reading* — and the second was written INSIDE an entry
+whose whole subject is a guard that cannot see what it is guarding.
+
+---
+
+### #7 · A denial the journal would not record
+
+`"hours": 1e309` parses to `Infinity`, which IS a number, so the `typeof` field check passed it;
+`firstDenial` then denied it for not being a whole number, and the run failed at
+`validation`/`E_RESOURCE_INVALID` — *"non-finite number Infinity at hours"* — because `decision`
+carries the raw value and the journal will not record one. **A denial nobody can journal is a denial
+nobody can read.** Refused at `weigh` now, where the reason can still be said. The message needed a
+second correction: `JSON.stringify(Infinity)` is the string `"null"`, so the formatter reported it
+as `number null`, which reads as a field that is not there.
+
+---
+
+### The mutation table — every guard deleted one at a time
+
+The only evidence that a guard's test tests THAT guard rather than its neighbours. Re-run on the
+final tree; line numbers are the final file's.
+
+| mutation | result |
+|---|---|
+| *(baseline)* | **25 pass, 0 fail** |
+| `grant-record.js:59` — append `history.grants` instead of `history.ledger` | 24 / 1 — *the ledger ROUND-TRIPS* |
+| `grant-weigh.js:205` — delete the human-only guard | 24 / 1 — *BOUND 1* |
+| `grant-weigh.js:207` — delete the level guard | 24 / 1 — *BOUND 2a* |
+| `grant-weigh.js:209` — delete the hours guard | 24 / 1 — *BOUND 2b* |
+| `grant-weigh.js:211` — delete the window guard | 23 / **2** — *BOUND 1* and *BOUND 3* |
+| `grant-weigh.js:83-95` — delete F5's defence | 24 / 1 — *F5's DEFENCE* |
+
+**The window guard takes TWO tests down and that is correct, not slack.** BOUND 3 by construction,
+and BOUND 1 because its ledger holds a human entry outside the window which only the window guard
+excludes. Every other mutation is caught by exactly the test written for it.
+
+**The table was first measured against the 22-test suite and RE-MEASURED here rather than adjusted**
+when three taxonomy tests landed. A count carried across a change is a count nobody ran, which is
+the same defect as #1 through #7 wearing an arithmetic costume.
+
+---
+
+### The hostile sweep — every malformed or out-of-policy request fails CLOSED
+
+Measured as a SET rather than one case, and asserted three ways per member, because "the run failed"
+and "the run failed after granting access" are the same exit code: exit 1, `record` never
+dispatched, and nothing on disk. Members: `not-a-request.txt`, `no-level.json`,
+`hours-not-finite.json`, `bad-level.json`, `unknown-resource.json`, `orders-db-too-long.json`,
+`payments-kms-admin.json`. All seven fail closed.
+
+---
+
+## 5 · What a further review round finds
+
+*Empty on purpose, and it is the SECOND time this heading has been empty. Round one turned up seven
+defects in this port's own work, four of them blocking, in a document whose author had already
+written that a builder's own green suite is not evidence — and then shipped a suite that stayed
+green through two deleted security guards. Assume this section is not empty because there is nothing
+left.*
+
+---
 ## 6 · What is left open
 
 - **All seven product entries, F1–F7.** None is fixed here; the brief was to record them. **F5 is
-  the one a maintainer should look at first**: it is a measured, silent destruction of a workflow's
-  own record, reachable with one `chmod`, and every error arm anybody writes has the same shape.
-- **The shipped graph carries four notes in its own `labels`** — `residue-error-arm` (F1),
-  `residue-static-approvers` (F3), `residue-blind-error-arm` (F5) and
-  `compensation-fires-without-an-edge` — because each is something a reader of the file needs and
-  none has anywhere better to live while those rows are open.
+  the one a maintainer should look at first**: an error arm is handed no reason, so every arm
+  anybody writes is a body asserting the reason it was built to handle. This workflow now DEFENDS
+  against its own instance with an `fs.glob` second opinion — that is a cost, not a closure, and
+  F5 names three places the defence does not reach.
+- **The shipped graph carries five notes in its own `labels`** — `reads-as`, `residue-error-arm`
+  (F1), `residue-static-approvers` (F3), `residue-blind-error-arm` (F5, now carrying the defence
+  and its limits), `compiles-silent` and `compensation-fires-without-an-edge` — because each is
+  something a reader of the file needs and none has anywhere better to live while those rows are
+  open.
+- **`policy.levels`' ARRAY ORDER is an undeclared privilege lattice.** `grant-weigh.js` ranks a
+  level by its index, so that array is what says `read < write < admin`, and nothing validates it
+  against anything. Reordering it to `["admin","read","write"]` does not reorder a list — it makes
+  a prior `read` outrank a requested `admin`, and an auto-renewal could then widen INTO admin. It is
+  stated in `access/policy.json`'s own `note` and in `examples/README.md` §10 because it is a
+  privilege decision that does not look like one, and **it is the one thing in this workflow a
+  reviewer would not think to check**.
 - **`merge_object`'s conflict arm is unreachable in this graph** and is therefore untested by it.
   `onConflict: "last_by_branch"` is declared because F1 forced the reducer, not because two writers
   ever meet. A graph that genuinely has two is still unexercised by any example.
@@ -1093,4 +1493,15 @@ whose author believed it was finished.*
   *rollback is driven by the JOURNAL, not by the graph* — so it is not a discovery about the code;
   it is the first time an EXAMPLE shows it, and nothing in `README.md` or `examples/README.md` said
   it. It also means the rejected migration-runner alternative in §1 was rejected for the right
-  reason: the edge would have changed nothing.
+  reason: the edge would have changed nothing. **Re-confirmed in review**, on a run whose
+  `write-ledger` failed after `write-grant` landed: `md5` of `out/grant.json` identical before and
+  after, `loom.tool (compensate) [ok]` in the trace.
+- **The renewal bounds are a POLICY, and this workflow now states one.** No widening, and only a
+  human decision starts a window — §4's #2–#4 record the alternatives. A real deployment might want
+  a fourth bound this does not have: a ceiling on how many times one approval may be renewed at all,
+  independent of the window. Nothing here measures whether the three are enough at scale.
+- **The suite is 25 tests and every GUARD in the workflow is mutation-checked; nothing else is.**
+  The mutation table covers `findRenewal`'s three bounds, the ledger append and F5's defence. The
+  router arms, the taxonomy and the drift tests are pinned by assertion only, and a reviewer looking
+  for the next gap should start by deleting something they cover and seeing whether anything goes
+  red.
