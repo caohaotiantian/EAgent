@@ -90,6 +90,21 @@ interface Result {
  * The CLI writes strings and only strings; the runner writes Buffers. So forward anything that is
  * not a string and capture the rest, which keeps `summary()`'s "stdout is EXACTLY one JSON object"
  * assertion honest — it still sees everything the binary wrote, and nothing it did not.
+ *
+ * **THE ASSUMPTION THIS RESTS ON, STATED RATHER THAN LEFT IMPLICIT** — because it is an assumption
+ * about two things neither of which this file owns: that `node --test` serializes its events as
+ * Buffers, and that `src/cli.ts` writes only strings. If the runner ever wrote a string event, this
+ * capture would swallow it and the outer reporter would undercount again; if the CLI ever wrote a
+ * Buffer, `summary()` would not see it and "stdout is exactly one JSON object" would pass over
+ * something it should have caught. **The failure mode of the second is the dangerous one**, so the
+ * discipline is: any test here that asserts on the ABSENCE of output must also assert on some
+ * positive content, which every caller of `summary()` does by parsing it.
+ *
+ * The alternative — hand `main()` an injected stream instead of hijacking the global — is the right
+ * fix and is not available from here: `main(argv, fetchImpl?)` takes no streams, and adding a
+ * parameter is a change under `packages/core/src`, which this port is explicitly not allowed to make.
+ * **Chosen deliberately, and recorded so the next person does not have to rediscover why.** If the
+ * CLI ever gains a stream parameter, this helper should use it and this comment should go.
  */
 async function loom(dir: string, argv: readonly string[]): Promise<Result> {
   const out: string[] = [];
@@ -149,7 +164,7 @@ interface Report {
   readonly passes: number;
   readonly stoppedBy: string;
   readonly cascades: number;
-  /** How many findings the FIRST audit held — what `cascades` is measured against (F12). */
+  /** How many findings the FIRST audit held — what `cascades` is measured against (F14 #2). */
   readonly startedWith: number;
   readonly applied: readonly Applied[];
   readonly open: readonly { rule: string; at: string; autofixable?: boolean; remedy: string }[];
@@ -811,7 +826,7 @@ test("a manifest read back TRUNCATED refuses, instead of being reported as inval
     const round = JSON.parse(readFileSync(join(ws.dir, HARDENED), "utf8")) as Record<string, unknown>;
     assert.equal(round["name"], "huge", "the whole manifest went through, annotations and all");
     assert.equal(Object.keys(round["annotations"] as Record<string, unknown>).length, 6000);
-    assert.match(readFileSync(join(ws.dir, REPORT), "utf8"), /Nothing\. The manifest already satisfied every rule/);
+    assert.match(readFileSync(join(ws.dir, REPORT), "utf8"), /Nothing, and nothing is open: this manifest satisfies all eight rules\./);
 
     // Drop `maxBytes` — the pre-fix graph — and the default cap truncates. The refusal must name
     // TRUNCATION, not JSON.
@@ -831,6 +846,111 @@ test("a manifest read back TRUNCATED refuses, instead of being reported as inval
     assert.match(String(error["message"]), /more were dropped/, r.out);
     // The old, false diagnosis must be gone.
     assert.doesNotMatch(String(error["message"]), /is not JSON/, r.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a control character in a manifest cannot reach the report — every field is escaped, not just the table", async () => {
+  // THE ESCAPING HAD A HOLE THAT ROUND ONE'S OWN FIX OPENED. `cell()` was applied to the `applied`
+  // table only; then the auditor learned to mark a dotted env key NON-autofixable (F14 #3b), which
+  // means a hostile key can no longer reach the table at all — it lands in `## Still open`, and in
+  // nothing else. So the one path a hostile key takes was the one path with no escaping on it.
+  //
+  // Measured on `bin/loom`, with an env key of `A\u0000B.PASSWORD` and a service name holding `\u0007`:
+  //
+  //   before   NUL bytes: 3 | BEL bytes: 1   and `file out/harden-report.md` says "data"
+  //   after    NUL bytes: 0 | BEL bytes: 0
+  //
+  // Three NULs in a markdown file is not cosmetic: `grep` treats the file as binary and prints
+  // "Binary file … matches" instead of the line, which is how a reader is told there is nothing to
+  // see. That is the harm `cell()`'s own docstring claims it prevents.
+  //
+  // AND `cell()` HAD NO TEST. Mutating its body to `return String(v);` left the whole suite green,
+  // which is the only reason the hole survived a round. This test is that mutation's tripwire.
+  const ws = workspace();
+  try {
+    const hostile = JSON.parse(readFileSync(join(ws.dir, "manifests", "orders-api.json"), "utf8")) as Record<string, unknown>;
+    hostile["name"] = "bell\u0007name";
+    hostile["env"] = { "A\u0000B.PASSWORD": "x", LOG_LEVEL: "debug" };
+    writeFileSync(join(ws.dir, "manifests", "hostile.json"), JSON.stringify(hostile, null, 2));
+
+    const { runId, gate, report } = await runToGate(ws.dir, "hostile.json");
+    // The dotted key is reported and NOT repaired, so it reaches the `open` list — the unescaped path.
+    assert.equal(report.open.some((f) => f.at === "env.A\u0000B.PASSWORD"), true, JSON.stringify(report.open));
+
+    const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const md = readFileSync(join(ws.dir, REPORT), "utf8");
+
+    // NOT ONE control character anywhere in the file — the assertion that does not depend on knowing
+    // which field carried it.
+    assert.doesNotMatch(md, /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/, "a control character reached the report");
+    assert.equal(md.includes("\u0000"), false, "a NUL reached the report");
+    // …and the escaped forms ARE there, so the test cannot be satisfied by dropping the fields.
+    assert.match(md, /env\.A\\x00B\.PASSWORD/, md.slice(0, 400));
+    assert.match(md, /# Config hardening — bell\\x07name/, md.slice(0, 200));
+    // The title and the path are interpolated outside the table, which is where the hole was.
+    assert.match(md, /`manifests\/hostile\.json`/, md.slice(0, 400));
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a report with nothing applied does not claim the rules are satisfied", async () => {
+  // F14 #6 — the FOURTH instance of the class, inside the sentence written to replace the third.
+  // With nothing auto-fixable, `## Applied, in order` said "Nothing. The manifest already satisfied
+  // every rule this tool can repair." — printed two paragraphs above "Still open — 2 …
+  // plaintext-secret", which is a rule this tool repairs seven times on `legacy-gateway.json`. The
+  // run established that nothing here was auto-fixable; "satisfied" is the opposite of what `open`
+  // says.
+  const ws = workspace();
+  try {
+    const { runId, gate, report } = await runToGate(ws.dir, "unquoted-credentials.json");
+    assert.equal(report.passes, 0);
+    assert.equal(report.open.length, 2);
+
+    const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+    assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+    const md = readFileSync(join(ws.dir, REPORT), "utf8");
+
+    assert.doesNotMatch(md, /already satisfied every rule/, md);
+    assert.match(md, /No finding here is auto-fixable — see \*\*Still open\*\* below, which is 2 finding\(s\)/, md);
+    assert.match(md, /^## Still open — 2$/m, md);
+    // The headline paragraph must not read as compliance either.
+    assert.match(md, /the audit then found nothing further it can REPAIR, and 2 finding\(s\) remain open/, md);
+
+    // AND THE CLAIM STILL FIRES WHERE IT IS TRUE, so this cannot be satisfied by deleting it: a
+    // genuinely compliant manifest says so, and says it about all eight rules.
+    const clean = JSON.parse(readFileSync(join(ws.dir, "manifests", "payments-worker.json"), "utf8")) as Record<string, unknown>;
+    clean["env"] = { LOG_LEVEL: "info" };
+    clean["healthcheck"] = { exec: ["/bin/true"] };
+    writeFileSync(join(ws.dir, "manifests", "clean.json"), JSON.stringify(clean, null, 2));
+    const ok = await runToGate(ws.dir, "clean.json");
+    assert.equal(ok.report.passes, 0);
+    assert.deepEqual([...ok.report.open], [], JSON.stringify(ok.report.open));
+    const okApproved = await loom(ws.dir, ["approve", ok.runId, ok.gate.gateId, "--as", "u:you"]);
+    assert.equal(okApproved.code, 0, `${okApproved.out}${okApproved.err}`);
+    assert.match(readFileSync(join(ws.dir, REPORT), "utf8"), /Nothing, and nothing is open: this manifest satisfies all eight rules\./);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("`fs.read` refuses FOUR ways, and a JSON array is the one the count kept missing", async () => {
+  // The doc and `examples/README.md` §9 both said `harden-parse.js` refuses three ways. It refuses
+  // four, and the fourth is the one an ordinary mistake produces: a JSON document that parses but is
+  // not an object. `[1,2,3]` reproduces it, and so does a file somebody wrapped in an array by
+  // accident — a shape `JSON.parse` accepts and every rule in the table would abstain on.
+  const ws = workspace();
+  try {
+    writeFileSync(join(ws.dir, "manifests", "an-array.json"), "[1,2,3]\n");
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", input("an-array.json")]);
+    assert.equal(r.code, 1, `${r.out}${r.err}`);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["class"], "validation", r.out);
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /parsed as an array, not a JSON object/, r.out);
   } finally {
     ws.dispose();
   }
