@@ -280,7 +280,16 @@ export interface RouterNode {
 export interface JoinNode {
   readonly branches: readonly NodeId[];
   readonly mode: "all" | "any" | "quorum" | "firstSuccess";
-  /** `quorum` only: an integer count, or a fraction of the branch width. */
+  /**
+   * `quorum` only: `k <= 1` is a FRACTION of the branch width and `k > 1` an integer count —
+   * `#maybeFireJoin` computes `need = k <= 1 ? Math.ceil(k * expected) : k`, so `k: 1` asks for
+   * EVERY branch and not for one, which is this field's most confusable value.
+   * It is a FLOOR and not only a short-circuit threshold: a quorum whose `need` the successes
+   * cannot reach never fires early, so the barrier falls through to quiescence, and a release
+   * that then carries no successful work is `E_QUORUM_UNREACHABLE` whatever `onBranchError` says
+   * (driven both ways over one graph by `test/run/join-evidence-and-work.test.ts`'s P1: `k: 0.5`
+   * over two members short-circuits and succeeds, `k: 1` over the same two fails).
+   */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
 }
@@ -940,31 +949,41 @@ export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budg
  *                   meaning.
  *     stringArray   `readonly NodeId[]`, `readonly string[]`
  *
+ * `readBy` IS THE `/** <kind> only. *​/` COMMENT ABOVE EACH FIELD, MADE READABLE. Nine of the
+ * thirteen are declared for ONE edge kind and mean nothing on the others, and the comments in
+ * `EdgeSpec` above have said so in prose all along. A diagnostic that cannot see it writes advice
+ * an author must not take — a wrong-typed `maxWidth` on a `seq` edge was told to "set maxWidth to
+ * a whole number", which would be a number no reader ever looks at. The refusal reads this and
+ * says *remove it* instead. `allowed-fields.test.ts` scrapes those comments out of this file and
+ * cross-checks them against this column, so the prose and the data cannot drift.
+ *
  * KEYED AND NOT A SECOND EXPORT, for the reason `POLICY_FIELDS` gives ten lines up: each list is
- * one name on a pinned public surface. The union is written inline rather than named, so this
+ * one name on a pinned public surface. The tag union is written inline rather than named, so this
  * change adds no exported type either, and the key ORDER is the old array's order — `Object.keys`
  * preserves it, so the `may declare ...` fix `unknownKeys` prints is byte-for-byte what it was.
  *
- * SIX OF THE THIRTEEN ARE NOT RE-CHECKED AT THE PARSE, because a total refusal already exists for
- * each and a second spelling of one refusal is how two diagnostics come to disagree. They are
- * named, with the code that covers each, in `validate.ts`'s `TYPE_CHECKED_ELSEWHERE` — the
- * default here is to CHECK, so a field added to this table is type-checked unless somebody opts
- * it out there.
+ * SIX OF THE THIRTEEN ARE NOT RE-CHECKED AT THE PARSE, because a refusal already exists for each
+ * and a second spelling of one refusal is how two diagnostics come to disagree. They are named,
+ * with the code that covers each and the two values that code cannot survive, in `validate.ts`'s
+ * `TYPE_CHECKED_ELSEWHERE` — the default here is to CHECK, so a field added to this table is
+ * type-checked unless somebody opts it out there.
  */
-export const EDGE_FIELDS: Readonly<Record<string, "string" | "count" | "stringArray">> = {
-  id: "string",
-  from: "string",
-  to: "string",
-  kind: "string",
-  when: "string",
-  over: "string",
-  as: "string",
-  maxWidth: "count",
-  branches: "stringArray",
-  until: "string",
-  maxIterations: "count",
-  codes: "stringArray",
-  compensates: "string",
+export const EDGE_FIELDS: Readonly<
+  Record<string, { readonly type: "string" | "count" | "stringArray"; readonly readBy?: EdgeKind }>
+> = {
+  id: { type: "string" },
+  from: { type: "string" },
+  to: { type: "string" },
+  kind: { type: "string" },
+  when: { type: "string", readBy: "conditional" },
+  over: { type: "string", readBy: "fanout" },
+  as: { type: "string", readBy: "fanout" },
+  maxWidth: { type: "count", readBy: "fanout" },
+  branches: { type: "stringArray", readBy: "join" },
+  until: { type: "string", readBy: "loop" },
+  maxIterations: { type: "count", readBy: "loop" },
+  codes: { type: "stringArray", readBy: "error" },
+  compensates: { type: "string", readBy: "compensation" },
 };
 
 /**
