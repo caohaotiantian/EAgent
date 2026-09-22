@@ -1,0 +1,7 @@
+{
+  "id": "REQ-1047",
+  "who": "u:dana",
+  "resource": "orders-db",
+  "hours": 2,
+  "reason": "have a look at the orders table"
+}

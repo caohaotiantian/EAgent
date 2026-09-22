@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "levels": ["read", "write", "admin"],
+  "maxHours": { "read": 72, "write": 24, "admin": 8 },
+  "renewalWithinHours": 720,
+  "resources": {
+    "docs-site": { "tier": "public", "owners": ["u:ravi"] },
+    "orders-db": { "tier": "restricted", "owners": ["u:ravi", "u:mina"] },
+    "payments-kms": { "tier": "secret", "owners": ["u:mina"] }
+  }
+}

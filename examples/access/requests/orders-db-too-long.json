@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1044",
+  "who": "u:dana",
+  "resource": "orders-db",
+  "level": "write",
+  "hours": 96,
+  "reason": "keep it open for the whole migration window"
+}

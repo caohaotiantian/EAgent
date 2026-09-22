@@ -1,0 +1,140 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "grant-access",
+    "project": "examples",
+    "version": 1,
+    "description": "Somebody asked for temporary access to a production resource. A ROUTER decides the ceremony from the resource's tier, the level asked for, the hours asked for and the requester's own history: granted automatically, signed by a person first, or denied with the policy rule that said no. The access ledger is read at the start of the run and written at the end, so the `kind: \"error\"` edge out of `read-ledger` is not a hypothetical — it is the FIRST run of this command, where there is no ledger to read yet.",
+    "labels": {
+      "reads-as": "the router picks the CEREMONY; the arms are how much human a decision needs",
+      "residue-error-arm": "`prior` and `first-grant` are mutually exclusive BY CONSTRUCTION — one is the `seq` target of `read-ledger` and the other its `error` target, and no run can take both. The compiler cannot see that: `GRAPH010_CONCURRENT_WRITE` calls them concurrent writers of `history` and refuses `replace`. `merge_object` is the workaround, and it is a workaround — the channel holds one contribution on every run that has ever been measured. See F1 of docs/workflow-port-2026-09-22b.md.",
+      "residue-static-approvers": "`sign` names `u:you` because `approval.approvers` is a STATIC list in the graph, while the people who may actually sign are `decision.owners` — read out of access/policy.json at run time. The gate therefore shows the right owners and accepts the wrong signature. See F3.",
+      "compiles-silent": "This graph prints NO diagnostic at all — measured, not assumed. `deny` is terminal and writes no declared output, but GRAPH002_DEAD_END does not fire on it: `decision` is a declared output and `weigh` writes it on the same path. An earlier draft of these labels claimed the warning, which was a label asserting something no run had established."
+    }
+  },
+  "policy": {
+    "posture": "on",
+    "capabilities": ["fs:read", "fs:write"],
+    "expansion": { "maxNodes": 64, "maxDepth": 1, "maxFanout": 1, "maxLoopIterations": 1 }
+  },
+  "channels": {
+    "requestPath": { "type": "string", "reduce": "replace" },
+    "request": { "type": "string", "reduce": "replace" },
+    "policyDoc": { "type": "string", "reduce": "replace" },
+    "ledgerDoc": { "type": "string", "reduce": "replace" },
+    "history": { "type": "object", "reduce": "merge_object", "onConflict": "last_by_branch" },
+    "decision": { "type": "object", "reduce": "replace" },
+    "grant": { "type": "object", "reduce": "replace" },
+    "grantDoc": { "type": "string", "reduce": "replace" },
+    "ledgerNext": { "type": "string", "reduce": "replace" },
+    "wroteGrant": { "type": "object", "reduce": "replace" },
+    "wroteLedger": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["requestPath"],
+  "outputs": ["decision", "grant", "wroteGrant", "wroteLedger"],
+  "nodes": [
+    {
+      "id": "read-request",
+      "type": "tool",
+      "reads": ["requestPath"],
+      "writes": ["request"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${requestPath}", "maxBytes": 200000 } }
+    },
+    {
+      "id": "read-policy",
+      "type": "tool",
+      "writes": ["policyDoc"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "access/policy.json", "maxBytes": 200000 } }
+    },
+    {
+      "id": "read-ledger",
+      "type": "tool",
+      "writes": ["ledgerDoc"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "out/access-ledger.json", "maxBytes": 200000 } }
+    },
+    {
+      "id": "prior",
+      "type": "function",
+      "reads": ["ledgerDoc", "request"],
+      "writes": ["history"],
+      "function": { "ref": "function/grant-prior@stable" }
+    },
+    {
+      "id": "first-grant",
+      "type": "function",
+      "writes": ["history"],
+      "function": { "ref": "function/grant-none@stable" }
+    },
+    {
+      "id": "weigh",
+      "type": "function",
+      "reads": ["request", "policyDoc", "history"],
+      "writes": ["decision"],
+      "function": { "ref": "function/grant-weigh@stable" }
+    },
+    {
+      "id": "route",
+      "type": "router",
+      "reads": ["decision"],
+      "router": {
+        "mode": "expression",
+        "fallbackEdge": "denied",
+        "cases": [
+          { "when": "decision.ceremony == \"auto\"", "take": ["granted"] },
+          { "when": "decision.ceremony == \"review\"", "take": ["needs-a-person"] }
+        ]
+      }
+    },
+    {
+      "id": "sign",
+      "type": "human_gate",
+      "reads": ["decision"],
+      "writes": [],
+      "humanGate": { "ref": "oversight/access@stable", "approval": { "approvers": ["u:you"] } }
+    },
+    {
+      "id": "record",
+      "type": "function",
+      "reads": ["decision", "history"],
+      "writes": ["grant", "grantDoc", "ledgerNext"],
+      "function": { "ref": "function/grant-record@stable" }
+    },
+    {
+      "id": "deny",
+      "type": "function",
+      "reads": ["decision"],
+      "writes": [],
+      "function": { "ref": "function/grant-deny@stable" }
+    },
+    {
+      "id": "write-grant",
+      "type": "tool",
+      "reads": ["grantDoc"],
+      "writes": ["wroteGrant"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/grant.json", "body": "${grantDoc}" } }
+    },
+    {
+      "id": "write-ledger",
+      "type": "tool",
+      "reads": ["ledgerNext"],
+      "writes": ["wroteLedger"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/access-ledger.json", "body": "${ledgerNext}" } }
+    }
+  ],
+  "edges": [
+    { "id": "then-policy", "from": "read-request", "to": "read-policy", "kind": "seq" },
+    { "id": "then-ledger", "from": "read-policy", "to": "read-ledger", "kind": "seq" },
+    { "id": "ledger-read", "from": "read-ledger", "to": "prior", "kind": "seq" },
+    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error" },
+    { "id": "weigh-it", "from": "prior", "to": "weigh", "kind": "seq" },
+    { "id": "weigh-it-fresh", "from": "first-grant", "to": "weigh", "kind": "seq" },
+    { "id": "decide", "from": "weigh", "to": "route", "kind": "seq" },
+    { "id": "granted", "from": "route", "to": "record", "kind": "conditional" },
+    { "id": "needs-a-person", "from": "route", "to": "sign", "kind": "conditional" },
+    { "id": "denied", "from": "route", "to": "deny", "kind": "conditional" },
+    { "id": "signed", "from": "sign", "to": "record", "kind": "seq" },
+    { "id": "publish-grant", "from": "record", "to": "write-grant", "kind": "seq" },
+    { "id": "publish-ledger", "from": "record", "to": "write-ledger", "kind": "seq" }
+  ]
+}

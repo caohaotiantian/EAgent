@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1043",
+  "who": "u:dana",
+  "resource": "payments-kms",
+  "level": "admin",
+  "hours": 2,
+  "reason": "rotate the signing key ahead of the quarterly audit"
+}

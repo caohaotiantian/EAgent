@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1046",
+  "who": "u:sam",
+  "resource": "docs-site",
+  "level": "admin",
+  "hours": 4,
+  "reason": "change the CDN invalidation rules"
+}

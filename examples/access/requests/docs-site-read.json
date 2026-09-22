@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1042",
+  "who": "u:sam",
+  "resource": "docs-site",
+  "level": "read",
+  "hours": 2,
+  "reason": "check the staging render of the pricing page"
+}

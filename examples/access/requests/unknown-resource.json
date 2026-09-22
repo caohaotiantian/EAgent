@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1045",
+  "who": "u:sam",
+  "resource": "billing-cache",
+  "level": "read",
+  "hours": 1,
+  "reason": "check whether the stale-entry bug is still there"
+}
