@@ -10,7 +10,9 @@
       "reads-as": "the router picks the CEREMONY; the arms are how much human a decision needs",
       "residue-error-arm": "`prior` and `first-grant` are mutually exclusive BY CONSTRUCTION — one is the `seq` target of `read-ledger` and the other its `error` target, and no run can take both. The compiler cannot see that: `GRAPH010_CONCURRENT_WRITE` calls them concurrent writers of `history` and refuses `replace`. `merge_object` is the workaround, and it is a workaround — the channel holds one contribution on every run that has ever been measured. See F1 of docs/workflow-port-2026-09-22b.md.",
       "residue-static-approvers": "`sign` names `u:you` because `approval.approvers` is a STATIC list in the graph, while the people who may actually sign are `decision.owners` — read out of access/policy.json at run time. The gate therefore shows the right owners and accepts the wrong signature. See F3.",
-      "compiles-silent": "This graph prints NO diagnostic at all — measured, not assumed. `deny` is terminal and writes no declared output, but GRAPH002_DEAD_END does not fire on it: `decision` is a declared output and `weigh` writes it on the same path. An earlier draft of these labels claimed the warning, which was a label asserting something no run had established."
+      "compiles-silent": "This graph prints NO diagnostic at all — measured, not assumed. `deny` is terminal and writes no declared output, but GRAPH002_DEAD_END does not fire on it: `decision` is a declared output and `weigh` writes it on the same path. An earlier draft of these labels claimed the warning, which was a label asserting something no run had established.",
+      "residue-blind-error-arm": "THE KNOWN HAZARD, MEASURED AND NOT CLOSABLE FROM THIS SIDE. An error arm is handed no reason: the failed node writes nothing and no channel carries the code or the message, so `first-grant` cannot tell \"there is no ledger yet\" from \"the ledger is there and I could not read it\". `codes` narrows by CLASS and every fs.read failure is the one code E_TOOL_SOURCE_UNAVAILABLE, so it does not separate them either. Measured with `chmod 222 out/access-ledger.json`: the arm fires, the run reports `succeeded`, and the ledger is REPLACED — one prior grant destroyed. See F5 of docs/workflow-port-2026-09-22b.md for the pasted repro and why no hook or body can close it.",
+      "compensation-fires-without-an-edge": "MEASURED, and worth knowing before you add a `compensation` edge you do not need: when `write-ledger` fails after `write-grant` succeeded, the engine rolls the grant write back on its own — `fs.write` declares `compensation: {tool: \"fs.restore\"}`, and `loom trace` shows `loom.tool (compensate) [ok]` under `write-grant`. out/grant.json still held the PREVIOUS run's grant afterwards. No compensation edge is declared in this graph and none is needed for that."
     }
   },
   "policy": {
@@ -126,7 +128,7 @@
     { "id": "then-policy", "from": "read-request", "to": "read-policy", "kind": "seq" },
     { "id": "then-ledger", "from": "read-policy", "to": "read-ledger", "kind": "seq" },
     { "id": "ledger-read", "from": "read-ledger", "to": "prior", "kind": "seq" },
-    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error" },
+    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error", "codes": ["E_TOOL_SOURCE_UNAVAILABLE"] },
     { "id": "weigh-it", "from": "prior", "to": "weigh", "kind": "seq" },
     { "id": "weigh-it-fresh", "from": "first-grant", "to": "weigh", "kind": "seq" },
     { "id": "decide", "from": "weigh", "to": "route", "kind": "seq" },

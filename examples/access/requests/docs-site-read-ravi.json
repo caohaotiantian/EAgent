@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1048",
+  "who": "u:ravi",
+  "resource": "docs-site",
+  "level": "read",
+  "hours": 1,
+  "reason": "confirm the changelog page still renders after the theme bump"
+}
