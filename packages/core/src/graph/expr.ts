@@ -83,7 +83,10 @@ function describeSource(v: unknown): string {
   if (typeof v === "bigint") return "a bigint";
   if (typeof v === "symbol") return "a symbol";
   if (typeof v === "function") return "a function";
+  // The two that read as words rather than as types: "got null" and "got undefined", against
+  // "got a number". `describeWidth`'s `String(v)` fallback prints these the same way.
   if (v === null) return "null";
+  if (v === undefined) return "undefined";
   if (Array.isArray(v)) return "an array";
   if (typeof v === "object") return "an object";
   return `a ${typeof v}`;

@@ -68,7 +68,7 @@ const NON_STRINGS: readonly { readonly what: string; readonly v: unknown; readon
   { what: "a bigint", v: 1n, says: "a bigint" },
   { what: "a symbol", v: Symbol("has(x)"), says: "a symbol" },
   { what: "a function", v: () => true, says: "a function" },
-  { what: "undefined", v: undefined, says: "a undefined" },
+  { what: "undefined", v: undefined, says: "undefined" },
 ];
 
 test("checkExpr RETURNS a diagnostic for every non-string source, and never spins", () => {
