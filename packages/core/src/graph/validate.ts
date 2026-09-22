@@ -46,6 +46,7 @@ import {
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
+  type BlockFieldType,
   type EdgeKind,
   type EdgeSpec,
   type ExpansionBudget,
@@ -1543,6 +1544,154 @@ function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: numb
 }
 
 /**
+ * One predicate per tag of `POLICY_FIELDS`/`NESTED_FIELDS` — the type half of the block schema.
+ *
+ * `EDGE_FIELD_IS`' three tags with four more, and `stringArray` INDEX-WALKS for the reason stated
+ * there: `Array.prototype.every` SKIPS HOLES, so `new Array(2)` passes it vacuously and then
+ * reaches `digest(spec)`, which walks `0..length-1` and does not skip.
+ */
+const BLOCK_FIELD_IS: Readonly<Record<BlockFieldType, (v: unknown) => boolean>> = {
+  string: (v) => typeof v === "string",
+  count: (v) => Number.isSafeInteger(v),
+  number: (v) => typeof v === "number" && Number.isFinite(v),
+  boolean: (v) => typeof v === "boolean",
+  stringArray: (v) => {
+    if (!Array.isArray(v)) return false;
+    for (let i = 0; i < v.length; i++) if (typeof v[i] !== "string") return false;
+    return true;
+  },
+  array: (v) => Array.isArray(v),
+  object: (v) => typeof v === "object" && v !== null && !Array.isArray(v),
+  unknown: () => true,
+};
+
+/** What a field of each tag IS, in the words the refusal uses. */
+const BLOCK_FIELD_SHAPE: Readonly<Record<BlockFieldType, string>> = {
+  string: "a string",
+  count: "a whole number",
+  number: "a number",
+  boolean: "true or false",
+  stringArray: "an array of strings",
+  array: "an array",
+  object: "an object",
+  unknown: "anything",
+};
+
+/**
+ * THE BLOCK FIELDS THIS PASS DOES NOT RE-CHECK, and the rule that already refuses each.
+ *
+ * `TYPE_CHECKED_ELSEWHERE` one scope in, with the same doctrine and the same failure mode: a
+ * second spelling of one refusal is how two diagnostics come to disagree, and the cost of
+ * forgetting an entry here is a DUPLICATE diagnostic rather than a hole. Every row was measured
+ * against `compile`, one graph per value, over `"banana"`, `42`, `null`, `["x"]`, `{a:1}` and
+ * `true` — the six a JSON file can express — and is on this list only because a rule refused
+ * every wrong one of them:
+ *
+ *     graphPolicy.posture, nodePolicy.posture      GRAPH003_UNKNOWN_POSTURE
+ *     graphPolicy.budget, nodePolicy.budget,       GRAPH003_MALFORMED, from `objectBlock`
+ *       graphPolicy.expansion, channel.contextProjection
+ *     graphPolicy.onBudgetExhausted                GRAPH003_BUDGET_ACTION_UNSUPPORTED
+ *     expansion.*  (all four)                      GRAPH003_MALFORMED, from `expansionOf` — which
+ *                                                  also owns the `>= 1` half and the fallback, so
+ *                                                  a `count` tag here would refuse LESS and say
+ *                                                  it differently
+ *     retry.maxAttempts                            GRAPH020_MISSING_FIELD
+ *     channel.reduce                               GRAPH003_UNKNOWN_REDUCER
+ *     channel.classification                       GRAPH003_UNKNOWN_CLASSIFICATION
+ *     metadata.name                                GRAPH003_MALFORMED, in `checkStructure`
+ *     approval.*                                   GRAPH014_APPROVER_INVALID / _APPROVAL_INVALID
+ *     sla.*, slaReminder.afterMs                   GRAPH014_SLA_INVALID
+ *     delivery.channels/redact/redactAs/escalation GRAPH014_DELIVERY_INVALID
+ *     deliveryEscalation.afterMs/channels          GRAPH014_DELIVERY_INVALID
+ *     batching.*, dedupe.*                         GRAPH014_BATCHING_INVALID / _DEDUPE_INVALID,
+ *                                                  and the whole block is inert while `enabled`
+ *                                                  is false, which is why the fields measure OK
+ *                                                  in that state and are still not this pass's
+ *
+ * THE DEFAULT IS TO CHECK. A field added to either table is type-checked unless somebody opts it
+ * out here, which is the fail-closed direction.
+ */
+const CHECKED_BY_A_RULE: ReadonlySet<string> = new Set([
+  "graphPolicy.posture",
+  "graphPolicy.budget",
+  "graphPolicy.expansion",
+  "graphPolicy.onBudgetExhausted",
+  "nodePolicy.posture",
+  "nodePolicy.budget",
+  "expansion.maxNodes",
+  "expansion.maxDepth",
+  "expansion.maxFanout",
+  "expansion.maxLoopIterations",
+  "retry.maxAttempts",
+  "channel.reduce",
+  "channel.classification",
+  "channel.contextProjection",
+  "contextProjection.take",
+  "contextProjection.maxTokens",
+  "contextProjection.overflow",
+  "metadata.name",
+  "approval.approvers",
+  "approval.separationOfDuties",
+  "sla.respondWithinMs",
+  "sla.onTimeout",
+  "sla.reminders",
+  "slaReminder.afterMs",
+  "delivery.channels",
+  "delivery.redact",
+  "delivery.redactAs",
+  "delivery.escalation",
+  "deliveryEscalation.afterMs",
+  "deliveryEscalation.channels",
+  "batching.enabled",
+  "batching.key",
+  "batching.windowMs",
+  "batching.maxBatch",
+  "dedupe.enabled",
+  "dedupe.windowMs",
+]);
+
+/**
+ * Every declared field of one block, against the type its table gives it.
+ *
+ * NOT FATAL, and the difference from `edgeFieldTypes` is the difference between the two scopes.
+ * A wrong-typed edge field reaches `computeFanoutStacks`' arithmetic and makes every downstream
+ * `parallelWidth` a `NaN`, so it has to gate. These are leaves: a bad `budget.tokens` costs a
+ * budget and a bad `retry.jitter` costs a jitter, and none of them makes a later rule reason
+ * wrongly. That is the same distinction `checkPolicyBlocks` already draws in its own header —
+ * "a bad POSTURE value is fatal … neither is a malformed `budget` or `expansion`".
+ *
+ * `Object.hasOwn` and not `block[field]`, for this file's rule: `in` and a bare index walk the
+ * prototype chain, so `Object.prototype.jitter = "yes"` would make every `retry` block in every
+ * graph look as though it had declared one. `unknownKeys` reads own keys and this agrees with it.
+ */
+function blockFieldTypes(
+  block: Readonly<Record<string, unknown>>,
+  scope: string,
+  fields: Readonly<Record<string, BlockFieldType>>,
+  what: string,
+  at: Diagnostic["at"],
+  d: Diagnostic[],
+): boolean {
+  let found = false;
+  for (const [field, tag] of Object.entries(fields)) {
+    if (CHECKED_BY_A_RULE.has(`${scope}.${field}`)) continue;
+    if (!Object.hasOwn(block, field)) continue;
+    const value = block[field];
+    if (value === undefined) continue;
+    if (BLOCK_FIELD_IS[tag]!(value)) continue;
+    found = true;
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: `${what} declares \`${field}\` as ${describeValue(value)}, which is not ${BLOCK_FIELD_SHAPE[tag]}`,
+      ...(at === undefined ? {} : { at }),
+      fix: `set \`${field}\` to ${BLOCK_FIELD_SHAPE[tag]}, or remove it`,
+    });
+  }
+  return found;
+}
+
+/**
  * A block that must be an object, reported when it is anything else.
  *
  * ABSENT IS FINE; MALFORMED IS NOT, and the two used to answer the same. The helper this
@@ -1623,7 +1772,17 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   const list = (fields: readonly string[]): string => fields.map((a) => `\`${a}\``).join(", ");
 
-  const check = (policy: unknown, whose: string, at: Diagnostic["at"], allowed: readonly string[]): void => {
+  const check = (
+    policy: unknown,
+    whose: string,
+    at: Diagnostic["at"],
+    scope: "graphPolicy" | "nodePolicy",
+    table: Readonly<Record<string, BlockFieldType>>,
+  ): void => {
+    // `Object.keys` AND NOT A SECOND ARRAY. `POLICY_FIELDS` carries a type per field now, and
+    // `Object.keys` preserves insertion order — so every `declares \`a\`, \`b\`, …` line these
+    // messages print is byte-for-byte what the name-only table printed.
+    const allowed = Object.keys(table);
     // A BARE POSTURE IS THE MISTAKE WORTH NAMING. `policy: "in"` is the reproduced case, and an
     // author who wrote it was reaching for the strongest oversight there is.
     const p = objectBlock(
@@ -1641,14 +1800,32 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
       return;
     }
     unknownKeys(p, allowed, `${whose}\`policy\` block`, at, d);
+    // AND WHAT THE KEYS HOLD (§A.81(a)). `capabilities` is the row that makes this load-bearing:
+    // `rule017Capabilities` reads it to decide whether the tenant holds what the graph asks for,
+    // and `policy: {capabilities: "k8s:write"}` — the singular an author writes by hand — threw
+    // `TypeError: allow.some is not a function` out of `compile` rather than refusing.
+    //
+    // FATAL, on the criterion this function's own header already states for `posture`: a later
+    // rule REASONS from this field, so leaving it in play makes the next diagnostic wrong — and
+    // here it is worse than wrong, it is the crash above. `capabilities` is also the ONLY field of
+    // either policy scope this call can fire on: `posture`, `budget`, `expansion` and
+    // `onBudgetExhausted` are all on `CHECKED_BY_A_RULE`, so no per-field list is needed to say
+    // which failure gates. A fifth policy field added tomorrow gates too, which is the fail-closed
+    // direction and is why that is stated rather than left to be noticed.
+    if (blockFieldTypes(p, scope, table, `${whose}\`policy\` block`, at, d)) fatal = true;
     const budget = objectBlock(
       p["budget"],
       `${whose}\`policy.budget\``,
       at,
-      `a budget declares ${list(POLICY_FIELDS.budget)}, all optional`,
+      `a budget declares ${list(Object.keys(POLICY_FIELDS.budget))}, all optional`,
       d,
     );
-    if (budget !== undefined) unknownKeys(budget, POLICY_FIELDS.budget, `${whose}\`policy.budget\` block`, at, d);
+    if (budget !== undefined) {
+      unknownKeys(budget, Object.keys(POLICY_FIELDS.budget), `${whose}\`policy.budget\` block`, at, d);
+      // All three of `costUsd`, `tokens` and `wallMs` compiled with ZERO diagnostics holding any
+      // of the six wrong types a JSON file can express — a budget nobody can enforce, silently.
+      blockFieldTypes(budget, "budget", POLICY_FIELDS.budget, `${whose}\`policy.budget\` block`, at, d);
+    }
     // `expansion` is graph-scope only, so a node declaring one is already an unknown key above
     // and must not also be walked as though it meant something.
     const expansion = allowed.includes("expansion")
@@ -1656,14 +1833,20 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
           p["expansion"],
           `${whose}\`policy.expansion\``,
           at,
-          `an expansion budget declares ${list(POLICY_FIELDS.expansion)}, all optional`,
+          `an expansion budget declares ${list(Object.keys(POLICY_FIELDS.expansion))}, all optional`,
           d,
         )
       : undefined;
     if (expansion !== undefined) {
       // A misspelled limit does not fail — it falls back to `DEFAULT_EXPANSION`. An author who
       // wrote `maxNodes: 8` and gets 256 has had a bound raised on them by a typo.
-      unknownKeys(expansion, POLICY_FIELDS.expansion, `${whose}\`policy.expansion\` block`, at, d);
+      unknownKeys(expansion, Object.keys(POLICY_FIELDS.expansion), `${whose}\`policy.expansion\` block`, at, d);
+      // ALL FOUR OF ITS FIELDS ARE ON `CHECKED_BY_A_RULE`, so this call refuses nothing today —
+      // and it is here rather than absent because the default in that set is to CHECK. `expansionOf`
+      // owns these: it refuses a non-positive-integer AND substitutes the default, and a `count`
+      // tag would refuse LESS (`0` and `-1` are well-typed counts) while saying it differently.
+      // A fifth expansion field added tomorrow is type-checked by this line without a decision.
+      blockFieldTypes(expansion, "expansion", POLICY_FIELDS.expansion, `${whose}\`policy.expansion\` block`, at, d);
     }
     const posture = p["posture"];
     if (posture !== undefined && !isPosture(posture)) {
@@ -1678,8 +1861,8 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
     }
   };
 
-  check(spec.policy, "the graph's ", undefined, POLICY_FIELDS.graphPolicy);
-  for (const n of spec.nodes) check(n.policy, `node "${n.id}"'s `, { nodeId: n.id }, POLICY_FIELDS.nodePolicy);
+  check(spec.policy, "the graph's ", undefined, "graphPolicy", POLICY_FIELDS.graphPolicy);
+  for (const n of spec.nodes) check(n.policy, `node "${n.id}"'s `, { nodeId: n.id }, "nodePolicy", POLICY_FIELDS.nodePolicy);
   return fatal;
 }
 
@@ -1985,7 +2168,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // so `nmae` compiled clean. This one is TIDY rather than load-bearing — no rule reasons from
   // `metadata` beyond `name` — and it is here because the two below it are not, and a family with
   // a member left out is a family nobody can check by naming it.
-  unknownKeys(spec.metadata as unknown as Record<string, unknown>, NESTED_FIELDS.metadata, "`metadata`", undefined, d);
+  unknownKeys(spec.metadata as unknown as Record<string, unknown>, Object.keys(NESTED_FIELDS.metadata), "`metadata`", undefined, d);
+  blockFieldTypes(spec.metadata as unknown as Record<string, unknown>, "metadata", NESTED_FIELDS.metadata, "`metadata`", undefined, d);
   // AND THE ELEMENTS, not just the arrays. `edges: [null]` reached `e.id` and crashed; a node
   // that is not an object does the same one loop over.
   for (const [field, list] of [
@@ -2183,7 +2367,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // same control: `classificaton: "secret_ref"` compiled clean, left the channel unclassified,
     // and dropped every reader's floor from `in` to `out` with nothing said. `initial`, `reduce`
     // and `onConflict` fail the same way one consequence down.
-    unknownKeys(decl, NESTED_FIELDS.channel, `channel "${name}"`, { channel: name }, d);
+    unknownKeys(decl, Object.keys(NESTED_FIELDS.channel), `channel "${name}"`, { channel: name }, d);
+    blockFieldTypes(decl, "channel", NESTED_FIELDS.channel, `channel "${name}"`, { channel: name }, d);
     const projection = objectBlock(
       decl["contextProjection"],
       `channel "${name}"'s \`contextProjection\``,
@@ -2192,7 +2377,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       d,
     );
     if (projection !== undefined) {
-      unknownKeys(projection, NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+      unknownKeys(projection, Object.keys(NESTED_FIELDS.contextProjection), `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+      blockFieldTypes(projection, "contextProjection", NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
       checkProjectionValues(name, projection, d);
     }
     const reduce = decl["reduce"];
@@ -2438,7 +2624,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     );
     if (n.retry !== undefined && retryBlock === undefined) fatal = true;
     if (retryBlock !== undefined) {
-      unknownKeys(retryBlock, NESTED_FIELDS.retry, `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
+      unknownKeys(retryBlock, Object.keys(NESTED_FIELDS.retry), `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
+      blockFieldTypes(retryBlock, "retry", NESTED_FIELDS.retry, `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
       // REQUIRED, and required as a NUMBER. `RetryPolicy.maxAttempts` is the only non-optional
       // field on the interface and nothing enforced it; a string survives the comparison by
       // coercion, but `undefined`, `null` and a non-integer all make it always-false.
@@ -4963,7 +5150,8 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // `separationOfDutys` and `delegate` each compiled clean and produced a gate that reads as
   // supervised and admits anybody. `NESTED_FIELDS.approval` is the enumeration; the near-miss
   // hint makes the typo cheap to fix rather than cheap to ignore.
-  unknownKeys(block, NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.approval), `human_gate "${n.id}"'s \`approval\` block`, at, d);
+  blockFieldTypes(block, "approval", NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
   const a = n.humanGate?.approval;
   if (a === undefined) return;
   // `approvers` MUST BE AN ARRAY, and the loop below is why. `for (const who of a.approvers ?? [])`
@@ -5085,7 +5273,8 @@ function checkSla(n: NodeSpec, d: Diagnostic[]): void {
   // `onTimout: "escalate"` compiled clean and the gate silently kept the default `fail`: a graph
   // that asked for someone else to be paged, and expires instead. That is `checkSla`'s own
   // argument about `default_action`, one misspelling out.
-  unknownKeys(block, NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.sla), `human_gate "${n.id}"'s \`sla\` block`, at, d);
+  blockFieldTypes(block, "sla", NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
   const sla = n.humanGate?.sla;
   if (sla === undefined) return;
   const bad = (what: string, fix: string): void => {
@@ -5178,7 +5367,8 @@ function checkReminders(
     // one level up was refused. Driven with that control, so the silence was the scope rather
     // than a short-circuit.
     if (isPlainRecord(entry)) {
-      unknownKeys(entry, NESTED_FIELDS.slaReminder, `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
+      unknownKeys(entry, Object.keys(NESTED_FIELDS.slaReminder), `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
+      blockFieldTypes(entry, "slaReminder", NESTED_FIELDS.slaReminder, `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
     }
     const afterMs: unknown = isPlainRecord(entry) ? entry["afterMs"] : undefined;
     if (!isPositiveMs(afterMs)) {
@@ -5255,7 +5445,7 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a batching block that is not an object",
         "batching is {enabled, key, windowMs, maxBatch}; an array, a Map or a Date has no fields the runtime can read and would merge nothing",
       );
-    } else if (unknownKeys(batching, NESTED_FIELDS.batching, `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
+    } else if (unknownKeys(batching, Object.keys(NESTED_FIELDS.batching), `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
       // An unknown key here is checked BEFORE the value rules, so `windowMz` is reported as the
       // typo it is rather than as a missing `windowMs` — the author who wrote one is told which.
     } else if (typeof batching["enabled"] !== "boolean") {
@@ -5296,7 +5486,7 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a dedupe block that is not an object",
         "dedupe is {enabled, windowMs}; an array, a Map or a Date has no fields the runtime can read and would collapse nothing",
       );
-    } else if (unknownKeys(dedupe, NESTED_FIELDS.dedupe, `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
+    } else if (unknownKeys(dedupe, Object.keys(NESTED_FIELDS.dedupe), `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
       // Same ordering as `batching`, and the same reason.
     } else if (typeof dedupe["enabled"] !== "boolean") {
       bad(
@@ -5362,7 +5552,8 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
   if (block === undefined) return;
   // `recipiants: []` compiled clean, so the gate was durable and queued and NOBODY WAS TOLD —
   // the one mode in which "an SLA fired and nobody knew" is possible, reached by one letter.
-  unknownKeys(block, NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.delivery), `human_gate "${n.id}"'s \`delivery\` block`, at, d);
+  blockFieldTypes(block, "delivery", NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
   const spec = n.humanGate?.delivery;
   if (spec === undefined) return;
   const bad = (what: string, fix: string): void => {
@@ -5410,7 +5601,8 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
     // GRAPH003_MALFORMED and then crash on `tier.action` — the diagnostic was written and the
     // author never saw it.
     if (tierBlock === undefined) continue;
-    unknownKeys(tierBlock, NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
+    unknownKeys(tierBlock, Object.keys(NESTED_FIELDS.deliveryEscalation), `human_gate "${n.id}"'s \`${where}\``, at, d);
+    blockFieldTypes(tierBlock, "deliveryEscalation", NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
     if (tier.action === "fail") {
       // A TERMINAL TIER ENDS THE CHAIN WHEREVER IT SITS. `nextTier` returns `undefined` at
       // the first `action: "fail"`, so every tier after it is unreachable — a graph naming

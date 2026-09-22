@@ -759,6 +759,39 @@ export const DEFAULT_EXPANSION: ExpansionBudget = {
   maxLoopIterations: 8,
 };
 
+/**
+ * THE SHAPES `POLICY_FIELDS` AND `NESTED_FIELDS` ACTUALLY DECLARE, no more — `EDGE_FIELDS`' three
+ * tags plus the four these two scopes need and an edge does not.
+ *
+ *     string        a `Posture`, a `ReducerName`, a `Classification`, a name, a key
+ *     count         a safe integer. The `>= 1` is NOT here, for the reason `EDGE_FIELDS` gives:
+ *                   a parse decides types and a rule decides meaning, so `policy.expansion`'s
+ *                   own `>= 1` stays in `expansionOf` where its fallback lives.
+ *     number        a finite number that need not be whole — `budget.costUsd` and
+ *                   `metadata.version`, and nothing else.
+ *     boolean       `retry.jitter`, `approval.separationOfDuties`, the two `enabled` flags
+ *     stringArray   `readonly string[]`, index-walked for the reason `EDGE_FIELD_IS` states
+ *     array         AN ARRAY, ELEMENTS SOMEBODY ELSE'S BUSINESS. `delivery.recipients` and
+ *                   `escalation.to` are `readonly Recipient[]`, and `checkDelivery` already
+ *                   refuses a bad ELEMENT with `GRAPH014_DELIVERY_INVALID` — measured. So the
+ *                   hole is arrayness alone, and checking more here would be a second spelling
+ *                   of a refusal that exists.
+ *     object        a plain object: `policy.budget`, `policy.expansion`,
+ *                   `channel.contextProjection`, `metadata.labels`
+ *     unknown       CHECKED BY NOBODY ON PURPOSE. `channel.initial` is a channel's seed value
+ *                   and its type is the channel's `type`, not a fixed one; a tag here would
+ *                   refuse the valid `initial: 0` on a `number` channel.
+ */
+export type BlockFieldType =
+  | "string"
+  | "count"
+  | "number"
+  | "boolean"
+  | "stringArray"
+  | "array"
+  | "object"
+  | "unknown";
+
 /** Which type-specific block each node type requires. Used by GRAPH020. */
 /**
  * The fields inside a type block that MUST be present, by node type.
@@ -920,12 +953,35 @@ export const SPEC_FIELDS: readonly string[] = [
  * `ALLOWED_FIELDS`, and checked against `GraphPolicy`, `NodePolicy`, `Budget` and
  * `ExpansionBudget` by the same test that checks the other four lists — an allow-list's
  * failure mode is refusing a field somebody legitimately added.
+ *
+ * AND A TYPE PER FIELD, the way `EDGE_FIELDS` carries one (§A.81(a)). The name half was written
+ * first and a name allow-list is half a schema: measured against `compile`, one graph per value,
+ * with the field spelled RIGHT and holding the wrong kind of thing —
+ *
+ *     policy.budget.costUsd / tokens / wallMs   every wrong type compiled with ZERO diagnostics
+ *     policy.capabilities: "k8s:write"          THREW TypeError: allow.some is not a function
+ *     policy.capabilities: null                 THREW Cannot read properties of null ('some')
+ *     policy.capabilities: 42 / {} / true       THREW (caps ?? []) is not iterable
+ *
+ * — so the graph scope's capability declaration, which `rule017Capabilities` reads to decide
+ * whether a tenant holds what a graph asks for, was a crash rather than a refusal for five of the
+ * six wrong types a JSON file can express. `graph/validate.ts`'s `blockFieldTypes` is the one
+ * place that enforces this column, and the fields a RULE already refuses by name are opted out
+ * there rather than checked twice.
  */
-export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budget" | "expansion", readonly string[]>> = {
-  graphPolicy: ["posture", "budget", "expansion", "capabilities", "onBudgetExhausted"],
-  nodePolicy: ["posture", "budget", "capabilities"],
-  budget: ["costUsd", "tokens", "wallMs"],
-  expansion: ["maxNodes", "maxDepth", "maxFanout", "maxLoopIterations"],
+export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budget" | "expansion", Readonly<Record<string, BlockFieldType>>>> = {
+  graphPolicy: {
+    posture: "string",
+    budget: "object",
+    expansion: "object",
+    capabilities: "stringArray",
+    onBudgetExhausted: "string",
+  },
+  nodePolicy: { posture: "string", budget: "object", capabilities: "stringArray" },
+  // `costUsd` is the one MONEY field in the schema and the only `number` in this table: a budget
+  // of $0.05 is not a whole number and `count` would refuse it.
+  budget: { costUsd: "number", tokens: "count", wallMs: "count" },
+  expansion: { maxNodes: "count", maxDepth: "count", maxFanout: "count", maxLoopIterations: "count" },
 };
 
 /**
@@ -1045,13 +1101,45 @@ export const NESTED_FIELDS: Readonly<
     | "deliveryEscalation"
     | "batching"
     | "dedupe",
-    readonly string[]
+    Readonly<Record<string, BlockFieldType>>
   >
 > = {
-  retry: ["maxAttempts", "backoff", "initialMs", "maxMs", "jitter", "onlyIf"],
-  channel: ["type", "reduce", "initial", "classification", "contextProjection", "identityKey", "onConflict"],
-  contextProjection: ["fields", "take", "maxTokens", "overflow"],
-  metadata: ["name", "project", "version", "description", "labels"],
+  // AND WHAT EACH ONE HOLDS, the same column `POLICY_FIELDS` grew and for the same reason
+  // (§A.81(a)). Measured, one graph per value, with every key spelled right: `retry`'s five
+  // optional fields, `channel.type`/`identityKey`/`onConflict`, `contextProjection.fields`,
+  // `metadata`'s four fields after `name`, `delivery.recipients` and `escalation.to`/`action` all
+  // compiled with ZERO diagnostics holding a string, a number, `null`, an array, an object or
+  // `true` — whichever of those they are not. Everything else in this table is already refused by
+  // a rule with a code of its own, and `graph/validate.ts`'s `CHECKED_BY_A_RULE` names each with
+  // the code that covers it rather than spelling one refusal twice.
+  retry: {
+    maxAttempts: "count",
+    backoff: "string",
+    initialMs: "count",
+    maxMs: "count",
+    jitter: "boolean",
+    onlyIf: "stringArray",
+  },
+  channel: {
+    type: "string",
+    reduce: "string",
+    initial: "unknown",
+    classification: "string",
+    contextProjection: "object",
+    identityKey: "string",
+    onConflict: "string",
+  },
+  contextProjection: { fields: "stringArray", take: "count", maxTokens: "count", overflow: "string" },
+  // `version` IS TAGGED `unknown` AND `GraphMetadata` SAYS `number`, and the disagreement is
+  // deliberate and is a finding rather than a fix. Tagging it `number` refused
+  // `metadata: {name: "stamp", version: "1.0.0"}` — an IN-TREE graph, in
+  // `test/cli/guards-lane-extension-engine-seams.test.ts`, that compiles and RUNS today. Nothing
+  // reads the field as a number: `cli.ts`'s only reader is `String(g.spec.metadata.version)` in a
+  // display line. So the type and the practice disagree and a tag here would refuse working code,
+  // which is the failure mode every table in this file names — "a guard that cries wolf on correct
+  // code is worse than no guard". Deciding whether `version` is a number or a version STRING is
+  // one change to `GraphMetadata` plus that fixture, and it is not a side effect of typing a table.
+  metadata: { name: "string", project: "string", version: "unknown", description: "string", labels: "object" },
   // THE `humanGate` SCOPES, and they are the reason this table is worth its cost. A dropped key
   // elsewhere is a lost setting; here it is an unsupervised action. Measured on a structurally
   // valid graph before these six rows existed, every one of these compiled with ZERO gate
@@ -1065,22 +1153,28 @@ export const NESTED_FIELDS: Readonly<
   // `approvers: []`, `u:mallory` — named by nobody — approves, and the guarded `fs.write` lands.
   // `approvers: "u:alice"` journals as the STRING, so the audit record reads supervised while
   // `String.prototype.includes` lets subject `"u"` and subject `"alice"` each approve.
-  approval: ["approvers", "separationOfDuties"],
-  sla: ["respondWithinMs", "onTimeout", "reminders"],
+  approval: { approvers: "stringArray", separationOfDuties: "boolean" },
+  sla: { respondWithinMs: "count", onTimeout: "string", reminders: "array" },
   // EACH ENTRY OF `sla.reminders`, and it is here rather than inline in `validate.ts` for the
   // reason every other row is: `allowed-fields.test.ts` reads this table against the interfaces
   // and fails when they drift. `GateSlaSpec.reminders` is `readonly {afterMs: number}[]` — an
   // anonymous inline type, which is why this row could not simply be derived, and why the scope
   // sat unguarded while its six siblings were closed. A typo'd key here is silently dropped: the
   // sweep reads `afterMs` and nothing else, so `{afterMs: 1000, evrey: true}` compiles clean.
-  slaReminder: ["afterMs"],
+  slaReminder: { afterMs: "count" },
   // `DeliverySpec` and `EscalationTier` are `run/delivery.ts`'s, not this file's — the same
   // arrangement `channel` and `contextProjection` already have with `state/channels.ts`, and
   // `allowed-fields.test.ts` reads that file too rather than restating them here.
-  delivery: ["channels", "recipients", "redact", "redactAs", "escalation"],
-  deliveryEscalation: ["afterMs", "to", "channels", "action"],
-  batching: ["enabled", "key", "windowMs", "maxBatch"],
-  dedupe: ["enabled", "windowMs"],
+  delivery: {
+    channels: "stringArray",
+    recipients: "array",
+    redact: "stringArray",
+    redactAs: "string",
+    escalation: "array",
+  },
+  deliveryEscalation: { afterMs: "count", to: "array", channels: "stringArray", action: "string" },
+  batching: { enabled: "boolean", key: "string", windowMs: "count", maxBatch: "count" },
+  dedupe: { enabled: "boolean", windowMs: "count" },
 };
 
 export const REQUIRED_BLOCK: Readonly<Record<NodeType, keyof NodeSpec>> = {
