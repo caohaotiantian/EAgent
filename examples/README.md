@@ -24,8 +24,10 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three false warnings** on every command: see §9 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
-directory, so a graph added later is covered without editing the test — and RUNS the three that
-need no model, asserting §5's six verdict strings and its `3/6 assertions passed`. Only §6 is
+directory, so a graph added later is covered without editing the test — and RUNS the three it can
+drive to COMPLETION without a model (§1, §3, §5), asserting §5's six verdict strings and its
+`3/6 assertions passed`. §8 and §9 need no model either and park on a human gate, which is why each
+has its own suite below; `two-person-approval` parks and is never answered. Only §6 is
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 §8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
 file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately

@@ -499,8 +499,10 @@ bounded loops twice:
 
 **Happened.** That is all of it. `examples/README.md` has a dedicated paragraph for the fan-out
 ("**The three parts that have to agree**, which is the step that costs people compiles") and no
-equivalent for a loop; no graph in `examples/graphs/` contains a `loop` edge; `loom compile --help`
-says nothing. Every one of the following had to be read out of `packages/core/src` or out of a test
+equivalent for a loop; **no graph in `examples/graphs/` contained a `loop` edge** before this one
+(`/usr/bin/grep -al '"loop"' graphs/*.json` matches `harden-config.json` and nothing else); and the
+only occurrence of the string in `loom compile --help` is "loopback", in a note about the network
+sandbox. Every one of the following had to be read out of `packages/core/src` or out of a test
 fixture, and each one was a compile or a run that failed first:
 
 | fact | where it actually lives |
