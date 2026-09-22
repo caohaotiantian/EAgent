@@ -15,10 +15,14 @@
  *   row; `ARMS` + `DEFERRED` here pin that every row is accounted for as either checked at the
  *   parse or covered elsewhere, so a field cannot be added and silently left unchecked.
  *
- *   THE SIX DEFERRALS ARE REAL. `TYPE_CHECKED_ELSEWHERE` is a hand-written set, and its failure
- *   mode is a hole somebody once believed was covered. Every member is driven here against every
- *   wrong-typed value and must still be refused by SOMETHING. If `GRAPH004_EXPR` ever stops being
- *   total over `when`, this is what goes red.
+ *   THE SIX DEFERRALS ARE REAL, FIVE OF THEM TOTAL AND THE SIXTH EXCLUDED BY NAME.
+ *   `TYPE_CHECKED_ELSEWHERE` is a hand-written set and its failure mode is a hole somebody once
+ *   believed was covered, so every member is driven against every wrong-typed value its tag has and
+ *   must be refused by SOMETHING — with a THROW counted as a failure, because a crash is not a
+ *   refusal. That distinction is what the first cut of this file got wrong: it drove eight of the
+ *   twelve values and its `d.length > 0` could not see an exception, so five sites that threw on a
+ *   `symbol` or a `bigint` passed. `kind` is the one exclusion, `KIND_STILL_THROWS` below names the
+ *   two values, and the site is in `graph/compile.ts` — not this lane's file to fix.
  *
  * WHAT THIS DOES NOT CLOSE, unchanged from `fanout-width-type.test.ts`: `Executor.attach()` is
  * public and `RunGraph` is exported, so a graph reaches the executor without passing this build's
@@ -130,14 +134,25 @@ test("EVERY FIELD OF THE TABLE IS ACCOUNTED FOR — seven checked here, six cove
   );
   assert.equal(ARMS.length + DEFERRED.length, 13);
   // And every tag is one of the three the checker knows. A fourth would be a silent no-op.
-  assert.deepEqual([...new Set(Object.values(EDGE_FIELDS))].sort(), ["count", "string", "stringArray"]);
+  assert.deepEqual([...new Set(Object.values(EDGE_FIELDS).map((v) => v.type))].sort(), ["count", "string", "stringArray"]);
+  // And every `readBy` is a real `EdgeKind`, so the not-declared-for-this-kind message cannot name
+  // a kind no edge can have. Four fields have none — exactly the four with no `<kind> only` comment
+  // in `EdgeSpec`, all of them in `TYPE_CHECKED_ELSEWHERE`.
+  const KINDS = ["seq", "conditional", "fanout", "join", "error", "compensation", "loop"];
+  for (const [field, decl] of Object.entries(EDGE_FIELDS)) {
+    if (decl.readBy === undefined) {
+      assert.ok(["id", "from", "to", "kind"].includes(field), `${field} has no readBy — is it really declared for every kind?`);
+      continue;
+    }
+    assert.ok(KINDS.includes(decl.readBy), `${field}.readBy = ${decl.readBy} is not an EdgeKind`);
+  }
 });
 
 test("THE TAG IS THE SCHEMA: every wrong-typed value of every checked field is refused, under its own code", () => {
   const seen: string[] = [];
   const perField = new Map<string, Set<string>>();
   for (const { field, code } of ARMS) {
-    const tag = EDGE_FIELDS[field]!;
+    const tag = EDGE_FIELDS[field]!.type;
     perField.set(field, new Set());
     for (const bad of WRONG[tag]) {
       // `e3` is `seq`, so the parse is the only thing with an opinion: exactly one error, and it
@@ -157,7 +172,7 @@ test("THE TAG IS THE SCHEMA: every wrong-typed value of every checked field is r
   // of this line said 82 from arithmetic done in a comment and the loop ran 75 — the same lesson
   // that handoff records one paragraph up ("a count in a comment must be re-measured after EVERY
   // round"). `expected` re-derives it, and the literal is what stops a table shrinking unnoticed.
-  const expected = ARMS.reduce((n, a) => n + WRONG[EDGE_FIELDS[a.field]!].length, 0);
+  const expected = ARMS.reduce((n, a) => n + WRONG[EDGE_FIELDS[a.field]!.type].length, 0);
   assert.equal(expected, 82, "the census shrank or grew — say which table changed");
   assert.equal(seen.length, expected);
 
@@ -192,7 +207,7 @@ test("TWO FAULTS DRAW TWO DIAGNOSTICS — the type check does not shadow the rul
 
 test("...and a RIGHT value of each is accepted, so the check is not refusing on principle", () => {
   for (const { field } of ARMS) {
-    const tag = EDGE_FIELDS[field]!;
+    const tag = EDGE_FIELDS[field]!.type;
     assert.deepEqual(
       errorsOf(withEdge("e3", { [field]: RIGHT[tag] })).map((d) => d.code),
       [],
@@ -204,19 +219,65 @@ test("...and a RIGHT value of each is accepted, so the check is not refusing on 
 const compileOf = (s: GraphSpec) =>
   compile({ spec: s, resolver: stubResolver(), tools: TOOLS, tenantCapabilities: TENANT_CAPABILITIES });
 
-test("THE SIX DEFERRALS ARE TOTAL — every wrong-typed value of each is still refused by something", () => {
+/**
+ * THE ONE EXCLUSION, and the fix round that found it is why this is a table rather than a sentence.
+ *
+ * `kind: 10n` and a `kind` whose `toJSON` throws still come out of `compile` as an EXCEPTION, from
+ * `unknownEdgeKinds`' `JSON.stringify(edge.kind)` in `graph/compile.ts` — a file this lane does not
+ * own. Listing them here makes the exclusion a measured fact: if that site ever learns to render
+ * safely, this test goes red and the row comes off the list.
+ */
+const KIND_STILL_THROWS: readonly unknown[] = [10n, { toJSON: () => { throw new Error("boom"); } }];
+
+test("THE SIX DEFERRALS, DRIVEN OVER THE WHOLE `WRONG` TABLE — five total, one excluded by name", () => {
   // The load-bearing pin for `TYPE_CHECKED_ELSEWHERE`. It is a hand-written set, and the reason it
-  // is allowed to exist is that a total refusal already covers each member; a set whose members are
-  // NOT total is a list of holes. Driven on `e10` (`verify -> write_report`, `kind: "conditional"`,
-  // which declares a `when`) so all six fields are live at once.
+  // is allowed to exist is that a refusal already covers each member; a set whose members are NOT
+  // total is a list of holes somebody believed were covered.
   //
-  // THROUGH `compile`, NOT `validateGraph`, and the difference is the next test: `kind` is refused
-  // by `unknownEdgeKinds`, which lives in `graph/compile.ts` and is not part of `validateGraph`.
+  // THE FIRST CUT DROVE EIGHT VALUES while this file's own `WRONG` table held twelve, and the four
+  // it skipped were the ones that mattered: a reviewer found that `10n` and `Symbol()` made FIVE of
+  // these six sites THROW rather than refuse. Measured on `19b183c4`, one graph per row —
+  //
+  //     id: Symbol()      TypeError: Cannot convert a Symbol value to a string  (the checkCodes site)
+  //     id: 10n           TypeError: Do not know how to serialize a BigInt      (badId)
+  //     id: {toJSON↯}     Error: boom                                          (badId)
+  //     from/to: Symbol() TypeError: Cannot convert a Symbol value to a string  (dangling)
+  //     when/until: Sym() TypeError: Cannot convert a Symbol value to a string  (rule004's `check`)
+  //     kind: 10n         TypeError: Do not know how to serialize a BigInt      (compile.ts)
+  //     kind: {toJSON↯}   Error: boom                                          (compile.ts)
+  //
+  // so the loop now drives EVERY value the table has, and asserts a DIAGNOSTIC rather than merely a
+  // non-empty result — a throw is not a refusal, and the first cut's `d.length > 0` could not tell
+  // the difference because an exception never reached it.
+  //
+  // THROUGH `compile`, NOT `validateGraph`: `kind` is refused by `unknownEdgeKinds`, which
+  // `validateGraph` does not run (the next test pins that boundary).
+  // `WRONG[the field's own tag]`, which for all six is `WRONG.string` — so `"24"` and `"banana"`
+  // are NOT driven here, and that is correct rather than a gap: a string is the RIGHT type for
+  // every one of these fields, `id: "24"` is a legal id (`isSafeId` accepts a leading digit) and
+  // compiles clean. The claim being pinned is about wrong TYPES.
   for (const { field, by } of DEFERRED) {
-    for (const bad of [0, -1, 2.5, Number.NaN, null, true, [], { a: 1 }]) {
-      const d = compileOf(withEdge("e10", { [field]: bad })).diagnostics.filter((x) => x.severity === "error");
+    const every = WRONG[EDGE_FIELDS[field]!.type];
+    assert.equal(every.length, 12, `the WRONG table for ${field}'s tag changed — re-measure this loop`);
+    for (const bad of every) {
+      const excluded = field === "kind" && KIND_STILL_THROWS.some((x) => Object.is(x, bad));
+      let d: readonly Diagnostic[] | undefined;
+      let threw: string | undefined;
+      try {
+        d = compileOf(withEdge("e10", { [field]: bad })).diagnostics.filter((x) => x.severity === "error");
+      } catch (err) {
+        threw = `${(err as Error).name}: ${(err as Error).message}`;
+      }
+      if (excluded) {
+        assert.ok(
+          threw !== undefined,
+          `kind = ${label(bad)} no longer throws — take it off KIND_STILL_THROWS and out of the docstring`,
+        );
+        continue;
+      }
+      assert.equal(threw, undefined, `${field} = ${label(bad)} CRASHED the compiler instead of refusing: ${threw}`);
       assert.ok(
-        d.length > 0,
+        (d ?? []).length > 0,
         `${field} = ${label(bad)} compiled clean — ${by} is no longer total and the parse must take the field back`,
       );
     }
@@ -309,51 +370,226 @@ test("A NON-FINITE NUMBER IS A DIAGNOSTIC, NOT A THROW — 60 rows of the census
   }
 });
 
-test("THE BYTES, one arm per code, message AND fix", () => {
-  // Three codes reach an author from this check, and the exact strings are pinned because §A.62's
-  // constraint was that a wrong-typed field's diagnostic may change and must then be nailed down.
-  // `describeValue` renders both the value and the edge's own id (§A.73): neither is trusted here,
-  // and `describeValue("e3")` is `"e3"`, so the text is what the lines around it interpolate raw.
-  const one = (patch: Record<string, unknown>): Diagnostic => {
-    const d = errorsOf(withEdge("e3", patch));
-    assert.equal(d.length, 1, d.map((x) => x.code).join(", "));
-    return d[0]!;
-  };
+const one = (edgeId: string, patch: Record<string, unknown>): Diagnostic => {
+  const d = errorsOf(withEdge(edgeId, patch));
+  assert.equal(d.length, 1, d.map((x) => x.code).join(", "));
+  return d[0]!;
+};
 
-  const width = one({ maxWidth: "24" });
+test("THE BYTES · the edge IS the kind that declares the field — word for word what the RULE printed", () => {
+  // The refusal an author most often meets, and it is byte-identical to `6fb2e618`'s, which is the
+  // point: §A.62 moved the mechanism and must not have moved the diagnostic. Two things make that
+  // true and both were missing from the first cut — the `fanout `/`loop ` subject, which the parse
+  // can print because it has read the kind, and the graph's OWN `expansion.maxFanout` in the fix,
+  // which `maxFanoutOf` reads with `expansionOf`'s own fallback. `incidentTriage` declares 25.
+  const width = one("e1", { maxWidth: "24" });
   assert.equal(width.code, "GRAPH007_BAD_MAX_WIDTH");
   assert.equal(
     width.message,
-    'edge "e3" declares maxWidth "24", which is not a positive integer — the width is multiplied into every downstream node\'s parallel width and sliced off the fanned channel, and neither reader can use this value',
+    'fanout edge "e1" declares maxWidth "24", which is not a positive integer — the width is multiplied into every downstream node\'s parallel width and sliced off the fanned channel, and neither reader can use this value',
   );
-  assert.equal(width.fix, 'set maxWidth on edge "e3" to a whole number ≥ 1 (unquoted: 24, not "24")');
+  assert.equal(width.fix, 'set maxWidth on edge "e1" to a whole number between 1 and 25 (unquoted: 24, not "24")');
 
-  const iterations = one({ maxIterations: "3" });
+  const iterations = one("e9", { maxIterations: "3" });
   assert.equal(iterations.code, "GRAPH006_BAD_MAX_ITERATIONS");
   assert.equal(
     iterations.message,
-    'edge "e3" declares maxIterations "3", which is not a positive integer — the bound is compared against the iteration counter and multiplied into the node\'s total multiplicity, and neither reader can use this value',
+    'loop edge "e9" declares maxIterations "3", which is not a positive integer — the bound is compared against the iteration counter and multiplied into the node\'s total multiplicity, and neither reader can use this value',
   );
-  assert.equal(iterations.fix, 'set maxIterations on edge "e3" to a whole number ≥ 1 (unquoted: 3, not "3")');
+  assert.equal(iterations.fix, 'set maxIterations on edge "e9" to a whole number ≥ 1 (unquoted: 3, not "3")');
 
-  const over = one({ over: 7 });
+  // NO ", or remove it" HERE, and that is the correction: removing `over` from a fanout is
+  // `GRAPH007_FANOUT_INCOMPLETE` and removing `compensates` from a compensation edge is
+  // `GRAPH012_NO_COMPENSATES`, so the first cut's fix walked an author into a second refusal.
+  const over = one("e1", { over: 7 });
   assert.equal(over.code, "GRAPH003_MALFORMED");
-  assert.equal(over.message, 'edge "e3" declares over 7, which is not a string');
-  assert.equal(over.fix, 'set over on edge "e3" to a string, or remove it');
+  assert.equal(over.message, 'fanout edge "e1" declares over 7, which is not a string');
+  assert.equal(over.fix, 'set over on edge "e1" to a string');
 
-  const branches = one({ branches: "investigate" });
-  assert.equal(branches.code, "GRAPH003_MALFORMED");
-  assert.equal(branches.message, 'edge "e3" declares branches "investigate", which is not an array of strings');
-  assert.equal(branches.fix, 'set branches on edge "e3" to an array of strings, or remove it');
+  const compensates = one("e12", { compensates: 7 });
+  assert.equal(compensates.message, 'compensation edge "e12" declares compensates 7, which is not a string');
+  assert.equal(compensates.fix, 'set compensates on edge "e12" to a string');
 
-  // A HOSTILE VALUE IS RENDERED, NOT RUN. `JSON.stringify` throws on a bigint and runs any
-  // `toJSON` the caller wrote; a guard that throws while describing what it refuses is worse than
-  // the thing it refuses.
-  assert.equal(one({ maxWidth: 10n }).message.includes("declares maxWidth 10n,"), true);
-  assert.equal(one({ over: Symbol("s") }).message, 'edge "e3" declares over a symbol, which is not a string');
+  const branches = one("e2", { branches: "investigate" });
+  assert.equal(branches.message, 'join edge "e2" declares branches "investigate", which is not an array of strings');
+  assert.equal(branches.fix, 'set branches on edge "e2" to an array of strings');
+
+  // `codes: null` ON THE KIND THAT DECLARES IT — the one previously-compiling shape reachable from
+  // plain JSON where the field's own kind reads it. `checkCodes` returns early on a non-array
+  // ("iterating a string would report every character"), so at base this was `ok: true`, zero
+  // diagnostics, and the `codes` an author believed they had written restricted nothing.
+  const codes = one("e11", { codes: null });
+  assert.equal(codes.code, "GRAPH003_MALFORMED");
+  assert.equal(codes.message, 'error edge "e11" declares codes null, which is not an array of strings');
+  assert.equal(codes.fix, 'set codes on edge "e11" to an array of strings');
+});
+
+test("THE BYTES · the edge is NOT that kind — the fix says REMOVE, and no reader is asserted", () => {
+  // The first cut printed the rule's own because-clause here ("the width is multiplied into every
+  // downstream node's parallel width") over a `seq` edge, where no such reader exists, and then
+  // told the author to "set maxWidth to a whole number" — a number nothing would ever read. Both
+  // halves are wrong for this branch and both are fixed: the tail names the kind the field is
+  // declared FOR, and the fix is removal, which is unambiguously right because nothing requires it.
+  const width = one("e3", { maxWidth: "24" });
+  assert.equal(width.code, "GRAPH007_BAD_MAX_WIDTH", "the CODE does not change with the kind");
   assert.equal(
-    one({ maxWidth: { toJSON: () => { throw new Error("boom"); } } }).message.includes("declares maxWidth an object,"),
+    width.message,
+    'edge "e3" declares maxWidth "24", which is not a positive integer — and maxWidth is declared for fanout edges, not for kind "seq"',
+  );
+  assert.equal(width.fix, 'remove maxWidth from edge "e3"');
+
+  const iterations = one("e3", { maxIterations: "3" });
+  assert.equal(
+    iterations.message,
+    'edge "e3" declares maxIterations "3", which is not a positive integer — and maxIterations is declared for loop edges, not for kind "seq"',
+  );
+  assert.equal(iterations.fix, 'remove maxIterations from edge "e3"');
+
+  const codes = one("e3", { codes: null });
+  assert.equal(
+    codes.message,
+    'edge "e3" declares codes null, which is not an array of strings — and codes is declared for error edges, not for kind "seq"',
+  );
+  assert.equal(codes.fix, 'remove codes from edge "e3"');
+
+  // THE KIND ITSELF IS UNTRUSTED in this sentence, so it is rendered too. A `kind` that is not a
+  // string reaches here because `TYPE_CHECKED_ELSEWHERE` defers it — the message must not be able
+  // to throw on it, and must not claim a subject it cannot name.
+  const d = errorsOf(withEdge("e3", { kind: 42, maxWidth: "24" }));
+  const hit = d.filter((x) => x.code === "GRAPH007_BAD_MAX_WIDTH");
+  assert.equal(hit.length, 1);
+  assert.equal(
+    hit[0]!.message,
+    'edge "e3" declares maxWidth "24", which is not a positive integer — and maxWidth is declared for fanout edges, not for kind 42',
+  );
+});
+
+test("A HOSTILE VALUE IS RENDERED, NOT RUN — including the two `describeValue` exists for", () => {
+  // `JSON.stringify` throws on a bigint and re-raises any `toJSON` the caller wrote; a guard that
+  // throws while describing what it is refusing is worse than the thing it refuses.
+  assert.equal(one("e3", { maxWidth: 10n }).message.includes("declares maxWidth 10n,"), true);
+  assert.equal(
+    one("e1", { over: Symbol("s") }).message,
+    'fanout edge "e1" declares over a symbol, which is not a string',
+  );
+  assert.equal(
+    one("e3", { maxWidth: { toJSON: () => { throw new Error("boom"); } } }).message.includes("declares maxWidth an object,"),
     true,
+  );
+});
+
+test("A SPARSE ARRAY IS REFUSED — `Array.prototype.every` SKIPS HOLES and `digest` does not", () => {
+  // The blocking finding of fix round 1. `stringArray` was `Array.isArray(v) && v.every(x => typeof
+  // x === "string")`, and `every` visits OWN indices only, so a hole satisfied it vacuously — then
+  // `canonical.ts` walked `0..length-1`, found the hole, and threw OUT of `compile`. Measured on
+  // `19b183c4`, and the crash class this whole check exists to close:
+  //
+  //     branches: new Array(2)  ->  THREW CanonicalizationError: undefined array element
+  //                                 at edges[2].branches[0]
+  //
+  // The predicate index-walks now, which asks about exactly the indices `digest` will ask about.
+  for (const [what, edgeId, patch] of [
+    ["branches on the join that declares it", "e2", { branches: new Array<string>(2) }],
+    ["branches on a kind that does not", "e3", { branches: new Array<string>(2) }],
+    ["a leading hole", "e2", { branches: [, "a"] as unknown as string[] }],
+    ["a trailing hole", "e2", { branches: ["a", , "b"] as unknown as string[] }],
+    ["codes on the error edge that declares it", "e11", { codes: new Array<string>(1) }],
+    ["length longer than the indices", "e2", { branches: Object.assign(["a"], { length: 4 }) }],
+  ] as const) {
+    const r = compile({
+      spec: withEdge(edgeId, patch as Record<string, unknown>),
+      resolver: stubResolver(),
+      tools: TOOLS,
+      tenantCapabilities: TENANT_CAPABILITIES,
+    });
+    // `compile`, not `validateGraph`: the throw was from `digest(spec)`, which only `compile` runs.
+    assert.equal(r.ok, false, what);
+    assert.ok(
+      r.diagnostics.some((x) => x.code === "GRAPH003_MALFORMED"),
+      `${what}: ${r.diagnostics.map((x) => x.code).join(", ") || "nothing"}`,
+    );
+  }
+  // AND A DENSE ARRAY OF STRINGS IS STILL FINE, so the walk did not refuse the ordinary case.
+  assert.deepEqual(errorsOf(withEdge("e2", { branches: ["investigate"] })).map((x) => x.code), []);
+  assert.deepEqual(errorsOf(withEdge("e2", { branches: [] })).map((x) => x.code), []);
+});
+
+test("OWN KEYS ONLY — a polluted `Object.prototype` used to put a `maxWidth` on every edge alive", () => {
+  // `edgeFieldTypes` read `edge[field]`, which walks the prototype chain, while `unknownKeys` two
+  // lines up reads `Object.keys` and this file's stated rule is `Object.hasOwn`. Measured on
+  // `19b183c4`: with `Object.prototype.maxWidth = "24"` set, the UNMUTATED fixture drew FIFTEEN
+  // `GRAPH007_BAD_MAX_WIDTH` refusals, one per edge, for a field no edge declares.
+  const proto = Object.prototype as unknown as Record<string, unknown>;
+  try {
+    proto["maxWidth"] = "24";
+    proto["branches"] = "nope";
+    assert.deepEqual(errorsOf(incidentTriage()).map((x) => x.code), []);
+  } finally {
+    delete proto["maxWidth"];
+    delete proto["branches"];
+  }
+  // And a field the edge really does declare is still read, so the own-key test did not switch the
+  // check off.
+  assert.deepEqual(errorsOf(withEdge("e1", { maxWidth: "24" })).map((x) => x.code), ["GRAPH007_BAD_MAX_WIDTH"]);
+});
+
+test("AN EDGE ID CANNOT FORGE A LINE — every value the edge loop names goes through `describeValue`", () => {
+  // §A.73's shape, found by a reviewer of this change: `GRAPH020_UNKNOWN_FIELD` interpolated
+  // `edge "${e.id}"` raw while the new sibling escaped it, so ONE compile printed one forged line
+  // and one escaped line about the same edge. Measured on `19b183c4`, the GRAPH020 message was
+  // three lines, the second of which reads `   fix: nothing is wrong` and the third `✓ ok`.
+  const forged = 'e3"\n   fix: nothing is wrong\n✓ ok';
+  const d = errorsOf(withEdge("e3", { id: forged, maxWidthh: 4, maxWidth: "24" }));
+  for (const x of d) {
+    assert.ok(!x.message.includes("\n"), `${x.code} still carries a newline: ${JSON.stringify(x.message)}`);
+    assert.ok(!(x.fix ?? "").includes("\n"), `${x.code}'s fix carries a newline`);
+  }
+  const g20 = d.find((x) => x.code === "GRAPH020_UNKNOWN_FIELD");
+  assert.ok(g20 !== undefined, d.map((x) => x.code).join(", "));
+  assert.equal(g20.message, 'edge "e3\\"\\n   fix: nothing is wrong\\n✓ ok" has an unknown field `maxWidthh`');
+  // AND AN ORDINARY ID IS UNCHANGED, which is why the quotes moved into the renderer rather than
+  // disappearing: `describeValue("e3")` is `"e3"`.
+  const plain = errorsOf(withEdge("e3", { maxWidthh: 4 }));
+  assert.equal(plain[0]!.message, 'edge "e3" has an unknown field `maxWidthh`');
+  assert.equal(plain[0]!.fix, "did you mean `maxWidth` or `maxIterations`?");
+});
+
+test("THE FIVE OTHER SITES THAT NAME AN UNCHECKED VALUE, and the bytes they print for a good graph", () => {
+  // `TYPE_CHECKED_ELSEWHERE` claims a refusal already covers each of its six members. Five of those
+  // refusals CRASHED on a value they were refusing, which is not a refusal at all — measured on
+  // `19b183c4`, one graph per row:
+  //
+  //     id: Symbol()     THREW TypeError: Cannot convert a Symbol value to a string   (checkCodes site)
+  //     id: 10n          THREW TypeError: Do not know how to serialize a BigInt       (badId)
+  //     from: Symbol()   THREW TypeError: Cannot convert a Symbol value to a string   (dangling)
+  //     when: Symbol()   THREW TypeError: Cannot convert a Symbol value to a string   (rule004)
+  //
+  // All four are diagnostics now. The bytes below are the ORDINARY half: what each site prints for
+  // a plainly-wrong-but-harmless value, so the fix cannot have been paid for with a worse message.
+  const bad = (patch: Record<string, unknown>, code: string): Diagnostic => {
+    const hit = errorsOf(withEdge("e10", patch)).filter((x) => x.code === code);
+    assert.ok(hit.length > 0, `${code} did not fire`);
+    return hit[0]!;
+  };
+  assert.equal(bad({ id: "not a safe id" }, "GRAPH003_BAD_ID").message, 'edge id "not a safe id" is not a usable id');
+  assert.equal(bad({ id: 0 }, "GRAPH003_BAD_ID").message, "edge id 0 is not a usable id");
+  assert.equal(bad({ id: 10n }, "GRAPH003_BAD_ID").message, "edge id 10n is not a usable id");
+  assert.equal(bad({ id: Symbol("s") }, "GRAPH003_BAD_ID").message, "edge id a symbol is not a usable id");
+  // `JSON.stringify` called BOTH of these `null`, which read as a formatting bug rather than as the
+  // value the author wrote. That is a message IMPROVEMENT and is pinned as one.
+  assert.equal(bad({ id: Number.NaN }, "GRAPH003_BAD_ID").message, "edge id NaN is not a usable id");
+  assert.equal(bad({ id: [] }, "GRAPH003_BAD_ID").message, "edge id an array is not a usable id");
+
+  assert.equal(bad({ from: "nope" }, "GRAPH003_DANGLING_EDGE").message, 'edge "e10" starts at unknown node "nope"');
+  assert.equal(bad({ from: Symbol("s") }, "GRAPH003_DANGLING_EDGE").message, 'edge "e10" starts at unknown node a symbol');
+  assert.equal(bad({ to: 7 }, "GRAPH003_DANGLING_EDGE").message, 'edge "e10" ends at unknown node 7');
+
+  assert.equal(bad({ when: "!!" }, "GRAPH004_EXPR").message.startsWith("`!!`: "), true, "a string expression is shown as written");
+  assert.equal(bad({ when: Symbol("s") }, "GRAPH004_EXPR").message.startsWith("`a symbol`: "), true);
+
+  assert.equal(
+    bad({ codes: ["nope"] }, "GRAPH003_UNKNOWN_ERROR_CODE").message,
+    'edge "e10" names error code "nope", which no error in this system carries — it would never match',
   );
 });
 

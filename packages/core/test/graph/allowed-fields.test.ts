@@ -192,6 +192,40 @@ test("EVERY FIELD THE THREE INTERFACES DECLARE IS ALLOWED — the guard must not
   assert.deepEqual(Object.keys(EDGE_FIELDS).sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
 });
 
+test("`EDGE_FIELDS.readBy` IS `EdgeSpec`'S OWN `<kind> only` COMMENT, and the two cannot drift", () => {
+  // `readBy` decides what a wrong-typed field's refusal TELLS an author: on the kind that declares
+  // the field it says to correct the value, on any other kind it says to remove it (see
+  // `edgeFieldTypes`). That is advice, so it has to be right — and the knowledge was already in this
+  // file, in prose, above each field: `/** `fanout` only. */`. This scrapes those comments and
+  // requires the data to agree, so the table cannot say `join` while the interface says `fanout`.
+  //
+  // A comment governs the RUN of fields under it until the next one, which is how `over`, `as` and
+  // `maxWidth` share one `fanout only` and `until`/`maxIterations` share one `loop only`.
+  const body = SPEC_SRC.slice(SPEC_SRC.indexOf("export interface EdgeSpec"));
+  const scraped = new Map<string, string>();
+  let current: string | undefined;
+  for (const line of body.slice(0, body.indexOf("\n}")).split("\n")) {
+    const comment = /^\s*\/\*\* `(\w+)` only/.exec(line);
+    if (comment !== null) {
+      current = comment[1];
+      continue;
+    }
+    const field = /^\s*readonly (\w+)\??:/.exec(line);
+    if (field !== null && current !== undefined) scraped.set(field[1]!, current);
+  }
+  // The scrape found something, so an empty map cannot pass this vacuously.
+  assert.equal(scraped.size, 9, `expected nine fields under a \`<kind> only\` comment, got ${[...scraped.keys()].join(", ")}`);
+  for (const [field, kind] of scraped) {
+    assert.equal(EDGE_FIELDS[field]?.readBy, kind, `EDGE_FIELDS.${field}.readBy and EdgeSpec's comment disagree`);
+  }
+  // And the four with no comment carry no `readBy`, so "declared for one kind" and "declared for
+  // every kind" stay distinguishable.
+  for (const field of Object.keys(EDGE_FIELDS)) {
+    if (scraped.has(field)) continue;
+    assert.equal(EDGE_FIELDS[field]?.readBy, undefined, `${field} has a readBy but no \`<kind> only\` comment to justify it`);
+  }
+});
+
 test("EVERY FIELD THE POLICY INTERFACES DECLARE IS ALLOWED — the same, one level in", () => {
   // `POLICY_FIELDS` is read at one call site for four scopes, and the cry-wolf risk is higher
   // here than above: a field added to `Budget` and not to this table refuses a graph whose
