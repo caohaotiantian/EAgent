@@ -950,13 +950,27 @@ export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budg
  *                   meaning.
  *     stringArray   `readonly NodeId[]`, `readonly string[]`
  *
- * `readBy` IS THE `/** <kind> only. *​/` COMMENT ABOVE EACH FIELD, MADE READABLE. Nine of the
- * thirteen are declared for ONE edge kind and mean nothing on the others, and the comments in
- * `EdgeSpec` above have said so in prose all along. A diagnostic that cannot see it writes advice
- * an author must not take — a wrong-typed `maxWidth` on a `seq` edge was told to "set maxWidth to
- * a whole number", which would be a number no reader ever looks at. The refusal reads this and
- * says *remove it* instead. `allowed-fields.test.ts` scrapes those comments out of this file and
- * cross-checks them against this column, so the prose and the data cannot drift.
+ * `readBy` IS THE `/** <kind> only. *​/` COMMENT ABOVE EACH FIELD, MADE READABLE — it says which
+ * kind DECLARES the field, which is NOT the same as "no other kind reads it". Nine of the thirteen
+ * carry such a comment, and `allowed-fields.test.ts` scrapes them out of this file and cross-checks
+ * them against this column, so the prose and the data cannot drift.
+ *
+ * "DECLARED FOR", AND THE WORD IS EXACT, because two readers cross kinds and an earlier version of
+ * this paragraph claimed they do not:
+ *
+ *     run/externalise.ts   walks EVERY edge and reads `when`, `until`, `over` and `as` whatever the
+ *                          kind is, deleting each named channel from the externalisable set — so a
+ *                          `seq` edge carrying a well-typed `as` really does change what the run
+ *                          externalises.
+ *     checkCodes           runs over every edge, so `codes: ["nope"]` on a `seq` edge draws
+ *                          `GRAPH003_UNKNOWN_ERROR_CODE` from a rule that read it.
+ *
+ * THE ADVICE IS STILL RIGHT, and the reason is the arm's own precondition rather than luck:
+ * `edgeFieldTypes` reaches the "remove it" branch only for a value that FAILS its tag. A
+ * wrong-typed `as` is a value `out.delete(...)` cannot match and `checkCodes` skips, so no reader
+ * — cross-kind or not — is using it, and removing it cannot change a behaviour it was producing.
+ * Were the arm ever widened to WELL-TYPED values on a non-declaring kind, this is the paragraph
+ * that would make it wrong.
  *
  * KEYED AND NOT A SECOND EXPORT, for the reason `POLICY_FIELDS` gives ten lines up: each list is
  * one name on a pinned public surface. The tag union is written inline rather than named, so this

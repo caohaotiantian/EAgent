@@ -938,13 +938,23 @@ const EDGE_FIELD_IS: Readonly<Record<"string" | "count" | "stringArray", (v: unk
 /**
  * What a field of each tag is, in the words the refusal uses, and the edit it asks for.
  *
- * NEITHER `to` SAYS "or remove it", and that is a correction rather than a shortening. This branch
- * is reached only when the edge's OWN kind is the one that declares the field, and there the
- * compiler mostly requires it: removing `over` or `as` from a fanout is
- * `GRAPH007_FANOUT_INCOMPLETE`, removing `compensates` from a compensation edge is
- * `GRAPH012_NO_COMPENSATES`, removing `maxWidth` is `GRAPH007_NO_MAX_WIDTH`. A fix an author
- * follows into a second refusal is worse than no fix. Where removal IS the answer — a field on a
- * kind that does not declare it — `edgeFieldTypes` says so itself and does not come here.
+ * "OR REMOVE IT" IS PER TAG AND IS DECIDED BY MEASURING EVERY FIELD OF THAT TAG on the kind that
+ * declares it, because this `to` is only ever used on THAT kind — the other branch of
+ * `edgeFieldTypes` writes its own "remove it" and never comes here. Removal has to be a fix the
+ * compiler then accepts, and for the `string` fields it is not:
+ *
+ *     over / as missing on a fanout          GRAPH007_FANOUT_INCOMPLETE
+ *     compensates missing on a compensation  GRAPH012_NO_COMPENSATES
+ *     maxWidth missing on a fanout           GRAPH007_NO_MAX_WIDTH  (`count`)
+ *     maxIterations missing on a loop        GRAPH006_UNBOUNDED_LOOP (`count`)
+ *     branches missing on a join             ok, zero diagnostics
+ *     codes missing on an error edge         ok, zero diagnostics
+ *
+ * — all six measured, one graph each. So `stringArray` keeps the hint and the other two do not. A
+ * fix an author follows into a second refusal is worse than no fix; a fix that withholds the
+ * simplest valid edit is worse than one that offers it. THE NEXT FIELD OF EITHER TAG HAS TO BE
+ * MEASURED THE SAME WAY — a required `stringArray` field would make this row wrong, which is why
+ * the table above it is the type and this one is the advice.
  *
  * `count` says "a whole number" and not "a whole number ≥ 1", because the tag is
  * `Number.isSafeInteger` alone; the two fields that DO want `≥ 1` say so in their own row below.
@@ -954,7 +964,7 @@ const EDGE_FIELD_IS: Readonly<Record<"string" | "count" | "stringArray", (v: unk
 const EDGE_FIELD_SHAPE: Readonly<Record<"string" | "count" | "stringArray", { readonly is: string; readonly to: string }>> = {
   string: { is: "a string", to: "a string" },
   count: { is: "a whole number", to: "a whole number" },
-  stringArray: { is: "an array of strings", to: "an array of strings" },
+  stringArray: { is: "an array of strings", to: "an array of strings, or remove it" },
 };
 
 /**
@@ -997,19 +1007,36 @@ const EDGE_FIELD_REFUSAL: Readonly<
 
 /**
  * `expansion.maxFanout` WITHOUT DIAGNOSING IT, because `expansionOf` is the one allowed to do
- * that and it runs later — calling it twice would report every bad expansion member twice.
+ * that — and on the path that reaches this function, `expansionOf` NEVER RUNS.
  *
- * The fallback is `expansionOf`'s own, member for member: a declared value that is a positive
- * integer wins, anything else takes `DEFAULT_EXPANSION`. That is what makes GRAPH007's fix
- * byte-identical to the one `rule007Fanout` printed before this check existed, including on a
- * graph whose `maxFanout` is itself malformed — where both fall back to the default and the
- * author gets the bad member's own refusal from `expansionOf` as well.
+ * AN EARLIER VERSION OF THIS COMMENT SAID THE AUTHOR STILL GETS THE BAD MEMBER'S OWN REFUSAL
+ * "as well". THAT IS FALSE, and the measurement is one graph carrying both faults:
+ *
+ *     maxFanout: "24" alone              GRAPH003_MALFORMED — policy.expansion.maxFanout is "24",
+ *                                        which is not a positive integer …
+ *     maxFanout: "24" + maxWidth: "24"   GRAPH007_BAD_MAX_WIDTH ONLY, ceiling 32
+ *
+ * `edgeFieldTypes` is fatal, `checkStructure` gates, and `expansionOf` is called after the gate —
+ * so a graph with a wrong-typed edge field never reaches it and the expansion member's refusal is
+ * suppressed until the author has fixed the edge and compiled again. Both faults were reported in
+ * one pass before this check existed. That is the cost of moving the type check in front of the
+ * gate, it is paid on multi-fault graphs only, and it is the same suppression `edgeFieldTypes`
+ * documents for warnings and for unrelated errors — recorded here because THIS function is where a
+ * reader would otherwise conclude the opposite.
+ *
+ * WHAT IS TRUE: the number is `expansionOf`'s, member for member — `Object.hasOwn`, then a
+ * declared value that is a positive integer, else `DEFAULT_EXPANSION`. `Object.hasOwn` and not a
+ * bare index, for the reason `edgeFieldTypes` gives: with `Object.prototype.maxFanout = 8` set and
+ * a graph that declares no `maxFanout` of its own, a bare read returned 8 while `expansionOf`
+ * returned 32, so the fix said "between 1 and 8" about a ceiling `rule007Fanout` enforced at 32 —
+ * two numbers for one limit, which is worse than either.
  */
 function maxFanoutOf(spec: GraphSpec): number {
   const policy: unknown = spec.policy;
   if (typeof policy !== "object" || policy === null) return DEFAULT_EXPANSION.maxFanout;
   const declared: unknown = (policy as Record<string, unknown>)["expansion"];
   if (typeof declared !== "object" || declared === null) return DEFAULT_EXPANSION.maxFanout;
+  if (!Object.hasOwn(declared as Record<string, unknown>, "maxFanout")) return DEFAULT_EXPANSION.maxFanout;
   const v: unknown = (declared as Record<string, unknown>)["maxFanout"];
   return isPositiveInt(v) ? v : DEFAULT_EXPANSION.maxFanout;
 }
@@ -1048,6 +1075,53 @@ function maxFanoutOf(spec: GraphSpec): number {
  * `describeValue("e1")` is `"e1"`, so a well-typed id renders as the surrounding lines' own
  * `edge "${e.id}"` did — and an id carrying a newline is escaped rather than able to forge a line.
  */
+/**
+ * ONE SPELLING OF "THAT FIELD CANNOT HOLD THAT", and both callers use it.
+ *
+ * `rule007Fanout` still owns the RANGE half of `maxWidth` (`< 1`, which is a policy question this
+ * parse deliberately does not answer), so the same code, the same sentence and the same fix have
+ * two producers. They were two COPIES for one round, and they had already drifted in the way two
+ * copies always do: each fetched the ceiling its own way, so `Object.prototype.maxFanout = 8`
+ * made one say "between 1 and 8" while the other enforced 32. A function rather than a byte-equal
+ * test between two strings, because a test tells you they disagree and this makes it impossible.
+ *
+ * `kind` IS PASSED IN rather than read off the edge, so `rule007Fanout` — which has already
+ * narrowed to `e.kind === "fanout"` — gets the reading-kind branch by construction.
+ */
+function edgeFieldRefusal(
+  field: string,
+  id: unknown,
+  kind: unknown,
+  value: unknown,
+  maxFanout: number,
+): Diagnostic {
+  const decl = EDGE_FIELDS[field]!;
+  const shape = EDGE_FIELD_SHAPE[decl.type];
+  const refusal = Object.hasOwn(EDGE_FIELD_REFUSAL, field)
+    ? EDGE_FIELD_REFUSAL[field]!
+    : { code: "GRAPH003_MALFORMED", is: shape.is, to: () => shape.to, because: "" };
+  // `decl.readBy === undefined` cannot happen for a field `edgeFieldTypes` reaches — the four
+  // fields with no `readBy` are exactly `id`, `from`, `to` and `kind`, all in
+  // `TYPE_CHECKED_ELSEWHERE` — but a fourteenth field declared for every kind would land here, and
+  // "every kind declares it" is the same branch as "this kind declares it".
+  const declaresIt = decl.readBy === undefined || kind === decl.readBy;
+  const subject = declaresIt && typeof kind === "string" ? `${kind} edge` : "edge";
+  const tail = declaresIt
+    ? refusal.because === ""
+      ? ""
+      : ` — ${refusal.because}`
+    : ` — and ${field} is declared for ${String(decl.readBy)} edges, not for kind ${describeValue(kind)}`;
+  return {
+    severity: "error",
+    code: refusal.code,
+    message: `${subject} ${describeValue(id)} declares ${field} ${describeValue(value)}, which is not ${refusal.is}${tail}`,
+    ...(typeof id === "string" ? { at: { edgeId: id as EdgeId } } : {}),
+    fix: declaresIt
+      ? `set ${field} on edge ${describeValue(id)} to ${refusal.to(maxFanout)}`
+      : `remove ${field} from edge ${describeValue(id)}`,
+  };
+}
+
 function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: number, d: Diagnostic[]): boolean {
   let bad = false;
   const id = edge["id"];
@@ -1058,30 +1132,7 @@ function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: numb
     const value = edge[field];
     if (value === undefined) continue;
     if (EDGE_FIELD_IS[decl.type](value)) continue;
-    const shape = EDGE_FIELD_SHAPE[decl.type];
-    const refusal = Object.hasOwn(EDGE_FIELD_REFUSAL, field)
-      ? EDGE_FIELD_REFUSAL[field]!
-      : { code: "GRAPH003_MALFORMED", is: shape.is, to: () => shape.to, because: "" };
-    // `decl.readBy === undefined` cannot happen for a field this loop reaches — the four fields
-    // with no `readBy` are exactly `id`, `from`, `to` and `kind`, all in
-    // `TYPE_CHECKED_ELSEWHERE` — but a fourteenth field declared for every kind would land here,
-    // and "every kind reads it" is the same branch as "this kind reads it".
-    const reads = decl.readBy === undefined || kind === decl.readBy;
-    const subject = reads && typeof kind === "string" ? `${kind} edge` : "edge";
-    const tail = reads
-      ? refusal.because === ""
-        ? ""
-        : ` — ${refusal.because}`
-      : ` — and ${field} is declared for ${String(decl.readBy)} edges, not for kind ${describeValue(kind)}`;
-    d.push({
-      severity: "error",
-      code: refusal.code,
-      message: `${subject} ${describeValue(id)} declares ${field} ${describeValue(value)}, which is not ${refusal.is}${tail}`,
-      ...(typeof id === "string" ? { at: { edgeId: id as EdgeId } } : {}),
-      fix: reads
-        ? `set ${field} on edge ${describeValue(id)} to ${refusal.to(maxFanout)}`
-        : `remove ${field} from edge ${describeValue(id)}`,
-    });
+    d.push(edgeFieldRefusal(field, id, kind, value, maxFanout));
     bad = true;
   }
   return bad;
@@ -2558,16 +2609,12 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
     // what reaches this rule is a safe integer or absent and the bound is all that is left to
     // decide (§A.62).
     if (e.maxWidth < 1) {
-      d.push({
-        severity: "error",
-        code: "GRAPH007_BAD_MAX_WIDTH",
-        message:
-          `fanout edge "${e.id}" declares maxWidth ${describeValue(e.maxWidth)}, which is not a positive integer — ` +
-          `the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, ` +
-          `and neither reader can use this value`,
-        at: { edgeId: e.id },
-        fix: `set maxWidth on edge "${e.id}" to a whole number between 1 and ${expansion.maxFanout} (unquoted: 24, not "24")`,
-      });
+      // THE SAME PRODUCER THE PARSE USES, not a second copy of the same sentence. This arm and
+      // `edgeFieldTypes` raise one code with one wording for one field, and the two spellings had
+      // already drifted on how the ceiling is fetched before they were merged into
+      // `edgeFieldRefusal`. `expansion.maxFanout` here is the REAL one, out of `expansionOf`,
+      // which is what `maxFanoutOf` reproduces on the earlier path.
+      d.push(edgeFieldRefusal("maxWidth", e.id, e.kind, e.maxWidth, expansion.maxFanout));
     }
     // The ceiling test is a bare `>` and must not run on a value that coerces: `"99" > 25` is
     // false and `NaN > 25` is false, which is what the parse-time type check now makes
