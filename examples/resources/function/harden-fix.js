@@ -135,6 +135,20 @@ function (view, ctx) {
     };
   }
 
+  // THE FIX LOG DOES NOT CARRY A CREDENTIAL'S BYTES, and it used to. `was` is the value before the
+  // repair, and for `plaintext-secret` that value IS the live password — so the log handed
+  // `"hunter2"` to `loom gates`, to the approver, and into `out/harden-report.md`, a file that goes
+  // back into the repository the manifest came from. The runtime's own gate projection redacts
+  // `hardened.env.DB_PASSWORD` to `[secret]` on the KEY NAME, so the only place the secret survived
+  // the door was the one field nothing was watching — and the suite blessed it. (F13.)
+  //
+  // What an approver needs is enough to recognise the change, which is the value's SHAPE, not its
+  // bytes: `{redacted, chars}`. The auditor marks which findings that applies to (`sensitiveWas`),
+  // so the rule table decides rather than this switch. `now` is never redacted — it is the
+  // `{secretRef}` that replaced the secret, and hiding it would hide the repair itself.
+  //
+  // THE FOLD IS UNAFFECTED, which is what makes this safe: `harden-audit.js` replays each entry by
+  // assigning `now` at `at` and never reads `was`.
   return {
     writes: {
       applied: [
@@ -143,13 +157,26 @@ function (view, ctx) {
           rule: target.rule,
           at: target.at,
           severity: target.severity,
+          // Carried so `harden-collate.js` can compare a fix against the FIRST audit's findings by
+          // IDENTITY rather than by rule name: `secret-not-declared` shares one `at` across every
+          // secret, so `detail` — which names the env key and the ref — is the only field that tells
+          // two of them apart. It never carries a value, only a key name and a shape.
+          detail: target.detail,
           cascadeOf: target.cascadeOf === undefined ? null : target.cascadeOf,
-          was: was === undefined ? null : was,
+          was: target.sensitiveWas === true ? redactValue(was) : was === undefined ? null : was,
           now: now,
         },
       ],
     },
   };
+
+  /** A value's shape, for a log an approver reads. Never the bytes. */
+  function redactValue(v) {
+    if (typeof v === "string") return { redacted: "string", chars: v.length };
+    if (v === undefined || v === null) return { redacted: "absent" };
+    if (Array.isArray(v)) return { redacted: "array", items: v.length };
+    return { redacted: typeof v };
+  }
 
   /** Read a dotted path of at most two segments — every `at` in the rule table is one of those. */
   function at(obj, path) {

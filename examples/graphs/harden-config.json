@@ -40,7 +40,7 @@
       "type": "tool",
       "reads": ["manifestPath"],
       "writes": ["source"],
-      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${manifestPath}" } }
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${manifestPath}", "maxBytes": 4000000 } }
     },
     {
       "id": "parse",

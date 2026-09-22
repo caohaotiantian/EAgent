@@ -30,6 +30,27 @@ function (view, ctx) {
   const source = String(view.require("source"));
   const path = String(view.require("manifestPath"));
 
+  // A TRUNCATED READ IS NOT A SYNTAX ERROR, and this check exists because the product reports it as
+  // one. `fs.read` caps at 200,000 characters unless the node says otherwise and appends its marker
+  // INTO the content rather than beside it, so a 1.2 MB manifest arrives as 200,000 valid characters
+  // plus `…[truncated 1000000 chars]` — and `JSON.parse` then blames a "Bad control character at
+  // position 200000". The graph now passes an explicit `maxBytes`, which moves the cliff; this moves
+  // the DIAGNOSIS, which is the half that survives somebody's manifest being bigger than whatever
+  // number is in the graph. (F12.)
+  const cut = /\n…\[truncated (\d+) chars\]$/.exec(source);
+  if (cut !== null) {
+    return {
+      refuse: {
+        reason:
+          "\"" + path + "\" was read back TRUNCATED: " + source.length + " characters arrived and " +
+          cut[1] + " more were dropped, because `fs.read` caps its output and marks the cut inside the " +
+          "content. What is here is not the manifest, and auditing part of a manifest reports the " +
+          "absences of the part that is missing as compliance. Raise `maxBytes` on this graph's " +
+          "\"load\" node above the file's size.",
+      },
+    };
+  }
+
   let parsed;
   try {
     parsed = JSON.parse(source);

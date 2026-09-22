@@ -88,18 +88,30 @@ function (view, ctx) {
   const add = (f) => findings.push(f);
 
   if (!pinned) {
-    const canPin = typeof m.release === "string" && m.release !== "";
+    // THE RELEASE MUST NOT ITSELF BE FLOATING, and leaving that out was a real hole rather than a
+    // pedantic one: `release: "latest"` passed `canPin`, the repair rewrote `svc:latest` to
+    // `svc:latest`, and the byte-identical result hit `harden-fix.js`'s no-change refusal under a
+    // message blaming "the rule's detector and its repair" — which was false, since the detector was
+    // right and the repair had simply been handed a target that is not a pin. A tool that reports a
+    // floating tag and then pins it to a floating tag has done nothing and said it did something.
+    const release = typeof m.release === "string" ? m.release : "";
+    const releaseFloats = release === "" || release === "latest" || release === "stable" || release === "edge";
+    const canPin = !releaseFloats;
     add({
       rule: "floating-image-tag",
       severity: "medium",
       at: "image",
       detail:
-        "image \"" + m.image + "\" is " + (tag === "" ? "untagged" : "tagged \"latest\"") +
+        "image \"" + m.image + "\" is " + (tag === "" ? "untagged" : "tagged \"" + tag + "\"") +
         ", so what deploys is whatever the registry happens to hold",
       autofixable: canPin,
       remedy: canPin
-        ? "pin it to the declared release \"" + m.release + "\""
-        : "this manifest declares no \"release\", so there is no version to pin to — add one, or pin the tag by hand",
+        ? "pin it to the declared release \"" + release + "\""
+        : release === ""
+          ? "this manifest declares no \"release\", so there is no version to pin to — add one, or pin the tag by hand"
+          : "this manifest's \"release\" is itself \"" + release + "\", which is a moving target and not a " +
+            "version — pinning to it would change nothing. Set \"release\" to the immutable version that " +
+            "is deployed.",
     });
   }
 
@@ -142,16 +154,46 @@ function (view, ctx) {
     });
   }
 
+  // A CREDENTIAL KEY IS REPORTED WHATEVER ITS VALUE'S TYPE, and this rule's first draft did the
+  // opposite: `if (typeof env[key] !== "string") continue;` dropped the key entirely, so
+  // `"DB_PASSWORD": 90210` and `"API_TOKEN": ["sk-live-1"]` got a clean bill of health — "already
+  // satisfied every rule", zero findings. The key name is the whole evidence this rule has, and it
+  // does not become weaker because somebody wrote the value unquoted. What DOES change is whether
+  // there is a repair: `secretRef` substitutes for a string, so a non-string is reported and left to
+  // a person.
+  //
+  // A DOTTED KEY IS REPORTED AND NOT REPAIRED, for a different reason with the same shape. Every
+  // `at` in this table is a path `harden-fix.js` assigns to and `assign()` above folds back, and
+  // both split on ".", so `env.APP.DB_PASSWORD` means "the DB_PASSWORD field of the APP object"
+  // rather than "the key called APP.DB_PASSWORD". Repairing it wrote a spurious nested
+  // `env.APP.DB_PASSWORD` and left the real key untouched — which then reached `harden-fix.js`'s
+  // no-change refusal wearing a message that blamed "the rule's detector and its repair", a
+  // sentence that was false. The path language cannot address the key, so the honest answer is to
+  // name it and stop.
   for (const key of Object.keys(env)) {
     if (!secretish.test(key)) continue;
-    if (typeof env[key] !== "string") continue;
+    const value = env[key];
+    if (value !== null && typeof value === "object" && !Array.isArray(value) && typeof value.secretRef === "string") continue;
+    const dotted = key.indexOf(".") !== -1;
+    const isString = typeof value === "string";
     add({
       rule: "plaintext-secret",
       severity: "high",
       at: "env." + key,
-      detail: "\"" + key + "\" holds a credential in the clear, in a file that is in version control",
-      autofixable: true,
-      remedy: "replace the value with a secretRef named \"" + secretName(key) + "\"",
+      detail:
+        "\"" + key + "\" holds a credential in the clear, in a file that is in version control" +
+        (isString ? "" : " (its value is " + describe(value) + ", not a string)"),
+      autofixable: isString && !dotted,
+      // The value's BYTES never travel in a finding, only its shape — see `sensitiveWas` below.
+      sensitiveWas: isString && !dotted,
+      remedy: dotted
+        ? "this key contains a \".\", which this tool's path language reads as object nesting, so it " +
+          "cannot address the key to repair it — move \"" + key + "\" behind a secretRef by hand, or " +
+          "rename the key without a dot"
+        : isString
+          ? "replace the value with a secretRef named \"" + secretName(key) + "\""
+          : "the value is " + describe(value) + ", so there is no string to substitute a secretRef for — " +
+            "move it behind a secretRef by hand",
     });
   }
 
@@ -232,6 +274,15 @@ function (view, ctx) {
 
   function secretName(key) {
     return key.toLowerCase().split("_").join("-");
+  }
+
+  /** A value's SHAPE, for a message that must not carry the value. Never the bytes. */
+  function describe(v) {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return "an array of " + v.length;
+    if (typeof v === "object") return "an object";
+    if (typeof v === "string") return "a string of " + v.length + " character(s)";
+    return "a " + typeof v;
   }
 
   /** Assign a dotted path of at most two segments — every `at` in the rule table is one of those. */

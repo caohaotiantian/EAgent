@@ -48,9 +48,18 @@ function (view, ctx) {
   // "2 of those 2 fix(es) closed a finding that DID NOT EXIST when the run started" about a finding
   // that was in the very first audit. So: `baseline` is what the first audit saw, and a cascade is a
   // fix for a rule that was NOT in it. See F11 of `docs/workflow-port-2026-09-22.md`.
+  // KEYED ON FINDING IDENTITY — rule AND where AND which — not on the rule NAME, and that was the
+  // THIRD instance of this same class. Keying on `rule` alone hid a cascade whenever the rule was
+  // already in the baseline for a DIFFERENT subject: a manifest with one plaintext `A_PASSWORD` and a
+  // `B_TOKEN` already holding an undeclared secretRef starts with `secret-not-declared` (about
+  // `b-token`) in its baseline, so the `secret-not-declared` that pass 1 CREATES (about `a-password`)
+  // was counted as pre-existing — three passes, `cascades: 0`, and the sentence suppressed on a run
+  // whose whole point was the cascade. `secret-not-declared` shares one `at` ("secrets") across every
+  // secret, so `detail` — which names the env key and the ref — is the only thing that tells two of
+  // them apart.
   const startedWith = {};
-  for (const f of baseline) startedWith[f.rule] = true;
-  const cascades = applied.filter((a) => startedWith[a.rule] !== true);
+  for (const f of baseline) startedWith[identity(f)] = true;
+  const cascades = applied.filter((a) => startedWith[identity(a)] !== true);
   // `settled` is the auditor's word and it is the one that decides: the budget arm is reached only
   // when the loop stopped with auto-fixable work still on the table.
   const stoppedBy = settled ? "settled" : "budget";
@@ -126,9 +135,30 @@ function (view, ctx) {
 
   return { writes: { report: report, hardened: hardened, summary: summary } };
 
+  /**
+   * A finding's identity: the rule, where it lands, AND which one it is.
+   *
+   * All three, because none of the first two is enough on its own. `at` alone collides across rules;
+   * `rule` alone collides across subjects (`secret-not-declared` is reported `at: "secrets"` for
+   * every secret there is); and `detail` is the field that names the env key and the ref, which is
+   * what actually distinguishes two of them. An applied entry carries `detail` for exactly this.
+   */
+  function identity(f) {
+    return String(f.rule) + "\u0000" + String(f.at) + "\u0000" + String(f.detail === undefined ? "" : f.detail);
+  }
+
   /** A table cell: short values in the clear, anything structured as compact JSON. */
   function inline(v) {
     if (v === null) return "*(absent)*";
+    // A redacted `was` (F13) is a SHAPE, not a value, and is rendered as prose so nobody reads
+    // `{"redacted":"string","chars":7}` as the thing that was in the file.
+    if (v !== null && typeof v === "object" && typeof v.redacted === "string") {
+      return v.redacted === "string"
+        ? "*(a string of " + v.chars + " chars — not shown)*"
+        : v.redacted === "absent"
+          ? "*(absent)*"
+          : "*(" + v.redacted + " — not shown)*";
+    }
     return "`" + (typeof v === "string" ? v : JSON.stringify(v)) + "`";
   }
 }

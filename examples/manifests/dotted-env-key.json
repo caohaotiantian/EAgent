@@ -1,0 +1,22 @@
+{
+  "name": "dotted-env-key",
+  "stage": "prod",
+  "release": "1.0.0",
+  "image": "registry.internal/b7d:1.0.0",
+  "pullPolicy": "IfNotPresent",
+  "user": "app",
+  "workdir": "/srv/app",
+  "ports": [
+    8080
+  ],
+  "healthcheck": {
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080
+    }
+  },
+  "env": {
+    "APP.DB_PASSWORD": "dotted-secret"
+  },
+  "secrets": []
+}

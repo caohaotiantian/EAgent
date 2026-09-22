@@ -1,0 +1,20 @@
+{
+  "name": "floating-release",
+  "stage": "prod",
+  "release": "latest",
+  "image": "registry.internal/b7:latest",
+  "pullPolicy": "IfNotPresent",
+  "user": "app",
+  "workdir": "/srv/app",
+  "ports": [
+    8080
+  ],
+  "healthcheck": {
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080
+    }
+  },
+  "env": {},
+  "secrets": []
+}
