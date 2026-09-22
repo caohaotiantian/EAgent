@@ -13,7 +13,10 @@ The first port's own summary of itself is the bar this one is measured against: 
 no source change; making it NATURAL needed eight."* **This one needed no source change either, and
 the count is ten.** Six of them are one mechanism — the compiler and the scheduler disagree with each
 other about whether a `loop` edge is an edge — and that mechanism cost four of the five round trips
-it took to get the graph to run.
+it took to get the graph to run. (**The fifth was mine**, a body still writing the channel name it
+had before the redesign, and it is not in the log: the binary named the node, the channel and the
+declaration in one line and it was fixed in seconds. That is what the other four should have looked
+like.)
 
 **Nothing in this document is fixed here. It is all recorded.**
 
