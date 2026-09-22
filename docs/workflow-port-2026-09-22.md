@@ -1331,8 +1331,9 @@ and nothing else.
 
 ### F14 · Defects in this port's OWN workflow, and what the method that found them cost
 
-**Not the product's friction — the port's.** **Eight defects, over three reviews, none found by the
-author.** Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the
+**Not the product's friction — the port's.** **Eight defects, over FOUR reviews, none found by the
+author** — and the count of reviews said "three" here until this settlement re-counted it against the
+four rounds the paragraphs below enumerate. Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the
 suite was green at 13/13. Round two was an independent reviewer who built the binary and drove §2 top to
 bottom, after round one's fixes and tests had landed. Rounds three and four re-read what the previous
 round had just written. They are recorded here because `CLAUDE.md` says **a builder's own green suite is

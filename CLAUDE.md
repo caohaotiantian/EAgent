@@ -14,24 +14,40 @@ it run against a real provider, watch it, stop it, and trust what it did.
 
 That is the bar. A correct mechanism nobody has used is not a product, and this project has
 repeatedly mistaken the first for the second. **The next real workflow somebody ports is worth more
-than the next invariant somebody proves.** One is ported:
+than the next invariant somebody proves.** TWO are ported, both against the shipped binary with no
+fork, no `--extension-module` and **zero changes under `packages/core/src`**:
 `examples/graphs/triage-failures.json` — eight nodes over four node types, three `function` bodies
-and an input directory, run end to end against the shipped binary with no fork, no
-`--extension-module` and **zero changes under `packages/core/src`** (`f24bcb7`, `77da881`,
-`422a730`); `docs/workflow-port-2026-09-09.md` is the commands a stranger runs and the eight things
-the product cost them.
+and an input directory (`f24bcb7`, `77da881`, `422a730`), whose port is
+`docs/workflow-port-2026-09-09.md` — and `examples/graphs/harden-config.json`, a bounded
+convergence loop: `loop` + `until` + `maxIterations`, a complementary `conditional` exit,
+`append_ordered` accumulating across ITERATIONS beside a `replace` projection of it, `len()` in a
+stop rule, 8 nodes, 4 `function` bodies, 11 manifest fixtures (`f43d5a0f`), whose port is
+`docs/workflow-port-2026-09-22.md`. **They overlap in `seq` alone**, which is why the second was
+worth as much as the first.
 
-**Running it needed no source change; making it NATURAL needed eight, and THAT is the number worth
-carrying.** The port logged eight friction entries and **all eight are now closed** — F6 in the port
-lane itself, F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave, and F1 last, at `51f4a5f`, where
-GRAPH021 learned to state the whole fan-out branch rule in one diagnostic instead of two. More than
-the count: the workflow now CONSUMES what those closures built rather than merely no longer
+**Running the FIRST needed no source change; making it NATURAL needed eight, and THAT is the number
+worth carrying.** The port logged eight friction entries and **all eight are now closed** — F6 in
+the port lane itself, F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave, and F1 last, at `51f4a5f`,
+where GRAPH021 learned to state the whole fan-out branch rule in one diagnostic instead of two. More
+than the count: the workflow now CONSUMES what those closures built rather than merely no longer
 suffering it — `triage-classify.js` reads `raw` as a plain `replace` string (F2, `77c245a`),
 `triage-plan.js` reads its fan-out width off `ctx.node` and refuses on purpose through `{refuse}`
 (`c2360be`, `f7f74d5`, `b181b55`), and its suite parses the whole of stdout and reads the approver's
 report out of `loom gates` (F4, F3). **The port is what pulled on them**, which is the argument for
-porting one at all: an invariant nobody exercises names no seam. **The next one is worth as much
-again**, and nothing has replaced it.
+porting one at all: an invariant nobody exercises names no seam.
+
+**The second port cost THIRTEEN, and needed no source change either — and the useful number is that
+THREE of the thirteen are ONE mechanism**: `graph/validate.ts:364` drops `loop` AND `compensation`
+from the forward DAG, so entry nodes, ancestry, concurrency and producer-before-consumer all behave
+as if a back-edge were absent while the executor schedules it (§A.84). That one mechanism cost four
+of the five round trips it took to make the graph run, and the diagnostic's own `fix:` line offers
+two routes that both end at it. Of the other ten, two are now rows as well (§A.83 `fs.read` putting
+its truncation marker inside the content, §A.82 a key-name redactor narrower than the workflow's own
+predicate) and the rest are recorded in the log. **F14 is the entry to read**: eight defects in the
+port's OWN workflow, over four reviews, none found by its author, every one of them *the report
+asserting something the run had not established* — the exact defect class that workflow exists to
+prevent, and the receipt for *a builder's own green suite is not evidence*. **A third port is worth
+as much again**, and nothing has replaced these two.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -195,7 +211,7 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-15b.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-22.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
