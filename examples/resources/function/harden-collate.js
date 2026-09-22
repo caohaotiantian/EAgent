@@ -64,6 +64,43 @@ function (view, ctx) {
   // when the loop stopped with auto-fixable work still on the table.
   const stoppedBy = settled ? "settled" : "budget";
 
+  // THE PROJECTION REDACTS ITS OWN CREDENTIALS, AND CANNOT DELEGATE THAT TO THE RUNTIME.
+  //
+  // `report.hardened` is the manifest as the approver sees it, and a credential this tool could not
+  // repair is still in it. The runtime's gate projection does redact by key name — which is how
+  // `env.DB_PASSWORD` comes out `[secret]` — but its predicate is NARROWER than this workflow's
+  // auditor:
+  //
+  //   runtime   /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i
+  //             plus a QUALIFIED_WORDS/QUALIFIERS rule where `token` counts only beside `api`,
+  //             `access`, `bearer`, `auth`, … — and `github`, `slack`, `registry`, `ci` are not
+  //             qualifiers
+  //   auditor   /(PASSWORD|SECRET|TOKEN)$/
+  //
+  // So `GITHUB.TOKEN` (a dot, not an underscore; `github` not a qualifier) and `MYTOKEN` (no
+  // separator at all) are credentials to the auditor and ordinary names to the runtime. Measured: the
+  // gate listing said *"GITHUB.TOKEN holds a credential in the clear"* in `open` and printed
+  // `"GITHUB.TOKEN": "correcthorsebattery"` in `hardened.env` three fields later. Every manifest this
+  // port or its reviewers had written happened to use an underscore, which is the only reason it took
+  // three rounds to see.
+  //
+  // THE RULE THIS ENCODES: a workflow that applies its own credential predicate must redact its own
+  // projection. Relying on the platform's predicate means shipping wherever the two disagree, and
+  // they disagree in BOTH directions (F13). The auditor hands over `credentialKey` verbatim, because
+  // `at` is a dotted path and the hazard is a key containing a dot.
+  //
+  // The FILE keeps the real value, deliberately: `out/service.hardened.json` is the manifest, and a
+  // credential the tool could not move behind a secretRef has to stay in it or the service loses its
+  // configuration. What must not carry the bytes is the thing a person READS — the gate listing and
+  // `out/harden-report.md`.
+  const shown = JSON.parse(JSON.stringify(manifest));
+  for (const f of open) {
+    if (f.rule !== "plaintext-secret" || typeof f.credentialKey !== "string") continue;
+    if (shown.env === null || typeof shown.env !== "object" || Array.isArray(shown.env)) continue;
+    if (!Object.prototype.hasOwnProperty.call(shown.env, f.credentialKey)) continue;
+    shown.env[f.credentialKey] = redactShape(shown.env[f.credentialKey]);
+  }
+
   const report = {
     manifest: path,
     service: manifest.name,
@@ -73,7 +110,7 @@ function (view, ctx) {
     startedWith: baseline.length,
     applied: applied,
     open: open,
-    hardened: manifest,
+    hardened: shown,
   };
 
   // A trailing newline and a two-space indent, because this file is going into the repository the
@@ -166,6 +203,20 @@ function (view, ctx) {
   const summary = lines.join("\n") + "\n";
 
   return { writes: { report: report, hardened: hardened, summary: summary } };
+
+  /**
+   * A value's SHAPE, in the same form `harden-fix.js` puts in `applied[].was`.
+   *
+   * Deliberately identical to that one, so the gate shows a credential the same way wherever it
+   * appears — `{redacted, chars}` in the fix log and `{redacted, chars}` in the projected manifest.
+   * Two spellings of "not shown" would make a reader wonder which is the real redaction.
+   */
+  function redactShape(v) {
+    if (typeof v === "string") return { redacted: "string", chars: v.length };
+    if (v === undefined || v === null) return { redacted: "absent" };
+    if (Array.isArray(v)) return { redacted: "array", items: v.length };
+    return { redacted: typeof v };
+  }
 
   /**
    * A finding's identity: the rule, where it lands, AND which one it is.

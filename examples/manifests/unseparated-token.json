@@ -1,0 +1,23 @@
+{
+  "name": "unseparated-token",
+  "stage": "prod",
+  "release": "0.4.1",
+  "image": "registry.internal/payments-worker:0.4.1",
+  "pullPolicy": "IfNotPresent",
+  "user": "app",
+  "workdir": "/srv/app",
+  "ports": [
+    8080
+  ],
+  "env": {
+    "LOG_LEVEL": "info",
+    "MYTOKEN": 987654321
+  },
+  "secrets": [],
+  "healthcheck": {
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080
+    }
+  }
+}

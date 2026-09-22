@@ -186,6 +186,12 @@ function (view, ctx) {
       autofixable: isString && !dotted,
       // The value's BYTES never travel in a finding, only its shape — see `sensitiveWas` below.
       sensitiveWas: isString && !dotted,
+      // THE KEY, VERBATIM, BECAUSE `at` CANNOT CARRY IT. `at` is a dotted path and this rule's whole
+      // hazard is a key that itself contains a dot, so `harden-collate.js` cannot recover the key by
+      // splitting `at` — it needs the string. It needs it because the REPORT has to redact its own
+      // projection of the manifest: the runtime's key-name redactor uses a narrower predicate than
+      // this rule does, so a key this rule calls a credential can reach the gate in the clear. (F13.)
+      credentialKey: key,
       remedy: dotted
         ? "this key contains a \".\", which this tool's path language reads as object nesting, so it " +
           "cannot address the key to repair it — move \"" + key + "\" behind a secretRef by hand, or " +
