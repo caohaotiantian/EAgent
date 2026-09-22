@@ -41,20 +41,30 @@
  *   - `any` and `firstSuccess` require one success, and §D.9's arm already refuses a fold with
  *     none. One approval of three still folds.
  *
- * THE UNIT THE FLOOR IS COUNTED IN is pinned by the last test: a branch that PRODUCED something
- * counts, even if a later member of it then died. That is `onBranchError: "skip"`'s own reading of
- * a degraded branch (`join-all-branches-fail.test.ts`, `join-evidence-and-work.test.ts`), and
- * requiring `k` ARRIVALS instead would refuse three shapes this runtime decided to fold, with the
- * humans' own writes already in the barrier.
+ * THE UNIT THE FLOOR IS COUNTED IN is held by "THE UNIT: a DEGRADED branch counts" and by nothing
+ * else in this file — the earlier claim that "the last test" held it was FALSE, and the way it was
+ * false is the reusable part: every gate-driven test above puts ONE node in each branch, where
+ * "branches that produced something" and "arrivals at the barrier" are the same number, so swapping
+ * `contributed` for `#maybeFireJoin`'s `succeeded` left all of them green. That mutation was run:
+ * with `contributed` replaced by `succeeded`, exactly one test in this file goes red, and it is that
+ * one. The shapes where the two units differ need a branch of TWO nodes (`head -seq-> tail`), which
+ * is what that test builds.
+ *
+ * What the unit means: a branch that PRODUCED something counts, even if a later member of it then
+ * died. That is `onBranchError: "skip"`'s own reading of a degraded branch
+ * (`join-all-branches-fail.test.ts`, `join-evidence-and-work.test.ts`), and requiring `k` ARRIVALS
+ * instead would refuse three shapes this runtime decided to fold, with the humans' own writes
+ * already in the barrier.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
-import type { NodeId, RunId } from "../../src/ids.ts";
+import type { NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
@@ -262,13 +272,24 @@ test("§A.75 — the refusal names `k`, the count and the width, so an operator 
   assert.equal(p.status, "failed");
   assert.match(
     String(p.error?.message ?? ""),
-    /mode "quorum" requires 2 of 3 branch\(es\) to succeed and 1 did/,
+    /mode "quorum" needs 2 of 3 branch\(es\) to have produced something and 1 did/,
     `the message says the count and the width — got: ${String(p.error?.message)}`,
   );
+  // AND IT CLAIMS THE RULE, NOT A CAUSE. The first draft said "the barrier released because no
+  // further arrival is possible", which this method cannot know: `#maybeFireJoin` returns a
+  // `task.ready` row carrying no reason, and the release counts ARRIVALS where the fold counts
+  // branches that PRODUCED, so a short-circuit release can reach this arm and the sentence would be
+  // false when it did. "PRODUCED" and not "succeeded" for the same reason the count is
+  // `contributed`: the degraded branch this arm deliberately counts did not succeed.
   assert.match(
     String(p.error?.message ?? ""),
-    /no further arrival is possible, which is not the same as its `k` being met/,
-    `and why the barrier released at all — got: ${String(p.error?.message)}`,
+    /`k` is a floor the fold enforces whatever `onBranchError` says/,
+    `and states the rule rather than guessing which release branch fired — got: ${String(p.error?.message)}`,
+  );
+  assert.doesNotMatch(
+    String(p.error?.message ?? ""),
+    /released because|no further arrival/,
+    `no causal claim about the release: ${String(p.error?.message)}`,
   );
 });
 
@@ -401,4 +422,293 @@ test("§A.75 — an EMPTY fan still folds and succeeds, at an absolute `k` as we
     assert.equal(p.status, "succeeded", `k=${k}: an empty fan is a legitimate shape — ${JSON.stringify(p.error ?? {})}`);
     assert.deepEqual(p.channels["note"], ["done-ran"], `k=${k}: and the node behind the barrier runs`);
   }
+});
+
+// ─── the FUNCTION-driven half: what the `contributed` unit actually holds ─────────────────
+//
+// Everything above drives the gate shape, where every branch is ONE node and `contributed` and
+// "arrivals at the barrier" are the same number. That is why they could not hold the unit: mutating
+// `contributed` to count arrivals leaves every one of them green. The shapes below are the ones
+// where the two differ, and they are what the choice is pinned by.
+
+const FN_CHANNELS = {
+  items: { type: "array", reduce: "replace" },
+  item: { type: "object", reduce: "replace" },
+  seen: { type: "array", reduce: "append_ordered" },
+  note: { type: "array", reduce: "append_ordered" },
+} as const;
+
+type Item = { readonly id: string; readonly headDies?: boolean; readonly tailDies?: boolean };
+
+/** `start -fanout(2)-> head -seq-> tail -join-> J -seq-> done`; each item says which member dies. */
+function degradedFanSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-degraded-fan", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 8, maxLoopIterations: 1 } },
+    channels: FN_CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: "start", type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: "head", type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/head@stable" } },
+      { id: "tail", type: "function", reads: ["item"], function: { ref: "function/tail@stable" } },
+      {
+        id: "J",
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: ["head", "tail"], mode: "quorum", k, onBranchError: "skip" },
+      },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "fo", from: "start", to: "head", kind: "fanout", over: "items", as: "item", maxWidth: 2 },
+      { id: "sq", from: "head", to: "tail", kind: "seq" },
+      // Both members need their own `kind: join` edge — §A.56's rule.
+      { id: "jn0", from: "head", to: "J", kind: "join", branches: ["head", "tail"] },
+      { id: "jn1", from: "tail", to: "J", kind: "join", branches: ["head", "tail"] },
+      // WITHOUT THIS EDGE `done` HAS NO INBOUND ONE AND IS AN ENTRY NODE, so it runs whatever the
+      // barrier decides and `note` stops being a signal about the barrier at all. Measured while
+      // writing this file: `J@root#0=failed` beside `done@root#0=succeeded`.
+      { id: "jd", from: "J", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/**
+ * §A.70's shape: `start -fanout(over "empty")-> ib -join-> IJ`, `start -seq-> worker (throws)`,
+ * `OJ.branches: ["IJ","worker"]`. With `empty: []` the inner fan is §A.47's legitimate empty one and
+ * `IJ` succeeds having folded nothing; with entries it folds real contributions. Either way the
+ * outer barrier's only WORK member died and `IJ` carries it, which is the residue §A.70 records.
+ */
+function nestedSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-nested-join", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 2, maxFanout: 16, maxLoopIterations: 1 } },
+    channels: { ...FN_CHANNELS, empty: { type: "array", reduce: "replace" } },
+    inputs: ["items", "empty"],
+    outputs: [],
+    nodes: [
+      { id: "start", type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: "ib", type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/inner@stable" } },
+      { id: "IJ", type: "join", reads: ["seen"], writes: ["seen"], join: { branches: ["ib"], mode: "all", onBranchError: "skip" } },
+      { id: "worker", type: "function", reads: ["items"], writes: ["seen"], function: { ref: "function/boom@stable" } },
+      {
+        id: "OJ",
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: ["IJ", "worker"], mode: "quorum", k, onBranchError: "skip" },
+      },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "fo", from: "start", to: "ib", kind: "fanout", over: "empty", as: "item", maxWidth: 4 },
+      { id: "ji", from: "ib", to: "IJ", kind: "join", branches: ["ib"] },
+      { id: "sw", from: "start", to: "worker", kind: "seq" },
+      { id: "jo1", from: "IJ", to: "OJ", kind: "join", branches: ["IJ", "worker"] },
+      { id: "jo2", from: "worker", to: "OJ", kind: "join", branches: ["IJ", "worker"] },
+      { id: "sq", from: "OJ", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** `start -fanout(over items)-> b0 -join-> J -seq-> done`; every branch succeeds. Width is an input. */
+function narrowFanSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-narrow-fan", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 2, maxFanout: 8, maxLoopIterations: 1 } },
+    channels: FN_CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: "start", type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      { id: "b0", type: "function", reads: ["item"], writes: ["seen"], function: { ref: "function/head@stable" } },
+      { id: "J", type: "join", reads: ["seen"], writes: ["seen"], join: { branches: ["b0"], mode: "quorum", k, onBranchError: "skip" } },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "fo", from: "start", to: "b0", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "jn", from: "b0", to: "J", kind: "join", branches: ["b0"] },
+      { id: "sq", from: "J", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+/** Drive a function-only graph to quiescence and read the barrier's own verdict out of its journal. */
+async function runFunctions(
+  spec: GraphSpec,
+  inputs: Record<string, unknown>,
+  joinNodeId: string,
+): Promise<{
+  readonly status: string;
+  readonly error: string | undefined;
+  readonly seen: unknown;
+  readonly note: unknown;
+  readonly joinError: string | undefined;
+  readonly joinMessage: string | undefined;
+}> {
+  const store = new MemoryStateStore({ now: () => NOW });
+  const functions = new FunctionRegistry();
+  functions.register("function/seed@stable", () => ({ writes: {} }));
+  functions.register("function/head@stable", (view) => {
+    const item = view.get<Item>("item") ?? { id: "?" };
+    if (item.headDies === true) throw new Error(`head ${item.id} failed`);
+    return { writes: { seen: [item.id] } };
+  });
+  functions.register("function/tail@stable", (view) => {
+    const item = view.get<Item>("item") ?? { id: "?" };
+    if (item.tailDies === true) throw new Error(`tail ${item.id} failed`);
+    return { writes: {} };
+  });
+  functions.register("function/inner@stable", () => ({ writes: { seen: ["inner"] } }));
+  functions.register("function/boom@stable", () => {
+    throw new Error("worker failed");
+  });
+  functions.register("function/done@stable", () => ({ writes: { note: ["done-ran"] } }));
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools: new ToolRegistry(),
+    functions,
+    models: new ModelRegistry(),
+    now: () => NOW,
+    sleep: async () => {},
+    maxParallelism: 8,
+    policy: { granted: [], budget: { runUsd: 1 } },
+  });
+  const graph = compileOrThrow({ spec, resolver, tools: {}, tenantCapabilities: [] });
+  const runId: RunId = await engine.submit({ graph, inputs });
+  const p = await engine.advance(runId);
+  const log: JournalEvent[] = [];
+  for await (const ev of store.read(runId, 1 as Seq)) log.push(ev);
+  const jf = log.find((ev) => ev.type === "task.failed" && String(ev.taskId).startsWith(`${joinNodeId}@`)) as
+    | { payload?: { error?: { code?: string; message?: string } } }
+    | undefined;
+  return {
+    status: p.status,
+    error: p.error?.code,
+    seen: p.channels["seen"],
+    note: p.channels["note"],
+    joinError: jf?.payload?.error?.code,
+    joinMessage: jf?.payload?.error?.message,
+  };
+}
+
+test("§A.75 — THE UNIT: a DEGRADED branch counts, because `onBranchError: \"skip\"` folds it on purpose", async () => {
+  // THE MUTATION THIS EXISTS TO KILL. `contributed` counts branches that PRODUCED something;
+  // `#maybeFireJoin`'s `succeeded` counts ARRIVALS, and excludes a member that handed off inside the
+  // branch set. On this graph every branch hands `head -> tail`, so ARRIVALS is `tail` alone and a
+  // branch whose `head` wrote and whose `tail` then threw arrives as nothing. Both branches are that
+  // shape here, so arrivals is 0 while `contributed` is 2 — and `k: 2` tells the two apart.
+  const both = await runFunctions(degradedFanSpec(2), { items: [{ id: "a", tailDies: true }, { id: "b", tailDies: true }] }, "J");
+  assert.equal(both.status, "succeeded", `two degraded branches still meet k: 2 — ${JSON.stringify(both)}`);
+  assert.equal(both.joinError, undefined, "the barrier refuses nothing");
+  assert.deepEqual(both.seen, ["a", "b"], "and what each branch produced before it died survives the fold");
+  assert.deepEqual(both.note, ["done-ran"], "so the node behind the barrier runs");
+
+  // THE MIRROR, on the same graph: one branch produced, the other died before producing anything.
+  // `contributed` is 1, so `k: 1` folds and `k: 2` refuses — the floor, read in the unit the fold
+  // counts in. Under the arrivals unit BOTH would refuse, which is what makes this pair the pin.
+  // `k: 0.5` of two is `need: 1`; `k: 1` would be `ceil(1 * 2)`, i.e. BOTH, which is the other leg.
+  const items: readonly Item[] = [{ id: "a", tailDies: true }, { id: "b", headDies: true }];
+  const met = await runFunctions(degradedFanSpec(0.5), { items }, "J");
+  assert.equal(met.status, "succeeded", `one produced branch meets need 1 — ${JSON.stringify(met)}`);
+  assert.deepEqual(met.seen, ["a"], "folding what the surviving branch produced");
+  assert.deepEqual(met.note, ["done-ran"], "and the node behind the barrier runs");
+
+  const short = await runFunctions(degradedFanSpec(2), { items }, "J");
+  assert.equal(short.status, "failed", `one produced branch does not meet k: 2 — ${JSON.stringify(short)}`);
+  assert.equal(short.joinError, CODES.E_QUORUM_UNREACHABLE, "named by the barrier");
+  assert.equal(
+    short.joinMessage,
+    'join "J": mode "quorum" needs 2 of 2 branch(es) to have produced something and 1 did — ' +
+      "`k` is a floor the fold enforces whatever `onBranchError` says",
+    `the message is in the unit it counted and claims nothing about which release branch fired — got: ${String(short.joinMessage)}`,
+  );
+  assert.equal(short.note, undefined, "and nothing behind the barrier ran");
+});
+
+test("§A.75 — §A.70's shape at `need > 1`: an empty-fan join can no longer carry a barrier whose work died", async () => {
+  // §A.70 (`join-evidence-and-work.test.ts`'s P4) records that an inner join over an EMPTY fan is a
+  // WORK member that succeeded producing nothing, so it carries an outer barrier whose only real
+  // worker threw — and the run reported `succeeded`. That row is NOT closed here: its closing
+  // condition is `#foldJoin` being able to read a member join's own `branchCount`, which is a
+  // projection question. What changed is that a `quorum` outer barrier asking for more branches than
+  // survived now refuses on the `k` floor, which covers the shape for `need > 1` and for no other
+  // reason. `k: 0.5` of two needs ONE, which `IJ` alone supplies, so P4's own rows are untouched —
+  // that is why P4 stayed green and why P4 is not evidence about this arm either way.
+  for (const [k, status] of [[0.5, "succeeded"], [1, "failed"], [2, "failed"]] as const) {
+    const r = await runFunctions(nestedSpec(k), { items: [{ id: "a" }], empty: [] }, "OJ");
+    assert.equal(r.status, status, `empty inner fan, k=${k} — ${JSON.stringify(r)}`);
+    if (status === "failed") {
+      assert.equal(r.joinError, CODES.E_QUORUM_UNREACHABLE, `k=${k}: named by the outer barrier`);
+      assert.equal(r.note, undefined, `k=${k}: and the node behind it did not run`);
+    } else {
+      assert.deepEqual(r.note, ["done-ran"], "k=0.5: unchanged — one of two branches meets it");
+    }
+  }
+
+  // P4'S CONTROL, the same graph with a NON-empty inner fan, and the honest half of this change.
+  // At `k: 1` the outer barrier asks for BOTH branches and gets one, so the run is refused WITH two
+  // real contributions already in the channel. That reads like §A.67's B1 defect and is not it: B1
+  // was a message saying the run did no work, and this message says what is true — one of two
+  // branches produced something and the graph asked for two. A graph that wants the surviving half
+  // folded writes `k: 0.5`, which is the assertion directly above this one.
+  const fullMet = await runFunctions(nestedSpec(0.5), { items: [{ id: "a" }], empty: [{ id: "x" }, { id: "y" }] }, "OJ");
+  assert.equal(fullMet.status, "succeeded", `k=0.5 folds the inner contributions — ${JSON.stringify(fullMet)}`);
+  assert.deepEqual(fullMet.seen, ["inner", "inner"], "which are in the channel");
+
+  const fullShort = await runFunctions(nestedSpec(1), { items: [{ id: "a" }], empty: [{ id: "x" }, { id: "y" }] }, "OJ");
+  assert.equal(fullShort.status, "failed", `k=1 wants both branches — ${JSON.stringify(fullShort)}`);
+  assert.equal(
+    fullShort.joinMessage,
+    'join "OJ": mode "quorum" needs 2 of 2 branch(es) to have produced something and 1 did — ' +
+      "`k` is a floor the fold enforces whatever `onBranchError` says",
+    `and says so honestly rather than claiming no work was done: ${String(fullShort.joinMessage)}`,
+  );
+  assert.deepEqual(fullShort.seen, ["inner", "inner"], "with the inner fold still in the channel, which the message does not deny");
+});
+
+test("§A.75 — an absolute `k` above the width the fan MATERIALISED refuses, and says that instead", async () => {
+  // DELIBERATE AND NAMED. `k: 2` over a fan whose runtime width is 1 can be met by no outcome, so a
+  // run in which EVERY branch succeeded still refuses. That is the refusing direction and it is
+  // allowed — but the general message ("needs 2 of 1 branch(es) ... and 1 did") reads like a lost
+  // branch and sends an operator looking for one, so this case gets its own sentence naming the
+  // fact, which is about the graph and not about the run. A compile-time refusal is possible for a
+  // STATIC branch list, where the width is known before anything runs; a fan-out width is an input,
+  // so this runtime arm is needed either way.
+  const one = await runFunctions(narrowFanSpec(2), { items: [{ id: "a" }] }, "J");
+  assert.equal(one.status, "failed", `width 1 cannot meet k: 2 — ${JSON.stringify(one)}`);
+  assert.equal(one.joinError, CODES.E_QUORUM_UNREACHABLE);
+  assert.equal(
+    one.joinMessage,
+    'join "J": mode "quorum" declares k 2, which exceeds the 1 branch(es) this barrier materialised — ' +
+      "no outcome can meet it, and 1 of them produced something. Lower `k` or widen the branch set",
+    `the message names the width, not a loss: ${String(one.joinMessage)}`,
+  );
+  // AND NOTHING REACHES THE CHANNEL, which is the opposite of the static-join case above and is not
+  // a contradiction: a branch at DEPTH holds its writes for its barrier (`writesHeldForJoin`), so a
+  // refused fold never applies them, where a static sibling arm at the ROOT coordinate has already
+  // applied its own. Measured both ways rather than assumed.
+  assert.equal(one.seen, undefined, `a fanned branch's writes are held for the barrier: ${JSON.stringify(one.seen)}`);
+  assert.equal(one.note, undefined, "and the node behind the barrier did not run");
+
+  // The same graph at the width its `k` asks for: folds.
+  const two = await runFunctions(narrowFanSpec(2), { items: [{ id: "a" }, { id: "b" }] }, "J");
+  assert.equal(two.status, "succeeded", `width 2 meets k: 2 — ${JSON.stringify(two)}`);
+  assert.deepEqual(two.note, ["done-ran"]);
+
+  // AND THE DISCONTINUITY AT ZERO IS PINNED RATHER THAN HIDDEN: width 0 SUCCEEDS where width 1
+  // fails, because §A.47 requires an empty fan to fold nothing and succeed and `members.length > 0`
+  // keeps this arm out of it. Two adjacent widths, opposite verdicts, both on purpose.
+  const none = await runFunctions(narrowFanSpec(2), { items: [] }, "J");
+  assert.equal(none.status, "succeeded", `width 0 is §A.47's shape — ${JSON.stringify(none)}`);
+  assert.deepEqual(none.note, ["done-ran"], "and the node behind the barrier runs");
 });

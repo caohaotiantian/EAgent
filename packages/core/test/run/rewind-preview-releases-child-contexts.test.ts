@@ -33,6 +33,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
+import { CODES } from "../../src/errors.ts";
 import { compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec, RunGraph } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
@@ -213,6 +214,8 @@ async function chargeUnderTheRealGraph(): Promise<{
   readonly ledger: Ledger;
   readonly runId: RunId;
   readonly childRunId: RunId;
+  /** The engine that RAN it, for the one leg whose question is about what this engine retired. */
+  readonly ran: Engine;
 }> {
   const store = new MemoryStateStore({ now: () => NOW });
   const ledger: Ledger = { charges: [], refunds: [] };
@@ -242,7 +245,7 @@ async function chargeUnderTheRealGraph(): Promise<{
     if (ev.type === "subgraph.started") childRunId = ev.payload.childRunId;
   }
   assert.ok(childRunId !== undefined, "the parent journal names its child");
-  return { store, ledger, runId, childRunId };
+  return { store, ledger, runId, childRunId, ran: engine };
 }
 
 /** The child's real graph, compiled — what an operator still holds and hands to `attach`. */
@@ -342,4 +345,43 @@ test("§A.76 — and the edited graph is genuinely what refuses the undo, with n
     `and the reason names the capability the edited graph no longer declares: ${String(child[0]?.reason)}`,
   );
   assert.deepEqual(ledger.refunds, [], "so the money does not come back");
+});
+
+test("§A.76 — and a preview does not undo `forget(childRunId)`, which is the other half of \"restores\"", async () => {
+  // THE `finally` CLAIMED TO RESTORE WHAT IT FOUND AND DROPPED THE CONTEXT ONLY. `#contextFor`'s
+  // first act is `this.#forgotten.delete(runId)`, so a child an operator had explicitly `forget`ten
+  // came back as a child this engine had merely never seen — and `#retainedGraphOf` answers those
+  // two differently. `forget`'s own docstring is the contract being broken: an explicit release
+  // means "`#reattach` declines it until `attach` says otherwise".
+  //
+  // MEASURED THROUGH THE DOOR THAT READS IT, because `#forgotten` has no public predicate either.
+  // A rewind of the CHILD with nothing attached goes through `#reattach` -> `#retainedGraphOf`,
+  // which declines a forgotten run — so the two states are "refused" and "proceeded, money moved".
+  // Before this arm, the leg WITH a preview in front of it proceeded and refunded 42.
+  for (const previewFirst of [false, true]) {
+    // THE SAME ENGINE THAT RAN IT, which is load-bearing and was wrong in the first draft of this
+    // test. `#retainedGraphOf` asks `#retiredRuns` FIRST, and only the engine that drove the child
+    // to a terminal state has it there — so on a fresh engine both legs refuse for a different
+    // reason (no retained graph at all) and the test measures nothing. Caught by mutating the
+    // restore away and watching this stay green.
+    const { ledger, runId, childRunId, ran: engine } = await chargeUnderTheRealGraph();
+
+    // The operator says: this engine holds nothing for that run.
+    engine.forget(childRunId);
+    if (previewFirst) await engine.planRewind(runId, 1 as Seq, OPERATOR);
+
+    let refused: string | undefined;
+    try {
+      const plan = await engine.planRewind(childRunId, 1 as Seq, OPERATOR);
+      await engine.rewind(childRunId, 1 as Seq, "undo", OPERATOR, { planHash: plan.planHash });
+    } catch (e) {
+      refused = (e as { code?: string }).code;
+    }
+    assert.equal(
+      refused,
+      CODES.E_RESTORE_ILLEGAL,
+      `previewFirst=${previewFirst}: a forgotten child is not re-attachable from what this engine retired`,
+    );
+    assert.deepEqual(ledger.refunds, [], `previewFirst=${previewFirst}: and no undo was dispatched`);
+  }
 });

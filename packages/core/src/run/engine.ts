@@ -2256,10 +2256,14 @@ export class Engine {
     /** Why this run's own steps cannot be dispatched. Read only when `ctx` is absent. */
     readonly why?: string;
     /**
-     * Every child run whose context this walk BUILT, for a caller that releases what it installed
-     * (§A.76). Absent means nobody is collecting, which is every caller that goes on to dispatch.
+     * Every child run whose context this walk BUILT, against whether `#forgotten` held it FIRST —
+     * for a caller that releases what it installed (§A.76). Absent means nobody is collecting,
+     * which is every caller that goes on to dispatch. The flag is what makes the release a restore
+     * rather than an approximation: `#contextFor` clears `#forgotten` unconditionally, so a release
+     * that only dropped the context would leave an explicitly-forgotten child reading as one this
+     * engine had merely never seen, and `#retainedGraphOf` answers those two differently.
      */
-    readonly installed?: Set<RunId>;
+    readonly installed?: Map<RunId, boolean>;
   }): Promise<readonly RollbackWalkStep[]> {
     const { runId, log, ctx, p } = input;
     const sinceSeq = input.sinceSeq ?? 0;
@@ -2370,7 +2374,7 @@ export class Engine {
     /** The ancestor's reason, when there was no context to resolve this child's ref from. */
     inherited?: string,
     /** Collects every child context this walk BUILT — see `#planRollback`'s `installed` (§A.76). */
-    installed?: Set<RunId>,
+    installed?: Map<RunId, boolean>,
   ): Promise<readonly RollbackWalkStep[]> {
     // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
     // No journal means the child never started, so it did nothing that needs undoing.
@@ -2498,7 +2502,7 @@ export class Engine {
     depth: number,
     seen: Set<RunId>,
     inherited?: string,
-    installed?: Set<RunId>,
+    installed?: Map<RunId, boolean>,
   ): Promise<readonly RollbackWalkStep[]> {
     try {
       return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited, installed);
@@ -2611,16 +2615,21 @@ export class Engine {
      * this argument existed that was true of the parent and false of every child. The live branch
      * above deliberately reports nothing: a context something else holds on purpose is not the
      * preview's to release.
+     *
+     * AND IT REPORTS `#forgotten` MEMBERSHIP TAKEN BEFORE THE BUILD, because `#contextFor`'s first
+     * act is `this.#forgotten.delete(runId)` and nothing else puts it back. Read after the build it
+     * is always `false`, which is why it is read on the line above it.
      */
-    installed?: Set<RunId>,
+    installed?: Map<RunId, boolean>,
   ): RunContext | undefined {
     const live = this.#runs.get(childRunId);
     if (live !== undefined) return live;
     const spec = parent.graph.subgraphs?.[ref];
     if (spec === undefined) return undefined;
     try {
+      const wasForgotten = this.#forgotten.has(childRunId);
       const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
-      installed?.add(childRunId);
+      installed?.set(childRunId, wasForgotten);
       return built;
     } catch {
       return undefined;
@@ -4893,7 +4902,7 @@ export class Engine {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
     const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
     // THE CHILD CONTEXTS THIS PREVIEW WILL BUILD, so the `finally` can hand them back too (§A.76).
-    const installed = new Set<RunId>();
+    const installed = new Map<RunId, boolean>();
     try {
       const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx, installed);
       // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE PLAN IS SHOWN OR JOURNALED (§A.74).
@@ -4928,9 +4937,25 @@ export class Engine {
       // it would make `#retainedGraphOf` compare the preview's rebuild against the child's own
       // journal hash and decline, so a child that had legitimately retired here earlier with its
       // real graph would stop being re-attachable: the preview making a later verb worse, which is
-      // exactly the shape §A.76 is about. Deleting restores what was held before, which is all
-      // this `finally` claims to do.
-      for (const child of installed) this.#runs.delete(child);
+      // exactly the shape §A.76 is about.
+      //
+      // AND `#forgotten` IS PUT BACK, WHICH IS THE OTHER HALF OF "RESTORES" AND WAS MISSING. This
+      // block claimed to leave the engine as it found it while dropping the context alone, and
+      // `#contextFor`'s first act is `this.#forgotten.delete(runId)` — so a child an operator had
+      // explicitly `forget`ten came back as a child this engine had merely never seen, and
+      // `#retainedGraphOf` reads those two differently: `forget`'s own docstring says an explicit
+      // release means "`#reattach` declines it until `attach` says otherwise", and a preview of the
+      // PARENT took that back. Measured on one engine, `forget(child)` then a rewind OF THE CHILD:
+      // `refused E_RESTORE_ILLEGAL` without a preview in between and `proceeded; refunds=[42]` with
+      // one. Both halves are pinned in `rewind-preview-releases-child-contexts.test.ts`.
+      //
+      // The PARENT needs no such arm: it is re-attached through `#reattach`, which reads
+      // `#retainedGraphOf` and therefore declines a forgotten run outright, so `attachedHere` is
+      // false for one and this block never installed it.
+      for (const [child, wasForgotten] of installed) {
+        this.#runs.delete(child);
+        if (wasForgotten) this.#forgotten.add(child);
+      }
     }
   }
 
@@ -4975,7 +5000,7 @@ export class Engine {
      * passes a set and releases it; `rewind` passes none, because it DISPATCHES through those
      * contexts and the run that owns them is the one it is undoing.
      */
-    installed?: Set<RunId>,
+    installed?: Map<RunId, boolean>,
   ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
     const walk = await this.#planRollback({
       runId,
@@ -8266,8 +8291,20 @@ export class Engine {
     //
     // NO QUIESCENCE CONJUNCT, unlike §A.67's arm directly above. That one makes an ABSENCE claim
     // ("not one of them succeeded") which a still-live member could falsify; this one reads a
-    // count that only ever grows and compares it to a floor, so a release that short-circuited on
-    // `succeeded >= need` satisfies it by construction, whoever is still running.
+    // count that only ever grows and compares it to a floor, so nothing a still-running member does
+    // later can turn a satisfied `k` back into an unsatisfied one.
+    //
+    // AND THE MESSAGE MAKES NO CLAIM ABOUT WHICH RELEASE BRANCH FIRED, which the first draft did
+    // ("the barrier released because no further arrival is possible"). This method cannot know that:
+    // `#maybeFireJoin` returns a `task.ready` row carrying no reason, and the two sides count
+    // different units — the release counts ARRIVALS and this arm counts branches that PRODUCED — so
+    // a short-circuit release can reach here in principle and the sentence would be false when it
+    // did. What the message says instead is the rule, which is true on every path: `k` is a floor
+    // the fold enforces whatever `onBranchError` says.
+    //
+    // "PRODUCED" AND NOT "SUCCEEDED", for the same reason the count is `contributed`: a degraded
+    // branch this arm deliberately counts did NOT succeed, and a message saying it did would be
+    // false about the very case the unit was chosen for.
     //
     // INDEPENDENT OF `onBranchError`, deliberately and for the reason §D.9 already gives: `skip`
     // says what to do with a branch that DIED, not that the barrier's own declaration is
@@ -8283,6 +8320,20 @@ export class Engine {
     // `E_QUORUM_UNREACHABLE` before this conjunct existed. "The fan materialised nothing" and "the
     // fan materialised three and two lost" are different runs and only the second is this arm's.
     //
+    // AND AN UNSATISFIABLE `k` GETS ITS OWN SENTENCE, because it is a different problem with a
+    // different fix. An ABSOLUTE `k` above the width the fan actually materialised — `k: 2` over a
+    // runtime width of 1 — can be met by no outcome, so a run in which EVERY branch succeeded still
+    // refuses. That is the refusing direction and it is allowed, but "needs 2 of 1 branch(es) and 1
+    // produced something" reads like a lost branch and sends an operator looking for one. This arm
+    // names the real fact, which is about the graph and not about this run. A compile-time refusal
+    // is possible for a STATIC branch list, where the width is known before anything runs; it
+    // belongs in `graph/validate.ts` and is not this arm's to add. A fan-out width is an INPUT, so
+    // the runtime arm is needed either way.
+    //
+    // `need > expected` IS THE DISCRIMINATOR AND IT IS EXACT: a fractional `k` is
+    // `ceil(k * expected)`, which cannot exceed `expected`, so this branch is reachable only from an
+    // absolute `k` — no second read of `join.k` is needed to tell the two apart.
+    //
     // `E_QUORUM_UNREACHABLE`, the code this door already raises for the other way a release can
     // carry no usable result; the difference is carried by the message, as it is between the two
     // arms above. A new `CODES` member would be new error vocabulary in the kernel for a
@@ -8297,8 +8348,11 @@ export class Engine {
           usage: { ...ZERO_USAGE },
           error: err.validation(
             CODES.E_QUORUM_UNREACHABLE,
-            `join "${w.node.id}": mode "quorum" requires ${need} of ${expected} branch(es) to succeed and ${contributed} did — ` +
-              `the barrier released because no further arrival is possible, which is not the same as its \`k\` being met`,
+            need > expected
+              ? `join "${w.node.id}": mode "quorum" declares k ${need}, which exceeds the ${expected} branch(es) this barrier ` +
+                `materialised — no outcome can meet it, and ${contributed} of them produced something. Lower \`k\` or widen the branch set`
+              : `join "${w.node.id}": mode "quorum" needs ${need} of ${expected} branch(es) to have produced something and ` +
+                `${contributed} did — \`k\` is a floor the fold enforces whatever \`onBranchError\` says`,
           ),
         };
       }
@@ -12072,6 +12126,15 @@ export class Engine {
    * refuse a barrier holding real writes — including a human's own `edit` answer. Both are named
    * here, in one function, so the choice is visible at the site instead of being a second unit
    * somebody re-derived.
+   *
+   * `contributed` COUNTS COORDINATES AT OR UNDER THIS BARRIER, so on paper a nested fan whose inner
+   * members sit deeper could report more "branches" than the outer plan's width. **That is a
+   * DIRECTION CLAIM AND NOT A MEASUREMENT: it could not be constructed through the compiler.** Two
+   * attempts here and an independent reviewer's third failed the same way — an inner join pops a
+   * level, so every shape that compiles keeps `contributed <= expected`. What is asserted is only
+   * which way it would err if a shape were found: toward FOLDING, never toward refusing a run that
+   * met its `k`. The reverse would be the unsafe direction, and that is why this is a paragraph
+   * rather than a guard.
    */
   #joinArrivals(
     ctx: RunContext,
