@@ -2,7 +2,7 @@
 
 **This directory is a Loom workspace** — a directory with `graphs/` and `resources/` in it. Loom
 reads nothing else; `bench-cases.json` at the root is not a workspace file, it is §5's input, and
-`reports/` is not one either — it is §8's.
+neither `reports/` nor `manifests/` is one — they are §8's and §9's.
 
 ```bash
 npm install && npm run build:binary   # → bin/loom
@@ -10,7 +10,7 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Six graphs, and they do not all run the same way.** Without `--models-file` the only registered
+**Seven graphs, and they do not all run the same way.** Without `--models-file` the only registered
 adapter is the offline mock, and `loom run` says so on stderr before it starts.
 
 | graph | § | needs a model? |
@@ -21,6 +21,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
+| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three false warnings** on every command: see §9 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
 directory, so a graph added later is covered without editing the test — and RUNS the three that
@@ -28,7 +29,8 @@ need no model, asserting §5's six verdict strings and its `3/6 assertions passe
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 §8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
 file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately
-copies only `graphs/` and `resources/`.
+copies only `graphs/` and `resources/`. §9 is the same arrangement one graph later:
+`packages/core/test/examples-harden.test.ts`, because it needs `manifests/`.
 
 ---
 
@@ -375,3 +377,107 @@ pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without 
 the true end of the string — so the first draft read a CRLF shard as completely clean and the run
 SUCCEEDED. That is a triage tool telling you a red suite is green, and it is the single worst thing
 this example could do.
+
+## 9 · `harden-config` — a convergence loop, ported
+
+A service manifest that has been in production for two years pulls `:latest`, runs as root, keeps a
+database password in `env`, logs at `debug`, and has no healthcheck. This graph fixes ONE finding per
+pass, **re-audits after every pass**, and asks you before it writes either the hardened manifest or
+the report explaining it.
+
+```
+  load ──seq──▶ parse ──seq──▶ audit ──conditional(!settled && len(applied) < 12)──▶ fix
+                                 ▲                                                   │
+                                 └──────── loop(until: settled, maxIterations: 16) ───┘
+
+  audit ──conditional(settled || len(applied) >= 12)──▶ collate ──seq──▶ review (human gate)
+  review ──seq──▶ write-manifest ──seq──▶ write-report
+```
+
+```bash
+loom compile graphs/harden-config.json                                    # ok + 3 false warnings, exit 0
+loom run     graphs/harden-config.json --input '{"manifestPath":"manifests/orders-api.json"}'
+# → "status": "awaiting_gate", and out/ does NOT exist yet.               exit 0
+loom trace   <runId>       # nine `audit` and eight `fix`, alternating
+loom gates   <runId>       # the gate's coordinates AND `reads.report`: the whole fix log
+loom approve <runId> <gateId> --as u:you                                  # exit 0
+cat out/harden-report.md   # 8 fixes over 8 passes, 3 of them cascades, 0 still open
+cat out/service.hardened.json
+loom replay  <runId>       # {"match": true, "hermetic": true}
+```
+
+**Why the loop is the workflow and not decoration.** Three of the eight fixes close a finding that
+DID NOT EXIST when the run started, because an earlier fix created it: pinning the floating tag makes
+`pullPolicy: "Always"` a pointless pull on every restart, dropping root makes a `/root/...` workdir
+unreadable by the process living in it, and moving a password behind a `secretRef` obliges the
+manifest to declare that secret or the deploy fails at admission. **A one-pass fixer ships a manifest
+that does not deploy.** `applied` is `append_ordered` and accumulates one entry per pass, so the
+person at the gate sees the whole chain in the order it was decided — which is the `replace`/`append`
+pair this graph is built on: `current` is where the manifest got to, `applied` is how.
+
+**`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains".** `manifests/payments-worker.json`
+declares no port, so a missing healthcheck has no probe target to invent; it is reported, it is
+`autofixable: false`, and it does not stop the loop settling. The other definition spins to the pass
+budget on every such manifest and then headlines the report with an exhausted budget instead of with
+the one thing a person has to decide. When the budget IS what stopped it —
+`manifests/legacy-gateway.json`, seven inline credentials and fourteen fixes against a budget of
+twelve — `report.stoppedBy` is `"budget"` and the report says *"this manifest is better, not done"*,
+because a budget stop parks on a gate and exits 0 exactly like a converged one.
+
+**Five things this section exists to save you**, because nothing else in this workspace has a `loop`
+edge in it and `docs/workflow-port-2026-09-22.md` is the ten things it cost to find them.
+
+- **The loop's target needs a NON-loop inbound edge, or it is an entry node and runs at t=0.**
+  `graph/spec.ts` states the rule — *"ENTRY NODES are nodes with no inbound non-`loop` edge"* — and
+  nothing enforces it for a loop body: the graph compiles, and `fix` runs beside `parse` before
+  anything has written what it reads, failing `E_CHANNEL_UNDECLARED` under class `internal`. That is
+  why `fix` is entered by the `repair` **conditional** and the back-edge runs `fix → audit`.
+- **`until` is evaluated on the scope of the node the loop edge LEAVES, with that node's own writes
+  overlaid RAW.** So a channel the loop's source writes reads as its one-element CONTRIBUTION there,
+  not as the accumulated channel: `until: "len(applied) >= 12"` on the `recheck` edge is a bound that
+  can never fire, measured. The pass budget therefore lives on the two `conditional` edges out of
+  `audit`, where `audit` does not write `applied`, and the `until` on `recheck` is a formality the
+  compiler requires (`GRAPH006_NO_STOP_RULE`).
+- **The stop rule has TWO homes that must agree, and nothing checks that they do.** `repair`'s
+  `when` and `done`'s `when` are exact complements by construction. Narrow one alone and the graph
+  still compiles; at run time `audit` reaches a state where neither is true, takes no edge, and the
+  run fails `internal`/`E_OUTPUT_MISSING` — naming neither the loop nor the node that stopped. A body
+  cannot read either expression: `ctx.node.out` (§2) carries an edge's `maxIterations` and not its
+  `until`, and carries nothing at all for a `conditional`'s `when`.
+- **A channel written BEFORE the loop and INSIDE it is `GRAPH010_CONCURRENT_WRITE`**, because the
+  concurrency analysis drops `loop` edges and the loop body then has no ancestors. That is why
+  `fix` writes only the log and `audit` FOLDS it over the seed to get `current`: one writer per
+  channel, and the fix log is the state with the manifest as its projection. Changing the reducer
+  instead — the first half of that diagnostic's own `fix:` line — compiles and then meets the
+  entry-node bullet above.
+- **Three of the warnings on every command are false**, and they are all the same mechanism:
+  `GRAPH002_DEAD_END` on `fix` (which has a `loop` edge out of it) and `GRAPH005_UNPRODUCED_READ`
+  twice for `applied` (which `fix` writes, upstream over that same `loop` edge). Following either
+  `fix:` line makes the graph worse — `add "applied" to inputs:` invites a caller to supply a fix log
+  the graph is supposed to build.
+
+`manifests/` holds five inputs and four of them are there to be refused or to stop short:
+`orders-api.json` converges in eight passes, `payments-worker.json` settles with one unrepairable
+finding open, `legacy-gateway.json` exhausts the budget, `no-image.json` is JSON that is not a
+service manifest, and `not-a-manifest.txt` is not JSON at all.
+
+**Both refusals in `harden-parse.js` are one defect wearing two hats, and it is §8's defect.**
+Auditing is a search for ABSENCES — no pinned tag, no healthcheck, no declared secret — and a search
+for absences run against a document nothing understood finds nothing and prints a clean bill of
+health. Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` —
+the graph declined — rather than as the `internal`/`E_INTERNAL` a `JSON.parse` left to throw would
+have worn. The third refusal, in `harden-fix.js`, is the one you should never reach: a repair that
+leaves its own finding in place spins the loop to the budget, so it refuses where the rule that did
+it can still be named.
+
+**Hardening the hardened manifest applies ZERO fixes, and that is the check worth running on any
+workflow shaped like this one.** It is the only end-to-end assertion that every detector in
+`harden-audit.js` agrees with every repair in `harden-fix.js` — the rule table lives in two files,
+because a code resource is a bare function expression and cannot import a sibling (§2) — and it
+catches a disagreement without the test having to know which rule caused it.
+
+**What comes back out of a channel is CANONICAL, and a document-rewriting workflow has to know
+that.** `out/service.hardened.json` has its object keys in sorted order and the input's were not, so
+`git diff` against the original is the whole file rather than the eight fixes. That is what makes a
+state hash comparable across a replay and is not going to change; the consequence is that the fix
+TABLE in the report is the diff, and the file is not.
