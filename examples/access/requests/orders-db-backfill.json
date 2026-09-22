@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1041",
+  "who": "u:dana",
+  "resource": "orders-db",
+  "level": "write",
+  "hours": 4,
+  "reason": "backfill the 2026-08 shipping rows the import job dropped"
+}

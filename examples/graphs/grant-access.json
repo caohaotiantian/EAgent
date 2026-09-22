@@ -1,0 +1,150 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "grant-access",
+    "project": "examples",
+    "version": 1,
+    "description": "Somebody asked for temporary access to a production resource. A ROUTER decides the ceremony from the resource's tier, the level asked for, the hours asked for and the requester's own history: granted automatically, signed by a person first, or denied with the policy rule that said no. The access ledger is read at the start of the run and written at the end, so the `kind: \"error\"` edge out of `read-ledger` is not a hypothetical — it is the FIRST run of this command, where there is no ledger to read yet.",
+    "labels": {
+      "reads-as": "the router picks the CEREMONY; the arms are how much human a decision needs",
+      "residue-error-arm": "`prior` and `first-grant` are mutually exclusive BY CONSTRUCTION — one is the `seq` target of `read-ledger` and the other its `error` target, and no run can take both. The compiler cannot see that: `GRAPH010_CONCURRENT_WRITE` calls them concurrent writers of `history` and refuses `replace`. `merge_object` is the workaround, and it is a workaround — the channel holds one contribution on every run that has ever been measured. See F1 of docs/workflow-port-2026-09-22b.md.",
+      "residue-static-approvers": "`sign` names `u:you` because `approval.approvers` is a STATIC list in the graph, while the people who may actually sign are `decision.owners` — read out of access/policy.json at run time. The gate therefore shows the right owners and accepts the wrong signature. See F3.",
+      "compiles-silent": "This graph prints NO diagnostic at all — measured, not assumed. `deny` is terminal and writes no declared output, but GRAPH002_DEAD_END does not fire on it: `decision` is a declared output and `weigh` writes it on the same path. An earlier draft of these labels claimed the warning, which was a label asserting something no run had established.",
+      "residue-blind-error-arm": "THE PRODUCT GAP, AND A DEFENCE THAT COVERS ONE CASE OF IT. An error arm is handed no reason: the failed node writes nothing and no channel carries the code or the message, so `first-grant` cannot tell \"there is no ledger yet\" from \"the ledger is there and I could not read it\". `codes` does not separate them either — a missing file, an unreadable file AND a path the sandbox refuses are all E_TOOL_SOURCE_UNAVAILABLE (measured; see F5). Undefended, `chmod 222 out/access-ledger.json` made the run report `succeeded` and REPLACED the ledger, destroying a prior grant. THE `look` NODE COVERS EXACTLY THAT ONE CASE: a regular file that is LISTABLE but not readable. THREE CASES ARE UNCOVERED BY IT, each measured — an unlistable parent directory (`chmod 333 out`), an escaping symlink at the path, and a directory at the path. All three make fs.glob answer `(no matches)`, which is the same answer as \"there is nothing here\", so the defence answers ITS undecidable case with the passing value exactly as the arm does. THEY DO NOT END ALIKE: only the unlistable parent destroys the ledger, and only it is silent (the run succeeds, exit 0). The other two fail the run CLOSED for an unrelated reason — the write meets the same obstruction the read did — ending unavailable/E_TOOL_SOURCE_UNAVAILABLE with the ledger intact. It is a guard that fails open standing in for a guard that fails open; only the product row closes this. See F5 of docs/workflow-port-2026-09-22b.md for the four-pattern measurement, and the KNOWN HAZARD test that pins the chmod-333 hole so it cannot stop existing in silence.",
+      "compensation-fires-without-an-edge": "MEASURED, and worth knowing before you add a `compensation` edge you do not need: when `write-ledger` fails after `write-grant` succeeded, the engine rolls the grant write back on its own — `fs.write` declares `compensation: {tool: \"fs.restore\"}`, and `loom trace` shows `loom.tool (compensate) [ok]` under `write-grant`. out/grant.json still held the PREVIOUS run's grant afterwards. No compensation edge is declared in this graph and none is needed for that."
+    }
+  },
+  "policy": {
+    "posture": "on",
+    "capabilities": ["fs:read", "fs:write"],
+    "expansion": { "maxNodes": 64, "maxDepth": 1, "maxFanout": 1, "maxLoopIterations": 1 }
+  },
+  "channels": {
+    "requestPath": { "type": "string", "reduce": "replace" },
+    "request": { "type": "string", "reduce": "replace" },
+    "policyDoc": { "type": "string", "reduce": "replace" },
+    "ledgerDoc": { "type": "string", "reduce": "replace" },
+    "listing": { "type": "string", "reduce": "replace" },
+    "history": { "type": "object", "reduce": "merge_object", "onConflict": "last_by_branch" },
+    "decision": { "type": "object", "reduce": "replace" },
+    "grant": { "type": "object", "reduce": "replace" },
+    "grantDoc": { "type": "string", "reduce": "replace" },
+    "ledgerNext": { "type": "string", "reduce": "replace" },
+    "wroteGrant": { "type": "object", "reduce": "replace" },
+    "wroteLedger": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["requestPath"],
+  "outputs": ["decision", "grant", "wroteGrant", "wroteLedger"],
+  "nodes": [
+    {
+      "id": "read-request",
+      "type": "tool",
+      "reads": ["requestPath"],
+      "writes": ["request"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${requestPath}", "maxBytes": 200000 } }
+    },
+    {
+      "id": "read-policy",
+      "type": "tool",
+      "writes": ["policyDoc"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "access/policy.json", "maxBytes": 200000 } }
+    },
+    {
+      "id": "look",
+      "type": "tool",
+      "writes": ["listing"],
+      "tool": { "name": "fs.glob", "version": "1.0", "args": { "pattern": "out/access-ledger.json" } }
+    },
+    {
+      "id": "read-ledger",
+      "type": "tool",
+      "writes": ["ledgerDoc"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "out/access-ledger.json", "maxBytes": 200000 } }
+    },
+    {
+      "id": "prior",
+      "type": "function",
+      "reads": ["ledgerDoc", "request"],
+      "writes": ["history"],
+      "function": { "ref": "function/grant-prior@stable" }
+    },
+    {
+      "id": "first-grant",
+      "type": "function",
+      "writes": ["history"],
+      "function": { "ref": "function/grant-none@stable" }
+    },
+    {
+      "id": "weigh",
+      "type": "function",
+      "reads": ["request", "policyDoc", "history", "listing"],
+      "writes": ["decision"],
+      "function": { "ref": "function/grant-weigh@stable" }
+    },
+    {
+      "id": "route",
+      "type": "router",
+      "reads": ["decision"],
+      "router": {
+        "mode": "expression",
+        "fallbackEdge": "denied",
+        "cases": [
+          { "when": "decision.ceremony == \"auto\"", "take": ["granted"] },
+          { "when": "decision.ceremony == \"review\"", "take": ["needs-a-person"] }
+        ]
+      }
+    },
+    {
+      "id": "sign",
+      "type": "human_gate",
+      "reads": ["decision"],
+      "writes": [],
+      "humanGate": { "ref": "oversight/access@stable", "approval": { "approvers": ["u:you"] } }
+    },
+    {
+      "id": "record",
+      "type": "function",
+      "reads": ["decision", "history"],
+      "writes": ["grant", "grantDoc", "ledgerNext"],
+      "function": { "ref": "function/grant-record@stable" }
+    },
+    {
+      "id": "deny",
+      "type": "function",
+      "reads": ["decision"],
+      "writes": [],
+      "function": { "ref": "function/grant-deny@stable" }
+    },
+    {
+      "id": "write-grant",
+      "type": "tool",
+      "reads": ["grantDoc"],
+      "writes": ["wroteGrant"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/grant.json", "body": "${grantDoc}" } }
+    },
+    {
+      "id": "write-ledger",
+      "type": "tool",
+      "reads": ["ledgerNext"],
+      "writes": ["wroteLedger"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/access-ledger.json", "body": "${ledgerNext}" } }
+    }
+  ],
+  "edges": [
+    { "id": "then-policy", "from": "read-request", "to": "read-policy", "kind": "seq" },
+    { "id": "then-look", "from": "read-policy", "to": "look", "kind": "seq" },
+    { "id": "then-ledger", "from": "look", "to": "read-ledger", "kind": "seq" },
+    { "id": "ledger-read", "from": "read-ledger", "to": "prior", "kind": "seq" },
+    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error", "codes": ["E_TOOL_SOURCE_UNAVAILABLE"] },
+    { "id": "weigh-it", "from": "prior", "to": "weigh", "kind": "seq" },
+    { "id": "weigh-it-fresh", "from": "first-grant", "to": "weigh", "kind": "seq" },
+    { "id": "decide", "from": "weigh", "to": "route", "kind": "seq" },
+    { "id": "granted", "from": "route", "to": "record", "kind": "conditional" },
+    { "id": "needs-a-person", "from": "route", "to": "sign", "kind": "conditional" },
+    { "id": "denied", "from": "route", "to": "deny", "kind": "conditional" },
+    { "id": "signed", "from": "sign", "to": "record", "kind": "seq" },
+    { "id": "publish-grant", "from": "record", "to": "write-grant", "kind": "seq" },
+    { "id": "publish-ledger", "from": "record", "to": "write-ledger", "kind": "seq" }
+  ]
+}

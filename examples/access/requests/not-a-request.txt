@@ -1,0 +1,4 @@
+who: dana
+resource: orders-db
+level: write
+hours: 4

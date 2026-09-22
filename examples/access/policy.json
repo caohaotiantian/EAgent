@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "note": "`levels` IS THE PRIVILEGE LATTICE, AND ITS ORDER IS THE WHOLE OF IT. grant-weigh.js ranks a level by its INDEX here, so this array is what says read < write < admin. Reordering it to [\"admin\",\"read\",\"write\"] does not reorder a list, it redefines which grants outrank which — a prior `read` would then outrank a requested `admin`, and an auto-renewal could widen into admin. Nothing validates this array against anything, so it is a privilege decision written as a JSON ordering, and it is stated here because it does not look like one.",
+  "levels": ["read", "write", "admin"],
+  "maxHours": { "read": 72, "write": 24, "admin": 8 },
+  "renewalWithinHours": 720,
+  "renewalNote": "A renewal skips the human. It is bounded three ways, all in grant-weigh.js's findRenewal: the prior grant must have been decided by a PERSON (`decidedByKind: \"human\"`), it must be at the same level or higher and for the same hours or more, and it must be inside this window measured from ITS OWN grantedAt. Auto-renewals do not start a new window, so one approval cannot be chained into indefinite access.",
+  "trustBoundaryNote": "ALL THREE BOUNDS READ out/access-ledger.json, SO THAT FILE IS A TRUST BOUNDARY. Anything that can write it can forge an approval: a hand-written entry with `decidedByKind: \"human\"` and a fresh `grantedAt` buys an `auto` grant with nobody at the gate. The graph holds fs:write on out/ by construction — it is where it publishes — so it cannot fence its own input, and nothing in the published surface changes that. This example ships under the premise that out/ is as trusted as graphs/ and resources/. A deployment that cannot assume that needs the ledger behind a store with its own authorisation, not a JSON file beside the output. Stated as a premise rather than a defect: see section 6 of docs/workflow-port-2026-09-22b.md.",
+  "resources": {
+    "docs-site": { "tier": "public", "owners": ["u:ravi"] },
+    "orders-db": { "tier": "restricted", "owners": ["u:ravi", "u:mina"] },
+    "payments-kms": { "tier": "secret", "owners": ["u:mina"] }
+  }
+}

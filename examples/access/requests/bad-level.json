@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1049",
+  "who": "u:sam",
+  "resource": "orders-db",
+  "level": "superuser",
+  "hours": 1,
+  "reason": "need full control for the index rebuild"
+}

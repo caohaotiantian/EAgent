@@ -1,0 +1,8 @@
+{
+  "id": "REQ-1050",
+  "who": "u:dana",
+  "resource": "orders-db",
+  "level": "write",
+  "hours": 24,
+  "reason": "the backfill needs a full day now that the second shard is in scope"
+}
