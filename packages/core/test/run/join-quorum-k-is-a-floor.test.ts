@@ -568,6 +568,7 @@ async function runFunctions(
     return { writes: {} };
   });
   functions.register("function/inner@stable", () => ({ writes: { seen: ["inner"] } }));
+  for (const arm of ["a", "b", "c"]) functions.register(`function/arm-${arm}@stable`, () => ({ writes: { seen: [arm] } }));
   functions.register("function/boom@stable", () => {
     throw new Error("worker failed");
   });
@@ -681,9 +682,10 @@ test("§A.75 — an absolute `k` above the width the fan MATERIALISED refuses, a
   // run in which EVERY branch succeeded still refuses. That is the refusing direction and it is
   // allowed — but the general message ("needs 2 of 1 branch(es) ... and 1 did") reads like a lost
   // branch and sends an operator looking for one, so this case gets its own sentence naming the
-  // fact, which is about the graph and not about the run. A compile-time refusal is possible for a
-  // STATIC branch list, where the width is known before anything runs; a fan-out width is an input,
-  // so this runtime arm is needed either way.
+  // fact, which is about the graph and not about the run. AND NOT A CHECK THAT BELONGS AT COMPILE
+  // TIME, which the first version of this comment claimed for a STATIC branch list: the last test in
+  // this file narrows a static three-name list to two at RUNTIME with a `conditional` edge, so there
+  // is no width for a compiler to read there either.
   const one = await runFunctions(narrowFanSpec(2), { items: [{ id: "a" }] }, "J");
   assert.equal(one.status, "failed", `width 1 cannot meet k: 2 — ${JSON.stringify(one)}`);
   assert.equal(one.joinError, CODES.E_QUORUM_UNREACHABLE);
@@ -711,4 +713,93 @@ test("§A.75 — an absolute `k` above the width the fan MATERIALISED refuses, a
   const none = await runFunctions(narrowFanSpec(2), { items: [] }, "J");
   assert.equal(none.status, "succeeded", `width 0 is §A.47's shape — ${JSON.stringify(none)}`);
   assert.deepEqual(none.note, ["done-ran"], "and the node behind the barrier runs");
+});
+
+/**
+ * A STATIC branch list NARROWED BY A CONDITIONAL EDGE — the shape that makes an unsatisfiable `k` a
+ * runtime fact even where the author wrote every branch out by name.
+ *
+ * `J.branches: [a, b, c]` with `c` reachable only through `kind: "conditional"`. The compiler sees
+ * three members; the run materialises two when the guard is false, so `expected` is 2 and `k: 3`
+ * cannot be met by any outcome. Both survivors sit at the ROOT coordinate, so their writes are
+ * already in the channel when the barrier refuses.
+ */
+function conditionalStaticSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-conditional-static", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: { ...FN_CHANNELS, flag: { type: "string", reduce: "replace" } },
+    inputs: ["items", "flag"],
+    outputs: [],
+    nodes: [
+      // `flag` IS DECLARED ON `start` because the `conditional` edge leaves it — `GRAPH004_UNDECLARED_READ`
+      // refuses a `when` over a channel the edge's source node does not read.
+      { id: "start", type: "function", reads: ["items", "flag"], function: { ref: "function/seed@stable" } },
+      { id: "a", type: "function", reads: ["items"], writes: ["seen"], function: { ref: "function/arm-a@stable" } },
+      { id: "b", type: "function", reads: ["items"], writes: ["seen"], function: { ref: "function/arm-b@stable" } },
+      { id: "c", type: "function", reads: ["items"], writes: ["seen"], function: { ref: "function/arm-c@stable" } },
+      {
+        id: "J",
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: ["a", "b", "c"], mode: "quorum", k, onBranchError: "skip" },
+      },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "sa", from: "start", to: "a", kind: "seq" },
+      { id: "sb", from: "start", to: "b", kind: "seq" },
+      // THE NARROWING. `c` runs only when the input says so, and nothing about that is visible to
+      // the compiler, which sees a three-member `branches` list either way.
+      { id: "sc", from: "start", to: "c", kind: "conditional", when: 'flag == "yes"' },
+      { id: "ja", from: "a", to: "J", kind: "join", branches: ["a", "b", "c"] },
+      { id: "jb", from: "b", to: "J", kind: "join", branches: ["a", "b", "c"] },
+      { id: "jc", from: "c", to: "J", kind: "join", branches: ["a", "b", "c"] },
+      { id: "jd", from: "J", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("§A.75 — a STATIC branch list narrowed by a `conditional` edge reaches the same arm, at runtime", async () => {
+  // WHY THIS ROW EXISTS: the comment in `#foldJoin` said a compile-time refusal of an unsatisfiable
+  // `k` "is possible for a STATIC branch list, where the width is known before anything runs". It is
+  // NOT. `expected` counts the members that MATERIALISED, and a `conditional` edge decides that from
+  // channel state — so `k: 3` over a three-name `branches` list is satisfiable on one input and
+  // unsatisfiable on the next, and the compiler cannot tell which. A compile-time rule would have to
+  // refuse the graph outright, including for every input where it works.
+  //
+  // DELIBERATE, AND IN THE REFUSING DIRECTION. The guard fails closed on a `k` that cannot be met,
+  // and the cost is stated rather than hidden: the two arms that DID run sit at the root coordinate,
+  // so `writesHeldForJoin` is false, and their writes are in the channel when the barrier refuses.
+  // That is a run refused with real data already applied — and the alternative is folding a quorum
+  // the graph declared and did not get.
+  const narrowed = await runFunctions(conditionalStaticSpec(3), { items: [{ id: "i" }], flag: "no" }, "J");
+  assert.equal(narrowed.status, "failed", `k: 3 over two materialised arms — ${JSON.stringify(narrowed)}`);
+  assert.equal(narrowed.joinError, CODES.E_QUORUM_UNREACHABLE);
+  assert.equal(
+    narrowed.joinMessage,
+    'join "J": mode "quorum" declares k 3, which exceeds the 2 branch(es) this barrier materialised — ' +
+      "no outcome can meet it, and 2 of them produced something. Lower `k` or widen the branch set",
+    `the message names the materialised width, which is the only true statement available here: ${String(narrowed.joinMessage)}`,
+  );
+  // THE COST, ASSERTED: both survivors' writes are already applied, because a static arm is at the
+  // root coordinate. The advice the message gives ("lower `k` or widen the branch set") names
+  // neither the conditional nor these writes — the arm knows the width, not why it is that width.
+  assert.deepEqual(narrowed.seen, ["a", "b"], `the arms that ran had already applied their writes: ${JSON.stringify(narrowed.seen)}`);
+  assert.equal(narrowed.note, undefined, "and the node behind the barrier did not run");
+
+  // THE SAME GRAPH, THE OTHER INPUT: three arms materialise and `k: 3` is met. One `GraphSpec`, two
+  // verdicts, decided by channel state — which is the whole argument against a compile-time rule.
+  const full = await runFunctions(conditionalStaticSpec(3), { items: [{ id: "i" }], flag: "yes" }, "J");
+  assert.equal(full.status, "succeeded", `the conditional arm ran, so k: 3 is met — ${JSON.stringify(full)}`);
+  assert.deepEqual(full.seen, ["a", "b", "c"], "all three produced");
+  assert.deepEqual(full.note, ["done-ran"], "and the barrier folded");
+
+  // And the narrowed width is not itself a refusal: `k: 2` over the two that ran folds.
+  const fits = await runFunctions(conditionalStaticSpec(2), { items: [{ id: "i" }], flag: "no" }, "J");
+  assert.equal(fits.status, "succeeded", `k: 2 over two materialised arms — ${JSON.stringify(fits)}`);
+  assert.deepEqual(fits.note, ["done-ran"], "the barrier folded");
 });

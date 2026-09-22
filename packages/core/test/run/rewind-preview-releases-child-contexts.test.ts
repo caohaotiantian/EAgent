@@ -45,6 +45,7 @@ import { OPERATOR, rewindWithPlan } from "./operator.ts";
 
 const NOW = 1_700_000_000_000;
 const CHILD_REF = "graph/double@stable";
+const MID_REF = "graph/mid@stable";
 
 const CHARGE: ToolManifestLite = {
   name: "pay.refundable",
@@ -142,17 +143,72 @@ function parentSpec(): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-function resolverWith(child: GraphSpec): ResourceResolver {
+function resolverWith(child: GraphSpec, mid?: GraphSpec): ResourceResolver {
   return {
     resolve: (ref) =>
       /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref) ? { ref, digest: `sha256:${"0".repeat(64)}`, channel: "stable" } : undefined,
-    subgraph: (ref) => (ref === CHILD_REF ? child : undefined),
+    subgraph: (ref) => (ref === CHILD_REF ? child : ref === MID_REF ? mid : undefined),
   } as ResourceResolver;
+}
+
+/** The middle of `top -> mid -> leaf`: it delegates onward and does nothing of its own. */
+function midSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "mid", project: "sub", version: 1 },
+    policy: {
+      posture: "out",
+      capabilities: ["pay"],
+      expansion: { maxNodes: 32, maxDepth: 4, maxFanout: 4, maxLoopIterations: 1 },
+    },
+    channels: { total: { type: "number", reduce: "replace" }, result: { type: "object", reduce: "replace" } },
+    inputs: ["total"],
+    outputs: ["result"],
+    nodes: [
+      {
+        id: "onward",
+        type: "subgraph",
+        reads: ["total"],
+        writes: ["result"],
+        subgraph: { ref: CHILD_REF, inputs: { amount: "total" }, outputs: { result: "receipt" }, budgetShare: 0.5 },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
+}
+
+/** The top of `top -> mid -> leaf`. */
+function topSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "top", project: "sub", version: 1 },
+    policy: {
+      posture: "out",
+      capabilities: ["pay"],
+      expansion: { maxNodes: 32, maxDepth: 4, maxFanout: 4, maxLoopIterations: 1 },
+    },
+    channels: { total: { type: "number", reduce: "replace" }, result: { type: "object", reduce: "replace" } },
+    inputs: ["total"],
+    outputs: ["result"],
+    nodes: [
+      {
+        id: "delegate",
+        type: "subgraph",
+        reads: ["total"],
+        writes: ["result"],
+        checkpoint: "before",
+        subgraph: { ref: MID_REF, inputs: { total: "total" }, outputs: { result: "result" }, budgetShare: 0.5 },
+      },
+    ],
+    edges: [],
+  } as unknown as GraphSpec;
 }
 
 type Ledger = { readonly charges: number[]; readonly refunds: number[] };
 
-function newEngine(store: MemoryStateStore, ledger: Ledger, child: GraphSpec): Engine {
+function newEngine(store: MemoryStateStore, ledger: Ledger, child: GraphSpec, mid?: GraphSpec): Engine {
   const tools = new ToolRegistry();
   tools.register({
     ...CHARGE,
@@ -185,7 +241,7 @@ function newEngine(store: MemoryStateStore, ledger: Ledger, child: GraphSpec): E
     models: new ModelRegistry(),
     now: () => NOW,
     sleep: async () => {},
-    resolver: resolverWith(child),
+    resolver: resolverWith(child, mid),
     policy: { granted: ["pay"], systemFloor: "out", budget: { runUsd: 10 } },
   });
 }
@@ -384,4 +440,140 @@ test("§A.76 — and a preview does not undo `forget(childRunId)`, which is the 
     );
     assert.deepEqual(ledger.refunds, [], `previewFirst=${previewFirst}: and no undo was dispatched`);
   }
+});
+
+/**
+ * A store that runs a callback the first time the preview's own `rewind.plan` row is appended.
+ *
+ * THIS IS HOW THE RACE IS MADE DETERMINISTIC WITHOUT TOUCHING A PRIVATE SEAM. `planRewind` journals
+ * what it showed (`#journalPlanShown`) after the walk and before its `finally`, so an append hook on
+ * that row lands in exactly the window where a concurrent `attach` used to be lost: the walk has
+ * already built the child's context, and the release has not run yet.
+ */
+class HookedStore extends MemoryStateStore {
+  #onPlanShown: (() => void) | undefined;
+  onPlanShown(fn: () => void): void {
+    this.#onPlanShown = fn;
+  }
+  override async append(input: Parameters<MemoryStateStore["append"]>[0]): ReturnType<MemoryStateStore["append"]> {
+    const out = await super.append(input);
+    const shows = input.events.some(
+      (e) => e.type === "operator.command" && (e.payload as { kind?: string } | undefined)?.kind === "rewind.plan",
+    );
+    if (shows && this.#onPlanShown !== undefined) {
+      const fn = this.#onPlanShown;
+      this.#onPlanShown = undefined;
+      fn();
+    }
+    return out;
+  }
+}
+
+test("§A.76 — an `attach` that lands DURING the preview is not re-forgotten by its release", async () => {
+  // THE RACE ROUND 2 FOUND. `planRewind` is async; `attach` and `forget` are synchronous and public.
+  // The first cut of the `forget` restore sampled `#forgotten` before the walk and wrote it back in
+  // the `finally`, which is after an `await` — so an operator's `attach(child, graph)` landing in
+  // between was overwritten by the older sample, and a run they had just asked for came back
+  // forgotten. The fix moves the restore into `#childContextFor`, in the same tick as the build, so
+  // the flag is clear at release time only if a CALLER cleared it.
+  //
+  // DRIVEN THROUGH THE JOURNAL RATHER THAN A PRIVATE HOOK: the callback fires on the append of the
+  // preview's own `rewind.plan` row, which is written after the walk and before the release.
+  const store = new HookedStore({ now: () => NOW });
+  const ledger: Ledger = { charges: [], refunds: [] };
+  const engine = newEngine(store, ledger, realChildSpec());
+  const graph = compileOrThrow({ spec: parentSpec(), resolver: resolverWith(realChildSpec()), tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  const runId: RunId = await engine.submit({ graph, inputs: { total: 21 } });
+  let p = await engine.advance(runId);
+  for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    p = await engine.resolveGate(runId, { gateId: open.gateId, decision: { kind: "approve" }, actor: OPERATOR, idempotencyKey: `k${i}` });
+  }
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  let childRunId: RunId | undefined;
+  for await (const ev of store.read(runId, 1 as Seq)) {
+    if (ev.type === "subgraph.started") childRunId = ev.payload.childRunId;
+  }
+  assert.ok(childRunId !== undefined);
+
+  // The operator releases the child, then — mid-preview — asks for it back.
+  engine.forget(childRunId);
+  store.onPlanShown(() => engine.attach(childRunId, realChildGraph()));
+  await engine.planRewind(runId, 1 as Seq, OPERATOR);
+
+  // THE OBSERVABLE: the child is rewindable, because the last thing anyone SAID about it was
+  // "attach". Before this fix the preview's release re-forgot it and this refused
+  // `E_RESTORE_ILLEGAL` — an operator's own request undone by a read-only verb.
+  const plan = await engine.planRewind(childRunId, 1 as Seq, OPERATOR);
+  await engine.rewind(childRunId, 1 as Seq, "undo", OPERATOR, { planHash: plan.planHash });
+  assert.deepEqual(ledger.refunds, [42], "the undo dispatched under the graph the operator attached");
+
+  // AND THE CONTROL, one line apart: no `attach` in that window, so the `forget` still stands.
+  const quiet = await chargeUnderTheRealGraph();
+  quiet.ran.forget(quiet.childRunId);
+  await quiet.ran.planRewind(quiet.runId, 1 as Seq, OPERATOR);
+  let refused: string | undefined;
+  try {
+    const p2 = await quiet.ran.planRewind(quiet.childRunId, 1 as Seq, OPERATOR);
+    await quiet.ran.rewind(quiet.childRunId, 1 as Seq, "undo", OPERATOR, { planHash: p2.planHash });
+  } catch (e) {
+    refused = (e as { code?: string }).code;
+  }
+  assert.equal(refused, CODES.E_RESTORE_ILLEGAL, "a forgotten child nobody re-attached is still forgotten");
+  assert.deepEqual(quiet.ledger.refunds, [], "and no undo ran");
+});
+
+test("§A.76 — the release reaches a GRANDCHILD, at depth 2", async () => {
+  // ROUND 0 LEAKED AT DEPTH 2 AND THE FIX COVERS IT BY CONSTRUCTION — `#planRollback` threads
+  // `installed` down its own descent, so every level the walk rebuilds is reported. Unpinned until
+  // now, which is the half that matters: the descent is where a per-level fix would have been
+  // written by hand and missed a level.
+  //
+  // `top -> mid -> leaf`, with the charge at the LEAF, so the walk has to rebuild two contexts to
+  // reach it and the one under test is the deeper one.
+  const store = new MemoryStateStore({ now: () => NOW });
+  const ledger: Ledger = { charges: [], refunds: [] };
+  const engine = newEngine(store, ledger, realChildSpec(), midSpec());
+  const graph = compileOrThrow({
+    spec: topSpec(),
+    resolver: resolverWith(realChildSpec(), midSpec()),
+    tools: MANIFESTS,
+    tenantCapabilities: ["pay"],
+  });
+  const runId: RunId = await engine.submit({ graph, inputs: { total: 21 } });
+  let p = await engine.advance(runId);
+  for (let i = 0; i < 6 && p.status === "awaiting_gate"; i++) {
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    p = await engine.resolveGate(runId, { gateId: open.gateId, decision: { kind: "approve" }, actor: OPERATOR, idempotencyKey: `k${i}` });
+  }
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  assert.deepEqual(ledger.charges, [42], "the money moved at the leaf");
+
+  // The LEAF is two `subgraph.started` hops down: the mid run's journal names it, not the top's.
+  const childrenOf = async (of: RunId): Promise<RunId[]> => {
+    const out: RunId[] = [];
+    for await (const ev of store.read(of, 1 as Seq)) if (ev.type === "subgraph.started") out.push(ev.payload.childRunId);
+    return out;
+  };
+  const mid = (await childrenOf(runId))[0];
+  assert.ok(mid !== undefined, "the top run names its child");
+  const leaf = (await childrenOf(mid))[0];
+  assert.ok(leaf !== undefined, "and the child names the grandchild");
+
+  engine.forget(leaf);
+  await engine.planRewind(runId, 1 as Seq, OPERATOR);
+
+  // If the preview left the GRANDCHILD's context installed, this would proceed on the graph the
+  // preview built. It refuses, because the release reached depth 2 and the `forget` survived it.
+  let refused: string | undefined;
+  try {
+    const plan = await engine.planRewind(leaf, 1 as Seq, OPERATOR);
+    await engine.rewind(leaf, 1 as Seq, "undo", OPERATOR, { planHash: plan.planHash });
+  } catch (e) {
+    refused = (e as { code?: string }).code;
+  }
+  assert.equal(refused, CODES.E_RESTORE_ILLEGAL, "the grandchild is released and still forgotten");
+  assert.deepEqual(ledger.refunds, [], "and nothing was undone behind the operator's back");
 });

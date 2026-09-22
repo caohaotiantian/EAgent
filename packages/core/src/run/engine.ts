@@ -2256,14 +2256,17 @@ export class Engine {
     /** Why this run's own steps cannot be dispatched. Read only when `ctx` is absent. */
     readonly why?: string;
     /**
-     * Every child run whose context this walk BUILT, against whether `#forgotten` held it FIRST —
-     * for a caller that releases what it installed (§A.76). Absent means nobody is collecting,
-     * which is every caller that goes on to dispatch. The flag is what makes the release a restore
-     * rather than an approximation: `#contextFor` clears `#forgotten` unconditionally, so a release
-     * that only dropped the context would leave an explicitly-forgotten child reading as one this
-     * engine had merely never seen, and `#retainedGraphOf` answers those two differently.
+     * Every child run whose context this walk BUILT, against the context it built — for a caller
+     * that releases what it installed (§A.76). Absent means nobody is collecting, which is every
+     * caller that goes on to dispatch.
+     *
+     * THE CONTEXT AND NOT A BARE ID, because `planRewind` is async and `attach`, `forget` and
+     * `submit` are all callable in between: the release deletes a run's context only when the one
+     * `#runs` holds is still the object this walk put there. `#forgotten` needs no such bookkeeping
+     * — `#childContextFor` puts the flag back at the moment it builds, so the release has nothing
+     * to restore and nothing to clobber.
      */
-    readonly installed?: Map<RunId, boolean>;
+    readonly installed?: Map<RunId, RunContext>;
   }): Promise<readonly RollbackWalkStep[]> {
     const { runId, log, ctx, p } = input;
     const sinceSeq = input.sinceSeq ?? 0;
@@ -2374,7 +2377,7 @@ export class Engine {
     /** The ancestor's reason, when there was no context to resolve this child's ref from. */
     inherited?: string,
     /** Collects every child context this walk BUILT — see `#planRollback`'s `installed` (§A.76). */
-    installed?: Map<RunId, boolean>,
+    installed?: Map<RunId, RunContext>,
   ): Promise<readonly RollbackWalkStep[]> {
     // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
     // No journal means the child never started, so it did nothing that needs undoing.
@@ -2502,7 +2505,7 @@ export class Engine {
     depth: number,
     seen: Set<RunId>,
     inherited?: string,
-    installed?: Map<RunId, boolean>,
+    installed?: Map<RunId, RunContext>,
   ): Promise<readonly RollbackWalkStep[]> {
     try {
       return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited, installed);
@@ -2616,11 +2619,19 @@ export class Engine {
      * above deliberately reports nothing: a context something else holds on purpose is not the
      * preview's to release.
      *
-     * AND IT REPORTS `#forgotten` MEMBERSHIP TAKEN BEFORE THE BUILD, because `#contextFor`'s first
-     * act is `this.#forgotten.delete(runId)` and nothing else puts it back. Read after the build it
-     * is always `false`, which is why it is read on the line above it.
+     * AND IT PUTS `#forgotten` BACK IMMEDIATELY, IN THE SAME TICK AS THE BUILD, rather than leaving
+     * it to whoever releases the context. `#contextFor` clears the flag because binding a graph is
+     * what un-forgets a run — but NOBODY ASKED for this child to be bound: a walk rebuilt it to
+     * answer a question about it. Restoring here rather than in `planRewind`'s `finally` is what
+     * removes the race round 2 found: the `finally` runs after an `await`, so an `attach` landing in
+     * between would have been overwritten by a flag sampled before it. Now the flag is only ever
+     * clear when a caller cleared it, and the release has nothing to restore.
+     *
+     * It is done for EVERY caller and not only the collecting one, because the reason is the same
+     * for all of them: `rewind` and `#compensate` rebuild a child to dispatch an undo in it, which
+     * is not a request to bind that run for anything else either.
      */
-    installed?: Map<RunId, boolean>,
+    installed?: Map<RunId, RunContext>,
   ): RunContext | undefined {
     const live = this.#runs.get(childRunId);
     if (live !== undefined) return live;
@@ -2629,7 +2640,8 @@ export class Engine {
     try {
       const wasForgotten = this.#forgotten.has(childRunId);
       const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
-      installed?.set(childRunId, wasForgotten);
+      if (wasForgotten) this.#forgotten.add(childRunId);
+      installed?.set(childRunId, built);
       return built;
     } catch {
       return undefined;
@@ -4902,7 +4914,7 @@ export class Engine {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
     const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
     // THE CHILD CONTEXTS THIS PREVIEW WILL BUILD, so the `finally` can hand them back too (§A.76).
-    const installed = new Map<RunId, boolean>();
+    const installed = new Map<RunId, RunContext>();
     try {
       const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx, installed);
       // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE PLAN IS SHOWN OR JOURNALED (§A.74).
@@ -4939,22 +4951,31 @@ export class Engine {
       // real graph would stop being re-attachable: the preview making a later verb worse, which is
       // exactly the shape §A.76 is about.
       //
-      // AND `#forgotten` IS PUT BACK, WHICH IS THE OTHER HALF OF "RESTORES" AND WAS MISSING. This
-      // block claimed to leave the engine as it found it while dropping the context alone, and
-      // `#contextFor`'s first act is `this.#forgotten.delete(runId)` — so a child an operator had
-      // explicitly `forget`ten came back as a child this engine had merely never seen, and
-      // `#retainedGraphOf` reads those two differently: `forget`'s own docstring says an explicit
-      // release means "`#reattach` declines it until `attach` says otherwise", and a preview of the
-      // PARENT took that back. Measured on one engine, `forget(child)` then a rewind OF THE CHILD:
-      // `refused E_RESTORE_ILLEGAL` without a preview in between and `proceeded; refunds=[42]` with
-      // one. Both halves are pinned in `rewind-preview-releases-child-contexts.test.ts`.
+      // AND `#forgotten` SURVIVES THE PREVIEW, WHICH IS THE OTHER HALF OF "RESTORES" AND WAS
+      // MISSING. This block claimed to leave the engine as it found it while dropping the context
+      // alone, and `#contextFor` clears `#forgotten` — so a child an operator had explicitly
+      // `forget`ten came back as a child this engine had merely never seen, and `#retainedGraphOf`
+      // reads those two differently: `forget`'s own docstring says an explicit release means
+      // "`#reattach` declines it until `attach` says otherwise", and a preview of the PARENT took
+      // that back. Measured on one engine, `forget(child)` then a rewind OF THE CHILD: `refused
+      // E_RESTORE_ILLEGAL` without a preview in between and `proceeded; refunds=[42]` with one.
+      //
+      // THE FLAG IS NOT PUT BACK HERE, and that is the round-2 correction. Restoring it here meant
+      // sampling it before an `await` and writing it after: `planRewind` is async and `attach` is
+      // synchronous and public, so an `attach(child, graph)` landing in between was overwritten by
+      // the older sample — the operator's own request re-forgotten under them. `#childContextFor`
+      // now puts the flag back in the same tick as the build, so by the time this runs the flag is
+      // clear only if a CALLER cleared it, and there is nothing here to clobber.
+      //
+      // AND THE CONTEXT IS DELETED ONLY IF IT IS STILL THE ONE THIS CALL BUILT. Same window, same
+      // reason: `forget` then `attach` in between leaves a DIFFERENT context in `#runs`, which
+      // somebody asked for and this verb did not install.
       //
       // The PARENT needs no such arm: it is re-attached through `#reattach`, which reads
       // `#retainedGraphOf` and therefore declines a forgotten run outright, so `attachedHere` is
       // false for one and this block never installed it.
-      for (const [child, wasForgotten] of installed) {
-        this.#runs.delete(child);
-        if (wasForgotten) this.#forgotten.add(child);
+      for (const [child, mine] of installed) {
+        if (this.#runs.get(child) === mine) this.#runs.delete(child);
       }
     }
   }
@@ -5000,7 +5021,7 @@ export class Engine {
      * passes a set and releases it; `rewind` passes none, because it DISPATCHES through those
      * contexts and the run that owns them is the one it is undoing.
      */
-    installed?: Map<RunId, boolean>,
+    installed?: Map<RunId, RunContext>,
   ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
     const walk = await this.#planRollback({
       runId,
@@ -6376,6 +6397,17 @@ export class Engine {
    * about at a security boundary.
    */
   #contextFor(runId: RunId, graph: RunGraph, limits?: BudgetLimits, inherited?: readonly string[]): RunContext {
+    // ABOVE THE EARLY RETURN, so BINDING A GRAPH un-forgets the run whether or not a context is
+    // already held. It used to sit below, where it could only ever fire for a run this engine had
+    // no context for — which is every ordinary caller, because `forget` deletes the context as it
+    // sets the flag, so the two states never overlapped. §A.76's preview is what made them
+    // overlap: it installs a child's context and `#childContextFor` puts the flag back, so for the
+    // length of one `planRewind` a run is BOTH held and forgotten. An `attach` landing in that
+    // window is a caller saying "bind this run", and it has to clear the flag even though the
+    // context it hands over is discarded (`#contextFor` returns the existing one untouched — the
+    // §A.76 arm this lane did not take). Otherwise the preview's release would re-forget a run
+    // somebody had just asked for, which is the race round 2 found.
+    this.#forgotten.delete(runId);
     const existing = this.#runs.get(runId);
     if (existing !== undefined) return existing;
     const own = graph.spec.policy?.capabilities;
@@ -6385,7 +6417,6 @@ export class Engine {
         : inherited === undefined
           ? own
           : own.filter((c) => inherited.some((p) => (p.endsWith("*") ? c.startsWith(p.slice(0, -1)) : p === c)));
-    this.#forgotten.delete(runId);
     const ctx: RunContext = {
       runId,
       graph,
@@ -8325,10 +8356,22 @@ export class Engine {
     // runtime width of 1 — can be met by no outcome, so a run in which EVERY branch succeeded still
     // refuses. That is the refusing direction and it is allowed, but "needs 2 of 1 branch(es) and 1
     // produced something" reads like a lost branch and sends an operator looking for one. This arm
-    // names the real fact, which is about the graph and not about this run. A compile-time refusal
-    // is possible for a STATIC branch list, where the width is known before anything runs; it
-    // belongs in `graph/validate.ts` and is not this arm's to add. A fan-out width is an INPUT, so
-    // the runtime arm is needed either way.
+    // names the real fact, which is about the graph and not about this run.
+    //
+    // AND A COMPILE-TIME REFUSAL IS NOT AVAILABLE EVEN FOR A STATIC BRANCH LIST — this comment
+    // claimed the opposite and running it says otherwise. `expected` counts the members that
+    // MATERIALISED, and a `kind: "conditional"` edge decides that from channel state: `branches:
+    // ["a","b","c"]` with `c` behind `when: flag == "yes"` and `k: 3` is satisfiable on one input and
+    // unsatisfiable on the next, from ONE `GraphSpec`. Both rows are driven in
+    // `join-quorum-k-is-a-floor.test.ts`. A compile-time rule would have to refuse the graph for
+    // every input, including the ones where it works, so the runtime arm is not a stopgap for a
+    // check that belongs earlier — it is the only place the question can be answered.
+    //
+    // THE COST OF THAT, STATED: a narrowed STATIC set puts its survivors at the ROOT coordinate,
+    // where `writesHeldForJoin` is false, so their writes are ALREADY IN THE CHANNEL when this arm
+    // refuses — and the advice names neither the conditional nor those writes, because this arm
+    // knows the width and not why the width is what it is. Deliberate: the alternative is folding a
+    // quorum the graph declared and did not get.
     //
     // `need > expected` IS THE DISCRIMINATOR AND IT IS EXACT: a fractional `k` is
     // `ceil(k * expected)`, which cannot exceed `expected`, so this branch is reachable only from an
