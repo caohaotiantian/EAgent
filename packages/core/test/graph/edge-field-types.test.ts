@@ -302,23 +302,22 @@ test("THE SIX DEFERRALS, DRIVEN OVER THE WHOLE `WRONG` TABLE — five total, one
   }
 });
 
-test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — the boundary, pinned", () => {
-  // `unknownEdgeKinds` refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS
-  // TYPE", which is why a type check in `checkStructure` would be a second refusal for one mistake
-  // rather than a first for a new one — one mistake, one refusal:
+test("`kind` IS DEFERRED TO `checkStructure`, AND THE DEFERRAL NOW REACHES A CHILD — §A.80", () => {
+  // The kind check refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE",
+  // which is why a type check for `kind` in `checkStructure` would be a second refusal for one
+  // mistake rather than a first for a new one — one mistake, one refusal:
   assert.deepEqual(
     compileOf(withEdge("e3", { kind: 42 })).diagnostics.filter((d) => d.severity === "error").map((d) => d.code),
     ["GRAPH003_UNKNOWN_EDGE_KIND"],
   );
 
-  // AND THE EXACT LIMIT OF THAT, asserted so nobody reads `TYPE_CHECKED_ELSEWHERE` as a claim
-  // about every path: `unknownEdgeKinds` is `compile`'s, so `validateGraph` ALONE says nothing
-  // about `kind` — and `rule016Subgraphs` recurses `validateGraph`, not `compile`, into a subgraph
-  // CHILD. A child edge's `kind` is therefore unchecked at compile and reaches the executor's own
-  // `EDGE_KINDS` copy in `#assertBound`. That is a PRE-EXISTING hole, not one the parse opened; the
-  // fix is the relocation `unknownEdgeKinds`' own docstring already proposes ("the rule belongs
-  // beside GRAPH020 and moving it there is a pure relocation"), which is `compile.ts`'s to make.
-  assert.deepEqual(errorsOf(withEdge("e3", { kind: 42 })).map((d) => d.code), []);
+  // THE PIN THAT WAS NEGATIVE AND IS NOW POSITIVE, and the flip is the whole of §A.80. This line
+  // used to assert `[]`: `unknownEdgeKinds` lived in `compile.ts` and ran on the TOP-LEVEL spec
+  // alone, so `validateGraph` said nothing about `kind` — and since `rule016Subgraphs` recurses
+  // `validateGraph` and not `compile`, a subgraph CHILD's `kind: 42` compiled clean and was met by
+  // the executor's own `EDGE_KINDS` copy at run time instead. The rule is now in `checkStructure`,
+  // which is exactly what the child recursion runs.
+  assert.deepEqual(errorsOf(withEdge("e3", { kind: 42 })).map((d) => d.code), ["GRAPH003_UNKNOWN_EDGE_KIND"]);
 
   // WHAT THE PARSE DID REACH, in the same breath: the child's wrong-typed `maxWidth` IS refused
   // now, because `edgeFieldTypes` lives in `checkStructure` and `checkStructure` is what the child
@@ -337,7 +336,6 @@ test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — t
       nodes,
       edges,
     }) as unknown as GraphSpec;
-  const child = graph("child", [tool("a"), tool("b")], [{ id: "c1", from: "a", to: "b", kind: "seq", maxWidth: "24" }]);
   const parent = graph(
     "parent",
     [
@@ -352,16 +350,36 @@ test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — t
     ],
     [],
   );
-  const r = compile({
-    spec: parent,
-    resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child } }),
-    tools: TOOLS,
-    tenantCapabilities: ["k8s:write"],
-  });
-  assert.equal(r.ok, false);
+  const throughParent = (childEdge: Record<string, unknown>): readonly Diagnostic[] => {
+    const child = graph("child", [tool("a"), tool("b")], [{ id: "c1", from: "a", to: "b", ...childEdge }]);
+    const r = compile({
+      spec: parent,
+      resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child } }),
+      tools: TOOLS,
+      tenantCapabilities: ["k8s:write"],
+    });
+    assert.equal(r.ok, false, `a child fault must refuse the parent; got ${r.diagnostics.map((x) => x.code).join(", ") || "nothing"}`);
+    return r.diagnostics;
+  };
+  const width = throughParent({ kind: "seq", maxWidth: "24" });
   assert.ok(
-    r.diagnostics.some((d) => d.code === "GRAPH007_BAD_MAX_WIDTH"),
-    `a child's wrong-typed width must reach the parent's compile; got ${r.diagnostics.map((d) => d.code).join(", ") || "nothing"}`,
+    width.some((d) => d.code === "GRAPH007_BAD_MAX_WIDTH"),
+    `a child's wrong-typed width must reach the parent's compile; got ${width.map((d) => d.code).join(", ") || "nothing"}`,
+  );
+
+  // AND THE CHILD'S `kind`, THROUGH THE PARENT — the probe §A.80 was opened with. Before the
+  // relocation this compile reported `GRAPH007_BAD_MAX_WIDTH` ALONE: §A.62's parse recursed into
+  // the child and the kind check did not.
+  const kind = throughParent({ kind: 42, maxWidth: "24" });
+  const hit = kind.find((d) => d.code === "GRAPH003_UNKNOWN_EDGE_KIND");
+  assert.ok(hit !== undefined, `got ${kind.map((d) => d.code).join(", ") || "nothing"}`);
+  // Re-tagged at the NODE that reaches the child, which is the only coordinate a parent's author
+  // can act on — the child's own `edgeId` names an edge in a file they may not have written.
+  assert.deepEqual(hit.at, { nodeId: "delegate" as NodeId });
+  assert.equal(
+    hit.message,
+    'in subgraph "subgraph/child@stable": edge "c1" declares kind 42, which is not an edge kind — ' +
+      "its `when`, `until`, `over` and `branches` are all ignored and the edge is taken unconditionally",
   );
 });
 

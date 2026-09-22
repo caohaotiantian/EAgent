@@ -46,6 +46,7 @@ import {
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
+  type EdgeKind,
   type EdgeSpec,
   type ExpansionBudget,
   type GraphSpec,
@@ -876,6 +877,35 @@ function unknownKeys(
 }
 
 /**
+ * The seven members of `EdgeKind`, as data a runtime check can read.
+ *
+ * `NodeType` is closed by GRAPH020 twenty lines from where the edge fields are checked, and this
+ * set was not closed anywhere: `EDGE_FIELDS` checks an edge's KEYS and nothing checked the VALUE
+ * of `kind`. Measured — `kind: "conditionl"`, `"Conditional"`, `"eror"` and `"__proto__"` all
+ * compiled with ZERO diagnostics at any severity, and at run time each fell to `#edgesToTake`'s
+ * `default:` arm and was TAKEN with its `when` never evaluated. The comment three lines above
+ * `EDGE_FIELDS` states the consequence for the sibling case it did close: "A misspelled `when`
+ * does not disable a condition — it makes the edge unconditional, so a branch the author meant to
+ * guard fires every time."
+ *
+ * MOVED HERE FROM `graph/compile.ts` (§A.80) — where its own docstring said it did not belong,
+ * *"only because of who owns which file today"*. `compile` ran the check on the top-level spec
+ * alone and `rule016Subgraphs` recurses `validateGraph`, so a subgraph CHILD's `kind` was
+ * unchecked; the refusal is now in `checkStructure`'s edge loop, which the child recursion runs.
+ * `run/engine.ts` keeps its own copy on purpose: `Executor.attach()` is public and a `RunGraph`
+ * can reach it without this build's compiler (`#assertBound`).
+ */
+const EDGE_KINDS: Readonly<Record<EdgeKind, true>> = {
+  seq: true,
+  conditional: true,
+  fanout: true,
+  join: true,
+  error: true,
+  compensation: true,
+  loop: true,
+};
+
+/**
  * THE EDGE FIELDS THIS PASS DOES NOT RE-CHECK, and the check that already refuses every
  * wrong-typed value of each.
  *
@@ -887,24 +917,28 @@ function unknownKeys(
  *
  *     id          GRAPH003_BAD_ID       `isSafeId` is false for every non-string
  *     from, to    GRAPH003_DANGLING_EDGE  a non-string is not a node id, so it dangles
- *     kind        GRAPH003_UNKNOWN_EDGE_KIND  in `graph/compile.ts`, and its own comment says
- *                 "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE"
+ *     kind        GRAPH003_UNKNOWN_EDGE_KIND  in `checkStructure`'s own edge loop below, which
+ *                 refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE"
  *     when, until GRAPH004_EXPR         `checkExpr` refuses every value, strings included
  *
  * "REFUSES EVERY WRONG TYPE" IS THE CLAIM, AND IT HAS ONE STATED EXCLUSION. Five of the six are
  * total, now that the sites naming the value render it through `describeValue` — before that a
  * `symbol` id threw `TypeError: Cannot convert a Symbol value to a string` out of this function
  * and a `bigint` id threw `Do not know how to serialize a BigInt` out of `badId`, which is a crash
- * where a refusal belonged. `kind` is the exclusion: `unknownEdgeKinds` builds its message with
- * `JSON.stringify(edge.kind)` in `graph/compile.ts`, so `kind: 10n` and a `kind` whose `toJSON`
- * throws still come out of `compile` as an exception rather than a diagnostic. That file is not
- * this one's to edit; the two values are pinned as throwing in
- * `test/graph/edge-field-types.test.ts` so the exclusion is a measured fact and not a hope.
+ * where a refusal belonged. `kind` is the exclusion, and the REASON changed at §A.80 while the
+ * exclusion did not: the check moved into this file, and its message still renders the value with
+ * `JSON.stringify(edge.kind) ?? String(edge.kind)` rather than with `describeValue`, because the
+ * two print different bytes for `{}` and `[]` and a relocation that also rewrites a diagnostic is
+ * not a relocation. So `kind: 10n` and a `kind` whose `toJSON` throws still come out of `compile`
+ * as an exception. The class is named and the two values are pinned as throwing in
+ * `test/graph/edge-field-types.test.ts`, so the exclusion is a measured fact and not a hope, and
+ * closing it is a decision about those bytes rather than about this set.
  *
  * A SECOND SPELLING OF ONE REFUSAL is the thing being avoided, and `objectBlock` below states the
  * cost: "an eighth spelling of one idea is how diagnostics come to disagree about what they
- * mean". For `kind` it is not even a matter of taste — `unknownEdgeKinds` runs BEFORE
- * `validateGraph`, so a check here would print two refusals for one mistake.
+ * mean". For `kind` it is not even a matter of taste — the kind check and a type check here would
+ * print two refusals for one mistake, which is why `kind` stays on this list now that the kind
+ * check is a dozen screens down rather than in another file.
  *
  * THE DEFAULT IS TO CHECK. A field added to `EDGE_FIELDS` is type-checked unless somebody opts it
  * out here, which is the fail-closed direction: the failure mode of forgetting this set is a
@@ -2198,6 +2232,53 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // shape widened to every code.
     if (unknownKeys(e as unknown as Record<string, unknown>, Object.keys(EDGE_FIELDS), `edge ${describeValue(e.id)}`, { edgeId: e.id }, d)) {
       fatal = true;
+    }
+    // AND THE ONE KEY WHOSE *VALUE* IS A VOCABULARY. `unknownKeys` closes the key names and
+    // `edgeFieldTypes` closes what the other twelve hold; `kind` is the thirteenth, and it is a
+    // closed set rather than a type — which is why `TYPE_CHECKED_ELSEWHERE` defers the type half
+    // of it to this check rather than the other way round.
+    //
+    // RELOCATED FROM `graph/compile.ts`'s `unknownEdgeKinds` (§A.80), which is what that
+    // function's own docstring asked for — *"the rule belongs beside GRAPH020 and moving it there
+    // is a pure relocation"* — and the reason it had to move is not tidiness. `compile` ran it on
+    // the TOP-LEVEL spec only, while `rule016Subgraphs` recurses `validateGraph`, so the one
+    // refusal that is total over `kind` did not reach a subgraph CHILD. Measured before, on a
+    // parent whose child carries one edge with `kind: 42` and `maxWidth: "24"`:
+    //
+    //     compile(parent)                    GRAPH007_BAD_MAX_WIDTH alone — the child's `kind`
+    //                                        was unchecked and reached the executor's own
+    //                                        `EDGE_KINDS` copy at run time
+    //     validateGraph alone, kind: 42       (none)
+    //
+    // and after, both report `GRAPH003_UNKNOWN_EDGE_KIND` as well. It was pinned NEGATIVELY in
+    // `test/graph/edge-field-types.test.ts`, which now pins it positively.
+    //
+    // NOT FATAL, which is the one thing about the move that is not free and is deliberate. The
+    // rule's diagnostics used to be PREPENDED to `validateGraph`'s, so they survived a fatal
+    // `checkStructure`; now they are inside it, and a graph that also trips an EARLIER fatal check
+    // — `channels: null`, a malformed node — reports that one and not this one. That is the gate's
+    // established semantics, stated at `edgeFieldTypes` for the same loop. Setting `fatal` here
+    // would be the larger change: every rule below `checkStructure` runs today on a graph with an
+    // unknown kind, and `rule003`'s own arms are written expecting to.
+    if (!Object.hasOwn(EDGE_KINDS, (e as { kind?: unknown }).kind as never)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_EDGE_KIND",
+        // `JSON.stringify` ANSWERS `undefined` FOR `undefined`, which would print the word "kind"
+        // followed by nothing and read as a formatting bug rather than as the missing declaration
+        // it is. `String()` covers every non-string this catches, and a string kind still gets its
+        // quotes so `""` is visible.
+        //
+        // NOT `describeValue`, although it is in this file now and renders safely — `JSON.stringify`
+        // prints `{}` and `[]` where `describeValue` prints "an object" and "an array", so swapping
+        // it is a message change and not a relocation. The class it cannot render — a `bigint`, a
+        // throwing `toJSON`, a circular object, and a `kind` whose Symbol key coercion throws — is
+        // named and pinned as THROWING in `test/graph/edge-field-types.test.ts`, and closing it is
+        // its own decision about those bytes.
+        message: `edge "${e.id}" declares kind ${JSON.stringify(e.kind) ?? String(e.kind)}, which is not an edge kind — its \`when\`, \`until\`, \`over\` and \`branches\` are all ignored and the edge is taken unconditionally`,
+        at: { edgeId: e.id },
+        fix: `use one of ${Object.keys(EDGE_KINDS).join(", ")}`,
+      });
     }
     // AND WHAT EACH KNOWN KEY HOLDS. `EDGE_FIELDS` used to be a NAME list — it said `maxWidth` was
     // allowed and nothing about its type, so `maxWidth: "24"` parsed and every reader that needed
