@@ -280,7 +280,17 @@ export interface RouterNode {
 export interface JoinNode {
   readonly branches: readonly NodeId[];
   readonly mode: "all" | "any" | "quorum" | "firstSuccess";
-  /** `quorum` only: an integer count, or a fraction of the branch width. */
+  /**
+   * `quorum` only: `k <= 1` is a FRACTION of the branch width and `k > 1` an integer count —
+   * `#maybeFireJoin` computes `need = k <= 1 ? Math.ceil(k * expected) : k`, so `k: 1` asks for
+   * EVERY branch and not for one, which is this field's most confusable value.
+   * It is a FLOOR and not only a short-circuit threshold: a quorum barrier released because no
+   * further arrival is possible refuses with `E_QUORUM_UNREACHABLE` when FEWER THAN `need`
+   * branches contributed — not merely when none did — whatever `onBranchError` says, so 1 of 2
+   * with `need` 2 under `skip` FAILS rather than folding the one that arrived, and the refusal
+   * names `need`, the branch width and how many contributed
+   * (`test/run/join-quorum-k-is-a-floor.test.ts`).
+   */
   readonly k?: number;
   readonly onBranchError: "fail" | "skip" | "compensate";
 }
@@ -918,21 +928,78 @@ export const POLICY_FIELDS: Readonly<Record<"graphPolicy" | "nodePolicy" | "budg
   expansion: ["maxNodes", "maxDepth", "maxFanout", "maxLoopIterations"],
 };
 
-export const EDGE_FIELDS: readonly string[] = [
-  "id",
-  "from",
-  "to",
-  "kind",
-  "when",
-  "over",
-  "as",
-  "maxWidth",
-  "branches",
-  "until",
-  "maxIterations",
-  "codes",
-  "compensates",
-];
+/**
+ * AND WHAT EACH ONE HOLDS. A NAME ALLOW-LIST IS HALF A SCHEMA, and the missing half was being
+ * written out by hand, once per field that had a type.
+ *
+ * This was `readonly string[]`: it said which keys an edge may carry and nothing about their
+ * values, so `maxWidth: "24"` parsed. Every reader that needed the type then tested for it
+ * itself — `rule006Cycles` on `maxIterations`, `rule007Fanout` on `maxWidth`, and `#assertBound`
+ * in `run/engine.ts` a third time — which is one predicate per field per reader, and the third
+ * copy is what turned this from a note into TODO §A.62. The tag is now the schema and
+ * `graph/validate.ts` checks it once, generically, in `checkStructure`; adding a fourteenth field
+ * with a type costs one row here and no predicate anywhere.
+ *
+ * THE THREE TAGS ARE THE THREE SHAPES `EdgeSpec` ACTUALLY DECLARES, no more:
+ *
+ *     string        `EdgeId`, `NodeId`, `EdgeKind`, an expression, a channel name
+ *     count         a safe integer. The `>= 1` is NOT here: `maxWidth: 0` and
+ *                   `maxIterations: 0` are well-typed counts with a policy problem, and the
+ *                   rules that own that policy keep their own codes for it (GRAPH007's
+ *                   ceiling, GRAPH006's unbounded loop). A parse decides types; a rule decides
+ *                   meaning.
+ *     stringArray   `readonly NodeId[]`, `readonly string[]`
+ *
+ * `readBy` IS THE `/** <kind> only. *​/` COMMENT ABOVE EACH FIELD, MADE READABLE — it says which
+ * kind DECLARES the field, which is NOT the same as "no other kind reads it". Nine of the thirteen
+ * carry such a comment, and `allowed-fields.test.ts` scrapes them out of this file and cross-checks
+ * them against this column, so the prose and the data cannot drift.
+ *
+ * "DECLARED FOR", AND THE WORD IS EXACT, because two readers cross kinds and an earlier version of
+ * this paragraph claimed they do not:
+ *
+ *     run/externalise.ts   walks EVERY edge and reads `when`, `until`, `over` and `as` whatever the
+ *                          kind is, deleting each named channel from the externalisable set — so a
+ *                          `seq` edge carrying a well-typed `as` really does change what the run
+ *                          externalises.
+ *     checkCodes           runs over every edge, so `codes: ["nope"]` on a `seq` edge draws
+ *                          `GRAPH003_UNKNOWN_ERROR_CODE` from a rule that read it.
+ *
+ * THE ADVICE IS STILL RIGHT, and the reason is the arm's own precondition rather than luck:
+ * `edgeFieldTypes` reaches the "remove it" branch only for a value that FAILS its tag. A
+ * wrong-typed `as` is a value `out.delete(...)` cannot match and `checkCodes` skips, so no reader
+ * — cross-kind or not — is using it, and removing it cannot change a behaviour it was producing.
+ * Were the arm ever widened to WELL-TYPED values on a non-declaring kind, this is the paragraph
+ * that would make it wrong.
+ *
+ * KEYED AND NOT A SECOND EXPORT, for the reason `POLICY_FIELDS` gives ten lines up: each list is
+ * one name on a pinned public surface. The tag union is written inline rather than named, so this
+ * change adds no exported type either, and the key ORDER is the old array's order — `Object.keys`
+ * preserves it, so the `may declare ...` fix `unknownKeys` prints is byte-for-byte what it was.
+ *
+ * SIX OF THE THIRTEEN ARE NOT RE-CHECKED AT THE PARSE, because a refusal already exists for each
+ * and a second spelling of one refusal is how two diagnostics come to disagree. They are named,
+ * with the code that covers each and the two values that code cannot survive, in `validate.ts`'s
+ * `TYPE_CHECKED_ELSEWHERE` — the default here is to CHECK, so a field added to this table is
+ * type-checked unless somebody opts it out there.
+ */
+export const EDGE_FIELDS: Readonly<
+  Record<string, { readonly type: "string" | "count" | "stringArray"; readonly readBy?: EdgeKind }>
+> = {
+  id: { type: "string" },
+  from: { type: "string" },
+  to: { type: "string" },
+  kind: { type: "string" },
+  when: { type: "string", readBy: "conditional" },
+  over: { type: "string", readBy: "fanout" },
+  as: { type: "string", readBy: "fanout" },
+  maxWidth: { type: "count", readBy: "fanout" },
+  branches: { type: "stringArray", readBy: "join" },
+  until: { type: "string", readBy: "loop" },
+  maxIterations: { type: "count", readBy: "loop" },
+  codes: { type: "stringArray", readBy: "error" },
+  compensates: { type: "string", readBy: "compensation" },
+};
 
 /**
  * And one level in AGAIN — the four blocks the five lists above walk straight past.

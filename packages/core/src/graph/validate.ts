@@ -863,6 +863,282 @@ function unknownKeys(
 }
 
 /**
+ * THE EDGE FIELDS THIS PASS DOES NOT RE-CHECK, and the check that already refuses every
+ * wrong-typed value of each.
+ *
+ * `EDGE_FIELDS` carries a type per field (see its docstring in `graph/spec.ts`), and
+ * `edgeFieldTypes` below enforces it. Six of the thirteen are left out, because for each one a
+ * refusal already covers EVERY wrong type — measured, one graph per value, in
+ * `test/graph/edge-field-types.test.ts`, which is what stops this set from becoming a list of
+ * holes somebody once believed were covered:
+ *
+ *     id          GRAPH003_BAD_ID       `isSafeId` is false for every non-string
+ *     from, to    GRAPH003_DANGLING_EDGE  a non-string is not a node id, so it dangles
+ *     kind        GRAPH003_UNKNOWN_EDGE_KIND  in `graph/compile.ts`, and its own comment says
+ *                 "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE"
+ *     when, until GRAPH004_EXPR         `checkExpr` refuses every value, strings included
+ *
+ * "REFUSES EVERY WRONG TYPE" IS THE CLAIM, AND IT HAS ONE STATED EXCLUSION. Five of the six are
+ * total, now that the sites naming the value render it through `describeValue` — before that a
+ * `symbol` id threw `TypeError: Cannot convert a Symbol value to a string` out of this function
+ * and a `bigint` id threw `Do not know how to serialize a BigInt` out of `badId`, which is a crash
+ * where a refusal belonged. `kind` is the exclusion: `unknownEdgeKinds` builds its message with
+ * `JSON.stringify(edge.kind)` in `graph/compile.ts`, so `kind: 10n` and a `kind` whose `toJSON`
+ * throws still come out of `compile` as an exception rather than a diagnostic. That file is not
+ * this one's to edit; the two values are pinned as throwing in
+ * `test/graph/edge-field-types.test.ts` so the exclusion is a measured fact and not a hope.
+ *
+ * A SECOND SPELLING OF ONE REFUSAL is the thing being avoided, and `objectBlock` below states the
+ * cost: "an eighth spelling of one idea is how diagnostics come to disagree about what they
+ * mean". For `kind` it is not even a matter of taste — `unknownEdgeKinds` runs BEFORE
+ * `validateGraph`, so a check here would print two refusals for one mistake.
+ *
+ * THE DEFAULT IS TO CHECK. A field added to `EDGE_FIELDS` is type-checked unless somebody opts it
+ * out here, which is the fail-closed direction: the failure mode of forgetting this set is a
+ * duplicate diagnostic, not a hole.
+ */
+const TYPE_CHECKED_ELSEWHERE: ReadonlySet<string> = new Set(["id", "from", "to", "kind", "when", "until"]);
+
+/**
+ * One predicate per tag of `EDGE_FIELDS` — the whole of the type half of the edge schema.
+ *
+ * `count` IS `Number.isSafeInteger` ALONE, and the missing `>= 1` is deliberate. `maxWidth: 0` and
+ * `maxIterations: 0` are well-typed counts with a policy problem: a fan-out of nothing is silent
+ * and a loop bound of nothing is unbounded, and the rules that own those facts —
+ * `rule007Fanout`'s ceiling and `rule006Cycles`' unbounded loop — keep the codes they have always
+ * had for them, which three suites assert on. A parse decides types; a rule decides meaning. The
+ * refusal below still says "not a positive integer" for those two, because that is the sentence
+ * they have always printed and the values that reach it are not integers at all.
+ *
+ * `stringArray` INDEX-WALKS, AND `Array.prototype.every` IS WHY. `every` SKIPS HOLES: it visits
+ * own indices only, so `new Array(2)` — and any array-like whose `length` is larger than the
+ * indices it actually has — passed `v.every(x => typeof x === "string")` VACUOUSLY and then
+ * reached `digest(spec)`, which walks `0..length-1` and does not skip. Measured on the fixture,
+ * one graph per case:
+ *
+ *     branches: new Array(2)  ->  THREW CanonicalizationError: undefined array element
+ *                                 at edges[2].branches[0]
+ *     branches: [, "a"]       ->  the same, at edges[2].branches[0]
+ *     codes: new Array(1)     ->  the same, at edges[13].codes[0]
+ *
+ * That is the exact crash class this check exists to close, reached by the one value shape `every`
+ * cannot see. The loop below asks about every index the length claims, which is the same set
+ * `canonical.ts` will ask about.
+ */
+const EDGE_FIELD_IS: Readonly<Record<"string" | "count" | "stringArray", (v: unknown) => boolean>> = {
+  string: (v) => typeof v === "string",
+  count: (v) => Number.isSafeInteger(v),
+  stringArray: (v) => {
+    if (!Array.isArray(v)) return false;
+    for (let i = 0; i < v.length; i++) if (typeof v[i] !== "string") return false;
+    return true;
+  },
+};
+
+/**
+ * What a field of each tag is, in the words the refusal uses, and the edit it asks for.
+ *
+ * "OR REMOVE IT" IS PER TAG AND IS DECIDED BY MEASURING EVERY FIELD OF THAT TAG on the kind that
+ * declares it, because this `to` is only ever used on THAT kind — the other branch of
+ * `edgeFieldTypes` writes its own "remove it" and never comes here. Removal has to be a fix the
+ * compiler then accepts, and for the `string` fields it is not:
+ *
+ *     over / as missing on a fanout          GRAPH007_FANOUT_INCOMPLETE
+ *     compensates missing on a compensation  GRAPH012_NO_COMPENSATES
+ *     maxWidth missing on a fanout           GRAPH007_NO_MAX_WIDTH  (`count`)
+ *     maxIterations missing on a loop        GRAPH006_UNBOUNDED_LOOP (`count`)
+ *     branches missing on a join             ok, zero diagnostics
+ *     codes missing on an error edge         ok, zero diagnostics
+ *
+ * — all six measured, one graph each. So `stringArray` keeps the hint and the other two do not. A
+ * fix an author follows into a second refusal is worse than no fix; a fix that withholds the
+ * simplest valid edit is worse than one that offers it. THE NEXT FIELD OF EITHER TAG HAS TO BE
+ * MEASURED THE SAME WAY — a required `stringArray` field would make this row wrong, which is why
+ * the table above it is the type and this one is the advice.
+ *
+ * `count` says "a whole number" and not "a whole number ≥ 1", because the tag is
+ * `Number.isSafeInteger` alone; the two fields that DO want `≥ 1` say so in their own row below.
+ * This row is unreached today for that reason, and it has to be right for the next count field
+ * rather than for the two that exist.
+ */
+const EDGE_FIELD_SHAPE: Readonly<Record<"string" | "count" | "stringArray", { readonly is: string; readonly to: string }>> = {
+  string: { is: "a string", to: "a string" },
+  count: { is: "a whole number", to: "a whole number" },
+  stringArray: { is: "an array of strings", to: "an array of strings, or remove it" },
+};
+
+/**
+ * DATA, NOT A PREDICATE: the two fields whose wrong-type refusal has a code of its own.
+ *
+ * `GRAPH007_BAD_MAX_WIDTH` and `GRAPH006_BAD_MAX_ITERATIONS` were the two hand-written type
+ * checks §A.62 exists to delete, and they are named by `test/examples-triage.test.ts` and by two
+ * suites under `test/graph/` — so the mechanism moved and the vocabulary did not. Everything else
+ * gets `GRAPH003_MALFORMED`, this file's existing answer at nine sites for "a value is not the
+ * shape it must be". A THIRD code for a refusal two codes already name is the thing not to add,
+ * and nothing here has to be touched to add a fourteenth field.
+ */
+const EDGE_FIELD_REFUSAL: Readonly<
+  Record<
+    string,
+    { readonly code: string; readonly is: string; readonly to: (maxFanout: number) => string; readonly because: string }
+  >
+> = {
+  maxWidth: {
+    code: "GRAPH007_BAD_MAX_WIDTH",
+    is: "a positive integer",
+    // THE GRAPH'S OWN CEILING, not a bare `≥ 1`. `rule007Fanout` printed `between 1 and
+    // ${expansion.maxFanout}` here before this check took the type half, and dropping it made the
+    // fix less useful than the one it replaced — an author told `≥ 1` can still write a width the
+    // very next rule refuses. The parse has the whole spec, so the number is readable.
+    to: (maxFanout) => `a whole number between 1 and ${maxFanout} (unquoted: 24, not "24")`,
+    because:
+      "the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, " +
+      "and neither reader can use this value",
+  },
+  maxIterations: {
+    code: "GRAPH006_BAD_MAX_ITERATIONS",
+    is: "a positive integer",
+    to: () => 'a whole number ≥ 1 (unquoted: 3, not "3")',
+    because:
+      "the bound is compared against the iteration counter and multiplied into the node's total multiplicity, " +
+      "and neither reader can use this value",
+  },
+};
+
+/**
+ * `expansion.maxFanout` WITHOUT DIAGNOSING IT, because `expansionOf` is the one allowed to do
+ * that — and on the path that reaches this function, `expansionOf` NEVER RUNS.
+ *
+ * AN EARLIER VERSION OF THIS COMMENT SAID THE AUTHOR STILL GETS THE BAD MEMBER'S OWN REFUSAL
+ * "as well". THAT IS FALSE, and the measurement is one graph carrying both faults:
+ *
+ *     maxFanout: "24" alone              GRAPH003_MALFORMED — policy.expansion.maxFanout is "24",
+ *                                        which is not a positive integer …
+ *     maxFanout: "24" + maxWidth: "24"   GRAPH007_BAD_MAX_WIDTH ONLY, ceiling 32
+ *
+ * `edgeFieldTypes` is fatal, `checkStructure` gates, and `expansionOf` is called after the gate —
+ * so a graph with a wrong-typed edge field never reaches it and the expansion member's refusal is
+ * suppressed until the author has fixed the edge and compiled again. Both faults were reported in
+ * one pass before this check existed. That is the cost of moving the type check in front of the
+ * gate, it is paid on multi-fault graphs only, and it is the same suppression `edgeFieldTypes`
+ * documents for warnings and for unrelated errors — recorded here because THIS function is where a
+ * reader would otherwise conclude the opposite.
+ *
+ * WHAT IS TRUE: the number is `expansionOf`'s, member for member — `Object.hasOwn`, then a
+ * declared value that is a positive integer, else `DEFAULT_EXPANSION`. `Object.hasOwn` and not a
+ * bare index, for the reason `edgeFieldTypes` gives: with `Object.prototype.maxFanout = 8` set and
+ * a graph that declares no `maxFanout` of its own, a bare read returned 8 while `expansionOf`
+ * returned 32, so the fix said "between 1 and 8" about a ceiling `rule007Fanout` enforced at 32 —
+ * two numbers for one limit, which is worse than either.
+ */
+function maxFanoutOf(spec: GraphSpec): number {
+  const policy: unknown = spec.policy;
+  if (typeof policy !== "object" || policy === null) return DEFAULT_EXPANSION.maxFanout;
+  const declared: unknown = (policy as Record<string, unknown>)["expansion"];
+  if (typeof declared !== "object" || declared === null) return DEFAULT_EXPANSION.maxFanout;
+  if (!Object.hasOwn(declared as Record<string, unknown>, "maxFanout")) return DEFAULT_EXPANSION.maxFanout;
+  const v: unknown = (declared as Record<string, unknown>)["maxFanout"];
+  return isPositiveInt(v) ? v : DEFAULT_EXPANSION.maxFanout;
+}
+
+/**
+ * Every declared field of one edge, against the type `EDGE_FIELDS` gives it.
+ *
+ * FATAL, for the reason `checkStructure`'s own header gives — "structural problems make every
+ * later rule report nonsense". Being fatal means this refusal SUPPRESSES every diagnostic below
+ * it, including warnings an author would otherwise also see; that is the gate's established
+ * semantics and not a side effect of this rule. Two measured consequences of the alternative:
+ * `computeFanoutStacks` multiplies the widths, so one `NaN` makes every downstream `parallelWidth`
+ * `NaN` and GRAPH010's concurrent-writer refusal silently stops firing; and a `NaN` or `Infinity`
+ * in any of the seven fields this checks used to reach `digest(spec)` and throw
+ * `CanonicalizationError: non-finite number` OUT of `compile`.
+ *
+ * IT READS THE EDGE'S KIND, and the two branches are different advice rather than different
+ * wording. Nine fields are declared for ONE kind (`EDGE_FIELDS`' `readBy`, which is `EdgeSpec`'s
+ * own `<kind> only` comment made readable):
+ *
+ *     the edge IS that kind      the refusal is the one that rule printed, word for word, and the
+ *                                fix says to CORRECT the value — which is right, because removing
+ *                                it is a second refusal (`GRAPH007_NO_MAX_WIDTH`,
+ *                                `GRAPH007_FANOUT_INCOMPLETE`, `GRAPH012_NO_COMPENSATES`).
+ *     the edge is NOT that kind  nothing reads the field, so telling an author to write a valid
+ *                                value would be telling them to write one nothing looks at. The
+ *                                fix says to REMOVE it, and the message says which kind declares
+ *                                it instead of asserting a reader that does not exist.
+ *
+ * `Object.hasOwn`, not `edge[field]`: the file's rule one screen down, for the reason stated there
+ * — `in` and a bare index walk the prototype chain, so `Object.prototype.maxWidth = "24"` made
+ * EVERY edge in EVERY graph look as though it had declared one. `unknownKeys` already reads own
+ * keys; this now agrees with it.
+ *
+ * `describeValue` for the value AND for the edge's own id, which is untrusted here too (§A.73).
+ * `describeValue("e1")` is `"e1"`, so a well-typed id renders as the surrounding lines' own
+ * `edge "${e.id}"` did — and an id carrying a newline is escaped rather than able to forge a line.
+ */
+/**
+ * ONE SPELLING OF "THAT FIELD CANNOT HOLD THAT", and both callers use it.
+ *
+ * `rule007Fanout` still owns the RANGE half of `maxWidth` (`< 1`, which is a policy question this
+ * parse deliberately does not answer), so the same code, the same sentence and the same fix have
+ * two producers. They were two COPIES for one round, and they had already drifted in the way two
+ * copies always do: each fetched the ceiling its own way, so `Object.prototype.maxFanout = 8`
+ * made one say "between 1 and 8" while the other enforced 32. A function rather than a byte-equal
+ * test between two strings, because a test tells you they disagree and this makes it impossible.
+ *
+ * `kind` IS PASSED IN rather than read off the edge, so `rule007Fanout` — which has already
+ * narrowed to `e.kind === "fanout"` — gets the reading-kind branch by construction.
+ */
+function edgeFieldRefusal(
+  field: string,
+  id: unknown,
+  kind: unknown,
+  value: unknown,
+  maxFanout: number,
+): Diagnostic {
+  const decl = EDGE_FIELDS[field]!;
+  const shape = EDGE_FIELD_SHAPE[decl.type];
+  const refusal = Object.hasOwn(EDGE_FIELD_REFUSAL, field)
+    ? EDGE_FIELD_REFUSAL[field]!
+    : { code: "GRAPH003_MALFORMED", is: shape.is, to: () => shape.to, because: "" };
+  // `decl.readBy === undefined` cannot happen for a field `edgeFieldTypes` reaches — the four
+  // fields with no `readBy` are exactly `id`, `from`, `to` and `kind`, all in
+  // `TYPE_CHECKED_ELSEWHERE` — but a fourteenth field declared for every kind would land here, and
+  // "every kind declares it" is the same branch as "this kind declares it".
+  const declaresIt = decl.readBy === undefined || kind === decl.readBy;
+  const subject = declaresIt && typeof kind === "string" ? `${kind} edge` : "edge";
+  const tail = declaresIt
+    ? refusal.because === ""
+      ? ""
+      : ` — ${refusal.because}`
+    : ` — and ${field} is declared for ${String(decl.readBy)} edges, not for kind ${describeValue(kind)}`;
+  return {
+    severity: "error",
+    code: refusal.code,
+    message: `${subject} ${describeValue(id)} declares ${field} ${describeValue(value)}, which is not ${refusal.is}${tail}`,
+    ...(typeof id === "string" ? { at: { edgeId: id as EdgeId } } : {}),
+    fix: declaresIt
+      ? `set ${field} on edge ${describeValue(id)} to ${refusal.to(maxFanout)}`
+      : `remove ${field} from edge ${describeValue(id)}`,
+  };
+}
+
+function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: number, d: Diagnostic[]): boolean {
+  let bad = false;
+  const id = edge["id"];
+  const kind = edge["kind"];
+  for (const [field, decl] of Object.entries(EDGE_FIELDS)) {
+    if (TYPE_CHECKED_ELSEWHERE.has(field)) continue;
+    if (!Object.hasOwn(edge, field)) continue;
+    const value = edge[field];
+    if (value === undefined) continue;
+    if (EDGE_FIELD_IS[decl.type](value)) continue;
+    d.push(edgeFieldRefusal(field, id, kind, value, maxFanout));
+    bad = true;
+  }
+  return bad;
+}
+
+/**
  * A block that must be an object, reported when it is anything else.
  *
  * ABSENT IS FINE; MALFORMED IS NOT, and the two used to answer the same. The helper this
@@ -1417,7 +1693,11 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     }
   };
 
-  for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge "${e.id}"`);
+  // `describeValue(e.id)`, and this template is where a `symbol` edge id threw `TypeError: Cannot
+  // convert a Symbol value to a string` out of the whole compile — the first thing in the file to
+  // name an id, before anything has said whether it is one. See the edge loop below for the rest of
+  // the argument; a string id renders identically, quotes included.
+  for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge ${describeValue(e.id)}`);
   for (const n of spec.nodes) checkCodes(n.retry?.onlyIf, { nodeId: n.id }, `node "${n.id}".retry.onlyIf`);
   for (const n of spec.nodes) checkRetryable(n.retry?.onlyIf, n.id);
 
@@ -1546,7 +1826,15 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     const base = {
       severity: "error" as const,
       code: "GRAPH003_BAD_ID",
-      message: `${what} ${JSON.stringify(id)} is not a usable id`,
+      // `describeValue`, NOT `JSON.stringify`, and the difference is that one of them throws on the
+      // value it is describing. `JSON.stringify(10n)` is `TypeError: Do not know how to serialize a
+      // BigInt` and `JSON.stringify({toJSON(){throw}})` re-raises, so an id of either kind came out
+      // of `compile` as an exception rather than as this refusal — which is the shape
+      // `describeValue`'s own docstring exists for. Measured on the fixture: `id: 10n` threw from
+      // this line; it is now `edge id 10n is not a usable id`. A string, a number, `null` and a
+      // boolean render exactly as they did; an array is `an array`, an object `an object`, and
+      // `NaN`/`Infinity` are their own names where `JSON.stringify` called both `null`.
+      message: `${what} ${describeValue(id)} is not a usable id`,
       fix: "an id starts with a letter or digit and may then use letters, digits, `.`, `_` and `-`; `@ # / [ ] :` are the separators TaskId, branch paths and effect keys are built from",
     };
     d.push(at === undefined ? base : { ...base, at });
@@ -1811,26 +2099,40 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   }
 
   const seenEdges = new Set<string>();
+  // EVERY VALUE THIS LOOP NAMES GOES THROUGH `describeValue`, and it is the same argument §A.73
+  // made one rule over. `edge "${e.id}"` is a template over a value nobody has checked yet, and it
+  // had two failure modes measured on this fixture: a `symbol` id threw `TypeError: Cannot convert
+  // a Symbol value to a string` from the `checkCodes` call above, so the compiler crashed instead
+  // of refusing; and an id carrying a newline FORGED LINES in the CLI's own output, because the
+  // printer puts one diagnostic per line and nothing escaped it. `describeValue` quotes a string
+  // the way `JSON.stringify` does, so an id `isSafeId` accepts renders exactly as it did — the
+  // quotes moved into the renderer, they did not disappear.
+  const edgeMaxFanout = maxFanoutOf(spec);
   for (const e of spec.edges) {
     if (seenEdges.has(e.id)) {
-      d.push({ severity: "error", code: "GRAPH003_DUPLICATE_ID", message: `duplicate edge id "${e.id}"`, at: { edgeId: e.id } });
+      d.push({ severity: "error", code: "GRAPH003_DUPLICATE_ID", message: `duplicate edge id ${describeValue(e.id)}`, at: { edgeId: e.id } });
       fatal = true;
     }
     seenEdges.add(e.id);
     if (!seenNodes.has(e.from)) {
-      d.push({ severity: "error", code: "GRAPH003_DANGLING_EDGE", message: `edge "${e.id}" starts at unknown node "${e.from}"`, at: { edgeId: e.id } });
+      d.push({ severity: "error", code: "GRAPH003_DANGLING_EDGE", message: `edge ${describeValue(e.id)} starts at unknown node ${describeValue(e.from)}`, at: { edgeId: e.id } });
       fatal = true;
     }
     if (!seenNodes.has(e.to)) {
-      d.push({ severity: "error", code: "GRAPH003_DANGLING_EDGE", message: `edge "${e.id}" ends at unknown node "${e.to}"`, at: { edgeId: e.id } });
+      d.push({ severity: "error", code: "GRAPH003_DANGLING_EDGE", message: `edge ${describeValue(e.id)} ends at unknown node ${describeValue(e.to)}`, at: { edgeId: e.id } });
       fatal = true;
     }
     // A misspelled `when` does not disable a condition — it makes the edge unconditional, so a
     // branch the author meant to guard fires every time. `codes` on an error edge is the same
     // shape widened to every code.
-    if (unknownKeys(e as unknown as Record<string, unknown>, EDGE_FIELDS, `edge "${e.id}"`, { edgeId: e.id }, d)) {
+    if (unknownKeys(e as unknown as Record<string, unknown>, Object.keys(EDGE_FIELDS), `edge ${describeValue(e.id)}`, { edgeId: e.id }, d)) {
       fatal = true;
     }
+    // AND WHAT EACH KNOWN KEY HOLDS. `EDGE_FIELDS` used to be a NAME list — it said `maxWidth` was
+    // allowed and nothing about its type, so `maxWidth: "24"` parsed and every reader that needed
+    // a number tested for one by hand (TODO §A.62). The table carries the type now and
+    // `edgeFieldTypes` is the one place that enforces it.
+    if (edgeFieldTypes(e as unknown as Record<string, unknown>, edgeMaxFanout, d)) fatal = true;
   }
 
   // `Object.hasOwn` at every "is this a declared channel?" site in this file. `in` walks
@@ -1921,10 +2223,19 @@ function rule004Expressions(
   d: Diagnostic[],
 ): void {
   const check = (src: string, where: NonNullable<Diagnostic["at"]>, readsOf: NodeId | undefined): void => {
+    // `src` IS TYPED `string` AND IS NOT ONE WHENEVER THE AUTHOR WROTE SOMETHING ELSE: `compile`'s
+    // input is `JSON.parse` output that `cli.ts` casts, so `when: 42` arrives here as a number and
+    // `checkExpr` refuses it — correctly, and this is the refusal `TYPE_CHECKED_ELSEWHERE` defers
+    // `when` and `until` to. But the MESSAGE interpolated it raw, so `when: Symbol()` threw
+    // `TypeError: Cannot convert a Symbol value to a string` from this very line and the compile
+    // crashed instead of printing the refusal it had already decided on. A string passes through
+    // untouched — this message quotes the expression in backticks and must keep showing it as the
+    // author typed it, which is why it is not `describeValue` outright.
+    const shown = typeof src === "string" ? src : describeValue(src);
     const r = checkExpr(src, channelTypes);
     if (!r.ok) {
       for (const message of r.errors) {
-        d.push({ severity: "error", code: "GRAPH004_EXPR", message: `\`${src}\`: ${message}`, at: where });
+        d.push({ severity: "error", code: "GRAPH004_EXPR", message: `\`${shown}\`: ${message}`, at: where });
       }
       return;
     }
@@ -1942,7 +2253,7 @@ function rule004Expressions(
         d.push({
           severity: "error",
           code: "GRAPH004_UNDECLARED_READ",
-          message: `\`${src}\` reads channel "${ref}", which node "${readsOf}" does not declare in \`reads\``,
+          message: `\`${shown}\` reads channel "${ref}", which node "${readsOf}" does not declare in \`reads\``,
           at: where,
           fix: `add "${ref}" to node "${readsOf}".reads`,
         });
@@ -2147,30 +2458,19 @@ function rule006Cycles(spec: GraphSpec, idx: GraphIndex, channelTypes: Record<st
   }
 
   for (const e of idx.loopEdges) {
-    // `undefined` and `<= 0` keep the code they have always had — three suites assert on it.
-    // Split off from them is the case `< 1` cannot see: `"3" < 1` and `NaN < 1` are both false,
-    // so a `maxIterations` that is not a number at all passed this test and then reached
-    // `Math.max(1, loop.maxIterations ?? 1)` and `w.task.iteration + 1 < (e.maxIterations ?? 1)`.
-    // See `isPositiveInt` under GRAPH007 for why the two fields are checked the same way.
-    const iterations: unknown = e.maxIterations;
-    if (iterations === undefined || (Number.isSafeInteger(iterations) && (iterations as number) < 1)) {
+    // `undefined` and `<= 0` keep the code they have always had — three suites assert on it. What
+    // used to sit beside this test is gone: `"3" < 1` and `NaN < 1` are both false, so a
+    // `maxIterations` that was not a number at all passed here and needed a second, hand-written
+    // type check one arm down. `EDGE_FIELDS` carries the type now and `edgeFieldTypes` refuses a
+    // non-integer FATALLY in `checkStructure`, so by the time this rule runs the value is a safe
+    // integer or absent, and a bare `< 1` is the whole of what is left to decide (§A.62).
+    if (e.maxIterations === undefined || e.maxIterations < 1) {
       d.push({
         severity: "error",
         code: "GRAPH006_UNBOUNDED_LOOP",
         message: `loop edge "${e.id}" has no maxIterations`,
         at: { edgeId: e.id },
         fix: `add maxIterations to edge "${e.id}"`,
-      });
-    } else if (!isPositiveInt(iterations)) {
-      d.push({
-        severity: "error",
-        code: "GRAPH006_BAD_MAX_ITERATIONS",
-        message:
-          `loop edge "${e.id}" declares maxIterations ${describeValue(iterations)}, which is not a positive integer — ` +
-          `the bound is compared against the iteration counter and multiplied into the node's total multiplicity, ` +
-          `and neither reader can use this value`,
-        at: { edgeId: e.id },
-        fix: `set maxIterations on edge "${e.id}" to a whole number ≥ 1 (unquoted: 3, not "3")`,
       });
     }
     if (e.until === undefined) {
@@ -2218,37 +2518,48 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
 /**
  * A COUNT THAT CAME OUT OF A JSON FILE IS NOT A NUMBER UNTIL SOMETHING ASKS.
  *
- * `maxWidth` and `maxIterations` are both `number` in `EdgeSpec` and both arrive from a parse
- * that checks NAMES only (`graph/spec.ts`'s `EDGE_FIELDS`). Every rule that read them tested
- * presence (`=== undefined`) and then compared with a bare relational operator, which coerces:
- * `"24" > 25` is false, `"banana" > 25` is false because `NaN` compares false with everything,
- * and both sailed through. The second one is the damaging case — `computeFanoutStacks`
- * multiplies the widths, so one `NaN` makes every downstream `parallelWidth` `NaN` and
- * GRAPH010's concurrent-writer refusal, which reads that number, silently stops firing.
+ * IT IS NO LONGER THE EDGE FIELDS THAT ASK HERE. `maxWidth` and `maxIterations` used to be
+ * checked by this predicate inside `rule007Fanout` and `rule006Cycles`, because `EDGE_FIELDS` was
+ * a NAME allow-list and nothing between the JSON and the rule asked what type the value was:
+ * `"24" > 25` is false, `"banana" > 25` is false because `NaN` compares false with everything, and
+ * both sailed through. `EDGE_FIELDS` carries a type per field now and `edgeFieldTypes` enforces
+ * it at the structural pass, so the two rules test a RANGE and nothing more (TODO §A.62).
  *
- * `0` is refused for the same reason a string is: `run/engine.ts`'s `items.slice(0, maxWidth)`
+ * WHAT STILL ASKS, and why this survives: `policy.expansion`'s four bounds, whose scope has no
+ * typed table (`POLICY_FIELDS.expansion` is still names only — the same row one level in), and
+ * `countOr1` below, which protects arithmetic that can run on a spec no validator has seen.
+ *
+ * `>= 1` and not merely an integer, because these are bounds an author sets to limit something:
+ * `0` is refused for the same reason a string is — `run/engine.ts`'s `items.slice(0, maxWidth)`
  * takes zero branches and the run ends `E_OUTPUT_MISSING` having dropped every shard without a
- * word. A non-integer is refused because the two readers disagree about it — `slice` truncates
- * `2.5` to 2 while the width product keeps the fraction.
+ * word — and a non-integer because the two readers disagree about it, `slice` truncating `2.5` to
+ * 2 while the width product keeps the fraction.
  */
 function isPositiveInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 }
 
 /**
- * The two fields are ALSO read by arithmetic that runs BEFORE any rule sees them —
+ * The two edge counts are ALSO read by arithmetic that can run BEFORE any rule sees them —
  * `computeFanoutStacks` multiplies the widths inside `indexGraph`, and `multiplicityOf`
  * multiplies the loop bound. A `bigint` or a `symbol` there is a `TypeError` out of the middle
- * of the compiler, so the refusal below never gets to be printed and the caller gets a crash
- * where a diagnostic belonged. Driven, on a spec built in memory (JSON cannot express either,
- * but `compile` and `validateGraph` are exported and take a `GraphSpec`):
+ * of the compiler, so the refusal never gets to be printed and the caller gets a crash where a
+ * diagnostic belonged. Driven, on a spec built in memory (JSON cannot express either, but
+ * `compile` and `validateGraph` are exported and take a `GraphSpec`):
  *
  *     maxWidth: 10n       -> TypeError: Cannot mix BigInt and other types
  *     maxWidth: Symbol()  -> TypeError: Cannot convert a Symbol value to a number
  *
- * `1` is the stand-in and it is safe BECAUSE the graph is refused anyway: an unreadable width
- * is `GRAPH007_BAD_MAX_WIDTH` and an unreadable bound `GRAPH006_BAD_MAX_ITERATIONS`, so no
- * decision downstream of this number is ever taken on a graph that reached it.
+ * `1` is the stand-in and it is safe BECAUSE the graph is refused anyway: an unreadable width is
+ * `GRAPH007_BAD_MAX_WIDTH` and an unreadable bound `GRAPH006_BAD_MAX_ITERATIONS`, from
+ * `edgeFieldTypes` now rather than from the two rules, so no decision downstream of this number
+ * is ever taken on a graph that reached it.
+ *
+ * THIS IS NOT DEAD NOW THAT THE PARSE REFUSES THOSE VALUES, and the reason is the ORDER. `compile`
+ * builds the index through a THUNK precisely so `checkStructure` runs first (see
+ * `ValidationContext.index`), but `run/engine.ts` calls `indexGraph(graph.spec)` DIRECTLY, on a
+ * graph that reached it through the public `Executor.attach()` — the precedent `#assertBound`
+ * states for `EdgeKind`. On that path this is the only thing between a forged width and a throw.
  */
 function countOr1(v: unknown): number {
   return isPositiveInt(v) ? v : 1;
@@ -2291,21 +2602,23 @@ function rule007Fanout(spec: GraphSpec, expansion: ExpansionBudget, d: Diagnosti
       });
       continue;
     }
-    if (!isPositiveInt(e.maxWidth)) {
-      d.push({
-        severity: "error",
-        code: "GRAPH007_BAD_MAX_WIDTH",
-        message:
-          `fanout edge "${e.id}" declares maxWidth ${describeValue(e.maxWidth)}, which is not a positive integer — ` +
-          `the width is multiplied into every downstream node's parallel width and sliced off the fanned channel, ` +
-          `and neither reader can use this value`,
-        at: { edgeId: e.id },
-        fix: `set maxWidth on edge "${e.id}" to a whole number between 1 and ${expansion.maxFanout} (unquoted: 24, not "24")`,
-      });
+    // A WIDTH OF NOTHING, and nothing else: `items.slice(0, 0)` takes zero branches and the run
+    // ends `E_OUTPUT_MISSING` having dropped every shard without a word. The hand-written type
+    // check that used to stand here is gone — `EDGE_FIELDS` carries the type and
+    // `edgeFieldTypes` refuses a non-integer FATALLY in `checkStructure` under this same code, so
+    // what reaches this rule is a safe integer or absent and the bound is all that is left to
+    // decide (§A.62).
+    if (e.maxWidth < 1) {
+      // THE SAME PRODUCER THE PARSE USES, not a second copy of the same sentence. This arm and
+      // `edgeFieldTypes` raise one code with one wording for one field, and the two spellings had
+      // already drifted on how the ceiling is fetched before they were merged into
+      // `edgeFieldRefusal`. `expansion.maxFanout` here is the REAL one, out of `expansionOf`,
+      // which is what `maxFanoutOf` reproduces on the earlier path.
+      d.push(edgeFieldRefusal("maxWidth", e.id, e.kind, e.maxWidth, expansion.maxFanout));
     }
     // The ceiling test is a bare `>` and must not run on a value that coerces: `"99" > 25` is
-    // false and `NaN > 25` is false, so an unreadable width used to pass it silently. `else`
-    // rather than a second `if`, so the narrowing above is what makes the comparison safe.
+    // false and `NaN > 25` is false, which is what the parse-time type check now makes
+    // impossible. `else` rather than a second `if`, so one width draws one refusal.
     else if (e.maxWidth > expansion.maxFanout) {
       d.push({
         severity: "error",

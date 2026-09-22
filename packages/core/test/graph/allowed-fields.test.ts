@@ -186,7 +186,79 @@ test("EVERY FIELD THE THREE INTERFACES DECLARE IS ALLOWED — the guard must not
   // that has fallen behind its interface refuses correct graphs, which is worse than the hole.
   assert.deepEqual([...NODE_FIELDS].sort(), membersOf("NodeSpec"), "NODE_FIELDS and NodeSpec disagree");
   assert.deepEqual([...SPEC_FIELDS].sort(), membersOf("GraphSpec"), "SPEC_FIELDS and GraphSpec disagree");
-  assert.deepEqual([...EDGE_FIELDS].sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
+  // `Object.keys`, because `EDGE_FIELDS` is keyed now: it carries a TYPE per field, not just the
+  // name (§A.62). The cross-check is the same one — every field `EdgeSpec` declares has a row —
+  // and the row's type is checked by `edge-field-types.test.ts`, against the same `EdgeSpec`.
+  assert.deepEqual(Object.keys(EDGE_FIELDS).sort(), membersOf("EdgeSpec"), "EDGE_FIELDS and EdgeSpec disagree");
+});
+
+test("`EDGE_FIELDS.readBy` IS `EdgeSpec`'S OWN `<kind> only` COMMENT, and the two cannot drift", () => {
+  // `readBy` decides what a wrong-typed field's refusal TELLS an author: on the kind that declares
+  // the field it says to correct the value, on any other kind it says to remove it (see
+  // `edgeFieldTypes`). That is advice, so it has to be right — and the knowledge was already in this
+  // file, in prose, above each field: `/** `fanout` only. */`. This scrapes those comments and
+  // requires the data to agree, so the table cannot say `join` while the interface says `fanout`.
+  //
+  // A comment governs the RUN of fields under it until the next one, which is how `over`, `as` and
+  // `maxWidth` share one `fanout only` and `until`/`maxIterations` share one `loop only`.
+  // THE MATCH IS PER JSDOC BLOCK, NOT PER LINE, and the single-line regex this replaces was a trap:
+  // rewrap `/** `fanout` only. */` onto two lines and it stopped matching, so `over` silently
+  // inherited the PRECEDING kind (`conditional`, off `when`) while the size-9 guard stayed
+  // satisfied — nine fields still attributed, one of them wrongly — and the failure, if any, blamed
+  // the TABLE. A block that exists and carries no `<kind> only` anywhere in it now fails by name,
+  // and says it is the comment that is unreadable.
+  const body = SPEC_SRC.slice(SPEC_SRC.indexOf("export interface EdgeSpec"));
+  const lines = body.slice(0, body.indexOf("\n}")).split("\n");
+  const scraped = new Map<string, string>();
+  let current: string | undefined;
+  let block: string | undefined; // the JSDoc immediately above the next field, if there is one
+  let inBlock = false;
+  let buf: string[] = [];
+  for (const line of lines) {
+    if (/^\s*\/\*\*/.test(line)) {
+      inBlock = true;
+      buf = [line];
+      if (/\*\//.test(line)) {
+        inBlock = false;
+        block = buf.join("\n");
+      }
+      continue;
+    }
+    if (inBlock) {
+      buf.push(line);
+      if (/\*\//.test(line)) {
+        inBlock = false;
+        block = buf.join("\n");
+      }
+      continue;
+    }
+    const field = /^\s*readonly (\w+)\??:/.exec(line);
+    if (field === null) continue;
+    if (block !== undefined) {
+      // A NEW BLOCK SITS DIRECTLY ABOVE THIS FIELD, so it is the authority for it — and if the
+      // phrase is not in it, that is a comment this test cannot read rather than a field that
+      // inherits. Failing here is the whole point: silence would re-attribute the field.
+      const phrase = /`(\w+)` only/.exec(block);
+      assert.ok(
+        phrase !== null,
+        `the JSDoc directly above \`${field[1]}\` carries no \`<kind> only\` phrase, so this test cannot say which kind declares it — fix the COMMENT (or, if the field really is for every kind, move it above the commented run):\n${block}`,
+      );
+      current = phrase[1];
+      block = undefined;
+    }
+    if (current !== undefined) scraped.set(field[1]!, current);
+  }
+  // The scrape found something, so an empty map cannot pass this vacuously.
+  assert.equal(scraped.size, 9, `expected nine fields under a \`<kind> only\` comment, got ${[...scraped.keys()].join(", ")}`);
+  for (const [field, kind] of scraped) {
+    assert.equal(EDGE_FIELDS[field]?.readBy, kind, `EDGE_FIELDS.${field}.readBy and EdgeSpec's comment disagree`);
+  }
+  // And the four with no comment carry no `readBy`, so "declared for one kind" and "declared for
+  // every kind" stay distinguishable.
+  for (const field of Object.keys(EDGE_FIELDS)) {
+    if (scraped.has(field)) continue;
+    assert.equal(EDGE_FIELDS[field]?.readBy, undefined, `${field} has a readBy but no \`<kind> only\` comment to justify it`);
+  }
 });
 
 test("EVERY FIELD THE POLICY INTERFACES DECLARE IS ALLOWED — the same, one level in", () => {
