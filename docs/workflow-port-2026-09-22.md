@@ -179,9 +179,9 @@ ls out                                   # ls: out: No such file or directory
 ```
 ! harden-config.json: GRAPH002_DEAD_END: …                                          ← stderr
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: …  (×2)                             ← stderr
-run 01M33CGY9APP56M85Q2YT0VH8Y — inspect it with: loom trace 01M33CGY9APP56M85Q2YT0VH8Y   ← stderr
+run 01M33MPNBCQ7N84RNGJJF4HYHZ — inspect it with: loom trace 01M33MPNBCQ7N84RNGJJF4HYHZ   ← stderr
 {
-  "runId": "01M33CGY9APP56M85Q2YT0VH8Y",
+  "runId": "01M33MPNBCQ7N84RNGJJF4HYHZ",
   "status": "awaiting_gate",
   "outputs": {},
   "usage": {
@@ -191,7 +191,7 @@ run 01M33CGY9APP56M85Q2YT0VH8Y — inspect it with: loom trace 01M33CGY9APP56M85
     "wallMs": 0
   }
 }
-gate gate_01M33CGYAFVQFJAN75R1WF83AH on node review — loom approve 01M33CGY9APP56M85Q2YT0VH8Y gate_01M33CGYAFVQFJAN75R1WF83AH --as YOUR_ID   ← stderr
+gate gate_01M33MPNCMM68Q8G4T2XGTNG61 on node review — loom approve 01M33MPNBCQ7N84RNGJJF4HYHZ gate_01M33MPNCMM68Q8G4T2XGTNG61 --as YOUR_ID   ← stderr
 ```
 exit 0. **Stdout is the JSON object and nothing else**, which is the first port's F4 holding on a
 second graph: `loom run … 2>/dev/null | jq .status` prints `"awaiting_gate"` here too.
@@ -248,26 +248,39 @@ loom gates "$RUN" 2>/dev/null
 ```json
 [
   {
-    "gateId": "gate_01M33CGYAFVQFJAN75R1WF83AH",
+    "gateId": "gate_01M33MPNCMM68Q8G4T2XGTNG61",
     "taskId": "review@root#8",
     "nodeId": "review",
     "policyRef": "oversight/harden@stable",
-    "contentDigest": "sha256:f03006e98e40026bb971199ac10a05f373f671403f003eebc859ef14c5d50698",
+    "contentDigest": "sha256:c4b44734d30d6aecca7df47a90ed88bd1f05d670ce3b5d3accd84639cbb2ef6a",
     "raisedAtSeq": 148,
-    "raisedAtTs": 1790041422159,
+    "raisedAtTs": 1790049998228,
     "state": "open",
     "tier": 0,
     "approvers": ["u:you"],
     "allowEdit": [],
-    "runId": "01M33CGY9APP56M85Q2YT0VH8Y",
+    "runId": "01M33MPNBCQ7N84RNGJJF4HYHZ",
     "onTimeout": "fail",
-    "reads": { "report": { … } }
+    "reads": { "report": { … } },
+    "readsResolved": [],
+    "readsUnresolved": [],
+    "readsTruncated": {},
+    "readsMayBeStale": []
   }
 ]
 ```
 
-`reads.report` is the whole thing — the gate node declares `"reads": ["report"]`, so the report it
-is holding comes down the same call. The three numbers a person decides on:
+**The `…` is the only thing elided, and the four `reads*` fields are shown rather than dropped** —
+an earlier draft of this paste silently omitted them, which mattered because each is a way `reads`
+can be less than it looks: `readsUnresolved` names channels the projection could not recompute,
+`readsTruncated` names ones it CUT at 64 KiB (`--max-bytes` is the dial), and `readsMayBeStale` names
+ones an earlier node on a fan-out branch has already written. All four are empty here — this gate sits
+after no fan-out and its report fits — and a reader who has never seen them full should know they can
+be. A quarter-megabyte manifest fills `readsTruncated` and the report stops being readable at the gate;
+`packages/core/test/examples-harden.test.ts` hits that case and reads through the disk instead.
+
+`reads.report` is the whole thing otherwise — the gate node declares `"reads": ["report"]`, so the
+report it is holding comes down the same call. The numbers a person decides on:
 
 ```bash
 loom gates "$RUN" 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, startedWith, open: (.open|length)}'
@@ -297,14 +310,14 @@ every pass could have found them.
 loom approve "$RUN" "$GATE" --as u:you
 ```
 
-Not silent: 132 lines of JSON, the finished run, ending in
+Not silent: 144 lines of JSON, the finished run, ending in
 
 ```json
     "wroteManifest": { "bytes": 476,  "path": "out/service.hardened.json" },
-    "wroteReport":   { "bytes": 1226, "path": "out/harden-report.md" }
+    "wroteReport":   { "bytes": 1252, "path": "out/harden-report.md" }
 ```
 
-(`bytes` is a UTF-16 code-unit count, so `wc -c` says 1232 for the report — it has six multibyte
+(`bytes` is a UTF-16 code-unit count, so `wc -c` says 1260 for the report — it has eight multibyte
 dashes in it. Same note as the first port's.)
 
 ```bash
@@ -391,13 +404,42 @@ loom audit  "$RUN"      # → ok — 16 rule(s) checked, 12 skipped    exit 0
 `fs.write`s, the human's decision, and the seeded PRNG draw the engine journals for every one of
 those tasks were all served from the journal rather than re-executed.
 
-**Three more manifests, because three arms of this workflow only show up on them.**
+**EIGHT more manifests, because every arm of this workflow only shows up on one of them.** Re-run
+against a freshly built binary after every fix in this document's `F14`, in one sweep:
+
+```bash
+for m in payments-worker legacy-gateway mixed-secrets unquoted-credentials \
+         floating-release dotted-env-key; do
+  RID=$(loom run graphs/harden-config.json --input "{\"manifestPath\":\"manifests/$m.json\"}" \
+        2>/dev/null | jq -r .runId)
+  printf '%-22s ' "$m"
+  loom gates "$RID" 2>/dev/null \
+    | jq -c '.[0].reads.report | {passes,stoppedBy,cascades,startedWith,open:(.open|length)}'
+done
+```
+
+```
+payments-worker        {"passes":1,"stoppedBy":"settled","cascades":0,"startedWith":2,"open":1}
+legacy-gateway         {"passes":12,"stoppedBy":"budget","cascades":5,"startedWith":7,"open":2}
+mixed-secrets          {"passes":3,"stoppedBy":"settled","cascades":1,"startedWith":2,"open":0}
+unquoted-credentials   {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":2,"open":2}
+floating-release       {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
+dotted-env-key         {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
+```
+
+**Read that table as six different ways the report can be wrong, each now pinned by a test.** The last
+four are the manifests F14 added: a cascade whose rule was already in the baseline for another secret
+(`mixed-secrets`, `cascades` 0 → 1); two credentials whose values are not strings and which used to
+produce ZERO findings (`unquoted-credentials`, `open` 0 → 2); and the two that used to reach the
+refusal this document calls unreachable (`floating-release`, `dotted-env-key`, both now `open` 1 with a
+remedy instead of a false accusation against the rule table).
+
+Taking the first two in turn:
 
 ```bash
 # 1 · A finding the tool CANNOT repair. No port is declared, so there is no probe target to invent.
-loom run graphs/harden-config.json --input '{"manifestPath":"manifests/payments-worker.json"}' 2>/dev/null | jq -r .runId
-loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, open: .open[0].rule}'
-# → { "passes": 1, "stoppedBy": "settled", "open": "no-healthcheck" }
+loom gates <runId> 2>/dev/null | jq '.[0].reads.report.open[0] | {rule, autofixable}'
+# → { "rule": "no-healthcheck", "autofixable": false }
 ```
 
 **`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains"**, and the difference
@@ -417,7 +459,7 @@ them apart is the report's own first paragraph: *"**the pass budget ran out with
 findings still open** — this manifest is better, not done."* A run whose report did not say so would
 be a person approving a manifest they believe is finished.
 
-**`"open": 2` is the number this report used to get wrong**, and it is F12's first defect: the auditor
+**`"open": 2` is the number this report used to get wrong**, and it is F14's first defect: the auditor
 reported only the FIRST undeclared secret per pass, so the gate said "Still open — 1" on a manifest
 with two. The check that does not depend on knowing the number is to harden the output again — it must
 need exactly as many passes as there were open auto-fixable findings, and then settle:
@@ -430,7 +472,7 @@ loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, startedWith, c
 rm manifests/legacy-round-two.json
 ```
 
-`"cascades": 0` is F12's second defect, fixed. Both entries here carry a static
+`"cascades": 0` is F14's second defect, fixed. Both entries here carry a static
 `cascadeOf: "plaintext-secret"`, and counting THAT is what made the old report say *"2 of those 2
 fix(es) closed a finding that DID NOT EXIST when the run started"* about two findings that were in the
 very first audit. `cascades` is now measured against `startedWith` — the first audit's own finding
