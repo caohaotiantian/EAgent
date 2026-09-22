@@ -860,6 +860,15 @@ test("P4 — RESIDUE: a nested join over an EMPTY fan still carries an outer bar
   // nothing, so it carries an outer barrier whose real work died." Closing it needs the fold to see
   // a member join's own `branchCount`, which lives in its `state.reduced` payload and is not on
   // `TaskRecord` — a projection question, not an arm of `#foldJoin`.
+  //
+  // AND SINCE §A.75, A `quorum` OUTER BARRIER AT `need > 1` REFUSES THIS SHAPE ON THE `k` FLOOR —
+  // which is why this test staying green is not evidence that nothing changed. `k: 0.5` of two
+  // members needs ONE, and `IJ` alone supplies it, so these rows are untouched; at `k: 1` (which is
+  // `ceil(1 × 2)`, i.e. BOTH) or `k: 2` the same graph now fails `E_QUORUM_UNREACHABLE` under a
+  // message that says what is true — one of two branches produced something and the graph asked for
+  // two. That is NOT this row closing and NOT B1's defect returning: the row is about a join
+  // counting as work it did not do, and the refusal above is about a count the graph itself
+  // declared. Both `k` values are driven in `join-quorum-k-is-a-floor.test.ts`.
   for (const mode of MODES) {
     const where = `mode=${mode}`;
     const empty = await runAcrossRestart(nestedJoinSpec(mode), [{ id: "a" }], approve, { empty: [] });

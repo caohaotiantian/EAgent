@@ -725,6 +725,13 @@ test("A STATIC SIBLING JOIN LOSING SOME ARMS STILL FOLDS — the refusal counts 
       // `writesHeldForJoin` is false and it applied its own writes at commit. What the refusal
       // stops is the FOLD and everything behind the barrier.
       assert.deepEqual(short.found, ["c"], "mode=quorum: the arm applied its own write at commit");
+      // BOTH REDUCERS, as the folding rows above assert. `total` is `sum` where `found` is
+      // `append_ordered`, and the surviving arm applied ITS OWN contribution to each at commit
+      // (root coordinate, so `writesHeldForJoin` is false) — so the refusal is visible as the
+      // absence of the FOLD, not as an empty channel. A `sum` that read 2 or 3 here would mean the
+      // refused barrier had folded something anyway, which is the failure this line can see and
+      // `found` alone cannot.
+      assert.equal(short.total, 1, "mode=quorum: one arm's own write under the `sum` reducer, and no fold on top of it");
     }
 
     // And the one row that must REFUSE: not one arm succeeded.
