@@ -645,7 +645,7 @@ back-edge running `fix → audit` — which then forces F4's problem onto the `u
 **Tried.** The obvious budget on the back-edge, once F3 had moved it to `fix → audit`:
 `"until": "settled || len(applied) >= 12"`. `fix` writes `applied`, which is `append_ordered`.
 
-**Happened.** Measured with two probes on a copy of the graph, counting `fix` tasks in `loom trace`:
+**Happened.** Measured with three probes on a copy of the graph, counting `fix` tasks in `loom trace`:
 
 ```
 $ # probe A — until: "len(applied) >= 1"
@@ -661,6 +661,21 @@ passes and exited by `settled`). So `applied` in that `until` is the node's own 
 CONTRIBUTION, not the accumulated channel: `len()` of it is 1 on every pass, forever.
 `run/engine.ts`'s `#edgesToTake` builds the scope as `{...scopeFor(p, …), ...outcome.writes}`, and
 for an `append_ordered` channel `outcome.writes` holds the delta.
+
+**Probe C isolates the cause, and is the one to re-run if you doubt this.** `findings` is written by
+`audit` and NOT by `fix`, so if the problem were "`until` sees stale or empty state" it would show up
+there too. `orders-api.json`'s first audit reports five findings:
+
+```
+$ # probe C — until: "len(findings) >= 3", same edge, same evaluation point
+$ loom run … ; loom trace <run> | grep -c 'loom.task fix'      # → 1
+$                loom trace <run> | grep -c 'loom.task audit'  # → 1
+```
+
+`len(findings) >= 3` was TRUE on the first evaluation — five is ≥ three — and stopped the loop after
+one pass. **A channel the loop's source does not write reads its real accumulated value at exactly
+the point where `applied` read 1.** The cause is the source node WRITING the channel, not the
+evaluation point.
 
 **Expected.** The channel's value. `until` is a predicate over channels; `len(applied) >= 12` reads
 as "twelve entries have accumulated" and there is nothing at the authoring surface to suggest
