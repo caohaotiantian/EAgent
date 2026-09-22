@@ -185,9 +185,9 @@ ls out                                   # ls: out: No such file or directory
 ```
 ! harden-config.json: GRAPH002_DEAD_END: …                                          ← stderr
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: …  (×2)                             ← stderr
-run 01M33MPNBCQ7N84RNGJJF4HYHZ — inspect it with: loom trace 01M33MPNBCQ7N84RNGJJF4HYHZ   ← stderr
+run 01M33QF27Z7C6TA7GPP9QWCAW6 — inspect it with: loom trace 01M33QF27Z7C6TA7GPP9QWCAW6   ← stderr
 {
-  "runId": "01M33MPNBCQ7N84RNGJJF4HYHZ",
+  "runId": "01M33QF27Z7C6TA7GPP9QWCAW6",
   "status": "awaiting_gate",
   "outputs": {},
   "usage": {
@@ -197,7 +197,7 @@ run 01M33MPNBCQ7N84RNGJJF4HYHZ — inspect it with: loom trace 01M33MPNBCQ7N84RN
     "wallMs": 0
   }
 }
-gate gate_01M33MPNCMM68Q8G4T2XGTNG61 on node review — loom approve 01M33MPNBCQ7N84RNGJJF4HYHZ gate_01M33MPNCMM68Q8G4T2XGTNG61 --as YOUR_ID   ← stderr
+gate gate_01M33QF299R5HKWSBETG339GD5 on node review — loom approve 01M33QF27Z7C6TA7GPP9QWCAW6 gate_01M33QF299R5HKWSBETG339GD5 --as YOUR_ID   ← stderr
 ```
 exit 0. **Stdout is the JSON object and nothing else**, which is the first port's F4 holding on a
 second graph: `loom run … 2>/dev/null | jq .status` prints `"awaiting_gate"` here too.
@@ -254,18 +254,18 @@ loom gates "$RUN" 2>/dev/null
 ```json
 [
   {
-    "gateId": "gate_01M33MPNCMM68Q8G4T2XGTNG61",
+    "gateId": "gate_01M33QF299R5HKWSBETG339GD5",
     "taskId": "review@root#8",
     "nodeId": "review",
     "policyRef": "oversight/harden@stable",
     "contentDigest": "sha256:c4b44734d30d6aecca7df47a90ed88bd1f05d670ce3b5d3accd84639cbb2ef6a",
     "raisedAtSeq": 148,
-    "raisedAtTs": 1790049998228,
+    "raisedAtTs": 1790052895017,
     "state": "open",
     "tier": 0,
     "approvers": ["u:you"],
     "allowEdit": [],
-    "runId": "01M33MPNBCQ7N84RNGJJF4HYHZ",
+    "runId": "01M33QF27Z7C6TA7GPP9QWCAW6",
     "onTimeout": "fail",
     "reads": { "report": { … } },
     "readsResolved": [],
@@ -320,13 +320,15 @@ Not silent: 144 lines of JSON, the finished run, ending in
 
 ```json
     "wroteManifest": { "bytes": 476,  "path": "out/service.hardened.json" },
-    "wroteReport":   { "bytes": 1252, "path": "out/harden-report.md" }
+    "wroteReport":   { "bytes": 1270, "path": "out/harden-report.md" }
 ```
 
-(`bytes` is a UTF-16 code-unit count and `wc -c` counts BYTES, so `wc -c` says 1260 against
-`"bytes": 1252` — a difference of eight, contributed by **four** em-dashes at three bytes each where
-UTF-16 counts one. An earlier draft said "eight multibyte dashes", conflating the count of dashes with
-the count of extra bytes. Same phenomenon as the first port's note, arithmetic restated.)
+(`bytes` is a UTF-16 code-unit count and `wc -c` counts BYTES, so `wc -c` says **1280** against
+`"bytes": 1270` — a difference of ten, contributed by **five** em-dashes at three bytes each where
+UTF-16 counts one. An earlier draft said "eight multibyte dashes", which conflated the count of dashes
+with the count of extra bytes and was wrong about both; the arithmetic is `5 × (3 − 1) = 10`. Same
+phenomenon as the first port's note. **Re-derived from the file rather than adjusted** — the dash count
+moved when the report's prose changed in F14 #6, which is exactly how the stale pair got there.)
 
 ```bash
 cat out/harden-report.md
@@ -335,7 +337,7 @@ cat out/harden-report.md
 ```markdown
 # Config hardening — orders-api
 
-8 fix(es) applied to `manifests/orders-api.json` over 8 pass(es); the audit then found nothing further this tool can repair.
+8 fix(es) applied to `manifests/orders-api.json`, one per pass; the audit then found nothing further — no rule this tool knows is unsatisfied.
 
 3 of those 8 fix(es) closed a finding that DID NOT EXIST when the run started — each was created by an earlier fix, and only a re-audit after every pass could have found it.
 
@@ -347,7 +349,7 @@ cat out/harden-report.md
 | 2 | `pull-policy-redundant` *(after `floating-image-tag`)* | `pullPolicy` | `Always` | `IfNotPresent` |
 | 3 | `runs-as-root` | `user` | `root` | `app` |
 | 4 | `workdir-not-readable` *(after `runs-as-root`)* | `workdir` | `/root/app` | `/srv/app` |
-| 5 | `plaintext-secret` | `env.DB_PASSWORD` | `hunter2` | `{"secretRef":"db-password"}` |
+| 5 | `plaintext-secret` | `env.DB_PASSWORD` | *(a string of 7 chars — not shown)* | `{"secretRef":"db-password"}` |
 | 6 | `secret-not-declared` *(after `plaintext-secret`)* | `secrets` | `[]` | `["db-password"]` |
 | 7 | `debug-logging-in-prod` | `env.LOG_LEVEL` | `debug` | `info` |
 | 8 | `no-healthcheck` | `healthcheck` | *(absent)* | `{"httpGet":{"path":"/healthz","port":8080}}` |
@@ -366,26 +368,46 @@ cat out/service.hardened.json
 ```json
 {
   "env": {
-    "DB_PASSWORD": { "secretRef": "db-password" },
+    "DB_PASSWORD": {
+      "secretRef": "db-password"
+    },
     "LOG_LEVEL": "info",
     "REGION": "eu-west-1"
   },
-  "healthcheck": { "httpGet": { "path": "/healthz", "port": 8080 } },
+  "healthcheck": {
+    "httpGet": {
+      "path": "/healthz",
+      "port": 8080
+    }
+  },
   "image": "registry.internal/orders-api:1.8.3",
   "name": "orders-api",
-  "ports": [8080],
+  "ports": [
+    8080
+  ],
   "pullPolicy": "IfNotPresent",
   "release": "1.8.3",
-  "secrets": ["db-password"],
+  "secrets": [
+    "db-password"
+  ],
   "stage": "prod",
   "user": "app",
   "workdir": "/srv/app"
 }
 ```
-(shown with the inner objects folded onto one line for this document; the real file is two-space
-indented throughout.) **The keys are in alphabetical order and the input's were not** — friction
-**F9**. A `git diff` against `manifests/orders-api.json` is the whole file rather than the eight
-fixes, which is why the fix table above exists.
+**That block is the file, byte for byte** — an earlier draft folded the inner objects onto one line "for
+this document", which is a small lie of exactly the kind §2 cannot afford: a walkthrough whose pasted
+output is prettier than the real thing is a walkthrough you cannot check. Both blocks in this section
+are now verifiable:
+
+```bash
+diff <(sed -n '/^```markdown$/,/^```$/p' docs/workflow-port-2026-09-22.md | sed '1d;$d') \
+     out/harden-report.md          # empty
+```
+
+**The keys are in alphabetical order and the input's were not** — friction **F9**. A `git diff` against
+`manifests/orders-api.json` is the whole file rather than the eight fixes, which is why the fix table
+above exists.
 
 **Hardening the hardened manifest applies ZERO fixes**, and that is the check worth running:
 
