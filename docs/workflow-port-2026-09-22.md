@@ -868,9 +868,13 @@ first port's log has an entry of this size too (F6, `examples/.gitignore`).
 - **Eight rules is a demonstration, not a policy.** A real deployment policy has dozens, and the
   one-fix-per-pass discipline that makes this readable at eight would need a budget in the hundreds.
   Whether that is still the right shape at that size is untested.
-- **The `until` on the `recheck` edge is a formality.** It reads `settled`, which is structurally
-  false wherever it is evaluated (the loop only runs when the audit said `false`), so the back-edge's
-  real bound is `maxIterations: 16` and the real decision is the pair of conditionals out of `audit`.
+- **The `until` on the `recheck` edge is a formality.** It reads `settled`, which is false wherever
+  it is evaluated: `fix` runs only when the `repair` conditional was true, i.e. when the audit wrote
+  `settled: false`, and `fix` does not write `settled`. So the back-edge's real bound is
+  `maxIterations: 16` and the real decision is the pair of conditionals out of `audit`. Consistent
+  with every run measured — the shipped manifest takes the back-edge on all eight `fix` tasks, and
+  an `until` that was ever true there would strand the run at `fix` (which has no other outgoing
+  edge) as F5's `E_OUTPUT_MISSING`, which never happened.
   The compiler requires an `until` (`GRAPH006_NO_STOP_RULE`) and F4 rules out putting anything
   meaningful in this one. Recorded here rather than as an eleventh entry because it is F4 and F5
   seen from the graph's side.
