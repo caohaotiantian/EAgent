@@ -435,8 +435,11 @@ that DID NOT EXIST when the run started" about findings that were in the very fi
 lists EVERY undeclared secret rather than the first: reporting one per pass is right for the FIXER,
 which applies one finding per pass, and wrong for the REPORT, where it said "Still open — 1" on a
 manifest with two — a person adds that secret, ships, and the deploy still fails at admission on the
-other. Both are F12 of `docs/workflow-port-2026-09-22.md`, both were found by a reviewer after the
-suite was green, and both now have a test that fails without the fix.
+other. Both are F14 of `docs/workflow-port-2026-09-22.md` — its **#1** and **#2** of six — both were
+found by a reviewer after the suite was green, and both now have a test verified to fail without its
+fix. **F14 is worth reading before you write a report of your own**: all six members are one sentence,
+*the report asserted something the run had not established*, and two of them are corrections to the
+paragraph that corrected the one before.
 
 **`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains".** `manifests/payments-worker.json`
 declares no port, so a missing healthcheck has no probe target to invent; it is reported, it is
@@ -508,10 +511,13 @@ this workflow can be wrong:
 The last six exist because a reviewer found the workflow wrong on each of them after the suite was
 green. That is the shape worth copying: **a fixture per way the report can lie**, not per feature.
 
-**All THREE refusals in `harden-parse.js` are one defect wearing three hats, and it is §8's defect** —
-the bytes are not JSON, the JSON is not a service manifest, and the read came back TRUNCATED (`fs.read`
-caps at 200,000 characters unless the node says otherwise and marks the cut inside the content, so a
-big manifest used to be reported as a syntax error; F12).
+**All FOUR refusals in `harden-parse.js` are one defect wearing four hats, and it is §8's defect** —
+the bytes are not JSON; the JSON parses but is not an OBJECT (`[1,2,3]`, or a manifest somebody wrapped
+in an array); the object declares no `name`/`image`; and the read came back TRUNCATED (`fs.read` caps
+at 200,000 characters unless the node says otherwise and marks the cut inside the content, so a big
+manifest used to be reported as a syntax error; F12). The count was "three" in two places until the
+members were enumerated — the not-an-object arm is the one that goes missing when you count from
+memory.
 Auditing is a search for ABSENCES — no pinned tag, no healthcheck, no declared secret — and a search
 for absences run against a document nothing understood finds nothing and prints a clean bill of
 health. Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` —

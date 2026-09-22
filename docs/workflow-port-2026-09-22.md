@@ -19,15 +19,21 @@ trip was mine**, a body still writing the channel name it had before a redesign,
 log: the binary named the node, the channel and the declaration in one line and it was fixed in
 seconds. That is what the other four should have looked like.)
 
-**F14 is a fourteenth entry of a different kind, and the most useful one to read**: **five defects in
+**F14 is a fourteenth entry of a different kind, and the most useful one to read**: **six defects in
 THIS PORT'S OWN workflow**, none found by its author. Two came from a fresh agent told to refute this
-log, three more from an independent reviewer who then drove §2 top to bottom. Every one of the five is
-the same sentence — *the report asserted something the run had not established* — which is the exact
-defect class this workflow exists to prevent. `CLAUDE.md` says **a builder's own green suite is not
-evidence**; F14 is the receipt, twice over, and the second round found three defects that the first
-round's fixes and tests sat next to without noticing.
+log; three more from an independent reviewer who then drove §2 top to bottom; the sixth from a THIRD
+review of the paragraph the second round had just written to fix the fifth. Every one of the six is the
+same sentence — *the report asserted something the run had not established* — which is the exact defect
+class this workflow exists to prevent.
 
-**Nothing in F1–F13 is fixed here — it is recorded.** F14's five are the port's own and are fixed, each
+`CLAUDE.md` says **a builder's own green suite is not evidence**. F14 is the receipt three times over,
+and the shape of it is worth more than any member: **each round's own correction round missed defects
+of the class it had just been fixing.** Round one fixed two and left three; round two fixed three and
+wrote the fourth instance of the class into the sentence replacing the third; round three found that
+one and a hole round one's own fix had OPENED — the escaping covered the `applied` table, and round
+one then made a hostile key land only in the list that had none.
+
+**Nothing in F1–F13 is fixed here — it is recorded.** F14's six are the port's own and are fixed, each
 with a test verified to FAIL with its fix reverted.
 
 ---
@@ -317,8 +323,10 @@ Not silent: 144 lines of JSON, the finished run, ending in
     "wroteReport":   { "bytes": 1252, "path": "out/harden-report.md" }
 ```
 
-(`bytes` is a UTF-16 code-unit count, so `wc -c` says 1260 for the report — it has eight multibyte
-dashes in it. Same note as the first port's.)
+(`bytes` is a UTF-16 code-unit count and `wc -c` counts BYTES, so `wc -c` says 1260 against
+`"bytes": 1252` — a difference of eight, contributed by **four** em-dashes at three bytes each where
+UTF-16 counts one. An earlier draft said "eight multibyte dashes", conflating the count of dashes with
+the count of extra bytes. Same phenomenon as the first port's note, arithmetic restated.)
 
 ```bash
 cat out/harden-report.md
@@ -438,8 +446,10 @@ Taking the first two in turn:
 
 ```bash
 # 1 · A finding the tool CANNOT repair. No port is declared, so there is no probe target to invent.
-loom gates <runId> 2>/dev/null | jq '.[0].reads.report.open[0] | {rule, autofixable}'
-# → { "rule": "no-healthcheck", "autofixable": false }
+RUN1=$(loom run graphs/harden-config.json \
+       --input '{"manifestPath":"manifests/payments-worker.json"}' 2>/dev/null | jq -r .runId)
+loom gates "$RUN1" 2>/dev/null | jq -c '.[0].reads.report.open[0] | {rule, autofixable}'
+# → {"rule":"no-healthcheck","autofixable":false}
 ```
 
 **`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains"**, and the difference
@@ -449,9 +459,12 @@ thing a person has to decide.
 
 ```bash
 # 2 · Dirtier than the pass budget. Seven inline credentials is fourteen fixes; the budget is twelve.
-loom run graphs/harden-config.json --input '{"manifestPath":"manifests/legacy-gateway.json"}' 2>/dev/null | jq -r .runId
-loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, startedWith, open: (.open|length)}'
-# → { "passes": 12, "stoppedBy": "budget", "cascades": 5, "startedWith": 7, "open": 2 }
+RUN2=$(loom run graphs/harden-config.json \
+       --input '{"manifestPath":"manifests/legacy-gateway.json"}' 2>/dev/null | jq -r .runId)
+GATE2=$(loom gates "$RUN2" 2>/dev/null | jq -r '.[0].gateId')
+loom gates "$RUN2" 2>/dev/null \
+  | jq -c '.[0].reads.report | {passes,stoppedBy,cascades,startedWith,open:(.open|length)}'
+# → {"passes":12,"stoppedBy":"budget","cascades":5,"startedWith":7,"open":2}
 ```
 
 A budget stop parks on a gate and exits 0 exactly like a converged one. The only thing that tells
@@ -464,11 +477,20 @@ reported only the FIRST undeclared secret per pass, so the gate said "Still open
 with two. The check that does not depend on knowing the number is to harden the output again — it must
 need exactly as many passes as there were open auto-fixable findings, and then settle:
 
+**Approve the legacy gate FIRST**, which an earlier draft of this block left out — and the omission is
+worth a sentence because it is the same failure as everything in F14. Without it,
+`out/service.hardened.json` is still the `orders-api` run's output, the block reads
+`{"passes":0,"startedWith":0}`, and the pasted `{2,2}` is a number from a walkthrough nobody could
+follow. **Two files in `out/` with no run id in their names is the trap**: they belong to whichever run
+was approved last.
+
 ```bash
+loom approve "$RUN2" "$GATE2" --as u:you >/dev/null      # ← writes THIS run's out/ files
 cp out/service.hardened.json manifests/legacy-round-two.json
-loom run graphs/harden-config.json --input '{"manifestPath":"manifests/legacy-round-two.json"}' 2>/dev/null | jq -r .runId
-loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, startedWith, cascades, stoppedBy}'
-# → { "passes": 2, "startedWith": 2, "cascades": 0, "stoppedBy": "settled" }
+RUN3=$(loom run graphs/harden-config.json \
+       --input '{"manifestPath":"manifests/legacy-round-two.json"}' 2>/dev/null | jq -r .runId)
+loom gates "$RUN3" 2>/dev/null | jq -c '.[0].reads.report | {passes,startedWith,cascades,stoppedBy}'
+# → {"passes":2,"startedWith":2,"cascades":0,"stoppedBy":"settled"}
 rm manifests/legacy-round-two.json
 ```
 
@@ -479,7 +501,7 @@ very first audit. `cascades` is now measured against `startedWith` — the first
 list — so it is 0 here and 3 on `orders-api.json`, and the sentence is printed only when it is true.
 
 ```bash
-# 3 · Three refusals, because each is a promise. Two of them below; the third is in the suite.
+# 3 · Four refusals, because each is a promise. Two below; the other two are pinned in the suite.
 loom run graphs/harden-config.json --input '{"manifestPath":"manifests/not-a-manifest.txt"}'
 ```
 
@@ -501,13 +523,21 @@ loom run graphs/harden-config.json --input '{"manifestPath":"manifests/no-image.
 #     would say this manifest is already compliant."
 ```
 
-**`harden-parse.js` refuses THREE ways and all three are one defect wearing three hats**, the same
-defect the first port's four refusals are about: auditing is a search for ABSENCES, and a search for
-absences run against a document nothing understood finds nothing and reports a clean bill of health.
-The two above are the bytes not being JSON and the JSON not being a manifest; **the third is a read
-that came back TRUNCATED** (F12), which is the one this port shipped wrong and the one whose failure
-mode is worst — a prefix of a manifest is a manifest with things missing from it, and everything
-missing reads as compliant. `{refuse: {reason}}` makes all three `validation`/`E_FUNCTION_REFUSED` —
+**`harden-parse.js` refuses FOUR ways and all four are one defect wearing four hats**, the same defect
+the first port's four refusals are about: auditing is a search for ABSENCES, and a search for absences
+run against a document nothing understood finds nothing and reports a clean bill of health. Named,
+because a count is worth nothing without its members:
+
+1. **the bytes are not JSON** — the block above;
+2. **the JSON parses but is not an OBJECT** — `[1,2,3]` reproduces it, and so does a manifest somebody
+   wrapped in an array by accident. This one is easy to miss when counting, which is why the count was
+   wrong in two places until it was enumerated;
+3. **the object is not a service manifest** — no `name` and/or no `image`, the block above;
+4. **the read came back TRUNCATED** (F12) — the one this port shipped wrong, and the one whose failure
+   mode is worst: a prefix of a manifest is a manifest with things missing from it, and everything
+   missing reads as compliant.
+
+`{refuse: {reason}}` makes all four `validation`/`E_FUNCTION_REFUSED` —
 the graph declined — rather than the `internal`/`E_INTERNAL` a `JSON.parse` left to throw would wear.
 
 `harden-fix.js`'s own refusal is the one you should not be able to reach: a repair that leaves its own
@@ -529,12 +559,12 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 19 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 22 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-**Nineteen tests.** Four are the ones the first port's suite has no analogue for, because its shape
+**Twenty-two tests.** Four are the ones the first port's suite has no analogue for, because its shape
 has no loop: **the pass count** (nine audits and eight fixes read out of `loom trace` — a graph that
 silently stopped after one pass would still park on a gate, still write a report and still exit 0,
 with a manifest carrying three findings its own fixes created); **the cascade order** (every
@@ -549,11 +579,28 @@ either improves somebody is told: one for **F5** (a `done` edge narrower than th
 for **F11** (`maxIterations` lowered to the budget). Each asserts that the message does NOT name the
 thing it should, which is what makes an improvement fail the test loudly.
 
-**Five exist because a reviewer found the workflow wrong after this suite was green** — F14's list:
-a non-string credential reported rather than skipped, a cascade keyed on finding identity, the two
-manifests that reached the "unreachable" refusal, the truncated read, and the credential's bytes
-kept out of the fix log. Each was verified to FAIL with its fix reverted, which is the only evidence
-that a regression test tests anything.
+**SEVEN exist because a reviewer found the workflow wrong after this suite was green**, and they map
+onto F14's six defects — one to one except where noted. Stating the mapping rather than a count,
+because an earlier draft said "five" and listed a set that matched neither the tests added nor F14's
+members:
+
+| F14 | test | added, or changed? |
+|---|---|---|
+| **#1** the gate undercounted `open` | *a manifest dirtier than the pass budget…* | **changed** — `open.length > 0` became `== 2`, plus the round-trip completeness check |
+| **#2** cascades not measured | *a cascade is MEASURED against the first audit…* | added |
+| **#3a** non-string credential skipped | *a credential whose value is not a string is REPORTED…* | added |
+| **#3b** identity keyed on rule name | *a cascade is identified by the FINDING…* | added |
+| **#4** the "unreachable" refusal reached twice | *two manifests that used to reach the unreachable refusal…* | added |
+| **#5** truncated read misreported | *a manifest read back TRUNCATED refuses…* | added |
+| **#5** credential bytes in the fix log | *the approval writes both files…* | **changed** — the assertion that blessed `was == "hunter2"` was inverted |
+| **#6** "already satisfied every rule" | *a report with nothing applied does not claim…* | added |
+| — escaping covered one path only | *a control character in a manifest cannot reach the report…* | added |
+
+So: **15 → 22 tests, seven added and two assertions inverted in place.** Every added one was verified
+to FAIL with its fix reverted, and the two changed ones fail against the pre-fix bodies — which is the
+only evidence that a regression test tests anything. The `cell()` escaping had NO test until the last
+row, and mutating its body to `return String(v);` left the suite green: that is why the hole it covers
+survived a whole review round.
 
 `examples-run.test.ts` picks the new graph up without being edited — its set is the directory — so
 the compile and resource-reachability halves were covered before this suite existed.
@@ -563,10 +610,10 @@ the compile and resource-reachability halves were covered before this suite exis
 ## 3 · Friction log
 
 Every entry is a place the shipped product cost more than it should have, with the command, what
-happened, what was expected, and what it cost. **Eleven found in the product (F1–F11), none fixed
-here.** F12 is a twelfth entry of a different kind: two defects in THIS PORT'S OWN workflow, found by
-an adversarial re-run after the suite was green, and fixed — recorded in the same log because the
-method that found them is the most transferable thing in this document.
+happened, what was expected, and what it cost. **Thirteen found in the product (F1–F13), none fixed
+here.** F14 is a fourteenth entry of a different kind: **six defects in THIS PORT'S OWN workflow**,
+none found by its author — recorded in the same log because the method that found them is the most
+transferable thing in this document.
 
 **THREE of the thirteen are one mechanism** — and the first version of this paragraph claimed seven,
 then listed six, and attributed three of them to a filter that has nothing to do with them. A
@@ -865,7 +912,7 @@ F6 rules out reading it from a body. The graph therefore states `len(applied) >=
 shipped graph's own `labels.residue-stop-rule-twice` says so, because there is nowhere else to say
 it.
 
-**Cost.** One probe run, and a permanent hazard in the shipped example — pinned as the thirteenth
+**Cost.** One probe run, and a permanent hazard in the shipped example — pinned as the fifteenth
 test in `examples-harden.test.ts`, labelled `RESIDUE`, asserting the message does NOT name the loop,
 so that improving it fails the test loudly.
 
@@ -1097,7 +1144,7 @@ $ loom run graphs/harden-config.json --input '{"manifestPath":"manifests/huge.js
 ```
 
 **Expected.** Either the whole file, or a refusal that says the read was cut. `builtin/tools.ts:370`
-defaults `maxBytes` to `200_000`, and `:383` appends the marker into the returned string:
+defaults `maxBytes` to `200_000`, and `:385` appends the marker into the returned string:
 `` `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` ``. So the body is handed 200,000
 valid characters plus a line of prose and blames the FILE for a syntax error that the READ created.
 The `details` beside it do carry `{bytes, truncated}` — but a `tool` node writes the tool's
@@ -1181,16 +1228,21 @@ gate listing and the written artefacts for the secret's actual bytes, which the 
 
 ### F14 · Defects in this port's OWN workflow, and what the method that found them cost
 
-**Not the product's friction — the port's.** **Five defects, in two rounds, none found by the author.**
-Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the suite was
-green at 13/13; round two was an independent reviewer who built the binary and drove §2 top to bottom,
-after round one's fixes and tests had landed. They are recorded here because `CLAUDE.md` says **a
-builder's own green suite is not evidence**, and this is what that costs when taken seriously. All five
-are fixed; each has a test verified to FAIL with its fix reverted.
+**Not the product's friction — the port's.** **Six defects, over three reviews, none found by the
+author.** Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the
+suite was green at 13/13. Round two was an independent reviewer who built the binary and drove §2 top to
+bottom, after round one's fixes and tests had landed. Round three re-read what round two had written.
+They are recorded here because `CLAUDE.md` says **a builder's own green suite is not evidence**, and
+this is what that costs when taken seriously. All six are fixed; each has a test verified to FAIL with
+its fix reverted.
 
-**The round-two finding that matters most is not any single defect — it is that round two existed.**
-Round one fixed two report defects and added tests that pass through the same code paths as three more
-defects without noticing them. A correction round is not a proof of correctness; it is one more pass
+**The finding that matters most is not any member — it is the pattern across the rounds.** Each round's
+own correction missed a defect of the class it had just been fixing: round one fixed two and left three
+in code its new tests ran through; round two wrote the FOURTH instance of the class into the sentence it
+was writing to fix the third; and round three found that one plus a hole **round one's fix had opened** —
+the escaping covered the `applied` table, then round one made a hostile key non-autofixable, so the only
+path such a key takes became the one path with no escaping on it. A correction round is not a proof of
+correctness; it is one more pass
 by somebody with the same blind spots.
 
 **1 · The gate undercounted what was still open, by half.** `harden-audit.js` reported only the FIRST
@@ -1275,25 +1327,52 @@ secret in a field no rule matches, **and this suite asserted that it did** — *
 is shown, because the approver has to see what left the file"*, in as many words. Now
 `{redacted:"string",chars:7}`, rendered *"a string of 7 chars — not shown"*.
 
-**What all five have in common, and it is one sentence:** **the report asserted something the run had
-not established.** Two asserted a completeness they had not checked (1, 3), two a novelty inferred from
-a constant (2, 4), and one asserted that showing a secret was a feature (5). The workflow's own doc
+**6 · "The manifest already satisfied every rule this tool can repair" — written to REPLACE #2, and the
+fourth instance of the class.** On `unquoted-credentials.json` that sentence printed two paragraphs
+above `## Still open — 2 … plaintext-secret`, a rule this tool repairs seven times on
+`legacy-gateway.json`:
+
+```
+### before
+## Applied, in order
+Nothing. The manifest already satisfied every rule this tool can repair.
+## Still open — 2
+- **`plaintext-secret`** (high) at `env.API_TOKEN` — …
+### after
+Nothing. No finding here is auto-fixable — see **Still open** below, which is 2 finding(s) a
+person has to act on.
+```
+
+What the run established is that nothing here was AUTO-FIXABLE. Whether the rules are "satisfied" is
+the opposite of what `open` says. Two weaker members of the same class went with it: *"over N pass(es)"*
+rendered the fix count a second time wearing the word "passes", though nothing in the state counts loop
+passes (nine `audit` tasks for eight fixes) — now *"one per pass"*, which is true by construction; and
+`severity`, a constant of the rule table, now says the word "severity" so it does not read as something
+this run computed.
+
+**What all six have in common, and it is one sentence:** **the report asserted something the run had
+not established.** Three asserted a completeness they had not checked (1, 3, 6), two a novelty inferred
+from a constant (2, 4), and one asserted that showing a secret was a feature (5). The workflow's own doc
 calls the cascade count *"the argument for the whole workflow"* — and an argument that is not measured
 is precisely what this project's property 3 is about. **The lens that finds these, stated so the next
-port can use it: for every number and every sentence the gate shows a person, name the thing in the
-run that establishes it. Where the answer is "a constant in the rule table" or "nothing", that is the
-defect.**
+port can use it: for every number and every sentence the gate shows a person, name the thing in the run
+that establishes it. Where the answer is "a constant in the rule table" or "nothing", that is the
+defect.** Run it over the sentence you just wrote to fix the last one, because that is where #4 and #6
+both came from.
 
-**Cost.** Two review rounds. Cheap, and only because somebody was told to look — twice. The method is
-the finding, and so is its limit: **round one's own correction round missed three of the five.** Four
-stale prose claims in shipped files were caught the same way in the same passes.
+**Cost.** Three review rounds, and each was cheap only because somebody was told to look. The method is
+the finding, and so is its limit, now measured rather than asserted: **round one missed three of the
+six; round two introduced one of them and missed the escaping hole its own fix had opened.** Five stale
+prose claims in shipped files were caught the same way in the same passes, and `cell()` — the helper
+whose docstring names the exact harm it prevents — had no test at all until round three, so mutating it
+to `return String(v);` was green.
 
 ---
 
 ## 4 · What is left open
 
-- **All eleven product entries, F1–F11.** None is fixed here; the brief was to record them. (F12's
-  two are this port's own and ARE fixed, each with a test that fails without the fix.)
+- **All thirteen product entries, F1–F13.** None is fixed here; the brief was to record them. (F14's
+  six are this port's own and ARE fixed, each with a test verified to fail without its fix.)
 - **The shipped graph carries two residues in its own `labels`**, `residue-stop-rule-twice` (F5) and
   `residue-single-writer` (F2), because both are things a reader of the graph needs and neither has
   anywhere better to live while F5 and F6 are open.
@@ -1315,5 +1394,5 @@ stale prose claims in shipped files were caught the same way in the same passes.
   an `until` that was ever true there would strand the run at `fix` (which has no other outgoing
   edge) as F5's `E_OUTPUT_MISSING`, which never happened.
   The compiler requires an `until` (`GRAPH006_NO_STOP_RULE`) and F4 rules out putting anything
-  meaningful in this one. Recorded here rather than as an eleventh entry because it is F4 and F5
+  meaningful in this one. Recorded here rather than as a fifteenth entry because it is F4 and F5
   seen from the graph's side.
