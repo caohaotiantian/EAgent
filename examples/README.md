@@ -2,7 +2,7 @@
 
 **This directory is a Loom workspace** — a directory with `graphs/` and `resources/` in it. Loom
 reads nothing else; `bench-cases.json` at the root is not a workspace file, it is §5's input, and
-`reports/` is not one either — it is §8's.
+neither `reports/` nor `manifests/` is one — they are §8's and §9's.
 
 ```bash
 npm install && npm run build:binary   # → bin/loom
@@ -10,7 +10,7 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Six graphs, and they do not all run the same way.** Without `--models-file` the only registered
+**Seven graphs, and they do not all run the same way.** Without `--models-file` the only registered
 adapter is the offline mock, and `loom run` says so on stderr before it starts.
 
 | graph | § | needs a model? |
@@ -21,14 +21,18 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
+| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three warnings that are wrong about their cause and right about a hazard** on every command: see §9 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
-directory, so a graph added later is covered without editing the test — and RUNS the three that
-need no model, asserting §5's six verdict strings and its `3/6 assertions passed`. Only §6 is
+directory, so a graph added later is covered without editing the test — and RUNS the three it can
+drive to COMPLETION without a model (§1, §3, §5), asserting §5's six verdict strings and its
+`3/6 assertions passed`. §8 and §9 need no model either and park on a human gate, which is why each
+has its own suite below; `two-person-approval` parks and is never answered. Only §6 is
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 §8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
 file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately
-copies only `graphs/` and `resources/`.
+copies only `graphs/` and `resources/`. §9 is the same arrangement one graph later:
+`packages/core/test/examples-harden.test.ts`, because it needs `manifests/`.
 
 ---
 
@@ -328,8 +332,16 @@ this one runs offline and means what it says, because there was never a model in
   read `reads` as "what the approver is being shown", not as the node's declaration. The digest
   stays and is a different thing: a BINDING to what the approver was shown, which `loom approve`
   re-derives and checks, not a summary anybody could read. A channel the graph classified
-  (`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
-  report prints whole. `reads` is best-effort and simply ABSENT, with a line on stderr naming the
+  (`secret_ref`) prints as `[secret]` rather than in the clear; nothing in §8 is classified, so its
+  report prints whole. **Classification is not the only door, and this sentence used to claim it was.**
+  A KEY NAME redacts too, whatever the channel declares — `security/redact.ts`'s `isSecretishKey`,
+  "belt and braces for hand-built payloads" as its own comment puts it — and no graph opts into that.
+  §9's report shows what it costs in both directions: its `hardened.env.DB_PASSWORD` prints `[secret]`
+  although by then it holds a harmless `{"secretRef":…}`, and so does its `secrets` list, which holds
+  only NAMES — while a field called `was` carried the live credential in the clear until §9's own
+  bodies stopped putting it there. Read "prints whole" as "prints whole unless a key is NAMED like a
+  secret"; F13 of `docs/workflow-port-2026-09-22.md` has the measurement.
+  `reads` is best-effort and simply ABSENT, with a line on stderr naming the
   gates and the reason, wherever it cannot be recomputed: no compile on record, a graph search that
   fails or finds no graph carrying that hash, no such node or task (what a run MUTATED after it
   started produces), and a gate MIRRORING one in a delegated child run — where the question is
@@ -375,3 +387,159 @@ pattern in `triage-classify.js` is anchored, `.` excludes `\r`, and `$` without 
 the true end of the string — so the first draft read a CRLF shard as completely clean and the run
 SUCCEEDED. That is a triage tool telling you a red suite is green, and it is the single worst thing
 this example could do.
+
+## 9 · `harden-config` — a convergence loop, ported
+
+A service manifest that has been in production for two years pulls `:latest`, runs as root, keeps a
+database password in `env`, logs at `debug`, and has no healthcheck. This graph fixes ONE finding per
+pass, **re-audits after every pass**, and asks you before it writes either the hardened manifest or
+the report explaining it.
+
+```
+  load ──seq──▶ parse ──seq──▶ audit ──conditional(!settled && len(applied) < 12)──▶ fix
+                                 ▲                                                   │
+                                 └──────── loop(until: settled, maxIterations: 16) ───┘
+
+  audit ──conditional(settled || len(applied) >= 12)──▶ collate ──seq──▶ review (human gate)
+  review ──seq──▶ write-manifest ──seq──▶ write-report
+```
+
+```bash
+loom compile graphs/harden-config.json                                    # ok + 3 warnings (F7 — right hazard, wrong cause), exit 0
+loom run     graphs/harden-config.json --input '{"manifestPath":"manifests/orders-api.json"}'
+# → "status": "awaiting_gate", and out/ does NOT exist yet.               exit 0
+loom trace   <runId>       # nine `audit` and eight `fix`, alternating
+loom gates   <runId>       # the gate's coordinates AND `reads.report`: the whole fix log
+loom approve <runId> <gateId> --as u:you                                  # exit 0
+cat out/harden-report.md   # 8 fixes over 8 passes, 3 of them cascades, 0 still open
+cat out/service.hardened.json
+loom replay  <runId>       # {"match": true, "hermetic": true}
+```
+
+**Why the loop is the workflow and not decoration.** Three of the eight fixes close a finding that
+DID NOT EXIST when the run started, because an earlier fix created it: pinning the floating tag makes
+`pullPolicy: "Always"` a pointless pull on every restart, dropping root makes a `/root/...` workdir
+unreadable by the process living in it, and moving a password behind a `secretRef` obliges the
+manifest to declare that secret or the deploy fails at admission. **A one-pass fixer ships a manifest
+that does not deploy.** `applied` is `append_ordered` and accumulates one entry per pass, so the
+person at the gate sees the whole chain in the order it was decided — which is the `replace`/`append`
+pair this graph is built on: `current` is where the manifest got to, `applied` is how.
+
+**Two things in that report are MEASURED and were not, which is the correction worth copying into any
+workflow shaped like this.** `cascades` is counted against `baseline` — the FIRST audit's own finding
+list, which `audit` writes once and `report.startedWith` states — and not against the rule table's
+static `cascadeOf` field. The two differ exactly when a manifest's first audit already holds a
+cascade-rule finding, and **the graph's own output is such a manifest** (a budget stop leaves
+`secret-not-declared` open), so re-hardening it used to print "2 of those 2 fix(es) closed a finding
+that DID NOT EXIST when the run started" about findings that were in the very first audit. And `open`
+lists EVERY undeclared secret rather than the first: reporting one per pass is right for the FIXER,
+which applies one finding per pass, and wrong for the REPORT, where it said "Still open — 1" on a
+manifest with two — a person adds that secret, ships, and the deploy still fails at admission on the
+other. Both are F14 of `docs/workflow-port-2026-09-22.md` — its **#1** and **#2** of six — both were
+found by a reviewer after the suite was green, and both now have a test verified to fail without its
+fix. **F14 is worth reading before you write a report of your own**: all six members are one sentence,
+*the report asserted something the run had not established*, and two of them are corrections to the
+paragraph that corrected the one before.
+
+**`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains".** `manifests/payments-worker.json`
+declares no port, so a missing healthcheck has no probe target to invent; it is reported, it is
+`autofixable: false`, and it does not stop the loop settling. The other definition spins to the pass
+budget on every such manifest and then headlines the report with an exhausted budget instead of with
+the one thing a person has to decide. When the budget IS what stopped it —
+`manifests/legacy-gateway.json`, seven inline credentials and fourteen fixes against a budget of
+twelve — `report.stoppedBy` is `"budget"` and the report says *"this manifest is better, not done"*,
+because a budget stop parks on a gate and exits 0 exactly like a converged one.
+
+**Six things this section exists to save you**, because nothing else in this workspace has a `loop`
+edge in it and `docs/workflow-port-2026-09-22.md` is the fourteen things it cost to find them.
+
+- **The loop's target needs a NON-loop inbound edge, or it is an entry node and runs at t=0.**
+  `graph/spec.ts` states the rule — *"ENTRY NODES are nodes with no inbound non-`loop` edge"* — and
+  nothing enforces it for a loop body: the graph compiles, and `fix` runs beside `parse` before
+  anything has written what it reads, failing `E_CHANNEL_UNDECLARED` under class `internal`. That is
+  why `fix` is entered by the `repair` **conditional** and the back-edge runs `fix → audit`.
+- **`until` is evaluated on the scope of the node the loop edge LEAVES, with that node's own writes
+  overlaid RAW.** So a channel the loop's source writes reads as its one-element CONTRIBUTION there,
+  not as the accumulated channel: `until: "len(applied) >= 12"` on the `recheck` edge is a bound that
+  can never fire, measured. The pass budget therefore lives on the two `conditional` edges out of
+  `audit`, where `audit` does not write `applied`, and the `until` on `recheck` is a formality the
+  compiler requires (`GRAPH006_NO_STOP_RULE`).
+- **The stop rule has TWO homes that must agree, and nothing checks that they do.** `repair`'s
+  `when` and `done`'s `when` are exact complements by construction. Narrow one alone and the graph
+  still compiles; at run time `audit` reaches a state where neither is true, takes no edge, and the
+  run fails `internal`/`E_OUTPUT_MISSING` — naming neither the loop nor the node that stopped. A body
+  cannot read either expression: `ctx.node.out` (§2) carries an edge's `maxIterations` and not its
+  `until`, and carries nothing at all for a `conditional`'s `when`.
+- **A channel written BEFORE the loop and INSIDE it is `GRAPH010_CONCURRENT_WRITE`**, because the
+  concurrency analysis drops `loop` edges and the loop body then has no ancestors. That is why
+  `fix` writes only the log and `audit` FOLDS it over the seed to get `current`: one writer per
+  channel, and the fix log is the state with the manifest as its projection. Changing the reducer
+  instead — the first half of that diagnostic's own `fix:` line — compiles and then meets the
+  entry-node bullet above.
+- **The bound has a THIRD home and it is `maxIterations`.** `recheck` carries 16 while the budget is
+  12, and the ordering is load-bearing: "tidy" it to 12 and the graph compiles at exit 0,
+  `orders-api.json` (8 passes) still works, and `legacy-gateway.json` — which needs all twelve —
+  strands with the same `E_OUTPUT_MISSING` that names neither bound. Two bounds on one thing,
+  enforced by two layers, checked by nothing.
+- **Three of the warnings on every command are wrong about the REASON and right about a HAZARD**, and
+  the reason half is all the same mechanism:
+  `GRAPH002_DEAD_END` on `fix` (which has a `loop` edge out of it) and `GRAPH005_UNPRODUCED_READ`
+  twice for `applied` (which `fix` writes, upstream over that same `loop` edge). Following either
+  `fix:` line makes the graph worse — `add "applied" to inputs:` invites a caller to supply a fix log
+  the graph is supposed to build. **But do not write them off, which this section's first draft did**:
+  `applied` really has no value on the first pass, `collate` really reads an unproduced `applied` on an
+  already-compliant manifest (`fix` never runs), and `fix` really is a dead end whenever
+  `maxIterations` binds before the budget. The `view.get(c) || []` in all four bodies is those
+  warnings being useful. They are right about the hazard, wrong about the cause, and their remedies
+  are wrong.
+
+`manifests/` holds **eleven** inputs and only one of them converges cleanly — the rest each pin one way
+this workflow can be wrong:
+
+| manifest | what it is for |
+|---|---|
+| `orders-api.json` | converges in eight passes, three of them cascades |
+| `payments-worker.json` | settles with one UNREPAIRABLE finding open (no port, so no probe target) |
+| `legacy-gateway.json` | exhausts the pass budget, and leaves TWO undeclared secrets open |
+| `mixed-secrets.json` | a cascade whose RULE is already in the baseline for another secret |
+| `unquoted-credentials.json` | `"DB_PASSWORD": 90210` — a credential the rule must still report |
+| `floating-release.json` | `release: "latest"` — a pin target that is not a pin |
+| `dotted-env-key.json` | an env key holding a `.`, which the `at` path language cannot address |
+| `qualified-token.json` | `GITHUB.TOKEN` — a credential the RUNTIME's key-name redactor does not recognise |
+| `unseparated-token.json` | `MYTOKEN: 987654321` — the same gap, with no separator and a non-string value |
+| `no-image.json` | JSON that is not a service manifest |
+| `not-a-manifest.txt` | not JSON at all |
+
+**The last eight exist because a reviewer found the workflow wrong on each of them after the suite was
+green.** That is the shape worth copying: **a fixture per way the report can lie**, not per feature. The
+final two are the sharpest of the set — on them the report *said* "holds a credential in the clear" and
+*printed* the credential three fields later, because this workflow's credential predicate is broader
+than the platform's and the projection had been left to the platform. **A workflow that classifies its
+own secrets must redact its own projection**; F13 has both regexes and the gap between them.
+
+**All FOUR refusals in `harden-parse.js` are one defect wearing four hats, and it is §8's defect** —
+the bytes are not JSON; the JSON parses but is not an OBJECT (`[1,2,3]`, or a manifest somebody wrapped
+in an array); the object declares no `name`/`image`; and the read came back TRUNCATED (`fs.read` caps
+at 200,000 characters unless the node says otherwise and marks the cut inside the content, so a big
+manifest used to be reported as a syntax error; F12). The count was "three" in two places until the
+members were enumerated — the not-an-object arm is the one that goes missing when you count from
+memory.
+Auditing is a search for ABSENCES — no pinned tag, no healthcheck, no declared secret — and a search
+for absences run against a document nothing understood finds nothing and prints a clean bill of
+health. Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` —
+the graph declined — rather than as the `internal`/`E_INTERNAL` a `JSON.parse` left to throw would
+have worn. The third refusal, in `harden-fix.js`, is the one you should never reach: a repair that
+leaves its own finding in place spins the loop to the budget, so it refuses where the rule that did
+it can still be named.
+
+**Hardening the hardened manifest applies ZERO fixes, and that is the check worth running on any
+workflow shaped like this one.** It is the only end-to-end assertion that every detector in
+`harden-audit.js` agrees with every repair in `harden-fix.js` — the rule table lives in two files,
+because a code resource is a bare function expression and cannot import a sibling (§2) — and it
+catches a disagreement without the test having to know which rule caused it.
+
+**What comes back out of a channel is CANONICAL, and a document-rewriting workflow has to know
+that.** `out/service.hardened.json` has its object keys in sorted order and the input's were not, so
+`git diff` against the original is the whole file rather than the eight fixes. That is what makes a
+state hash comparable across a replay and is not going to change; the consequence is that the fix
+TABLE in the report is the diff, and the file is not.

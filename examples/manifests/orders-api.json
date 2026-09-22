@@ -1,0 +1,16 @@
+{
+  "name": "orders-api",
+  "stage": "prod",
+  "release": "1.8.3",
+  "image": "registry.internal/orders-api:latest",
+  "pullPolicy": "Always",
+  "user": "root",
+  "workdir": "/root/app",
+  "ports": [8080],
+  "env": {
+    "LOG_LEVEL": "debug",
+    "DB_PASSWORD": "hunter2",
+    "REGION": "eu-west-1"
+  },
+  "secrets": []
+}

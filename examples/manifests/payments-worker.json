@@ -1,0 +1,14 @@
+{
+  "name": "payments-worker",
+  "stage": "prod",
+  "release": "0.4.1",
+  "image": "registry.internal/payments-worker:0.4.1",
+  "pullPolicy": "IfNotPresent",
+  "user": "app",
+  "workdir": "/srv/app",
+  "ports": [],
+  "env": {
+    "LOG_LEVEL": "debug"
+  },
+  "secrets": []
+}
