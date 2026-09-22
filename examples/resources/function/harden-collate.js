@@ -47,7 +47,7 @@ function (view, ctx) {
   // manifest: a budget stop leaves `secret-not-declared` open, and re-hardening that file reported
   // "2 of those 2 fix(es) closed a finding that DID NOT EXIST when the run started" about a finding
   // that was in the very first audit. So: `baseline` is what the first audit saw, and a cascade is a
-  // fix for a rule that was NOT in it. See F11 of `docs/workflow-port-2026-09-22.md`.
+  // fix for a rule that was NOT in it. See F14 of `docs/workflow-port-2026-09-22.md`.
   // KEYED ON FINDING IDENTITY — rule AND where AND which — not on the rule NAME, and that was the
   // THIRD instance of this same class. Keying on `rule` alone hid a cascade whenever the rule was
   // already in the baseline for a DIFFERENT subject: a manifest with one plaintext `A_PASSWORD` and a
@@ -113,8 +113,8 @@ function (view, ctx) {
     lines.push("|---|---|---|---|---|");
     for (const a of applied) {
       lines.push(
-        "| " + a.pass + " | `" + a.rule + "`" + (a.cascadeOf ? " *(after `" + a.cascadeOf + "`)*" : "") +
-          " | `" + a.at + "` | " + inline(a.was) + " | " + inline(a.now) + " |",
+        "| " + a.pass + " | `" + cell(a.rule) + "`" + (a.cascadeOf ? " *(after `" + cell(a.cascadeOf) + "`)*" : "") +
+          " | `" + cell(a.at) + "` | " + inline(a.was) + " | " + inline(a.now) + " |",
       );
     }
   }
@@ -147,6 +147,26 @@ function (view, ctx) {
     return String(f.rule) + "\u0000" + String(f.at) + "\u0000" + String(f.detail === undefined ? "" : f.detail);
   }
 
+  /**
+   * ONE TABLE CELL, and what a manifest can legally put in one is why this exists.
+   *
+   * A JSON object key may hold a newline, a `|`, a backtick or a NUL, and every one of those breaks a
+   * markdown table — measured: an env key of `"A\nB_PASSWORD"` split the row in half, leaving
+   * `` `env.A `` on one line and `B_PASSWORD` on the next, so the table a person approves stopped
+   * being a table. A NUL lands in the file verbatim and makes `grep` treat the report as binary,
+   * which is how a reader is told there is nothing to see.
+   *
+   * The escape is deliberately visible rather than clever: a reader has to be able to tell a key
+   * that CONTAINS a newline from a key that does not, so it becomes `\n` rather than a space.
+   */
+  function cell(v) {
+    return String(v)
+      .split("\\").join("\\\\")
+      .split("|").join("\\|")
+      .split("`").join("'")
+      .replace(/[\u0000-\u001f\u007f]/g, (c) => "\\x" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+  }
+
   /** A table cell: short values in the clear, anything structured as compact JSON. */
   function inline(v) {
     if (v === null) return "*(absent)*";
@@ -159,6 +179,6 @@ function (view, ctx) {
           ? "*(absent)*"
           : "*(" + v.redacted + " — not shown)*";
     }
-    return "`" + (typeof v === "string" ? v : JSON.stringify(v)) + "`";
+    return "`" + cell(typeof v === "string" ? v : JSON.stringify(v)) + "`";
   }
 }

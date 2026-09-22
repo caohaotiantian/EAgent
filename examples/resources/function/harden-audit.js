@@ -267,7 +267,7 @@ function (view, ctx) {
   // On a manifest that already carries a cascade-rule finding on its first audit — which the graph's
   // OWN output does, whenever a budget stop leaves a `secret-not-declared` open — the report then
   // said "2 of those 2 fixes closed a finding that DID NOT EXIST when the run started" about a
-  // finding that was in the very first audit. See F11 of `docs/workflow-port-2026-09-22.md`.
+  // finding that was in the very first audit. See F14 of `docs/workflow-port-2026-09-22.md`.
   const writes = { current: m, findings: findings, settled: settled };
   if (applied.length === 0) writes.baseline = findings;
   return { writes: writes };

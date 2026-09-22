@@ -11,21 +11,24 @@ the code.
 
 The first port's own summary of itself is the bar this one is measured against: *"Running it needed
 no source change; making it NATURAL needed eight."* **This one needed no source change either, and
-the count is eleven** — F1–F11 below. Seven of them are one mechanism, the compiler and the scheduler
-disagreeing about whether a `loop` edge is an edge, and that mechanism cost four of the five round
-trips it took to get the graph to run. (**The fifth was mine**, a body still writing the channel name
-it had before a redesign, and it is not in the log: the binary named the node, the channel and the
-declaration in one line and it was fixed in seconds. That is what the other four should have looked
-like.)
+the count is thirteen** — F1–F13 below. **Three** of them are one mechanism (the compiler and the
+scheduler disagreeing about whether a `loop` edge is an edge), which cost four of the five round trips
+it took to get the graph to run; the other ten are ten different things, and an earlier draft of this
+document got that grouping wrong in both directions — see the paragraph opening §3. (**The fifth round
+trip was mine**, a body still writing the channel name it had before a redesign, and it is not in the
+log: the binary named the node, the channel and the declaration in one line and it was fixed in
+seconds. That is what the other four should have looked like.)
 
-**F12 is a twelfth entry of a different kind and the most useful one to read**: two defects in THIS
-PORT'S OWN workflow, found by a fresh agent told to refute this log *after* the suite was green at
-13/13. One was the exact defect class the workflow exists to prevent. `CLAUDE.md` says a builder's own
-green suite is not evidence; F12 is what that costs when it is taken seriously, and what it would have
-cost if it had not been.
+**F14 is a fourteenth entry of a different kind, and the most useful one to read**: **five defects in
+THIS PORT'S OWN workflow**, none found by its author. Two came from a fresh agent told to refute this
+log, three more from an independent reviewer who then drove §2 top to bottom. Every one of the five is
+the same sentence — *the report asserted something the run had not established* — which is the exact
+defect class this workflow exists to prevent. `CLAUDE.md` says **a builder's own green suite is not
+evidence**; F14 is the receipt, twice over, and the second round found three defects that the first
+round's fixes and tests sat next to without noticing.
 
-**Nothing in F1–F11 is fixed here — it is recorded.** F12's two are the port's own and are fixed, each
-with a test that fails without the fix.
+**Nothing in F1–F13 is fixed here — it is recorded.** F14's five are the port's own and are fixed, each
+with a test verified to FAIL with its fix reverted.
 
 ---
 
@@ -161,7 +164,7 @@ ok
   deadline write-manifest (default): timeoutMs=600000
   deadline write-report (default): timeoutMs=600000
 ```
-exit 0. **All three warnings are false**, and you will see them on every command below — friction
+exit 0. **All three warnings are wrong about the REASON and right about a HAZARD** — see F7 — and you will see them on every command below. Friction
 **F7**. `fix` is not terminal (it has a `loop` edge out of it) and `applied` is written by `fix`
 upstream of both readers (over a `loop` edge). Seven deadlines, not eight: `review` is a gate and
 runs no body that could time out.
@@ -384,7 +387,7 @@ loom replay "$RUN"      # → {"match": true, "hermetic": true}      exit 0
 loom audit  "$RUN"      # → ok — 16 rule(s) checked, 12 skipped    exit 0
 ```
 
-`hermetic: true` over a seventeen-`function`-task run is the load-bearing word: the `fs.read`, both
+`hermetic: true` over a nineteen-`function`-task run is the load-bearing word: the `fs.read`, both
 `fs.write`s, the human's decision, and the seeded PRNG draw the engine journals for every one of
 those tasks were all served from the journal rather than re-executed.
 
@@ -434,7 +437,7 @@ very first audit. `cascades` is now measured against `startedWith` — the first
 list — so it is 0 here and 3 on `orders-api.json`, and the sentence is printed only when it is true.
 
 ```bash
-# 3 · Two refusals, because each is a promise.
+# 3 · Three refusals, because each is a promise. Two of them below; the third is in the suite.
 loom run graphs/harden-config.json --input '{"manifestPath":"manifests/not-a-manifest.txt"}'
 ```
 
@@ -456,15 +459,20 @@ loom run graphs/harden-config.json --input '{"manifestPath":"manifests/no-image.
 #     would say this manifest is already compliant."
 ```
 
-**Both refusals are one defect wearing two hats, and it is the same defect the first port's four
-refusals are about:** auditing is a search for ABSENCES, and a search for absences run against a
-document nothing understood finds nothing and reports a clean bill of health. `{refuse: {reason}}`
-makes that `validation`/`E_FUNCTION_REFUSED` — the graph declined — rather than the
-`internal`/`E_INTERNAL` a `JSON.parse` left to throw would have worn.
+**`harden-parse.js` refuses THREE ways and all three are one defect wearing three hats**, the same
+defect the first port's four refusals are about: auditing is a search for ABSENCES, and a search for
+absences run against a document nothing understood finds nothing and reports a clean bill of health.
+The two above are the bytes not being JSON and the JSON not being a manifest; **the third is a read
+that came back TRUNCATED** (F12), which is the one this port shipped wrong and the one whose failure
+mode is worst — a prefix of a manifest is a manifest with things missing from it, and everything
+missing reads as compliant. `{refuse: {reason}}` makes all three `validation`/`E_FUNCTION_REFUSED` —
+the graph declined — rather than the `internal`/`E_INTERNAL` a `JSON.parse` left to throw would wear.
 
-The third refusal, in `harden-fix.js`, is the one you should not be able to reach: a repair that
-leaves its own finding in place would be re-reported next pass and spin the loop to its budget, so
-it refuses HERE, where the rule that did it is still known and can be named. The idempotence check
+`harden-fix.js`'s own refusal is the one you should not be able to reach: a repair that leaves its own
+finding in place would be re-reported next pass and spin the loop to its budget, so it refuses HERE,
+where the rule that did it is still known and can be named. **Two ordinary manifests DID reach it**
+until this round — a `release` that is itself `latest`, and an env key containing a dot — each under a
+message blaming "the rule's detector and its repair" that was false both times (F14). The idempotence check
 above is what keeps it unreachable.
 
 **Tidy up.**
@@ -479,21 +487,31 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 13 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 19 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-Thirteen tests. Four of them are the ones the first port's suite has no analogue for, because its
-shape has no loop: **the pass count** (nine audits and eight fixes read out of `loom trace` — a
-graph that silently stopped after one pass would still park on a gate, still write a report and
-still exit 0, with a manifest carrying three findings its own fixes created); **the cascade order**
-(every `cascadeOf` entry is required to appear after the entry that created it, which is the
-assertion that re-auditing found it rather than luck); **idempotence** (hardening the output applies
-zero fixes); and **the budget's home** (`len(applied) >= 12` edited down to `3` in the workspace copy
-alone, with the run required to stop at the new number — the same drift test the first port's
-`maxWidth` one is, and the only way to know the bodies hold no constant of their own). The
-thirteenth is labelled `RESIDUE` and pins **F5** so that the day it improves, somebody is told.
+**Nineteen tests.** Four are the ones the first port's suite has no analogue for, because its shape
+has no loop: **the pass count** (nine audits and eight fixes read out of `loom trace` — a graph that
+silently stopped after one pass would still park on a gate, still write a report and still exit 0,
+with a manifest carrying three findings its own fixes created); **the cascade order** (every
+`cascadeOf` entry is required to appear after the entry that created it, which is the assertion that
+re-auditing found it rather than luck); **idempotence** (hardening the output applies zero fixes); and
+**the budget's home** (`len(applied) >= 12` edited down to `3` in the workspace copy alone, with the
+run required to stop at the new number — the same drift test the first port's `maxWidth` one is, and
+the only way to know the bodies hold no constant of their own).
+
+**Two are labelled `RESIDUE`** and pin product behaviour rather than the workflow's, so that the day
+either improves somebody is told: one for **F5** (a `done` edge narrower than the loop's exit) and one
+for **F11** (`maxIterations` lowered to the budget). Each asserts that the message does NOT name the
+thing it should, which is what makes an improvement fail the test loudly.
+
+**Five exist because a reviewer found the workflow wrong after this suite was green** — F14's list:
+a non-string credential reported rather than skipped, a cascade keyed on finding identity, the two
+manifests that reached the "unreachable" refusal, the truncated read, and the credential's bytes
+kept out of the fix log. Each was verified to FAIL with its fix reverted, which is the only evidence
+that a regression test tests anything.
 
 `examples-run.test.ts` picks the new graph up without being edited — its set is the directory — so
 the compile and resource-reachability halves were covered before this suite existed.
@@ -508,13 +526,29 @@ here.** F12 is a twelfth entry of a different kind: two defects in THIS PORT'S O
 an adversarial re-run after the suite was green, and fixed — recorded in the same log because the
 method that found them is the most transferable thing in this document.
 
-**Seven of the eleven are one mechanism**, stated once so the entries can be read against it:
+**THREE of the thirteen are one mechanism** — and the first version of this paragraph claimed seven,
+then listed six, and attributed three of them to a filter that has nothing to do with them. A
+miscounted mechanism sends the next reader to the wrong file, so here is the corrected grouping:
 
-> **A `loop` edge is an edge to the scheduler and not an edge to the compiler.** `graph/validate.ts`
-> filters `kind !== "loop"` out before computing the forward DAG, and every analysis built on that
-> DAG — entry nodes, terminal nodes, ancestry, concurrency, producer-before-consumer — behaves as if
-> the back-edge were not there. `run/engine.ts` then schedules it. F2, F3, F5, F7, F10 and F11 are
-> that disagreement; F1 is nothing having written it down; F6 is the same absence in `ctx.node.out`.
+> **THE ONE MECHANISM — a `loop` edge is an edge to the scheduler and not to the compiler.**
+> `graph/validate.ts:364` builds the forward DAG as
+> `edges.filter(e => e.kind !== "loop" && e.kind !== "compensation")` — it drops `compensation` too —
+> and every analysis over that DAG (entry nodes, terminal nodes, ancestry, concurrency,
+> producer-before-consumer) behaves as if the back-edge were absent. `run/engine.ts` then schedules
+> it. **That is F2, F3 and F7, and only those three.**
+
+The others are their own things, and three were mis-filed:
+
+- **F5 and F10 need no loop at all.** Two non-exhaustive `conditional` edges out of one node produce
+  `E_OUTPUT_MISSING` on a graph with no loop edge in it, and two conditionals sharing one expression
+  produce the duplicate `GRAPH004` the same way. They are **conditional-edge friction that the loop
+  made me meet** — a loop is what forces you to write a pair of complementary conditionals in the
+  first place — and filing them under the DAG filter was wrong.
+- **F11 is two bounds in two layers**, the graph's `len(applied) >= 12` and the engine's
+  `maxIterations`, with the ordering load-bearing and unchecked. Nothing to do with the filter.
+- **F1** is nothing having written any of this down; **F4** is the scope an edge expression is
+  evaluated against; **F6** an absence in `ctx.node.out`; **F8** a field `loom trace` drops; **F9**
+  canonical form; **F12** a built-in tool's cap; **F13** redaction by key name.
 
 ### F1 · Nothing in the published surface says how to write a loop, and every fact came from reading the source
 
@@ -575,10 +609,16 @@ round trips deep instead of two.
 
 ```
 $ loom compile graphs/harden-config.json
+! harden-config.json: GRAPH005_UNPRODUCED_READ: node "fix" reads "findings", which no upstream node writes and which is not a graph input
+   fix: add "findings" to inputs:, or have an upstream node write it
 ✗ harden-config.json: GRAPH010_CONCURRENT_WRITE: nodes "parse" and "fix" can run concurrently and both write "manifest", whose reducer `replace` is not multi-writer safe
    fix: change channel "manifest" to a multi-writer-safe reducer, or sequence "parse" and "fix"
 E_GRAPH_INVALID: graph has 1 error(s): GRAPH010_CONCURRENT_WRITE
 ```
+
+(The `GRAPH005` line is F7's warning arriving early, and an earlier draft of this entry dropped it from
+the paste. It is left in because it is part of what a stranger sees, and because it is the same
+mechanism: `fix`'s only inbound edge is the `loop`, so the DAG shows it no producer for `findings`.)
 
 **Expected.** To compile. `parse` and `fix` cannot run concurrently: every path to `fix` goes through
 `audit`, and `audit`'s only non-loop inbound edge comes from `parse`. The analysis drops `loop` edges
@@ -708,6 +748,14 @@ So the honest claim is: **an `until` on an edge leaving a node that writes the c
 PASS'S CONTRIBUTION, not the accumulation.** `len(applied) >= 12` cannot fire on `recheck` because
 `harden-fix.js` appends one entry per pass — a property of the body, not of the engine.
 
+**AND IT IS NOT ABOUT `until`.** `run/engine.ts:11353` builds the scope ONCE, before the switch that
+handles every outgoing kind, so a `conditional`'s `when` out of a writer reads the same delta. That
+generalisation is the reason this graph works: the budget lives on the two conditionals out of
+**`audit`**, and `audit` does not write `applied` — so what those `when`s read is the accumulated
+channel. Move either of them onto an edge out of `fix` and the bound silently stops binding. The rule
+to carry is about the WRITER, not about the edge kind: **any edge expression evaluated on a node that
+writes the channel it tests sees that node's contribution.**
+
 **Probe C isolates the cause, and is the one to re-run if you doubt this.** `findings` is written by
 `audit` and NOT by `fix`, so if the problem were "`until` sees stale or empty state" it would show up
 there too. `orders-api.json`'s first audit reports five findings:
@@ -812,7 +860,7 @@ loop body cannot state its own ceiling the way a fan-out body can.
 
 ---
 
-### F7 · Three false warnings on a correct graph, on every command that touches it
+### F7 · Three warnings on a correct graph, on every command, each wrong about its cause
 
 **Tried.** Six verbs on the shipped graph: `loom compile`, `loom run`, `loom trace`, `loom replay`,
 `loom gates`, `loom audit`.
@@ -825,7 +873,25 @@ loop body cannot state its own ceiling the way a fan-out body can.
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: node "collate" reads "applied", which no upstream node writes and which is not a graph input
 ```
 
-`loom audit` is the sixth and the only one of them that does not. Whether a verb not in that list
+**And the noise scales with the WORKSPACE, not with the graph you named.** `gates`, `trace` and
+`replay` compile every graph in `graphs/` to find the one whose hash the journal recorded, so "three
+lines" is three only because this workspace holds one graph with a loop in it. Measured, in a scratch
+workspace holding four copies of it:
+
+```
+$ ls graphs | wc -l                                          # 4
+$ loom gates "$RUN" >/dev/null 2>stderr.txt ; wc -l < stderr.txt
+      12
+$ grep -c 'GRAPH002_DEAD_END\|GRAPH005_UNPRODUCED_READ' stderr.txt
+      12
+```
+
+Three per loop-bearing graph, linear, on every one of those five verbs. A workspace somebody is
+actually developing in — a handful of candidates and probes beside the real graph — prints dozens of
+lines of false-cause warnings before every listing, and a stranger's first instinct is that something
+is badly wrong with their workspace.
+
+`loom audit` is the sixth verb and the only one of them that does not print them. Whether a verb not in that list
 prints them is untested.
 
 **Expected.** Silence — and that expectation is where this entry was overstated, which an adversarial
@@ -970,12 +1036,120 @@ different layer. Pinned as the second `RESIDUE` test in `examples-harden.test.ts
 
 ---
 
-### F12 · Two defects in this port's own workflow, and what they say about the method
+### F12 · `fs.read` truncates at 200,000 characters and puts the marker INSIDE the content, so a big manifest reads as a syntax error
 
-**Not the product's friction — the port's.** Both were found by a fresh agent told to refute this log
-and to hunt for a wrong result, after the suite was green at 13/13. They are recorded here because
-`CLAUDE.md` says **a builder's own green suite is not evidence**, and this is the price of that being
-true. Both are fixed; both now have a test that fails without the fix.
+**Tried.** Point the graph at a 1.2 MB manifest — an ordinary size for a real service definition with
+annotations on it.
+
+**Happened.**
+
+```
+$ loom run graphs/harden-config.json --input '{"manifestPath":"manifests/huge.json"}'
+  "error": {
+    "class": "validation",
+    "code": "E_FUNCTION_REFUSED",
+    "message": "function \"function/harden-parse@stable\" on node \"parse\" refused:
+      \"manifests/huge.json\" is not JSON (Bad control character in string literal in JSON at
+      position 200000 …)"
+  }
+```
+
+**Expected.** Either the whole file, or a refusal that says the read was cut. `builtin/tools.ts:370`
+defaults `maxBytes` to `200_000`, and `:383` appends the marker into the returned string:
+`` `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` ``. So the body is handed 200,000
+valid characters plus a line of prose and blames the FILE for a syntax error that the READ created.
+The `details` beside it do carry `{bytes, truncated}` — but a `tool` node writes the tool's
+`content` to its declared channel, and nothing hands a `function` body downstream the details.
+
+**Why this is the workflow's worst case rather than an inconvenience.** Auditing is a search for
+absences. Two hundred thousand characters of a manifest is a manifest with things missing from it, and
+every rule that would have fired on the missing part abstains — which prints as compliance. The only
+reason this surfaced as a refusal at all is that the marker happens to break JSON; a format where a
+truncated prefix still parses would have produced a clean bill of health on a third of a file.
+
+**Cost.** Twenty minutes chasing a "Bad control character" in a file that `python3 -m json.tool`
+reads without complaint. Closed in the port's own files two ways, because one is a dial and the other
+is a diagnosis: `load` now passes `"maxBytes": 4000000`, and `harden-parse.js` recognises the marker
+and says how much was dropped. The second is the half that survives somebody's manifest being bigger
+than whatever number is in the graph:
+
+```
+$ # with maxBytes dropped back to the default, same file
+"function/harden-parse@stable" on node "parse" refused: "manifests/huge.json" was read back
+TRUNCATED: 200027 characters arrived and 1164352 more were dropped, because `fs.read` caps its
+output and marks the cut inside the content. …
+```
+
+---
+
+### F13 · The gate redacts by KEY NAME, so the harmless `{secretRef}` is hidden and the live password is not
+
+**Tried.** Read what the approver is actually shown, field by field, rather than checking that the
+report is present.
+
+**Happened.** On `orders-api.json`, whose `env.DB_PASSWORD` is `"hunter2"` before the run and
+`{"secretRef":"db-password"}` after:
+
+```
+$ loom gates "$RUN" | jq '.[0].reads.report | {
+$     harmless: .hardened.env.DB_PASSWORD, names: .hardened.secrets, live: .applied[4].was }'
+{
+  "harmless": "[secret]",            ← the {secretRef} that REPLACED the secret
+  "names":    "[secret]",            ← a list of secret NAMES, no values in it
+  "live":     "hunter2"              ← the actual credential, in the clear
+}
+```
+
+`security/redact.ts:731` (`isSecretishKey`) redacts on the KEY, and `:559-562` applies it whatever the
+channel's declared classification says — "belt and braces for hand-built payloads", as its own comment
+puts it. So `env.DB_PASSWORD` and `secrets` are hidden because of what they are CALLED, and
+`applied[4].was` is shown because it is called `was`.
+
+**Expected.** Redaction that tracks where a secret actually is. The two halves are independently
+wrong: hiding `{"secretRef":"db-password"}` and a list of names removes exactly the evidence an
+approver needs to see that the repair happened, while showing `was` hands them the credential — and,
+through `out/harden-report.md`, commits it to the repository the manifest came from.
+
+**It also falsifies a claim in `examples/README.md`**, §8's *"A channel the graph classified
+(`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
+report prints whole."* Classification is not the only door; a key NAME is another, and no graph opts
+into it. That sentence is corrected in this round.
+
+**Whose bug is `was`?** Not the runtime's — **the port's**, and it is F14's fifth member. The runtime
+redacted everything it had a rule for; the workflow put a credential in a field whose name no rule
+matches, and the suite asserted that it did *("the plaintext credential is shown, because the
+approver has to see what left the file")*. **An approver needs to recognise a change, not to read the
+secret**, so `was` now carries the value's SHAPE — `{redacted:"string",chars:7}`, rendered in the
+report as *"a string of 7 chars — not shown"* — and `now` stays in the clear, because hiding the
+`{secretRef}` would hide the repair itself. The auditor marks which findings this applies to, so the
+rule table decides rather than the fixer, and the fold is unaffected: it replays `now` at `at` and
+never reads `was`.
+
+**What remains the product's**, and is recorded rather than worked around: a key called `secrets`
+holding only names still prints `[secret]`, so the gate cannot show an approver which secrets a
+manifest declares. There is no way for a graph to say "this key's name looks sensitive and its value
+is not".
+
+**Cost.** The measurement itself was cheap — one `jq` over a listing this port had already pasted
+twice without looking past `applied[].rule`. What it cost is the thing worth recording: **a redaction
+that reads NAMES cannot be audited by reading names.** The only check that finds this is to grep the
+gate listing and the written artefacts for the secret's actual bytes, which the suite now does.
+
+---
+
+### F14 · Defects in this port's OWN workflow, and what the method that found them cost
+
+**Not the product's friction — the port's.** **Five defects, in two rounds, none found by the author.**
+Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the suite was
+green at 13/13; round two was an independent reviewer who built the binary and drove §2 top to bottom,
+after round one's fixes and tests had landed. They are recorded here because `CLAUDE.md` says **a
+builder's own green suite is not evidence**, and this is what that costs when taken seriously. All five
+are fixed; each has a test verified to FAIL with its fix reverted.
+
+**The round-two finding that matters most is not any single defect — it is that round two existed.**
+Round one fixed two report defects and added tests that pass through the same code paths as three more
+defects without noticing them. A correction round is not a proof of correctness; it is one more pass
+by somebody with the same blind spots.
 
 **1 · The gate undercounted what was still open, by half.** `harden-audit.js` reported only the FIRST
 undeclared `secretRef` per pass, reasoning that two findings claiming the same `at` would have the
@@ -1015,14 +1189,62 @@ The fix is an `audit`-written `baseline` channel holding the FIRST audit's findi
 cascade is measured. `cascadeOf` stays as the per-entry annotation, because as a statement about the
 RULE it was always true; only the count and the sentence were the lie.
 
-**What the two have in common, and it is one sentence:** the report asserted something the run had not
-measured. One asserted a completeness it had not checked, the other a novelty it had inferred from a
-constant. The workflow's own doc calls the cascade count *"the argument for the whole workflow"* — and
-an argument that is not measured is the thing this project's property 3 is entirely about.
+**3 · A credential whose value was not a string was dropped entirely.** `harden-audit.js` read
+`if (typeof env[key] !== "string") continue;`, so a manifest with `"DB_PASSWORD": 90210` and
+`"API_TOKEN": ["sk-live-1"]` produced ZERO findings:
 
-**Cost.** One reviewer, and the correction round in `eb973c92`…`HEAD`. Cheap, and only because
-somebody was told to look. The method is the finding: three stale prose claims in shipped files were
-caught the same way in the same pass.
+```
+$ # before — manifests/unquoted-credentials.json
+{"passes":0,"open":0,"stoppedBy":"settled"}
+## Applied, in order
+Nothing. The manifest already satisfied every rule this tool can repair.
+$ # after
+{"passes":0,"open":2,"stoppedBy":"settled"}      both plaintext-secret, autofixable: false
+```
+
+**A credential scanner that stays quiet because somebody wrote the value unquoted is worse than no
+scanner**: it converts "nobody looked" into "somebody looked and it is fine". The key NAME is the whole
+evidence this rule has and it does not get weaker with the value's type; what changes is whether a
+repair exists, since `secretRef` substitutes for a string. Now reported non-autofixable with a remedy,
+and neither the finding nor the remedy carries the value — only its shape.
+
+**4 · The cascade count was keyed on RULE NAME, which is defect 2 again, one level in.** Fixing 2 made
+the count measured; it did not make it *identified*. Keying `startedWith` on `f.rule` hides every
+cascade whose rule was already in the baseline **for a different subject**:
+
+```
+$ # manifests/mixed-secrets.json — one plaintext A_PASSWORD, plus B_TOKEN already holding an
+$ # undeclared secretRef, so `secret-not-declared` is in the baseline about b-token
+### before                            ### after
+{"passes":3,"cascades":0}             {"passes":3,"cascades":1,"startedWith":2}
+```
+
+The `secret-not-declared` that pass 1 CREATES, about `a-password`, had a rule name that was already
+there — so the sentence was suppressed on a run whose whole point was the cascade. Identity is now
+rule + `at` + `detail`: `secret-not-declared` reports `at: "secrets"` for every secret there is, so
+`detail` is the only field that separates two of them, and the applied entry carries it for exactly
+this comparison. **This is the third instance of the class, and it survived the fix for the second.**
+
+**5 · The fix log carried the live credential to the approver** — the F13 half that belongs to the port
+rather than to the runtime. `applied[].was` is the value before the repair, which for
+`plaintext-secret` IS the password, so `hunter2` reached `loom gates`, the approver, and
+`out/harden-report.md`. The runtime had redacted every field it had a rule for; the workflow put the
+secret in a field no rule matches, **and this suite asserted that it did** — *"the plaintext credential
+is shown, because the approver has to see what left the file"*, in as many words. Now
+`{redacted:"string",chars:7}`, rendered *"a string of 7 chars — not shown"*.
+
+**What all five have in common, and it is one sentence:** **the report asserted something the run had
+not established.** Two asserted a completeness they had not checked (1, 3), two a novelty inferred from
+a constant (2, 4), and one asserted that showing a secret was a feature (5). The workflow's own doc
+calls the cascade count *"the argument for the whole workflow"* — and an argument that is not measured
+is precisely what this project's property 3 is about. **The lens that finds these, stated so the next
+port can use it: for every number and every sentence the gate shows a person, name the thing in the
+run that establishes it. Where the answer is "a constant in the rule table" or "nothing", that is the
+defect.**
+
+**Cost.** Two review rounds. Cheap, and only because somebody was told to look — twice. The method is
+the finding, and so is its limit: **round one's own correction round missed three of the five.** Four
+stale prose claims in shipped files were caught the same way in the same passes.
 
 ---
 

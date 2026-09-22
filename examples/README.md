@@ -21,7 +21,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
-| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three false warnings** on every command: see §9 |
+| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three warnings that are wrong about their cause and right about a hazard** on every command: see §9 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
 directory, so a graph added later is covered without editing the test — and RUNS the three it can
@@ -332,8 +332,16 @@ this one runs offline and means what it says, because there was never a model in
   read `reads` as "what the approver is being shown", not as the node's declaration. The digest
   stays and is a different thing: a BINDING to what the approver was shown, which `loom approve`
   re-derives and checks, not a summary anybody could read. A channel the graph classified
-  (`secret_ref`) prints as `[secret]` rather than in the clear; nothing here is classified, so the
-  report prints whole. `reads` is best-effort and simply ABSENT, with a line on stderr naming the
+  (`secret_ref`) prints as `[secret]` rather than in the clear; nothing in §8 is classified, so its
+  report prints whole. **Classification is not the only door, and this sentence used to claim it was.**
+  A KEY NAME redacts too, whatever the channel declares — `security/redact.ts`'s `isSecretishKey`,
+  "belt and braces for hand-built payloads" as its own comment puts it — and no graph opts into that.
+  §9's report shows what it costs in both directions: its `hardened.env.DB_PASSWORD` prints `[secret]`
+  although by then it holds a harmless `{"secretRef":…}`, and so does its `secrets` list, which holds
+  only NAMES — while a field called `was` carried the live credential in the clear until §9's own
+  bodies stopped putting it there. Read "prints whole" as "prints whole unless a key is NAMED like a
+  secret"; F13 of `docs/workflow-port-2026-09-22.md` has the measurement.
+  `reads` is best-effort and simply ABSENT, with a line on stderr naming the
   gates and the reason, wherever it cannot be recomputed: no compile on record, a graph search that
   fails or finds no graph carrying that hash, no such node or task (what a run MUTATED after it
   started produces), and a gate MIRRORING one in a delegated child run — where the question is
@@ -397,7 +405,7 @@ the report explaining it.
 ```
 
 ```bash
-loom compile graphs/harden-config.json                                    # ok + 3 false warnings, exit 0
+loom compile graphs/harden-config.json                                    # ok + 3 warnings (F7 — right hazard, wrong cause), exit 0
 loom run     graphs/harden-config.json --input '{"manifestPath":"manifests/orders-api.json"}'
 # → "status": "awaiting_gate", and out/ does NOT exist yet.               exit 0
 loom trace   <runId>       # nine `audit` and eight `fix`, alternating
@@ -440,7 +448,7 @@ twelve — `report.stoppedBy` is `"budget"` and the report says *"this manifest 
 because a budget stop parks on a gate and exits 0 exactly like a converged one.
 
 **Six things this section exists to save you**, because nothing else in this workspace has a `loop`
-edge in it and `docs/workflow-port-2026-09-22.md` is the ten things it cost to find them.
+edge in it and `docs/workflow-port-2026-09-22.md` is the fourteen things it cost to find them.
 
 - **The loop's target needs a NON-loop inbound edge, or it is an entry node and runs at t=0.**
   `graph/spec.ts` states the rule — *"ENTRY NODES are nodes with no inbound non-`loop` edge"* — and
@@ -482,12 +490,28 @@ edge in it and `docs/workflow-port-2026-09-22.md` is the ten things it cost to f
   warnings being useful. They are right about the hazard, wrong about the cause, and their remedies
   are wrong.
 
-`manifests/` holds five inputs and four of them are there to be refused or to stop short:
-`orders-api.json` converges in eight passes, `payments-worker.json` settles with one unrepairable
-finding open, `legacy-gateway.json` exhausts the budget, `no-image.json` is JSON that is not a
-service manifest, and `not-a-manifest.txt` is not JSON at all.
+`manifests/` holds **nine** inputs and only one of them converges cleanly — the rest each pin one way
+this workflow can be wrong:
 
-**Both refusals in `harden-parse.js` are one defect wearing two hats, and it is §8's defect.**
+| manifest | what it is for |
+|---|---|
+| `orders-api.json` | converges in eight passes, three of them cascades |
+| `payments-worker.json` | settles with one UNREPAIRABLE finding open (no port, so no probe target) |
+| `legacy-gateway.json` | exhausts the pass budget, and leaves TWO undeclared secrets open |
+| `mixed-secrets.json` | a cascade whose RULE is already in the baseline for another secret |
+| `unquoted-credentials.json` | `"DB_PASSWORD": 90210` — a credential the rule must still report |
+| `floating-release.json` | `release: "latest"` — a pin target that is not a pin |
+| `dotted-env-key.json` | an env key holding a `.`, which the `at` path language cannot address |
+| `no-image.json` | JSON that is not a service manifest |
+| `not-a-manifest.txt` | not JSON at all |
+
+The last six exist because a reviewer found the workflow wrong on each of them after the suite was
+green. That is the shape worth copying: **a fixture per way the report can lie**, not per feature.
+
+**All THREE refusals in `harden-parse.js` are one defect wearing three hats, and it is §8's defect** —
+the bytes are not JSON, the JSON is not a service manifest, and the read came back TRUNCATED (`fs.read`
+caps at 200,000 characters unless the node says otherwise and marks the cut inside the content, so a
+big manifest used to be reported as a syntax error; F12).
 Auditing is a search for ABSENCES — no pinned tag, no healthcheck, no declared secret — and a search
 for absences run against a document nothing understood finds nothing and prints a clean bill of
 health. Each returns `{refuse: {reason}}`, so the run fails as `validation`/`E_FUNCTION_REFUSED` —
