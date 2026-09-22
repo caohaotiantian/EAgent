@@ -2255,6 +2255,11 @@ export class Engine {
     readonly resolveFrom?: RunContext;
     /** Why this run's own steps cannot be dispatched. Read only when `ctx` is absent. */
     readonly why?: string;
+    /**
+     * Every child run whose context this walk BUILT, for a caller that releases what it installed
+     * (§A.76). Absent means nobody is collecting, which is every caller that goes on to dispatch.
+     */
+    readonly installed?: Set<RunId>;
   }): Promise<readonly RollbackWalkStep[]> {
     const { runId, log, ctx, p } = input;
     const sinceSeq = input.sinceSeq ?? 0;
@@ -2309,7 +2314,16 @@ export class Engine {
         // <ref>", which is true but sends the operator to attach the CHILD — and the fix for a
         // detached ancestor is to attach the ancestor. A reason that names the wrong run is
         // worse than a generic one, so the ancestor's travels down.
-        out.push(...(await this.#planRollbackChild(resolveFrom, item.child, depth + 1, seen, resolveFrom === undefined ? why : undefined)));
+        out.push(
+          ...(await this.#planRollbackChild(
+            resolveFrom,
+            item.child,
+            depth + 1,
+            seen,
+            resolveFrom === undefined ? why : undefined,
+            input.installed,
+          )),
+        );
         continue;
       }
       const step = item.step!;
@@ -2355,15 +2369,17 @@ export class Engine {
     seen: Set<RunId>,
     /** The ancestor's reason, when there was no context to resolve this child's ref from. */
     inherited?: string,
+    /** Collects every child context this walk BUILT — see `#planRollback`'s `installed` (§A.76). */
+    installed?: Set<RunId>,
   ): Promise<readonly RollbackWalkStep[]> {
     // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
     // No journal means the child never started, so it did nothing that needs undoing.
     const p = await this.projection(child.runId);
     if (p === undefined) return [];
 
-    const ctx = parent === undefined ? undefined : this.#childContextFor(parent, child.runId, child.ref);
+    const ctx = parent === undefined ? undefined : this.#childContextFor(parent, child.runId, child.ref, installed);
     if (ctx !== undefined) {
-      return this.#planRollback({ runId: child.runId, log: ctx.log, ctx, p, depth, seen });
+      return this.#planRollback({ runId: child.runId, log: ctx.log, ctx, p, depth, seen, ...(installed === undefined ? {} : { installed }) });
     }
 
     // EVERY step, not only the attemptable ones — `#dispatchRollback` journals all of them, which
@@ -2383,6 +2399,7 @@ export class Engine {
       p,
       depth,
       seen,
+      ...(installed === undefined ? {} : { installed }),
       ...(parent === undefined ? {} : { resolveFrom: parent }),
       why:
         inherited ??
@@ -2481,9 +2498,10 @@ export class Engine {
     depth: number,
     seen: Set<RunId>,
     inherited?: string,
+    installed?: Set<RunId>,
   ): Promise<readonly RollbackWalkStep[]> {
     try {
-      return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited);
+      return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited, installed);
     } catch (e) {
       // `describeThrown` ON ALL THREE, not on the thrown value alone. The first version of this
       // block ran it on `e` and then coerced `child.runId` and `child.ref` raw, and those two are
@@ -2582,13 +2600,28 @@ export class Engine {
    * run and the `not_attempted` rows the caller writes instead. So the answer is "no context",
    * which is a fact the caller journals, rather than an exception nobody records.
    */
-  #childContextFor(parent: RunContext, childRunId: RunId, ref: string): RunContext | undefined {
+  #childContextFor(
+    parent: RunContext,
+    childRunId: RunId,
+    ref: string,
+    /**
+     * WHERE A BUILT CONTEXT IS REPORTED, and only a BUILT one (§A.76). `#contextFor` REGISTERS
+     * what it builds in `#runs`, and a caller that is only previewing has to be able to hand that
+     * back — `planRewind`'s `finally` says it releases "only what THIS call attached", and until
+     * this argument existed that was true of the parent and false of every child. The live branch
+     * above deliberately reports nothing: a context something else holds on purpose is not the
+     * preview's to release.
+     */
+    installed?: Set<RunId>,
+  ): RunContext | undefined {
     const live = this.#runs.get(childRunId);
     if (live !== undefined) return live;
     const spec = parent.graph.subgraphs?.[ref];
     if (spec === undefined) return undefined;
     try {
-      return this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+      const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+      installed?.add(childRunId);
+      return built;
     } catch {
       return undefined;
     }
@@ -4859,8 +4892,10 @@ export class Engine {
   async planRewind(runId: RunId, atSeq: Seq, by: HumanActor): Promise<RewindPlan> {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
     const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
+    // THE CHILD CONTEXTS THIS PREVIEW WILL BUILD, so the `finally` can hand them back too (§A.76).
+    const installed = new Set<RunId>();
     try {
-      const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+      const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx, installed);
       // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE PLAN IS SHOWN OR JOURNALED (§A.74).
       // This is the second half of the paragraph above: `#rewindRefusals` is everything `rewind`
       // refuses BEFORE it plans, and `#refusePlannedRewind` is everything it refuses AFTER.
@@ -4875,6 +4910,27 @@ export class Engine {
       // the leak `#retire` exists to close. Only what THIS call attached: a run something else
       // holds on purpose is not this verb's to release.
       if (attachedHere) this.#retire(runId);
+      // AND THE CHILDREN, WHICH THIS SENTENCE DID NOT COVER UNTIL §A.76. The walk rebuilds a
+      // context for every child whose graph the parent's `subgraphs[ref]` compiles, and
+      // `#contextFor` registers each one in `#runs` — so the preview left the engine holding runs
+      // it had never been asked to hold. That is the leak above, one level down, and it is worse
+      // than a leak: `#contextFor` returns an existing context UNTOUCHED, so the next
+      // `attach(childRunId, correctedGraph)` was a silent no-op and the stale graph the preview
+      // built was what the following verb dispatched under. Measured on a delegated
+      // `pay.refundable` charge whose workflow had been edited since: the operator attached the
+      // child's real graph, rewound, and the refund was journaled `failed` for a capability the
+      // edited graph no longer declares — the money did not come back
+      // (`rewind-preview-releases-child-contexts.test.ts`).
+      //
+      // `#runs.delete` AND NOT `#retire`, deliberately. `#retire` also records the run in
+      // `#retiredRuns` against the graph it retired with, which is what lets `#reattach` rebuild
+      // it later — and the graph THIS call built is the one that should not be believed. Recording
+      // it would make `#retainedGraphOf` compare the preview's rebuild against the child's own
+      // journal hash and decline, so a child that had legitimately retired here earlier with its
+      // real graph would stop being re-attachable: the preview making a later verb worse, which is
+      // exactly the shape §A.76 is about. Deleting restores what was held before, which is all
+      // this `finally` claims to do.
+      for (const child of installed) this.#runs.delete(child);
     }
   }
 
@@ -4914,8 +4970,21 @@ export class Engine {
     p: RunProjection,
     live: RunContext | undefined,
     ctx: { readonly log: RunLog },
+    /**
+     * WHAT THIS WALK REGISTERED, for a caller that has to hand it back (§A.76). `planRewind`
+     * passes a set and releases it; `rewind` passes none, because it DISPATCHES through those
+     * contexts and the run that owns them is the one it is undoing.
+     */
+    installed?: Set<RunId>,
   ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
-    const walk = await this.#planRollback({ runId, log: ctx.log, ...(live === undefined ? {} : { ctx: live }), p, sinceSeq: atSeq });
+    const walk = await this.#planRollback({
+      runId,
+      log: ctx.log,
+      ...(live === undefined ? {} : { ctx: live }),
+      p,
+      sinceSeq: atSeq,
+      ...(installed === undefined ? {} : { installed }),
+    });
     const steps: RewindPlanStep[] = walk.map((item) => {
       // Only where an undo would actually be built, and `detailsOf` is asked rather than
       // second-guessed: it returns `undefined` for exactly the results `#compensateOne` refuses
@@ -12103,7 +12172,6 @@ export class Engine {
       status: selfStatus,
       take,
     });
-    const all = branchIndexOf(p).all;
 
     // QUIESCENCE: a barrier may not fire while an arrival is still possible.
     //
@@ -12129,7 +12197,7 @@ export class Engine {
       const to = ctx.index.edgeById.get(id)?.to;
       return to !== undefined && reachesMember(to);
     });
-    const stillLive = all.some((t) => {
+    const stillLive = branchIndexOf(p).all.some((t) => {
       if (t.taskId === w.task.taskId) return false;
       if (isTerminalTaskState(t.state)) return false;
       if (!isAtOrUnderBranch(t.branch, parent)) return false;
