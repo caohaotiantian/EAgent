@@ -6051,16 +6051,20 @@ export class Engine {
   /**
    * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
    *
-   * §A.63. `#assertBound`'s two VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, and a
-   * `maxWidth` outside `readableFanoutWidth`, three lines apart — both `throw` before anything is
-   * appended. The caller got `E_GRAPH_INVALID` and the journal, which is the only authoritative
-   * state, held `run.submitted, run.compiled, run.started, task.ready` and not one word about the
-   * width; a second process attaching later saw a `running` run with no reason and no terminal
-   * row. A decision was taken and the fold could not reconstruct it.
+   * §A.63. `#assertBound`'s THREE VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
+   * `maxWidth` outside `readableFanoutWidth`, and a loop `maxIterations` outside
+   * `readableLoopBound` (§A.81) — all `throw` before anything is appended. The caller got
+   * `E_GRAPH_INVALID` and the journal, which is the only authoritative state, held
+   * `run.submitted, run.compiled, run.started, task.ready` and not one word about the width; a
+   * second process attaching later saw a `running` run with no reason and no terminal row. A
+   * decision was taken and the fold could not reconstruct it.
    *
-   * BOTH CHECKS BY CONSTRUCTION, and that is why this keys on the CODE rather than on either
-   * arm. `0dd0a524` closed a three-lines-apart asymmetry between those two checks; answering one
-   * of them here and not the other would put it straight back.
+   * EVERY CHECK BY CONSTRUCTION, and that is why this keys on the CODE rather than on any arm.
+   * `0dd0a524` closed a three-lines-apart asymmetry between the first two; answering some of them
+   * here and not the others would put it straight back. **A fourth check added to `#assertBound`
+   * under `E_GRAPH_INVALID` joins this automatically and must also join `FAULTS` in
+   * `test/run/advance-refusal-is-journaled.test.ts`**, which is the census that makes the claim
+   * checkable rather than asserted — §A.81's own check was added to it for exactly that reason.
    *
    * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
    * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
@@ -6334,7 +6338,7 @@ export class Engine {
         `the graph supplied for ${why} has ${unreadableIterations.length === 1 ? "a loop edge" : "loop edges"} whose maxIterations this build cannot read: ` +
           `${unreadableIterations.map((edge) => `"${edge.id}" (maxIterations ${describeWidth(edge.maxIterations)})`).join(", ")} — ` +
           `the bound is compared against the iteration counter to decide whether the loop may run again, ` +
-          `and an unreadable one stops the loop after one pass and reports the run succeeded`,
+          `and an unreadable one stops the loop after one pass whatever bound was declared, and reports the run succeeded`,
         {
           details: {
             runId: ctx.runId,
@@ -14530,15 +14534,31 @@ function readableFanoutWidth(v: unknown): v is number {
  * A SECOND NAME FOR ONE RULE, ON PURPOSE. The two are the same predicate today and they are not
  * the same QUESTION: each refusal has to say what ITS reader does with the value, and the two
  * consequences are different in the way that matters — an unreadable width fans out zero branches,
- * which is silent, while an unreadable bound stops the loop after one pass and the run reports
- * `succeeded`. Folding them into one call site would put the sentence "fans out zero branches" on
+ * which is silent, while an unreadable bound stops the loop after one pass WHATEVER BOUND THE
+ * GRAPH DECLARED and the run reports `succeeded`. (One pass is not itself the harm: it is what
+ * `maxIterations: 1` legally asks for. The harm is that the declared bound is silently not the
+ * one honoured.) Folding them into one call site would put the sentence "fans out zero branches" on
  * a loop edge. **They must move together**: if either rule changes, ask the same question of the
  * other, because the only thing keeping them in step is this paragraph.
  *
- * ITS ONE READER is `#loopMayContinue`'s `w.task.iteration + 1 < (e.maxIterations ?? 1)`. `>= 1`
- * rather than `Number.isSafeInteger` alone, matching `rule006Cycles`' own bound
+ * IT HAS TWO READERS, NOT ONE, and the second is the one a first cut of this docstring missed.
+ *
+ *   `#loopMayContinue`'s `w.task.iteration + 1 < (e.maxIterations ?? 1)` — the scheduler's.
+ *   `nodeShapeOf` (this file), which copies `maxIterations` onto `ctx.node.out` for EVERY function
+ *   body (`run/registry.ts` names it as clause (i), "the outgoing-edge fields that bound what this
+ *   node's own output can produce"). `examples/resources/function/harden-fix.js`, `plan.js` and
+ *   `triage-plan.js` all read that shape, which is `c2360be`'s whole point: a bound is spelled
+ *   once, in the graph, and the body reads it rather than hard-coding it.
+ *
+ * THE SECOND READER STRENGTHENS THE CASE for refusing at the door rather than weakening it. A body
+ * handed `maxIterations: {}` does arithmetic on it and gets `NaN` — the bound the graph declared
+ * reaches the body as a value it cannot use, in a body whose reason for reading it is to avoid
+ * hard-coding one. Refusing the graph is the only answer that keeps both readers honest.
+ *
+ * `>= 1` rather than `Number.isSafeInteger` alone, matching `rule006Cycles`' own bound
  * (`e.maxIterations === undefined || e.maxIterations < 1` ⇒ `GRAPH006_UNBOUNDED_LOOP`): `0` and
- * absent both make that comparison false at the first iteration, which is a loop that never loops.
+ * absent both make the scheduler's comparison false at the first iteration, which is a loop that
+ * never loops.
  */
 function readableLoopBound(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;

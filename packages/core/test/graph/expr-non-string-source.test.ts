@@ -25,13 +25,23 @@
  *   drive. Over a real string every branch of `lex` advances `i` (whitespace `i++`; the quote branch
  *   `i = j + 1`; the digit branch is entered only when `ch` IS a digit, which the character class
  *   matches; the ident branch likewise; `op.length >= 1`), so the type test above makes it dead
- *   code — until the next branch, which is what it is for. Measured by deleting the five lines of
- *   the type test from a backup copy of `expr.ts` and re-running the `[null]` probe:
+ *   code — until the next branch, which is what it is for. Two mutations drive it, each hermetic:
+ *   a copy of `expr.ts` in a `mkdtemp` directory with its one import rewritten to an absolute URL,
+ *   and the mutation asserted to have APPLIED so a rename cannot make the pin vacuous.
  *
- *     {"ok":false,"errors":["lexer made no progress at offset 0 in ``"]}
+ *     type test disabled, `[null]`      {"ok":false,"errors":["lexer made no progress at offset 0 …"]}
+ *     `i = (i + op.length) % 2`, "a+b"  THREW E_EXPR_INVALID lexer made no progress at offset 0 …
  *
- *   in place of the heap death. Its presence is pinned below by reading the source, which is a weak
- *   pin and an honest one: it catches a silent deletion and it does not claim to exercise it.
+ *   WHAT THE GUARD COVERS IS "EVERY ITERATION STRICTLY ADVANCES `i`", and the second mutation is
+ *   why that sentence is worth its space. This pin first asserted the SOURCE TEXT
+ *   `if (i === lastStart) throw` — which both forbade the strengthening the guard needed and
+ *   certified a weaker guard as correct. `===` asks only whether two CONSECUTIVE iterations start
+ *   at the same offset, and a branch that moves `i` BACKWARDS never repeats consecutively: with
+ *   that injection `i` oscillates 0,1,0,1 and `parseExpr("a+b")` died with `FATAL ERROR:
+ *   Ineffective mark-compacts near heap limit` under `--max-old-space-size=200`, which is §A.78's
+ *   own heap death restored. **Pin the property, never the operator.** The second mutation runs in
+ *   a CHILD PROCESS because the failure it catches is an infinite loop, which would hang the
+ *   runner rather than fail it.
  *
  * AND THE STRING PATH IS UNCHANGED, which is the thing a new guard at the top of a lexer is most
  * likely to break. Asserted here on the syntax and depth messages, and separately by compiling all
@@ -40,7 +50,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { compile } from "../../src/graph/compile.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
@@ -132,12 +146,87 @@ test("compile refuses `when: [null]` with GRAPH004_EXPR, naming the edge, in bou
   assert.match(JSON.stringify(expr[0]!), /e3/);
 });
 
-test("the progress assertion is still in `lex` — pinned by source, exercised by mutation", () => {
-  // Unreachable while the type test above stands (see this file's header for the mutation that
-  // drives it). This catches its deletion, and claims nothing more than that.
+/**
+ * A copy of `expr.ts` with `mutate` applied, importable — the machinery both progress-assertion
+ * pins run on.
+ *
+ * HERMETIC: the copy lands in a fresh `mkdtemp` directory, its ONE import (`../errors.ts`) is
+ * rewritten to an absolute `file://` URL of the real module, and the directory is removed after.
+ * Nothing is written inside the repository and nothing is left behind.
+ *
+ * THE MUTATION IS ASSERTED TO HAVE APPLIED, which is the failure mode a source-rewriting test
+ * actually has: rename the thing being matched and the mutation silently becomes a no-op, the
+ * copy behaves like the original, and the test passes while testing nothing.
+ */
+function mutatedCopy(dir: string, tag: string, find: string, replace: string): string {
+  const original = readFileSync(new URL("../../src/graph/expr.ts", import.meta.url), "utf8");
+  const errors = new URL("../../src/errors.ts", import.meta.url).href;
+  assert.ok(original.includes(find), `the mutation target ${JSON.stringify(find)} is gone from expr.ts — this pin is testing nothing`);
+  const text = original.replace('from "../errors.ts"', `from ${JSON.stringify(errors)}`).replace(find, replace);
+  const file = join(dir, `expr-${tag}.ts`);
+  writeFileSync(file, text);
+  return file;
+}
+
+test("the progress assertion refuses a branch that CONSUMES NOTHING — by mutation", async () => {
+  // Unreachable from outside while the type test stands, so it is driven by deleting that test
+  // from a copy and handing the copy the value that OOMed: `i` stays at 0, the second iteration
+  // starts where the first did, and the guard fires. In-process is safe here because this shape
+  // provably terminates on the second iteration under either form of the test.
+  const dir = mkdtempSync(join(tmpdir(), "loom-expr-nogress-"));
+  try {
+    const file = mutatedCopy(
+      dir,
+      "notype",
+      'if (typeof src !== "string") {',
+      'if ((false as boolean) && typeof src !== "string") {',
+    );
+    const mod = (await import(pathToFileURL(file).href)) as { checkExpr: typeof checkExpr };
+    const r = mod.checkExpr([null] as unknown as string, {});
+    assert.equal(r.ok, false);
+    assert.ok(!r.ok);
+    assert.deepEqual(r.errors, ["lexer made no progress at offset 0 in ``"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the progress assertion refuses a branch that moves `i` BACKWARDS — by mutation", () => {
+  // THE PROPERTY, NOT THE OPERATOR. The first cut of this pin asserted the source text
+  // `if (i === lastStart) throw`, which forbade the very strengthening the guard needed: `===`
+  // asks "did two CONSECUTIVE iterations start at the same offset?", and a branch that moves `i`
+  // backwards never repeats consecutively. With `i = (i + op.length) % 2` injected into the
+  // operator arm, `i` oscillates 0,1,0,1 and `parseExpr("a+b")` died with
+  // `FATAL ERROR: Ineffective mark-compacts near heap limit` — §A.78's heap death restored.
+  //
+  // IN A CHILD PROCESS, because the failure this pin exists to catch is an INFINITE LOOP: a
+  // regression to `===` would hang or OOM the test runner rather than fail it. The child gets a
+  // 200 MB heap and a 30s ceiling, so a regression is a captured heap death and a red test.
+  const dir = mkdtempSync(join(tmpdir(), "loom-expr-backwards-"));
+  try {
+    const file = mutatedCopy(dir, "nonmono", "    i += op.length;", "    i = (i + op.length) % 2;");
+    const driver = join(dir, "driver.mjs");
+    writeFileSync(
+      driver,
+      `const { parseExpr } = await import(${JSON.stringify(pathToFileURL(file).href)});\n` +
+        `try { parseExpr("a+b"); console.log("RETURNED"); } catch (e) { console.log("THREW", e.code, e.message); }\n`,
+    );
+    const out = execFileSync(process.execPath, ["--max-old-space-size=200", driver], {
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.match(out, /THREW E_EXPR_INVALID lexer made no progress/, `the backwards branch was not refused: ${out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the progress assertion is still in `lex` at all", () => {
+  // The message, not the operator — B2's lesson. A pin on the exact comparison is a pin against
+  // its own strengthening.
   const src = readFileSync(new URL("../../src/graph/expr.ts", import.meta.url), "utf8");
   assert.match(src, /lexer made no progress/, "the progress assertion was removed from `lex`");
-  assert.match(src, /if \(i === lastStart\) throw/, "the progress assertion no longer guards the loop");
 });
 
 test("a STRING source keeps the message it had — the new guard changes no existing text", () => {

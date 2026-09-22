@@ -38,6 +38,7 @@
  *     submit -> advance (one process)           REFUSED E_GRAPH_INVALID, journal ends run.failed
  *     restart: engine 2 attaches, advances      REFUSED E_GRAPH_INVALID, run.failed rows: 1
  *     pause -> attach -> resume -> advance      NOT refused, and NOT a hole — see below
+ *     a run that HAS EXECUTED, then a restart   REFUSED every advance, run.failed rows: 0
  *
  * The third line is pre-existing and identical for the `maxWidth` guard, measured side by side:
  * `#contextFor` "returns the existing one untouched", so `attach` on a run THIS PROCESS ALREADY
@@ -45,10 +46,22 @@
  * is why that run completes honestly. The genuine attach path is a process that holds no context —
  * a restart — and that is line two.
  *
- * AND THE JOURNAL SAYS WHY. `#failUnreadableGraph` keys on the CODE (`E_GRAPH_INVALID` +
- * `validation`) and not on either existing arm — "BOTH CHECKS BY CONSTRUCTION" — so this third
- * check joins §A.63's machinery without touching it: the run is FAILED with the refusal's own
- * `details` rather than left `running` with nothing on the log saying why. Pinned below.
+ * THE FOURTH LINE IS THE §A.66 ARM AND IT IS THE CORRECT ONE, which is why it is pinned rather
+ * than merely noted. A run parked at a `human_gate` has EXECUTED, and `#failUnreadableGraph`
+ * conjoins "never executed" because the identity pair it checks is synthesisable by anyone with
+ * journal READ access — so a caller bending the bound on a run's own `graphHash` must not be able
+ * to kill a live parked run. The honest cost is §A.63's own sentence: the advance is refused every
+ * time and NO terminal row is ever written. Measured identically for `maxWidth`, so it is the
+ * shared pre-existing arm and not something this check introduced, and the run still recovers —
+ * attaching the HONEST graph advances it back to `awaiting_gate`.
+ *
+ * AND THE JOURNAL SAYS WHY, for the runs that have not executed. `#failUnreadableGraph` keys on
+ * the CODE (`E_GRAPH_INVALID` + `validation`) and not on any one arm — "EVERY CHECK BY
+ * CONSTRUCTION" — so this third check joins §A.63's machinery without touching it: the run is
+ * FAILED with the refusal's own `details` rather than left `running` with nothing on the log
+ * saying why. Pinned below, and pinned again as the third member of `FAULTS` in
+ * `advance-refusal-is-journaled.test.ts`, which is the census that runs all six of its cases over
+ * every `#assertBound` vocabulary check.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -61,7 +74,7 @@ import type { RunId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry } from "../../src/run/registry.ts";
-import { resolver } from "./skeleton.ts";
+import { resolver, SKELETON_TENANT_CAPS } from "./skeleton.ts";
 
 const NOW = 1_700_000_000_000;
 
@@ -178,7 +191,7 @@ test("every unreadable maxIterations is refused at advance, naming the edge and 
         assert.match(e.message, /"e2" \(maxIterations /, `${what}: the edge is not named`);
         assert.ok(e.message.includes(`(maxIterations ${says})`), `${what}: got ${e.message}`);
         // The consequence, in the refusal, the way the width's says what ITS reader does.
-        assert.match(e.message, /stops the loop after one pass and reports the run succeeded/, what);
+        assert.match(e.message, /stops the loop after one pass whatever bound was declared, and reports the run succeeded/, what);
         const details = e.details as Record<string, unknown> | undefined;
         assert.deepEqual(details?.["edges"], [{ id: "e2", maxIterations: says }], what);
         return true;
@@ -238,6 +251,80 @@ test("a restart with the run's OWN graph still advances — the guard is about t
   const p = await second.advance(runId);
   assert.equal(p.status, "succeeded");
   assert.deepEqual(p.channels["n"], ["s", "x", "x", "x", "x", "x", "x"]);
+});
+
+/**
+ * `start --loop--> start`, then a `human_gate`: a run that EXECUTES and then PARKS, which is the
+ * §A.66 arm — the one shape where the refusal is correct and the terminal row is correctly absent.
+ */
+function parkingSpec(): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "loop-bound-parked", project: "unreadable", version: 1 },
+    policy: { expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 4, maxLoopIterations: 8 } },
+    channels: { n: { type: "array", reduce: "append_ordered" }, items: { type: "array", reduce: "replace" } },
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: "seed", type: "function", reads: [], writes: ["n"], function: { ref: "function/seed@stable" } },
+      { id: "hold", type: "human_gate", reads: ["items"], humanGate: { ref: "oversight/hold@stable" } },
+      { id: "done", type: "function", reads: ["n"], writes: [], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      { id: "lp", from: "seed", to: "seed", kind: "loop", until: "len(n) >= 2", maxIterations: 4 },
+      { id: "s0", from: "seed", to: "hold", kind: "seq" },
+      { id: "s1", from: "hold", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("a run that HAS EXECUTED is refused on every advance and is NOT failed — the §A.66 arm", async () => {
+  // THE CORRECT ARM, asserted so nobody "fixes" it into a terminal row. `#failUnreadableGraph`
+  // conjoins "this run has never EXECUTED" precisely because the identity pair is synthesisable
+  // from journal read access — so a caller who bends the bound on a run's OWN graphHash must not
+  // be able to kill a live parked run. The cost is the honest one and it is stated in §A.63's
+  // sentence: the run is left where it was with no row saying why the advance was refused.
+  //
+  // IDENTICAL FOR `maxWidth`, measured side by side, so this is the shared pre-existing arm and
+  // not something the §A.81 check introduced.
+  const store = new MemoryStateStore({ now: () => NOW });
+  const good = compile({ spec: parkingSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
+  assert.ok(good.ok, `the parking graph must compile: ${good.diagnostics.map((d) => d.code).join(", ")}`);
+
+  const first = engineOn(store);
+  const runId = await first.submit({ graph: good.graph, inputs: { items: [{ id: "a" }] } });
+  const parked = await first.advance(runId);
+  assert.equal(parked.status, "awaiting_gate", "the run must EXECUTE and park for this arm to mean anything");
+
+  // A restart handed the run's OWN identity with the bound bent.
+  const bent = JSON.parse(JSON.stringify(good.graph)) as RunGraph;
+  (bent.spec.edges.find((x) => x.id === "lp") as unknown as Record<string, unknown>)["maxIterations"] = {};
+  (bent as unknown as Record<string, unknown>)["graphHash"] = good.graph.graphHash;
+
+  const second = engineOn(store);
+  second.attach(runId, bent);
+  for (const attempt of ["first", "second"]) {
+    await assert.rejects(
+      () => second.advance(runId),
+      (err: unknown) => {
+        assert.ok(isLoomError(err));
+        assert.equal(err.code, CODES.E_GRAPH_INVALID, attempt);
+        return true;
+      },
+      attempt,
+    );
+  }
+
+  // NO TERMINAL ROW, and the live run is intact.
+  const types = await typesOf(store, runId);
+  assert.equal(types.filter((t) => t === "run.failed").length, 0, "a live parked run must not be failed");
+  assert.equal(types.at(-1), "run.suspended");
+
+  // And the honest graph still advances it — the refusal was about the graph in hand, not the run.
+  const third = engineOn(store);
+  third.attach(runId, good.graph);
+  assert.equal((await third.advance(runId)).status, "awaiting_gate");
 });
 
 test("the guard is scoped to `loop`: an unreadable maxIterations on another kind is not read", async () => {

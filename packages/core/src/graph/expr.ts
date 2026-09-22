@@ -109,10 +109,20 @@ function describeSource(v: unknown): string {
  * diagnostic, no exit code an operator can act on and nothing naming the edge — a denial of service
  * on `loom compile` reachable from a graph FILE.
  *
- * THE TYPE TEST IS WHAT MAKES THE DIAGNOSTIC TRUE, and the progress assertion is what makes the
- * next one of these impossible. A type test alone leaves any FUTURE branch that fails to advance
- * `i` spinning exactly as this one did; a progress assertion alone would answer an ordinary
- * mistyped `when` with "made no progress", which names the lexer rather than the graph. So both.
+ * THE TYPE TEST IS WHAT MAKES THE DIAGNOSTIC TRUE, and the progress assertion is what bounds the
+ * loop. A type test alone leaves a future branch that fails to advance `i` spinning exactly as
+ * this one did; a progress assertion alone would answer an ordinary mistyped `when` with "made no
+ * progress", which names the lexer rather than the graph. So both.
+ *
+ * WHAT THE PROGRESS ASSERTION COVERS, SAID EXACTLY, because its first cut claimed more than it
+ * did. It is **every iteration must strictly advance `i`** — not "the same offset twice running".
+ * The weaker `===` form shipped first and a reviewer walked past it in one line: inject
+ * `i = (i + op.length) % 2` into the operator arm and `i` oscillates 0,1,0,1, so no two
+ * CONSECUTIVE iterations start at the same offset and the heap dies exactly as `[null]` did
+ * (measured, `--max-old-space-size=200`: `FATAL ERROR: Ineffective mark-compacts near heap
+ * limit`). `<=` refuses that on the third iteration. The claim it replaces — "any future branch
+ * that fails to advance `i` has this exact shape" — was false for a branch that moves `i`
+ * BACKWARDS, and the shape was never the point: the invariant is monotonic progress.
  *
  * IT IS IN `lex` AND NOT IN `checkExpr` because `parseExpr` is EXPORTED and the executor calls it
  * (`#expr` in `run/engine.ts`) without passing through `checkExpr` at all — a guard one level up
@@ -124,8 +134,11 @@ function describeSource(v: unknown): string {
  * sets `i = j + 1 > i`; the digit branch is entered only when `ch` IS a digit, which the character
  * class then matches and the exponent `break` cannot decline, so `j > i`; the ident branch likewise;
  * and `op.length >= 1`. So the type test above makes it dead — until the next branch, which is the
- * one it is for. Pinned by deleting the type test from a backup copy and re-running the probe:
- * `E_EXPR_INVALID: lexer made no progress at offset 0` in place of the heap death.
+ * one it is for. Pinned by two hermetic mutations in
+ * `test/graph/expr-non-string-source.test.ts`, each asserting the mutation APPLIED so a rename
+ * cannot make the pin vacuous: disabling the type test and handing it `[null]`, and injecting the
+ * backwards branch above. **Pin the property, never the operator** — the first cut of that pin
+ * asserted the source text `if (i === lastStart) throw`, which forbade this very strengthening.
  */
 function lex(src: string): Tok[] {
   if (typeof src !== "string") {
@@ -135,11 +148,17 @@ function lex(src: string): Tok[] {
   }
   const out: Tok[] = [];
   let i = 0;
-  // The previous iteration's starting offset. `i` only ever increases here, so `i === lastStart`
-  // is exactly "this iteration consumed nothing", for every branch below and every branch added.
+  // The previous iteration's starting offset. EVERY ITERATION MUST STRICTLY ADVANCE `i`, so the
+  // test is `<=` and not `===`. `===` was the first cut and it asked a weaker question — "did two
+  // CONSECUTIVE iterations start at the same offset?" — which a branch moving `i` backwards walks
+  // straight past. Measured, with `i = (i + op.length) % 2` injected into the operator arm and
+  // `--max-old-space-size=200`: `i` oscillates 0,1,0,1 and never repeats consecutively, so
+  // `parseExpr("a+b")` died with `FATAL ERROR: Ineffective mark-compacts near heap limit` —
+  // §A.78's heap death restored by a branch the guard was supposed to cover. Under `<=` the same
+  // injection is refused on the third iteration.
   let lastStart = -1;
   while (i < src.length) {
-    if (i === lastStart) throw syntax(src, i, "lexer made no progress");
+    if (i <= lastStart) throw syntax(src, i, "lexer made no progress");
     lastStart = i;
     const ch = src[i]!;
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {

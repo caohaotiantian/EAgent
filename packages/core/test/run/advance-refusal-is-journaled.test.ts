@@ -1,12 +1,13 @@
 /**
  * A REFUSAL AT THE ADVANCE DOOR LEAVES A ROW THE FOLD CAN SERVE. (§A.63.)
  *
- * `#assertBound`'s two VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, and a `maxWidth`
- * outside `readableFanoutWidth`, three lines apart — both `throw` before anything is appended. The
- * caller got `E_GRAPH_INVALID`; the journal, which is the only authoritative state, held
- * `run.submitted, run.compiled, run.started, task.ready` and nothing about why. A second process
- * attaching later saw a `running` run with no reason and no terminal row. Measured on `dbaa5671`,
- * for BOTH checks, submit-then-advance on a hand-built `RunGraph`:
+ * `#assertBound`'s VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a `maxWidth` outside
+ * `readableFanoutWidth`, and (§A.81) a loop `maxIterations` outside `readableLoopBound` — all
+ * `throw` before anything is appended. The caller got `E_GRAPH_INVALID`; the journal, which is the
+ * only authoritative state, held `run.submitted, run.compiled, run.started, task.ready` and
+ * nothing about why. A second process attaching later saw a `running` run with no reason and no
+ * terminal row. Measured on `dbaa5671`, for both checks that existed then, submit-then-advance on
+ * a hand-built `RunGraph`:
  *
  *     === maxWidth: "24" ===
  *     advance threw: E_GRAPH_INVALID / validation
@@ -17,9 +18,18 @@
  *
  *     === kind: "conditionl" ===        (identical, line for line)
  *
- * BOTH CHECKS OR NEITHER. `0dd0a524` closed a three-lines-apart asymmetry between these two;
- * answering one of them and not the other puts it straight back, which is why every case below
- * runs over both and why the engine keys on the CODE rather than on either arm.
+ * EVERY CHECK OR NONE. `0dd0a524` closed a three-lines-apart asymmetry between the first two;
+ * answering some of them and not the others puts it straight back, which is why every case below
+ * runs over ALL of `FAULTS` and why the engine keys on the CODE rather than on any one arm.
+ *
+ * **A CHECK ADDED TO `#assertBound` UNDER `E_GRAPH_INVALID` BELONGS IN `FAULTS`.** §A.81's
+ * `maxIterations` check is the third member and was added here in the same lane that added the
+ * check, which is the point: the census is what makes "every check" checkable instead of asserted.
+ * Measured by disabling that one check in `#assertBound` and re-running this file — the five tests
+ * that iterate `FAULTS` all go RED and the sixth, which does not, stays green:
+ *
+ *     pass 1  fail 5      (guard disabled)
+ *     pass 6  fail 0      (guard present)
  *
  * THE ORDINARY HALF IS THE LAST TEST, and it is the reason the engine does not simply fail the
  * run on every refusal at this door. `advance` refuses the graph IN HAND, and the vocabulary
@@ -244,6 +254,28 @@ const FAULTS: readonly Fault[] = [
         spec: { ...g.spec, edges: g.spec.edges.map((x) => (x.kind === "join" ? { ...x, kind: "conditionl" } : x)) },
       }) as RunGraph,
     edge: "jn0",
+  },
+  {
+    // §A.81. `#assertBound` grew a THIRD vocabulary check and this census is what stops the
+    // asymmetry `0dd0a524` closed from coming back one edge kind over: `#loopMayContinue` met the
+    // raw `maxIterations`, `{}` made its comparison `NaN`, and the loop stopped after one pass
+    // with the run reporting `succeeded`. The fault ADDS the loop edge rather than bending an
+    // existing one, because `fanSpec` has no cycle and the point is the value, not the topology —
+    // and `submit` records the hash of the graph it is handed, so this run really is bound to a
+    // graph nothing can read, which is the §A.63 shape every test below needs.
+    what: "a loop maxIterations this build cannot read (the check §A.81 added)",
+    mangle: (g) =>
+      ({
+        ...g,
+        spec: {
+          ...g.spec,
+          edges: [
+            ...g.spec.edges,
+            { id: e("lp"), from: n("b0"), to: n("b0"), kind: "loop", until: "len(seen) >= 2", maxIterations: {} },
+          ],
+        },
+      }) as unknown as RunGraph,
+    edge: "lp",
   },
 ];
 
