@@ -76,10 +76,15 @@
   // the hole it is standing in for, and saying so is the point of the comment.
   //
   //   COVERED: a regular file that is LISTABLE but not readable (`chmod 222` on the ledger).
-  //   NOT COVERED, each measured and each still losing the ledger in silence:
-  //     · an unlistable PARENT directory — `chmod 333 out` (pinned as a KNOWN HAZARD test);
-  //     · an escaping SYMLINK at the path — fs.glob skips it;
-  //     · a DIRECTORY at the path — fs.glob lists files.
+  //   UNCOVERED BY THIS DEFENCE, each measured — and they DO NOT END ALIKE, which is the part
+  //   worth reading:
+  //     · an unlistable PARENT directory — `chmod 333 out`. fs.glob skips it, and the run
+  //       SUCCEEDS and REWRITES the ledger. This is the silent data loss, and the only one.
+  //       Pinned as a KNOWN HAZARD test so it cannot stop existing quietly.
+  //     · an escaping SYMLINK at the path — fs.glob skips it. The run fails CLOSED, ledger
+  //       intact, for a reason this defence had nothing to do with: `write-ledger` meets the
+  //       same obstruction `read-ledger` did (`write-grant` lands first and is compensated).
+  //     · a DIRECTORY at the path — fs.glob lists files. Same ending as the symlink.
   //
   // All three make fs.glob answer `(no matches)`, which is byte-identical to its answer for "there
   // is nothing here" — so `ledgerOnDisk` is false and the run proceeds. Four patterns were tried

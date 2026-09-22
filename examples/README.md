@@ -639,12 +639,15 @@ report `succeeded` and REPLACE the ledger, destroying a prior grant.
 **The defence is a second tool asking the same question, and it covers ONE of the four ways this
 read can fail.** `fs.glob` lists a file `fs.read` cannot open, so the `look` node runs it over the
 ledger's path and `weigh` refuses when the listing is non-empty and the history came from the error
-arm. **Covered: a regular file that is listable but not readable.** Not covered, each measured and
-each still losing the ledger in silence — an unlistable parent directory (`chmod 333 out`), an
-escaping symlink at the path, and a directory at the path. All three make `fs.glob` answer
-`(no matches)`, which is its answer for "there is nothing here" as well, so **the defence answers
-its own undecidable case with the passing value exactly as the arm does**: a guard that fails open
-standing in for a guard that fails open. Four glob patterns were measured and none distinguishes
+arm. **Covered: a regular file that is listable but not readable.** Three cases are UNCOVERED BY THE
+DEFENCE, each measured — an unlistable parent directory (`chmod 333 out`), an escaping symlink at
+the path, and a directory at the path. All three make `fs.glob` answer `(no matches)`, which is its
+answer for "there is nothing here" as well, so **the defence answers its own undecidable case with
+the passing value exactly as the arm does**: a guard that fails open standing in for a guard that
+fails open. **They do not end alike, and that distinction is the dangerous part: only the unlistable
+parent destroys the ledger, and only it is silent** (the run succeeds, exit 0). The other two fail
+the run CLOSED for an unrelated reason — the write meets the same obstruction the read did, so they
+end `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE` with the ledger intact. Four glob patterns were measured and none distinguishes
 "empty" from "cannot enumerate", so no arrangement of read-only tools closes this — only the product
 gap does. **It answers "does the file exist", not "why did the read fail".** Its one safe-by-
 construction property is that its TOCTOU window loses in the failing-CLOSED direction.

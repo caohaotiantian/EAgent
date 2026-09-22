@@ -695,7 +695,9 @@ the file's permissions, or move it aside deliberately if you mean to start a new
 is not "there is no ledger", the error arm cannot see reasons, and `first-grant` reported a fact
 that was false. **The arm is still blind: F5 is a PRODUCT entry and is not closed.** What changed
 is that this workflow now asks a second, read-only tool whether the file exists, and refuses when
-the two disagree. §3's F5 has what that costs and where it does not reach.
+the two disagree — **which covers ONE of the four ways this read can fail, and fails open on the
+rest exactly as the arm does; §3's F5 has the four-pattern table and the case that still loses the
+ledger.**
 
 **`$RUN` IS ALREADY DEAD BY HERE, and §3 re-captures it rather than pretending otherwise.** The
 sweep above clears `out/` and `.loom/` before every row, deliberately, and the F5 block clears them
@@ -1000,9 +1002,13 @@ The graph ships `["u:you"]`, and the gate therefore **shows the right owners and
 signature**:
 
 ```bash
-loom gates "$RUN" 2>/dev/null | jq -c '{approvers, owners: .reads.decision.owners}'
+loom gates "$RUN" 2>/dev/null | jq -c '.[0] | {approvers, owners: .reads.decision.owners}'
 # → {"approvers":["u:you"],"owners":["u:ravi","u:mina"]}
 ```
+
+(`loom gates` prints an ARRAY of rows, so the `.[0] |` is not optional — without it `jq` exits 5
+with `Cannot index array with string "approvers"`. An earlier draft pasted the command without it
+and the right output beside it, which is the one combination a reader cannot catch by eye.)
 
 `loom approve "$RUN" "$GATE" --as u:you` succeeds. `--as u:ravi` — one of the two people the policy
 says owns the resource — is `E_GATE_NOT_AUTHORIZED`.
@@ -1239,14 +1245,23 @@ directory"**, so nothing here separates an empty answer from a blind one. Wideni
 the one thing worth trying and it does not work; anything further would be inventing a signal.
 
 **SO THE CLAIM IS NARROWED TO WHAT WAS MEASURED. The defence covers EXACTLY ONE CASE: a regular
-file that is LISTABLE but not readable.** It does not cover three others, each measured, each
-losing the ledger in silence:
+file that is LISTABLE but not readable.** Three others are UNCOVERED BY THE DEFENCE — in all three
+`fs.glob` answers `(no matches)`, so `ledgerOnDisk` is false and `weigh` does not refuse — but they
+do not all end the same way, and the difference is the whole of what is dangerous here. **One
+destroys the ledger silently. The other two fail the run CLOSED, for an unrelated reason: the write
+hits the same obstruction the read did.**
 
-| not covered | what `fs.glob` says | what happens |
+| uncovered by the defence | what `fs.glob` says | how the run ends |
 |---|---|---|
-| the PARENT directory cannot be enumerated (`chmod 333 out`) | `(no matches)` | the run succeeds, the ledger is rewritten |
-| an escaping SYMLINK at the path | `(no matches)` — glob skips it | reaches `record` and `write-grant [ok]`; the ledger survived only because `write-ledger` hit the same obstruction |
-| a DIRECTORY at the path | `(no matches)` — glob lists files | same shape |
+| the PARENT directory cannot be enumerated (`chmod 333 out`) | `(no matches)` | **succeeds, exit 0, and the ledger is rewritten — the data loss** |
+| an escaping SYMLINK at the path | `(no matches)` — glob skips it | fails `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE`; reaches `record` and `write-grant [ok]`, which is then COMPENSATED, and `write-ledger [error]` ends it. The ledger is intact |
+| a DIRECTORY at the path | `(no matches)` — glob lists files | the same: fails `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE`, ledger intact |
+
+**Only the first is a silent loss, and only it is pinned as a KNOWN HAZARD.** An earlier version of
+the sentence above said all three were "losing the ledger in silence" — which the table beside it
+already contradicted, and which is worse than an unmeasured claim, because the measurement was four
+lines away. "Uncovered" means the DEFENCE does not catch them; what ends those two runs is the
+write failing the same way the read did, which is not something `look` decided.
 
 **An earlier draft gave a FALSE mechanism for the third limit** — *"`look`'s pattern is a different
 literal, so `ledgerOnDisk` is false"*. It is the SAME literal; the symlink case globs that exact
@@ -1357,9 +1372,14 @@ the field you expect them in* — applied here because there is no field.
 ## 4 · Defects in this port's OWN workflow, and what found each one
 
 Port 2's F14 is eight defects in its own workflow, found by four review rounds, every one of them
-*the report asserting something the run had not established*. **This port has nine, and they are a
-different class**: six of them are *a guard nothing distinguishes*. Recorded in the same log
-because the METHOD is the transferable part.
+*the report asserting something the run had not established*. **This port has nine, and the largest
+group is a different class: FIVE SURVIVED BECAUSE NOTHING DISTINGUISHED THEM — #1, #2, #3, #4 and
+#8.** Four of those five were hidden by one fixture that satisfies every guard at once; the fifth,
+#8, by a TOOL whose one answer covers two facts. **The members are named rather than counted**,
+because an earlier draft of this sentence said six and the table under it lists five, which is the
+defect this whole section is about. (#5, #6, #7 and #9 are each their own thing: a claim never
+established, a claim measured false, a denial the journal would not record, and an ordering
+asserted rather than driven.) Recorded in the same log because the METHOD is the transferable part.
 
 **One was found by the author's own mutation sweep, eight across TWO review rounds, six of those
 blocking.** Nothing here was found by reading.
@@ -1630,7 +1650,9 @@ nothing else.*
   the one a maintainer should look at first**: an error arm is handed no reason, so every arm
   anybody writes is a body asserting the reason it was built to handle. This workflow now DEFENDS
   against its own instance with an `fs.glob` second opinion — that is a cost, not a closure, and
-  F5 names three places the defence does not reach.
+  **it covers ONE of the four ways that read can fail (§3's F5)**, failing open on the other three
+  in the same shape as the arm it stands in for. One of those three still destroys the ledger
+  silently and is pinned as a KNOWN HAZARD test.
 - **The shipped graph carries SIX notes in its own `labels`** — `reads-as`, `residue-error-arm`
   (F1), `residue-static-approvers` (F3), `compiles-silent`, `residue-blind-error-arm` (F5, carrying
   the defence, the one case it covers and the three it does not) and
