@@ -70,10 +70,74 @@ type Tok =
 
 const OPERATORS = ["||", "&&", "==", "!=", "<=", ">=", "<", ">", "!", "+", "-", "*", "/", "%", "(", ")", "[", "]", ".", ","];
 
+/**
+ * A source value in a refusal, rendered without trusting it.
+ *
+ * `syntax()` interpolates `src` into its message and hands it back in `details.source`, which is
+ * fine for the string this lexer is declared to take and is not fine for the values that actually
+ * reach it: `JSON.stringify` runs any `toJSON` the caller wrote and throws on a `bigint`, and a
+ * guard that throws while describing what it refuses is worse than the thing it refuses. The same
+ * argument `run/engine.ts`'s `describeWidth` is written for, one module over.
+ */
+function describeSource(v: unknown): string {
+  if (typeof v === "bigint") return "a bigint";
+  if (typeof v === "symbol") return "a symbol";
+  if (typeof v === "function") return "a function";
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object") return "an object";
+  return `a ${typeof v}`;
+}
+
+/**
+ * A NON-STRING SOURCE IS REFUSED BEFORE THE LOOP, AND THE LOOP ASSERTS ITS OWN PROGRESS. Two
+ * guards, because they answer two different questions and only the second generalises.
+ *
+ * §A.78. `src` is declared `string` and was not one: `compile`'s input is `JSON.parse` output that
+ * `cli.ts` CASTS, and `TYPE_CHECKED_ELSEWHERE` defers `when`/`until` to `GRAPH004_EXPR` precisely
+ * because `checkExpr` refuses every non-string. It did, for a number, a `null` and an object —
+ * they reach a branch that throws. It did NOT for an ARRAY, and the path is worth writing down
+ * because it is a template rather than a typo. With `src = [null]`: `src.length` is 1, `src[0]` is
+ * `null`, and **`null >= "0" && null <= "9"` is TRUE by numeric coercion**, so the number branch is
+ * taken; `/[0-9._eE+-]/.test(null)` is false so `j` stays at `i`; `src.slice(i, j)` on an ARRAY is
+ * `[]` and `Number([])` is `0`, which is finite — so a `num` token is pushed and `i = j` makes no
+ * progress. `out` grows until the heap is gone. Measured at `be29cb43`, `[null]` on one edge, with
+ * `--max-old-space-size=300`: `FATAL ERROR: Ineffective mark-compacts near heap limit`, no
+ * diagnostic, no exit code an operator can act on and nothing naming the edge — a denial of service
+ * on `loom compile` reachable from a graph FILE.
+ *
+ * THE TYPE TEST IS WHAT MAKES THE DIAGNOSTIC TRUE, and the progress assertion is what makes the
+ * next one of these impossible. A type test alone leaves any FUTURE branch that fails to advance
+ * `i` spinning exactly as this one did; a progress assertion alone would answer an ordinary
+ * mistyped `when` with "made no progress", which names the lexer rather than the graph. So both.
+ *
+ * IT IS IN `lex` AND NOT IN `checkExpr` because `parseExpr` is EXPORTED and the executor calls it
+ * (`#expr` in `run/engine.ts`) without passing through `checkExpr` at all — a guard one level up
+ * would close the compiler's entrance and leave the run-time one open, on a `RunGraph` that reached
+ * `attach` without this build's compiler.
+ *
+ * THE PROGRESS ASSERTION IS UNREACHABLE FROM OUTSIDE TODAY, which is a fact to state rather than a
+ * reason to drop it. Over a real string every branch advances: whitespace `i++`; the quote branch
+ * sets `i = j + 1 > i`; the digit branch is entered only when `ch` IS a digit, which the character
+ * class then matches and the exponent `break` cannot decline, so `j > i`; the ident branch likewise;
+ * and `op.length >= 1`. So the type test above makes it dead — until the next branch, which is the
+ * one it is for. Pinned by deleting the type test from a backup copy and re-running the probe:
+ * `E_EXPR_INVALID: lexer made no progress at offset 0` in place of the heap death.
+ */
 function lex(src: string): Tok[] {
+  if (typeof src !== "string") {
+    throw err.validation(CODES.E_EXPR_INVALID, `expression must be a string, got ${describeSource(src)}`, {
+      details: { source: describeSource(src) },
+    });
+  }
   const out: Tok[] = [];
   let i = 0;
+  // The previous iteration's starting offset. `i` only ever increases here, so `i === lastStart`
+  // is exactly "this iteration consumed nothing", for every branch below and every branch added.
+  let lastStart = -1;
   while (i < src.length) {
+    if (i === lastStart) throw syntax(src, i, "lexer made no progress");
+    lastStart = i;
     const ch = src[i]!;
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
       i++;
