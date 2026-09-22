@@ -605,8 +605,10 @@ own status is `[ok]`**, which no other example can show you.
 
 **A tool node whose failure you HANDLE does not need `unhandled: true`.** That flag suppresses
 `GRAPH011_UNHANDLED_IRREVERSIBLE`, which fires only for a tool whose class is `irreversible` or
-`externally_visible`; `fs.write` is `reversible_write`, so neither this graph nor §9 sets it. The
-flag on §1's and §3's write nodes buys nothing and is left alone.
+`externally_visible`; `fs.write` is `reversible_write`, so it is not one, and neither this graph nor
+§8 nor §9 sets the flag. `/usr/bin/grep -al 'unhandled' graphs/*.json` matches exactly two files —
+§3's `guarded-write.json` and `two-person-approval.json` — where it buys nothing today and is left
+alone.
 
 **Two things this graph measured that are worth knowing before you build one like it.**
 
