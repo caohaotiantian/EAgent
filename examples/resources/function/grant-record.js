@@ -26,6 +26,14 @@
         ? "automatically, as a renewal of an existing grant"
         : "automatically, under the public-tier read rule";
 
+  // `decidedByKind` IS READ BY `grant-weigh.js` AND `decidedBy` IS NOT. The prose above is for a
+  // person; this is the machine-readable half, and `findRenewal` keys its first bound on it —
+  // only a `"human"` entry starts a renewal window, so an auto-renewal cannot restart the clock
+  // and one approval cannot be chained into indefinite access. Keeping them two fields rather than
+  // parsing the sentence is deliberate: a guard that greps prose breaks the first time the prose
+  // is edited, and the prose here is edited for readability.
+  const decidedByKind = d.ceremony === "review" ? "human" : "automatic";
+
   const grant = {
     requestId: d.requestId,
     who: d.who,
@@ -37,6 +45,7 @@
     expiresAt,
     ceremony: d.ceremony,
     decidedBy,
+    decidedByKind,
     reason: d.reason,
     renewalOf: d.renewalOf === null ? null : d.renewalOf.at,
   };

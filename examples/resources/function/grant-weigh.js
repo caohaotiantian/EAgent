@@ -22,8 +22,18 @@
   const req = request.value;
   const pol = policy.value;
 
+  // `Number.isFinite` AND NOT JUST `typeof`, because `Infinity` and `NaN` are numbers. A request
+  // whose file says `"hours": 1e309` parses to `Infinity`, passed this check, was DENIED by
+  // `firstDenial` for not being a whole number — and then failed the run at
+  // `validation`/`E_RESOURCE_INVALID`, "non-finite number Infinity at hours", because `decision`
+  // carries the raw value and the journal will not record one. A denial nobody can journal is a
+  // denial nobody can read, so the value is refused here where the reason can still be said.
   for (const [field, kind] of [["who", "string"], ["resource", "string"], ["level", "string"], ["hours", "number"]]) {
-    if (typeof req[field] !== kind || (kind === "string" && req[field].trim() === "")) {
+    if (
+      typeof req[field] !== kind ||
+      (kind === "string" && req[field].trim() === "") ||
+      (kind === "number" && !Number.isFinite(req[field]))
+    ) {
       return {
         refuse: {
           reason:
@@ -53,21 +63,62 @@
   const rank = pol.levels.indexOf(req.level);
   const cap = Object.hasOwn(pol.maxHours, req.level) ? pol.maxHours[req.level] : undefined;
 
-  // THE RULES, IN ORDER, AND THE ORDER IS LOAD-BEARING. Every denial is checked before any
-  // renewal is looked for: a prior grant is a reason to skip the human, never a reason to exceed
-  // the cap. Inverting these two would let somebody widen an expired grant by re-asking for it.
+  // A LEDGER THAT EXISTS AND WAS NOT READ IS A REFUSAL, AND THIS IS THE ONLY PLACE THAT CAN SEE IT.
+  //
+  // The `error` arm on `read-ledger` is handed no reason (F5), so `first-grant` reports "there is
+  // no ledger yet" for a read that failed for ANY reason — including a ledger that is present and
+  // unreadable, which `grant-record.js` would then REPLACE with a document built from nothing.
+  // `look` runs `fs.glob` over the same path and its listing is the second opinion: glob lists a
+  // file `fs.read` cannot open (measured at `chmod 222`), so **listing non-empty AND history from
+  // the error arm** is exactly the case the arm cannot distinguish and this can.
+  //
+  // IT IS A NARROW DEFENCE AND NOT A CLOSURE OF F5, and the difference is worth stating: it works
+  // because this workflow's failing read has a PATH that another read-only tool can ask about. An
+  // error arm over `net.fetch`, `proc.exec` or a tool with no listable namespace has no second
+  // opinion available, and is still handed no reason. It also has a window: the file can appear or
+  // vanish between `look` and `read-ledger`, so a run that loses the race refuses where it should
+  // have proceeded — which is the failing-CLOSED direction and is why this shape is acceptable.
+  const listing = String(view.require("listing")).trim();
+  const ledgerOnDisk = listing !== "" && listing !== "(no matches)";
+  if (ledgerOnDisk && history.source === "none") {
+    return {
+      refuse: {
+        reason:
+          `"out/access-ledger.json" IS on disk — fs.glob lists it as "${listing}" — but the run reached ` +
+          `here on the error arm, which means fs.read could not open it and this graph was told only ` +
+          `that it failed. Granting now would publish a ledger rebuilt from an empty history and ` +
+          `destroy every grant the file already holds. Fix the file's permissions, or move it aside ` +
+          `deliberately if you mean to start a new ledger.`,
+      },
+    };
+  }
+
+  // DENIALS BEFORE RENEWALS, and the reason is the cap and ONLY the cap: `firstDenial` refuses
+  // anything over `maxHours`, so no renewal can be reached by a request that exceeds it. It does
+  // NOT stop a renewal from widening what was already approved — that is `findRenewal`'s own job,
+  // and it is where the three bounds live. An earlier version of this comment claimed the ordering
+  // prevented widening; it does not, and the measurement that showed so is in §3 of
+  // `docs/workflow-port-2026-09-22b.md` (a human-approved 4h write followed by an `auto` 24h
+  // "renewal" of it).
   const denial = firstDenial();
   const renewal = denial === null ? findRenewal() : null;
 
   const ceremony =
     denial !== null ? "deny" : renewal !== null ? "auto" : tier === "public" && req.level === "read" ? "auto" : "review";
 
+  // A RENEWAL'S `why` NAMES BOTH SIDES, so the record cannot describe a WIDER grant as a renewal:
+  // the level and the hours a person actually approved are printed beside the ones being granted
+  // now, and `findRenewal` has already refused to return anything that widens either. An earlier
+  // version printed only the prior level and the age, and said "this is a renewal and not a new
+  // grant" over a 24h grant renewing a 4h approval.
   const why =
     denial !== null
       ? denial
       : renewal !== null
-        ? `${req.who} was already granted ${renewal.level} on ${req.resource} ${hoursAgo(renewal)} hours ago, ` +
-          `within the policy's ${pol.renewalWithinHours}-hour renewal window, so this is a renewal and not a new grant`
+        ? `a person granted ${req.who} ${renewal.level}/${renewal.hours}h on ${req.resource} ` +
+          `${hoursAgo(renewal)} hours ago, inside the policy's ${pol.renewalWithinHours}-hour window; ` +
+          `this asks for ${req.level}/${req.hours}h, which is no wider, so it renews that decision ` +
+          `rather than making a new one`
         : ceremony === "auto"
           ? `${req.resource} is public-tier and this asks only to read it`
           : `${req.resource} is ${tier}-tier and this asks to ${req.level} it, which no rule grants without a person`;
@@ -120,10 +171,30 @@
     return null;
   }
 
-  // A RENEWAL IS A PRIOR GRANT AT THIS LEVEL OR HIGHER, STILL INSIDE THE WINDOW. Same-or-higher
-  // rather than equal: somebody who was trusted with `admin` last week does not need a second
-  // person to be handed `read` today, and requiring an exact match would send the WIDER grant
-  // through automatically and the narrower one to a human.
+  // A RENEWAL SKIPS THE PERSON, SO IT IS BOUNDED THREE WAYS AND EVERY ONE OF THEM IS LOAD-BEARING.
+  // Each has a test that goes red when it alone is deleted — see `examples-grant.test.ts`, which
+  // exists because the first version of this body had two of these guards and a suite that stayed
+  // 16/16 green with EITHER of them removed.
+  //
+  //   1. A PERSON DECIDED THE PRIOR GRANT. Only `decidedByKind: "human"` starts a window. Without
+  //      this, an auto-renewal is itself renewable and its fresh `grantedAt` restarts the clock,
+  //      so ONE approval chains into indefinite access — measured: a grant expired 718 hours ago
+  //      renewed `auto`, because the window is measured from `grantedAt` and every renewal reset
+  //      it. The window now always ends 720 hours after the last time a human said yes.
+  //   2. A RENEWAL MAY NOT WIDEN. Not the level (a prior `read` cannot carry a requested `write`)
+  //      and not the duration (a prior 4h cannot carry a requested 24h). Widening is a NEW
+  //      decision and goes to a person. `firstDenial` does not cover this: it enforces the
+  //      policy's cap, and 24h of write is inside the 24h cap — so without this guard a human who
+  //      approved four hours had authorised a day.
+  //   3. IT IS STILL INSIDE THE WINDOW, measured from the prior grant's own `grantedAt`.
+  //
+  // Same-or-higher on the level, rather than equal: somebody trusted with `admin` yesterday does
+  // not need a second person to be handed `read` today, and requiring an exact match would send
+  // the NARROWER request to a human while the wider one sailed through.
+  //
+  // WHAT "HIGHER" MEANS IS `pol.levels`' ARRAY ORDER and nothing else — that array is the privilege
+  // lattice, and `access/policy.json`'s own `note` says so, because reordering it silently
+  // redefines which grants outrank which.
   function findRenewal() {
     const windowMs = Number(pol.renewalWithinHours) * 3_600_000;
     if (!Number.isFinite(windowMs) || windowMs <= 0) return null;
@@ -131,8 +202,11 @@
     let best = null;
     for (const g of history.grants) {
       if (g === null || typeof g !== "object") continue;
+      if (g.decidedByKind !== "human") continue;
       const priorRank = pol.levels.indexOf(g.level);
-      if (priorRank < rank) continue;
+      if (priorRank < 0 || priorRank < rank) continue;
+      const priorHours = Number(g.hours);
+      if (!Number.isFinite(priorHours) || req.hours > priorHours) continue;
       const at = Number(g.grantedAt);
       if (!Number.isFinite(at) || now - at > windowMs || at > now) continue;
       if (best === null || at > Number(best.grantedAt)) best = g;
@@ -189,6 +263,10 @@
     if (v === undefined) return "nothing";
     if (v === null) return "null";
     if (Array.isArray(v)) return `an array of ${v.length}`;
+    // `JSON.stringify(Infinity)` is the string "null", so the obvious formatter reported a
+    // non-finite `hours` as "number null" — which reads as a missing field and sends whoever is
+    // holding the request looking for one. `String()` says `Infinity`.
+    if (typeof v === "number" && !Number.isFinite(v)) return `the non-finite number ${String(v)}`;
     return `${typeof v} ${JSON.stringify(v)}`;
   }
 }

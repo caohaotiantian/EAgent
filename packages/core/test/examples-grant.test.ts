@@ -15,9 +15,11 @@
  *    are the `seq` and `error` targets of one node; exactly one must appear, and the OTHER must
  *    be absent. A run that took both, or that took the success arm on a missing file, would still
  *    produce a grant — with a history it had no right to.
- *  - **The router's three arms and its fallback**, each pinned to the node it must reach.
- *    `deny` firing when `record` should have, or the reverse, is the whole failure mode: one of
- *    those two nodes grants production access and the other refuses it.
+ *  - **The router's two cases and its `fallbackEdge`** — three destinations, but TWO `cases[]`
+ *    entries and one fallback, which is not the same thing and was called "three arms" here once.
+ *    Each is pinned to the node it must reach: `deny` firing when `record` should have, or the
+ *    reverse, is the whole failure mode, because one of those two nodes grants production access
+ *    and the other refuses it.
  *  - **The gate is the only thing between a decision and the disk.** Nothing is on disk while the
  *    run is parked, and both files appear on approval.
  *  - **The ledger ROUND-TRIPS.** Run one writes it, run two reads it and renews off it. This is
@@ -26,17 +28,24 @@
  *  - **The policy lives in the FIXTURE, not in the bodies.** `maxHours.write` is edited down in
  *    the workspace copy alone and the denial is required to follow it. A body holding its own
  *    constant fails this. Same drift test the first port's `maxWidth` one is.
- *  - **RESIDUE: the blind error arm.** A ledger that cannot be READ but can be WRITTEN is
- *    silently replaced. That is a product gap (F5), not a workflow defect, and the test asserts
- *    the CURRENT loss so that the day it is closed, somebody is told.
+ *  - **THE THREE BOUNDS ON A RENEWAL, one test each, each with a control.** A renewal skips the
+ *    person, so every bound is the difference between "a human said yes to this" and "a human
+ *    said yes to something else". They are at the foot of this file and they are the reason it
+ *    grew: the first version of this suite was 16/16 GREEN with either of the two bounds that
+ *    existed then DELETED, because the only renewal it exercised was a minutes-old, same-level,
+ *    same-hours repeat — a fixture that satisfies every guard at once and distinguishes none.
+ *  - **F5's DEFENCE, in both directions.** A ledger that cannot be READ but can be WRITTEN must be
+ *    REFUSED (it used to be silently replaced), and the ordinary first run — where there really is
+ *    no ledger — must still proceed. A defence that fired on the second would be worse than none.
  *
  * Offline by construction: no `agent` node, so no adapter is registered, no key is read, and no
- * network call is possible. Nothing here asserts on a duration or on a ratio of two.
+ * network call is possible. Nothing here asserts on a duration or on a ratio of two; the tests
+ * that need an aged history SEED it with explicit timestamps rather than waiting for a clock.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -370,8 +379,9 @@ test("the ledger ROUND-TRIPS: what run one wrote, run two reads back and renews 
     // ONE prior grant, although the ledger holds two: the history `weigh` decides on is filtered
     // to this requester and this resource, so u:sam's docs-site grant must not appear here.
     assert.equal(d.priorGrants.length, 1);
-    assert.match(d.why, /was already granted write on orders-db/);
-    assert.match(d.why, /within the policy's 720-hour renewal window/);
+    assert.match(d.why, /a person granted u:dana write\/4h on orders-db/);
+    assert.match(d.why, /inside the policy's 720-hour window/);
+    assert.match(d.why, /this asks for write\/4h, which is no wider/);
 
     const renewed = JSON.parse(readFileSync(join(ws.dir, GRANT), "utf8")) as Grant;
     assert.equal(renewed.ceremony, "auto");
@@ -609,19 +619,19 @@ test("the compiler prints NOTHING on this graph — no error, no warning", async
     assert.deepEqual(diagnostics, [], `expected no diagnostic:\n${c.err}`);
 
     // `ok`, then one deadline line per node that can time out. `router` and `human_gate` run no
-    // body that could, so the ten are the twelve nodes minus `route` and `sign`.
+    // body that could, so the eleven are the thirteen nodes minus `route` and `sign`.
     assert.match(c.out, /^ok$/m, c.out);
     const deadlines = c.out.split("\n").filter((l) => /^\s+deadline /.test(l));
-    assert.equal(deadlines.length, 10, c.out);
+    assert.equal(deadlines.length, 11, c.out);
     assert.equal(deadlines.filter((l) => / route | sign /.test(l)).length, 0, c.out);
   } finally {
     ws.dispose();
   }
 });
 
-// ── RESIDUE: product behaviour this workflow cannot close ─────────────────────
+// ── the defence F5 cost, and the product behaviour behind it ──────────────────
 
-test("RESIDUE (F5) — a ledger that cannot be READ but CAN be written is silently replaced", async () => {
+test("F5's DEFENCE — a ledger that cannot be READ but CAN be written is REFUSED, not replaced", async () => {
   const ws = workspace();
   try {
     // Establish a ledger holding somebody's grant.
@@ -630,9 +640,9 @@ test("RESIDUE (F5) — a ledger that cannot be READ but CAN be written is silent
     const before = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
     assert.deepEqual(before.grants.map((g) => g.who), ["u:sam"]);
 
-    // Write-only. `read-ledger` fails; the error arm CANNOT SEE WHY, so `first-grant` reports
-    // "there is no ledger yet" — which is false — and `grant-record.js` rebuilds the document
-    // from an empty list.
+    // Write-only. `read-ledger` fails and the error arm CANNOT SEE WHY, so `first-grant` still
+    // reports "there is no ledger yet" — which is false. The DEFENCE is `look`: `fs.glob` lists a
+    // file `fs.read` cannot open, so `weigh` has a second opinion the arm does not.
     chmodSync(join(ws.dir, LEDGER), 0o222);
     let second: { r: Result; s: Record<string, unknown> };
     try {
@@ -641,13 +651,36 @@ test("RESIDUE (F5) — a ledger that cannot be READ but CAN be written is silent
       chmodSync(join(ws.dir, LEDGER), 0o644);
     }
 
-    // THE LOSS, ASSERTED. This test says what the product does TODAY so that the day an error arm
-    // can see its failure's reason, it fails loudly and is read rather than absorbed. The expected
-    // behaviour is a REFUSAL here, not a success.
-    assert.equal(second.s["status"], "succeeded", "today it succeeds, and that is the finding");
-    assert.equal((outputs(second.s)["decision"] as Decision).historySource, "none");
+    // BEFORE THE DEFENCE THIS RUN SUCCEEDED AND THE LEDGER WAS REPLACED. Both halves are asserted:
+    // the refusal, and — the one that actually matters — that the bytes on disk did not move.
+    assert.equal(second.r.code, 1, `${second.r.out}${second.r.err}`);
+    assert.equal(second.s["status"], "failed");
+    const e = errorOf(second.s);
+    assert.equal(e.class, "validation");
+    assert.equal(e.code, "E_FUNCTION_REFUSED");
+    assert.match(String(e.message), /on node "weigh" refused/);
+    assert.match(String(e.message), /IS on disk — fs.glob lists it/);
+    assert.match(String(e.message), /destroy every grant the file already holds/);
+
     const after = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
-    assert.deepEqual(after.grants.map((g) => g.who), ["u:ravi"], "u:sam's grant is GONE — that is the hazard");
+    assert.deepEqual(after.grants.map((g) => g.who), ["u:sam"], "u:sam's grant must survive");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("F5's defence does NOT fire on the ordinary first run, where there really is no ledger", async () => {
+  const ws = workspace();
+  try {
+    // THE OTHER HALF, and the one a defence like this gets wrong. `look` finds nothing, the error
+    // arm fires for the RIGHT reason, and the run must proceed. A defence that refused here would
+    // make the first run of the command impossible.
+    const r = await run(ws.dir, "docs-site-read.json");
+    assert.equal(r.s["status"], "succeeded", `${r.r.out}${r.r.err}`);
+    assert.equal((outputs(r.s)["decision"] as Decision).historySource, "none");
+    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+    assert.equal(counts["look"], 1, JSON.stringify(counts));
+    assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
   } finally {
     ws.dispose();
   }
@@ -661,10 +694,11 @@ test("a failed run's already-landed fs.write is COMPENSATED, with no compensatio
     const before = readFileSync(join(ws.dir, GRANT), "utf8");
     assert.match(before, /REQ-1042/);
 
-    // Unreadable AND unwritable: `read-ledger` fails onto the error arm, `write-grant` SUCCEEDS,
-    // and `write-ledger` then fails — so the run fails with one irreversible-ish effect already
-    // on disk.
-    chmodSync(join(ws.dir, LEDGER), 0o000);
+    // READ-ONLY, not unreadable — and the distinction is what F5's defence changed. `read-ledger`
+    // now SUCCEEDS (so `prior` runs and `weigh` does not refuse), `write-grant` succeeds, and
+    // `write-ledger` is the node that fails. An earlier version of this test used `chmod 000`,
+    // which since the `look` node refuses at `weigh` and never reaches a write at all.
+    chmodSync(join(ws.dir, LEDGER), 0o444);
     let second: { r: Result; s: Record<string, unknown> };
     try {
       second = await run(ws.dir, "docs-site-read-ravi.json");
@@ -683,6 +717,276 @@ test("a failed run's already-landed fs.write is COMPENSATED, with no compensatio
     // And the trace says so in its own words, which is where somebody would go looking.
     const t = await loom(ws.dir, ["trace", String(second.s["runId"])]);
     assert.match(t.out, /loom\.tool \(compensate\)/, t.out);
+  } finally {
+    ws.dispose();
+  }
+});
+
+// ── the three bounds on a renewal, one test per bound ─────────────────────────
+//
+// A renewal SKIPS THE PERSON, so each bound is the difference between "a human said yes to this"
+// and "a human said yes to something else". These tests exist because the first version of this
+// suite was 16/16 GREEN with either of the two bounds that existed then DELETED: the only renewal
+// it ever exercised was a same-level, same-hours, minutes-old repeat of an approval, which
+// satisfies every guard at once and therefore distinguishes none of them.
+//
+// Each seeds the ledger BY HAND rather than by running the graph. That is deliberate: a test that
+// builds its history by approving gates can only ever produce a history that is seconds old and
+// exactly as wide as what it asked for, which is the fixture that hid the gap. Seeding also keeps
+// them deterministic — no sleeping, no clock arithmetic against a real approval.
+
+/** Write a ledger holding exactly these grants, ages given in hours BEFORE now. */
+function seedLedger(
+  dir: string,
+  rows: readonly { hoursAgo: number; level: string; hours: number; kind: "human" | "automatic"; who?: string }[],
+): void {
+  const now = Date.now();
+  const grants = rows.map((r, i) => ({
+    requestId: `SEED-${i}`,
+    who: r.who ?? "u:dana",
+    resource: "orders-db",
+    tier: "restricted",
+    level: r.level,
+    hours: r.hours,
+    grantedAt: now - r.hoursAgo * 3_600_000,
+    expiresAt: now - r.hoursAgo * 3_600_000 + r.hours * 3_600_000,
+    ceremony: r.kind === "human" ? "review" : "auto",
+    decidedBy: r.kind === "human" ? 'a person, at the "sign" gate' : "automatically",
+    decidedByKind: r.kind,
+    reason: "seeded by examples-grant.test.ts",
+    renewalOf: null,
+  }));
+  mkdirSync(join(dir, "out"), { recursive: true });
+  writeFileSync(
+    join(dir, LEDGER),
+    `${JSON.stringify({ version: 1, note: "seeded by the suite", grants }, null, 2)}\n`,
+  );
+}
+
+/** Edit one top-level field of the workspace copy of the policy. */
+function setPolicy(dir: string, field: string, value: unknown): void {
+  const path = join(dir, "access", "policy.json");
+  const policy = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  policy[field] = value;
+  writeFileSync(path, `${JSON.stringify(policy, null, 2)}\n`);
+}
+
+test("BOUND 1 — only a HUMAN-decided grant starts a renewal window", async () => {
+  const ws = workspace();
+  try {
+    // A person said yes three hours ago; an auto-renewal of it landed six minutes ago. The window
+    // is two hours. If auto entries counted, the fresh one would carry this — and every renewal
+    // would restart the clock, so ONE approval becomes indefinite access at the cap.
+    setPolicy(ws.dir, "renewalWithinHours", 2);
+    seedLedger(ws.dir, [
+      { hoursAgo: 3, level: "write", hours: 4, kind: "human" },
+      { hoursAgo: 0.1, level: "write", hours: 4, kind: "automatic" },
+    ]);
+
+    const r = await run(ws.dir, "orders-db-backfill.json");
+    assert.equal(
+      r.s["status"],
+      "awaiting_gate",
+      `the only HUMAN decision is older than the window, so this needs a person: ${r.r.out}${r.r.err}`,
+    );
+    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+    assert.equal(counts["sign"], 1, JSON.stringify(counts));
+
+    // THE CONTROL: make the fresh entry human and the same ledger renews with no gate. Without it
+    // this test would pass against a `findRenewal` that had stopped renewing anything.
+    const ws2 = workspace();
+    try {
+      setPolicy(ws2.dir, "renewalWithinHours", 2);
+      seedLedger(ws2.dir, [
+        { hoursAgo: 3, level: "write", hours: 4, kind: "human" },
+        { hoursAgo: 0.1, level: "write", hours: 4, kind: "human" },
+      ]);
+      const ok = await run(ws2.dir, "orders-db-backfill.json");
+      assert.equal(ok.s["status"], "succeeded", `${ok.r.out}${ok.r.err}`);
+      assert.equal((outputs(ok.s)["decision"] as Decision).ceremony, "auto");
+    } finally {
+      ws2.dispose();
+    }
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("BOUND 2a — a renewal may not widen the LEVEL", async () => {
+  const ws = workspace();
+  try {
+    // A person approved READ. This asks for WRITE. `orders-db` is restricted, so nothing but a
+    // renewal can skip the gate — and a read approval is not an approval to write.
+    seedLedger(ws.dir, [{ hoursAgo: 1, level: "read", hours: 4, kind: "human" }]);
+
+    const r = await run(ws.dir, "orders-db-backfill.json");
+    assert.equal(r.s["status"], "awaiting_gate", `${r.r.out}${r.r.err}`);
+    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+    assert.equal(counts["sign"], 1, JSON.stringify(counts));
+
+    // THE CONTROL, and without it this test passes against a graph that never renews: the same
+    // ledger at the same level renews with no gate at all.
+    const ws2 = workspace();
+    try {
+      seedLedger(ws2.dir, [{ hoursAgo: 1, level: "write", hours: 4, kind: "human" }]);
+      const ok = await run(ws2.dir, "orders-db-backfill.json");
+      assert.equal(ok.s["status"], "succeeded", `${ok.r.out}${ok.r.err}`);
+      assert.equal((outputs(ok.s)["decision"] as Decision).ceremony, "auto");
+    } finally {
+      ws2.dispose();
+    }
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("BOUND 2b — a renewal may not widen the HOURS", async () => {
+  const ws = workspace();
+  try {
+    // A person approved write for FOUR hours. This asks for TWENTY-FOUR, which is inside the
+    // policy's 24h cap — so `firstDenial` lets it through and only this bound stops it. Before it
+    // existed, a human who approved four hours had authorised a day.
+    seedLedger(ws.dir, [{ hoursAgo: 1, level: "write", hours: 4, kind: "human" }]);
+
+    const r = await run(ws.dir, "orders-db-long-write.json");
+    assert.equal(r.s["status"], "awaiting_gate", `24h is wider than the 4h a person approved: ${r.r.out}${r.r.err}`);
+
+    // And the NARROWER direction still renews, which is the half that says this is a width test
+    // and not "renewals are off".
+    const narrower = await run(ws.dir, "orders-db-read.json");
+    assert.equal(narrower.s["status"], "succeeded", `${narrower.r.out}${narrower.r.err}`);
+    const d = outputs(narrower.s)["decision"] as Decision;
+    assert.equal(d.ceremony, "auto");
+    assert.match(d.why, /which is no wider, so it renews that decision/);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("BOUND 3 — a renewal must be inside the window, measured from the prior grant", async () => {
+  const ws = workspace();
+  try {
+    // One human grant, 719 hours old, against a one-hour window. The previous version of this
+    // suite set `renewalWithinHours` to 0, which exits `findRenewal` at its `windowMs <= 0` guard
+    // and never reaches the comparison — so deleting the comparison kept it green.
+    setPolicy(ws.dir, "renewalWithinHours", 1);
+    seedLedger(ws.dir, [{ hoursAgo: 719, level: "write", hours: 4, kind: "human" }]);
+
+    const r = await run(ws.dir, "orders-db-backfill.json");
+    assert.equal(r.s["status"], "awaiting_gate", `719h old against a 1h window: ${r.r.out}${r.r.err}`);
+
+    // THE CONTROL: the same ledger with a window wide enough to hold it renews. Without this the
+    // test would pass against a `findRenewal` that returned null unconditionally.
+    const ws2 = workspace();
+    try {
+      setPolicy(ws2.dir, "renewalWithinHours", 720);
+      seedLedger(ws2.dir, [{ hoursAgo: 719, level: "write", hours: 4, kind: "human" }]);
+      const ok = await run(ws2.dir, "orders-db-backfill.json");
+      assert.equal(ok.s["status"], "succeeded", `${ok.r.out}${ok.r.err}`);
+      assert.equal((outputs(ok.s)["decision"] as Decision).ceremony, "auto");
+    } finally {
+      ws2.dispose();
+    }
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a renewal's `why` names BOTH widths, so a record cannot call a wider grant a renewal", async () => {
+  const ws = workspace();
+  try {
+    seedLedger(ws.dir, [{ hoursAgo: 2, level: "admin", hours: 8, kind: "human" }]);
+    const r = await run(ws.dir, "orders-db-backfill.json");
+    assert.equal(r.s["status"], "succeeded", `${r.r.out}${r.r.err}`);
+    const d = outputs(r.s)["decision"] as Decision;
+    assert.equal(d.ceremony, "auto");
+    // The prior decision AND the one being made, both spelled out. The old message printed only
+    // the prior level and the age, and said "this is a renewal and not a new grant" over a grant
+    // four times as long as the one a person had approved.
+    assert.match(d.why, /a person granted u:dana admin\/8h on orders-db 2 hours ago/);
+    assert.match(d.why, /this asks for write\/4h, which is no wider/);
+  } finally {
+    ws.dispose();
+  }
+});
+
+// ── the failure taxonomy, all FOUR kinds ──────────────────────────────────────
+//
+// §2 of the port doc used to name two — a denial at `deny` and a refusal at `weigh` — and a
+// reviewer found two more that a caller wrapping this workflow will meet. They are different
+// CLASSES, not just different messages, and a script that branches on `class`/`code` needs all
+// four: `unavailable` means the workflow never started, `validation` means it declined.
+
+test("a missing REQUEST file fails at the TOOL, because read-request has no error edge", async () => {
+  const ws = workspace();
+  try {
+    // ONLY `read-ledger` has an error arm, and deliberately: a ledger may legitimately not exist,
+    // while a request the caller named and did not provide is the caller's bug. This is the
+    // `unavailable` class — the workflow never ran, as against declining to grant.
+    const r = await run(ws.dir, "no-such-request.json");
+    assert.equal(r.r.code, 1, `${r.r.out}${r.r.err}`);
+    assert.equal(r.s["status"], "failed");
+    const e = errorOf(r.s);
+    assert.equal(e.class, "unavailable", JSON.stringify(e));
+    assert.equal(e.code, "E_TOOL_SOURCE_UNAVAILABLE", JSON.stringify(e));
+
+    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+    assert.equal(counts["weigh"], undefined, `nothing downstream runs: ${JSON.stringify(counts)}`);
+    assert.equal(counts["first-grant"], undefined, "and the ledger's error arm is not involved");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a NON-FINITE `hours` is refused at `weigh`, not left to fail the journal", async () => {
+  const ws = workspace();
+  try {
+    // `"hours": 1e309` parses to `Infinity`, which IS a number — so a `typeof` check passes it.
+    // It used to be denied by `firstDenial` for not being a whole number and then fail the run at
+    // `validation`/`E_RESOURCE_INVALID`, "non-finite number Infinity at hours", because `decision`
+    // carries the raw value and the journal will not record one. A denial nobody can journal is a
+    // denial nobody can read.
+    const r = await run(ws.dir, "hours-not-finite.json");
+    assert.equal(r.r.code, 1, `${r.r.out}${r.r.err}`);
+    const e = errorOf(r.s);
+    assert.equal(e.class, "validation", JSON.stringify(e));
+    assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+    assert.match(String(e.message), /on node "weigh" refused/);
+    // The value is NAMED, and named readably: `JSON.stringify(Infinity)` is the string "null", so
+    // the obvious formatter reported this as "number null" — which reads as a missing field.
+    assert.match(String(e.message), /found the non-finite number Infinity/);
+    assert.doesNotMatch(String(e.message), /E_RESOURCE_INVALID/);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("every hostile request fails CLOSED — nothing reaches `record`, nothing reaches disk", async () => {
+  const ws = workspace();
+  try {
+    // A sweep rather than one case, because the claim is about the SET: no malformed or
+    // out-of-policy request may produce a grant. Each is asserted three ways — exit 1, `record`
+    // never dispatched, and no file on disk — since "the run failed" and "the run failed after
+    // granting access" are the same exit code.
+    const hostile: readonly string[] = [
+      "not-a-request.txt",
+      "no-level.json",
+      "hours-not-finite.json",
+      "bad-level.json",
+      "unknown-resource.json",
+      "orders-db-too-long.json",
+      "payments-kms-admin.json",
+    ];
+    for (const request of hostile) {
+      const r = await run(ws.dir, request);
+      assert.equal(r.r.code, 1, `${request} must exit 1: ${r.r.out}${r.r.err}`);
+      assert.equal(r.s["status"], "failed", request);
+      const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+      assert.equal(counts["record"], undefined, `${request} reached record: ${JSON.stringify(counts)}`);
+      assert.equal(counts["write-grant"], undefined, `${request} reached write-grant: ${JSON.stringify(counts)}`);
+      assert.equal(existsSync(join(ws.dir, GRANT)), false, `${request} left a grant on disk`);
+      assert.equal(existsSync(join(ws.dir, LEDGER)), false, `${request} touched the ledger`);
+    }
   } finally {
     ws.dispose();
   }
