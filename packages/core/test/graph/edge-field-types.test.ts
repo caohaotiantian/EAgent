@@ -21,8 +21,9 @@
  *   must be refused by SOMETHING — with a THROW counted as a failure, because a crash is not a
  *   refusal. That distinction is what the first cut of this file got wrong: it drove eight of the
  *   twelve values and its `d.length > 0` could not see an exception, so five sites that threw on a
- *   `symbol` or a `bigint` passed. `kind` is the one exclusion, `KIND_STILL_THROWS` below names the
- *   two values, and the site is in `graph/compile.ts` — not this lane's file to fix.
+ *   `symbol` or a `bigint` passed. `kind` is the one exclusion; it is a CLASS and not two values —
+ *   `KIND_STILL_THROWS` below names the class, measures its members and drives two of them — and the
+ *   site is in `graph/compile.ts`, not this lane's file to fix.
  *
  * WHAT THIS DOES NOT CLOSE, unchanged from `fanout-width-type.test.ts`: `Executor.attach()` is
  * public and `RunGraph` is exported, so a graph reaches the executor without passing this build's
@@ -220,12 +221,29 @@ const compileOf = (s: GraphSpec) =>
   compile({ spec: s, resolver: stubResolver(), tools: TOOLS, tenantCapabilities: TENANT_CAPABILITIES });
 
 /**
- * THE ONE EXCLUSION, and the fix round that found it is why this is a table rather than a sentence.
+ * THE ONE EXCLUSION, AND IT IS A CLASS RATHER THAN TWO VALUES — say the set honestly.
  *
- * `kind: 10n` and a `kind` whose `toJSON` throws still come out of `compile` as an EXCEPTION, from
- * `unknownEdgeKinds`' `JSON.stringify(edge.kind)` in `graph/compile.ts` — a file this lane does not
- * own. Listing them here makes the exclusion a measured fact: if that site ever learns to render
- * safely, this test goes red and the row comes off the list.
+ * `graph/compile.ts`'s `unknownEdgeKinds` has TWO sites that coerce the value, and the class is the
+ * union of what each cannot do — measured, one graph per row, in `.agent/spec-a62/probe-kind-class.ts`:
+ *
+ *     :325 `JSON.stringify(edge.kind)`   10n              TypeError: Do not know how to serialize a BigInt
+ *                                        [10n], {a:10n}   the same, at any depth
+ *                                        {toJSON throws}  Error: boom
+ *                                        a circular object TypeError: Converting circular structure
+ *                                        a Proxy whose get trap throws
+ *     :317 `Object.hasOwn(…, edge.kind)` [Symbol()]       TypeError: Cannot convert a Symbol value
+ *                                        (the KEY coercion, not the message)
+ *
+ * A BARE `Symbol()` DOES NOT THROW and is a diagnostic — `String(sym)` is legal where a template is
+ * not, and `?? String(edge.kind)` is what catches it. So the set is "a `kind` that
+ * `JSON.stringify` refuses, plus one that `Object.hasOwn`'s key coercion refuses", and the two
+ * values driven below are MEMBERS OF IT, not the whole of it. Naming only those two here would be
+ * the same mistake `TYPE_CHECKED_ELSEWHERE` made when it said "total".
+ *
+ * NOT THIS LANE'S FILE TO FIX — `compile.ts` is outside the owned set, and the repair is the one
+ * `unknownEdgeKinds`' own docstring already proposes: move the rule beside GRAPH020, where
+ * `describeValue` is. Listing these makes the exclusion a measured fact rather than a hope: if that
+ * site ever learns to render safely, this test goes red and the rows come off.
  */
 const KIND_STILL_THROWS: readonly unknown[] = [10n, { toJSON: () => { throw new Error("boom"); } }];
 
@@ -412,7 +430,10 @@ test("THE BYTES · the edge IS the kind that declares the field — word for wor
 
   const branches = one("e2", { branches: "investigate" });
   assert.equal(branches.message, 'join edge "e2" declares branches "investigate", which is not an array of strings');
-  assert.equal(branches.fix, 'set branches on edge "e2" to an array of strings');
+  // ", or remove it" IS BACK for the two `stringArray` fields and only for them — a join with no
+  // `branches` compiles clean, so removal is a valid edit and round 1 was wrong to withhold it.
+  // `REMOVAL IS OFFERED ONLY WHERE THE COMPILER ACCEPTS IT` below measures all six fields.
+  assert.equal(branches.fix, 'set branches on edge "e2" to an array of strings, or remove it');
 
   // `codes: null` ON THE KIND THAT DECLARES IT — the one previously-compiling shape reachable from
   // plain JSON where the field's own kind reads it. `checkCodes` returns early on a non-array
@@ -421,7 +442,7 @@ test("THE BYTES · the edge IS the kind that declares the field — word for wor
   const codes = one("e11", { codes: null });
   assert.equal(codes.code, "GRAPH003_MALFORMED");
   assert.equal(codes.message, 'error edge "e11" declares codes null, which is not an array of strings');
-  assert.equal(codes.fix, 'set codes on edge "e11" to an array of strings');
+  assert.equal(codes.fix, 'set codes on edge "e11" to an array of strings, or remove it');
 });
 
 test("THE BYTES · the edge is NOT that kind — the fix says REMOVE, and no reader is asserted", () => {
@@ -531,6 +552,92 @@ test("OWN KEYS ONLY — a polluted `Object.prototype` used to put a `maxWidth` o
   // And a field the edge really does declare is still read, so the own-key test did not switch the
   // check off.
   assert.deepEqual(errorsOf(withEdge("e1", { maxWidth: "24" })).map((x) => x.code), ["GRAPH007_BAD_MAX_WIDTH"]);
+});
+
+test("OWN KEYS FOR THE CEILING TOO — two numbers for one limit is worse than either", () => {
+  // The same defect one scope over, and it produced a WRONG NUMBER rather than a spurious refusal.
+  // `maxFanoutOf` read `expansion["maxFanout"]` bare while `expansionOf` uses `Object.hasOwn`, so on
+  // a graph declaring no `maxFanout` of its own with `Object.prototype.maxFanout = 8` set, the two
+  // disagreed — measured on one object:
+  //
+  //     declared["maxFanout"]                  -> 8
+  //     Object.hasOwn(declared, "maxFanout")   -> false, so expansionOf answers DEFAULT 32
+  //
+  // The fix said "between 1 and 8" about a ceiling `rule007Fanout` enforced at 32.
+  const noCeiling = (): GraphSpec => {
+    const s = clone(incidentTriage()) as unknown as Record<string, unknown>;
+    delete ((s["policy"] as Record<string, unknown>)["expansion"] as Record<string, unknown>)["maxFanout"];
+    const edges = s["edges"] as Record<string, unknown>[];
+    const i = edges.findIndex((x) => x["id"] === "e1");
+    edges[i] = { ...edges[i]!, maxWidth: "24" };
+    return s as unknown as GraphSpec;
+  };
+  const proto = Object.prototype as unknown as Record<string, unknown>;
+  try {
+    proto["maxFanout"] = 8;
+    const d = errorsOf(noCeiling()).filter((x) => x.code === "GRAPH007_BAD_MAX_WIDTH");
+    assert.equal(d.length, 1);
+    assert.equal(d[0]!.fix, 'set maxWidth on edge "e1" to a whole number between 1 and 32 (unquoted: 24, not "24")');
+  } finally {
+    delete proto["maxFanout"];
+  }
+  // And a DECLARED ceiling still wins, so the own-key test did not turn the read into a constant.
+  assert.equal(
+    errorsOf(withEdge("e1", { maxWidth: "24" })).find((x) => x.code === "GRAPH007_BAD_MAX_WIDTH")!.fix,
+    'set maxWidth on edge "e1" to a whole number between 1 and 25 (unquoted: 24, not "24")',
+  );
+});
+
+test("ONE SPELLING · the parse's arm and `rule007Fanout`'s arm are the same producer", () => {
+  // `GRAPH007_BAD_MAX_WIDTH` has two raisers — the parse for a wrong TYPE, `rule007Fanout` for a
+  // value below 1 — and for one round they were two copies of one sentence. They had already
+  // drifted: each fetched `maxFanout` its own way. `edgeFieldRefusal` is now the single producer and
+  // this asserts the two paths agree on everything but the value, on ONE graph, so a copy cannot
+  // come back without going red.
+  const parse = errorsOf(withEdge("e1", { maxWidth: "24" })).find((x) => x.code === "GRAPH007_BAD_MAX_WIDTH")!;
+  const rule = errorsOf(withEdge("e1", { maxWidth: 0 })).find((x) => x.code === "GRAPH007_BAD_MAX_WIDTH")!;
+  assert.equal(parse.fix, rule.fix, "the two arms disagree about the fix");
+  assert.deepEqual(parse.at, rule.at);
+  assert.equal(parse.severity, rule.severity);
+  // The messages differ in the VALUE and nowhere else.
+  assert.equal(parse.message.replace('maxWidth "24"', "maxWidth <v>"), rule.message.replace("maxWidth 0", "maxWidth <v>"));
+});
+
+test("REMOVAL IS OFFERED ONLY WHERE THE COMPILER ACCEPTS IT — measured per field, not per taste", () => {
+  // ", or remove it" was dropped from every tag in round 1. Right for `string` and `count`, WRONG
+  // for the two `stringArray` fields: measured, one graph each, a join with no `branches` and an
+  // error edge with no `codes` both compile with ZERO diagnostics, so removal is a valid fix and
+  // withholding it made the refusal less useful than it could be.
+  const dropped = (edgeId: string, field: string): GraphSpec => {
+    const s = clone(incidentTriage()) as unknown as Record<string, unknown>;
+    const edges = s["edges"] as Record<string, unknown>[];
+    const i = edges.findIndex((x) => x["id"] === edgeId);
+    const copy = { ...edges[i]! };
+    delete copy[field];
+    edges[i] = copy;
+    return s as unknown as GraphSpec;
+  };
+  // THE PREMISE FIRST, so the advice below rests on a measurement and not on a belief.
+  assert.deepEqual(errorsOf(dropped("e2", "branches")).map((x) => x.code), [], "a join with no branches must compile");
+  assert.deepEqual(errorsOf(dropped("e11", "codes")).map((x) => x.code), [], "an error edge with no codes must compile");
+  assert.deepEqual(
+    errorsOf(dropped("e1", "over")).map((x) => x.code),
+    ["GRAPH007_FANOUT_INCOMPLETE"],
+    "and removing `over` from a fanout is refused, which is why `string` offers no such hint",
+  );
+  assert.deepEqual(errorsOf(dropped("e12", "compensates")).map((x) => x.code), ["GRAPH012_NO_COMPENSATES"]);
+  assert.deepEqual(errorsOf(dropped("e1", "maxWidth")).map((x) => x.code), ["GRAPH007_NO_MAX_WIDTH"]);
+  assert.deepEqual(errorsOf(dropped("e9", "maxIterations")).map((x) => x.code), ["GRAPH006_UNBOUNDED_LOOP"]);
+
+  // THEN THE ADVICE, and it follows the measurement exactly.
+  assert.equal(one("e2", { branches: 7 }).fix, 'set branches on edge "e2" to an array of strings, or remove it');
+  assert.equal(one("e11", { codes: 7 }).fix, 'set codes on edge "e11" to an array of strings, or remove it');
+  assert.equal(one("e1", { over: 7 }).fix, 'set over on edge "e1" to a string');
+  assert.equal(one("e12", { compensates: 7 }).fix, 'set compensates on edge "e12" to a string');
+  assert.equal(
+    one("e1", { maxWidth: "24" }).fix,
+    'set maxWidth on edge "e1" to a whole number between 1 and 25 (unquoted: 24, not "24")',
+  );
 });
 
 test("AN EDGE ID CANNOT FORGE A LINE — every value the edge loop names goes through `describeValue`", () => {

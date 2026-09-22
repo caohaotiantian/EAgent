@@ -201,17 +201,52 @@ test("`EDGE_FIELDS.readBy` IS `EdgeSpec`'S OWN `<kind> only` COMMENT, and the tw
   //
   // A comment governs the RUN of fields under it until the next one, which is how `over`, `as` and
   // `maxWidth` share one `fanout only` and `until`/`maxIterations` share one `loop only`.
+  // THE MATCH IS PER JSDOC BLOCK, NOT PER LINE, and the single-line regex this replaces was a trap:
+  // rewrap `/** `fanout` only. */` onto two lines and it stopped matching, so `over` silently
+  // inherited the PRECEDING kind (`conditional`, off `when`) while the size-9 guard stayed
+  // satisfied — nine fields still attributed, one of them wrongly — and the failure, if any, blamed
+  // the TABLE. A block that exists and carries no `<kind> only` anywhere in it now fails by name,
+  // and says it is the comment that is unreadable.
   const body = SPEC_SRC.slice(SPEC_SRC.indexOf("export interface EdgeSpec"));
+  const lines = body.slice(0, body.indexOf("\n}")).split("\n");
   const scraped = new Map<string, string>();
   let current: string | undefined;
-  for (const line of body.slice(0, body.indexOf("\n}")).split("\n")) {
-    const comment = /^\s*\/\*\* `(\w+)` only/.exec(line);
-    if (comment !== null) {
-      current = comment[1];
+  let block: string | undefined; // the JSDoc immediately above the next field, if there is one
+  let inBlock = false;
+  let buf: string[] = [];
+  for (const line of lines) {
+    if (/^\s*\/\*\*/.test(line)) {
+      inBlock = true;
+      buf = [line];
+      if (/\*\//.test(line)) {
+        inBlock = false;
+        block = buf.join("\n");
+      }
+      continue;
+    }
+    if (inBlock) {
+      buf.push(line);
+      if (/\*\//.test(line)) {
+        inBlock = false;
+        block = buf.join("\n");
+      }
       continue;
     }
     const field = /^\s*readonly (\w+)\??:/.exec(line);
-    if (field !== null && current !== undefined) scraped.set(field[1]!, current);
+    if (field === null) continue;
+    if (block !== undefined) {
+      // A NEW BLOCK SITS DIRECTLY ABOVE THIS FIELD, so it is the authority for it — and if the
+      // phrase is not in it, that is a comment this test cannot read rather than a field that
+      // inherits. Failing here is the whole point: silence would re-attribute the field.
+      const phrase = /`(\w+)` only/.exec(block);
+      assert.ok(
+        phrase !== null,
+        `the JSDoc directly above \`${field[1]}\` carries no \`<kind> only\` phrase, so this test cannot say which kind declares it — fix the COMMENT (or, if the field really is for every kind, move it above the commented run):\n${block}`,
+      );
+      current = phrase[1];
+      block = undefined;
+    }
+    if (current !== undefined) scraped.set(field[1]!, current);
   }
   // The scrape found something, so an empty map cannot pass this vacuously.
   assert.equal(scraped.size, 9, `expected nine fields under a \`<kind> only\` comment, got ${[...scraped.keys()].join(", ")}`);
