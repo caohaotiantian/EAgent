@@ -463,11 +463,19 @@ test("a cascade is MEASURED against the first audit, not read off the rule table
 });
 
 test("RESIDUE — maxIterations is a THIRD home for the bound, and lowering it to the budget strands the run", async () => {
-  // F5 of the port doc says the stop rule has two homes. It has three: `repair`'s `when`, `done`'s
-  // `when`, and the `recheck` edge's `maxIterations`, which the engine enforces independently. The
-  // shipped graph escapes only because 16 > 12. "Tidying" it to match the budget compiles at exit 0
-  // and then strands any manifest that actually needs the budget — with the same message F5 names,
-  // which mentions neither the loop nor the bound that stopped it.
+  // **THIS TEST IS F11**, and its comment used to cite F5 twice and F11 never. F5 says the stop rule
+  // has two homes; **F11 is that it has three** — `repair`'s `when`, `done`'s `when`, and the `recheck`
+  // edge's `maxIterations`, which the ENGINE enforces independently of either expression. The shipped
+  // graph escapes only because 16 > 12. "Tidying" it to match the budget compiles at exit 0 and then
+  // strands any manifest that actually needs the budget.
+  //
+  // It lands on the SAME symptom F5 names — `internal`/`E_OUTPUT_MISSING`, naming neither the loop nor
+  // the bound that stopped the run — which is why the two were easy to conflate. They are different
+  // findings: F5 is two expressions that must agree and nothing checking it, F11 is two bounds in two
+  // LAYERS with an ordering nothing checks.
+  //
+  // In file order this is the FIRST of the two `RESIDUE` tests and F5's is the second, which is the
+  // opposite of what F11's prose said.
   //
   // Pinned so that the day the compiler refuses this, or the message names the bound, somebody is
   // told. If it starts failing for that reason, that is the improvement — update it.

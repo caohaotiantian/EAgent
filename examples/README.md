@@ -493,7 +493,7 @@ edge in it and `docs/workflow-port-2026-09-22.md` is the fourteen things it cost
   warnings being useful. They are right about the hazard, wrong about the cause, and their remedies
   are wrong.
 
-`manifests/` holds **nine** inputs and only one of them converges cleanly — the rest each pin one way
+`manifests/` holds **eleven** inputs and only one of them converges cleanly — the rest each pin one way
 this workflow can be wrong:
 
 | manifest | what it is for |
@@ -505,11 +505,17 @@ this workflow can be wrong:
 | `unquoted-credentials.json` | `"DB_PASSWORD": 90210` — a credential the rule must still report |
 | `floating-release.json` | `release: "latest"` — a pin target that is not a pin |
 | `dotted-env-key.json` | an env key holding a `.`, which the `at` path language cannot address |
+| `qualified-token.json` | `GITHUB.TOKEN` — a credential the RUNTIME's key-name redactor does not recognise |
+| `unseparated-token.json` | `MYTOKEN: 987654321` — the same gap, with no separator and a non-string value |
 | `no-image.json` | JSON that is not a service manifest |
 | `not-a-manifest.txt` | not JSON at all |
 
-The last six exist because a reviewer found the workflow wrong on each of them after the suite was
-green. That is the shape worth copying: **a fixture per way the report can lie**, not per feature.
+**The last eight exist because a reviewer found the workflow wrong on each of them after the suite was
+green.** That is the shape worth copying: **a fixture per way the report can lie**, not per feature. The
+final two are the sharpest of the set — on them the report *said* "holds a credential in the clear" and
+*printed* the credential three fields later, because this workflow's credential predicate is broader
+than the platform's and the projection had been left to the platform. **A workflow that classifies its
+own secrets must redact its own projection**; F13 has both regexes and the gap between them.
 
 **All FOUR refusals in `harden-parse.js` are one defect wearing four hats, and it is §8's defect** —
 the bytes are not JSON; the JSON parses but is not an OBJECT (`[1,2,3]`, or a manifest somebody wrapped

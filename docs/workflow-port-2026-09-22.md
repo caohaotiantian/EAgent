@@ -19,21 +19,28 @@ trip was mine**, a body still writing the channel name it had before a redesign,
 log: the binary named the node, the channel and the declaration in one line and it was fixed in
 seconds. That is what the other four should have looked like.)
 
-**F14 is a fourteenth entry of a different kind, and the most useful one to read**: **six defects in
-THIS PORT'S OWN workflow**, none found by its author. Two came from a fresh agent told to refute this
-log; three more from an independent reviewer who then drove §2 top to bottom; the sixth from a THIRD
-review of the paragraph the second round had just written to fix the fifth. Every one of the six is the
-same sentence — *the report asserted something the run had not established* — which is the exact defect
-class this workflow exists to prevent.
+**F14 is a fourteenth entry of a different kind, and the most useful one to read**: **eight defects in
+THIS PORT'S OWN workflow**, none found by its author. **Two** came from a fresh agent told to refute this
+log; **three** more from an independent reviewer who then drove §2 top to bottom; **three** from two
+further reviews of what the previous round had just written. Every one of the eight is the same sentence
+— *the report asserted something the run had not established* — which is the exact defect class this
+workflow exists to prevent.
 
-`CLAUDE.md` says **a builder's own green suite is not evidence**. F14 is the receipt three times over,
-and the shape of it is worth more than any member: **each round's own correction round missed defects
-of the class it had just been fixing.** Round one fixed two and left three; round two fixed three and
-wrote the fourth instance of the class into the sentence replacing the third; round three found that
-one and a hole round one's own fix had OPENED — the escaping covered the `applied` table, and round
-one then made a hostile key land only in the list that had none.
+`CLAUDE.md` says **a builder's own green suite is not evidence**. F14 is the receipt four times over, and
+the shape is worth more than any member: **each round's own correction missed defects of the class it had
+just been fixing, and twice a fix MOVED a hazard rather than closing it.**
 
-**Nothing in F1–F13 is fixed here — it is recorded.** F14's six are the port's own and are fixed, each
+- Round one fixed two and left three, in code its new tests ran through.
+- Round two fixed three and wrote the FOURTH instance of the class into the sentence replacing the third.
+- Round three found that one, plus a hole round one had OPENED: the escaping covered the `applied` table,
+  and round one then made a hostile key non-autofixable, so such a key stopped reaching the table and
+  started landing in the one list with no escaping on it.
+- Round four found the worst of the eight — a live credential printed at the gate under a finding saying
+  it was in the clear — which had survived every earlier round because **F13 had taught this port to
+  trust the runtime's redactor**, and the runtime's predicate is narrower than the auditor's. Learning a
+  platform guarantee and then relying on it past its edge is its own failure mode.
+
+**Nothing in F1–F13 is fixed here — it is recorded.** F14's eight are the port's own and are fixed, each
 with a test verified to FAIL with its fix reverted.
 
 ---
@@ -400,9 +407,21 @@ this document", which is a small lie of exactly the kind §2 cannot afford: a wa
 output is prettier than the real thing is a walkthrough you cannot check. Both blocks in this section
 are now verifiable:
 
+**Both paths are relative to `$REPO/examples`**, which is where §2 has been since its third block — an
+earlier draft mixed a repo-root path for the doc with an `examples`-relative one for the output, so the
+command ran from no directory at all. Copy-pasteable where you are standing:
+
 ```bash
-diff <(sed -n '/^```markdown$/,/^```$/p' docs/workflow-port-2026-09-22.md | sed '1d;$d') \
-     out/harden-report.md          # empty
+DOC=../docs/workflow-port-2026-09-22.md
+
+# 1 · the report markdown block
+diff <(sed -n '/^```markdown$/,/^```$/p' "$DOC" | sed '1d;$d') out/harden-report.md
+# (no output)
+
+# 2 · the hardened-manifest block — the ```json fence that follows the `cat` of that file
+diff <(awk '/^cat out\/service\.hardened\.json$/{f=1} f&&/^```json$/{g=1;next} g&&/^```$/{exit} g' "$DOC") \
+     out/service.hardened.json
+# (no output)
 ```
 
 **The keys are in alphabetical order and the input's were not** — friction **F9**. A `git diff` against
@@ -439,7 +458,7 @@ against a freshly built binary after every fix in this document's `F14`, in one 
 
 ```bash
 for m in payments-worker legacy-gateway mixed-secrets unquoted-credentials \
-         floating-release dotted-env-key; do
+         floating-release dotted-env-key qualified-token unseparated-token; do
   RID=$(loom run graphs/harden-config.json --input "{\"manifestPath\":\"manifests/$m.json\"}" \
         2>/dev/null | jq -r .runId)
   printf '%-22s ' "$m"
@@ -455,14 +474,23 @@ mixed-secrets          {"passes":3,"stoppedBy":"settled","cascades":1,"startedWi
 unquoted-credentials   {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":2,"open":2}
 floating-release       {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
 dotted-env-key         {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
+qualified-token        {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
+unseparated-token      {"passes":0,"stoppedBy":"settled","cascades":0,"startedWith":1,"open":1}
 ```
 
-**Read that table as six different ways the report can be wrong, each now pinned by a test.** The last
-four are the manifests F14 added: a cascade whose rule was already in the baseline for another secret
-(`mixed-secrets`, `cascades` 0 → 1); two credentials whose values are not strings and which used to
-produce ZERO findings (`unquoted-credentials`, `open` 0 → 2); and the two that used to reach the
-refusal this document calls unreachable (`floating-release`, `dotted-env-key`, both now `open` 1 with a
-remedy instead of a false accusation against the rule table).
+**Read that table as eight different ways the report can be wrong, each now pinned by a test.** The last
+six are the manifests F14 added, one per defect: a cascade whose rule was already in the baseline for
+another secret (`mixed-secrets`, `cascades` 0 → 1); two credentials whose values are not strings and
+which used to produce ZERO findings (`unquoted-credentials`, `open` 0 → 2); the two that used to reach
+the refusal this document calls unreachable (`floating-release`, `dotted-env-key`, both now `open` 1 with
+a remedy instead of a false accusation against the rule table); and the two whose credential the RUNTIME's
+redactor does not recognise (`qualified-token`, `unseparated-token` — the gate printed
+`"GITHUB.TOKEN": "correcthorsebattery"` under a finding that said it held a credential in the clear).
+
+**Note what the sweep CANNOT tell you about the last two.** Their rows are identical to
+`dotted-env-key`'s — `{0,settled,0,1,1}` — before and after the fix, because the defect was never in
+these numbers: it was in a field the sweep does not print. That is why the test for them greps the whole
+listing rather than asserting on a count, and it is the general lesson of F13.
 
 Taking the first two in turn:
 
@@ -581,12 +609,12 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 22 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 23 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-**Twenty-two tests.** Four are the ones the first port's suite has no analogue for, because its shape
+**Twenty-three tests.** Four are the ones the first port's suite has no analogue for, because its shape
 has no loop: **the pass count** (nine audits and eight fixes read out of `loom trace` — a graph that
 silently stopped after one pass would still park on a gate, still write a report and still exit 0,
 with a manifest carrying three findings its own fixes created); **the cascade order** (every
@@ -597,32 +625,43 @@ run required to stop at the new number — the same drift test the first port's 
 the only way to know the bodies hold no constant of their own).
 
 **Two are labelled `RESIDUE`** and pin product behaviour rather than the workflow's, so that the day
-either improves somebody is told: one for **F5** (a `done` edge narrower than the loop's exit) and one
-for **F11** (`maxIterations` lowered to the budget). Each asserts that the message does NOT name the
-thing it should, which is what makes an improvement fail the test loudly.
+either improves somebody is told: in file order, the first is **F11** (`maxIterations` lowered to the
+budget — two bounds in two layers) and the second is **F5** (a `done` edge narrower than the loop's
+exit — two expressions that must agree). **Both land on the same symptom**,
+`internal`/`E_OUTPUT_MISSING` naming neither the loop nor what stopped it, which is why they are easy
+to conflate and were — the F11 test's own comment cited F5 twice and F11 never. Each asserts the
+message does NOT name the thing it should, which is what makes an improvement fail the test loudly.
 
 **SEVEN exist because a reviewer found the workflow wrong after this suite was green**, and they map
-onto F14's six defects — one to one except where noted. Stating the mapping rather than a count,
+onto F14's eight defects, one to one. Stating the mapping rather than a count,
 because an earlier draft said "five" and listed a set that matched neither the tests added nor F14's
 members:
+
+**F14's numbering below is the one in §3; this table maps each member to the test that pins it.**
 
 | F14 | test | added, or changed? |
 |---|---|---|
 | **#1** the gate undercounted `open` | *a manifest dirtier than the pass budget…* | **changed** — `open.length > 0` became `== 2`, plus the round-trip completeness check |
-| **#2** cascades not measured | *a cascade is MEASURED against the first audit…* | added |
-| **#3a** non-string credential skipped | *a credential whose value is not a string is REPORTED…* | added |
-| **#3b** identity keyed on rule name | *a cascade is identified by the FINDING…* | added |
-| **#4** the "unreachable" refusal reached twice | *two manifests that used to reach the unreachable refusal…* | added |
-| **#5** truncated read misreported | *a manifest read back TRUNCATED refuses…* | added |
-| **#5** credential bytes in the fix log | *the approval writes both files…* | **changed** — the assertion that blessed `was == "hunter2"` was inverted |
+| **#2** the cascade count was not measured | *a cascade is MEASURED against the first audit…* | added |
+| **#3** a non-string credential was dropped | *a credential whose value is not a string is REPORTED…* | added |
+| **#4** cascade identity keyed on rule name | *a cascade is identified by the FINDING…* | added |
+| **#5** the fix log carried the credential | *the approval writes both files…* | **changed** — the assertion that blessed `was == "hunter2"` was inverted |
 | **#6** "already satisfied every rule" | *a report with nothing applied does not claim…* | added |
-| — escaping covered one path only | *a control character in a manifest cannot reach the report…* | added |
+| **#7** escaping covered the table only | *a control character in a manifest cannot reach the report…* | added |
+| **#8** the projection trusted the runtime | *a credential the RUNTIME's redactor does not recognise…* | added |
 
-So: **15 → 22 tests, seven added and two assertions inverted in place.** Every added one was verified
+Two more tests came out of the same review rounds and pin PRODUCT findings rather than report claims,
+which is why they are not F14 members: *a manifest read back TRUNCATED refuses…* (**F12**) and
+*two manifests that used to reach the unreachable refusal…* (the auditor accepting a floating `release`
+and a dotted key — a gap in the rule table, not a false claim about the run).
+
+So: **15 → 23 tests, eight added and two assertions inverted in place.** Every added one was verified
 to FAIL with its fix reverted, and the two changed ones fail against the pre-fix bodies — which is the
-only evidence that a regression test tests anything. The `cell()` escaping had NO test until the last
-row, and mutating its body to `return String(v);` left the suite green: that is why the hole it covers
-survived a whole review round.
+only evidence that a regression test tests anything. **Two of the eight pin code that had NO test at
+all**: `cell()`, whose docstring names the exact harm it prevents (mutating it to `return String(v);`
+left the suite green through a whole round), and the projected `hardened`, where the only credential
+grep in the suite was over `report.open` on one manifest — green precisely because it looked at the
+wrong field.
 
 `examples-run.test.ts` picks the new graph up without being edited — its set is the directory — so
 the compile and resource-reachability halves were covered before this suite existed.
@@ -633,7 +672,7 @@ the compile and resource-reachability halves were covered before this suite exis
 
 Every entry is a place the shipped product cost more than it should have, with the command, what
 happened, what was expected, and what it cost. **Thirteen found in the product (F1–F13), none fixed
-here.** F14 is a fourteenth entry of a different kind: **six defects in THIS PORT'S OWN workflow**,
+here.** F14 is a fourteenth entry of a different kind: **eight defects in THIS PORT'S OWN workflow**,
 none found by its author — recorded in the same log because the method that found them is the most
 transferable thing in this document.
 
@@ -1143,7 +1182,7 @@ the edit ships green and only the manifest that actually needs the budget breaks
 
 **Cost.** Nothing during the build, because the shipped numbers happen to be ordered correctly. It is
 here because it makes F5's "two homes" wrong: there are THREE, and the third is enforced by a
-different layer. Pinned as the second `RESIDUE` test in `examples-harden.test.ts`.
+different layer. Pinned by the FIRST of the two `RESIDUE` tests in `examples-harden.test.ts` — first in file order, F5's being second, which an earlier draft had the wrong way round.
 
 ---
 
@@ -1236,36 +1275,83 @@ report as *"a string of 7 chars — not shown"* — and `now` stays in the clear
 rule table decides rather than the fixer, and the fold is unaffected: it replays `now` at `at` and
 never reads `was`.
 
-**What remains the product's**, and is recorded rather than worked around: a key called `secrets`
-holding only names still prints `[secret]`, so the gate cannot show an approver which secrets a
-manifest declares. There is no way for a graph to say "this key's name looks sensitive and its value
-is not".
+**A NAME-BASED REDACTOR FAILS IN BOTH DIRECTIONS, and both are the product's.** Naming the direction
+matters because they need opposite remedies:
 
-**Cost.** The measurement itself was cheap — one `jq` over a listing this port had already pasted
-twice without looking past `applied[].rule`. What it cost is the thing worth recording: **a redaction
-that reads NAMES cannot be audited by reading names.** The only check that finds this is to grep the
-gate listing and the written artefacts for the secret's actual bytes, which the suite now does.
+- **OVER-redaction, of safe values.** A key is hidden for what it is CALLED, whatever it holds. So
+  `hardened.env.DB_PASSWORD` prints `[secret]` although by then it holds the harmless
+  `{"secretRef":"db-password"}` the repair put there, and `hardened.secrets` prints `[secret]` although
+  it holds only NAMES. The gate therefore cannot show an approver either that the repair happened or
+  which secrets the manifest declares — it hides exactly the evidence the approval is about. There is
+  no way for a graph to say *"this key's name looks sensitive and its value is not"*.
+- **UNDER-redaction, of credentials the predicate does not recognise** — the worse half, and this port
+  shipped a live credential through it for three review rounds. `security/redact.ts:652` is
+
+  ```
+  /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i
+  ```
+
+  plus a `QUALIFIED_WORDS`/`QUALIFIERS` rule under which `token` counts only next to `api`, `access`,
+  `bearer`, `auth`, `signing`, … — and `github`, `slack`, `registry`, `ci` are **not** qualifiers. So
+  the predicate needs an UNDERSCORE before the credential word, and a dotted or unseparated name is an
+  ordinary field. Against this workflow's auditor, `/(PASSWORD|SECRET|TOKEN)$/`, the runtime is
+  strictly narrower, and the gap is where a real secret sits:
+
+  ```
+  $ # a clean manifest with env["GITHUB.TOKEN"] = "correcthorsebattery"
+  $ loom gates "$RUN" | jq '.[0].reads.report | {said: .open[0].detail, printed: .hardened.env}'
+  {
+    "said":    "\"GITHUB.TOKEN\" holds a credential in the clear, in a file that is in version control",
+    "printed": {"GITHUB.TOKEN": "correcthorsebattery", "LOG_LEVEL": "info"}
+  }
+  ```
+
+  Same for a non-string `MYTOKEN: 987654321` with no separator at all. **The gate said one thing and
+  printed the other, three fields apart.**
+
+**THE RULE THAT FOLLOWS, and it is the transferable part: a workflow that applies its own credential
+predicate must redact its own projection.** Delegating to the platform's means shipping wherever the
+two disagree, and you cannot see the disagreement by reading either regex — only by running a key
+that falls in the gap. `harden-collate.js` now redacts `report.hardened` off the auditor's own
+`credentialKey`, so this workflow has ONE predicate and the projection follows it. **This is a product
+friction and a TODO candidate**, not just a port defect: every workflow that classifies its own
+secrets faces it, the platform offers no way to declare a per-key classification on a projection, and
+nothing warns that the two predicates differ.
+
+**Cost.** The measurement was cheap and the delay was not. One `jq` over a listing this port had
+pasted four times without looking past `applied[].rule` found it — in the THIRD review round, after
+F13 had already been written about the same door. What it cost is the thing worth recording: **a
+redaction that reads NAMES cannot be audited by reading names**, and a suite that greps one field is
+exactly as green as one that greps the right field. The only check that finds this is to grep the
+WHOLE gate listing and both written artefacts for the secret's actual bytes — which the suite now
+does, on the two keys that fall in the gap, having previously grepped `report.open` on one manifest
+and nothing else.
 
 ---
 
 ### F14 · Defects in this port's OWN workflow, and what the method that found them cost
 
-**Not the product's friction — the port's.** **Six defects, over three reviews, none found by the
+**Not the product's friction — the port's.** **Eight defects, over three reviews, none found by the
 author.** Round one was a fresh agent told to refute this log and to hunt for a wrong result, after the
 suite was green at 13/13. Round two was an independent reviewer who built the binary and drove §2 top to
-bottom, after round one's fixes and tests had landed. Round three re-read what round two had written.
-They are recorded here because `CLAUDE.md` says **a builder's own green suite is not evidence**, and
-this is what that costs when taken seriously. All six are fixed; each has a test verified to FAIL with
-its fix reverted.
+bottom, after round one's fixes and tests had landed. Rounds three and four re-read what the previous
+round had just written. They are recorded here because `CLAUDE.md` says **a builder's own green suite is
+not evidence**, and this is what that costs when taken seriously. All eight are fixed; each has a test
+verified to FAIL with its fix reverted.
 
 **The finding that matters most is not any member — it is the pattern across the rounds.** Each round's
 own correction missed a defect of the class it had just been fixing: round one fixed two and left three
 in code its new tests ran through; round two wrote the FOURTH instance of the class into the sentence it
-was writing to fix the third; and round three found that one plus a hole **round one's fix had opened** —
+was writing to fix the third; round three found that one plus a hole **round one's fix had opened** —
 the escaping covered the `applied` table, then round one made a hostile key non-autofixable, so the only
-path such a key takes became the one path with no escaping on it. A correction round is not a proof of
-correctness; it is one more pass
-by somebody with the same blind spots.
+path such a key takes became the one path with no escaping on it; and round four found a live credential
+at the gate that every earlier round had walked past, because **F13 had taught this port that the runtime
+redacts the projection** and nobody asked where that guarantee ends.
+
+**Two distinct failure modes, worth separating:** a fix that MOVES a hazard instead of closing it (#7),
+and a platform guarantee relied on past its edge (#8). Neither is caught by re-reading the fix; both are
+caught by running an input that falls in the gap. A correction round is not a proof of correctness; it is
+one more pass by somebody with the same blind spots.
 
 **1 · The gate undercounted what was still open, by half.** `harden-audit.js` reported only the FIRST
 undeclared `secretRef` per pass, reasoning that two findings claiming the same `at` would have the
@@ -1372,9 +1458,35 @@ passes (nine `audit` tasks for eight fixes) — now *"one per pass"*, which is t
 `severity`, a constant of the rule table, now says the word "severity" so it does not read as something
 this run computed.
 
-**What all six have in common, and it is one sentence:** **the report asserted something the run had
+**7 · The table-cell escaping covered the table, and round one moved the hazard off it.** `cell()` was
+applied to `applied` and nowhere else. Then the fix for the dotted key (part of #4's round) made such a
+key NON-autofixable — so it stopped reaching the table and started landing in `## Still open`, the one
+rendering path with no escaping on it. An env key of `A\u0000B.PASSWORD` put **three NUL bytes** in
+`out/harden-report.md`, at which point `file` calls it `data` and `grep` says "Binary file … matches"
+instead of the line: a reader told there is nothing to see, by the report. **A fix that moves where
+hostile input lands has to be followed to where it now lands.** `cell()` is now at every interpolation
+site, and had no test at all until this round — mutating it to `return String(v);` was green.
+
+**8 · The projected manifest trusted the RUNTIME's credential predicate, which is narrower than this
+workflow's.** The sharpest member, and the one that survived all three rounds:
+
+```
+open[0].detail   "GITHUB.TOKEN" holds a credential in the clear, in a file that is in version control
+hardened.env     {"GITHUB.TOKEN": "correcthorsebattery", "LOG_LEVEL": "info"}
+```
+
+The report said it and printed it, three fields apart. F13 had established that the gate projection
+redacts by key name, and this port then RELIED on that — delegating to a predicate that wants an
+underscore before the credential word and treats `github` as an ordinary qualifier, against an auditor
+that matches `/(PASSWORD|SECRET|TOKEN)$/`. Every manifest anybody had written happened to have the
+underscore. Now `report.hardened` is redacted from the auditor's own `credentialKey`, so there is ONE
+predicate and the projection follows it. **The rule: a workflow that classifies its own secrets must
+redact its own projection** — see F13 for both regexes and the direction each failure runs.
+
+**What all eight have in common, and it is one sentence:** **the report asserted something the run had
 not established.** Three asserted a completeness they had not checked (1, 3, 6), two a novelty inferred
-from a constant (2, 4), and one asserted that showing a secret was a feature (5). The workflow's own doc
+from a constant (2, 4), and three asserted that a value was safe to show — because the assertion was
+never made at all (5, 8) or because the guard that would have made it was pointed elsewhere (7). The workflow's own doc
 calls the cascade count *"the argument for the whole workflow"* — and an argument that is not measured
 is precisely what this project's property 3 is about. **The lens that finds these, stated so the next
 port can use it: for every number and every sentence the gate shows a person, name the thing in the run
@@ -1382,19 +1494,26 @@ that establishes it. Where the answer is "a constant in the rule table" or "noth
 defect.** Run it over the sentence you just wrote to fix the last one, because that is where #4 and #6
 both came from.
 
-**Cost.** Three review rounds, and each was cheap only because somebody was told to look. The method is
-the finding, and so is its limit, now measured rather than asserted: **round one missed three of the
-six; round two introduced one of them and missed the escaping hole its own fix had opened.** Five stale
-prose claims in shipped files were caught the same way in the same passes, and `cell()` — the helper
-whose docstring names the exact harm it prevents — had no test at all until round three, so mutating it
-to `return String(v);` was green.
+**Cost.** Four review rounds, and each was cheap only because somebody was told to look. The method is
+the finding, and so is its limit, now measured rather than asserted: **round one missed five of the eight;
+round two introduced one of them and missed two more; round three missed the last.** Five stale prose
+claims in shipped files were caught the same way in the same passes.
+
+**What made the last two findable at all was running an input nobody had written before** — a key with a
+NUL in it, and a credential key without an underscore. Both defects were invisible to every form of
+re-reading, including re-reading the fix: `cell()` looked correct and was applied to the wrong set of
+call sites; the projection looked safe and was safe for every key anybody had happened to try. **The
+suite's own coverage told the same lie both times** — `cell()` had no test until round three (mutating it
+to `return String(v);` was green), and the one credential grep was over `report.open` on one manifest,
+green because it looked at the wrong field rather than because the field was clean. **Coverage of the
+guard is not coverage of the gap the guard is for.**
 
 ---
 
 ## 4 · What is left open
 
 - **All thirteen product entries, F1–F13.** None is fixed here; the brief was to record them. (F14's
-  six are this port's own and ARE fixed, each with a test verified to fail without its fix.)
+  eight are this port's own and ARE fixed, each with a test verified to fail without its fix.)
 - **The shipped graph carries two residues in its own `labels`**, `residue-stop-rule-twice` (F5) and
   `residue-single-writer` (F2), because both are things a reader of the graph needs and neither has
   anywhere better to live while F5 and F6 are open.
