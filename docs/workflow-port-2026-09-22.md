@@ -192,9 +192,9 @@ ls out                                   # ls: out: No such file or directory
 ```
 ! harden-config.json: GRAPH002_DEAD_END: …                                          ← stderr
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: …  (×2)                             ← stderr
-run 01M33QF27Z7C6TA7GPP9QWCAW6 — inspect it with: loom trace 01M33QF27Z7C6TA7GPP9QWCAW6   ← stderr
+run 01M33SR4PM5M9HA8XWHQHK6R9P — inspect it with: loom trace 01M33SR4PM5M9HA8XWHQHK6R9P   ← stderr
 {
-  "runId": "01M33QF27Z7C6TA7GPP9QWCAW6",
+  "runId": "01M33SR4PM5M9HA8XWHQHK6R9P",
   "status": "awaiting_gate",
   "outputs": {},
   "usage": {
@@ -204,7 +204,7 @@ run 01M33QF27Z7C6TA7GPP9QWCAW6 — inspect it with: loom trace 01M33QF27Z7C6TA7G
     "wallMs": 0
   }
 }
-gate gate_01M33QF299R5HKWSBETG339GD5 on node review — loom approve 01M33QF27Z7C6TA7GPP9QWCAW6 gate_01M33QF299R5HKWSBETG339GD5 --as YOUR_ID   ← stderr
+gate gate_01M33SR4QYQX7ZYCNV0R99GYT9 on node review — loom approve 01M33SR4PM5M9HA8XWHQHK6R9P gate_01M33SR4QYQX7ZYCNV0R99GYT9 --as YOUR_ID   ← stderr
 ```
 exit 0. **Stdout is the JSON object and nothing else**, which is the first port's F4 holding on a
 second graph: `loom run … 2>/dev/null | jq .status` prints `"awaiting_gate"` here too.
@@ -261,18 +261,18 @@ loom gates "$RUN" 2>/dev/null
 ```json
 [
   {
-    "gateId": "gate_01M33QF299R5HKWSBETG339GD5",
+    "gateId": "gate_01M33SR4QYQX7ZYCNV0R99GYT9",
     "taskId": "review@root#8",
     "nodeId": "review",
     "policyRef": "oversight/harden@stable",
     "contentDigest": "sha256:c4b44734d30d6aecca7df47a90ed88bd1f05d670ce3b5d3accd84639cbb2ef6a",
     "raisedAtSeq": 148,
-    "raisedAtTs": 1790052895017,
+    "raisedAtTs": 1790055289598,
     "state": "open",
     "tier": 0,
     "approvers": ["u:you"],
     "allowEdit": [],
-    "runId": "01M33QF27Z7C6TA7GPP9QWCAW6",
+    "runId": "01M33SR4PM5M9HA8XWHQHK6R9P",
     "onTimeout": "fail",
     "reads": { "report": { … } },
     "readsResolved": [],
