@@ -286,11 +286,40 @@ export interface GraphIndex {
   /** Edges that carry normal forward flow: everything except `loop` and `compensation`. */
   readonly dagEdges: readonly EdgeSpec[];
   readonly loopEdges: readonly EdgeSpec[];
+  /**
+   * EVERY EDGE THE EXECUTOR CAN TRAVERSE — `dagEdges` plus the back-edges, which is not the
+   * same graph and was treated as the same graph by five analyses (§A.84).
+   *
+   * Same predicate as `graph/mutate.ts`'s `traversable`, and for the reason written out there:
+   * `#edgesToTake` answers `case "compensation": break;` and rollback is journal-driven, so
+   * `compensation` is the ONE kind nothing ever walks; `error` stays in because `#errorEdges`
+   * dispatches on failure; and `loop` stays in because `#edgesToTake` DOES take a loop edge.
+   */
+  readonly flowEdges: readonly EdgeSpec[];
   readonly entryNodes: readonly NodeId[];
   readonly terminalNodes: readonly NodeId[];
   /** Topological order over `dagEdges`; empty when the forward graph is cyclic. */
   readonly topoOrder: readonly NodeId[];
   readonly ancestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
+  /**
+   * Ancestors over `flowEdges` with the cycles CUT rather than collapsed: the order the
+   * scheduler actually realises, walking out from the entry nodes.
+   *
+   * It is not `ancestors` widened and it is not a full closure over `flowEdges`. See
+   * `computeFlowOrder` for the construction and `canPrecede`/`rule010ConcurrentWriters` for why
+   * the two readers want different halves of it.
+   */
+  readonly flowOrder: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
+  /**
+   * The FULL transitive closure over `flowEdges`, cycles included: every node that can have run
+   * before this one on some pass. A superset of `ancestors` by construction.
+   *
+   * The half of "cycles handled" that `flowOrder` deliberately drops. A node inside a loop body
+   * has seen every other node of that body's writes by its second pass, which is a producer
+   * question (`canPrecede`), and it is NOT ordered against them, which is a concurrency question
+   * (`rule010ConcurrentWriters` reads `flowOrder` alone for exactly that reason).
+   */
+  readonly flowAncestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
   readonly reachable: ReadonlySet<NodeId>;
   /**
    * How many instances of a node can run AT THE SAME TIME: Π fanout widths on the
@@ -374,23 +403,118 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // forward cycle, which is only the same question while both filters name the same two kinds. It
   // decides whether that rule OFFERS an edit AND whether it prints §A.69's counterfactual about one
   // — four of its ten message arms turn on it. Widen or narrow one filter without the other and both
-  // become false statements, with nothing local to notice (§A.73).
+  // become false statements, with nothing local to notice (§A.73). THAT COUPLING IS UNCHANGED BY
+  // §A.84 AND IS THE REASON THE FIX IS A SECOND RELATION RATHER THAN A WIDER FILTER: `ancestors`
+  // still walks `dagEdges`' two exclusions and nothing else, so `wouldCycle` still asks the
+  // question it was written to ask, and `test/graph/fanout-branch-diagnostic.test.ts`'s pin that
+  // "the `loop` edge is invisible to `ancestors`" is still true on purpose.
+  //
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // EVERY ANALYSIS OVER `dagEdges`, AND WHICH OF THEM IS WRONG ON A BACK-EDGE (§A.84). The row
+  // asked for this set to be NAMED before anything moved, because "include loop edges in
+  // `dagEdges`" makes almost every looping graph look cyclic and is not the fix.
+  //
+  //   topoOrder = topoSort(nodes, dagEdges)       RIGHT, and must stay. A back-edge in here
+  //                                               empties the sort, which is exactly what
+  //                                               GRAPH006_UNMARKED_CYCLE reads it for.
+  //   rule006Cycles, `topoOrder.length === 0`     RIGHT. "The forward graph contains a cycle" is
+  //                                               a question about the graph WITHOUT its
+  //                                               declared back-edges, by definition.
+  //   computeFanoutStacks / computeCriticalPath   RIGHT. Both sweep `topoOrder`, so both need an
+  //                                               acyclic order; a loop multiplies COUNT, which
+  //                                               `applyLoopFactors` already applies separately.
+  //   ancestors (its own copy of the filter)      RIGHT for `rule021`'s `wouldCycle`, which asks
+  //                                               "would this edit close a FORWARD cycle", and
+  //                                               WRONG for every reader that asks "did this run
+  //                                               before that". Those three move, below.
+  //   entryNodes (`hasNonLoopIn`)                 WRONG. It excluded `loop` from the inbound
+  //                                               test, so a loop's TARGET whose only inbound
+  //                                               edge is the back-edge was an ENTRY node and ran
+  //                                               at t=0 beside the real first node. Measured on
+  //                                               the canonical loop graph: node order
+  //                                               ["parse","fix","audit","fix","audit",…] with
+  //                                               the fixer running before the thing it fixes.
+  //   terminalNodes (`hasForwardOut`)             WRONG. A node whose only outbound edge is the
+  //                                               back-edge had no forward out, so it "ends a
+  //                                               path" — and `examples/graphs/harden-config.json`
+  //                                               printed `GRAPH002_DEAD_END: terminal node "fix"`
+  //                                               on every command, about a node the executor
+  //                                               leaves on every pass.
+  //   rule005Dataflow GRAPH005_UNPRODUCED_READ    WRONG. A loop-carried write is invisible: on
+  //                                               that same graph, `audit` and `collate` were
+  //                                               each told "reads \"applied\", which no upstream
+  //                                               node writes" about a channel `fix` writes on
+  //                                               every pass.
+  //   rule010ConcurrentWriters GRAPH010           WRONG. Two nodes joined only through a
+  //                                               back-edge look unordered, so the canonical loop
+  //                                               graph was REFUSED for `parse` and `fix` "can
+  //                                               run concurrently" when every path to `fix` goes
+  //                                               through `audit`.
+  //   rule002Terminals `producesOutput`           WRONG for the same reason as `ancestors`.
+  //
+  // THE THREE THAT MOVE READ `flowAncestors` THROUGH `canPrecede`, and GRAPH010 reads `flowOrder`
+  // beside it for a reason stated at that rule. The ones that stay right keep `ancestors`, and so
+  // does `wouldCycle`, which is how the §A.73 coupling survives a change to this function.
+  // Entry and terminal keep their own filters rather than being folded into either relation — a
+  // compensation edge means its target is not a start point and is still an edge nothing walks, so
+  // the two questions genuinely differ and always did.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
+  // The executor's own edge set. `graph/mutate.ts`'s `traversable` is this same filter and says
+  // why at length: `compensation` is the only kind nothing ever walks.
+  const flowEdges = spec.edges.filter((e) => e.kind !== "compensation");
 
-  // Entry: no inbound edge of any kind EXCEPT a loop back-edge. There is
-  // deliberately no `entry:` field — a second way to say where a graph starts is a
-  // second thing that can disagree with the edges.
+  // Entry: nothing points at it — OR nothing but a back-edge AND nothing can reach it. There is
+  // deliberately no `entry:` field: a second way to say where a graph starts is a second thing
+  // that can disagree with the edges.
   //
-  // Note this differs from `dagEdges`: a compensation edge is excluded from the DAG
-  // (including it makes almost every graph look cyclic) but it DOES mean its target is
-  // not a start point. Nothing traverses a compensation edge, so listing its target here
-  // would be the ONLY thing that ever scheduled that node — and it would run at the start
-  // of the run, before the action it is declared to undo.
-  const hasNonLoopIn = new Set(spec.edges.filter((e) => e.kind !== "loop").map((e) => e.to));
-  const entryNodes = spec.nodes.filter((n) => !hasNonLoopIn.has(n.id)).map((n) => n.id);
-  const hasForwardOut = new Set(dagEdges.map((e) => e.from));
-  const terminalNodes = spec.nodes.filter((n) => !hasForwardOut.has(n.id)).map((n) => n.id);
+  // IT WAS "no inbound edge of any kind EXCEPT a loop back-edge", FULL STOP, and that exception
+  // was §A.84's third symptom. The argument for it is real and is kept — a loop whose target has
+  // no other way in would otherwise never start, and `test/graph/graph-lane-mutation-dominance`
+  // drives exactly that graph — but it was applied UNCONDITIONALLY, so a loop target that the
+  // rest of the graph reaches perfectly well was ALSO scheduled at t=0, beside the real first
+  // node. Measured on the canonical loop shape, the fixer running before the thing it fixes:
+  //
+  //     before   node order ["parse","fix","audit","fix","audit","fix","audit"]
+  //     after    node order ["parse","audit","fix","audit","fix","audit","fix","audit"]
+  //
+  // So the exception is now conditional on the thing it was argued from: a node whose only
+  // inbound edges are `loop` is an entry only when nothing STARTS it — when no root reaches it
+  // over `flowEdges`. `#edgesToTake` has a `loop` arm, so a reachable loop target is scheduled by
+  // its source exactly like any other successor and needs no second door.
+  //
+  // THE ROOT TEST READS `spec.edges` AND NOT `flowEdges`, which is the one place the two must
+  // differ: nothing traverses a compensation edge, so listing its target as an entry would be the
+  // ONLY thing that ever scheduled that node — and it would run at the START of the run, before
+  // the action it is declared to undo. A node whose only inbound is a compensation edge is
+  // therefore neither a root nor loop-only-inbound, and is an entry under neither arm, exactly as
+  // before.
+  const hasAnyIn = new Set(spec.edges.map((e) => e.to));
+  const isRoot = (id: NodeId): boolean => !hasAnyIn.has(id);
+  const started = new Set<NodeId>();
+  {
+    const flowOut = new Map<NodeId, NodeId[]>();
+    for (const e of flowEdges) (flowOut.get(e.from) ?? flowOut.set(e.from, []).get(e.from)!).push(e.to);
+    const q = spec.nodes.filter((n) => isRoot(n.id)).map((n) => n.id);
+    while (q.length > 0) {
+      const id = q.pop()!;
+      if (started.has(id)) continue;
+      started.add(id);
+      for (const to of flowOut.get(id) ?? []) q.push(to);
+    }
+  }
+  const entryNodes = spec.nodes
+    .filter(
+      (n) =>
+        isRoot(n.id) ||
+        (!started.has(n.id) && (inbound.get(n.id) ?? []).every((e) => e.kind === "loop")),
+    )
+    .map((n) => n.id);
+  // Terminal: no outbound edge the executor can take. `dagEdges` here meant a loop's SOURCE ended
+  // the run, which is what printed `GRAPH002_DEAD_END` on a shipped graph's `fix` node forever.
+  const hasFlowOut = new Set(flowEdges.map((e) => e.from));
+  const terminalNodes = spec.nodes.filter((n) => !hasFlowOut.has(n.id)).map((n) => n.id);
 
   const topoOrder = topoSort(spec.nodes.map((n) => n.id), dagEdges);
 
@@ -408,6 +532,8 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
       for (const a of ancestors.get(e.from) ?? []) acc.add(a);
     }
   }
+
+  const { flowOrder, flowAncestors } = computeFlowOrder(spec, entryNodes, flowEdges);
 
   const reachable = new Set<NodeId>();
   const stack = [...entryNodes];
@@ -439,15 +565,246 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     outbound,
     dagEdges,
     loopEdges,
+    flowEdges,
     entryNodes,
     terminalNodes,
     topoOrder,
     ancestors,
+    flowOrder,
+    flowAncestors,
     reachable,
     parallelWidth,
     multiplicity,
     criticalPath,
   };
+}
+
+/**
+ * "Did `a` run before `b`", over every edge the executor takes, on a graph that may have cycles.
+ *
+ * THE TWO HALVES ARE DIFFERENT QUESTIONS AND THAT IS WHY THERE ARE TWO MAPS. A loop body's nodes
+ * have all seen each other's writes by the second pass — so for a PRODUCER question they precede
+ * one another — and they are still strictly ordered within one pass, so for a CONCURRENCY question
+ * two of them in parallel fan-out branches are NOT ordered and GRAPH010 must still refuse them.
+ * Collapsing a cycle to "everybody precedes everybody" answers the first and loses the second;
+ * cutting the cycle answers the second and loses the first. `flowOrder` is the cut graph and
+ * `flowAncestors` is the closure the cut is absent from, so each reader takes the half it means.
+ *
+ * THE CUT IS A DEPTH-FIRST WALK FROM THE ENTRY NODES, and an edge into a node still on the stack
+ * is the back-edge. That is not a graph-theoretic convenience — it is the order the SCHEDULER
+ * realises, which is the only order any of these rules is about. On the canonical loop shape
+ * (`parse -seq-> audit -loop-> fix -seq-> audit`) the author put `until` on the FORWARD body edge
+ * and `seq` on the edge that closes the cycle, so "cut the `loop` edges" — which is what
+ * `dagEdges` does — cuts the wrong one and leaves `fix` with no ancestors at all. The walk cuts
+ * `fix -> audit`, and `flowOrder(fix)` is `{parse, audit}`: what actually ran first.
+ *
+ * ONLY `flowOrder` IS ORDER-SENSITIVE, AND ITS ONE READER MAKES THAT SAFE. Which intra-cycle edges
+ * get cut depends on the order `spec.nodes` and `spec.edges` are written in, so the walk reads
+ * both in declaration order and is deterministic for a given spec — the same sensitivity
+ * `digest(spec)` already has. `flowAncestors` has none of it: a transitive closure over a fixed
+ * edge set does not care how the walk found it. And `flowOrder`'s only reader,
+ * `rule010ConcurrentWriters`, takes a UNION with the order-free `ancestors`, so a pair that is
+ * ordered today stays ordered whatever this walk decides. The cut can only ADD orderings, and
+ * GRAPH010 reads an ordering as a reason to be SILENT — so the worst this can do is withhold a
+ * refusal it was already free to withhold. It cannot manufacture one.
+ *
+ * THE COMPONENTS ARE TARJAN'S, AND THE CHEAPER THING WAS TRIED AND IS WRONG. "Everything on the
+ * DFS stack between a back-edge's target and its source", unioned across back-edges, looks like it
+ * finds the same components and does not: on a loop body that FANS OUT — `head -> left -> merge`,
+ * `head -> right -> merge`, `merge -loop-> head` — the walk meets `right -> merge` as a CROSS edge,
+ * because `merge` is already finished, so no window ever names `right` and it never joins the
+ * component its own back-edge put `left` in. That is the exact graph the last test in
+ * `test/graph/loop-edge-analyses.test.ts` drives, and it failed. Tarjan's lowlink is what
+ * distinguishes a cross edge INTO the component from one leaving it; a stack window cannot.
+ *
+ * ONE WALK, NOT TWO. The cut needs "is the target still on the CURRENT PATH" and Tarjan's stack
+ * holds finished-but-unassigned nodes too, so `grey` is tracked separately from `onStack` and the
+ * two answer their own questions off the same traversal.
+ */
+function computeFlowOrder(
+  spec: GraphSpec,
+  entryNodes: readonly NodeId[],
+  flowEdges: readonly EdgeSpec[],
+): { flowOrder: ReadonlyMap<NodeId, ReadonlySet<NodeId>>; flowAncestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>> } {
+  // EDGES AND NOT TARGETS IN THE ADJACENCY MAP, and a `selfLoop` set built in the same single
+  // pass. Both are there because `test/scale.test.ts` counts every read of the spec and asserts
+  // the total grows sub-quadratically in elements: the first cut of this function scanned
+  // `flowEdges` to find the edge behind a back-edge and scanned it again per node to ask about a
+  // self-loop, which is O(V x E) and took the growth exponent from n^0.99 to n^1.52 on the 5,400
+  // element fixture — a red on a guard whose whole job is to catch exactly that.
+  const ids = spec.nodes.map((n) => n.id);
+  const successors = new Map<NodeId, EdgeSpec[]>();
+  for (const id of ids) successors.set(id, []);
+  const selfLoop = new Set<NodeId>();
+  for (const e of flowEdges) {
+    successors.get(e.from)?.push(e);
+    if (e.from === e.to) selfLoop.add(e.from);
+  }
+
+  // ITERATIVELY, with an explicit frame stack. A recursive walk is one JS frame per node and this
+  // runs on graphs the scale suite builds with hundreds of nodes on one path; the explicit stack
+  // costs a cursor per frame and cannot overflow.
+  const cut = new Set<EdgeSpec>();
+  const order$ = new Map<NodeId, number>(); // Tarjan's discovery index; also "visited"
+  const low = new Map<NodeId, number>();
+  const onStack = new Set<NodeId>(); // Tarjan's component stack membership
+  const grey = new Set<NodeId>(); // the CURRENT path, which is a smaller set and a different one
+  const sccStack: NodeId[] = [];
+  const rootOf = new Map<NodeId, NodeId>();
+  /** Nodes that really go round a cycle — a component of one node with no self-loop is not one. */
+  const inCycle = new Set<NodeId>();
+  let counter = 0;
+
+  const open = (id: NodeId): void => {
+    order$.set(id, counter);
+    low.set(id, counter);
+    counter += 1;
+    sccStack.push(id);
+    onStack.add(id);
+    grey.add(id);
+  };
+  const close = (id: NodeId): void => {
+    grey.delete(id);
+    if (low.get(id) !== order$.get(id)) return;
+    const comp: NodeId[] = [];
+    for (;;) {
+      const m = sccStack.pop()!;
+      onStack.delete(m);
+      comp.push(m);
+      if (m === id) break;
+    }
+    for (const m of comp) rootOf.set(m, id);
+    if (comp.length > 1) for (const m of comp) inCycle.add(m);
+    // A one-node component is a cycle only through a self-loop, which the pass above answered.
+    else if (selfLoop.has(id)) inCycle.add(id);
+  };
+
+  const walk = (root: NodeId): void => {
+    if (order$.has(root)) return;
+    open(root);
+    const frames: { id: NodeId; i: number }[] = [{ id: root, i: 0 }];
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const succ = successors.get(frame.id) ?? [];
+      if (frame.i >= succ.length) {
+        close(frame.id);
+        frames.pop();
+        const parentFrame = frames[frames.length - 1];
+        if (parentFrame !== undefined) {
+          low.set(parentFrame.id, Math.min(low.get(parentFrame.id)!, low.get(frame.id)!));
+        }
+        continue;
+      }
+      const edge = succ[frame.i]!;
+      const next = edge.to;
+      frame.i += 1;
+      if (!order$.has(next)) {
+        open(next);
+        frames.push({ id: next, i: 0 });
+        continue;
+      }
+      // ON THE CURRENT PATH -> a genuine DFS back-edge, and the edge the cut takes.
+      if (grey.has(next)) cut.add(edge);
+      // ON THE COMPONENT STACK -> the target is in this node's component whether the edge was a
+      // back-edge or a cross-edge, which is the distinction a stack window cannot make.
+      if (onStack.has(next)) low.set(frame.id, Math.min(low.get(frame.id)!, order$.get(next)!));
+    }
+  };
+
+  // ENTRIES FIRST, IN DECLARATION ORDER, THEN EVERY REMAINING NODE. The second pass is not
+  // decoration: an unreachable component has no entry node of its own, and leaving it unvisited
+  // would leave its members with an empty `flowOrder` — which GRAPH005 reads as "nothing wrote
+  // this" and GRAPH010 as "unordered". GRAPH001 refuses such a component separately; this rule
+  // must not also lie about it.
+  for (const id of entryNodes) walk(id);
+  for (const id of ids) walk(id);
+
+  const orderEdges = flowEdges.filter((e) => !cut.has(e));
+  const order = topoSort(ids, orderEdges);
+  const inboundOrder = new Map<NodeId, NodeId[]>();
+  for (const id of ids) inboundOrder.set(id, []);
+  for (const e of orderEdges) inboundOrder.get(e.to)?.push(e.from);
+
+  const flowOrder = new Map<NodeId, Set<NodeId>>();
+  for (const id of ids) flowOrder.set(id, new Set());
+  for (const id of order) {
+    const acc = flowOrder.get(id)!;
+    for (const from of inboundOrder.get(id) ?? []) {
+      acc.add(from);
+      for (const a of flowOrder.get(from) ?? []) acc.add(a);
+    }
+  }
+
+  // AND THE FULL CLOSURE, ON THE CONDENSATION. `flowOrder` ∪ "everybody in my component" is NOT
+  // the closure and the difference is a shipped graph: `harden-config.json`'s `collate` sits
+  // OUTSIDE the loop, one `conditional` edge off `audit`, and reads a channel only `fix` — inside
+  // the loop — writes. `fix` precedes it through the back-edge and then out of the cycle, which is
+  // two hops of two different relations, and a predicate that unions the two without closing over
+  // them says no. Collapsing each component to a point makes the graph acyclic and the ordinary
+  // accumulate-over-a-topological-order answer correct again.
+  const compIds = [...new Set(ids.map((id) => rootOf.get(id)!))];
+  const members = new Map<NodeId, NodeId[]>();
+  for (const c of compIds) members.set(c, []);
+  for (const id of ids) members.get(rootOf.get(id)!)!.push(id);
+  // TWO FIELDS, NOT A SPREAD. `topoSort` reads `from` and `to` and nothing else, and `{...e}`
+  // copies every declared field of every edge — which `scale.test.ts`'s proxy counts, for a
+  // condensation that throws the copy away.
+  const compEdges: EdgeSpec[] = [];
+  for (const e of flowEdges) {
+    const a = rootOf.get(e.from);
+    const b = rootOf.get(e.to);
+    if (a !== undefined && b !== undefined && a !== b) compEdges.push({ from: a, to: b } as EdgeSpec);
+  }
+  const compOrder = topoSort(compIds, compEdges);
+  const compIn = new Map<NodeId, NodeId[]>();
+  for (const c of compIds) compIn.set(c, []);
+  for (const e of compEdges) compIn.get(e.to)?.push(e.from);
+  const compAncestors = new Map<NodeId, Set<NodeId>>();
+  for (const c of compIds) compAncestors.set(c, new Set());
+  for (const c of compOrder) {
+    const acc = compAncestors.get(c)!;
+    for (const from of compIn.get(c) ?? []) {
+      acc.add(from);
+      for (const a of compAncestors.get(from) ?? []) acc.add(a);
+    }
+  }
+  const flowAncestors = new Map<NodeId, Set<NodeId>>();
+  for (const id of ids) {
+    const acc = new Set<NodeId>();
+    for (const c of compAncestors.get(rootOf.get(id)!) ?? []) for (const m of members.get(c) ?? []) acc.add(m);
+    // Its own component's members count only when the component really is a cycle: a node that
+    // goes round has seen every other member's writes by its second pass. A component of one node
+    // with no self-loop is just a node, and `producedBySelf` is the rule that owns that case.
+    if (inCycle.has(id)) for (const m of members.get(rootOf.get(id)!) ?? []) acc.add(m);
+    flowAncestors.set(id, acc);
+  }
+
+  return { flowOrder, flowAncestors };
+}
+
+/**
+ * CAN `a` HAVE RUN BEFORE `b` — the producer question, and the one predicate that answers it.
+ *
+ * `flowAncestors` ALONE, and the two things it already contains are why it is not a union:
+ *
+ *   `ancestors` ⊆ this, by construction — `dagEdges` ⊆ `flowEdges` and this is a full closure —
+ *     so no reader of this predicate can start warning about a graph the old code was silent on.
+ *   THE LOOP-CARRIED WRITE. `audit` reads a channel only `fix` writes, and on every pass after the
+ *     first it has. That is a real read of a real value and `GRAPH005_UNPRODUCED_READ` said it was
+ *     not, on a shipped example, on every command.
+ *
+ * NOT `flowOrder`, which is the same edge set with the cycles CUT: cutting is right for a
+ * concurrency question and wrong for this one, and `rule010ConcurrentWriters` says why from the
+ * other side.
+ *
+ * WHAT IT GIVES UP, stated because a widened predicate is a quieter compiler: the FIRST pass of a
+ * loop reads what nothing has written yet. `harden-config.json`'s `audit` reads `applied` before
+ * `fix` has ever run, which is intentional there — the channel is `append_ordered` and starts
+ * empty — but the general case is a real hazard that no diagnostic now names, and naming it is a
+ * new rule about iteration one rather than a wider version of this one.
+ */
+function canPrecede(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  return idx.flowAncestors.get(b)?.has(a) ?? false;
 }
 
 /**
@@ -2353,8 +2710,13 @@ function rule002Terminals(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): vo
     return;
   }
   // Every terminal path must be able to end somewhere that produced an output.
+  //
+  // `canPrecede` AND NOT `idx.ancestors` (§A.84): a node inside a loop body reaches its output
+  // writer through the back-edge, and `ancestors` does not walk one. `idx.terminalNodes` itself
+  // moved in the same change — a node whose only outbound edge is the back-edge is not where a
+  // path ends — so this rule now asks about a smaller set as well as asking it correctly.
   for (const t of idx.terminalNodes) {
-    const producesOutput = writers.has(t) || [...(idx.ancestors.get(t) ?? [])].some((a) => writers.has(a));
+    const producesOutput = writers.has(t) || [...idx.byId.keys()].some((a) => writers.has(a) && canPrecede(idx, a, t));
     if (!producesOutput) {
       d.push({
         severity: "warning",
@@ -2580,8 +2942,13 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
         continue;
       }
       if (inputs.has(r)) continue;
-      const producedUpstream = [...(idx.ancestors.get(n.id) ?? [])].some((a) =>
-        (idx.byId.get(a)?.writes ?? []).includes(r),
+      // PRODUCER-BEFORE-CONSUMER OVER THE EDGES THE EXECUTOR TAKES (§A.84). This read
+      // `idx.ancestors`, which does not walk a `loop` edge, so a loop-carried write was invisible:
+      // `examples/graphs/harden-config.json` was told on every command that `audit` and `collate`
+      // each "reads \"applied\", which no upstream node writes" about a channel its `fix` node
+      // writes on every pass. `canPrecede` is the same question asked of the real edge set.
+      const producedUpstream = [...idx.byId.keys()].some(
+        (a) => a !== n.id && (idx.byId.get(a)?.writes ?? []).includes(r) && canPrecede(idx, a, n.id),
       );
       const producedBySelf = (n.writes ?? []).includes(r);
       if (!producedUpstream && !producedBySelf) {
@@ -3831,7 +4198,22 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
       for (let j = i + 1; j < writers.length; j++) {
         const a = writers[i]!;
         const b = writers[j]!;
-        const related = (idx.ancestors.get(a)?.has(b) ?? false) || (idx.ancestors.get(b)?.has(a) ?? false);
+        // ORDERED OVER THE EDGES THE EXECUTOR TAKES, AND THE CYCLE IS DELIBERATELY CUT AND NOT IN THIS
+        // UNION (§A.84). `idx.ancestors` does not walk a `loop` edge, so two nodes joined only
+        // through a back-edge looked unordered and the canonical loop graph was REFUSED —
+        // `nodes "parse" and "fix" can run concurrently` about a graph where every path to `fix`
+        // goes through `audit`. `flowOrder` is the scheduler's own order and fixes that.
+        //
+        // But `canPrecede`'s third relation would go too far here, and the case is the one this
+        // rule exists for: a fan-out INSIDE a loop body puts two genuinely concurrent nodes in the
+        // same cycle, so "they go round together" would exempt exactly the pair that races. The
+        // producer question wants that relation and the concurrency question must not have it —
+        // which is why `GraphIndex` carries the two halves separately instead of one closure.
+        const related =
+          (idx.ancestors.get(a)?.has(b) ?? false) ||
+          (idx.ancestors.get(b)?.has(a) ?? false) ||
+          (idx.flowOrder.get(a)?.has(b) ?? false) ||
+          (idx.flowOrder.get(b)?.has(a) ?? false);
         if (related) continue; // sequential — last write is well-defined
         // A compensation node is DECLARED to run only after its target failed, so the two
         // are ordered even though `ancestors` deliberately excludes compensation edges (a
