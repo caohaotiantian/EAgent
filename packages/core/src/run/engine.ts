@@ -8358,14 +8358,29 @@ export class Engine {
     // produced something" reads like a lost branch and sends an operator looking for one. This arm
     // names the real fact, which is about the graph and not about this run.
     //
-    // AND A COMPILE-TIME REFUSAL IS NOT AVAILABLE EVEN FOR A STATIC BRANCH LIST — this comment
-    // claimed the opposite and running it says otherwise. `expected` counts the members that
-    // MATERIALISED, and a `kind: "conditional"` edge decides that from channel state: `branches:
-    // ["a","b","c"]` with `c` behind `when: flag == "yes"` and `k: 3` is satisfiable on one input and
-    // unsatisfiable on the next, from ONE `GraphSpec`. Both rows are driven in
-    // `join-quorum-k-is-a-floor.test.ts`. A compile-time rule would have to refuse the graph for
-    // every input, including the ones where it works, so the runtime arm is not a stopgap for a
-    // check that belongs earlier — it is the only place the question can be answered.
+    // WHAT IS AND IS NOT DECIDABLE BEFORE THE RUN, and this comment has now been wrong in BOTH
+    // directions — the version before this one said a static branch list is statically refusable
+    // (too strong), the one after it said no static branch list is (also too strong, and it deleted
+    // a true residue). The line runs between two questions:
+    //
+    //   - "WILL THIS RUN MEET `k`?" is a runtime question even for a branch list written out by
+    //     name. `expected` counts the members that MATERIALISED, and a `kind: "conditional"` edge
+    //     decides that from channel state: `branches: ["a","b","c"]` with `c` behind
+    //     `when: flag == "yes"` and `k: 3` is satisfiable on one input and unsatisfiable on the next,
+    //     from ONE `GraphSpec`. A compile rule for THAT would refuse the graph for every input,
+    //     including the ones where it works. So this arm is the only place it can be answered, and
+    //     both rows are driven in `join-quorum-k-is-a-floor.test.ts`.
+    //
+    //   - "CAN ANY RUN MEET `k`?" is a COMPILE question whenever every member is static and none is
+    //     fanned out, and it is NOT ASKED TODAY. `GRAPH008_QUORUM_K` checks that `k` is positive and
+    //     that a `k > 1` is a whole number, and never that it is `<= branches.length`. Measured:
+    //     three static arms, no conditional, no fan-out, `k: 4` — `compile` returns CLEAN, zero
+    //     diagnostics, and the run reaches this arm with all three arms' writes already in the
+    //     channel. That graph can succeed for no input at all and the compiler passed it.
+    //
+    // THE SECOND ONE BELONGS IN `graph/validate.ts` AND IS NOT THIS ARM'S TO ADD — a fold cannot
+    // refuse a graph, and refusing at the barrier is what this arm is for. It is recorded as a
+    // `TODO.md` line rather than left in a comment nobody greps.
     //
     // THE COST OF THAT, STATED: a narrowed STATIC set puts its survivors at the ROOT coordinate,
     // where `writesHeldForJoin` is false, so their writes are ALREADY IN THE CHANNEL when this arm

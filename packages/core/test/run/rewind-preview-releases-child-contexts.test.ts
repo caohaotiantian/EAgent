@@ -304,6 +304,16 @@ async function chargeUnderTheRealGraph(): Promise<{
   return { store, ledger, runId, childRunId, ran: engine };
 }
 
+/** The EDITED child graph, compiled — the one that no longer declares `pay`, so its undo refuses. */
+function editedChildGraph(): RunGraph {
+  return compileOrThrow({
+    spec: editedChildSpec(),
+    resolver: resolverWith(editedChildSpec()),
+    tools: MANIFESTS,
+    tenantCapabilities: ["pay"],
+  });
+}
+
 /** The child's real graph, compiled — what an operator still holds and hands to `attach`. */
 function realChildGraph(): RunGraph {
   return compileOrThrow({
@@ -502,12 +512,21 @@ test("§A.76 — an `attach` that lands DURING the preview is not re-forgotten b
   store.onPlanShown(() => engine.attach(childRunId, realChildGraph()));
   await engine.planRewind(runId, 1 as Seq, OPERATOR);
 
-  // THE OBSERVABLE: the child is rewindable, because the last thing anyone SAID about it was
-  // "attach". Before this fix the preview's release re-forgot it and this refused
-  // `E_RESTORE_ILLEGAL` — an operator's own request undone by a read-only verb.
+  // THE OBSERVABLE, AND IT IS ABOUT THE FLAG AND NOT ABOUT THE GRAPH. The child is rewindable
+  // because the last thing anyone SAID about it was `attach`; before this fix the preview's release
+  // re-forgot it and this refused `E_RESTORE_ILLEGAL` — an operator's own request undone by a
+  // read-only verb.
+  //
+  // WHAT DID *NOT* HAPPEN, because the first version of this message claimed it did: the graph the
+  // operator passed is not what the undo runs under. Their `attach` arrived while the preview's own
+  // context was installed, so `#contextFor` returned that one and DISCARDED the graph (the §A.76 arm
+  // this lane did not take); the release then dropped it, and `#reattach` rebuilt the child from
+  // `#retiredRuns`. Measured by substituting `editedChildGraph()` for `realChildGraph()` on the line
+  // above: still `refunds: [42]`, i.e. still the RETIRED graph. The claim this leg can make is that
+  // the run is reachable at all.
   const plan = await engine.planRewind(childRunId, 1 as Seq, OPERATOR);
   await engine.rewind(childRunId, 1 as Seq, "undo", OPERATOR, { planHash: plan.planHash });
-  assert.deepEqual(ledger.refunds, [42], "the undo dispatched under the graph the operator attached");
+  assert.deepEqual(ledger.refunds, [42], "the child was still reachable, so its undo ran — under the graph it retired with");
 
   // AND THE CONTROL, one line apart: no `attach` in that window, so the `forget` still stands.
   const quiet = await chargeUnderTheRealGraph();
@@ -576,4 +595,58 @@ test("§A.76 — the release reaches a GRANDCHILD, at depth 2", async () => {
   }
   assert.equal(refused, CODES.E_RESTORE_ILLEGAL, "the grandchild is released and still forgotten");
   assert.deepEqual(ledger.refunds, [], "and nothing was undone behind the operator's back");
+});
+
+test("§A.76 — a context the OPERATOR installed mid-preview survives the release, because it is not the preview's", async () => {
+  // THE IDENTITY CHECK, AND NOTHING ELSE PINNED IT — making the release unconditional left all 1,459
+  // run tests green. The window is the same one as the leg above, and the difference is one call: the
+  // operator `forget`s the child FIRST, so their `attach` builds a context of its own instead of
+  // being handed the preview's. `#runs` then holds THEIR object, the release compares identity and
+  // leaves it, and the undo runs under the graph THEY passed.
+  //
+  // THE OBSERVABLE IS THAT GRAPH'S OWN REFUSAL: they attach the EDITED child graph, which no longer
+  // declares `pay`, so the refund is journaled `failed` and the money stays where it is. Round 1's
+  // unconditional release destroyed their context, `#reattach` rebuilt the child from `#retiredRuns`
+  // — the REAL graph — and the refund went through, which is the engine overruling an operator with
+  // a graph they had replaced.
+  const store = new HookedStore({ now: () => NOW });
+  const ledger: Ledger = { charges: [], refunds: [] };
+  const engine = newEngine(store, ledger, realChildSpec());
+  const graph = compileOrThrow({ spec: parentSpec(), resolver: resolverWith(realChildSpec()), tools: MANIFESTS, tenantCapabilities: ["pay"] });
+  const runId: RunId = await engine.submit({ graph, inputs: { total: 21 } });
+  let p = await engine.advance(runId);
+  for (let i = 0; i < 4 && p.status === "awaiting_gate"; i++) {
+    const open = Object.values(p.gates).find((g) => g.state === "open");
+    if (open === undefined) break;
+    p = await engine.resolveGate(runId, { gateId: open.gateId, decision: { kind: "approve" }, actor: OPERATOR, idempotencyKey: `k${i}` });
+  }
+  assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+  let childRunId: RunId | undefined;
+  for await (const ev of store.read(runId, 1 as Seq)) {
+    if (ev.type === "subgraph.started") childRunId = ev.payload.childRunId;
+  }
+  assert.ok(childRunId !== undefined);
+
+  // BOTH CALLS INSIDE THE WINDOW, which is what makes the surviving context theirs and not ours.
+  store.onPlanShown(() => {
+    engine.forget(childRunId);
+    engine.attach(childRunId, editedChildGraph());
+  });
+  await engine.planRewind(runId, 1 as Seq, OPERATOR);
+
+  const plan = await engine.planRewind(childRunId, 1 as Seq, OPERATOR);
+  await engine.rewind(childRunId, 1 as Seq, "undo", OPERATOR, { planHash: plan.planHash });
+  const rows = (await records(store, runId)).filter((r) => r.run === "child");
+  assert.equal(rows.length, 1, `one undo in the child's journal: ${JSON.stringify(rows)}`);
+  assert.equal(
+    rows[0]?.outcome,
+    "failed",
+    `the operator's OWN graph is what the undo ran under — got ${JSON.stringify(rows[0])}`,
+  );
+  assert.match(
+    String(rows[0]?.reason ?? ""),
+    /capability "pay" is outside the graph's declared `policy\.capabilities`/,
+    `and its refusal is the edited graph's: ${String(rows[0]?.reason)}`,
+  );
+  assert.deepEqual(ledger.refunds, [], "so no money moved — the engine did not overrule them with a graph they replaced");
 });

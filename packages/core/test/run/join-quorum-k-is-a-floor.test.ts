@@ -62,7 +62,7 @@ import test from "node:test";
 
 import { InProcessEventBus } from "../../src/bus.ts";
 import { CODES } from "../../src/errors.ts";
-import { compileOrThrow } from "../../src/graph/compile.ts";
+import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { JournalEvent } from "../../src/journal/events.ts";
@@ -682,10 +682,16 @@ test("§A.75 — an absolute `k` above the width the fan MATERIALISED refuses, a
   // run in which EVERY branch succeeded still refuses. That is the refusing direction and it is
   // allowed — but the general message ("needs 2 of 1 branch(es) ... and 1 did") reads like a lost
   // branch and sends an operator looking for one, so this case gets its own sentence naming the
-  // fact, which is about the graph and not about the run. AND NOT A CHECK THAT BELONGS AT COMPILE
-  // TIME, which the first version of this comment claimed for a STATIC branch list: the last test in
-  // this file narrows a static three-name list to two at RUNTIME with a `conditional` edge, so there
-  // is no width for a compiler to read there either.
+  // fact, which is about the graph and not about the run.
+  //
+  // AND THE COMPILE-TIME QUESTION IS NARROWER THAN EITHER VERSION OF THIS COMMENT SAID. "Will THIS
+  // run meet `k`?" is a runtime question even for a static branch list — the last test in this file
+  // narrows a static three-name list to two with a `conditional` edge, so the width is an input
+  // there too. But "can ANY run meet `k`?" is decidable whenever every member is static and none is
+  // fanned: a whole-count `k` above `branches.length` can be met by no outcome ever, and
+  // `GRAPH008_QUORUM_K` does not check it — three static arms with `k: 4` compile CLEAN and are
+  // refused here instead, with all three arms' writes already in the channel. That refusal belongs
+  // in `graph/validate.ts`; `TODO.md` carries it.
   const one = await runFunctions(narrowFanSpec(2), { items: [{ id: "a" }] }, "J");
   assert.equal(one.status, "failed", `width 1 cannot meet k: 2 — ${JSON.stringify(one)}`);
   assert.equal(one.joinError, CODES.E_QUORUM_UNREACHABLE);
@@ -802,4 +808,80 @@ test("§A.75 — a STATIC branch list narrowed by a `conditional` edge reaches t
   const fits = await runFunctions(conditionalStaticSpec(2), { items: [{ id: "i" }], flag: "no" }, "J");
   assert.equal(fits.status, "succeeded", `k: 2 over two materialised arms — ${JSON.stringify(fits)}`);
   assert.deepEqual(fits.note, ["done-ran"], "the barrier folded");
+});
+
+/** Three STATIC arms, no conditional and no fan-out: the width is knowable before anything runs. */
+function staticArmsSpec(k: number): GraphSpec {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: "a75-static-arms", project: "probe", version: 1 },
+    policy: { expansion: { maxNodes: 32, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
+    channels: FN_CHANNELS,
+    inputs: ["items"],
+    outputs: [],
+    nodes: [
+      { id: "start", type: "function", reads: ["items"], function: { ref: "function/seed@stable" } },
+      ...["a", "b", "c"].map((id) => ({
+        id,
+        type: "function",
+        reads: ["items"],
+        writes: ["seen"],
+        function: { ref: `function/arm-${id}@stable` },
+      })),
+      {
+        id: "J",
+        type: "join",
+        reads: ["seen"],
+        writes: ["seen"],
+        join: { branches: ["a", "b", "c"], mode: "quorum", k, onBranchError: "skip" },
+      },
+      { id: "done", type: "function", reads: ["seen"], writes: ["note"], function: { ref: "function/done@stable" } },
+    ],
+    edges: [
+      ...["a", "b", "c"].map((id) => ({ id: `s${id}`, from: "start", to: id, kind: "seq" })),
+      ...["a", "b", "c"].map((id) => ({ id: `j${id}`, from: id, to: "J", kind: "join", branches: ["a", "b", "c"] })),
+      { id: "jd", from: "J", to: "done", kind: "seq" },
+    ],
+  } as unknown as GraphSpec;
+}
+
+test("§A.75 — RESIDUE: a whole-count `k` ABOVE a static branch list compiles CLEAN and is refused only here", async () => {
+  // THE ONE HALF OF THE COMPILE-TIME QUESTION THAT *IS* DECIDABLE, and is not decided. Every member
+  // of this barrier is static, none is behind a `conditional` edge and none is fanned out, so
+  // `branches.length` is the width before anything runs — and `k: 4` over three of them can be met by
+  // NO input. `GRAPH008_QUORUM_K` checks that `k` is positive and that a `k > 1` is a whole number,
+  // and never that it is `<= branches.length`, so the graph compiles with ZERO diagnostics and the
+  // run gets all the way to the barrier before anything objects.
+  //
+  // THIS TEST PINS THE RESIDUE RATHER THAN CLAIMING IT IS FINE. The right refusal is in
+  // `graph/validate.ts` — a fold cannot refuse a graph — and `TODO.md` carries the line. What is
+  // asserted here is (1) that the compiler really does pass it, so the residue cannot quietly stop
+  // existing without this going red, and (2) that the runtime arm catches it, so nothing folds a
+  // quorum that was unreachable from the start.
+  const clean = compile({ spec: staticArmsSpec(4), resolver, tools: {}, tenantCapabilities: [] });
+  assert.deepEqual(
+    (clean.diagnostics ?? []).map((d) => d.code),
+    [],
+    `RESIDUE: the compiler passes a k no run can meet — if this is now non-empty, graph/validate.ts learned the rule and this test is what says so`,
+  );
+
+  const four = await runFunctions(staticArmsSpec(4), { items: [{ id: "i" }] }, "J");
+  assert.equal(four.status, "failed", `k: 4 over three static arms — ${JSON.stringify(four)}`);
+  assert.equal(four.joinError, CODES.E_QUORUM_UNREACHABLE);
+  assert.equal(
+    four.joinMessage,
+    'join "J": mode "quorum" declares k 4, which exceeds the 3 branch(es) this barrier materialised — ' +
+      "no outcome can meet it, and 3 of them produced something. Lower `k` or widen the branch set",
+    `named as a width and not as a loss: ${String(four.joinMessage)}`,
+  );
+  // THE COST OF CATCHING IT THIS LATE, asserted: every arm ran, succeeded, and applied its write at
+  // the root coordinate, so a graph that could never have worked spent the whole run first.
+  assert.deepEqual(four.seen, ["a", "b", "c"], `all three arms ran and wrote: ${JSON.stringify(four.seen)}`);
+  assert.equal(four.note, undefined, "and only the node behind the barrier was spared");
+
+  // The control at the width the list actually has: folds.
+  const three = await runFunctions(staticArmsSpec(3), { items: [{ id: "i" }] }, "J");
+  assert.equal(three.status, "succeeded", `k: 3 of three is met — ${JSON.stringify(three)}`);
+  assert.deepEqual(three.note, ["done-ran"]);
 });
