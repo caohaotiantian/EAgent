@@ -238,7 +238,20 @@ function namesUnder(
   // version an oversight decision may rest on.
   const reachedAt = new Map<ResourceRef, number>();
   const walk = (spec: GraphSpec, depth: number): void => {
+    // A CHILD THAT IS NOT A GRAPH CONTRIBUTES NOTHING, exactly as an unresolvable ref does, and
+    // for the same reason it does not loosen anything: this walk runs BEFORE `rule016Subgraphs`,
+    // so it is the first thing to touch a child spec, and a resolver's answer comes out of a
+    // FILE. Measured before this guard, on a resolver returning each value for a declared ref:
+    //
+    //     42 / {} / "x" / []   THREW TypeError: spec.nodes is not iterable
+    //     null                 THREW TypeError: Cannot read properties of null (reading 'nodes')
+    //
+    // Skipping cannot let such a graph through: the child's own `checkStructure` refuses it
+    // through `rule016Subgraphs`' recursion, re-tagged `in subgraph "…": …`. A node inside it is
+    // skipped for the same reason — `reachableToolNames(null)` is the same crash one level in.
+    if (typeof spec !== "object" || spec === null || !Array.isArray(spec.nodes)) return;
     for (const n of spec.nodes) {
+      if (typeof n !== "object" || n === null) continue;
       for (const name of reachableToolNames(n)) if (!out.includes(name)) out.push(name);
       const ref = n.subgraph?.ref;
       if (ref === undefined || depth + 1 > maxDepth) continue;
@@ -1528,6 +1541,21 @@ function neverRetryable(code: string): readonly ErrorClass[] | undefined {
 
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
+  // THE SPEC IS A SPEC, before the loop below reads a field off it. `compile`'s input is a cast
+  // `JSON.parse`, and a file holding `null` is valid JSON: `spec.inputs` on it threw
+  // `TypeError: Cannot read properties of null (reading 'inputs')` out of `compile`. Every other
+  // non-object — `42`, `"x"`, `[]` — already landed on the `inputs` row below, so this arm is
+  // `null` and `undefined` alone and is stated as the shape question rather than as a special
+  // case of one field's. It reaches a CHILD spec too, through `rule016Subgraphs`' recursion.
+  if (typeof spec !== "object" || spec === null) {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: `the graph must be an object, not ${spec === null ? "null" : typeof spec}`,
+      fix: "a graph is `{apiVersion, kind, metadata, channels, inputs, outputs, nodes, edges}`",
+    });
+    return true;
+  }
   // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
   // `E_INTERNAL: TypeError: spec.inputs is not iterable`, and a missing `metadata` compiled
   // CLEAN and then failed the run on `Cannot read properties of undefined (reading 'name')` —
@@ -1956,7 +1984,13 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // malformed value is not a smaller claim, it is an unreadable one, and the fail-closed
     // reading of an unreadable label is that the node is untrusted — which `isExternal` now also
     // answers on its own, because a journal can carry a shape this compiler never saw.
-    if (n.type === "function" && n.function !== undefined) {
+    //
+    // `typeof … === "object"` AND NOT `!== undefined`, because `function: null` passed that test
+    // and threw `TypeError: Cannot read properties of null (reading 'effects')` — the one member
+    // of the eight-way `<block>: null` crash below that did NOT come out of `Object.keys`, and so
+    // the one the check down there cannot cover on its own. A block that is not a block is that
+    // check's to report; this one asks only about a block that is.
+    if (n.type === "function" && typeof n.function === "object" && n.function !== null) {
       const declared: unknown = (n.function as { effects?: unknown }).effects;
       const bad =
         declared !== undefined &&
@@ -2031,23 +2065,63 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       }
     }
 
+    // AND THAT THE TYPE BLOCK IS A BLOCK AT ALL, before either check below reads inside it.
+    //
+    // `REQUIRED_FIELDS` proves `agent: {}` has no `profile` and `ALLOWED_FIELDS` proves it carries
+    // nothing invented; both assume the thing is an object, and `typeof null === "object"` is why
+    // the second one did not. Measured on one graph per node type, every one of the eight:
+    //
+    //     tool: null / agent: null / join: null / router: null / evaluator: null /
+    //     humanGate: null / subgraph: null   ->  THREW TypeError: Cannot convert undefined or
+    //                                            null to object   (`Object.keys(null)`)
+    //     function: null                     ->  THREW TypeError: Cannot read properties of null
+    //                                            (reading 'effects')
+    //
+    // — a crash where a diagnostic belonged, and the ancestor of §A.79 one scope out: a graph
+    // FILE decides this value, because `compile`'s input is a cast `JSON.parse`.
+    //
+    // IT GATES THE TWO CHECKS BELOW rather than running beside them, because their answers are
+    // false for a non-object. `subgraph: 42` reported `` `ref` is missing `` — the `ref` is not
+    // missing from a block that does not exist — and a correction that replaces a false claim
+    // with a differently-false one is worse than the original.
+    //
+    // `GRAPH003_MALFORMED` and `objectBlock` rather than a new code: this is already the file's
+    // answer to "a block is not the shape it must be" at the channel, policy and element sites.
+    const holder = REQUIRED_BLOCK[n.type];
+    const rawBlock = (n as unknown as Record<string, unknown>)[holder as string];
+    const blockWhere = `node "${n.id}"'s \`${String(holder)}\` block`;
+    const declared =
+      rawBlock === undefined
+        ? undefined
+        : objectBlock(
+            rawBlock,
+            blockWhere,
+            { nodeId: n.id },
+            `a \`${String(holder)}\` block is an object — ${blockWhere} may declare ${ALLOWED_FIELDS[n.type]
+              .map((a) => `\`${a}\``)
+              .join(", ")}`,
+            d,
+          );
+    const blockIsMalformed = rawBlock !== undefined && declared === undefined;
+    if (blockIsMalformed) fatal = true;
+
     // AND THE BLOCK'S OWN REQUIRED FIELDS. `REQUIRED_BLOCK` proves a node HAS an `agent:`; it
     // says nothing about `agent: {}`. Every one of these used to reach `parseRef(undefined)` and
     // come back as `E_INTERNAL: TypeError: Cannot read properties of undefined (reading
     // 'lastIndexOf')`, which tells an author nothing about their graph.
-    for (const [field, holder, shape] of REQUIRED_FIELDS[n.type] ?? []) {
-      const block = n[holder] as Record<string, unknown> | undefined;
+    for (const [field, blockHolder, shape] of blockIsMalformed ? [] : REQUIRED_FIELDS[n.type] ?? []) {
+      const block = n[blockHolder] as Record<string, unknown> | undefined;
       const value = block?.[field];
       const bad = shape === "array" ? !Array.isArray(value) : typeof value !== "string";
       if (block !== undefined && bad) {
         d.push({
           severity: "error",
           code: "GRAPH020_MISSING_FIELD",
-          message: `node "${n.id}" has a \`${String(holder)}\` block whose \`${field}\` is ${
+          message: `node "${n.id}" has a \`${String(blockHolder)}\` block whose \`${field}\` is ${
             value === undefined ? "missing" : `not ${shape === "array" ? "an array" : "a string"}`
           }`,
           at: { nodeId: n.id },
-          fix: `add \`${field}:\` to node "${n.id}"'s \`${String(holder)}\` block`,
+          fix: `add \`${field}:\` to node "${n.id}"'s \`${String(blockHolder)}\` block`,
         });
         fatal = true;
       }
@@ -2070,11 +2144,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // fields were deleted, and the generic refusal here is what an author meets instead. It has
     // no undecidable case — a key is in `ALLOWED_FIELDS` or the graph is refused — where a
     // per-field warning had to be argued into existence one field at a time.
-    const holder = REQUIRED_BLOCK[n.type];
-    const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
-    if (declared !== undefined && typeof declared === "object") {
-      const where = `node "${n.id}"'s \`${String(holder)}\` block`;
-      if (unknownKeys(declared, ALLOWED_FIELDS[n.type], where, { nodeId: n.id }, d)) fatal = true;
+    if (declared !== undefined) {
+      if (unknownKeys(declared, ALLOWED_FIELDS[n.type], blockWhere, { nodeId: n.id }, d)) fatal = true;
     }
 
     // AND THE NODE'S OWN KEYS. This is where the family's worst member lives: `policyy:
@@ -5053,6 +5124,44 @@ function rule015Resources(spec: GraphSpec, resolver: ResourceResolver, d: Diagno
 
 // ── GRAPH016 ─────────────────────────────────────────────────────────────────
 
+/**
+ * A `subgraph` node's `inputs`/`outputs` map, or `undefined` with the refusal already pushed.
+ *
+ * NOT `objectBlock`, and the difference is the whole point of this function: `objectBlock` treats
+ * ABSENT as fine, because the `policy` blocks it was written for are optional. These two are not
+ * — `SubgraphNode` declares both, and `run/engine.ts`'s `#contextFor` walks `sub.inputs` with the
+ * same `Object.entries`, so an absent one is a crash at run time rather than a subgraph that maps
+ * nothing. The channel loop in `checkStructure` makes the same distinction the same way, by
+ * reporting the absent case itself rather than letting a `fatal` with no diagnostic behind it
+ * reach `compile` as `ok`.
+ *
+ * ONE MESSAGE FOR ABSENT AND FOR WRONG-SHAPED, because they are one mistake from the author's
+ * side — "there is no mapping here" — and two spellings of one refusal is how two diagnostics
+ * come to disagree. The message names the NODE, which is §A.79's closing condition, and states
+ * the direction of the arrow, because `inputs` and `outputs` run OPPOSITE ways and a message that
+ * only says "must be an object" leaves an author to guess which key is which.
+ */
+function requiredMapping(
+  v: unknown,
+  nodeId: NodeId,
+  field: "inputs" | "outputs",
+  keyIs: string,
+  valueIs: string,
+  d: Diagnostic[],
+): Readonly<Record<string, unknown>> | undefined {
+  if (typeof v === "object" && v !== null && !Array.isArray(v)) return v as Readonly<Record<string, unknown>>;
+  d.push({
+    severity: "error",
+    code: "GRAPH003_MALFORMED",
+    message:
+      `subgraph "${nodeId}" declares \`${field}\` as ${describeValue(v)}, which is not a channel mapping — ` +
+      `\`${field}\` maps ${keyIs} to ${valueIs} and is required`,
+    at: { nodeId },
+    fix: `write \`${field}: {}\` to declare the subgraph maps no ${field === "inputs" ? "input" : "output"}, or give it \`{"<${keyIs.replace(" ", "-")}>": "<${valueIs.replace(" ", "-")}>"}\``,
+  });
+  return undefined;
+}
+
 function rule016Subgraphs(
   spec: GraphSpec,
   ctx: ValidationContext,
@@ -5091,16 +5200,52 @@ function rule016Subgraphs(
     const child = ctx.resolver.subgraph?.(sub.ref);
     if (child === undefined) continue; // GRAPH015 already reported a missing ref
 
-    for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
-      if (!Object.hasOwn(spec.channels, parentCh)) {
+    // THE FOUR BLOCKS THIS RULE READS, ASKED ABOUT BEFORE THEY ARE READ (§A.79). The rule read
+    // all four straight, and `compile`'s input is a cast `JSON.parse` — so a graph FILE, and a
+    // resolver handing back a resource FILE, decided whether any of them existed. Measured on
+    // `compile`, one graph per value, before this:
+    //
+    //     subgraph: {ref, outputs}       (no `inputs`)   THREW TypeError: Cannot convert
+    //     subgraph: {ref, inputs}        (no `outputs`)  undefined or null to object
+    //     inputs: null / outputs: null                   — the same, from `Object.entries`
+    //     child spec with no `channels` / channels: null THREW the same, from `Object.hasOwn`
+    //     inputs: 42                                     ok, ZERO diagnostics — the mapping
+    //                                                    silently dropped, which is the quiet
+    //                                                    half and the worse one
+    //     inputs: "inp"                                  SIX GRAPH016_BAD_MAPPINGs about child
+    //                                                    channels "0", "1", "2" — a diagnostic
+    //                                                    about the string's own indices
+    //
+    // THE TWO HALVES GET DIFFERENT TREATMENT, because only one of them has a second reporter.
+    // `sub.inputs`/`sub.outputs` are the PARENT's declaration and nothing else looks at them, so
+    // they are refused here. The CHILD's `channels` is reported by the child's own
+    // `checkStructure` through the recursion below, re-tagged `in subgraph "…": …` and pointed at
+    // this node — so this rule only declines to answer the child half of a mapping it cannot
+    // answer, rather than spelling that refusal a second time. `namesUnder`'s walk, which runs
+    // before this rule, skips a malformed child for the same reason.
+    //
+    // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
+    // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
+    // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
+    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
+    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    const childIsGraph = typeof child === "object" && child !== null;
+    const rawChildChannels: unknown = childIsGraph ? child.channels : undefined;
+    const childChannels: Readonly<Record<string, unknown>> | undefined =
+      typeof rawChildChannels === "object" && rawChildChannels !== null && !Array.isArray(rawChildChannels)
+        ? (rawChildChannels as Readonly<Record<string, unknown>>)
+        : undefined;
+
+    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
+      if (!Object.hasOwn(spec.channels, parentCh as string)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${parentCh}"`,
+          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
           at: { nodeId: n.id },
         });
       }
-      if (!Object.hasOwn(child.channels, childCh)) {
+      if (childChannels !== undefined && !Object.hasOwn(childChannels, childCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
@@ -5109,7 +5254,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const [parentCh, childCh] of Object.entries(sub.outputs)) {
+    for (const [parentCh, childCh] of Object.entries(outputs ?? {})) {
       if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
@@ -5118,11 +5263,11 @@ function rule016Subgraphs(
           at: { nodeId: n.id },
         });
       }
-      if (!Object.hasOwn(child.channels, childCh)) {
+      if (childChannels !== undefined && !Object.hasOwn(childChannels, childCh as string)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps output from child channel "${childCh}", which "${sub.ref}" does not declare`,
+          message: `subgraph "${n.id}" maps output from child channel "${String(childCh)}", which "${sub.ref}" does not declare`,
           at: { nodeId: n.id },
         });
       }
