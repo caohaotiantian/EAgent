@@ -273,7 +273,7 @@ test("EVERY FIELD THE POLICY INTERFACES DECLARE IS ALLOWED — the same, one lev
   };
   for (const [key, iface] of Object.entries(IFACE) as [keyof typeof POLICY_FIELDS, string][]) {
     assert.deepEqual(
-      [...POLICY_FIELDS[key]].sort(),
+      Object.keys(POLICY_FIELDS[key]).sort(),
       membersOf(iface),
       `POLICY_FIELDS.${key} and ${iface} disagree — a field was added to one and not the other`,
     );
@@ -563,7 +563,7 @@ test("EVERY FIELD THESE FOUR INTERFACES DECLARE IS ALLOWED — the guard must no
   };
   for (const [key, [iface, src]] of Object.entries(IFACE) as [keyof typeof NESTED_FIELDS, readonly [string, string]][]) {
     assert.deepEqual(
-      [...NESTED_FIELDS[key]].sort(),
+      Object.keys(NESTED_FIELDS[key]).sort(),
       membersOf(iface, src),
       `NESTED_FIELDS.${key} and ${iface} disagree — a field was added to one and not the other`,
     );

@@ -221,31 +221,38 @@ const compileOf = (s: GraphSpec) =>
   compile({ spec: s, resolver: stubResolver(), tools: TOOLS, tenantCapabilities: TENANT_CAPABILITIES });
 
 /**
- * THE ONE EXCLUSION, AND IT IS A CLASS RATHER THAN TWO VALUES — say the set honestly.
+ * THE EXCLUSION THAT USED TO BE HERE, AND THE CHANGE THAT EMPTIED IT — §A.80's residue, closed.
  *
- * `graph/compile.ts`'s `unknownEdgeKinds` has TWO sites that coerce the value, and the class is the
- * union of what each cannot do — measured, one graph per row, in `.agent/spec-a62/probe-kind-class.ts`:
+ * `kind` was the one deferral whose refusal was not total, because `graph/compile.ts`'s
+ * `unknownEdgeKinds` had TWO sites that coerced the value and each had values it could not
+ * survive — measured, one graph per row:
  *
- *     :325 `JSON.stringify(edge.kind)`   10n              TypeError: Do not know how to serialize a BigInt
- *                                        [10n], {a:10n}   the same, at any depth
- *                                        {toJSON throws}  Error: boom
- *                                        a circular object TypeError: Converting circular structure
- *                                        a Proxy whose get trap throws
- *     :317 `Object.hasOwn(…, edge.kind)` [Symbol()]       TypeError: Cannot convert a Symbol value
- *                                        (the KEY coercion, not the message)
+ *     `JSON.stringify(edge.kind)`     10n              TypeError: Do not know how to serialize a BigInt
+ *                                     [10n], {a:10n}   the same, at any depth
+ *                                     {toJSON throws}  Error: boom
+ *                                     a circular object TypeError: Converting circular structure
+ *     `Object.hasOwn(…, edge.kind)`   [Symbol()]       TypeError: Cannot convert a Symbol value
+ *                                     (the KEY coercion, not the message)
  *
- * A BARE `Symbol()` DOES NOT THROW and is a diagnostic — `String(sym)` is legal where a template is
- * not, and `?? String(edge.kind)` is what catches it. So the set is "a `kind` that
- * `JSON.stringify` refuses, plus one that `Object.hasOwn`'s key coercion refuses", and the two
- * values driven below are MEMBERS OF IT, not the whole of it. Naming only those two here would be
- * the same mistake `TYPE_CHECKED_ELSEWHERE` made when it said "total".
+ * This file's old docstring said the repair was "not this lane's to make" because the rule lived in
+ * `compile.ts`. §A.80 moved it into `graph/validate.ts` — and that relocation made the hole WORSE
+ * before it made it better: `rule016Subgraphs` recurses `validateGraph`, so a SUBGRAPH CHILD's edge
+ * now reaches this render too, turning an `ok: true` compile into an exception on a child nobody
+ * had to look at.
  *
- * NOT THIS LANE'S FILE TO FIX — `compile.ts` is outside the owned set, and the repair is the one
- * `unknownEdgeKinds`' own docstring already proposes: move the rule beside GRAPH020, where
- * `describeValue` is. Listing these makes the exclusion a measured fact rather than a hope: if that
- * site ever learns to render safely, this test goes red and the rows come off.
+ * BOTH SITES ARE TOTAL NOW. The guard asks `typeof e.kind !== "string"` before `Object.hasOwn`, so
+ * no key is coerced; and `renderKind` falls back to `describeValue` for anything `JSON.stringify`
+ * throws on, so every value a JSON file can express keeps its exact bytes and the ones it cannot
+ * express render as text instead of crashing. The list is therefore EMPTY, which is what this
+ * docstring predicted would happen — *"if that site ever learns to render safely, this test goes
+ * red and the rows come off"*. It did, and they have.
+ *
+ * EMPTY OF VALUES, AND THAT IS NOT THE SAME AS "NOTHING THROWS". An edge carrying a throwing
+ * ACCESSOR — `Object.defineProperty(edge, "kind", {get() { throw … }})` — still throws at the
+ * property READ, before any guard sees a value, and does so identically at base. Nothing in this
+ * file's reach can close that: it is a property of the object, not of the kind.
  */
-const KIND_STILL_THROWS: readonly unknown[] = [10n, { toJSON: () => { throw new Error("boom"); } }];
+const KIND_STILL_THROWS: readonly unknown[] = [];
 
 test("THE SIX DEFERRALS, DRIVEN OVER THE WHOLE `WRONG` TABLE — five total, one excluded by name", () => {
   // The load-bearing pin for `TYPE_CHECKED_ELSEWHERE`. It is a hand-written set, and the reason it
@@ -302,23 +309,22 @@ test("THE SIX DEFERRALS, DRIVEN OVER THE WHOLE `WRONG` TABLE — five total, one
   }
 });
 
-test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — the boundary, pinned", () => {
-  // `unknownEdgeKinds` refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS
-  // TYPE", which is why a type check in `checkStructure` would be a second refusal for one mistake
-  // rather than a first for a new one — one mistake, one refusal:
+test("`kind` IS DEFERRED TO `checkStructure`, AND THE DEFERRAL NOW REACHES A CHILD — §A.80", () => {
+  // The kind check refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE",
+  // which is why a type check for `kind` in `checkStructure` would be a second refusal for one
+  // mistake rather than a first for a new one — one mistake, one refusal:
   assert.deepEqual(
     compileOf(withEdge("e3", { kind: 42 })).diagnostics.filter((d) => d.severity === "error").map((d) => d.code),
     ["GRAPH003_UNKNOWN_EDGE_KIND"],
   );
 
-  // AND THE EXACT LIMIT OF THAT, asserted so nobody reads `TYPE_CHECKED_ELSEWHERE` as a claim
-  // about every path: `unknownEdgeKinds` is `compile`'s, so `validateGraph` ALONE says nothing
-  // about `kind` — and `rule016Subgraphs` recurses `validateGraph`, not `compile`, into a subgraph
-  // CHILD. A child edge's `kind` is therefore unchecked at compile and reaches the executor's own
-  // `EDGE_KINDS` copy in `#assertBound`. That is a PRE-EXISTING hole, not one the parse opened; the
-  // fix is the relocation `unknownEdgeKinds`' own docstring already proposes ("the rule belongs
-  // beside GRAPH020 and moving it there is a pure relocation"), which is `compile.ts`'s to make.
-  assert.deepEqual(errorsOf(withEdge("e3", { kind: 42 })).map((d) => d.code), []);
+  // THE PIN THAT WAS NEGATIVE AND IS NOW POSITIVE, and the flip is the whole of §A.80. This line
+  // used to assert `[]`: `unknownEdgeKinds` lived in `compile.ts` and ran on the TOP-LEVEL spec
+  // alone, so `validateGraph` said nothing about `kind` — and since `rule016Subgraphs` recurses
+  // `validateGraph` and not `compile`, a subgraph CHILD's `kind: 42` compiled clean and was met by
+  // the executor's own `EDGE_KINDS` copy at run time instead. The rule is now in `checkStructure`,
+  // which is exactly what the child recursion runs.
+  assert.deepEqual(errorsOf(withEdge("e3", { kind: 42 })).map((d) => d.code), ["GRAPH003_UNKNOWN_EDGE_KIND"]);
 
   // WHAT THE PARSE DID REACH, in the same breath: the child's wrong-typed `maxWidth` IS refused
   // now, because `edgeFieldTypes` lives in `checkStructure` and `checkStructure` is what the child
@@ -337,7 +343,6 @@ test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — t
       nodes,
       edges,
     }) as unknown as GraphSpec;
-  const child = graph("child", [tool("a"), tool("b")], [{ id: "c1", from: "a", to: "b", kind: "seq", maxWidth: "24" }]);
   const parent = graph(
     "parent",
     [
@@ -352,16 +357,36 @@ test("`kind` IS DEFERRED TO `compile`, AND THAT IS WHERE THE DEFERRAL ENDS — t
     ],
     [],
   );
-  const r = compile({
-    spec: parent,
-    resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child } }),
-    tools: TOOLS,
-    tenantCapabilities: ["k8s:write"],
-  });
-  assert.equal(r.ok, false);
+  const throughParent = (childEdge: Record<string, unknown>): readonly Diagnostic[] => {
+    const child = graph("child", [tool("a"), tool("b")], [{ id: "c1", from: "a", to: "b", ...childEdge }]);
+    const r = compile({
+      spec: parent,
+      resolver: stubResolver({ subgraphs: { "subgraph/child@stable": child } }),
+      tools: TOOLS,
+      tenantCapabilities: ["k8s:write"],
+    });
+    assert.equal(r.ok, false, `a child fault must refuse the parent; got ${r.diagnostics.map((x) => x.code).join(", ") || "nothing"}`);
+    return r.diagnostics;
+  };
+  const width = throughParent({ kind: "seq", maxWidth: "24" });
   assert.ok(
-    r.diagnostics.some((d) => d.code === "GRAPH007_BAD_MAX_WIDTH"),
-    `a child's wrong-typed width must reach the parent's compile; got ${r.diagnostics.map((d) => d.code).join(", ") || "nothing"}`,
+    width.some((d) => d.code === "GRAPH007_BAD_MAX_WIDTH"),
+    `a child's wrong-typed width must reach the parent's compile; got ${width.map((d) => d.code).join(", ") || "nothing"}`,
+  );
+
+  // AND THE CHILD'S `kind`, THROUGH THE PARENT — the probe §A.80 was opened with. Before the
+  // relocation this compile reported `GRAPH007_BAD_MAX_WIDTH` ALONE: §A.62's parse recursed into
+  // the child and the kind check did not.
+  const kind = throughParent({ kind: 42, maxWidth: "24" });
+  const hit = kind.find((d) => d.code === "GRAPH003_UNKNOWN_EDGE_KIND");
+  assert.ok(hit !== undefined, `got ${kind.map((d) => d.code).join(", ") || "nothing"}`);
+  // Re-tagged at the NODE that reaches the child, which is the only coordinate a parent's author
+  // can act on — the child's own `edgeId` names an edge in a file they may not have written.
+  assert.deepEqual(hit.at, { nodeId: "delegate" as NodeId });
+  assert.equal(
+    hit.message,
+    'in subgraph "subgraph/child@stable": edge "c1" declares kind 42, which is not an edge kind — ' +
+      "its `when`, `until`, `over` and `branches` are all ignored and the edge is taken unconditionally",
   );
 });
 
@@ -497,6 +522,41 @@ test("A HOSTILE VALUE IS RENDERED, NOT RUN — including the two `describeValue`
     one("e3", { maxWidth: { toJSON: () => { throw new Error("boom"); } } }).message.includes("declares maxWidth an object,"),
     true,
   );
+});
+
+test("`kind` IS ASKED ABOUT ITS TYPE BEFORE `Object.hasOwn` — the KEY coercion throws too", () => {
+  // THE OTHER COERCION, and it is a separate site from the message. `renderKind` closed the one in
+  // the message; `Object.hasOwn(EDGE_KINDS, e.kind)` COERCES ITS KEY, so a `kind` whose string
+  // conversion throws crashed the guard BEFORE any rendering happened. Asking `typeof !== "string"`
+  // first reaches exactly the same verdict — every non-string is still refused, which is what
+  // "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE" has always meant —
+  // without ever handing the value to a coercion.
+  //
+  // Measured on `79cab047` with that clause removed, both of these THREW out of `compile`:
+  //
+  //     kind: [Symbol("x")]           TypeError: Cannot convert a Symbol value to a string
+  //     kind: {toString(){throw}}     Error: boom
+  //
+  // This test is why the clause is not a tidy-up: the relocation of §A.80 put this call where a
+  // SUBGRAPH CHILD's edge reaches it, so the crash is one resolver away from an `ok: true` compile.
+  for (const [label, kind] of [
+    ["an array holding a symbol", [Symbol("x")]],
+    ["an object whose toString throws", { toString: () => { throw new Error("boom"); } }],
+  ] as [string, unknown][]) {
+    let threw: string | undefined;
+    let codes: string[] = [];
+    let ok: boolean | undefined;
+    try {
+      const r = compileOf(withEdge("e3", { kind }));
+      ok = r.ok;
+      codes = r.diagnostics.filter((x) => x.severity === "error").map((x) => x.code);
+    } catch (e) {
+      threw = `${(e as Error).name}: ${(e as Error).message}`;
+    }
+    assert.equal(threw, undefined, `kind = ${label} CRASHED the compiler instead of refusing: ${String(threw)}`);
+    assert.equal(ok, false, `kind = ${label} must not compile`);
+    assert.ok(codes.includes("GRAPH003_UNKNOWN_EDGE_KIND"), `${label}: got ${codes.join(", ") || "nothing"}`);
+  }
 });
 
 test("A SPARSE ARRAY IS REFUSED — `Array.prototype.every` SKIPS HOLES and `digest` does not", () => {

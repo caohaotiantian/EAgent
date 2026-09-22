@@ -46,6 +46,7 @@ import {
   REQUIRED_BLOCK,
   REQUIRED_FIELDS,
   reachableToolNames,
+  type EdgeKind,
   type EdgeSpec,
   type ExpansionBudget,
   type GraphSpec,
@@ -238,7 +239,20 @@ function namesUnder(
   // version an oversight decision may rest on.
   const reachedAt = new Map<ResourceRef, number>();
   const walk = (spec: GraphSpec, depth: number): void => {
+    // A CHILD THAT IS NOT A GRAPH CONTRIBUTES NOTHING, exactly as an unresolvable ref does, and
+    // for the same reason it does not loosen anything: this walk runs BEFORE `rule016Subgraphs`,
+    // so it is the first thing to touch a child spec, and a resolver's answer comes out of a
+    // FILE. Measured before this guard, on a resolver returning each value for a declared ref:
+    //
+    //     42 / {} / "x" / []   THREW TypeError: spec.nodes is not iterable
+    //     null                 THREW TypeError: Cannot read properties of null (reading 'nodes')
+    //
+    // Skipping cannot let such a graph through: the child's own `checkStructure` refuses it
+    // through `rule016Subgraphs`' recursion, re-tagged `in subgraph "…": …`. A node inside it is
+    // skipped for the same reason — `reachableToolNames(null)` is the same crash one level in.
+    if (typeof spec !== "object" || spec === null || !Array.isArray(spec.nodes)) return;
     for (const n of spec.nodes) {
+      if (typeof n !== "object" || n === null) continue;
       for (const name of reachableToolNames(n)) if (!out.includes(name)) out.push(name);
       const ref = n.subgraph?.ref;
       if (ref === undefined || depth + 1 > maxDepth) continue;
@@ -272,11 +286,48 @@ export interface GraphIndex {
   /** Edges that carry normal forward flow: everything except `loop` and `compensation`. */
   readonly dagEdges: readonly EdgeSpec[];
   readonly loopEdges: readonly EdgeSpec[];
+  /**
+   * EVERY EDGE THE EXECUTOR CAN TRAVERSE — `dagEdges` plus the back-edges, which is not the
+   * same graph and was treated as the same graph by five analyses (§A.84).
+   *
+   * Same predicate as `graph/mutate.ts`'s `traversable`, and for the reason written out there:
+   * `#edgesToTake` answers `case "compensation": break;` and rollback is journal-driven, so
+   * `compensation` is the ONE kind nothing ever walks; `error` stays in because `#errorEdges`
+   * dispatches on failure; and `loop` stays in because `#edgesToTake` DOES take a loop edge.
+   */
+  readonly flowEdges: readonly EdgeSpec[];
   readonly entryNodes: readonly NodeId[];
   readonly terminalNodes: readonly NodeId[];
   /** Topological order over `dagEdges`; empty when the forward graph is cyclic. */
   readonly topoOrder: readonly NodeId[];
   readonly ancestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
+  /**
+   * Ancestors over `flowEdges` with the cycles CUT rather than collapsed: the order the
+   * scheduler actually realises, walking out from the entry nodes.
+   *
+   * It is not `ancestors` widened and it is not a full closure over `flowEdges`. See
+   * `computeFlowOrder` for the construction and `canPrecede`/`rule010ConcurrentWriters` for why
+   * the two readers want different halves of it.
+   */
+  /**
+   * IMMEDIATE-DOMINATOR TREE over `flowEdges`, rooted at a virtual node above the entry set.
+   *
+   * `a` dominates `b` when EVERY path from an entry to `b` passes through `a` — which is the only
+   * ordering strong enough for `rule010ConcurrentWriters` to stay silent on, because GRAPH010's
+   * silence has to hold on every pass and "some path orders them" does not. See `computeDominators`
+   * for what that replaced and the graph that proved it had to.
+   */
+  readonly dominators: DomTree;
+  /**
+   * The FULL transitive closure over `flowEdges`, cycles included: every node that can have run
+   * before this one on some pass. A superset of `ancestors` by construction.
+   *
+   * THE OTHER HALF OF "CYCLES HANDLED", and it answers a different question from `dominators`.
+   * A node inside a loop body has seen every other node of that body's writes by its second pass,
+   * which is a PRODUCER question (`canPrecede`), and it is NOT ordered against them, which is a
+   * CONCURRENCY question — so `rule010ConcurrentWriters` reads `dominators` and never this.
+   */
+  readonly flowAncestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
   readonly reachable: ReadonlySet<NodeId>;
   /**
    * How many instances of a node can run AT THE SAME TIME: Π fanout widths on the
@@ -360,21 +411,124 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
   // forward cycle, which is only the same question while both filters name the same two kinds. It
   // decides whether that rule OFFERS an edit AND whether it prints §A.69's counterfactual about one
   // — four of its ten message arms turn on it. Widen or narrow one filter without the other and both
-  // become false statements, with nothing local to notice (§A.73).
+  // become false statements, with nothing local to notice (§A.73). THAT COUPLING IS UNCHANGED BY
+  // §A.84 AND IS THE REASON THE FIX IS A SECOND RELATION RATHER THAN A WIDER FILTER: `ancestors`
+  // still walks `dagEdges`' two exclusions and nothing else, so `wouldCycle` still asks the
+  // question it was written to ask, and `test/graph/fanout-branch-diagnostic.test.ts`'s pin that
+  // "the `loop` edge is invisible to `ancestors`" is still true on purpose.
+  //
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // EVERY ANALYSIS OVER `dagEdges`, AND WHICH OF THEM IS WRONG ON A BACK-EDGE (§A.84). The row
+  // asked for this set to be NAMED before anything moved, because "include loop edges in
+  // `dagEdges`" makes almost every looping graph look cyclic and is not the fix.
+  //
+  //   topoOrder = topoSort(nodes, dagEdges)       RIGHT, and must stay. A back-edge in here
+  //                                               empties the sort, which is exactly what
+  //                                               GRAPH006_UNMARKED_CYCLE reads it for.
+  //   rule006Cycles, `topoOrder.length === 0`     RIGHT. "The forward graph contains a cycle" is
+  //                                               a question about the graph WITHOUT its
+  //                                               declared back-edges, by definition.
+  //   computeFanoutStacks / computeCriticalPath   RIGHT. Both sweep `topoOrder`, so both need an
+  //                                               acyclic order; a loop multiplies COUNT, which
+  //                                               `applyLoopFactors` already applies separately.
+  //   ancestors (its own copy of the filter)      RIGHT for `rule021`'s `wouldCycle`, which asks
+  //                                               "would this edit close a FORWARD cycle", and
+  //                                               WRONG for every reader that asks "did this run
+  //                                               before that". Those three move, below.
+  //   entryNodes (`hasNonLoopIn`)                 WRONG. It excluded `loop` from the inbound
+  //                                               test, so a loop's TARGET whose only inbound
+  //                                               edge is the back-edge was an ENTRY node and ran
+  //                                               at t=0 beside the real first node. Measured on
+  //                                               the canonical loop graph: node order
+  //                                               ["parse","fix","audit","fix","audit",…] with
+  //                                               the fixer running before the thing it fixes.
+  //   terminalNodes (`hasForwardOut`)             WRONG. A node whose only outbound edge is the
+  //                                               back-edge had no forward out, so it "ends a
+  //                                               path" — and `examples/graphs/harden-config.json`
+  //                                               printed `GRAPH002_DEAD_END: terminal node "fix"`
+  //                                               on every command, about a node the executor
+  //                                               leaves on every pass.
+  //   rule005Dataflow GRAPH005_UNPRODUCED_READ    WRONG. A loop-carried write is invisible: on
+  //                                               that same graph, `audit` and `collate` were
+  //                                               each told "reads \"applied\", which no upstream
+  //                                               node writes" about a channel `fix` writes on
+  //                                               every pass.
+  //   rule010ConcurrentWriters GRAPH010           WRONG. Two nodes joined only through a
+  //                                               back-edge look unordered, so the canonical loop
+  //                                               graph was REFUSED for `parse` and `fix` "can
+  //                                               run concurrently" when every path to `fix` goes
+  //                                               through `audit`.
+  //   rule002Terminals `producesOutput`           WRONG for the same reason as `ancestors`.
+  //
+  // THE THREE THAT MOVE READ `flowAncestors` THROUGH `canPrecede`, and GRAPH010 reads `dominators`
+  // INSTEAD of it for a reason stated at that rule. The ones that stay right keep `ancestors`, and so
+  // does `wouldCycle`, which is how the §A.73 coupling survives a change to this function.
+  // Entry and terminal keep their own filters rather than being folded into either relation — a
+  // compensation edge means its target is not a start point and is still an edge nothing walks, so
+  // the two questions genuinely differ and always did.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
   const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation");
   const loopEdges = spec.edges.filter((e) => e.kind === "loop");
+  // The executor's own edge set. `graph/mutate.ts`'s `traversable` is this same filter and says
+  // why at length: `compensation` is the only kind nothing ever walks.
+  const flowEdges = spec.edges.filter((e) => e.kind !== "compensation");
 
-  // Entry: no inbound edge of any kind EXCEPT a loop back-edge. There is
-  // deliberately no `entry:` field — a second way to say where a graph starts is a
-  // second thing that can disagree with the edges.
+  // Entry: nothing points at it — OR nothing but a back-edge AND nothing can reach it. There is
+  // deliberately no `entry:` field: a second way to say where a graph starts is a second thing
+  // that can disagree with the edges.
   //
-  // Note this differs from `dagEdges`: a compensation edge is excluded from the DAG
-  // (including it makes almost every graph look cyclic) but it DOES mean its target is
-  // not a start point. Nothing traverses a compensation edge, so listing its target here
-  // would be the ONLY thing that ever scheduled that node — and it would run at the start
-  // of the run, before the action it is declared to undo.
-  const hasNonLoopIn = new Set(spec.edges.filter((e) => e.kind !== "loop").map((e) => e.to));
-  const entryNodes = spec.nodes.filter((n) => !hasNonLoopIn.has(n.id)).map((n) => n.id);
+  // IT WAS "no inbound edge of any kind EXCEPT a loop back-edge", FULL STOP, and that exception
+  // was §A.84's third symptom. The argument for it is real and is kept — a loop whose target has
+  // no other way in would otherwise never start, and `test/graph/graph-lane-mutation-dominance`
+  // drives exactly that graph — but it was applied UNCONDITIONALLY, so a loop target that the
+  // rest of the graph reaches perfectly well was ALSO scheduled at t=0, beside the real first
+  // node. Measured on the canonical loop shape, the fixer running before the thing it fixes:
+  //
+  //     before   node order ["parse","fix","audit","fix","audit","fix","audit"]
+  //     after    node order ["parse","audit","fix","audit","fix","audit","fix","audit"]
+  //
+  // So the exception is now conditional on the thing it was argued from: a node whose only
+  // inbound edges are `loop` is an entry only when nothing STARTS it — when no root reaches it
+  // over `flowEdges`. `#edgesToTake` has a `loop` arm, so a reachable loop target is scheduled by
+  // its source exactly like any other successor and needs no second door.
+  //
+  // THE ROOT TEST READS `spec.edges` AND NOT `flowEdges`, which is the one place the two must
+  // differ: nothing traverses a compensation edge, so listing its target as an entry would be the
+  // ONLY thing that ever scheduled that node — and it would run at the START of the run, before
+  // the action it is declared to undo. A node whose only inbound is a compensation edge is
+  // therefore neither a root nor loop-only-inbound, and is an entry under neither arm, exactly as
+  // before.
+  const hasAnyIn = new Set(spec.edges.map((e) => e.to));
+  const isRoot = (id: NodeId): boolean => !hasAnyIn.has(id);
+  const started = new Set<NodeId>();
+  {
+    const flowOut = new Map<NodeId, NodeId[]>();
+    for (const e of flowEdges) (flowOut.get(e.from) ?? flowOut.set(e.from, []).get(e.from)!).push(e.to);
+    const q = spec.nodes.filter((n) => isRoot(n.id)).map((n) => n.id);
+    while (q.length > 0) {
+      const id = q.pop()!;
+      if (started.has(id)) continue;
+      started.add(id);
+      for (const to of flowOut.get(id) ?? []) q.push(to);
+    }
+  }
+  const entryNodes = spec.nodes
+    .filter(
+      (n) =>
+        isRoot(n.id) ||
+        (!started.has(n.id) && (inbound.get(n.id) ?? []).every((e) => e.kind === "loop")),
+    )
+    .map((n) => n.id);
+  // Terminal: no FORWARD outbound edge. A loop's source is still where a path ends — it leaves by
+  // the back-edge, which returns to somewhere the run has already been.
+  //
+  // THIS WAS BRIEFLY `flowEdges` AND THAT WAS WRONG, measured rather than argued. The false
+  // `GRAPH002_DEAD_END` on `harden-config.json`'s `fix` is real, but making a loop source
+  // non-terminal emptied the set on essentially every looping graph — the canonical loop, two
+  // loops sharing a node, nested loops and a self-loop all returned `[]` — so GRAPH002 went
+  // silent on exactly the graphs §A.84 makes legal, and `evolution/exam.ts`'s
+  // `terminalNodes.length !== 1` refused any exam with a bounded loop in it. The false warning is
+  // `rule002Terminals`' to fix, and it fixes it by asking a better question of the same set.
   const hasForwardOut = new Set(dagEdges.map((e) => e.from));
   const terminalNodes = spec.nodes.filter((n) => !hasForwardOut.has(n.id)).map((n) => n.id);
 
@@ -394,6 +548,9 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
       for (const a of ancestors.get(e.from) ?? []) acc.add(a);
     }
   }
+
+  const { flowAncestors } = computeFlowOrder(spec, entryNodes, flowEdges);
+  const dominators = computeDominators(spec, entryNodes, flowEdges);
 
   const reachable = new Set<NodeId>();
   const stack = [...entryNodes];
@@ -425,15 +582,398 @@ export function indexGraph(spec: GraphSpec): GraphIndex {
     outbound,
     dagEdges,
     loopEdges,
+    flowEdges,
     entryNodes,
     terminalNodes,
     topoOrder,
     ancestors,
+    dominators,
+    flowAncestors,
     reachable,
     parallelWidth,
     multiplicity,
     criticalPath,
   };
+}
+
+/**
+ * The immediate-dominator tree, and `dominates(a, b)` over it.
+ *
+ * A TREE AND NOT A MAP OF SETS, which is the whole reason this is affordable on every compile.
+ * `graph/mutate.ts`'s own `dominators` computes the same relation over the same edge set for a
+ * different question — whether a graft moved what must run before an existing node — and it
+ * materialises V bitset rows of V bits, a bounded quadratic its own docstring calls out and its
+ * caller guards with a node ceiling. That cost is right for a rule that runs on a proposed
+ * mutation and wrong for one that runs on every `loom compile`, so this keeps one parent pointer
+ * per node and answers by walking the chain. THE TWO ARE THE SAME RELATION AND ARE NOT SHARED,
+ * which is a duplicate worth naming rather than hiding: unifying them is a change to a file this
+ * did not own.
+ */
+interface DomTree {
+  /** Immediate dominator of each node; absent for the roots and for anything unreachable. */
+  readonly idom: ReadonlyMap<NodeId, NodeId>;
+  /** Does `a` dominate `b` — is `a` on every path from an entry to `b`? Reflexive. */
+  dominates(a: NodeId, b: NodeId): boolean;
+}
+
+/**
+ * EVERY PATH, not some path — the relation `rule010ConcurrentWriters` needs and the one it did
+ * not have.
+ *
+ * WHAT THIS REPLACED AND WHY, because the thing it replaced looked right and shipped. The first
+ * cut of §A.84 gave GRAPH010 a `flowOrder` relation: `flowEdges` with the cycles cut by a
+ * depth-first walk from the entry nodes, read as "the order the scheduler realises". It is not
+ * that. The cut only removes an edge whose target is still on the CURRENT PATH, so a `loop` edge
+ * met as a TREE edge stays in and contributes an ordering that is true from pass two and false on
+ * pass one. Measured on `siblings.json` — `start -> summarize`, `start -> scan -> fix`, and
+ * `fix -loop-> summarize`, with `summarize` and `fix` both writing a `replace` channel:
+ *
+ *     base   GRAPH010_CONCURRENT_WRITE: nodes "summarize" and "fix" …
+ *     first  cut of §A.84: compiles CLEAN, because flowOrder(summarize) contains fix
+ *     the UNCHANGED executor: node order ["start","scan","summarize","fix"]
+ *
+ * — `summarize` and `fix` in ONE pass with nothing ordering them, which is the race GRAPH010
+ * exists to refuse, and the compiler had stopped saying so. Worse, the cut depends on the order
+ * `spec.nodes` and `spec.edges` are written in: the same graph permuted gave different GRAPH010
+ * sets on 527 of 8,000 fuzz seeds, where base is permutation-stable at 0.
+ *
+ * THE DOCSTRING THAT SHIPPED WITH IT WAS THE DEFECT, and it is quoted here rather than deleted:
+ * *"the cut can only withhold a refusal it was already free to withhold"*. It was not free to
+ * withhold this one. An argument that a guard may only get quieter is not an argument that every
+ * refusal it drops was wrong.
+ *
+ * DOMINANCE HAS NEITHER FAULT. `a` dominates `b` when every path from an entry to `b` runs through
+ * `a`, so an ordering it reports holds on every pass by construction; and it is a property of the
+ * graph, not of a traversal, so no permutation can change it. On the port's own graph every path
+ * to `fix` passes through `audit` and `parse`, so they are ordered and GRAPH010 is correctly
+ * silent; in `siblings.json` `summarize` is reached from `start` without `fix`, so they are
+ * concurrent and it correctly refuses.
+ *
+ * WHAT §A.84 COSTS PER COMPILE, measured rather than waved at, because this is the second
+ * whole-graph relation `indexGraph` now builds. On `scale.test.ts`'s own fixtures:
+ *
+ *     compile 500 nodes (best of 15)      21 ms before §A.84 -> 54 ms -> 39 ms
+ *     compile 500 nodes / 4,900 edges     35.6 ms            -> 73.6 ms -> 65 ms
+ *
+ * The middle column is this lane's first cut; the last is after the two avoidable O(V)-per-item
+ * scans it had added to GRAPH002 and GRAPH005 were replaced by the indexes those rules already
+ * had to hand. What remains — roughly 1.9x — is the second closure plus this tree, and it is a
+ * real cost rather than a measurement artefact. The growth EXPONENT is untouched at n^0.99 and
+ * the guard's bound is 3,000 ms, so it is paid and it is nowhere near the wall.
+ *
+ * COOPER–HARVEY–KENNEDY, over a VIRTUAL ROOT above the entry set. The virtual root is what makes
+ * a multi-entry graph answerable at all: without it two entries have no common dominator and the
+ * intersection has nowhere to terminate. Nodes unreachable from any entry get no `idom` and
+ * dominate nothing but themselves — GRAPH001 refuses such a node separately and this rule must not
+ * also make a claim about it.
+ */
+function computeDominators(
+  spec: GraphSpec,
+  entryNodes: readonly NodeId[],
+  flowEdges: readonly EdgeSpec[],
+): DomTree {
+  const ids = spec.nodes.map((n) => n.id);
+  const index = new Map<NodeId, number>();
+  ids.forEach((id, i) => index.set(id, i));
+  const ROOT = ids.length; // the virtual root's slot, one past every real node
+
+  const preds: number[][] = ids.map(() => []);
+  for (const e of flowEdges) {
+    const to = index.get(e.to);
+    const from = index.get(e.from);
+    // An edge naming an id no node declares: `GRAPH003_DANGLING_EDGE` reports it on its own.
+    if (to !== undefined && from !== undefined) preds[to]!.push(from);
+  }
+  for (const id of entryNodes) {
+    const i = index.get(id);
+    if (i !== undefined) preds[i]!.push(ROOT);
+  }
+
+  const succs: number[][] = ids.map(() => []);
+  for (const e of flowEdges) {
+    const to = index.get(e.to);
+    const from = index.get(e.from);
+    if (to !== undefined && from !== undefined) succs[from]!.push(to);
+  }
+  const rootSucc: number[] = [];
+  for (const id of entryNodes) {
+    const i = index.get(id);
+    if (i !== undefined) rootSucc.push(i);
+  }
+  const succOf = (n: number): number[] => (n === ROOT ? rootSucc : succs[n]!);
+
+  // REVERSE POSTORDER FROM THE VIRTUAL ROOT, iteratively. CHK converges in one or two sweeps when
+  // a node is visited after its predecessors, and a recursive walk is one JS frame per node on a
+  // graph the scale suite builds hundreds deep.
+  const postorder: number[] = [];
+  const rpoNum = new Map<number, number>();
+  {
+    const seen = new Set<number>([ROOT]);
+    const frames: { n: number; i: number }[] = [{ n: ROOT, i: 0 }];
+    while (frames.length > 0) {
+      const f = frames[frames.length - 1]!;
+      const ss = succOf(f.n);
+      if (f.i >= ss.length) {
+        postorder.push(f.n);
+        frames.pop();
+        continue;
+      }
+      const next = ss[f.i]!;
+      f.i += 1;
+      if (seen.has(next)) continue;
+      seen.add(next);
+      frames.push({ n: next, i: 0 });
+    }
+  }
+  const rpo = [...postorder].reverse();
+  rpo.forEach((n, i) => rpoNum.set(n, i));
+
+  const idomOf = new Map<number, number>();
+  idomOf.set(ROOT, ROOT);
+  const intersect = (a: number, b: number): number => {
+    let x = a;
+    let y = b;
+    while (x !== y) {
+      // The classic two-finger walk: the node with the LARGER reverse-postorder number is the
+      // deeper one, so it climbs.
+      while ((rpoNum.get(x) ?? Infinity) > (rpoNum.get(y) ?? Infinity)) x = idomOf.get(x) ?? ROOT;
+      while ((rpoNum.get(y) ?? Infinity) > (rpoNum.get(x) ?? Infinity)) y = idomOf.get(y) ?? ROOT;
+    }
+    return x;
+  };
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const n of rpo) {
+      if (n === ROOT) continue;
+      let candidate: number | undefined;
+      for (const p of preds[n]!) {
+        if (!idomOf.has(p)) continue; // not yet processed on this sweep
+        candidate = candidate === undefined ? p : intersect(p, candidate);
+      }
+      if (candidate !== undefined && idomOf.get(n) !== candidate) {
+        idomOf.set(n, candidate);
+        changed = true;
+      }
+    }
+  }
+
+  const idom = new Map<NodeId, NodeId>();
+  for (const [n, d] of idomOf) {
+    if (n === ROOT || d === ROOT) continue;
+    idom.set(ids[n]!, ids[d]!);
+  }
+  return {
+    idom,
+    dominates: (a, b) => {
+      if (a === b) return true;
+      const ai = index.get(a);
+      let cur = index.get(b);
+      if (ai === undefined || cur === undefined) return false;
+      // WALK THE CHAIN, bounded by the node count: a malformed tree cannot spin here.
+      for (let steps = 0; steps <= ids.length; steps++) {
+        const up = idomOf.get(cur);
+        if (up === undefined || up === ROOT || up === cur) return false;
+        if (up === ai) return true;
+        cur = up;
+      }
+      return false;
+    },
+  };
+}
+
+/**
+ * "CAN `a` HAVE RUN BEFORE `b` ON SOME PASS" — the full closure over every edge the executor takes,
+ * on a graph that may have cycles.
+ *
+ * PRODUCER, NOT ORDER, AND THE TWO NEED OPPOSITE ANSWERS INSIDE A CYCLE. A loop body's nodes have
+ * all seen each other's writes by the second pass, so for a PRODUCER question they precede one
+ * another — which is this map, and which is what silences `GRAPH005_UNPRODUCED_READ` on a
+ * loop-carried write. They are NOT ordered against each other for a CONCURRENCY question: two of
+ * them in parallel fan-out branches race, and GRAPH010 must still refuse them. So GRAPH010 reads
+ * `dominators` and never this, and `computeDominators` states why nothing weaker will do.
+ *
+ * ORDER-FREE. A transitive closure over a fixed edge set does not depend on how the walk found it,
+ * which is the property the relation this replaced did NOT have.
+ *
+ * THE COMPONENTS ARE TARJAN'S, AND THE CHEAPER THING WAS TRIED AND IS WRONG. "Everything on the
+ * DFS stack between a back-edge's target and its source", unioned across back-edges, looks like it
+ * finds the same components and does not: on a loop body that FANS OUT — `head -> left -> merge`,
+ * `head -> right -> merge`, `merge -loop-> head` — the walk meets `right -> merge` as a CROSS edge,
+ * because `merge` is already finished, so no window ever names `right` and it never joins the
+ * component its own back-edge put `left` in. That is the exact graph the last test in
+ * `test/graph/loop-edge-analyses.test.ts` drives, and it failed. Tarjan's lowlink is what
+ * distinguishes a cross edge INTO the component from one leaving it; a stack window cannot.
+ *
+ * ONE WALK, NOT TWO. The cut needs "is the target still on the CURRENT PATH" and Tarjan's stack
+ * holds finished-but-unassigned nodes too, so `grey` is tracked separately from `onStack` and the
+ * two answer their own questions off the same traversal.
+ */
+function computeFlowOrder(
+  spec: GraphSpec,
+  entryNodes: readonly NodeId[],
+  flowEdges: readonly EdgeSpec[],
+): { flowAncestors: ReadonlyMap<NodeId, ReadonlySet<NodeId>> } {
+  // EDGES AND NOT TARGETS IN THE ADJACENCY MAP, and a `selfLoop` set built in the same single
+  // pass. Both are there because `test/scale.test.ts` counts every read of the spec and asserts
+  // the total grows sub-quadratically in elements: the first cut of this function scanned
+  // `flowEdges` to find the edge behind a back-edge and scanned it again per node to ask about a
+  // self-loop, which is O(V x E) and took the growth exponent from n^0.99 to n^1.52 on the 5,400
+  // element fixture — a red on a guard whose whole job is to catch exactly that.
+  const ids = spec.nodes.map((n) => n.id);
+  const successors = new Map<NodeId, EdgeSpec[]>();
+  for (const id of ids) successors.set(id, []);
+  const selfLoop = new Set<NodeId>();
+  for (const e of flowEdges) {
+    successors.get(e.from)?.push(e);
+    if (e.from === e.to) selfLoop.add(e.from);
+  }
+
+  // ITERATIVELY, with an explicit frame stack. A recursive walk is one JS frame per node and this
+  // runs on graphs the scale suite builds with hundreds of nodes on one path; the explicit stack
+  // costs a cursor per frame and cannot overflow.
+  const cut = new Set<EdgeSpec>();
+  const order$ = new Map<NodeId, number>(); // Tarjan's discovery index; also "visited"
+  const low = new Map<NodeId, number>();
+  const onStack = new Set<NodeId>(); // Tarjan's component stack membership
+  const grey = new Set<NodeId>(); // the CURRENT path, which is a smaller set and a different one
+  const sccStack: NodeId[] = [];
+  const rootOf = new Map<NodeId, NodeId>();
+  /** Nodes that really go round a cycle — a component of one node with no self-loop is not one. */
+  const inCycle = new Set<NodeId>();
+  let counter = 0;
+
+  const open = (id: NodeId): void => {
+    order$.set(id, counter);
+    low.set(id, counter);
+    counter += 1;
+    sccStack.push(id);
+    onStack.add(id);
+    grey.add(id);
+  };
+  const close = (id: NodeId): void => {
+    grey.delete(id);
+    if (low.get(id) !== order$.get(id)) return;
+    const comp: NodeId[] = [];
+    for (;;) {
+      const m = sccStack.pop()!;
+      onStack.delete(m);
+      comp.push(m);
+      if (m === id) break;
+    }
+    for (const m of comp) rootOf.set(m, id);
+    if (comp.length > 1) for (const m of comp) inCycle.add(m);
+    // A one-node component is a cycle only through a self-loop, which the pass above answered.
+    else if (selfLoop.has(id)) inCycle.add(id);
+  };
+
+  const walk = (root: NodeId): void => {
+    if (order$.has(root)) return;
+    open(root);
+    const frames: { id: NodeId; i: number }[] = [{ id: root, i: 0 }];
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const succ = successors.get(frame.id) ?? [];
+      if (frame.i >= succ.length) {
+        close(frame.id);
+        frames.pop();
+        const parentFrame = frames[frames.length - 1];
+        if (parentFrame !== undefined) {
+          low.set(parentFrame.id, Math.min(low.get(parentFrame.id)!, low.get(frame.id)!));
+        }
+        continue;
+      }
+      const edge = succ[frame.i]!;
+      const next = edge.to;
+      frame.i += 1;
+      if (!order$.has(next)) {
+        open(next);
+        frames.push({ id: next, i: 0 });
+        continue;
+      }
+      // ON THE COMPONENT STACK -> the target is in this node's component whether the edge was a
+      // back-edge or a cross-edge, which is the distinction a stack window cannot make.
+      if (onStack.has(next)) low.set(frame.id, Math.min(low.get(frame.id)!, order$.get(next)!));
+    }
+  };
+
+  // ENTRIES FIRST, THEN EVERY REMAINING NODE. The second pass is not decoration: an unreachable
+  // component has no entry node of its own, and leaving it unvisited would leave its members with
+  // an empty `flowAncestors` — which GRAPH005 reads as "nothing wrote this". GRAPH001 refuses such
+  // a component separately; this rule must not also lie about it. The ORDER of the two passes
+  // cannot change the answer — Tarjan's components are a property of the graph.
+  for (const id of entryNodes) walk(id);
+  for (const id of ids) walk(id);
+
+  // ON THE CONDENSATION, because an acyclic-reachability relation ∪ "everybody in my component"
+  // is NOT the closure and the difference is a shipped graph: `harden-config.json`'s `collate` sits
+  // OUTSIDE the loop, one `conditional` edge off `audit`, and reads a channel only `fix` — inside
+  // the loop — writes. `fix` precedes it through the back-edge and then out of the cycle, which is
+  // two hops of two different relations, and a predicate that unions the two without closing over
+  // them says no. Collapsing each component to a point makes the graph acyclic and the ordinary
+  // accumulate-over-a-topological-order answer correct again.
+  const compIds = [...new Set(ids.map((id) => rootOf.get(id)!))];
+  const members = new Map<NodeId, NodeId[]>();
+  for (const c of compIds) members.set(c, []);
+  for (const id of ids) members.get(rootOf.get(id)!)!.push(id);
+  // TWO FIELDS, NOT A SPREAD. `topoSort` reads `from` and `to` and nothing else, and `{...e}`
+  // copies every declared field of every edge — which `scale.test.ts`'s proxy counts, for a
+  // condensation that throws the copy away.
+  const compEdges: EdgeSpec[] = [];
+  for (const e of flowEdges) {
+    const a = rootOf.get(e.from);
+    const b = rootOf.get(e.to);
+    if (a !== undefined && b !== undefined && a !== b) compEdges.push({ from: a, to: b } as EdgeSpec);
+  }
+  const compOrder = topoSort(compIds, compEdges);
+  const compIn = new Map<NodeId, NodeId[]>();
+  for (const c of compIds) compIn.set(c, []);
+  for (const e of compEdges) compIn.get(e.to)?.push(e.from);
+  const compAncestors = new Map<NodeId, Set<NodeId>>();
+  for (const c of compIds) compAncestors.set(c, new Set());
+  for (const c of compOrder) {
+    const acc = compAncestors.get(c)!;
+    for (const from of compIn.get(c) ?? []) {
+      acc.add(from);
+      for (const a of compAncestors.get(from) ?? []) acc.add(a);
+    }
+  }
+  const flowAncestors = new Map<NodeId, Set<NodeId>>();
+  for (const id of ids) {
+    const acc = new Set<NodeId>();
+    for (const c of compAncestors.get(rootOf.get(id)!) ?? []) for (const m of members.get(c) ?? []) acc.add(m);
+    // Its own component's members count only when the component really is a cycle: a node that
+    // goes round has seen every other member's writes by its second pass. A component of one node
+    // with no self-loop is just a node, and `producedBySelf` is the rule that owns that case.
+    if (inCycle.has(id)) for (const m of members.get(rootOf.get(id)!) ?? []) acc.add(m);
+    flowAncestors.set(id, acc);
+  }
+
+  return { flowAncestors };
+}
+
+/**
+ * CAN `a` HAVE RUN BEFORE `b` — the producer question, and the one predicate that answers it.
+ *
+ * `flowAncestors` ALONE, and the two things it already contains are why it is not a union:
+ *
+ *   `ancestors` ⊆ this, by construction — `dagEdges` ⊆ `flowEdges` and this is a full closure —
+ *     so no reader of this predicate can start warning about a graph the old code was silent on.
+ *   THE LOOP-CARRIED WRITE. `audit` reads a channel only `fix` writes, and on every pass after the
+ *     first it has. That is a real read of a real value and `GRAPH005_UNPRODUCED_READ` said it was
+ *     not, on a shipped example, on every command.
+ *
+ * NOT `dominators`, which is the same edge set asked a stricter question: "every path" is right
+ * for a concurrency question and far too strong for this one — a loop-carried write reaches its
+ * reader on a path that need not be every path.
+ *
+ * WHAT IT GIVES UP, stated because a widened predicate is a quieter compiler: the FIRST pass of a
+ * loop reads what nothing has written yet. `harden-config.json`'s `audit` reads `applied` before
+ * `fix` has ever run, which is intentional there — the channel is `append_ordered` and starts
+ * empty — but the general case is a real hazard that no diagnostic now names, and naming it is a
+ * new rule about iteration one rather than a wider version of this one.
+ */
+function canPrecede(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  return idx.flowAncestors.get(b)?.has(a) ?? false;
 }
 
 /**
@@ -863,6 +1403,35 @@ function unknownKeys(
 }
 
 /**
+ * The seven members of `EdgeKind`, as data a runtime check can read.
+ *
+ * `NodeType` is closed by GRAPH020 twenty lines from where the edge fields are checked, and this
+ * set was not closed anywhere: `EDGE_FIELDS` checks an edge's KEYS and nothing checked the VALUE
+ * of `kind`. Measured — `kind: "conditionl"`, `"Conditional"`, `"eror"` and `"__proto__"` all
+ * compiled with ZERO diagnostics at any severity, and at run time each fell to `#edgesToTake`'s
+ * `default:` arm and was TAKEN with its `when` never evaluated. The comment three lines above
+ * `EDGE_FIELDS` states the consequence for the sibling case it did close: "A misspelled `when`
+ * does not disable a condition — it makes the edge unconditional, so a branch the author meant to
+ * guard fires every time."
+ *
+ * MOVED HERE FROM `graph/compile.ts` (§A.80) — where its own docstring said it did not belong,
+ * *"only because of who owns which file today"*. `compile` ran the check on the top-level spec
+ * alone and `rule016Subgraphs` recurses `validateGraph`, so a subgraph CHILD's `kind` was
+ * unchecked; the refusal is now in `checkStructure`'s edge loop, which the child recursion runs.
+ * `run/engine.ts` keeps its own copy on purpose: `Executor.attach()` is public and a `RunGraph`
+ * can reach it without this build's compiler (`#assertBound`).
+ */
+const EDGE_KINDS: Readonly<Record<EdgeKind, true>> = {
+  seq: true,
+  conditional: true,
+  fanout: true,
+  join: true,
+  error: true,
+  compensation: true,
+  loop: true,
+};
+
+/**
  * THE EDGE FIELDS THIS PASS DOES NOT RE-CHECK, and the check that already refuses every
  * wrong-typed value of each.
  *
@@ -874,24 +1443,28 @@ function unknownKeys(
  *
  *     id          GRAPH003_BAD_ID       `isSafeId` is false for every non-string
  *     from, to    GRAPH003_DANGLING_EDGE  a non-string is not a node id, so it dangles
- *     kind        GRAPH003_UNKNOWN_EDGE_KIND  in `graph/compile.ts`, and its own comment says
- *                 "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE"
+ *     kind        GRAPH003_UNKNOWN_EDGE_KIND  in `checkStructure`'s own edge loop below, which
+ *                 refuses "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE"
  *     when, until GRAPH004_EXPR         `checkExpr` refuses every value, strings included
  *
  * "REFUSES EVERY WRONG TYPE" IS THE CLAIM, AND IT HAS ONE STATED EXCLUSION. Five of the six are
  * total, now that the sites naming the value render it through `describeValue` — before that a
  * `symbol` id threw `TypeError: Cannot convert a Symbol value to a string` out of this function
  * and a `bigint` id threw `Do not know how to serialize a BigInt` out of `badId`, which is a crash
- * where a refusal belonged. `kind` is the exclusion: `unknownEdgeKinds` builds its message with
- * `JSON.stringify(edge.kind)` in `graph/compile.ts`, so `kind: 10n` and a `kind` whose `toJSON`
- * throws still come out of `compile` as an exception rather than a diagnostic. That file is not
- * this one's to edit; the two values are pinned as throwing in
- * `test/graph/edge-field-types.test.ts` so the exclusion is a measured fact and not a hope.
+ * where a refusal belonged. `kind` is the exclusion, and the REASON changed at §A.80 while the
+ * exclusion did not: the check moved into this file, and its message still renders the value with
+ * `JSON.stringify(edge.kind) ?? String(edge.kind)` rather than with `describeValue`, because the
+ * two print different bytes for `{}` and `[]` and a relocation that also rewrites a diagnostic is
+ * not a relocation. So `kind: 10n` and a `kind` whose `toJSON` throws still come out of `compile`
+ * as an exception. The class is named and the two values are pinned as throwing in
+ * `test/graph/edge-field-types.test.ts`, so the exclusion is a measured fact and not a hope, and
+ * closing it is a decision about those bytes rather than about this set.
  *
  * A SECOND SPELLING OF ONE REFUSAL is the thing being avoided, and `objectBlock` below states the
  * cost: "an eighth spelling of one idea is how diagnostics come to disagree about what they
- * mean". For `kind` it is not even a matter of taste — `unknownEdgeKinds` runs BEFORE
- * `validateGraph`, so a check here would print two refusals for one mistake.
+ * mean". For `kind` it is not even a matter of taste — the kind check and a type check here would
+ * print two refusals for one mistake, which is why `kind` stays on this list now that the kind
+ * check is a dozen screens down rather than in another file.
  *
  * THE DEFAULT IS TO CHECK. A field added to `EDGE_FIELDS` is type-checked unless somebody opts it
  * out here, which is the fail-closed direction: the failure mode of forgetting this set is a
@@ -1122,6 +1695,24 @@ function edgeFieldRefusal(
   };
 }
 
+/**
+ * An edge `kind` in a diagnostic, rendered without trusting it and without changing its bytes.
+ *
+ * `JSON.stringify` for everything it can render — which is every value a JSON graph file can hold,
+ * so the relocated `GRAPH003_UNKNOWN_EDGE_KIND` message is byte-identical to `compile.ts`'s — and
+ * `describeValue` for the values it throws on. `?? String(...)` stays for `undefined`, which
+ * `JSON.stringify` answers with `undefined` rather than a string: the message would otherwise
+ * print the word "kind" followed by nothing and read as a formatting bug rather than as the
+ * missing declaration it is.
+ */
+function renderKind(kind: unknown): string {
+  try {
+    return JSON.stringify(kind) ?? String(kind);
+  } catch {
+    return describeValue(kind);
+  }
+}
+
 function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: number, d: Diagnostic[]): boolean {
   let bad = false;
   const id = edge["id"];
@@ -1136,6 +1727,170 @@ function edgeFieldTypes(edge: Readonly<Record<string, unknown>>, maxFanout: numb
     bad = true;
   }
   return bad;
+}
+
+/**
+ * The tag union, DERIVED from the table rather than imported as a name.
+ *
+ * `graph/spec.ts` declares it module-private on purpose — `scripts/check-surface.mjs` pins the
+ * exported NAME set, and a new name on the public contract arriving under a `fix:` subject is the
+ * ledger-watch case `CLAUDE.md` names, not something to answer with `--write`. `EDGE_FIELDS` set
+ * the precedent by writing its own tag union inline for the same reason.
+ *
+ * An indexed access and not a re-declaration: a second spelling of this union in a second file is
+ * exactly how two enumerations come to disagree, which is the argument `REQUIRED_FIELDS` and
+ * `ALLOWED_FIELDS` both make for living beside the interfaces they describe. `POLICY_FIELDS` is
+ * ANNOTATED with the union (it is not `as const`), so this reads the declared type and not the
+ * five tags its own rows happen to use — `NESTED_FIELDS` would give the identical answer.
+ */
+type BlockFieldType = (typeof POLICY_FIELDS)[keyof typeof POLICY_FIELDS][string];
+
+/**
+ * One predicate per tag of `POLICY_FIELDS`/`NESTED_FIELDS` — the type half of the block schema.
+ *
+ * `EDGE_FIELD_IS`' three tags with four more, and `stringArray` INDEX-WALKS for the reason stated
+ * there: `Array.prototype.every` SKIPS HOLES, so `new Array(2)` passes it vacuously and then
+ * reaches `digest(spec)`, which walks `0..length-1` and does not skip.
+ */
+const BLOCK_FIELD_IS: Readonly<Record<BlockFieldType, (v: unknown) => boolean>> = {
+  string: (v) => typeof v === "string",
+  count: (v) => Number.isSafeInteger(v),
+  number: (v) => typeof v === "number" && Number.isFinite(v),
+  boolean: (v) => typeof v === "boolean",
+  stringArray: (v) => {
+    if (!Array.isArray(v)) return false;
+    for (let i = 0; i < v.length; i++) if (typeof v[i] !== "string") return false;
+    return true;
+  },
+  array: (v) => Array.isArray(v),
+  object: (v) => typeof v === "object" && v !== null && !Array.isArray(v),
+  unknown: () => true,
+};
+
+/** What a field of each tag IS, in the words the refusal uses. */
+const BLOCK_FIELD_SHAPE: Readonly<Record<BlockFieldType, string>> = {
+  string: "a string",
+  count: "a whole number",
+  number: "a number",
+  boolean: "true or false",
+  stringArray: "an array of strings",
+  array: "an array",
+  object: "an object",
+  unknown: "anything",
+};
+
+/**
+ * THE BLOCK FIELDS THIS PASS DOES NOT RE-CHECK, and the rule that already refuses each.
+ *
+ * `TYPE_CHECKED_ELSEWHERE` one scope in, with the same doctrine and the same failure mode: a
+ * second spelling of one refusal is how two diagnostics come to disagree, and the cost of
+ * forgetting an entry here is a DUPLICATE diagnostic rather than a hole. Every row was measured
+ * against `compile`, one graph per value, over `"banana"`, `42`, `null`, `["x"]`, `{a:1}` and
+ * `true` — the six a JSON file can express — and is on this list only because a rule refused
+ * every wrong one of them:
+ *
+ *     graphPolicy.posture, nodePolicy.posture      GRAPH003_UNKNOWN_POSTURE
+ *     graphPolicy.budget, nodePolicy.budget,       GRAPH003_MALFORMED, from `objectBlock`
+ *       graphPolicy.expansion, channel.contextProjection
+ *     graphPolicy.onBudgetExhausted                GRAPH003_BUDGET_ACTION_UNSUPPORTED
+ *     expansion.*  (all four)                      GRAPH003_MALFORMED, from `expansionOf` — which
+ *                                                  also owns the `>= 1` half and the fallback, so
+ *                                                  a `count` tag here would refuse LESS and say
+ *                                                  it differently
+ *     retry.maxAttempts                            GRAPH020_MISSING_FIELD
+ *     channel.reduce                               GRAPH003_UNKNOWN_REDUCER
+ *     channel.classification                       GRAPH003_UNKNOWN_CLASSIFICATION
+ *     metadata.name                                GRAPH003_MALFORMED, in `checkStructure`
+ *     approval.*                                   GRAPH014_APPROVER_INVALID / _APPROVAL_INVALID
+ *     sla.*, slaReminder.afterMs                   GRAPH014_SLA_INVALID
+ *     delivery.channels/redact/redactAs/escalation GRAPH014_DELIVERY_INVALID
+ *     deliveryEscalation.afterMs/channels          GRAPH014_DELIVERY_INVALID
+ *     batching.*, dedupe.*                         GRAPH014_BATCHING_INVALID / _DEDUPE_INVALID,
+ *                                                  and the whole block is inert while `enabled`
+ *                                                  is false, which is why the fields measure OK
+ *                                                  in that state and are still not this pass's
+ *
+ * THE DEFAULT IS TO CHECK. A field added to either table is type-checked unless somebody opts it
+ * out here, which is the fail-closed direction.
+ */
+const CHECKED_BY_A_RULE: ReadonlySet<string> = new Set([
+  "graphPolicy.posture",
+  "graphPolicy.budget",
+  "graphPolicy.expansion",
+  "graphPolicy.onBudgetExhausted",
+  "nodePolicy.posture",
+  "nodePolicy.budget",
+  "expansion.maxNodes",
+  "expansion.maxDepth",
+  "expansion.maxFanout",
+  "expansion.maxLoopIterations",
+  "retry.maxAttempts",
+  "channel.reduce",
+  "channel.classification",
+  "channel.contextProjection",
+  "contextProjection.take",
+  "contextProjection.maxTokens",
+  "contextProjection.overflow",
+  "metadata.name",
+  "approval.approvers",
+  "approval.separationOfDuties",
+  "sla.respondWithinMs",
+  "sla.onTimeout",
+  "sla.reminders",
+  "slaReminder.afterMs",
+  "delivery.channels",
+  "delivery.redact",
+  "delivery.redactAs",
+  "delivery.escalation",
+  "deliveryEscalation.afterMs",
+  "deliveryEscalation.channels",
+  "batching.enabled",
+  "batching.key",
+  "batching.windowMs",
+  "batching.maxBatch",
+  "dedupe.enabled",
+  "dedupe.windowMs",
+]);
+
+/**
+ * Every declared field of one block, against the type its table gives it.
+ *
+ * NOT FATAL, and the difference from `edgeFieldTypes` is the difference between the two scopes.
+ * A wrong-typed edge field reaches `computeFanoutStacks`' arithmetic and makes every downstream
+ * `parallelWidth` a `NaN`, so it has to gate. These are leaves: a bad `budget.tokens` costs a
+ * budget and a bad `retry.jitter` costs a jitter, and none of them makes a later rule reason
+ * wrongly. That is the same distinction `checkPolicyBlocks` already draws in its own header —
+ * "a bad POSTURE value is fatal … neither is a malformed `budget` or `expansion`".
+ *
+ * `Object.hasOwn` and not `block[field]`, for this file's rule: `in` and a bare index walk the
+ * prototype chain, so `Object.prototype.jitter = "yes"` would make every `retry` block in every
+ * graph look as though it had declared one. `unknownKeys` reads own keys and this agrees with it.
+ */
+function blockFieldTypes(
+  block: Readonly<Record<string, unknown>>,
+  scope: string,
+  fields: Readonly<Record<string, BlockFieldType>>,
+  what: string,
+  at: Diagnostic["at"],
+  d: Diagnostic[],
+): boolean {
+  let found = false;
+  for (const [field, tag] of Object.entries(fields)) {
+    if (CHECKED_BY_A_RULE.has(`${scope}.${field}`)) continue;
+    if (!Object.hasOwn(block, field)) continue;
+    const value = block[field];
+    if (value === undefined) continue;
+    if (BLOCK_FIELD_IS[tag]!(value)) continue;
+    found = true;
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: `${what} declares \`${field}\` as ${describeValue(value)}, which is not ${BLOCK_FIELD_SHAPE[tag]}`,
+      ...(at === undefined ? {} : { at }),
+      fix: `set \`${field}\` to ${BLOCK_FIELD_SHAPE[tag]}, or remove it`,
+    });
+  }
+  return found;
 }
 
 /**
@@ -1219,7 +1974,17 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
   const list = (fields: readonly string[]): string => fields.map((a) => `\`${a}\``).join(", ");
 
-  const check = (policy: unknown, whose: string, at: Diagnostic["at"], allowed: readonly string[]): void => {
+  const check = (
+    policy: unknown,
+    whose: string,
+    at: Diagnostic["at"],
+    scope: "graphPolicy" | "nodePolicy",
+    table: Readonly<Record<string, BlockFieldType>>,
+  ): void => {
+    // `Object.keys` AND NOT A SECOND ARRAY. `POLICY_FIELDS` carries a type per field now, and
+    // `Object.keys` preserves insertion order — so every `declares \`a\`, \`b\`, …` line these
+    // messages print is byte-for-byte what the name-only table printed.
+    const allowed = Object.keys(table);
     // A BARE POSTURE IS THE MISTAKE WORTH NAMING. `policy: "in"` is the reproduced case, and an
     // author who wrote it was reaching for the strongest oversight there is.
     const p = objectBlock(
@@ -1237,14 +2002,43 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
       return;
     }
     unknownKeys(p, allowed, `${whose}\`policy\` block`, at, d);
+    // AND WHAT THE KEYS HOLD (§A.81(a)). `capabilities` is the row that makes this load-bearing:
+    // `rule017Capabilities` reads it to decide whether the tenant holds what the graph asks for,
+    // and `policy: {capabilities: "k8s:write"}` — the singular an author writes by hand — threw
+    // `TypeError: allow.some is not a function` out of `compile` rather than refusing.
+    //
+    // ON A GRAPH THAT REACHES THE CAPABILITY CHECK, and the qualifier is measured rather than
+    // hedging: the crash needs a node whose capabilities are actually compared (a `tool` node,
+    // against a tenant list). A function-only graph with the same malformed value produced nine
+    // `GRAPH017_CAPABILITY_NOT_DECLARED` diagnostics and `ok: true` — the string iterated as its
+    // own characters — so the fault is "unreadable and believed" there and "a crash" here.
+    //
+    // THE FATAL COSTS THE REST OF THE PASS, which is the honest price. On a `k8s.apply` node with
+    // `capabilities: "k8s:write"`, `GRAPH011_UNHANDLED_IRREVERSIBLE` is suppressed along with
+    // everything else below the gate — the author fixes the quoting and compiles again to see it.
+    // That is the gate's established semantics, and the alternative is the crash above.
+    //
+    // FATAL, on the criterion this function's own header already states for `posture`: a later
+    // rule REASONS from this field, so leaving it in play makes the next diagnostic wrong — and
+    // here it is worse than wrong, it is the crash above. `capabilities` is also the ONLY field of
+    // either policy scope this call can fire on: `posture`, `budget`, `expansion` and
+    // `onBudgetExhausted` are all on `CHECKED_BY_A_RULE`, so no per-field list is needed to say
+    // which failure gates. A fifth policy field added tomorrow gates too, which is the fail-closed
+    // direction and is why that is stated rather than left to be noticed.
+    if (blockFieldTypes(p, scope, table, `${whose}\`policy\` block`, at, d)) fatal = true;
     const budget = objectBlock(
       p["budget"],
       `${whose}\`policy.budget\``,
       at,
-      `a budget declares ${list(POLICY_FIELDS.budget)}, all optional`,
+      `a budget declares ${list(Object.keys(POLICY_FIELDS.budget))}, all optional`,
       d,
     );
-    if (budget !== undefined) unknownKeys(budget, POLICY_FIELDS.budget, `${whose}\`policy.budget\` block`, at, d);
+    if (budget !== undefined) {
+      unknownKeys(budget, Object.keys(POLICY_FIELDS.budget), `${whose}\`policy.budget\` block`, at, d);
+      // All three of `costUsd`, `tokens` and `wallMs` compiled with ZERO diagnostics holding any
+      // of the six wrong types a JSON file can express — a budget nobody can enforce, silently.
+      blockFieldTypes(budget, "budget", POLICY_FIELDS.budget, `${whose}\`policy.budget\` block`, at, d);
+    }
     // `expansion` is graph-scope only, so a node declaring one is already an unknown key above
     // and must not also be walked as though it meant something.
     const expansion = allowed.includes("expansion")
@@ -1252,14 +2046,20 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
           p["expansion"],
           `${whose}\`policy.expansion\``,
           at,
-          `an expansion budget declares ${list(POLICY_FIELDS.expansion)}, all optional`,
+          `an expansion budget declares ${list(Object.keys(POLICY_FIELDS.expansion))}, all optional`,
           d,
         )
       : undefined;
     if (expansion !== undefined) {
       // A misspelled limit does not fail — it falls back to `DEFAULT_EXPANSION`. An author who
       // wrote `maxNodes: 8` and gets 256 has had a bound raised on them by a typo.
-      unknownKeys(expansion, POLICY_FIELDS.expansion, `${whose}\`policy.expansion\` block`, at, d);
+      unknownKeys(expansion, Object.keys(POLICY_FIELDS.expansion), `${whose}\`policy.expansion\` block`, at, d);
+      // ALL FOUR OF ITS FIELDS ARE ON `CHECKED_BY_A_RULE`, so this call refuses nothing today —
+      // and it is here rather than absent because the default in that set is to CHECK. `expansionOf`
+      // owns these: it refuses a non-positive-integer AND substitutes the default, and a `count`
+      // tag would refuse LESS (`0` and `-1` are well-typed counts) while saying it differently.
+      // A fifth expansion field added tomorrow is type-checked by this line without a decision.
+      blockFieldTypes(expansion, "expansion", POLICY_FIELDS.expansion, `${whose}\`policy.expansion\` block`, at, d);
     }
     const posture = p["posture"];
     if (posture !== undefined && !isPosture(posture)) {
@@ -1274,8 +2074,8 @@ function checkPolicyBlocks(spec: GraphSpec, d: Diagnostic[]): boolean {
     }
   };
 
-  check(spec.policy, "the graph's ", undefined, POLICY_FIELDS.graphPolicy);
-  for (const n of spec.nodes) check(n.policy, `node "${n.id}"'s `, { nodeId: n.id }, POLICY_FIELDS.nodePolicy);
+  check(spec.policy, "the graph's ", undefined, "graphPolicy", POLICY_FIELDS.graphPolicy);
+  for (const n of spec.nodes) check(n.policy, `node "${n.id}"'s `, { nodeId: n.id }, "nodePolicy", POLICY_FIELDS.nodePolicy);
   return fatal;
 }
 
@@ -1528,6 +2328,25 @@ function neverRetryable(code: string): readonly ErrorClass[] | undefined {
 
 function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   let fatal = false;
+  // THE SPEC IS A SPEC, before the loop below reads a field off it. `compile`'s input is a cast
+  // `JSON.parse`, and a file holding `null` is valid JSON: `spec.inputs` on it threw
+  // `TypeError: Cannot read properties of null (reading 'inputs')` out of `compile`.
+  //
+  // IT CATCHES EVERY NON-OBJECT AND NOT ONLY THE TWO THAT CRASHED, which is a change of MESSAGE
+  // for the others and is the better one. `42`, `"x"` and `true` used to reach the `inputs` row
+  // below and be told "`inputs` must be an array, not absent" — true of a number in the sense
+  // that a number has no `inputs`, and useless to an author who wrote a graph file that is not a
+  // graph. They now read "the graph must be an object, not number". `[]` still lands here too.
+  // It reaches a CHILD spec as well, through `rule016Subgraphs`' recursion.
+  if (typeof spec !== "object" || spec === null) {
+    d.push({
+      severity: "error",
+      code: "GRAPH003_MALFORMED",
+      message: `the graph must be an object, not ${spec === null ? "null" : typeof spec}`,
+      fix: "a graph is `{apiVersion, kind, metadata, channels, inputs, outputs, nodes, edges}`",
+    });
+    return true;
+  }
   // TOP-LEVEL SHAPE, BEFORE ANYTHING ITERATES IT. `spec.inputs` missing produced
   // `E_INTERNAL: TypeError: spec.inputs is not iterable`, and a missing `metadata` compiled
   // CLEAN and then failed the run on `Cannot read properties of undefined (reading 'name')` —
@@ -1566,7 +2385,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // so `nmae` compiled clean. This one is TIDY rather than load-bearing — no rule reasons from
   // `metadata` beyond `name` — and it is here because the two below it are not, and a family with
   // a member left out is a family nobody can check by naming it.
-  unknownKeys(spec.metadata as unknown as Record<string, unknown>, NESTED_FIELDS.metadata, "`metadata`", undefined, d);
+  unknownKeys(spec.metadata as unknown as Record<string, unknown>, Object.keys(NESTED_FIELDS.metadata), "`metadata`", undefined, d);
+  blockFieldTypes(spec.metadata as unknown as Record<string, unknown>, "metadata", NESTED_FIELDS.metadata, "`metadata`", undefined, d);
   // AND THE ELEMENTS, not just the arrays. `edges: [null]` reached `e.id` and crashed; a node
   // that is not an object does the same one loop over.
   for (const [field, list] of [
@@ -1730,7 +2550,15 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // the most. See `checkPolicyBlocks`.
   if (checkPolicyBlocks(spec, d)) fatal = true;
 
-  if (typeof spec.channels !== "object" || spec.channels === null) {
+  // AN ARRAY IS NOT AN OBJECT HERE, although `typeof []` says otherwise, and the omission was
+  // reachable: `channels: []` walked straight past this test, and `Object.entries([])` is `[]`, so
+  // the graph read as "declares no channels" instead of "declares channels wrongly". Through a
+  // SUBGRAPH that was the difference between a refusal and silence — `rule016Subgraphs` asked
+  // whether the child's `channels` was a plain object and skipped its half of every mapping check
+  // when it was not, so a child with `channels: []` lost both `GRAPH016_BAD_MAPPING`s the base
+  // compiler printed. `Array.isArray` is the same third clause `objectBlock` twenty lines up has
+  // always had, missing from the one place a caller could reach with a JSON array.
+  if (typeof spec.channels !== "object" || spec.channels === null || Array.isArray(spec.channels)) {
     d.push({
       severity: "error",
       code: "GRAPH003_MALFORMED",
@@ -1764,7 +2592,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // same control: `classificaton: "secret_ref"` compiled clean, left the channel unclassified,
     // and dropped every reader's floor from `in` to `out` with nothing said. `initial`, `reduce`
     // and `onConflict` fail the same way one consequence down.
-    unknownKeys(decl, NESTED_FIELDS.channel, `channel "${name}"`, { channel: name }, d);
+    unknownKeys(decl, Object.keys(NESTED_FIELDS.channel), `channel "${name}"`, { channel: name }, d);
+    blockFieldTypes(decl, "channel", NESTED_FIELDS.channel, `channel "${name}"`, { channel: name }, d);
     const projection = objectBlock(
       decl["contextProjection"],
       `channel "${name}"'s \`contextProjection\``,
@@ -1773,7 +2602,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       d,
     );
     if (projection !== undefined) {
-      unknownKeys(projection, NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+      unknownKeys(projection, Object.keys(NESTED_FIELDS.contextProjection), `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
+      blockFieldTypes(projection, "contextProjection", NESTED_FIELDS.contextProjection, `channel "${name}"'s \`contextProjection\``, { channel: name }, d);
       checkProjectionValues(name, projection, d);
     }
     const reduce = decl["reduce"];
@@ -1956,7 +2786,13 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // malformed value is not a smaller claim, it is an unreadable one, and the fail-closed
     // reading of an unreadable label is that the node is untrusted — which `isExternal` now also
     // answers on its own, because a journal can carry a shape this compiler never saw.
-    if (n.type === "function" && n.function !== undefined) {
+    //
+    // `typeof … === "object"` AND NOT `!== undefined`, because `function: null` passed that test
+    // and threw `TypeError: Cannot read properties of null (reading 'effects')` — the one member
+    // of the eight-way `<block>: null` crash below that did NOT come out of `Object.keys`, and so
+    // the one the check down there cannot cover on its own. A block that is not a block is that
+    // check's to report; this one asks only about a block that is.
+    if (n.type === "function" && typeof n.function === "object" && n.function !== null) {
       const declared: unknown = (n.function as { effects?: unknown }).effects;
       const bad =
         declared !== undefined &&
@@ -2013,7 +2849,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     );
     if (n.retry !== undefined && retryBlock === undefined) fatal = true;
     if (retryBlock !== undefined) {
-      unknownKeys(retryBlock, NESTED_FIELDS.retry, `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
+      unknownKeys(retryBlock, Object.keys(NESTED_FIELDS.retry), `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
+      blockFieldTypes(retryBlock, "retry", NESTED_FIELDS.retry, `node "${n.id}"'s \`retry\` block`, { nodeId: n.id }, d);
       // REQUIRED, and required as a NUMBER. `RetryPolicy.maxAttempts` is the only non-optional
       // field on the interface and nothing enforced it; a string survives the comparison by
       // coercion, but `undefined`, `null` and a non-integer all make it always-false.
@@ -2031,23 +2868,63 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
       }
     }
 
+    // AND THAT THE TYPE BLOCK IS A BLOCK AT ALL, before either check below reads inside it.
+    //
+    // `REQUIRED_FIELDS` proves `agent: {}` has no `profile` and `ALLOWED_FIELDS` proves it carries
+    // nothing invented; both assume the thing is an object, and `typeof null === "object"` is why
+    // the second one did not. Measured on one graph per node type, every one of the eight:
+    //
+    //     tool: null / agent: null / join: null / router: null / evaluator: null /
+    //     humanGate: null / subgraph: null   ->  THREW TypeError: Cannot convert undefined or
+    //                                            null to object   (`Object.keys(null)`)
+    //     function: null                     ->  THREW TypeError: Cannot read properties of null
+    //                                            (reading 'effects')
+    //
+    // — a crash where a diagnostic belonged, and the ancestor of §A.79 one scope out: a graph
+    // FILE decides this value, because `compile`'s input is a cast `JSON.parse`.
+    //
+    // IT GATES THE TWO CHECKS BELOW rather than running beside them, because their answers are
+    // false for a non-object. `subgraph: 42` reported `` `ref` is missing `` — the `ref` is not
+    // missing from a block that does not exist — and a correction that replaces a false claim
+    // with a differently-false one is worse than the original.
+    //
+    // `GRAPH003_MALFORMED` and `objectBlock` rather than a new code: this is already the file's
+    // answer to "a block is not the shape it must be" at the channel, policy and element sites.
+    const holder = REQUIRED_BLOCK[n.type];
+    const rawBlock = (n as unknown as Record<string, unknown>)[holder as string];
+    const blockWhere = `node "${n.id}"'s \`${String(holder)}\` block`;
+    const declared =
+      rawBlock === undefined
+        ? undefined
+        : objectBlock(
+            rawBlock,
+            blockWhere,
+            { nodeId: n.id },
+            `a \`${String(holder)}\` block is an object — ${blockWhere} may declare ${ALLOWED_FIELDS[n.type]
+              .map((a) => `\`${a}\``)
+              .join(", ")}`,
+            d,
+          );
+    const blockIsMalformed = rawBlock !== undefined && declared === undefined;
+    if (blockIsMalformed) fatal = true;
+
     // AND THE BLOCK'S OWN REQUIRED FIELDS. `REQUIRED_BLOCK` proves a node HAS an `agent:`; it
     // says nothing about `agent: {}`. Every one of these used to reach `parseRef(undefined)` and
     // come back as `E_INTERNAL: TypeError: Cannot read properties of undefined (reading
     // 'lastIndexOf')`, which tells an author nothing about their graph.
-    for (const [field, holder, shape] of REQUIRED_FIELDS[n.type] ?? []) {
-      const block = n[holder] as Record<string, unknown> | undefined;
+    for (const [field, blockHolder, shape] of blockIsMalformed ? [] : REQUIRED_FIELDS[n.type] ?? []) {
+      const block = n[blockHolder] as Record<string, unknown> | undefined;
       const value = block?.[field];
       const bad = shape === "array" ? !Array.isArray(value) : typeof value !== "string";
       if (block !== undefined && bad) {
         d.push({
           severity: "error",
           code: "GRAPH020_MISSING_FIELD",
-          message: `node "${n.id}" has a \`${String(holder)}\` block whose \`${field}\` is ${
+          message: `node "${n.id}" has a \`${String(blockHolder)}\` block whose \`${field}\` is ${
             value === undefined ? "missing" : `not ${shape === "array" ? "an array" : "a string"}`
           }`,
           at: { nodeId: n.id },
-          fix: `add \`${field}:\` to node "${n.id}"'s \`${String(holder)}\` block`,
+          fix: `add \`${field}:\` to node "${n.id}"'s \`${String(blockHolder)}\` block`,
         });
         fatal = true;
       }
@@ -2070,11 +2947,8 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // fields were deleted, and the generic refusal here is what an author meets instead. It has
     // no undecidable case — a key is in `ALLOWED_FIELDS` or the graph is refused — where a
     // per-field warning had to be argued into existence one field at a time.
-    const holder = REQUIRED_BLOCK[n.type];
-    const declared = (n as unknown as Record<string, unknown>)[holder as string] as Record<string, unknown> | undefined;
-    if (declared !== undefined && typeof declared === "object") {
-      const where = `node "${n.id}"'s \`${String(holder)}\` block`;
-      if (unknownKeys(declared, ALLOWED_FIELDS[n.type], where, { nodeId: n.id }, d)) fatal = true;
+    if (declared !== undefined) {
+      if (unknownKeys(declared, ALLOWED_FIELDS[n.type], blockWhere, { nodeId: n.id }, d)) fatal = true;
     }
 
     // AND THE NODE'S OWN KEYS. This is where the family's worst member lives: `policyy:
@@ -2127,6 +3001,79 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
     // shape widened to every code.
     if (unknownKeys(e as unknown as Record<string, unknown>, Object.keys(EDGE_FIELDS), `edge ${describeValue(e.id)}`, { edgeId: e.id }, d)) {
       fatal = true;
+    }
+    // AND THE ONE KEY WHOSE *VALUE* IS A VOCABULARY. `unknownKeys` closes the key names and
+    // `edgeFieldTypes` closes what the other twelve hold; `kind` is the thirteenth, and it is a
+    // closed set rather than a type — which is why `TYPE_CHECKED_ELSEWHERE` defers the type half
+    // of it to this check rather than the other way round.
+    //
+    // RELOCATED FROM `graph/compile.ts`'s `unknownEdgeKinds` (§A.80), which is what that
+    // function's own docstring asked for — *"the rule belongs beside GRAPH020 and moving it there
+    // is a pure relocation"* — and the reason it had to move is not tidiness. `compile` ran it on
+    // the TOP-LEVEL spec only, while `rule016Subgraphs` recurses `validateGraph`, so the one
+    // refusal that is total over `kind` did not reach a subgraph CHILD. Measured before, on a
+    // parent whose child carries one edge with `kind: 42` and `maxWidth: "24"`:
+    //
+    //     compile(parent)                    GRAPH007_BAD_MAX_WIDTH alone — the child's `kind`
+    //                                        was unchecked and reached the executor's own
+    //                                        `EDGE_KINDS` copy at run time
+    //     validateGraph alone, kind: 42       (none)
+    //
+    // and after, both report `GRAPH003_UNKNOWN_EDGE_KIND` as well. It was pinned NEGATIVELY in
+    // `test/graph/edge-field-types.test.ts`, which now pins it positively.
+    //
+    // NOT FATAL, which is the one thing about the move that is not free and is deliberate. The
+    // rule's diagnostics used to be PREPENDED to `validateGraph`'s, so they survived a fatal
+    // `checkStructure`; now they are inside it, and a graph that also trips an EARLIER fatal check
+    // — `channels: null`, a malformed node — reports that one and NOT this one. That is the gate's
+    // established semantics, stated at `edgeFieldTypes` for the same loop. Setting `fatal` here
+    // would be the larger change: every rule below `checkStructure` runs today on a graph with an
+    // unknown kind, and `rule003`'s own arms are written expecting to.
+    //
+    // THE OTHER TWO THINGS THE MOVE CHANGED, neither a behaviour change and both worth stating
+    // because a reader comparing output across the relocation will see them:
+    //
+    //   POSITION. The message TEXT is byte-identical, but it used to be FIRST in `diagnostics`
+    //     and is now emitted in edge-loop order — so on an edge that is also missing a key,
+    //     `GRAPH020_UNKNOWN_FIELD` now precedes `GRAPH003_UNKNOWN_EDGE_KIND` where it followed.
+    //     Nothing reads the order; `compile` reports a SET and the CLI prints it as one.
+    //   SUPPRESSION. The lost-behind-an-earlier-fatal case above is the same fact from the
+    //     author's side: `channels: null` plus `kind: 42` used to print both and now prints one.
+    // `typeof !== "string"` FIRST, AND THAT IS NOT A NARROWING. The rule is still "any kind that
+    // is not an own key of `EDGE_KINDS`, whatever its type" — every non-string fails this clause
+    // exactly as it failed `Object.hasOwn` — but `Object.hasOwn(obj, key)` COERCES its key, so
+    // `kind: [Symbol()]` threw `TypeError: Cannot convert a Symbol value to a string` from the
+    // guard itself. Asking about the type first reaches the same verdict without coercing.
+    if (typeof e.kind !== "string" || !Object.hasOwn(EDGE_KINDS, e.kind)) {
+      d.push({
+        severity: "error",
+        code: "GRAPH003_UNKNOWN_EDGE_KIND",
+        // `JSON.stringify` ANSWERS `undefined` FOR `undefined`, which would print the word "kind"
+        // followed by nothing and read as a formatting bug rather than as the missing declaration
+        // it is. `String()` covers every non-string this catches, and a string kind still gets its
+        // quotes so `""` is visible.
+        //
+        // NOT `describeValue` FOR THE JSON-REACHABLE VALUES, although it is in this file now —
+        // `JSON.stringify` prints `{}` and `[]` where `describeValue` prints "an object" and "an
+        // array", so swapping it outright is a message change and not a relocation.
+        //
+        // BUT THE RENDER IS TOTAL NOW, and that arm is not cosmetic. `JSON.stringify` throws on a
+        // `bigint`, on a circular object, and on any `toJSON` the caller wrote — and the
+        // relocation put this call where a SUBGRAPH CHILD's edge reaches it, so a child edge with
+        // `kind: 10n` turned an `ok: true` compile into an exception out of `compile`. Only a
+        // programmatic resolver can hand one over — a JSON file expresses no `bigint`, no `symbol`
+        // and no cycle — which is why the case is narrow and is NOT why it would be acceptable: a
+        // guard that throws while describing what it is refusing is the
+        // crash-where-a-refusal-belongs shape this file closes everywhere else.
+        //
+        // `describeValue` IS THE FALLBACK AND NOT THE DEFAULT, which is what keeps this a
+        // relocation: it prints "an object" and "an array" where `JSON.stringify` prints `{}` and
+        // `[]`, so every value a JSON file can express still renders byte-for-byte as it did, and
+        // only the values that would have CRASHED take the other path.
+        message: `edge "${e.id}" declares kind ${renderKind(e.kind)}, which is not an edge kind — its \`when\`, \`until\`, \`over\` and \`branches\` are all ignored and the edge is taken unconditionally`,
+        at: { edgeId: e.id },
+        fix: `use one of ${Object.keys(EDGE_KINDS).join(", ")}`,
+      });
     }
     // AND WHAT EACH KNOWN KEY HOLDS. `EDGE_FIELDS` used to be a NAME list — it said `maxWidth` was
     // allowed and nothing about its type, so `maxWidth: "24"` parsed and every reader that needed
@@ -2201,8 +3148,29 @@ function rule002Terminals(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): vo
     return;
   }
   // Every terminal path must be able to end somewhere that produced an output.
+  //
+  // BOTH DIRECTIONS OVER `flowEdges`, AND THE SECOND IS THE §A.84 FIX. This asked
+  // `idx.ancestors` — "did a writer run before me" — which does not walk a `loop` edge, so
+  // `harden-config.json`'s `fix` was told on every command that it "ends a path on which no
+  // declared output is ever written" while `fix -loop-> audit -> collate` writes `report` on
+  // every pass. The writer is DOWNSTREAM of the terminal node, through the back-edge, which is a
+  // shape only a loop can produce and which the old question could not express.
+  //
+  // WHAT IT IS NOT: `terminalNodes` widened. Making a loop source non-terminal was tried and
+  // emptied the set on nearly every looping graph, taking GRAPH002 with it — see `indexGraph`.
+  // The set is the base one; only the question changed.
+  //
+  // AND IT STILL WARNS WHERE IT SHOULD, which is the half a widening loses: on `s -> good`
+  // (writing the output) beside `s -> b -> c` with `c -loop-> b`, the terminal `c` reaches only
+  // `b` and `c`, neither writes an output, and no writer reaches `c` — so it is still a dead end
+  // and still says so.
+  // OVER `writers`, NOT OVER EVERY NODE: the set is already built two lines up, and scanning
+  // `idx.byId` to filter it back down is the same avoidable O(nodes) per terminal that
+  // `rule005Dataflow` paid for per read.
+  const reachesAWriter = (t: NodeId): boolean =>
+    [...writers].some((w) => canPrecede(idx, w, t) || canPrecede(idx, t, w));
   for (const t of idx.terminalNodes) {
-    const producesOutput = writers.has(t) || [...(idx.ancestors.get(t) ?? [])].some((a) => writers.has(a));
+    const producesOutput = writers.has(t) || reachesAWriter(t);
     if (!producesOutput) {
       d.push({
         severity: "warning",
@@ -2354,6 +3322,15 @@ function rule005RouterEdges(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): 
 
 function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
   const inputs = new Set(spec.inputs);
+  // WHO WRITES EACH CHANNEL, once for the rule rather than per read. See the producer check below.
+  const writersByChannel = new Map<string, NodeId[]>();
+  for (const n of spec.nodes) {
+    for (const w of n.writes ?? []) {
+      const list = writersByChannel.get(w);
+      if (list === undefined) writersByChannel.set(w, [n.id]);
+      else list.push(n.id);
+    }
+  }
   // A fanout edge introduces its item channel into the target's scope.
   const fanoutItems = new Map<NodeId, Set<string>>();
   for (const e of spec.edges) {
@@ -2428,9 +3405,17 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
         continue;
       }
       if (inputs.has(r)) continue;
-      const producedUpstream = [...(idx.ancestors.get(n.id) ?? [])].some((a) =>
-        (idx.byId.get(a)?.writes ?? []).includes(r),
-      );
+      // PRODUCER-BEFORE-CONSUMER OVER THE EDGES THE EXECUTOR TAKES (§A.84). This read
+      // `idx.ancestors`, which does not walk a `loop` edge, so a loop-carried write was invisible:
+      // `examples/graphs/harden-config.json` was told on every command that `audit` and `collate`
+      // each "reads \"applied\", which no upstream node writes" about a channel its `fix` node
+      // writes on every pass. `canPrecede` is the same question asked of the real edge set.
+      //
+      // OVER THE WRITERS OF THIS CHANNEL, not over every node. The first cut scanned all of
+      // `idx.byId` per READ and asked `.writes.includes(r)` inside the loop, which is
+      // O(nodes x reads x writes) and took `scale.test.ts`'s 500-node compile from 21 ms to 54 ms
+      // for an answer the one-pass index below gives in the same breath.
+      const producedUpstream = (writersByChannel.get(r) ?? []).some((a) => a !== n.id && canPrecede(idx, a, n.id));
       const producedBySelf = (n.writes ?? []).includes(r);
       if (!producedUpstream && !producedBySelf) {
         d.push({
@@ -3679,7 +4664,38 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
       for (let j = i + 1; j < writers.length; j++) {
         const a = writers[i]!;
         const b = writers[j]!;
-        const related = (idx.ancestors.get(a)?.has(b) ?? false) || (idx.ancestors.get(b)?.has(a) ?? false);
+        // ORDERED ON EVERY PASS, WHICH IS DOMINANCE AND NOT REACHABILITY (§A.84).
+        //
+        // `idx.ancestors` does not walk a `loop` edge, so two nodes joined only through a
+        // back-edge looked unordered and the canonical loop graph was REFUSED — `nodes "parse"
+        // and "fix" can run concurrently` about a graph where every path to `fix` goes through
+        // `audit`. That is the defect this arm exists to fix.
+        //
+        // THE FIRST FIX FOR IT WAS WRONG AND IS WORTH THE SPACE. It asked whether SOME path
+        // ordered the pair (a cut-cycle reachability relation), and a reason to be silent has to
+        // hold on EVERY pass. On `start -> summarize`, `start -> scan -> fix`, `fix -loop->
+        // summarize` that relation ordered `summarize` after `fix` — true from pass two — while
+        // the executor ran `["start","scan","summarize","fix"]`, both in pass ONE, both writing
+        // one `replace` channel, and GRAPH010 said nothing. It was also declaration-order
+        // dependent: 527 of 8,000 permutation-fuzz seeds changed their GRAPH010 set.
+        //
+        // Dominance has neither fault — every path from an entry to `b` passes through `a`, which
+        // is a property of the graph and not of a traversal. `computeDominators` states the whole
+        // argument.
+        //
+        // AND `canPrecede`'s RELATION MUST NOT APPEAR HERE, for the case this rule exists for: a
+        // fan-out INSIDE a loop body puts two genuinely concurrent nodes in the same cycle, so
+        // "they go round together" would exempt exactly the pair that races. The producer question
+        // wants that relation and the concurrency question must not have it — which is why
+        // `GraphIndex` carries the two separately.
+        //
+        // `idx.ancestors` STAYS IN THE UNION, so this arm can only ever be quieter than the code
+        // that shipped before §A.84 and no graph that compiled then starts being refused now.
+        const related =
+          (idx.ancestors.get(a)?.has(b) ?? false) ||
+          (idx.ancestors.get(b)?.has(a) ?? false) ||
+          idx.dominators.dominates(a, b) ||
+          idx.dominators.dominates(b, a);
         if (related) continue; // sequential — last write is well-defined
         // A compensation node is DECLARED to run only after its target failed, so the two
         // are ordered even though `ancestors` deliberately excludes compensation edges (a
@@ -4429,7 +5445,8 @@ function checkApproval(n: NodeSpec, d: Diagnostic[]): void {
   // `separationOfDutys` and `delegate` each compiled clean and produced a gate that reads as
   // supervised and admits anybody. `NESTED_FIELDS.approval` is the enumeration; the near-miss
   // hint makes the typo cheap to fix rather than cheap to ignore.
-  unknownKeys(block, NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.approval), `human_gate "${n.id}"'s \`approval\` block`, at, d);
+  blockFieldTypes(block, "approval", NESTED_FIELDS.approval, `human_gate "${n.id}"'s \`approval\` block`, at, d);
   const a = n.humanGate?.approval;
   if (a === undefined) return;
   // `approvers` MUST BE AN ARRAY, and the loop below is why. `for (const who of a.approvers ?? [])`
@@ -4551,7 +5568,8 @@ function checkSla(n: NodeSpec, d: Diagnostic[]): void {
   // `onTimout: "escalate"` compiled clean and the gate silently kept the default `fail`: a graph
   // that asked for someone else to be paged, and expires instead. That is `checkSla`'s own
   // argument about `default_action`, one misspelling out.
-  unknownKeys(block, NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.sla), `human_gate "${n.id}"'s \`sla\` block`, at, d);
+  blockFieldTypes(block, "sla", NESTED_FIELDS.sla, `human_gate "${n.id}"'s \`sla\` block`, at, d);
   const sla = n.humanGate?.sla;
   if (sla === undefined) return;
   const bad = (what: string, fix: string): void => {
@@ -4644,7 +5662,8 @@ function checkReminders(
     // one level up was refused. Driven with that control, so the silence was the scope rather
     // than a short-circuit.
     if (isPlainRecord(entry)) {
-      unknownKeys(entry, NESTED_FIELDS.slaReminder, `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
+      unknownKeys(entry, Object.keys(NESTED_FIELDS.slaReminder), `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
+      blockFieldTypes(entry, "slaReminder", NESTED_FIELDS.slaReminder, `human_gate "${n.id}"'s \`sla.reminders[${String(i)}]\``, at, d);
     }
     const afterMs: unknown = isPlainRecord(entry) ? entry["afterMs"] : undefined;
     if (!isPositiveMs(afterMs)) {
@@ -4721,7 +5740,7 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a batching block that is not an object",
         "batching is {enabled, key, windowMs, maxBatch}; an array, a Map or a Date has no fields the runtime can read and would merge nothing",
       );
-    } else if (unknownKeys(batching, NESTED_FIELDS.batching, `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
+    } else if (unknownKeys(batching, Object.keys(NESTED_FIELDS.batching), `human_gate "${n.id}"'s \`batching\` block`, at, d)) {
       // An unknown key here is checked BEFORE the value rules, so `windowMz` is reported as the
       // typo it is rather than as a missing `windowMs` — the author who wrote one is told which.
     } else if (typeof batching["enabled"] !== "boolean") {
@@ -4762,7 +5781,7 @@ function checkSaturation(n: NodeSpec, d: Diagnostic[]): void {
         "declares a dedupe block that is not an object",
         "dedupe is {enabled, windowMs}; an array, a Map or a Date has no fields the runtime can read and would collapse nothing",
       );
-    } else if (unknownKeys(dedupe, NESTED_FIELDS.dedupe, `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
+    } else if (unknownKeys(dedupe, Object.keys(NESTED_FIELDS.dedupe), `human_gate "${n.id}"'s \`dedupe\` block`, at, d)) {
       // Same ordering as `batching`, and the same reason.
     } else if (typeof dedupe["enabled"] !== "boolean") {
       bad(
@@ -4828,7 +5847,8 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
   if (block === undefined) return;
   // `recipiants: []` compiled clean, so the gate was durable and queued and NOBODY WAS TOLD —
   // the one mode in which "an SLA fired and nobody knew" is possible, reached by one letter.
-  unknownKeys(block, NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
+  unknownKeys(block, Object.keys(NESTED_FIELDS.delivery), `human_gate "${n.id}"'s \`delivery\` block`, at, d);
+  blockFieldTypes(block, "delivery", NESTED_FIELDS.delivery, `human_gate "${n.id}"'s \`delivery\` block`, at, d);
   const spec = n.humanGate?.delivery;
   if (spec === undefined) return;
   const bad = (what: string, fix: string): void => {
@@ -4876,7 +5896,8 @@ function checkDelivery(n: NodeSpec, d: Diagnostic[]): void {
     // GRAPH003_MALFORMED and then crash on `tier.action` — the diagnostic was written and the
     // author never saw it.
     if (tierBlock === undefined) continue;
-    unknownKeys(tierBlock, NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
+    unknownKeys(tierBlock, Object.keys(NESTED_FIELDS.deliveryEscalation), `human_gate "${n.id}"'s \`${where}\``, at, d);
+    blockFieldTypes(tierBlock, "deliveryEscalation", NESTED_FIELDS.deliveryEscalation, `human_gate "${n.id}"'s \`${where}\``, at, d);
     if (tier.action === "fail") {
       // A TERMINAL TIER ENDS THE CHAIN WHEREVER IT SITS. `nextTier` returns `undefined` at
       // the first `action: "fail"`, so every tier after it is unreachable — a graph naming
@@ -5053,6 +6074,50 @@ function rule015Resources(spec: GraphSpec, resolver: ResourceResolver, d: Diagno
 
 // ── GRAPH016 ─────────────────────────────────────────────────────────────────
 
+/**
+ * A `subgraph` node's `inputs`/`outputs` map, or `undefined` with the refusal already pushed.
+ *
+ * NOT `objectBlock`, and the difference is the whole point of this function: `objectBlock` treats
+ * ABSENT as fine, because the `policy` blocks it was written for are optional. These two are not
+ * — `SubgraphNode` declares both, and `run/engine.ts`'s `#contextFor` walks `sub.inputs` with the
+ * same `Object.entries`, so an absent one is a crash at run time rather than a subgraph that maps
+ * nothing. The channel loop in `checkStructure` makes the same distinction the same way, by
+ * reporting the absent case itself rather than letting a `fatal` with no diagnostic behind it
+ * reach `compile` as `ok`.
+ *
+ * ONE MESSAGE FOR ABSENT AND FOR WRONG-SHAPED, because they are one mistake from the author's
+ * side — "there is no mapping here" — and two spellings of one refusal is how two diagnostics
+ * come to disagree. The message names the NODE, which is §A.79's closing condition, and states
+ * the direction of the arrow, because `inputs` and `outputs` run OPPOSITE ways and a message that
+ * only says "must be an object" leaves an author to guess which key is which.
+ */
+function requiredMapping(
+  v: unknown,
+  nodeId: NodeId,
+  field: "inputs" | "outputs",
+  keyIs: string,
+  valueIs: string,
+  d: Diagnostic[],
+): Readonly<Record<string, unknown>> | undefined {
+  if (typeof v === "object" && v !== null && !Array.isArray(v)) return v as Readonly<Record<string, unknown>>;
+  d.push({
+    severity: "error",
+    code: "GRAPH003_MALFORMED",
+    // "DOES NOT DECLARE" FOR THE ABSENT CASE. `describeValue(undefined)` is the word "undefined",
+    // so the absent case read "declares `inputs` as undefined" — which tells an author they wrote
+    // something they did not write. Absent and wrong-shaped are one mistake to fix and two
+    // different things to say.
+    message:
+      (v === undefined
+        ? `subgraph "${nodeId}" does not declare \`${field}\``
+        : `subgraph "${nodeId}" declares \`${field}\` as ${describeValue(v)}, which is not a channel mapping`) +
+      ` — \`${field}\` maps ${keyIs} to ${valueIs} and is required`,
+    at: { nodeId },
+    fix: `write \`${field}: {}\` to declare the subgraph maps no ${field === "inputs" ? "input" : "output"}, or give it \`{"<${keyIs.replace(" ", "-")}>": "<${valueIs.replace(" ", "-")}>"}\``,
+  });
+  return undefined;
+}
+
 function rule016Subgraphs(
   spec: GraphSpec,
   ctx: ValidationContext,
@@ -5091,16 +6156,64 @@ function rule016Subgraphs(
     const child = ctx.resolver.subgraph?.(sub.ref);
     if (child === undefined) continue; // GRAPH015 already reported a missing ref
 
-    for (const [childCh, parentCh] of Object.entries(sub.inputs)) {
-      if (!Object.hasOwn(spec.channels, parentCh)) {
+    // THE FOUR BLOCKS THIS RULE READS, ASKED ABOUT BEFORE THEY ARE READ (§A.79). The rule read
+    // all four straight, and `compile`'s input is a cast `JSON.parse` — so a graph FILE, and a
+    // resolver handing back a resource FILE, decided whether any of them existed. Measured on
+    // `compile`, one graph per value, before this:
+    //
+    //     subgraph: {ref, outputs}       (no `inputs`)   THREW TypeError: Cannot convert
+    //     subgraph: {ref, inputs}        (no `outputs`)  undefined or null to object
+    //     inputs: null / outputs: null                   — the same, from `Object.entries`
+    //     child spec with no `channels` / channels: null THREW the same, from `Object.hasOwn`
+    //     inputs: 42                                     ok, ZERO diagnostics — the mapping
+    //                                                    silently dropped, which is the quiet
+    //                                                    half and the worse one
+    //     inputs: "inp"                                  SIX GRAPH016_BAD_MAPPINGs about child
+    //                                                    channels "0", "1", "2" — a diagnostic
+    //                                                    about the string's own indices
+    //
+    // THE TWO HALVES GET DIFFERENT TREATMENT, because only one of them has a second reporter.
+    // `sub.inputs`/`sub.outputs` are the PARENT's declaration and nothing else looks at them, so
+    // they are refused here. The CHILD's `channels` is reported by the child's own
+    // `checkStructure` through the recursion below, re-tagged `in subgraph "…": …` and pointed at
+    // this node — so this rule only declines to answer the child half of a mapping it cannot
+    // answer, rather than spelling that refusal a second time. `namesUnder`'s walk, which runs
+    // before this rule, skips a malformed child for the same reason.
+    //
+    // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
+    // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
+    // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
+    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
+    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    // NOT A PLAIN OBJECT IS REFUSE, NEVER SKIP, and that distinction was a defect. This used to
+    // hand back `undefined` for a child whose `channels` was not a plain object and the mapping
+    // loops below skipped their child half — so `channels: []` lost both `GRAPH016_BAD_MAPPING`s
+    // the base compiler printed, on the reasoning that the child's own `checkStructure` would
+    // report it. It did not: `typeof [] === "object"` let an array past that check too, so the
+    // ONE reporter this deferred to was silent as well and the whole fault came out clean.
+    //
+    // An empty map is the honest stand-in rather than a skip: a child whose `channels` is not a
+    // channel map declares no channel of any name, so every mapping into it really does name
+    // something the child does not declare, and saying so is true rather than a placeholder. The
+    // child's own `channels` refusal arrives beside it through the recursion, re-tagged at this
+    // node — two diagnostics for two different mistakes, which is what base printed for `[]`.
+    const childIsGraph = typeof child === "object" && child !== null;
+    const rawChildChannels: unknown = childIsGraph ? child.channels : undefined;
+    const childChannels: Readonly<Record<string, unknown>> =
+      typeof rawChildChannels === "object" && rawChildChannels !== null && !Array.isArray(rawChildChannels)
+        ? (rawChildChannels as Readonly<Record<string, unknown>>)
+        : {};
+
+    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
+      if (!Object.hasOwn(spec.channels, parentCh as string)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${parentCh}"`,
+          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
           at: { nodeId: n.id },
         });
       }
-      if (!Object.hasOwn(child.channels, childCh)) {
+      if (!Object.hasOwn(childChannels, childCh)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
@@ -5109,7 +6222,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const [parentCh, childCh] of Object.entries(sub.outputs)) {
+    for (const [parentCh, childCh] of Object.entries(outputs ?? {})) {
       if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
@@ -5118,11 +6231,11 @@ function rule016Subgraphs(
           at: { nodeId: n.id },
         });
       }
-      if (!Object.hasOwn(child.channels, childCh)) {
+      if (!Object.hasOwn(childChannels, childCh as string)) {
         d.push({
           severity: "error",
           code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps output from child channel "${childCh}", which "${sub.ref}" does not declare`,
+          message: `subgraph "${n.id}" maps output from child channel "${String(childCh)}", which "${sub.ref}" does not declare`,
           at: { nodeId: n.id },
         });
       }
