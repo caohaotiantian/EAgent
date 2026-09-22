@@ -753,9 +753,10 @@ loop body cannot state its own ceiling the way a fan-out body can.
 
 ### F7 · Three false warnings on a correct graph, on every command that touches it
 
-**Tried.** `loom compile`, `loom run`, `loom trace`, `loom replay`, `loom gates` on the shipped graph.
+**Tried.** Six verbs on the shipped graph: `loom compile`, `loom run`, `loom trace`, `loom replay`,
+`loom gates`, `loom audit`.
 
-**Happened.** All five print, on stderr:
+**Happened.** The first five print, on stderr:
 
 ```
 ! harden-config.json: GRAPH002_DEAD_END: terminal node "fix" ends a path on which no declared output is ever written
@@ -763,7 +764,8 @@ loop body cannot state its own ceiling the way a fan-out body can.
 ! harden-config.json: GRAPH005_UNPRODUCED_READ: node "collate" reads "applied", which no upstream node writes and which is not a graph input
 ```
 
-Of the six verbs tried, `loom audit` is the one that does not.
+`loom audit` is the sixth and the only one of them that does not. Whether a verb not in that list
+prints them is untested.
 
 **Expected.** Silence. All three are false, for the one mechanism above: `fix` is not terminal (it
 has a `loop` edge out of it, which is how the run gets back to `audit`); and `applied` is written by
