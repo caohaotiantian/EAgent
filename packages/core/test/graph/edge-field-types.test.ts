@@ -246,6 +246,11 @@ const compileOf = (s: GraphSpec) =>
  * express render as text instead of crashing. The list is therefore EMPTY, which is what this
  * docstring predicted would happen — *"if that site ever learns to render safely, this test goes
  * red and the rows come off"*. It did, and they have.
+ *
+ * EMPTY OF VALUES, AND THAT IS NOT THE SAME AS "NOTHING THROWS". An edge carrying a throwing
+ * ACCESSOR — `Object.defineProperty(edge, "kind", {get() { throw … }})` — still throws at the
+ * property READ, before any guard sees a value, and does so identically at base. Nothing in this
+ * file's reach can close that: it is a property of the object, not of the kind.
  */
 const KIND_STILL_THROWS: readonly unknown[] = [];
 
@@ -517,6 +522,41 @@ test("A HOSTILE VALUE IS RENDERED, NOT RUN — including the two `describeValue`
     one("e3", { maxWidth: { toJSON: () => { throw new Error("boom"); } } }).message.includes("declares maxWidth an object,"),
     true,
   );
+});
+
+test("`kind` IS ASKED ABOUT ITS TYPE BEFORE `Object.hasOwn` — the KEY coercion throws too", () => {
+  // THE OTHER COERCION, and it is a separate site from the message. `renderKind` closed the one in
+  // the message; `Object.hasOwn(EDGE_KINDS, e.kind)` COERCES ITS KEY, so a `kind` whose string
+  // conversion throws crashed the guard BEFORE any rendering happened. Asking `typeof !== "string"`
+  // first reaches exactly the same verdict — every non-string is still refused, which is what
+  // "ANY KIND THAT IS NOT AN OWN KEY OF `EDGE_KINDS`, WHATEVER ITS TYPE" has always meant —
+  // without ever handing the value to a coercion.
+  //
+  // Measured on `79cab047` with that clause removed, both of these THREW out of `compile`:
+  //
+  //     kind: [Symbol("x")]           TypeError: Cannot convert a Symbol value to a string
+  //     kind: {toString(){throw}}     Error: boom
+  //
+  // This test is why the clause is not a tidy-up: the relocation of §A.80 put this call where a
+  // SUBGRAPH CHILD's edge reaches it, so the crash is one resolver away from an `ok: true` compile.
+  for (const [label, kind] of [
+    ["an array holding a symbol", [Symbol("x")]],
+    ["an object whose toString throws", { toString: () => { throw new Error("boom"); } }],
+  ] as [string, unknown][]) {
+    let threw: string | undefined;
+    let codes: string[] = [];
+    let ok: boolean | undefined;
+    try {
+      const r = compileOf(withEdge("e3", { kind }));
+      ok = r.ok;
+      codes = r.diagnostics.filter((x) => x.severity === "error").map((x) => x.code);
+    } catch (e) {
+      threw = `${(e as Error).name}: ${(e as Error).message}`;
+    }
+    assert.equal(threw, undefined, `kind = ${label} CRASHED the compiler instead of refusing: ${String(threw)}`);
+    assert.equal(ok, false, `kind = ${label} must not compile`);
+    assert.ok(codes.includes("GRAPH003_UNKNOWN_EDGE_KIND"), `${label}: got ${codes.join(", ") || "nothing"}`);
+  }
 });
 
 test("A SPARSE ARRAY IS REFUSED — `Array.prototype.every` SKIPS HOLES and `digest` does not", () => {
