@@ -2,11 +2,23 @@
  * `function/harden-audit@stable` — fold the fix log over the parsed manifest, read the result
  * against the deployment policy, and say whether another pass is worth making.
  *
- * THIS NODE IS THE LOOP'S SOURCE, and that is a decision rather than an accident. An `until` is
- * evaluated on the scope of the node the loop edge LEAVES, so a back-edge leaving `fix` would test
- * a `settled` computed before that pass's fix had landed — a stop rule one pass out of date, which
- * stops either too early or never. The cycle therefore runs `fix → audit` forwards with
- * `audit → fix` as the declared `loop`, and the stop rule is read off a fresh audit every time.
+ * THIS NODE DECIDES WHETHER THE LOOP GOES ROUND AGAIN, AND IT IS NOT THE LOOP'S SOURCE. Read the
+ * graph rather than this comment if the two ever disagree: the cycle is `audit --repair(conditional
+ * when !settled && len(applied) < 12)--> fix --recheck(loop)--> audit`, and the forward exit is
+ * `audit --done(conditional when settled || len(applied) >= 12)--> collate`. The two conditionals
+ * are exact complements, so every pass leaves this node by exactly one edge.
+ *
+ * **The back-edge's own `until` is inert, and saying so is the honest version of what this comment
+ * used to claim.** It reads `settled`, and `fix` is scheduled only when `settled` was false and
+ * writes nothing but `applied` — so `settled` is false wherever that `until` is evaluated and the
+ * back-edge is always taken. `maxIterations: 16` is its only real bound. The earlier draft of this
+ * paragraph said the loop edge left THIS node, warned that a back-edge leaving `fix` "stops either
+ * too early or never", and then shipped exactly that, landing on never. It reads correctly anyway
+ * because the convergence decision was moved to the conditionals above, where both `settled` and
+ * `applied` are the channel's real values — but the warning was right and the design it described
+ * was not the one that compiles. `F3`, `F4` and `F5` of `docs/workflow-port-2026-09-22.md` are why
+ * it cannot be: the loop's target needs a non-loop inbound edge or it runs at t=0, and an `until` on
+ * `recheck` would read `fix`'s own contribution to `applied` rather than the channel.
  *
  * **THIS BODY OWNS `current`, AND `fix` WRITES NOTHING BUT THE LOG.** The obvious shape — `parse`
  * seeds the manifest, `fix` rewrites it in place — does not compile: `GRAPH010_CONCURRENT_WRITE`
@@ -143,10 +155,20 @@ function (view, ctx) {
     });
   }
 
-  // Reported `at: "secrets"` and not at the env key, because `at` is where the REPAIR lands and
-  // the repair appends to the secrets list. Only the first undeclared ref is reported per pass:
-  // two of them would both claim the same `at`, and the second's `now` would be computed against a
-  // manifest the first has already changed.
+  // Reported `at: "secrets"` and not at the env key, because `at` is where the REPAIR lands and the
+  // repair appends to the secrets list.
+  //
+  // EVERY UNDECLARED REF IS REPORTED, NOT JUST THE FIRST, and the first draft of this rule got that
+  // wrong in the direction this whole workflow exists to prevent. It `break`ed after one, reasoning
+  // that two findings claiming the same `at` would have the second's `now` computed against a
+  // manifest the first had already changed. That is true of REPAIRING and false of REPORTING, and
+  // conflating the two cost the report its honesty: on `manifests/legacy-gateway.json`, which
+  // exhausts the pass budget with two refs still undeclared, the gate said "Still open — 1". A
+  // person adds that one secret, ships, and the deploy still fails at admission on the other.
+  //
+  // Reporting all of them is safe because `harden-fix.js` applies the FIRST auto-fixable finding and
+  // exactly one per pass, so the stale-`now` hazard never arises — the next audit recomputes the
+  // whole list against the manifest the last fix produced.
   for (const key of Object.keys(env)) {
     const v = env[key];
     if (v === null || typeof v !== "object" || Array.isArray(v)) continue;
@@ -163,7 +185,6 @@ function (view, ctx) {
       autofixable: true,
       remedy: "add \"" + v.secretRef + "\" to \"secrets\"",
     });
-    break;
   }
 
   if (m.stage === "prod" && (env.LOG_LEVEL === "debug" || env.LOG_LEVEL === "trace")) {
@@ -196,7 +217,18 @@ function (view, ctx) {
   // entered at all.
   const settled = findings.every((f) => f.autofixable !== true);
 
-  return { writes: { current: m, findings: findings, settled: settled } };
+  // `baseline` is THE FIRST AUDIT'S findings, written once and never again — the only pass on which
+  // `applied` is empty is the first. `harden-collate.js` needs it to make a MEASURED claim out of
+  // "this finding did not exist when the run started": `cascadeOf` in the table above is a static
+  // property of the RULE (what must be repaired before this rule can fire at all), and the first
+  // draft of the report counted those declarations and presented the total as a fact about this run.
+  // On a manifest that already carries a cascade-rule finding on its first audit — which the graph's
+  // OWN output does, whenever a budget stop leaves a `secret-not-declared` open — the report then
+  // said "2 of those 2 fixes closed a finding that DID NOT EXIST when the run started" about a
+  // finding that was in the very first audit. See F11 of `docs/workflow-port-2026-09-22.md`.
+  const writes = { current: m, findings: findings, settled: settled };
+  if (applied.length === 0) writes.baseline = findings;
+  return { writes: writes };
 
   function secretName(key) {
     return key.toLowerCase().split("_").join("-");

@@ -23,6 +23,7 @@
     "seed": { "type": "object", "reduce": "replace" },
     "current": { "type": "object", "reduce": "replace" },
     "findings": { "type": "array", "reduce": "replace" },
+    "baseline": { "type": "array", "reduce": "replace" },
     "settled": { "type": "boolean", "reduce": "replace" },
     "applied": { "type": "array", "reduce": "append_ordered" },
     "report": { "type": "object", "reduce": "replace" },
@@ -52,7 +53,7 @@
       "id": "audit",
       "type": "function",
       "reads": ["seed", "applied"],
-      "writes": ["current", "findings", "settled"],
+      "writes": ["current", "findings", "settled", "baseline"],
       "function": { "ref": "function/harden-audit@stable" }
     },
     {
@@ -65,7 +66,7 @@
     {
       "id": "collate",
       "type": "function",
-      "reads": ["current", "manifestPath", "findings", "applied", "settled"],
+      "reads": ["current", "manifestPath", "findings", "applied", "settled", "baseline"],
       "writes": ["report", "hardened", "summary"],
       "function": { "ref": "function/harden-collate@stable" }
     },

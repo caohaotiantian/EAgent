@@ -7,10 +7,11 @@
  * rather than for a machine, and the three questions it has to answer before anybody types
  * `loom approve` are:
  *
- *  1. **What changed?** `applied`, in order, each entry carrying the value before and after. Three
- *     of the eight on the shipped manifest are marked `cascadeOf` — findings that did not exist
- *     when the run started and that only a re-audit could have found. `cascades` counts them,
- *     because that number is the argument for the loop.
+ *  1. **What changed?** `applied`, in order, each entry carrying the value before and after. Three of
+ *     the eight on the shipped manifest closed a finding that was NOT in the first audit — created by
+ *     an earlier fix, and findable only by re-auditing. `cascades` counts them against `baseline`,
+ *     the first audit's own finding list, because that number is the argument for the loop and an
+ *     argument is worth nothing if it is not measured. `startedWith` is what it is measured against.
  *  2. **What did NOT get fixed?** `open`. A finding the fixer cannot repair does not stop the
  *     loop (see `harden-audit.js` on what `settled` means) and it must not vanish either: it is
  *     the reason a person is reading this at all.
@@ -33,9 +34,23 @@ function (view, ctx) {
   const findings = view.require("findings");
   const applied = view.get("applied") || [];
   const settled = view.require("settled") === true;
+  const baseline = view.get("baseline") || [];
 
   const open = findings.slice();
-  const cascades = applied.filter((a) => a.cascadeOf !== null && a.cascadeOf !== undefined);
+
+  // A CASCADE IS MEASURED AGAINST THE FIRST AUDIT, NOT READ OFF THE RULE TABLE, and getting that
+  // wrong is the one defect a fresh reviewer found in this workflow. `cascadeOf` on an entry is a
+  // static property of the RULE — "this rule cannot fire until that one is repaired" — and the first
+  // draft counted those declarations and printed the total under the sentence "did not exist when the
+  // run started". That sentence is a claim about THIS RUN, and on a manifest whose first audit
+  // already reports a cascade-rule finding it was simply false. The graph's own output is such a
+  // manifest: a budget stop leaves `secret-not-declared` open, and re-hardening that file reported
+  // "2 of those 2 fix(es) closed a finding that DID NOT EXIST when the run started" about a finding
+  // that was in the very first audit. So: `baseline` is what the first audit saw, and a cascade is a
+  // fix for a rule that was NOT in it. See F11 of `docs/workflow-port-2026-09-22.md`.
+  const startedWith = {};
+  for (const f of baseline) startedWith[f.rule] = true;
+  const cascades = applied.filter((a) => startedWith[a.rule] !== true);
   // `settled` is the auditor's word and it is the one that decides: the budget arm is reached only
   // when the loop stopped with auto-fixable work still on the table.
   const stoppedBy = settled ? "settled" : "budget";
@@ -46,6 +61,7 @@ function (view, ctx) {
     passes: applied.length,
     stoppedBy: stoppedBy,
     cascades: cascades.length,
+    startedWith: baseline.length,
     applied: applied,
     open: open,
     hardened: manifest,
@@ -59,7 +75,7 @@ function (view, ctx) {
   // order, whatever order the manifest was written in, because that is what makes a state hash
   // comparable across a replay. So `git diff` against `manifests/orders-api.json` is the whole
   // file, not the eight fixes. The eight fixes are in `applied`, and in the table below, which is
-  // why that table exists. See F6 of `docs/workflow-port-2026-09-22.md`.
+  // why that table exists. See F9 of `docs/workflow-port-2026-09-22.md`.
   const hardened = JSON.stringify(manifest, null, 2) + "\n";
 
   const lines = [];
