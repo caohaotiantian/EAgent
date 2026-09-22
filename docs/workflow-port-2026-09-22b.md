@@ -24,9 +24,9 @@ the graph. F5: the reason a node failed is data, and an `error` arm is handed no
 the one to read**: it is not an inconvenience, it is a measured destruction of the workflow's own
 record, and it is reachable with one `chmod`.
 
-**§4 is the entry to read, and it is this port's F14.** **Seven defects in THIS PORT'S OWN workflow
-and this document** — one found by the author's own mutation sweep and **six by one review round**,
-of which **four were blocking**. The four are worth the summary, because they are one sentence:
+**§4 is the entry to read, and it is this port's F14.** **Nine defects in THIS PORT'S OWN workflow
+and this document** — one found by the author's own mutation sweep and **eight across two review
+rounds**, of which **six were blocking**. They are one sentence:
 *a guard nothing distinguishes is a guard nobody has*.
 
 - **Two bounds on a renewal were untested**, and deleting either kept the suite 16/16 green. The
@@ -36,12 +36,21 @@ of which **four were blocking**. The four are worth the summary, because they ar
   granted `write/24h` and called it a renewal. And the window was measured from any entry's
   `grantedAt`, so each auto-renewal restarted the clock and one approval became indefinite access.
 - **F5's "not closable from this side" was never established.** A `tool` node is neither a function
-  nor a hook, and `fs.glob` lists a file `fs.read` cannot open. The defence is now BUILT.
+  nor a hook, and `fs.glob` lists a file `fs.read` cannot open. A defence was BUILT.
 - **F5's own paragraph made a false claim about `codes`** — a path the sandbox refuses carries the
   same code as a missing file, so the narrowing does not separate the cases that matter.
+- **AND THEN THE DEFENCE ITSELF FAILED OPEN, which is the one to carry.** `fs.glob` answers
+  `(no matches)` for "there is nothing here" AND for "I cannot see what is here", so `chmod 333` on
+  the parent directory reproduces the original F5 data loss verbatim *with the defence in place*.
+  **The workaround for a guard that fails open was itself a guard that fails open** — the same lens
+  one layer down. Four glob patterns were tried; none gives a signal. The claim is now narrowed to
+  the one case it covers, the three it does not are named, and the hole is pinned NEGATIVELY.
+- **And the second draft's third limit gave a FALSE mechanism for it** — "a different literal" —
+  when the same literal globs and still answers nothing.
 
 **Nothing in F1–F7 is fixed here — the product entries are recorded, not closed.** Everything in §4
-is this port's own and IS fixed, each with a mutation or a measurement that fails without its fix.
+is this port's own; eight are fixed, and the ninth is pinned as a known hazard because **no
+arrangement of the published surface closes it.**
 
 ---
 
@@ -688,9 +697,14 @@ that was false. **The arm is still blind: F5 is a PRODUCT entry and is not close
 is that this workflow now asks a second, read-only tool whether the file exists, and refuses when
 the two disagree. §3's F5 has what that costs and where it does not reach.
 
-**Tidy up — LAST, because `out/` holds the journal `$RUN` names.** F2's and F3's repros below use
-`$RUN` and `$GATE`; running this line before them is `E_RUN_NOT_FOUND` for anybody reading straight
-through, which is how an earlier draft ordered it.
+**`$RUN` IS ALREADY DEAD BY HERE, and §3 re-captures it rather than pretending otherwise.** The
+sweep above clears `out/` and `.loom/` before every row, deliberately, and the F5 block clears them
+again — so the journal `$RUN` named is long gone, and F2's and F3's repros below open with a fresh
+run of their own. An earlier draft instead moved the tidy-up to the end and claimed that made the
+ordering work; it did not, because the deletions that matter are inside §2, and asserting an
+ordering the page does not have is the same defect as asserting a number nobody ran.
+
+**Tidy up.**
 
 ```bash
 rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
@@ -702,13 +716,13 @@ rm -rf "$REPO/examples/out" "$REPO/examples/.loom"
 
 ```bash
 cd "$REPO"
-node --test --test-timeout=60000 packages/core/test/examples-grant.test.ts    # 25 pass, 0 fail
+node --test --test-timeout=60000 packages/core/test/examples-grant.test.ts    # 26 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-harden.test.ts   # 23 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-triage.test.ts   # 15 pass, 0 fail
 node --test --test-timeout=60000 packages/core/test/examples-run.test.ts      # 15 pass, 0 fail
 ```
 
-**Twenty-five tests, and what they pin is different from either earlier port because the shape is.**
+**Twenty-six tests, and what they pin is different from either earlier port because the shape is.**
 Port 1's risk is branch ORDER under a fan-out; port 2's is CONVERGENCE of a loop. This graph has
 neither. **Its risk is that control went the wrong way — and a graph that routed wrong still exits
 0, still writes a grant, and looks exactly like one that routed right.** So the arms are read off
@@ -776,6 +790,22 @@ The other five are their own things: **F1** is a concurrency rule that does not 
 are exclusive; **F2** is a graph search with a loud side effect; **F4** is nothing having written any
 of this down; **F6** is canonical form, seen from inside one document; **F7** is two different
 answers wearing one error code.
+
+**START HERE IF YOU ARE READING STRAIGHT THROUGH.** §2 cleared `out/` and `.loom/` several times —
+before every sweep row, and again in the F5 block — so the `$RUN` it captured no longer exists.
+F2 and F3 need a live one, so take a fresh pair:
+
+```bash
+cd "$REPO/examples"
+rm -rf out .loom
+RUN=$(loom run graphs/grant-access.json \
+      --input '{"requestPath":"access/requests/orders-db-backfill.json"}' 2>/dev/null | jq -r .runId)
+GATE=$(loom gates "$RUN" 2>/dev/null | jq -r '.[0].gateId')
+echo "$RUN $GATE"
+# → 01M346A7WEM7B2HK11C7ZQ9SDD gate_01M346A7WYGVYY337AB43WE6QF
+```
+
+That run is parked on its gate, which is all F2 and F3 need — neither answers it.
 
 ---
 
@@ -1164,19 +1194,79 @@ defended graph, the same `chmod 222` as above:
 fired on the ordinary first run — where there really is no ledger — would make the command's first
 use impossible.
 
-**F5 STAYS A PRODUCT ENTRY, and the defence is its cost rather than its closure.** Three reasons,
-each a limit of the workaround and not of the workflow:
+#### THE DEFENCE ANSWERS ITS OWN UNDECIDABLE CASE WITH THE PASSING VALUE
 
-1. **It works only because this failing read has a PATH another read-only tool can ask about.** An
-   error arm over `net.fetch`, `proc.exec`, or any tool without a listable namespace has no second
-   opinion available. The arm is still handed nothing.
-2. **It has a TOCTOU window.** The file can appear or vanish between `look` and `read-ledger`. The
-   race loses in the failing-CLOSED direction — a spurious refusal, never a spurious grant — which
-   is why the shape is acceptable, but it is a race.
-3. **It answers "does the file exist", not "why did the read fail".** The sandbox-escape case above
-   is not covered by it at all: `look`'s pattern is a different literal, so `ledgerOnDisk` is false
-   and the run proceeds. A defence built on a second tool can only re-ask the question the second
-   tool answers.
+**The first version of this section claimed three limits, and a reviewer showed the defence was
+broken rather than merely narrow.** `ledgerOnDisk` is
+`listing !== "" && listing !== "(no matches)"`, and **`fs.glob` says `(no matches)` for "there is
+nothing here" AND for "I cannot see what is here".** So the defence has the identical shape to the
+gap it stands in for. Measured on the DEFENDED graph:
+
+```bash
+rm -rf out .loom
+loom run graphs/grant-access.json --input '{"requestPath":"access/requests/docs-site-read.json"}' >/dev/null 2>&1
+jq -c '[.grants[].who]' out/access-ledger.json       # → ["u:sam"]
+
+chmod 222 out/access-ledger.json
+chmod 333 out                                        # the DIRECTORY cannot be enumerated
+loom run graphs/grant-access.json \
+  --input '{"requestPath":"access/requests/docs-site-read-ravi.json"}' 2>/dev/null \
+  | jq -c '{status, historySource: .outputs.decision.historySource}'
+chmod 755 out; chmod 644 out/access-ledger.json
+jq -c '[.grants[].who]' out/access-ledger.json
+```
+
+```
+{"status":"succeeded","historySource":"none"}
+["u:ravi"]
+```
+
+**The original F5 data loss, verbatim, with the defence in place** — `look [ok]`, `read-ledger
+[error]`, `weigh [ok]`, exit 0, `u:sam`'s grant gone.
+
+**ONE WIDENING WAS TRIED AND THERE IS NO SIGNAL TO WIDEN TO.** Four patterns against the
+`chmod 333` directory, and the control beside them:
+
+| pattern | `out` listable, ledger `chmod 222` | `out` `chmod 333` |
+|---|---|---|
+| `out/access-ledger.json` | `out/access-ledger.json` | `(no matches)` |
+| `out/*` | `out/access-ledger.json\nout/grant.json` | `(no matches)` |
+| `out/**` | — | `(no matches)` |
+| `out` | — | `(no matches)` |
+
+`fs.glob` reports a count and a truncation flag and **has no arm for "I could not read the
+directory"**, so nothing here separates an empty answer from a blind one. Widening the pattern was
+the one thing worth trying and it does not work; anything further would be inventing a signal.
+
+**SO THE CLAIM IS NARROWED TO WHAT WAS MEASURED. The defence covers EXACTLY ONE CASE: a regular
+file that is LISTABLE but not readable.** It does not cover three others, each measured, each
+losing the ledger in silence:
+
+| not covered | what `fs.glob` says | what happens |
+|---|---|---|
+| the PARENT directory cannot be enumerated (`chmod 333 out`) | `(no matches)` | the run succeeds, the ledger is rewritten |
+| an escaping SYMLINK at the path | `(no matches)` — glob skips it | reaches `record` and `write-grant [ok]`; the ledger survived only because `write-ledger` hit the same obstruction |
+| a DIRECTORY at the path | `(no matches)` — glob lists files | same shape |
+
+**An earlier draft gave a FALSE mechanism for the third limit** — *"`look`'s pattern is a different
+literal, so `ledgerOnDisk` is false"*. It is the SAME literal; the symlink case globs that exact
+path and still answers `(no matches)`. The true sentence is the one in `examples/README.md` §10:
+**it answers "does the file exist", not "why did the read fail".**
+
+**This is `CLAUDE.md`'s lens one layer down, and that is the finding.** *A guard answering its
+undecidable case with the passing value* — the error arm does it, and **the workaround for it does
+it too**. A second read-only tool can only re-ask its own question, and its own question has the
+same blind spot, so **no arrangement of read-only tools closes this**. That is why F5 is a PRODUCT
+row and why the defence is recorded as a cost with a hole rather than as a fix.
+
+**The hole is pinned NEGATIVELY**, as a test that asserts today's LOSS — `chmod 333 out`, the run
+succeeds, the ledger is rewritten — so it cannot stop existing in silence. When F5 closes, that test
+should FAIL, and the right change is to delete it along with the `look` node rather than loosen it.
+
+**The remaining limit, which is real and is not this one:** a TOCTOU window. The file can appear or
+vanish between `look` and `read-ledger`. That race loses in the failing-CLOSED direction — a
+spurious refusal, never a spurious grant — and is the only part of this shape that is safe by
+construction.
 
 **What would actually close it** is a projection of the failure — the code and the message — into a
 channel the error arm may declare in `reads`. That is a new channel shape, not a new field, and it
@@ -1185,9 +1275,11 @@ needs the answer to *what does an arm see when the failure is not a tool's* befo
 **Also checked and not a closure:** a `preTool` hook sees `{tool, args}` and may only NARROW; it
 cannot reach the disk (same sandbox, no `fs`), so it cannot tell the cases apart either.
 
-**Cost.** Found by a `chmod`, not by review — and the defence was found by a REVIEWER, after this
-entry had already asserted there was none. Two nodes' worth of graph, one refusal, three tests, and
-a `fs.glob` call on every run of a workflow that does not otherwise need one.
+**Cost.** Found by a `chmod`, not by review; the defence was found by a REVIEWER after this entry had
+asserted there was none; and **the defence's own hole was found by the NEXT reviewer after this
+entry had asserted it was merely narrow.** Two nodes' worth of graph, one refusal, four tests, and a
+`fs.glob` call on every run of a workflow that does not otherwise need one — buying coverage of one
+of the four ways this read can fail.
 
 ---
 
@@ -1265,22 +1357,35 @@ the field you expect them in* — applied here because there is no field.
 ## 4 · Defects in this port's OWN workflow, and what found each one
 
 Port 2's F14 is eight defects in its own workflow, found by four review rounds, every one of them
-*the report asserting something the run had not established*. **This port has seven, and they are a
-different class**: five of them are *a guard nothing distinguishes*. Recorded in the same log
+*the report asserting something the run had not established*. **This port has nine, and they are a
+different class**: six of them are *a guard nothing distinguishes*. Recorded in the same log
 because the METHOD is the transferable part.
 
-**One was found by the author's own mutation sweep, six by ONE review round, four of those
+**One was found by the author's own mutation sweep, eight across TWO review rounds, six of those
 blocking.** Nothing here was found by reading.
 
 | # | defect | found by |
 |---|---|---|
 | **#1** | the ledger append used the FILTERED grant list | the author's mutation sweep |
-| **#2** | two of `findRenewal`'s guards were untested — deleting either kept the suite green | review, blocking |
-| **#3** | a renewal could WIDEN the level or the hours a person approved | review, blocking |
-| **#4** | the renewal window restarted on every auto-renewal, so one approval never expired | review, blocking |
-| **#5** | F5's "not closable from this side" was never established — a `tool` node is neither a function nor a hook | review, blocking |
-| **#6** | F5's `codes` paragraph claimed a narrowing it does not do | review |
-| **#7** | a non-finite `hours` produced a denial the journal would not record | review |
+| **#2** | two of `findRenewal`'s guards were untested — deleting either kept the suite green | review 1, blocking |
+| **#3** | a renewal could WIDEN the level or the hours a person approved | review 1, blocking |
+| **#4** | the renewal window restarted on every auto-renewal, so one approval never expired | review 1, blocking |
+| **#5** | F5's "not closable from this side" was never established — a `tool` node is neither a function nor a hook | review 1, blocking |
+| **#6** | F5's `codes` paragraph claimed a narrowing it does not do | review 1 |
+| **#7** | a non-finite `hours` produced a denial the journal would not record | review 1 |
+| **#8** | **the defence built for #5 FAILS OPEN** — `chmod 333` on the parent directory reproduces the original F5 loss with it in place | review 2, blocking |
+| **#9** | §2 asserted an ordering it did not have: the tidy-up was moved "last" while §2's own clears had already killed the journal `$RUN` names | review 2, blocking |
+
+**#8 IS THE ONE TO CARRY, and it is the sharpest thing in this document.** Round 1 found that F5's
+"nothing can close this" was unestablished, and a defence was built and shipped with three limits
+written beside it. Round 2 found that **the defence has the same defect as the thing it defends
+against** — `fs.glob` answers `(no matches)` for "nothing here" and for "cannot see", so it answers
+its undecidable case with the passing value. The author had just spent a section explaining that
+lens about somebody else's code. **A workaround for a fail-open guard is a guard, and nobody
+audited it as one.**
+
+And #9 is the smaller twin of the same habit: round 1 *fixed* an ordering complaint by asserting a
+new ordering, without driving the page top to bottom to check the new one held.
 
 Plus six documentation corrections, each a claim measured and found false: F2's verb count, the
 census's `append_ordered` row and its "five of eight" reducers, "three arms" for a router with two
@@ -1379,9 +1484,8 @@ as what was asked for, which is the fixture that hid all three defects.
 
 **#5. "NOT CLOSABLE FROM THIS SIDE" was never established.** The sentence named `{function, hook}`
 as the whole of what an author has, and **a `tool` node is neither**. `fs.glob` — already used by
-`triage-failures` — lists a file `fs.read` cannot open. The defence is now built, measured, and
-pinned in both directions; F3 of §3 has it, and F5 keeps its PRODUCT status with the defence
-recorded as a cost with three named limits.
+`triage-failures` — lists a file `fs.read` cannot open. A defence was built and pinned in both
+directions. **See #8: it does not do what round one then claimed for it.**
 
 **#6. The `codes` paragraph claimed a narrowing that does not happen.** Re-measured in F5: a path the
 sandbox refuses carries `E_TOOL_SOURCE_UNAVAILABLE`, matches the shipped list, takes the arm, and
@@ -1403,6 +1507,63 @@ as `number null`, which reads as a field that is not there.
 
 ---
 
+### #8 · The defence built for #5 fails open the same way the gap does
+
+**This is the most useful entry in the document.**
+
+Round one closed #5 by building the `look` node and shipped it with three limits written beside it,
+in a section that had just explained `CLAUDE.md`'s lens — *a guard answering its undecidable case
+with the passing value* — about the runtime's error arm. **Round two pointed the same lens at the
+defence.**
+
+`ledgerOnDisk` is `listing !== "" && listing !== "(no matches)"`. `fs.glob` answers `(no matches)`
+for "there is nothing here" and for "I cannot see what is here", and nothing distinguishes them. So
+`chmod 333` on the parent directory reproduces the ORIGINAL F5 loss verbatim, with the defence in
+place: `look [ok]`, `read-ledger [error]`, `weigh [ok]`, exit 0, a prior grant destroyed. F5 in §3
+has the run and the four-pattern table.
+
+**Three things were done, and a fourth deliberately was not.**
+
+1. **One widening was tried** — `out/*`, `out/**`, `out` beside the literal. All four answer
+   `(no matches)` against an unlistable directory. `fs.glob` has no arm for "I could not enumerate",
+   so there is no signal to build on. **Nothing was invented to cover the gap.**
+2. **Every statement of the claim was narrowed to what was measured** — F5's limits, the graph's
+   `residue-blind-error-arm` label, `grant-weigh.js`'s own comment and `examples/README.md` §10 —
+   to *covers a regular file that is listable but unreadable*, with the three it does not cover
+   named: an unlistable parent, an escaping symlink, a directory at the path.
+3. **The hole is pinned NEGATIVELY**, asserting today's loss, and vacuity-checked (forcing the
+   defence always-on makes that test fail, so it is measuring the hazard and not the weather).
+4. **The defence was NOT deleted.** It covers a real case — the plain `chmod 222` that found F5 in
+   the first place — and removing it would trade a partial guard for none. What was wrong was the
+   claim around it, not its existence.
+
+**The transferable sentence: a workaround for a fail-open guard is itself a guard, and it needs the
+same audit.** Nobody gave this one that audit — including the author, in the paragraph where they
+were explaining the concept.
+
+**And round one's own third limit gave a FALSE mechanism**, which is #6's shape again one round
+later: it said the sandbox-escape case is missed because *"`look`'s pattern is a different
+literal"*. It is the same literal. The symlink case globs that exact path and still answers
+`(no matches)`. A correction that replaces a false claim with a differently-false one is worse than
+the original, and `CLAUDE.md` says so in as many words.
+
+---
+
+### #9 · A fix that asserted an ordering the page does not have
+
+Round one was told the tidy-up deleted the journal F2 and F3 then name. It moved the line to the end
+and wrote *"Tidy up — LAST, because `out/` holds the journal `$RUN` names"*. **That is still wrong**:
+§2's sweep clears `out/` and `.loom/` before EVERY row, deliberately, and the F5 block clears them
+again, so `$RUN` is dead well before the tidy-up either way. Driving §2 straight into §3 printed
+`E_RUN_NOT_FOUND`.
+
+The fix is not another ordering claim: **§3 now re-captures `$RUN` and `$GATE` with a pasted run of
+its own**, and the tidy-up paragraph says the journal is already gone instead of asserting a
+sequence. **The general form — do not fix an ordering complaint by asserting a different ordering;
+drive the page top to bottom and see.**
+
+---
+
 ### The mutation table — every guard deleted one at a time
 
 The only evidence that a guard's test tests THAT guard rather than its neighbours. Re-run on the
@@ -1410,21 +1571,27 @@ final tree; line numbers are the final file's.
 
 | mutation | result |
 |---|---|
-| *(baseline)* | **25 pass, 0 fail** |
-| `grant-record.js:59` — append `history.grants` instead of `history.ledger` | 24 / 1 — *the ledger ROUND-TRIPS* |
-| `grant-weigh.js:205` — delete the human-only guard | 24 / 1 — *BOUND 1* |
-| `grant-weigh.js:207` — delete the level guard | 24 / 1 — *BOUND 2a* |
-| `grant-weigh.js:209` — delete the hours guard | 24 / 1 — *BOUND 2b* |
-| `grant-weigh.js:211` — delete the window guard | 23 / **2** — *BOUND 1* and *BOUND 3* |
-| `grant-weigh.js:83-95` — delete F5's defence | 24 / 1 — *F5's DEFENCE* |
+| *(baseline)* | **26 pass, 0 fail** |
+| `grant-record.js:59` — append `history.grants` instead of `history.ledger` | 25 / 1 — *the ledger ROUND-TRIPS* |
+| `grant-weigh.js:217` — delete the human-only guard | 25 / 1 — *BOUND 1* |
+| `grant-weigh.js:219` — delete the level guard | 25 / 1 — *BOUND 2a* |
+| `grant-weigh.js:221` — delete the hours guard | 25 / 1 — *BOUND 2b* |
+| `grant-weigh.js:223` — delete the window guard | 24 / **2** — *BOUND 1* and *BOUND 3* |
+| `grant-weigh.js:95-107` — delete F5's defence | 25 / 1 — *F5's DEFENCE* |
+| `grant-weigh.js:94` — `ledgerOnDisk = true` (the defence always fires) | 11 / **15**, including the KNOWN HAZARD test |
 
 **The window guard takes TWO tests down and that is correct, not slack.** BOUND 3 by construction,
 and BOUND 1 because its ledger holds a human entry outside the window which only the window guard
 excludes. Every other mutation is caught by exactly the test written for it.
 
-**The table was first measured against the 22-test suite and RE-MEASURED here rather than adjusted**
-when three taxonomy tests landed. A count carried across a change is a count nobody ran, which is
-the same defect as #1 through #7 wearing an arithmetic costume.
+**The last row is a VACUITY check on the negative pin**, not a guard deletion. A test that asserts
+today's LOSS can pass by accident — it would go green against a workflow that had stopped working
+entirely — so the defence was forced ON and the hazard test is required to notice. It does.
+
+**The table has now been re-measured THREE times rather than adjusted**: against the 22-test suite,
+against 25 when the taxonomy tests landed, and here at 26 with the line numbers moved by F5's
+rewritten comment. A count carried across a change is a count nobody ran, which is the same defect
+as #1 through #7 wearing an arithmetic costume.
 
 ---
 
@@ -1440,11 +1607,21 @@ dispatched, and nothing on disk. Members: `not-a-request.txt`, `no-level.json`,
 
 ## 5 · What a further review round finds
 
-*Empty on purpose, and it is the SECOND time this heading has been empty. Round one turned up seven
-defects in this port's own work, four of them blocking, in a document whose author had already
-written that a builder's own green suite is not evidence — and then shipped a suite that stayed
-green through two deleted security guards. Assume this section is not empty because there is nothing
-left.*
+*Empty on purpose, and it is the THIRD time this heading has been empty.*
+
+*Round one turned up seven defects, four blocking, in a document whose author had already written
+that a builder's own green suite is not evidence — and then shipped a suite that stayed green
+through two deleted security guards.*
+
+***Round two turned up two more, both blocking, and one of them was in the FIX round one had just
+written*** *— a defence built to close a fail-open guard, which failed open itself, shipped with
+three limits beside it of which one gave a mechanism that was false. The author had explained that
+exact lens, in that exact section, about somebody else's code.*
+
+*The pattern across the two rounds is not "the author missed things". It is that **every round's own
+correction introduced a defect of the class it was correcting**, which is also what port 2's F14
+records across four rounds. Read this heading being empty as a fact about who has looked, and
+nothing else.*
 
 ---
 ## 6 · What is left open
@@ -1454,11 +1631,13 @@ left.*
   anybody writes is a body asserting the reason it was built to handle. This workflow now DEFENDS
   against its own instance with an `fs.glob` second opinion — that is a cost, not a closure, and
   F5 names three places the defence does not reach.
-- **The shipped graph carries five notes in its own `labels`** — `reads-as`, `residue-error-arm`
-  (F1), `residue-static-approvers` (F3), `residue-blind-error-arm` (F5, now carrying the defence
-  and its limits), `compiles-silent` and `compensation-fires-without-an-edge` — because each is
-  something a reader of the file needs and none has anywhere better to live while those rows are
-  open.
+- **The shipped graph carries SIX notes in its own `labels`** — `reads-as`, `residue-error-arm`
+  (F1), `residue-static-approvers` (F3), `compiles-silent`, `residue-blind-error-arm` (F5, carrying
+  the defence, the one case it covers and the three it does not) and
+  `compensation-fires-without-an-edge` — because each is something a reader of the file needs and
+  none has anywhere better to live while those rows are open. (The count said five and listed six.
+  `node -e` over `metadata.labels` says six. §4's own sentence about counts carried rather than
+  re-read applies to this document as readily as to its subject.)
 - **`policy.levels`' ARRAY ORDER is an undeclared privilege lattice.** `grant-weigh.js` ranks a
   level by its index, so that array is what says `read < write < admin`, and nothing validates it
   against anything. Reordering it to `["admin","read","write"]` does not reorder a list — it makes
@@ -1496,11 +1675,30 @@ left.*
   reason: the edge would have changed nothing. **Re-confirmed in review**, on a run whose
   `write-ledger` failed after `write-grant` landed: `md5` of `out/grant.json` identical before and
   after, `loom.tool (compensate) [ok]` in the trace.
+- **THE LEDGER IS A TRUST BOUNDARY AND THIS WORKFLOW DOES NOT DEFEND IT — stated as a premise, not
+  as a gap to be closed here.** Every renewal bound reads `decidedByKind`, `grantedAt`, `level` and
+  `hours` straight off `out/access-ledger.json`, so **anything that can write that file can forge
+  an approval**: a hand-written entry with `decidedByKind: "human"` and a fresh `grantedAt` buys an
+  `auto` grant with no person involved. The graph holds `fs:write` on `out/` by construction — it
+  is where it publishes — so the workflow cannot fence its own input, and no arrangement of the
+  published surface changes that. **The premise this ships under is that `out/` is as trusted as
+  `graphs/` and `resources/`**, which is the same premise `--extension-module`'s argv-only rule
+  protects one layer up: a path read out of a FILE must not decide who may approve. A deployment
+  that cannot make that assumption needs the ledger behind something the graph cannot write —
+  a store with its own authorisation, not a JSON file beside the output.
 - **The renewal bounds are a POLICY, and this workflow now states one.** No widening, and only a
   human decision starts a window — §4's #2–#4 record the alternatives. A real deployment might want
   a fourth bound this does not have: a ceiling on how many times one approval may be renewed at all,
   independent of the window. Nothing here measures whether the three are enough at scale.
-- **The suite is 25 tests and every GUARD in the workflow is mutation-checked; nothing else is.**
+- **A STRUCTURAL ALTERNATIVE TO F5's DEFENCE, not taken here and worth naming.** Every version of
+  this hazard is a REWRITE destroying what it could not read. A ledger written as one file per run
+  — `out/ledger/<runId>.json`, folded by `prior` — cannot lose an entry to a failed read, because
+  nothing is ever overwritten. It does not fix F5 (a blind arm still under-counts the history, so a
+  renewal would be re-reviewed) but it moves the failure from DATA LOSS to a spurious gate, which
+  is the failing-closed direction. It was not taken because it is a redesign of §2's whole
+  walkthrough at round two of three, and because the port's job here is to measure the product
+  rather than to engineer around it.
+- **The suite is 26 tests and every GUARD in the workflow is mutation-checked; nothing else is.**
   The mutation table covers `findRenewal`'s three bounds, the ledger append and F5's defence. The
   router arms, the taxonomy and the drift tests are pinned by assertion only, and a reviewer looking
   for the next gap should start by deleting something they cover and seeing whether anything goes

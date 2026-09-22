@@ -72,12 +72,24 @@
   // file `fs.read` cannot open (measured at `chmod 222`), so **listing non-empty AND history from
   // the error arm** is exactly the case the arm cannot distinguish and this can.
   //
-  // IT IS A NARROW DEFENCE AND NOT A CLOSURE OF F5, and the difference is worth stating: it works
-  // because this workflow's failing read has a PATH that another read-only tool can ask about. An
-  // error arm over `net.fetch`, `proc.exec` or a tool with no listable namespace has no second
-  // opinion available, and is still handed no reason. It also has a window: the file can appear or
-  // vanish between `look` and `read-ledger`, so a run that loses the race refuses where it should
-  // have proceeded — which is the failing-CLOSED direction and is why this shape is acceptable.
+  // THIS DEFENCE COVERS EXACTLY ONE CASE AND FAILS OPEN ON THE REST, which is the same shape as
+  // the hole it is standing in for, and saying so is the point of the comment.
+  //
+  //   COVERED: a regular file that is LISTABLE but not readable (`chmod 222` on the ledger).
+  //   NOT COVERED, each measured and each still losing the ledger in silence:
+  //     · an unlistable PARENT directory — `chmod 333 out` (pinned as a KNOWN HAZARD test);
+  //     · an escaping SYMLINK at the path — fs.glob skips it;
+  //     · a DIRECTORY at the path — fs.glob lists files.
+  //
+  // All three make fs.glob answer `(no matches)`, which is byte-identical to its answer for "there
+  // is nothing here" — so `ledgerOnDisk` is false and the run proceeds. Four patterns were tried
+  // (`out/access-ledger.json`, `out/*`, `out/**`, `out`) and none distinguishes "empty" from
+  // "cannot enumerate". **A guard that fails open is being guarded by a guard that fails open**;
+  // only a failure projection from the runtime closes it, which is why F5 stays a PRODUCT row.
+  //
+  // It also has a TOCTOU window: the file can appear or vanish between `look` and `read-ledger`.
+  // That race loses in the failing-CLOSED direction — a spurious refusal, never a spurious grant —
+  // which is the one part of this shape that is safe by construction.
   const listing = String(view.require("listing")).trim();
   const ledgerOnDisk = listing !== "" && listing !== "(no matches)";
   if (ledgerOnDisk && history.source === "none") {

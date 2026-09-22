@@ -991,3 +991,57 @@ test("every hostile request fails CLOSED — nothing reaches `record`, nothing r
     ws.dispose();
   }
 });
+
+test("KNOWN HAZARD (F5) — an UNLISTABLE parent directory defeats the `look` defence entirely", async () => {
+  const ws = workspace();
+  try {
+    // THIS TEST ASSERTS A LOSS, DELIBERATELY, so that the hole cannot stop existing in silence.
+    //
+    // `look` decides "is there a ledger" from `fs.glob`, and `fs.glob` answers `(no matches)` for
+    // BOTH "there is nothing here" and "I cannot see what is here". So the defence answers its own
+    // undecidable case with the passing value — the very shape of the F5 product gap it stands in
+    // for. A guard that fails open, guarding a guard that fails open.
+    //
+    // Four patterns were measured against a `chmod 333` directory and none distinguishes the two:
+    //   out/access-ledger.json → "(no matches)"      out/**  → "(no matches)"
+    //   out/*                  → "(no matches)"      out     → "(no matches)"
+    // The same `(no matches)` also hides an escaping symlink at the path and a directory at the
+    // path. The defence covers exactly ONE case: a regular file that is listable but unreadable.
+    //
+    // WHEN F5 IS CLOSED — an error arm handed its failure's code and message — this test should
+    // FAIL, and the right change is to delete it along with the `look` node, not to loosen it.
+    const first = await run(ws.dir, "docs-site-read.json");
+    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
+    const before = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
+    assert.deepEqual(before.grants.map((g) => g.who), ["u:sam"]);
+
+    // The ledger is unreadable AND its directory cannot be enumerated — but both are still
+    // WRITABLE, which is what makes this destructive rather than merely a failed run.
+    chmodSync(join(ws.dir, LEDGER), 0o222);
+    chmodSync(join(ws.dir, "out"), 0o333);
+    let second: { r: Result; s: Record<string, unknown> };
+    try {
+      second = await run(ws.dir, "docs-site-read-ravi.json");
+    } finally {
+      chmodSync(join(ws.dir, "out"), 0o755);
+      chmodSync(join(ws.dir, LEDGER), 0o644);
+    }
+
+    // THE LOSS, ASSERTED. Identical to the pre-defence F5 measurement: exit 0, the error arm's
+    // history reported as "none", and a prior grant destroyed.
+    assert.equal(second.r.code, 0, `${second.r.out}${second.r.err}`);
+    assert.equal(second.s["status"], "succeeded", "today it succeeds, and that is the finding");
+    assert.equal((outputs(second.s)["decision"] as Decision).historySource, "none");
+
+    // `look` RAN AND SUCCEEDED — it is not that the defence errored, it is that it was satisfied.
+    const counts = await taskCounts(ws.dir, String(second.s["runId"]));
+    assert.equal(counts["look"], 1, JSON.stringify(counts));
+    assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
+    assert.equal(counts["prior"], undefined, JSON.stringify(counts));
+
+    const after = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
+    assert.deepEqual(after.grants.map((g) => g.who), ["u:ravi"], "u:sam's grant is GONE — the hazard");
+  } finally {
+    ws.dispose();
+  }
+});

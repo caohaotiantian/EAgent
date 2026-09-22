@@ -636,15 +636,22 @@ a missing file, an unreadable file AND a path the sandbox refuses are all
 is there and I could not read it" — and undefended, `chmod 222 out/access-ledger.json` made the run
 report `succeeded` and REPLACE the ledger, destroying a prior grant.
 
-**The defence is a second tool asking the same question.** `fs.glob` lists a file `fs.read` cannot
-open, so the `look` node runs it over the ledger's path and `weigh` refuses when the listing is
-non-empty and the history came from the error arm. It is **narrow, not a closure**, and the three
-limits are the point: it works only because this failing read has a PATH another read-only tool can
-ask about (an arm over `net.fetch` or `proc.exec` has no second opinion); it has a TOCTOU window,
-which loses in the failing-CLOSED direction; and it answers "does the file exist", not "why did the
-read fail". F5 of `docs/workflow-port-2026-09-22b.md` has the measurements, and both directions are
-pinned in `packages/core/test/examples-grant.test.ts` — a defence that also fired on the ordinary
-first run would make the command's first use impossible.
+**The defence is a second tool asking the same question, and it covers ONE of the four ways this
+read can fail.** `fs.glob` lists a file `fs.read` cannot open, so the `look` node runs it over the
+ledger's path and `weigh` refuses when the listing is non-empty and the history came from the error
+arm. **Covered: a regular file that is listable but not readable.** Not covered, each measured and
+each still losing the ledger in silence — an unlistable parent directory (`chmod 333 out`), an
+escaping symlink at the path, and a directory at the path. All three make `fs.glob` answer
+`(no matches)`, which is its answer for "there is nothing here" as well, so **the defence answers
+its own undecidable case with the passing value exactly as the arm does**: a guard that fails open
+standing in for a guard that fails open. Four glob patterns were measured and none distinguishes
+"empty" from "cannot enumerate", so no arrangement of read-only tools closes this — only the product
+gap does. **It answers "does the file exist", not "why did the read fail".** Its one safe-by-
+construction property is that its TOCTOU window loses in the failing-CLOSED direction.
+F5 of `docs/workflow-port-2026-09-22b.md` has the four-pattern table;
+`packages/core/test/examples-grant.test.ts` pins the defence in both directions — a defence that
+also fired on the ordinary first run would make the command's first use impossible — **and pins the
+`chmod 333` hole NEGATIVELY, as a test asserting today's loss, so it cannot stop existing quietly.**
 
 **A renewal skips the person, so it is bounded three ways**, all in `grant-weigh.js`'s
 `findRenewal`, and each has its own test with a control: only a `decidedByKind: "human"` grant
