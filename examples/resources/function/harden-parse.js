@@ -19,9 +19,12 @@
  *    compliant".
  *
  * The parse is the ONLY place the loop's state is seeded, which is why it is its own node: `audit`
- * and `fix` both run many times and neither may reach for `source` again. `manifest` has exactly
- * two writers — this node once, and `fix` once per pass — and the second is what makes it
- * `replace` rather than an accumulator.
+ * runs once per pass and must never reach for `source` again. **`seed` therefore has exactly ONE
+ * writer, this node, and is never written again** — the manifest the loop works on is `current`,
+ * which `audit` derives by folding `applied` over this seed. That split is not tidiness: a channel
+ * written here AND by a node inside the loop is `GRAPH010_CONCURRENT_WRITE`, because the concurrency
+ * analysis drops `loop` edges and the loop body then has no ancestors at all (F2 of
+ * `docs/workflow-port-2026-09-22.md`).
  */
 function (view, ctx) {
   const source = String(view.require("source"));

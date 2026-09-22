@@ -16,11 +16,14 @@
  * only fire because an earlier fix landed, and a sweep that fixed everything at once would either
  * miss them or hide them inside one diff.
  *
- * THE LOOP'S BUDGET IS THE GRAPH'S, NOT THIS BODY'S. `len(applied) >= 12` is written on the `again`
- * edge's `until` and on the `done` edge's `when`, and nothing here duplicates it — this body cannot
- * read it either way, because `ctx.node.out` carries an edge's `maxWidth` and `maxIterations` but
- * not its `until` (F4). What it does instead is guarantee PROGRESS, so that a budget is never what
- * stops a converging run. Three refusals, one per way progress can stall:
+ * THE LOOP'S BUDGET IS THE GRAPH'S, NOT THIS BODY'S. `len(applied) >= 12` is written on the two
+ * `conditional` edges out of `audit` — `repair`'s `when` and `done`'s `when`, exact complements — and
+ * nothing here duplicates it. This body could not read it if it wanted to: `ctx.node.out` carries an
+ * edge's `maxWidth` and `maxIterations` and neither a loop's `until` nor a conditional's `when` (F6),
+ * and the `recheck` back-edge this node owns could not carry the budget anyway, because an `until`
+ * there reads this body's own one-element contribution to `applied` rather than the channel (F4).
+ * What this body does instead is guarantee PROGRESS, so that a budget is never what stops a
+ * converging run. Three refusals, one per way progress can stall:
  *
  *  - **Nothing to fix.** This node is only scheduled while the auditor said `settled: false`, which
  *    means at least one auto-fixable finding. Arriving with none is the graph and the auditor
