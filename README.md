@@ -174,12 +174,14 @@ a replay whose `match: false` is really about the graph.
 ## Examples that run
 
 [`examples/`](examples/) is a workspace, not a snippet dump: copy the directory, `cd` into it, and
-follow [`examples/README.md`](examples/README.md). Its §§1–4 and §8 work offline with no key; §§5–6
-have an `agent` node and want a real model, and §7 registers an adapter for one — that README's
-table says which is which. `packages/core/test/examples-run.test.ts` compiles every graph there on
-every `npm run check` and runs the three that need no model, so an example that stops working stops
-the build; §8 is compiled there and run by `packages/core/test/examples-triage.test.ts`, a separate
-file because it needs `reports/` in the workspace copy. Inside:
+follow [`examples/README.md`](examples/README.md). Its §§1–4 and §§8–10 work offline with no key;
+§§5–6 have an `agent` node and want a real model, and §7 registers an adapter for one — that
+README's table says which is which. `packages/core/test/examples-run.test.ts` compiles every graph
+there on every `npm run check` and runs the three that need no model, so an example that stops
+working stops the build; §§8, 9 and 10 are compiled there and RUN by
+`packages/core/test/examples-triage.test.ts`, `examples-harden.test.ts` and `examples-grant.test.ts`
+— a file each, because each needs a directory (`reports/`, `manifests/`, `access/`) that
+`examples-run.test.ts` deliberately does not copy. Inside:
 `graphs/fan-out-join.json` (fan-out → branch-ordered join, with a `loom replay` that comes back
 `{"match": true}`), `resources/function/*.js`, `resources/hook/no-secrets.js` (a `preTool` hook
 blocking a credential before it reaches the disk), `graphs/review-bench.json` (a benchmark whose
@@ -241,6 +243,13 @@ summary anybody could recognise.
 eight-entry friction log. **All eight are now closed** — its §0 "Closed since" head is the ledger
 and names a commit for each of the seven that closed after the doc was written, F6 having been
 fixed in the port lane itself.
+**Two more workflows have been ported since, the same way** — against the shipped binary, no fork,
+no `--extension-module`, nothing under `packages/core/src` changed by either lane:
+`graphs/harden-config.json` (§9), a bounded convergence loop, in
+[`docs/workflow-port-2026-09-22.md`](docs/workflow-port-2026-09-22.md); and
+`graphs/grant-access.json` (§10), a decision routed by how much human it needs, in
+[`docs/workflow-port-2026-09-22b.md`](docs/workflow-port-2026-09-22b.md). Each carries its own
+friction log, and those logs are where most of `TODO.md`'s product rows come from.
 
 Two rules that fail a first attempt. A `resources/function/*.js` or `resources/hook/*.js` file is a
 BARE FUNCTION EXPRESSION — the loader evaluates `(<the file>)`, so `module.exports = function (…)

@@ -20,29 +20,31 @@ away. `§Z` is the register of closures with the sha that carries each argument.
 
 ---
 
-## State — one command each, re-run 2026-09-22 on the settlement HEAD
+## State — one command each, re-run 2026-09-22b on the settlement HEAD
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **4,043 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 3,982 → 4,043) | `npm test` |
-| pinned exports | 542, **unmoved** — the 2026-09-22 wave added no exported name either: `EDGE_FIELDS` changed its TYPE and kept its name (`readBy` and the field tags are inline, so no type name is exported), `#joinArrivals`, `edgeFieldRefusal`, `TYPE_CHECKED_ELSEWHERE` and `describeWidth` are all module-private. **And that is the guard's blind spot, not its endorsement**: `EDGE_FIELDS` went from an ARRAY to a RECORD, which breaks an out-of-tree `.includes` reader at "unchanged" | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-22 wave's only kernel edits are `run/engine.ts` (`a8aa5584`, `7c39d99a`, `85675acc`, `ff72ffae`, `5ddaf71e`, `c966fad9`) and `graph/spec.ts` (`5f4fd61a`, `c9685caa`, `44221801`, `e890cc41`), all under `fix:`/`docs:` and owing no trailer. `graph/validate.ts`, where most of §A.62 landed, is on `kernel.json`'s `notKernel` list BY NAME, with a written reason. **LEDGER WATCH: `graph/spec.ts` gained ENFORCEMENT vocabulary under `fix:`** — a field's type is now a thing the compiler acts on — and neither guard can see that | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files, unmoved — the 2026-09-22 wave added no `src/` file either; of its 21 new files, FOUR are test suites, one is a doc, and the other sixteen are a graph, eleven manifest fixtures and four `function` bodies, all under `examples/` | `node scripts/check-zero-dep.mjs` |
-| NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8 — re-run because `docs/workflow-port-2026-09-22.md` QUOTES control characters, and it wrote none. The denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
+| tests on `loom` | **4,117 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,043 → 4,117) | `npm test` |
+| pinned exports | 542, **unmoved** — the 2026-09-22b wave added no exported name either, and this is the wave where the guard was SEEN working: the validate lane's first cut exported `BlockFieldType` and `check-surface.mjs` refused it (`added: BlockFieldType`), so the union is module-private now, derived inside `validate.ts` by an indexed-access type. `blockFieldTypes`, `readableLoopBound`, `computeDominators`, `flowAncestors` and `DomTree` are all module-private too. **LEDGER WATCH, and it is the same blind spot one table over**: `POLICY_FIELDS` and `NESTED_FIELDS` went from ARRAYS to RECORDS and kept their names, exactly as `EDGE_FIELDS` did last wave — and the break is worse in one direction, because an out-of-tree `.includes`/spread reader THROWS while a `.length` or indexed-loop reader fails SILENTLY, validating nothing | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-22b wave's only kernel edits are `graph/spec.ts` (`d1b452fe`, `83aa54bf`, `79cab047`) and `run/engine.ts` (`648cc9c6`, `78e64ce3`, `297d12e0`), all under `fix:` and owing no trailer. `graph/validate.ts`, where §A.79, §A.80, §A.84 and §A.81(a) landed, is on `kernel.json`'s `notKernel` list BY NAME, with a written reason. **LEDGER WATCH, carried forward and now true of a SECOND table: `graph/spec.ts` gained enforcement vocabulary under `fix:` again** — `POLICY_FIELDS`/`NESTED_FIELDS` now carry a type the compiler acts on, as `EDGE_FIELDS` did last wave — and neither guard can see that | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, 67 files, unmoved — the 2026-09-22b wave added no `src/` file either; of its 27 new files, SIX are test suites, one is a doc, and the other twenty are a graph, a policy, thirteen request fixtures and five `function` bodies, all under `examples/` | `node scripts/check-zero-dep.mjs` |
+| NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved — re-run because `docs/workflow-port-2026-09-22b.md` QUOTES control characters too, and it wrote none. The denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | 60 codes, unmoved — the 2026-09-22 wave added no code: §A.75's third arm reuses `E_QUORUM_UNREACHABLE`, §A.62's parse reuses `GRAPH003_MALFORMED` and the two counts' own codes, and the port added none because it changed no source | `Object.keys(CODES).length` |
+| error vocabulary | 60 codes, unmoved — the 2026-09-22b wave added no code either: §A.78 reuses `GRAPH004_EXPR` (and `E_EXPR_INVALID` at run time), §A.79 `GRAPH003_MALFORMED`, §A.80 `GRAPH003_UNKNOWN_EDGE_KIND`, §A.81(b) `E_GRAPH_INVALID`, §A.84 the four rule codes it made correct, and the port added none because it changed no source | `Object.keys(CODES).length` |
 | README's extensibility ledger | **18** and **3**, both unmoved | the two `sed … \| /usr/bin/grep -a -c` commands in `CLAUDE.md` §2 |
-| README's test floor | **3,500+**, unchanged; the probe counts **3,781** `test(` declarations across **357** files (3,720 / 353 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
+| README's test floor | **3,500+**, unchanged; the probe counts **3,855** `test(` declarations across **363** files (3,781 / 357 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
 
-The kernel guard also prints a commits-judged count (853 at the merge of the three lanes). It is
-deliberately not a cell above: it moves with every commit, this file's own included — rule 3.
+The kernel guard also prints a commits-judged count (879 at the merge of the three lanes; 853 one
+wave ago). It is deliberately not a cell above: it moves with every commit, this file's own
+included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
-per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-22 lanes are
-`7d23ec2b` (spec-a62), `c966fad9` (engine-a75-a76) and `f43d5a0f` (port-2), merged `--no-ff` in that
-order with zero conflicts.
-`docs/handoff-2026-09-22.md` is the current handoff; `docs/handoff-2026-09-19.md` is the one before it.
+per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-22b lanes are
+`0431ddcb` (validate-a84), `297d12e0` (bounds-a78-a81) and `9ee826a5` (port-3), merged `--no-ff` in
+that order (`452b7c9c`, `5af927ee`, `86a35a0a`) with zero conflicts — the EIGHTH wave running.
+`docs/handoff-2026-09-22b.md` is the current handoff; `docs/handoff-2026-09-22.md` is the one before
+it.
 
 ## Row census — three commands, run on this file
 
@@ -58,7 +60,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 83 | 56 | 27 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), and eight opened by the 2026-09-22 settlement (§A.77–§A.84). The 2026-09-22 wave closed THREE (§A.62, §A.75, §A.76) and opened EIGHT, so open went 22 → 27 — **a RISE, and the largest in this file's history** (the previous largest was 21 → 24; the last rise of any size was 22 → 23), **and that is what a port does**: three of the eight (§A.82, §A.83, §A.84) are the second workflow port's friction log, found by a stranger driving the shipped binary rather than by a reviewer reading source, and four more (§A.78–§A.81) are §A.62's residue, found by probing the field it was typing. Only §A.77 is a residue of a fix in the narrow sense |
+| §A | 93 | 61 | 32 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 9 | 5 | 4 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so |
@@ -1356,6 +1358,22 @@ row says so; §A.55 and §A.56 are PRE-EXISTING and were surfaced by the work be
   `check-surface.mjs` calls unchanged. Related: `EDGE_FIELDS` went from an ARRAY to a RECORD, so any
   out-of-tree reader doing `EDGE_FIELDS.includes(f)` breaks silently at the same "unchanged" —
   whether that is a shape break the project owes a policy on is on the owed list.
+  **NOTE ADDED 2026-09-22b: "closes at TWO" is now "closes at TWO, TWICE."** §A.81(b) added
+  `readableLoopBound` beside `readableFanoutWidth` in `run/engine.ts`, by this row's own argument —
+  the executor must not depend on having been the compiler's caller — so there are two hand-written
+  copies of one predicate, and the grep this row rests on reads **4 / 6** rather than 4 / 4:
+  ```
+  $ /usr/bin/grep -acE 'isPositiveInt|readableFanoutWidth' packages/core/src/graph/validate.ts packages/core/src/run/engine.ts
+  packages/core/src/graph/validate.ts:4
+  packages/core/src/run/engine.ts:6
+  ```
+  The two predicates are IDENTICAL today (`typeof === "number" && Number.isSafeInteger && >= 1`) and
+  are deliberately not folded, because each refusal has to say what ITS reader does with the value
+  and the two consequences differ: an unreadable width fans out zero branches, an unreadable bound
+  stops the loop after one pass and reports `succeeded`. **The only thing keeping them in step is a
+  paragraph** — `readableLoopBound`'s docstring, which says so and says *they must move together*.
+  A drift RISK, recorded so nobody discovers it, and not a defect: no row, because there is nothing
+  to fix until they disagree.
   **Residue, each its own row rather than carried here:** §A.78 (`when: [null]` OOMs the compiler),
   §A.79 (a `subgraph` block with no `inputs` crashes `rule016Subgraphs`), §A.80 (a subgraph child's
   edge `kind` is unchecked at compile, pinned negatively), §A.81 (`POLICY_FIELDS`/`NESTED_FIELDS`
@@ -1973,6 +1991,20 @@ the row says so.
   one engine; `#contextFor` may throw after a `#forgotten.delete`, at base extent. One door
   TIGHTENED as a side effect: a gate redelivered against a forgotten-and-retired child now answers
   `E_RUN_NOT_FOUND` where it answered `E_GATE_NOT_FOUND`.
+  **NOTE ADDED 2026-09-22b, because §A.81(b) gave the silent discard a COST it did not visibly
+  have.** `#assertBound` now refuses an unreadable `maxIterations` as well as an unreadable
+  `maxWidth` — and NEITHER check can ever see a graph attached to a run this process already holds,
+  because `#contextFor` returns the live context and the supplied graph is dropped on the floor.
+  Measured on the merged HEAD, one bent bound and one control that differs in a single step
+  (`node .agent/wave-2026-09-22b/probes/attach-discards.mjs "$PWD"`):
+  ```
+  attach on a run this process HOLDS  -> NO REFUSAL status=succeeded n=["s","x","x","x","x","x","x"]
+  attach after a RESTART (not held)   -> REFUSED E_GRAPH_INVALID
+  ```
+  The first line ran the GOOD bound — seven items, six iterations — so the bent graph reached
+  nothing at all. It is PRE-EXISTING and identical for `maxWidth`, and it is a note rather than a
+  row because closing it is the owed decision above (*should `attach` be honest*) and not a
+  separate defect.
 
 ### Opened by the 2026-09-22 settlement
 
@@ -1981,6 +2013,12 @@ the merged settlement HEAD** rather than taken from a lane report. Eight rows: o
 lane's residue, four are the spec lane's, and three come out of the second workflow port's friction
 log (`docs/workflow-port-2026-09-22.md`), which is where a product row belongs when a stranger met it
 rather than a reviewer.
+
+**FIVE of the eight closed in the very next wave** — §A.78, §A.79, §A.80, §A.81 and §A.84, struck
+below with their shas — which is the strongest argument this file has for writing a row with a
+repro in it: the rows a lane could pick up and close were the ones a stranger could run. The three
+still open are the two that need a DECISION about a channel's shape (§A.82, §A.83) and the one
+nobody took (§A.77).
 
 - **A.77 · A whole-count `k` above a STATIC, non-fan `branches` list compiles CLEAN and is refused
   only at the barrier, with every arm's writes already applied.** File:
@@ -2010,95 +2048,123 @@ rather than a reviewer.
   **Closes when** `validate.ts` refuses `k > branches.length` for a barrier whose every member is
   static and unfanned, with the two undecidable shapes named at the site and left alone.
 
-- **A.78 · `when: [null]` on any edge exhausts the compiler's heap instead of producing
-  `GRAPH004_EXPR`.** File: `packages/core/src/graph/expr.ts:73`, `lex`. `checkExpr` is handed the
-  edge's raw value — `compile`'s input is `JSON.parse` output that `cli.ts` casts, and
-  `TYPE_CHECKED_ELSEWHERE` defers `when`/`until` to `GRAPH004_EXPR` precisely because it refuses
-  every non-string. It does, for a number, a `null` and an object. It does not for an ARRAY, because
-  `lex` never returns: with `src = [null]`, `src.length` is 1 and `src[0]` is `null`, and
-  `null >= "0" && null <= "9"` is TRUE by numeric coercion, so the number branch is taken;
-  `/[0-9._eE+-]/.test(null)` is false so `j` stays at `i`; `src.slice(i, j)` on an ARRAY is `[]`,
-  `Number([])` is `0`, which is finite — so a `num` token is pushed, `i = j` makes no progress, and
-  `out` grows until the heap is gone. Repro, base `6fb2e618` and the merged HEAD alike:
+- ~~**A.78 · `when: [null]` on any edge exhausts the compiler's heap instead of producing
+  `GRAPH004_EXPR`.**~~ **CLOSED at `931f844f`, `34410c2c` (+ pins `78e64ce3`, `297d12e0`).** File:
+  `packages/core/src/graph/expr.ts`, `lex`. **TWO guards, and the row asked for the second**: a type
+  test (`E_EXPR_INVALID` → `GRAPH004_EXPR`, message
+  `expression must be a string, got <an array|an object|…>`) and a PROGRESS ASSERTION —
+  `i <= lastStart` on every iteration — because the defect is `i` not advancing and any future
+  branch that fails to advance it has the same shape. Placed in `lex` rather than in `checkExpr`
+  because `parseExpr` is the EXECUTOR's own entrance and a `RunGraph` reaches it without having
+  passed this build's compiler. Repro, re-run on the merged HEAD:
   ```
-  $ node --max-old-space-size=400 .agent/wave-2026-09-22/probes/probe-when-null-oom.ts
+  $ node --max-old-space-size=400 .agent/wave-2026-09-22b/probes/probe-when-null-oom.ts
   compiling with when: [null] …
-  FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory
-  $ node --max-old-space-size=300 .agent/wave-2026-09-22/probes/narrow-when-null.ts   # checkExpr alone
-  checkExpr([null]) …
-  FATAL ERROR: Ineffective mark-compacts near heap limit
+  returned: GRAPH004_EXPR
   ```
-  It is a DENIAL OF SERVICE on `loom compile`, reachable from a graph file: the process dies with no
-  diagnostic, no exit code an operator can act on and nothing naming the edge.
-  **Closes when** `lex` (or `checkExpr` above it) refuses a non-string `src` before the loop, so
-  `when: [null]` prints `GRAPH004_EXPR` like every other wrong-typed expression — and the guard is a
-  progress assertion rather than a type test, because the defect is `i` not advancing and any future
-  branch that fails to advance it has the same shape.
+  **THE BLOCKING FINDING THE FIRST CUT CARRIED: the assertion was `i === lastStart`, which is a
+  STALL test and not an ADVANCE test.** The reviewer injected a branch that moves `i` BACKWARDS
+  (`i = (i + op.length) % 2`) and the compiler OOMed again with the guard in place; `i <= lastStart`
+  is the fix, and the lane's own round-1 pin — a REGEX asserting the source reads `i === lastStart` —
+  would have forbidden the strengthening. **Pin the property, never the operator.**
+  **Both mutation pins run in a CHILD process**, 200 MB heap and a 30 s ceiling, because round 2
+  found that an in-process one under `i <` takes the test runner's whole heap: seven tests are
+  charged as one unnamed failure and the `finally` that removes the temp dir never runs.
+  Byte-identical `GRAPH004` text for every STRING expression; seven example graphs byte-identical.
+  **A deliberate TIGHTENING, recorded because it is not a fix:** a `String` object and a `String`
+  subclass PARSED at `be29cb43` and are refused now, and `["a"]`/`["1"]` moved from a parse error to
+  `GRAPH004_EXPR`. None of the three is reachable from a graph FILE — `JSON.parse` produces no
+  boxed string.
 
-- **A.79 · A `subgraph` block with no `inputs` crashes the compiler with a `TypeError`.** File:
-  `packages/core/src/graph/validate.ts:5094`, `rule016Subgraphs` — `Object.entries(sub.inputs)` with
-  nothing above it establishing that `inputs` is present. `SubgraphNode.inputs` is not optional in
-  the type, and `compile`'s input is a cast `JSON.parse`, so the author of a graph file decides
-  whether it exists. Repro on the merged HEAD,
-  `node .agent/wave-2026-09-22/probes/probe-subgraph-no-inputs.ts`:
+- ~~**A.79 · A `subgraph` block with no `inputs` crashes the compiler with a `TypeError`.**~~
+  **CLOSED at `7dd6029c` (+ `79cab047`).** File: `packages/core/src/graph/validate.ts`,
+  `rule016Subgraphs`. Every required sub-block the rule READS is now asked about before it is read —
+  `inputs`, `outputs`, the `subgraph` block itself, the child's `channels`, and the child spec's
+  shape — each answering `GRAPH003_MALFORMED` and NAMING the node, which is the half the row
+  insisted on (*"a single `?? {}` here closes one input and leaves its siblings"*). `namesUnder` was
+  made non-crashing with it, and a child's faults are re-tagged `in subgraph "…":` at the parent's
+  node coordinate, verified three levels deep. Repro on the merged HEAD:
   ```
-  THREW TypeError: Cannot convert undefined or null to object
-      at Object.entries (<anonymous>)
-      at rule016Subgraphs (packages/core/src/graph/validate.ts:5094:46)
-      at validateGraph (packages/core/src/graph/validate.ts:716:3)
-      at compile (packages/core/src/graph/compile.ts:342:60)
+  $ node .agent/wave-2026-09-22b/probes/probe-subgraph-no-inputs.ts
+  returned: GRAPH003_MALFORMED
   ```
-  Same family as §A.78 and as the 60 `CanonicalizationError` rows §A.62 closed: *a crash where a
-  diagnostic belonged*.
-  **Closes when** a missing or non-object `subgraph.inputs` is a diagnostic naming the node — and the
-  same question is asked of every other required sub-block `rule016Subgraphs` reads without
-  checking, because a single `?? {}` here closes one input and leaves its siblings.
+  **What made it a rule rather than an edit:** `<block>: null` crashed the compiler on ALL EIGHT
+  node types at `be29cb43`, not only on `subgraph`.
+  **THE BLOCKING FINDING THE FIRST CUT CARRIED: a child `channels: []` compiled CLEAN where the base
+  refused `GRAPH016`.** The new "is this an object" question answered `[]` with *malformed, carry
+  on*, and the parent then read the child as declaring channels it does not have — a guard that made
+  an ALREADY-REFUSED graph quieter, which is the fail-open direction. Fixed in two places: the
+  child's own `checkStructure` refuses an ARRAY, and the parent treats a non-object as *declares no
+  channels*. The lane's suite was green over it.
 
-- **A.80 · A subgraph CHILD's edge `kind` is unchecked at compile, so `kind: 42` inside a child
-  spec compiles clean.** File: `packages/core/src/graph/compile.ts`, `unknownEdgeKinds`, against
-  `rule016Subgraphs` in `validate.ts`. `unknownEdgeKinds` lives in `compile.ts` and runs on the
-  TOP-LEVEL spec only; `rule016Subgraphs` recurses `validateGraph`, which does not include it. So the
-  one refusal that is total over `kind` — the reason `TYPE_CHECKED_ELSEWHERE` defers it — does not
-  reach a child. Repro on the merged HEAD,
-  `node .agent/wave-2026-09-22/probes/probe-subgraph-kind.ts`:
+- ~~**A.80 · A subgraph CHILD's edge `kind` is unchecked at compile, so `kind: 42` inside a child
+  spec compiles clean.**~~ **CLOSED at `5a0d1637` (+ `0431ddcb`).** `EDGE_KINDS` and the kind check
+  moved out of `compile.ts`'s `unknownEdgeKinds` into `checkStructure` beside `GRAPH020` — the
+  relocation `unknownEdgeKinds`' own docstring proposed — so it reaches a child at ANY depth, and
+  the negative pin in `test/graph/edge-field-types.test.ts` flipped positive. Repro on the merged
+  HEAD:
   ```
+  $ node .agent/wave-2026-09-22b/probes/probe-subgraph-kind.ts
   compile(parent), child edge has kind: 42 AND maxWidth: "24"
-    ok: false  errors: GRAPH007_BAD_MAX_WIDTH      ← §A.62's new parse check DOES recurse
-  validateGraph ALONE, kind: 42 on a top-level edge (no compile pre-pass)
-    errors: (none)                                 ← and nothing in validateGraph covers `kind`
-  ```
-  PRE-EXISTING, and pinned NEGATIVELY in `packages/core/test/graph/edge-field-types.test.ts` so it
-  cannot stop existing in silence. Consequence: the executor's own `EDGE_KINDS` check is what
-  eventually meets it, at run time, in a child.
-  **Closes when** the kind check sits beside `GRAPH020_UNKNOWN_FIELD` inside `validateGraph`, which
-  is the relocation `unknownEdgeKinds`' own docstring proposes (*"the rule belongs beside GRAPH020 and
-  moving it there is a pure relocation"*) — and it is `compile.ts`'s to make, not `validate.ts`'s.
+    ok: false  errors: GRAPH003_UNKNOWN_EDGE_KIND, GRAPH007_BAD_MAX_WIDTH
 
-- **A.81 · `POLICY_FIELDS` and `NESTED_FIELDS` are still NAME-only, and `maxIterations` has no
-  executor copy — so a loop bound this build cannot read stops the loop after one pass in silence.**
-  *(§A.62 one scope in, plus its asymmetry in the executor.)* Files:
-  `packages/core/src/graph/spec.ts` (`POLICY_FIELDS`, `NESTED_FIELDS`) and
-  `packages/core/src/run/engine.ts` (`#assertBound` against `#loopMayContinue`). Two halves of one
-  shape. (a) `policy.expansion`'s four bounds are hand-checked at `validate.ts` exactly as the two
-  edge counts were before §A.62 — which is why `isPositiveInt` survives there at all. (b)
-  `#assertBound` re-checks an unreadable `maxWidth` through `readableFanoutWidth`, with a written
-  reason (*"an unreadable one fans out zero branches in silence"*), and there is NO equivalent for
-  `maxIterations`: `#loopMayContinue` is `w.task.iteration + 1 < (e.maxIterations ?? 1)`, a raw
-  comparison. A `RunGraph` reaching `attach` without this build's compiler therefore carries the
-  bound straight in. Repro on the merged HEAD, one compiled loop graph with the bound mutated on the
-  RunGraph (`node .agent/wave-2026-09-22/probes/probe-maxiter-executor.mjs`):
+  validateGraph ALONE, kind: 42 on a top-level edge (no compile pre-pass)
+    errors: GRAPH003_UNKNOWN_EDGE_KIND
   ```
+  **The message TEXT is byte-identical and its POSITION is not**, and both are disclosed at the
+  site: `GRAPH020_UNKNOWN_FIELD` now precedes `GRAPH003_UNKNOWN_EDGE_KIND` on a graph drawing both,
+  and the refusal is LOST behind an earlier fatal on a graph that has one. It stays non-fatal.
+  **`renderKind` was made total** on the way past — a `bigint`, a circular object, a throwing
+  `toJSON` and a `Proxy` all render, and the test's `KIND_STILL_THROWS` set is now EMPTY OF VALUES.
+  **NOTE, not a row:** a throwing ACCESSOR on the edge object still throws at the property read,
+  before any renderer sees the value, and that is base extent — `ok=true` → throw is what the
+  executor does with such an object anyway.
+  **The finding the third round carried:** the `typeof` test has to come BEFORE `Object.hasOwn`,
+  because a key that coerces (`[Symbol()]`) throws at the membership test. Pinned at `0431ddcb`,
+  red on revert.
+
+- ~~**A.81 · `POLICY_FIELDS` and `NESTED_FIELDS` are still NAME-only, and `maxIterations` has no
+  executor copy — so a loop bound this build cannot read stops the loop after one pass in
+  silence.**~~ **CLOSED WHOLE, one half per lane: (a) `d1b452fe`, `83aa54bf` (validate) and (b)
+  `648cc9c6`, `78e64ce3` (bounds).**
+  **(a)** `POLICY_FIELDS`/`NESTED_FIELDS` carry a type per field (`BlockFieldType`), one
+  `blockFieldTypes` pass wired at 15 call sites enforces it, and **21 fields newly refuse a wrong
+  type with NO in-tree graph tightened**. `BlockFieldType` is MODULE-PRIVATE: round 1 exported it
+  and `check-surface.mjs` refused (`added: BlockFieldType`), so it is derived inside `validate.ts`
+  by an indexed-access type, with exhaustiveness proved by deleting an arm (TS2741).
+  `CHECKED_BY_A_RULE` names the 36 fields a rule owns; `metadata.version` and `channel.initial` are
+  tagged `unknown` ON PURPOSE (§A.87, §A.88); `policy.expansion` keeps `isPositiveInt`, because a
+  `count` tag would refuse LESS than the existing bound does. **The cost, disclosed at the site:**
+  `policy.capabilities`' refusal is FATAL, so `GRAPH011_UNHANDLED_IRREVERSIBLE` is suppressed on a
+  `k8s.apply` node in the same graph — the base crashes this closes reproduce only on a graph that
+  reaches the capability check.
+  **(b)** `readableLoopBound` sits beside `readableFanoutWidth` and `#assertBound` gained a THIRD
+  vocabulary check, under `E_GRAPH_INVALID`, so it joins `#failUnreadableGraph` by code. Repro on
+  the merged HEAD — the probe the row opened with, unchanged:
+  ```
+  $ node .agent/wave-2026-09-22b/probes/probe-maxiter-executor.mjs
   maxIterations=6     advance=status=succeeded n=["s","x","x","x","x","x","x"]
-  maxIterations="6"   advance=status=succeeded n=["s","x","x","x","x","x","x"]
-  maxIterations={}    advance=status=succeeded n=["s","x"]
+  maxIterations="6"   advance=REFUSED E_GRAPH_INVALID: … has a loop edge whose maxIterations this
+                      build cannot read: "e2" (maxIterations "6") …
+  maxIterations={}    advance=REFUSED E_GRAPH_INVALID: … (maxIterations an object) …
   ```
-  `{}` makes the comparison `NaN`, so the loop stops after ONE pass, the conditional exit never fires,
-  and the run reports **`succeeded`** having done a seventh of its work — the same failure mode
-  `readableFanoutWidth` exists to refuse, one edge kind over, and it fails OPEN.
-  **Closes when** `POLICY_FIELDS`/`NESTED_FIELDS` carry a type the way `EDGE_FIELDS` now does, AND
-  `#assertBound` refuses an unreadable `maxIterations` on a `loop` edge with the message
-  `readableFanoutWidth`'s already has. Either half alone leaves the other; the executor half is the
-  one that costs a live run.
+  The numeric string `"6"` is refused too — the compiler already refuses it — and so is a restart.
+  The message names what the bound is compared against and what an unreadable one does: *stops the
+  loop after one pass whatever bound was declared, and reports the run succeeded*. `maxIterations`
+  has **TWO readers, not one**: `#loopMayContinue`, and `nodeShapeOf`, which copies it onto
+  `ctx.node.out` for every function body.
+  **THE BLOCKING FINDING THE FIRST CUT CARRIED: two enumerations still said TWO checks.**
+  `engine.ts`'s `#assertBound` docstring and `advance-refusal-is-journaled.test.ts`'s FAULTS census
+  each list the vocabulary checks BY NAME, and neither had gained the third — a census whose whole
+  job is to be total, silently short. Fixed: three named, FAULTS has a third member, and disabling
+  the check now reds 5 of 6.
+  **§A.66's executed-run arm is pinned as CORRECT for `maxIterations`** — refused on every
+  `advance`, NO terminal row, and an honest graph recovers the run — and is deliberately left
+  UNPINNED for `maxWidth`.
+  **Residue, recorded rather than carried:** `readableFanoutWidth` and `readableLoopBound` are one
+  rule under two names, held in step by a docstring alone — the note is on §A.62's row, where the
+  "closes at TWO" argument created the second copy. And a `RunGraph` handed to `attach` on a run
+  THIS PROCESS ALREADY HOLDS never reaches `#assertBound` at all — see the note on §A.76.
 
 - **A.82 · The runtime's key-name redactor is narrower than a reasonable auditor's, and nothing
   warns that the two disagree.** *(From the second port's F13 — `docs/workflow-port-2026-09-22.md`.)*
@@ -2164,41 +2230,326 @@ rather than a reviewer.
   when the cap is hit and the caller did not ask for truncation. Either is a change to what a `tool`
   node puts in a channel, so it needs a decision about that shape and not just an edit here.
 
-- **A.84 · A `loop` edge is an edge to the scheduler and not to the compiler, so every DAG analysis
-  is wrong about a graph with one in it.** *(From the second port's F2, F3 and F7 — one mechanism,
-  three symptoms, four of the five round trips it took to get the second port's graph to run.)*
-  File: `packages/core/src/graph/validate.ts:364` —
-  `const dagEdges = spec.edges.filter((e) => e.kind !== "loop" && e.kind !== "compensation")` — and
-  every analysis over `dagEdges`: entry nodes, terminal nodes, `ancestors`, concurrency,
-  producer-before-consumer. `run/engine.ts` then schedules the back-edge. Repro on the merged HEAD,
-  the canonical loop shape and then the diagnostic's own first `fix:`
-  (`node .agent/wave-2026-09-22/probes/probe-loop-invisible.mjs`):
+- ~~**A.84 · A `loop` edge is an edge to the scheduler and not to the compiler, so every DAG
+  analysis is wrong about a graph with one in it.**~~ **CLOSED at `731eca44`, `79cab047`
+  (+ `0431ddcb`).** The row demanded that the SET of analyses be named first, and it is, at the
+  site: of `dagEdges`' readers, `topoOrder`, `rule006Cycles`, the fan-out stacks, the critical path,
+  `ancestors` and `wouldCycle` are RIGHT to drop the back-edge; entry nodes, terminal nodes,
+  `GRAPH005`, `GRAPH010` and `GRAPH002` were WRONG. What shipped:
+  - `flowEdges` — every edge but `compensation`, the same predicate `graph/mutate.ts`'s
+    `traversable` already uses.
+  - `flowAncestors` — a Tarjan condensation, full closure — read through `canPrecede` by
+    `GRAPH005_UNPRODUCED_READ` and by `GRAPH002_DEAD_END`.
+  - `GRAPH010_CONCURRENT_WRITE` rests on **DOMINANCE** (`GraphIndex.dominators`, a
+    Cooper–Harvey–Kennedy idom tree over `flowEdges` from a virtual root above the entry set):
+    `ordered = ancestors either way ∨ dominates either way`.
+  - `entryNodes`' loop exception is now CONDITIONAL: a node whose only inbound edge is a `loop` is
+    an entry only if no ROOT reaches it over `flowEdges`, and the root test reads `spec.edges`, so a
+    compensation target is still not an entry.
+  - `terminalNodes` is UNCHANGED from base, and `ancestors`/`dagEdges`/`wouldCycle` are untouched,
+    so §A.73's coupling survives BY CONSTRUCTION rather than by care.
+  Repro on the merged HEAD, the row's own probe:
   ```
-  compile: REFUSED
-    warning GRAPH005_UNPRODUCED_READ: node "fix" reads "findings", which no upstream node writes …
-    error   GRAPH010_CONCURRENT_WRITE: nodes "parse" and "fix" can run concurrently and both write
-            "manifest", whose reducer `replace` is not multi-writer safe
+  $ node .agent/wave-2026-09-22b/probes/probe-loop-invisible.mjs
+  compile: ok
 
   same graph, merge_object (the diagnostic's own first fix:) -> compile: ok
-    run status=succeeded  node order=["parse","fix","audit","fix","audit","fix","audit"]
-    "fix" ran at t=0 beside "parse": true
+    run status=succeeded  node order=["parse","audit","fix","audit","fix","audit","fix","audit"]
+    "fix" ran at t=0 beside "parse": false
   ```
-  `parse` and `fix` CANNOT run concurrently — every path to `fix` goes through `audit`, whose only
-  non-loop inbound edge comes from `parse` — and `applied` IS written upstream of both its readers,
-  over a `loop` edge. **Both `fix:` routes GRAPH010 offers end at the third symptom**: the reducer
-  swap compiles and then runs the fixer at t=0 (the loop's target has no non-loop inbound edge, so it
-  is an ENTRY node), and *sequence `parse` and `fix`* means adding a non-loop edge between them,
-  which is the same graph. The warnings are printed on **every command**, on a correct graph, and
-  each is wrong about the reason and right about a hazard.
-  **It drops `compensation` too**, with a written reason for that kind, and the entry-node list
-  deliberately differs from `dagEdges` — so this is not one filter to widen. **And `rule021`'s
-  `wouldCycle` depends on this exclusion list matching `ancestors`' one**, four of its ten message
-  arms turning on it (§A.73), so a change here is a change there.
-  **Closes when** the analyses that are wrong on a back-edge read a graph that has it: ancestry and
-  concurrency over the FULL edge set with cycles handled, producer-before-consumer over the same, and
-  entry/terminal staying where they are for the reasons already written at the site. The set of
-  analyses is what needs naming first — this row is not "include loop edges in `dagEdges`", which
-  makes almost every looping graph look cyclic.
+  `examples/graphs/harden-config.json` compiles with **ZERO** warnings, three at base and all three
+  this row — and that is **the ONLY change across the seven shipped graphs' `loom compile` output**.
+  **THE BLOCKING FINDING THE FIRST CUT CARRIED, and it is this wave's sharpest.** The first cut gave
+  `GRAPH010` a `flowOrder` relation — `flowEdges` with its cycles cut by a depth-first walk — which
+  MANUFACTURES orderings that are true from pass two and false on pass one. On `siblings.json`
+  (`start → summarize`, `start → scan → fix`, `fix -loop→ summarize`) it compiled CLEAN where base
+  refused, while the UNCHANGED executor runs `summarize` and `fix` in one pass: a real race the
+  compiler had stopped reporting. It was also declaration-order dependent — 495–527 of 8,000
+  permutation seeds flipped, against 0 at base. **The docstring that shipped with it was the
+  defect** — *"the cut can only withhold a refusal it was already free to withhold"* — and a
+  permutation fuzz found it in one run. It is QUOTED at `computeDominators` rather than deleted.
+  **A second blocking finding, same round:** moving `terminalNodes` emptied it on every looping
+  graph, so `GRAPH002` went dead. Reverted to base; `rule002` now asks *dead iff no output writer in
+  `flowAncestors(t) ∪ reach(t)`*.
+  **What the final review measured**, from a `git archive` extract: a dominance ORACLE over 435,916
+  pairs across 12,071 graphs (3,071 multi-entry) with **0 mismatches**; permutation flips
+  **0 of 8,000**; **no graph that compiled at `be29cb43` is refused at HEAD**, over 12,000 random
+  graphs; loop-free acyclic graphs bit-identical. The reviewer WITHDREW its own round-1 claim that
+  an empty terminal set broke `loom exam attest` — `examShape` is the same at base and head, a
+  grader being a leaf. Recording the withdrawal is the point: a reviewer's finding is a claim too.
+  **The cost, measured and recorded at `computeDominators`:** the growth exponent is untouched at
+  n^0.99, and the 500-node compile constant went 21 → 54 → 39 ms, the last after a
+  `writersByChannel` precompute.
+  Residue → **§A.86** (`rule002`'s `reach(t)` half is reachability the run may never realise) and
+  **§A.89** (one relation, two implementations).
+
+### Opened by the 2026-09-22b settlement
+
+Found while building or reviewing the seventh wave — three lanes again — and **every row below was
+RE-RUN on the merged settlement HEAD**, not taken from a lane report. Ten rows: five are residue of
+the four compiler rows this wave closed, four come out of the THIRD workflow port's friction log
+(`docs/workflow-port-2026-09-22b.md`), and one is a product row a port found that has a closed
+ancestor. The probes are in `.agent/wave-2026-09-22b/probes/` (gitignored), copied out of the lane
+worktrees and the reviewers' extracts and re-pointed at this checkout.
+
+**§A.90 is the one to read first.** It is the only row in this file that ends in destroyed data with
+exit code 0.
+
+- **A.85 · A `RunGraph` whose `when`, `until` or router-case `when` is not a string is refused at
+  RUN time, mid-`#commit`, and the run is left `running` with NO terminal row.** *(§A.78's residue —
+  the refusal it created is correct and arrives in the wrong place.)* Files:
+  `packages/core/src/graph/expr.ts` (`lex`, the new type test) and
+  `packages/core/src/run/engine.ts` (`#assertBound`, which does not ask this question). `#expr` has
+  THREE call sites — `router.cases[].when` on the NODE, `e.until` and `e.when` on an EDGE — and
+  `graph/validate.ts` checks all three at compile, so this is only reachable through a `RunGraph`
+  that did not come from this build's compiler, which is exactly what `attach` accepts. Repro on the
+  merged HEAD, `node .agent/wave-2026-09-22b/probes/a85-expr-runtime.mjs "$PWD"`:
+  ```
+  conditional when: [null]
+    1st advance: THREW E_EXPR_INVALID: expression must be a string, got an array
+    2nd advance: status=running
+    terminal rows: run.failed=0 run.succeeded=0 | last row: effect.completed
+  loop until: [null]
+    1st advance: THREW E_EXPR_INVALID: expression must be a string, got an array
+    2nd advance: status=running
+    terminal rows: run.failed=0 run.succeeded=0 | last row: effect.completed
+  ```
+  **PRE-EXISTING and now merely typed**: at `be29cb43` the array case OOMed (§A.78) and `null` threw
+  a bare `TypeError`; it is a `LoomError` now, which is better and is not placement. The cost is the
+  one `#assertBound` exists to prevent: work already committed, a run an operator cannot tell from a
+  live one, and a second `advance` that answers `running` rather than naming the fault. The tree
+  says this at `#failUnreadableGraph`.
+  **Closes when** `#assertBound` gains a FOURTH vocabulary check over EDGES AND ROUTER CASES — an
+  edge-only check would be partial, which is why the bounds lane declined to write one — and it
+  joins the `FAULTS` census in `advance-refusal-is-journaled.test.ts` with the other three.
+
+- **A.86 · `rule002`'s `reach(t)` half is reachability the run may never REALISE, so `GRAPH002` went
+  silent on a graph the base warned about.** *(§A.84's residue, at WARNING level.)* File:
+  `packages/core/src/graph/validate.ts`, `rule002DeadEnds` — dead iff no output writer in
+  `flowAncestors(t) ∪ reach(t)`. `reach(t)` walks `flowEdges` and reads neither a loop's
+  `maxIterations` nor a `conditional`'s `when`, so a writer behind a never-true condition after a
+  back-edge that can only fire once is counted as reached. Repro on the merged HEAD, the same file
+  against both compilers:
+  ```
+  $ node .agent/wave-2026-09-22b/probes/compile-file.mjs "$PWD" \
+      .agent/wave-2026-09-22b/probes/R1_unreachable_pass_writer.json
+  ok: true
+    (no diagnostics)
+  $ node .agent/wave-2026-09-22b/probes/compile-file.mjs <be29cb43 extract> \
+      .agent/wave-2026-09-22b/probes/R1_unreachable_pass_writer.json
+  ok: true
+    warning GRAPH002_DEAD_END: terminal node "t" ends a path on which no declared output is ever written
+  ```
+  The graph is a loop with `maxIterations: 1` whose only output writer sits behind
+  `when: "len(a) >= 500"` after the back-edge. **This is an over-approximation in the QUIET
+  direction and it is deliberate**: §A.84 traded a rule that was wrong about every looping graph for
+  one that is right about the reachable set and generous about the realisable one. It is a warning,
+  not an error, and nothing this file knows of depends on it firing.
+  **Closes when** *reachability the run can realise* is a thing the compiler computes — which needs
+  the loop bound and the edge condition, i.e. exactly the two facts a static analysis cannot have in
+  general — or when the row is closed with an ARGUMENT that a warning may over-approximate and the
+  argument is written at `rule002DeadEnds`. **The second is probably the right answer**; it is a row
+  so that somebody decides rather than discovers.
+
+- **A.87 · `GraphMetadata.version` is declared `number` and an IN-TREE fixture writes `"1.0.0"` and
+  runs.** File: `packages/core/src/graph/spec.ts:629` (the type) against `:1144` (the tag), and
+  `packages/core/test/cli/guards-lane-extension-engine-seams.test.ts:90` (the fixture). §A.81(a)
+  tagged the field `unknown` rather than `number`, and said why in place: tagging it `number`
+  refuses a graph that compiles and RUNS today, and *"a guard that cries wolf on correct code is
+  worse than no guard"*. Nothing reads it as a number — `cli.ts`'s only reader is
+  `String(g.spec.metadata.version)` in a display line. Repro is the disagreement itself:
+  ```
+  $ /usr/bin/grep -an 'readonly version: number' packages/core/src/graph/spec.ts
+  629:  readonly version: number;
+  $ /usr/bin/grep -an 'version: "1.0.0"' packages/core/test/cli/guards-lane-extension-engine-seams.test.ts
+  90:  metadata: { name: "stamp", version: "1.0.0" },
+  ```
+  **Closes when** somebody decides which it is — a number or a version STRING — and the loser
+  changes. It is one edit to `GraphMetadata`, one to that fixture, and one tag; it is on the owed
+  list because the decision is a product decision and not a typing one.
+
+- **A.88 · `contextProjection.take: null` compiles clean, because the rule that owns the field reads
+  `null` as ABSENT.** File: `packages/core/src/graph/validate.ts`, `checkProjectionValues` —
+  `take !== undefined && take !== null && …`. `take` is on `CHECKED_BY_A_RULE`, so §A.81(a)'s pass
+  defers to that rule, and the rule drops `null` silently where it refuses `"banana"`, `["x"]`,
+  `{a:1}` and `true` with `GRAPH003_MALFORMED`. **Pinned POSITIVELY as `STILL_ACCEPTED`** in
+  `packages/core/test/graph/block-field-types.test.ts:195`, a one-member set asserting today's
+  acceptance, so it cannot stop existing in silence:
+  ```
+  $ /usr/bin/grep -an 'STILL_ACCEPTED' packages/core/test/graph/block-field-types.test.ts
+  195:const STILL_ACCEPTED: ReadonlySet<string> = new Set(["contextProjection.take:null"]);
+  ```
+  Taking `take` off the opt-out list closes this one value and gives the other four TWO diagnostics
+  for one mistake, which is the trade `CHECKED_BY_A_RULE` exists to refuse.
+  **Closes when** `checkProjectionValues` refuses an explicit `null` where it refuses the other four
+  — one line in that rule, and the pin above goes red when it lands, which is the signal to delete
+  the row and the set member together.
+
+- **A.89 · One dominance relation, two implementations, in two files.** Files:
+  `packages/core/src/graph/validate.ts` (`computeDominators`, a Cooper–Harvey–Kennedy idom TREE,
+  built on every `loom compile`) and `packages/core/src/graph/mutate.ts:327` (`dominators`, V bitset
+  rows of V bits, built on a proposed mutation). Both are the same relation over the same edge set
+  (`flowEdges` there, `traversable(spec)` here — the same predicate) and they are asked different
+  questions, which is why each cost is right where it is: a quadratic is affordable on a mutation
+  and not on every compile. **Named at the site rather than hidden**, which is the only reason this
+  is a row and not a defect:
+  ```
+  $ /usr/bin/grep -an 'THE TWO ARE THE SAME RELATION AND ARE NOT SHARED' packages/core/src/graph/validate.ts
+  607:   * per node and answers by walking the chain. THE TWO ARE THE SAME RELATION AND ARE NOT SHARED,
+  ```
+  **Closes when** one of them is the other's caller, or when a written argument says they must stay
+  apart and what keeps them in agreement. It needs `mutate.ts`, which the lane that built the second
+  one did not own.
+
+- **A.90 · An `error` arm is handed no reason, so a workflow rebuilds its own record from an empty
+  history and exits 0 — SILENT DATA LOSS.** *(From the third port's F5 —
+  `docs/workflow-port-2026-09-22b.md`. **The priority row of this settlement.**)* Files:
+  `packages/core/src/builtin/tools.ts` (one `try` around the open, returning
+  `{content: "cannot read …", isError: true}`) and `packages/core/src/run/engine.ts:8462`, which
+  turns any `isError` without a typed error into
+  `err.unavailable(CODES.E_TOOL_SOURCE_UNAVAILABLE, result.content)`. **Three different outcomes —
+  the file is absent, the file is there and unreadable, the path is one the sandbox refuses — are
+  ONE code**, so `codes: ["E_TOOL_SOURCE_UNAVAILABLE"]` on the arm narrows none of them apart; and
+  the `content` that WOULD distinguish them reaches no channel, because a failed task's writes are
+  not applied and there is no `error` projection an arm may declare in `reads`. Repro on the merged
+  HEAD, on the SHIPPED graph with its defence in place, `chmod 333` on the output directory:
+  ```
+  $ cd examples && rm -rf out .loom
+  $ loom run graphs/grant-access.json --input '{"requestPath":"access/requests/docs-site-read.json"}' >/dev/null 2>&1
+  $ jq -c '[.grants[].who]' out/access-ledger.json
+  ["u:sam"]
+  $ chmod 222 out/access-ledger.json && chmod 333 out
+  $ loom run graphs/grant-access.json --input '{"requestPath":"access/requests/docs-site-read-ravi.json"}' 2>/dev/null \
+      | jq -c '{status, historySource: .outputs.decision.historySource}'
+  {"status":"succeeded","historySource":"none"}
+  $ chmod 755 out; chmod 644 out/access-ledger.json; jq -c '[.grants[].who]' out/access-ledger.json
+  ["u:ravi"]
+  ```
+  `u:sam`'s grant is gone, the run exited 0, and nothing said a word. **The general form is
+  `CLAUDE.md`'s own lens one layer down:** an error arm's undecidable case is *why*, its passing
+  value is *the benign reason it was written for*, and every error arm anybody writes is a body
+  asserting the reason it was built to handle.
+  **The port's defence is itself a fail-open guard, and that is the part that transfers.** An
+  `fs.glob` `look` node upstream of the read covers EXACTLY ONE case — a regular file that is
+  LISTABLE but not readable, where the run now fails closed and the ledger survives (measured) —
+  and `fs.glob` answers `(no matches)` for *nothing here* AND for *cannot enumerate*, so the
+  workaround for a guard that answers its undecidable case with the passing value does the same
+  thing. Four glob patterns were tried against the unlistable directory and none yields a signal.
+  The hole above is pinned NEGATIVELY in `packages/core/test/examples-grant.test.ts` as a KNOWN
+  HAZARD asserting today's LOSS. Two of the other three uncovered cases (an escaping symlink, a
+  directory at the path) fail the run CLOSED, for an unrelated reason: the WRITE meets the same
+  obstruction the read did.
+  **Closes when** the failure's code and message are a projection an `error` arm may declare in
+  `reads`. That is a new CHANNEL SHAPE and not a new field, and it needs the answer to *what does an
+  arm see when the failure is not a tool's* first — which is the same decision §A.83 is waiting on,
+  one door over. When it lands, the KNOWN HAZARD test should fail and be DELETED along with the
+  `look` node rather than loosened. **A structural alternative is on the owed list**: a per-run
+  ledger file cannot lose an entry to a failed read, and converts a silent loss into a spurious
+  gate.
+
+- **A.91 · A by-hash graph lookup COMPILES every graph in `graphs/` and prints the others'
+  diagnostics on stderr.** *(From the third port's F2.)* Files: the graph-by-hash resolution behind
+  `loom replay`, `loom trace` and `loom approve`. These verbs find the graph by the hash the journal
+  recorded and compile the candidates in `graphs/` to compare hashes; every candidate's diagnostics
+  go to stderr on the way past. Repro on the merged HEAD, with a noisy graph the operator did not
+  ask about dropped into the workspace:
+  ```
+  $ loom compile graphs/zz-noisy.json 2>&1 | head -1
+  ! zz-noisy.json: GRAPH005_UNPRODUCED_READ: node "n" reads "a", which no upstream node writes and which is not a graph input
+  $ loom replay "$RUN" 2>&1 >/dev/null | /usr/bin/grep -aE '^! ' | /usr/bin/grep -av 'grant-access' | sed 's/:.*//' | sort | uniq -c
+     1 ! zz-noisy.json
+  $ for v in audit replay trace; do printf '%-8s ' "$v"; loom $v "$RUN" 2>&1 >/dev/null | /usr/bin/grep -a -c 'zz-noisy'; done
+  audit    0
+  replay   1
+  trace    1
+  $ loom replay "$RUN" --graph graphs/grant-access.json 2>&1 >/dev/null | /usr/bin/grep -a -c 'zz-noisy'
+  0
+  ```
+  **THREE verbs and not four, measured one at a time** — `loom audit` does NOT leak, because it
+  never looks the graph up (*"no edgeSource supplied: the compiled graph is not in the journal, only
+  its hash"*). `--graph` names the file directly and the noise vanishes, which is both the
+  workaround and the confirmation. **It is not cosmetic in the direction that matters**: an operator
+  approving a production change is shown warnings that name a file they did not run, and a script
+  doing `2>&1` carries another graph's diagnostics into whatever reads it.
+  **Closes when** a by-hash lookup is silent about candidates the operator did not name — a compile
+  for hash comparison is an internal question and its diagnostics belong to nobody.
+
+- **A.92 · A gate's approvers are STATIC, so a graph cannot ask the people its own data names.**
+  *(From the third port's F3.)* File: `packages/core/src/graph/spec.ts`, `ApprovalSpec` — exactly
+  two fields, `approvers` and `separationOfDuties`, and `approvers` is a list of literal subject
+  strings in the graph FILE. `${…}` interpolation is a `tool.args` mechanism (`resolveArgs`) and
+  reaches nothing in `humanGate`. Repro on the merged HEAD, one parked run of the shipped graph:
+  ```
+  $ loom gates "$RUN" | jq -c '.[0] | {approvers, owners: .reads.decision.owners}'
+  {"approvers":["u:you"],"owners":["u:ravi","u:mina"]}
+  $ loom approve "$RUN" "$GATE" --as u:ravi
+  E_GATE_NOT_AUTHORIZED: gate "gate_…" does not name "u:ravi" as an approver
+  ```
+  **The gate shows the right owners and accepts the wrong signature.** `u:ravi` is one of the two
+  people `access/policy.json` says owns the resource, read at RUN time into `decision.owners` and
+  displayed at the gate. **This is the interesting half of "no k-of-n field"**: `examples/README.md`
+  already states that k-of-n lives in `join` and not in `approval` — N gates plus a quorum join —
+  which answers *how many* and cannot answer *which people*, because the N gates are static too.
+  **Closes when** an approver list can be channel-valued, or when the compiler REFUSES to express it
+  and says so. What there is now is a field that looks like it answers the question and answers a
+  different one; the port ships an honesty convention (`labels.residue-static-approvers`) instead.
+
+- **A.93 · A denial and a failure-to-decide wear ONE error code, so only prose tells them apart.**
+  *(From the third port's F7.)* Files: `packages/core/src/run/engine.ts` (`requireOutcome`,
+  `OUTCOME_KEYS`) and `packages/core/src/errors.ts` (`E_FUNCTION_REFUSED`). `{refuse: {reason}}` is
+  the only verdict a `function` body has for declining, and both meanings arrive identically:
+  ```
+  $ loom run graphs/grant-access.json --input '{"requestPath":"access/requests/payments-kms-admin.json"}' 2>/dev/null | jq -c '{status, class: .error.class, code: .error.code}'
+  {"status":"failed","class":"validation","code":"E_FUNCTION_REFUSED"}
+  $ loom run graphs/grant-access.json --input '{"requestPath":"access/requests/not-a-request.txt"}' 2>/dev/null | jq -c '{status, class: .error.class, code: .error.code}'
+  {"status":"failed","class":"validation","code":"E_FUNCTION_REFUSED"}
+  ```
+  The first is *policy says no*; the second is *we could not read your request*. Both exit 1, and
+  the only difference is the node name inside the message, so a wrapping script must
+  `capture("on node \"(?<n>[^\"]+)\"")` out of prose. **The distinction is load-bearing and the
+  workflow already makes it deliberately** — the port's `grant-weigh.js` refuses only when it cannot
+  DECIDE, and everything it decided against goes to a `deny` node through the router's fallback,
+  precisely so a requester is never told their access was refused on the merits when nobody looked.
+  **The graph draws the line and cannot publish it.**
+  **What is NOT the answer, and was tried:** writing the outcome to a channel and letting the run
+  succeed — then a denial exits 0 and a caller that ignores the body grants access. Refusing is the
+  right shape.
+  **Closes when** a refusal carries a graph-declared discriminator — `{refuse: {reason, code}}` —
+  that the engine carries through. **This is the same closure `f7f74d5`'s own `Kernel-seam:` trailer
+  names**: an extension-registrable verdict table cannot exist while `graph/validate.ts` checks
+  `EdgeSpec.codes` and `retry.onlyIf` against a CLOSED `CODES`, so a *graph-declared* code is the
+  narrower thing to design here.
+
+- **A.94 · `GRAPH010_CONCURRENT_WRITE` calls the `seq` target and the `error` target of ONE node
+  concurrent writers, and they are exclusive by construction.** *(From the third port's F1.)* File:
+  `packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`. **This is NOT §A.84** — that
+  was `loop` and `compensation` being DROPPED from the forward DAG; `error` is not on that exclusion
+  list, so the edge IS visible and its EXCLUSIVITY is not. `#errorEdges` is reached only from
+  `outcome.status === "failed"` and `#edgesToTake` only from a success, so control takes exactly
+  one, and that is true of EVERY `seq`/`error` pair in every graph. Repro on the merged HEAD, on the
+  shipped graph with its workaround reducer swapped back:
+  ```
+  $ cd examples && sed -i.bak 's/"history": { "type": "object", "reduce": "merge_object", "onConflict": "last_by_branch" }/"history": { "type": "object", "reduce": "replace" }/' graphs/grant-access.json
+  $ loom compile graphs/grant-access.json; mv graphs/grant-access.json.bak graphs/grant-access.json
+  ✗ grant-access.json: GRAPH010_CONCURRENT_WRITE: nodes "prior" and "first-grant" can run concurrently and both write "history", whose reducer `replace` is not multi-writer safe
+     fix: change channel "history" to a multi-writer-safe reducer, or sequence "prior" and "first-grant"
+  E_GRAPH_INVALID: graph has 1 error(s): GRAPH010_CONCURRENT_WRITE
+  ```
+  **Neither half of the `fix:` line is what the graph wants**, measured rather than reasoned about:
+  *sequence them* asks for the recovery to run after the success, and *change the reducer* is what
+  ships — `merge_object` with `onConflict: "last_by_branch"` — buying a conflict arm that can never
+  fire, because the channel has held exactly one contribution on every run ever measured. The graph
+  says so in `labels.residue-error-arm`, so a reader does not conclude the channel really has two
+  writers.
+  **The closest relative is §A.40 and it is CLOSED** — the same shape one edge kind over, where
+  `rule010ConcurrentWriters` learned an exemption for a provably branch-local channel. §A.48 records
+  what that exemption does NOT cover; this would be a second one and a NARROWER one, because a
+  `seq`/`error` pair's exclusivity is STRUCTURAL rather than dataflow-dependent.
+  **Closes when** `rule010ConcurrentWriters` treats two nodes as non-concurrent when every path to
+  one is a success arm and every path to the other the matching failure arm of the same node —
+  stated as a property of the GRAPH, which is what `ac693d0` re-keyed §A.40's W6 on when enumerating
+  engine methods failed.
+
 
 ---
 
@@ -3015,7 +3366,7 @@ Each traces to a decision in `DESIGN.md`.
   `61b00d12`; the dedupe bounds the COUNT of distinct renderings, not the length.
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-22 — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-22b — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -3129,6 +3480,11 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.62 | `5f4fd61a`, `c9685caa`, `44221801`, `19b183c4`, `cdf8d60a`, `e890cc41`, `7d23ec2b` | `EDGE_FIELDS` carries a TYPE per field plus `readBy`, and `checkStructure`'s edge loop checks it once, generically, on EVERY edge kind — a wrong-typed field is a property of a value and not of the rule that will read it. `rule006Cycles`' and `rule007Fanout`'s hand-written type halves deleted; `edgeFieldRefusal` is the single producer of the width refusal; the parse decides the TYPE and the rules keep the RANGE, so `maxWidth: 0` keeps its code, message and `expansion.maxFanout` ceiling. Six fields deferred BY NAME to a refusal proven total (`TYPE_CHECKED_ELSEWHERE`), pinned. Side effect: 60 census rows that made `compile()` THROW `CanonicalizationError` now return a diagnostic. **Closed at TWO** — `readableFanoutWidth` stays hand-written in `engine.ts` because `attach()` is public and the executor must not depend on having been the compiler's caller. Byte-identity holds on single-fault graphs only; LEDGER WATCH: `graph/spec.ts` is kernel and gained enforcement under `fix:` |
 | A.75 | `a8aa5584`, `ff72ffae`, `5ddaf71e`, `c966fad9`, `7c39d99a`, `85675acc`, `08d32804`, `5f2f104d`, `e9e50d29` | `k` is a FLOOR the fold enforces whatever `onBranchError` says. `#joinArrivals` is ONE helper that `#maybeFireJoin` and `#foldJoin` both call, so the fold asks the mode's own question on the numbers the fire decision was taken on by construction; a third `#foldJoin` arm sits LAST so every existing refusal keeps its message byte for byte. The unit is `contributed`, not arrivals — a branch `skip` absorbed after an earlier member wrote still counts, because that is what `skip` is for — and an empty fan is exempt by §A.47. All three NOT-wanted lines of §A.68's `skip` matrix move; neither wanted line does. Residue → §A.77 |
 | A.76 | `a8aa5584`, `ff72ffae`, `5ddaf71e`, `e9e50d29` | `planRewind` releases every context its plan INSTALLED, children and grandchildren — the verb's own already-written rule applied to the half it was not applied to — with `#runs.delete` rather than `#retire`, so the preview's REBUILT graph is not recorded as the graph a child retired with. `#forgotten` membership is carried and restored, and `#contextFor` clears it ABOVE its early return so an `attach` landing mid-preview is not re-forgotten. The OBSERVABLE the row demanded exists: previewed child, re-attached with a good graph, rewound, undo dispatches. `attach` was NOT made honest — replacing a live context's graph moves the oversight floor under a running wave — so that arm is on the owed list |
+| A.78 | `931f844f`, `34410c2c`, `78e64ce3`, `297d12e0` | `lex` type-tests its source (`E_EXPR_INVALID` → `GRAPH004_EXPR`) AND asserts progress (`i <= lastStart`), in `lex` rather than `checkExpr` because `parseExpr` is the executor's own entrance. The first cut's `i === lastStart` was a STALL test: a reviewer's backwards branch OOMed the compiler again with the guard in place, and the lane's own regex pin would have forbidden the fix — pin the property, never the operator. Both mutation pins run in a CHILD process at 200 MB, because an in-process one took the runner's whole heap and charged seven tests as one unnamed failure. Deliberate tightening: a `String` OBJECT is refused now, unreachable from JSON |
+| A.79 | `7dd6029c`, `79cab047` | every required sub-block `rule016Subgraphs` READS is asked about before it is read — `inputs`, `outputs`, the `subgraph` block, child `channels`, child spec shape — each `GRAPH003_MALFORMED` and naming the node, with child faults re-tagged `in subgraph "…":` three levels deep. `<block>: null` crashed all EIGHT node types at base. First cut's blocking: a child `channels: []` compiled CLEAN where base refused `GRAPH016` — a guard that made an already-refused graph quieter |
+| A.80 | `5a0d1637`, `0431ddcb` | `EDGE_KINDS` and the kind check relocated from `compile.ts` into `checkStructure` beside `GRAPH020`, so they reach a child at any depth; the negative pin flipped positive. Message TEXT byte-identical, POSITION not — and the refusal is lost behind an earlier fatal, both disclosed at the site. `renderKind` made total (`KIND_STILL_THROWS` now empty of values); a throwing ACCESSOR still throws at the property read, base extent. Third round: `typeof` before `Object.hasOwn`, because `[Symbol()]` throws at the membership test |
+| A.81 | `d1b452fe`, `83aa54bf` (a) · `648cc9c6`, `78e64ce3` (b) | **both halves, so the row closes whole.** (a) `POLICY_FIELDS`/`NESTED_FIELDS` carry a type, one `blockFieldTypes` pass at 15 sites, 21 fields newly refusing a wrong type and no in-tree graph tightened; `BlockFieldType` stays MODULE-PRIVATE after `check-surface` refused the export. (b) `readableLoopBound` and a THIRD `#assertBound` check under `E_GRAPH_INVALID`; `"6"` and a restart refused too. First cut's blocking: two enumerations — a docstring and a FAULTS census — still said TWO checks. Residue → §A.85, and the drift note on §A.62 |
+| A.84 | `731eca44`, `79cab047`, `0431ddcb` | the compiler reads a graph that HAS a back-edge: `flowEdges`, `flowAncestors` (Tarjan) through `canPrecede` for GRAPH005/GRAPH002, and **DOMINANCE** (`GraphIndex.dominators`, Cooper–Harvey–Kennedy over a virtual root) for GRAPH010; `entryNodes`' loop exception made conditional; `terminalNodes`, `ancestors`, `dagEdges` and `wouldCycle` untouched, so §A.73's coupling survives by construction. `harden-config.json` goes from 3 warnings to ZERO, the only change across the seven shipped graphs. First cut's blocking: a `flowOrder` DFS cut MANUFACTURED pass-2 orderings, so GRAPH010 went silent on a real race and its answer depended on declaration order (527/8,000 seeds) — **and its docstring was the defect**. Final review: dominance oracle 0 mismatches over 435,916 pairs, 0/8,000 permutation flips, no base-ok graph refused. Residue → §A.86, §A.89 |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
@@ -3152,6 +3508,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | `--extension-module` | `cc320d1` | fork list moved the right way |
 | `port-workflow` | `f24bcb7`, `77da881`, `422a730` | `triage-failures` — one real chore ported with no fork, and the eight-entry friction log it produced |
 | `port-workflow-2` | `f43d5a0f` (lane `99be52f6`..`f43d5a0f`) | `harden-config` — a SECOND real workflow ported end to end against the shipped binary with no fork, no `--extension-module` and zero changes under `packages/core/src`: a bounded convergence loop (`loop` + `until` + `maxIterations`, a complementary `conditional` exit, `append_ordered` accumulating across ITERATIONS beside a `replace` projection, `len()` in a stop rule, 8 nodes, 4 function bodies, 11 manifests). `docs/workflow-port-2026-09-22.md` is the commands a stranger runs; **F1–F13 are the product friction and THREE of them are one mechanism** (§A.84), F12 → §A.83, F13 → §A.82. **F14 is the port's own eight defects over four reviews, none found by its author** — every one of them the report asserting something the run had not established, which is the defect class the workflow exists to prevent. Suite `test/examples-harden.test.ts`, 23 tests |
+| `port-workflow-3` | `9ee826a5` (lane `7c203c5d`..`9ee826a5`, merged `86a35a0a`) | `grant-access` — a THIRD real workflow ported end to end against the shipped binary with no fork, no `--extension-module` and zero changes under `packages/core/src`: temporary access to a production resource, ROUTED BY CEREMONY. 13 nodes over four node types (6 `tool`, 5 `function`, 1 `router`, 1 `human_gate`), 14 edges over three kinds (10 `seq`, 3 `conditional`, 1 **`error`**), `merge_object` beside `replace`, 5 `function` bodies, 13 request fixtures. **Four mechanisms no other shipped graph holds**: a `router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, a reducer that is neither `replace` nor `append_ordered`, and a node reached by two mutually exclusive paths that runs exactly once. It overlaps port 1 in `human_gate`/`function`/`tool`/`fs.*`/`seq`/`replace` and port 2 in `conditional` besides. `docs/workflow-port-2026-09-22b.md` is the commands a stranger runs; **SEVEN product friction entries, NONE closed** — F5 → §A.90 (silent data loss, the priority row), F2 → §A.91, F3 → §A.92, F7 → §A.93, F1 → §A.94, F4 a docs gap that `examples/README.md` §10 now fills, F6 the port-2 F9 canonical-form mechanism in a new manifestation (recorded in the log, no row, because port 2's F9 has none either). **§4 is NINE defects in the port's own workflow, and its own table attributes them to the author's mutation sweep (one) and TWO review rounds (six then two), SIX of the nine blocking** — counted from the table here rather than carried, because §5's prose says round one found seven where the table lists six, a disagreement left standing in that doc rather than edited there. A third re-drive then found a TENTH the table does not hold: a sentence in round two's own correction that the table four lines below it contradicted. The shape differs from port 2's F14: five are *a guard nothing distinguishes* (two renewal guards were deletable with the suite green, found by MUTATION and not by reading), and every round's own correction carried a defect of the class it was correcting. First shown by an example here: a failed run's landed `fs.write` is rolled back by `fs.restore` with NO compensation edge, journal-driven. Suite `test/examples-grant.test.ts`, 26 tests |
 | `examples-consume` | `b181b55`, `0b3719a`, `f71cd1a`, `aaf4b65`, `76216df` | the ported workflow CONSUMES four of the things this wave built, rather than only no longer suffering them; `docs/workflow-port-2026-09-09.md` §0 is the "Closed since" head |
 
 **The defect class that accounted for nearly every real finding, stated once because it will

@@ -14,16 +14,23 @@ it run against a real provider, watch it, stop it, and trust what it did.
 
 That is the bar. A correct mechanism nobody has used is not a product, and this project has
 repeatedly mistaken the first for the second. **The next real workflow somebody ports is worth more
-than the next invariant somebody proves.** TWO are ported, both against the shipped binary with no
-fork, no `--extension-module` and **zero changes under `packages/core/src`**:
+than the next invariant somebody proves.** THREE are ported, each against the shipped binary with
+no fork, no `--extension-module` and **zero changes under `packages/core/src`**:
 `examples/graphs/triage-failures.json` — eight nodes over four node types, three `function` bodies
 and an input directory (`f24bcb7`, `77da881`, `422a730`), whose port is
-`docs/workflow-port-2026-09-09.md` — and `examples/graphs/harden-config.json`, a bounded
+`docs/workflow-port-2026-09-09.md`; `examples/graphs/harden-config.json`, a bounded
 convergence loop: `loop` + `until` + `maxIterations`, a complementary `conditional` exit,
 `append_ordered` accumulating across ITERATIONS beside a `replace` projection of it, `len()` in a
 stop rule, 8 nodes, 4 `function` bodies, 11 manifest fixtures (`f43d5a0f`), whose port is
-`docs/workflow-port-2026-09-22.md`. **They overlap in `seq` alone**, which is why the second was
-worth as much as the first.
+`docs/workflow-port-2026-09-22.md` — **it overlaps the first in `seq` alone**, which is why the
+second was worth as much as the first; and `examples/graphs/grant-access.json`, temporary access to
+a production resource ROUTED BY CEREMONY: 13 nodes over four node types, 14 edges over three kinds,
+5 `function` bodies, 13 request fixtures (`9ee826a5`), whose port is
+`docs/workflow-port-2026-09-22b.md`. **The third holds four mechanisms neither other one does** — a
+`router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, a reducer that is neither
+`replace` nor `append_ordered`, and a node reached by two mutually exclusive paths that runs exactly
+once — which is the whole reason it was worth doing: it overlaps port 1 in `human_gate`, `function`,
+`tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional` besides, and nowhere else.
 
 **Running the FIRST needed no source change; making it NATURAL needed eight, and THAT is the number
 worth carrying.** The port logged eight friction entries and **all eight are now closed** — F6 in
@@ -37,17 +44,31 @@ report out of `loom gates` (F4, F3). **The port is what pulled on them**, which 
 porting one at all: an invariant nobody exercises names no seam.
 
 **The second port cost THIRTEEN, and needed no source change either — and the useful number is that
-THREE of the thirteen are ONE mechanism**: `graph/validate.ts:364` drops `loop` AND `compensation`
-from the forward DAG, so entry nodes, ancestry, concurrency and producer-before-consumer all behave
-as if a back-edge were absent while the executor schedules it (§A.84). That one mechanism cost four
-of the five round trips it took to make the graph run, and the diagnostic's own `fix:` line offers
-two routes that both end at it. Of the other ten, two are now rows as well (§A.83 `fs.read` putting
-its truncation marker inside the content, §A.82 a key-name redactor narrower than the workflow's own
-predicate) and the rest are recorded in the log. **F14 is the entry to read**: eight defects in the
-port's OWN workflow, over four reviews, none found by its author, every one of them *the report
-asserting something the run had not established* — the exact defect class that workflow exists to
-prevent, and the receipt for *a builder's own green suite is not evidence*. **A third port is worth
-as much again**, and nothing has replaced these two.
+THREE of the thirteen were ONE mechanism**: `graph/validate.ts` dropped `loop` AND `compensation`
+from the forward DAG, so entry nodes, ancestry, concurrency and producer-before-consumer all behaved
+as if a back-edge were absent while the executor scheduled it. That one mechanism cost four of the
+five round trips it took to make the graph run, and the diagnostic's own `fix:` line offered two
+routes that both ended at it. **It is CLOSED** — §A.84, `731eca44`/`79cab047`, where `GRAPH010` came
+to rest on DOMINANCE over an edge set that keeps the back-edge, and `harden-config.json` went from
+three warnings to none. Of the other ten, two are still rows (§A.83 `fs.read` putting its truncation
+marker inside the content, §A.82 a key-name redactor narrower than the workflow's own predicate) and
+the rest are recorded in the log. **F14 is the entry to read**: eight defects in the port's OWN
+workflow, over four reviews, none found by its author, every one of them *the report asserting
+something the run had not established* — the exact defect class that workflow exists to prevent, and
+the receipt for *a builder's own green suite is not evidence*.
+
+**The third port cost SEVEN, none of them closed yet, and its lesson is a different one: a
+workaround for a fail-open guard is a guard, and nobody audited it as one.** F5 is the row to read —
+`§A.90`, the only row in `TODO.md` that ends in destroyed data with exit code 0. An `error` arm is
+handed no reason, so *there is no ledger* and *I could not read the ledger* are the same event; the
+port built a defence out of a second read-only tool, and `fs.glob` answers `(no matches)` for
+*nothing here* AND for *cannot enumerate*, so the defence has the identical shape to the gap it
+stands in for. The other six are §A.91–§A.94, one docs gap that `examples/README.md` §10 now fills,
+and one canonical-form manifestation recorded in the log. **§4 of that log is NINE defects in the
+port's own workflow, six of them blocking, and five are one class** — *a guard nothing
+distinguishes*: two renewal guards could be DELETED with the suite green, and MUTATION found them
+where reading had not. **A FOURTH port is worth as much again**, and nothing
+has replaced these three.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -211,11 +232,11 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-22.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-22b.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-22 wave is merged into `loom`; the handoff says what each lane
+Every branch through the 2026-09-22b wave is merged into `loom`; the handoff says what each lane
 did and left open, and which of its lanes' claims did not survive being re-run.
 
 ## Commands

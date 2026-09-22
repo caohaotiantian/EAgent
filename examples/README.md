@@ -21,7 +21,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
-| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three warnings that are wrong about their cause and right about a hazard** on every command: see §9 |
+| `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it. It printed **three warnings that were wrong about their cause and right about a hazard** on every command until §A.84 closed; it compiles SILENT now, and §9 keeps the paragraph because the hazards are still real |
 | `graphs/grant-access.json` | 10 | **no**, and it means something offline — the ceremony is read off the resource's tier, the level and the hours. The only graph here with a `router` or a `kind: "error"` edge, and the only one using a reducer other than `replace`/`append_ordered`. It compiles with **no diagnostic at all**, and it reaches three different endings on three different inputs: see §10 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
@@ -409,7 +409,7 @@ the report explaining it.
 ```
 
 ```bash
-loom compile graphs/harden-config.json                                    # ok + 3 warnings (F7 — right hazard, wrong cause), exit 0
+loom compile graphs/harden-config.json                                    # ok, no diagnostics, exit 0 (3 warnings before §A.84)
 loom run     graphs/harden-config.json --input '{"manifestPath":"manifests/orders-api.json"}'
 # → "status": "awaiting_gate", and out/ does NOT exist yet.               exit 0
 loom trace   <runId>       # nine `audit` and eight `fix`, alternating
@@ -485,17 +485,19 @@ edge in it and `docs/workflow-port-2026-09-22.md` is the fourteen things it cost
   `orders-api.json` (8 passes) still works, and `legacy-gateway.json` — which needs all twelve —
   strands with the same `E_OUTPUT_MISSING` that names neither bound. Two bounds on one thing,
   enforced by two layers, checked by nothing.
-- **Three of the warnings on every command are wrong about the REASON and right about a HAZARD**, and
-  the reason half is all the same mechanism:
-  `GRAPH002_DEAD_END` on `fix` (which has a `loop` edge out of it) and `GRAPH005_UNPRODUCED_READ`
-  twice for `applied` (which `fix` writes, upstream over that same `loop` edge). Following either
-  `fix:` line makes the graph worse — `add "applied" to inputs:` invites a caller to supply a fix log
-  the graph is supposed to build. **But do not write them off, which this section's first draft did**:
-  `applied` really has no value on the first pass, `collate` really reads an unproduced `applied` on an
-  already-compliant manifest (`fix` never runs), and `fix` really is a dead end whenever
-  `maxIterations` binds before the budget. The `view.get(c) || []` in all four bodies is those
-  warnings being useful. They are right about the hazard, wrong about the cause, and their remedies
-  are wrong.
+- **Three warnings on every command were wrong about the REASON and right about a HAZARD — they are
+  GONE now, and the hazards are not.** `GRAPH002_DEAD_END` on `fix` (which has a `loop` edge out of
+  it) and `GRAPH005_UNPRODUCED_READ` twice for `applied` (which `fix` writes, upstream over that
+  same `loop` edge): one mechanism, the compiler dropping the back-edge, and **§A.84 closed it**, so
+  `loom compile graphs/harden-config.json` now prints no diagnostic at all. That was measured here
+  rather than assumed — this graph's three were the ONLY change across the seven graphs' compile
+  output. **Do not read the silence as "there was nothing there", which is the mirror of the mistake
+  this section's first draft made in the other direction**: `applied` really has no value on the
+  first pass, `collate` really reads an unproduced `applied` on an already-compliant manifest (`fix`
+  never runs), and `fix` really is a dead end whenever `maxIterations` binds before the budget. The
+  `view.get(c) || []` in all four bodies is what defends against those, and it is still load-bearing
+  with the warnings gone. Following either old `fix:` line would have made the graph worse —
+  `add "applied" to inputs:` invites a caller to supply a fix log the graph is supposed to build.
 
 `manifests/` holds **eleven** inputs and only one of them converges cleanly — the rest each pin one way
 this workflow can be wrong:

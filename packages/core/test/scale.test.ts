@@ -149,15 +149,17 @@ function fastest(label: string, fn: () => void, runs = 5): number {
  * A COUNT AND NOT A CLOCK, and the reason is that the clock carries the machine's load into
  * the answer while the count does not. Measured 2026-09-05 on a 16-core machine, `node --test
  * packages/core/test/scale.test.ts` against forty CPU burners, three consecutive runs: every
- * count below was IDENTICAL, digit for digit, to the idle run — 103,200 → 325,600 → 548,000,
- * exponents 0.988 / 0.995 / 0.990 — while the absolute timings moved (100 nodes 2.2 → 2.5 ms,
- * 500 nodes 19.9 → 22.0–24.4 ms).
+ * count in the table below was IDENTICAL, digit for digit, to the idle run — the figures that
+ * experiment saw were 103,200 → 325,600 → 548,000, exponents 0.988 / 0.995 / 0.990 — while the
+ * absolute timings moved (100 nodes 2.2 → 2.5 ms, 500 nodes 19.9 → 22.0–24.4 ms). THE COUNTS ARE
+ * HIGHER TODAY AND THE EXPONENTS ARE NOT: §A.84 gave `indexGraph` a second whole-graph relation,
+ * and the table below carries the 2026-09-22b re-measurement. The load experiment was not re-run.
  *
  * WHAT THAT EXPERIMENT DID NOT REPRODUCE, said out loud because the file used to imply it
  * always would: the wall-clock RATIO stayed put, 8.8–9.9× under load against 9.0–9.2× idle.
  * On the pre-`2ec0b76` compiler the same experiment drove it to 31.3×, 41.0×, 45.9× and 51.6×
  * while the count read `314356 → 5616756` in all four — but that compiler no longer exists
- * (~1,043 spec reads per element where this one makes ~101), and a working set an order of
+ * (~1,043 spec reads per element where this one makes ~120), and a working set an order of
  * magnitude smaller is not disturbed the same way. So the honest statement is narrower than
  * the old one: the ratio CAN blow up under load and has, the count never can, and only one of
  * them is fit to decide a test.
@@ -228,14 +230,16 @@ test("compile scales sub-quadratically from 100 to 500 nodes", () => {
   // tracks. An exponent says the thing directly — quadratic MEANS 2, whatever the fixture
   // does — and a third size catches an ACCELERATING trend that two endpoints average away.
   //
-  // Measured 2026-09-05, and every one of these is deterministic:
+  // Re-measured 2026-09-22b, and every one of these is deterministic. The reads column moved
+  // when §A.84 gave `indexGraph` a second whole-graph relation (a dominator tree); the exponent,
+  // which is the thing this test asserts, did not. The 2026-09-05 figures are in brackets:
   //
   //     nodes  elements    reads   reads/element   exponent against the previous size
-  //       100      1,000  103,200        103.20    —
-  //       300      3,200  325,600        101.75    0.988
-  //       500      5,400  548,000        101.48    0.995
+  //       100      1,000  122,039        122.04    —          (103,200 / 103.20)
+  //       300      3,200  385,639        120.51    0.989      (325,600 / 101.75 / 0.988)
+  //       500      5,400  649,239        120.23    0.996      (548,000 / 101.48 / 0.995)
   //
-  // So compile is now LINEAR in spec elements, at ~101 reads each. The bound of 1.5 sits
+  // So compile is still LINEAR in spec elements, at ~120 reads each. The bound of 1.5 sits
   // halfway to quadratic: half an exponent of headroom above the observed 0.99, and half an
   // exponent of margin below the 2.0 it exists to catch.
   const sizes = [10, 30, 50].map((stages) => {
@@ -255,15 +259,16 @@ test("compile scales sub-quadratically from 100 to 500 nodes", () => {
   //
   // STATED AGAINST A MEASURED ONE-PASS COST, NOT A CONSTANT, and that is the correction. The
   // constant this used to carry (`elements * 100`) was set when compile made ~1,043 reads per
-  // element; `2ec0b76` took it to ~101 and left the tripwire 1.5% under the measurement, so
+  // element; `2ec0b76` took it to ~101 (it is ~120 today) and left the tripwire 1.5% under the
+  // measurement, so
   // the guard was one ordinary improvement away from a red that meant nothing. A constant
   // cannot tell "the counter stopped seeing the compiler" from "the compiler got faster".
   // `onePassReads` can: it is what a single full walk of the SAME spec costs, so the assertion
   // reads "compile still traverses this spec many times over, not once".
   //
-  // Measured: one pass is 29,025 reads (5.38 per element) against compile's 548,000 — 18.9×,
-  // asserted at 4×. That leaves 4.7× of headroom above the tripwire and 3.1× between the
-  // tripwire and the blind compiler simulated below; the old form had 1.5% and 20×.
+  // Measured 2026-09-22b: one pass is 29,025 reads (5.38 per element) against compile's
+  // 649,239 — 22.4×, asserted at 4×. That leaves 5.6× of headroom above the tripwire and 3.1×
+  // between the tripwire and the blind compiler simulated below; the old form had 1.5% and 20×.
   const onePass = onePassReads(50, 10);
   const big = sizes[2]!;
   console.log(
