@@ -955,3 +955,80 @@ test("`fs.read` refuses FOUR ways, and a JSON array is the one the count kept mi
     ws.dispose();
   }
 });
+
+test("a credential the RUNTIME's redactor does not recognise still never reaches the approver", async () => {
+  // THE WORST DEFECT THIS PORT SHIPPED, and it survived three review rounds because every manifest
+  // anybody had written happened to put an underscore before the credential word.
+  //
+  // The gate projection redacts by key NAME, and its predicate is NARROWER than this workflow's:
+  //
+  //   runtime   /^(?:.*_)?(?:password|passwd|secret|token|api[_-]?key|authorization|credential)s?$/i
+  //             plus a qualified-word rule where `token` counts only beside `api`, `access`,
+  //             `bearer`, `auth`, … and `github`/`slack`/`registry`/`ci` are NOT qualifiers
+  //   auditor   /(PASSWORD|SECRET|TOKEN)$/
+  //
+  // So `GITHUB.TOKEN` (a dot, not an underscore; `github` not a qualifier) and `MYTOKEN` (no
+  // separator at all) are credentials to the auditor and ordinary names to the runtime. Measured
+  // before the fix — the gate said one thing and printed the other, three fields apart:
+  //
+  //   open[0].detail   "GITHUB.TOKEN" holds a credential in the clear, in a file that is in …
+  //   hardened.env     {"GITHUB.TOKEN": "correcthorsebattery", "LOG_LEVEL": "info"}
+  //
+  // The lesson generalises past this workflow: **a workflow that applies its own credential
+  // predicate must redact its own projection**, because delegating to the platform's means shipping
+  // wherever the two disagree. `harden-collate.js` now does, off the auditor's own `credentialKey`.
+  //
+  // THE GREP IS OVER THE WHOLE OF `loom gates` STDOUT, not over one field. The reason is this
+  // defect: a per-field assertion looks exactly as green when the bytes are in a field the test did
+  // not name, and the previous version of this suite only ever grepped `report.open`.
+  const ws = workspace();
+  try {
+    for (const [manifest, secret, key] of [
+      ["qualified-token.json", "correcthorsebattery", "GITHUB.TOKEN"],
+      ["unseparated-token.json", "987654321", "MYTOKEN"],
+    ] as const) {
+      const { runId, gate, report } = await runToGate(ws.dir, manifest);
+
+      // The auditor DID flag it — otherwise this test would pass by the credential never being seen.
+      assert.equal(
+        report.open.some((f) => f.rule === "plaintext-secret" && f.at === `env.${key}`),
+        true,
+        `${manifest}: the auditor must report ${key} as a credential — ${JSON.stringify(report.open)}`,
+      );
+
+      // …and the whole listing, every field of it, is free of the bytes.
+      const listed = await loom(ws.dir, ["gates", runId]);
+      assert.equal(listed.code, 0, `${listed.out}${listed.err}`);
+      assert.equal(
+        listed.out.includes(secret),
+        false,
+        `${manifest}: the credential reached the gate listing`,
+      );
+      // The value is present as a SHAPE, so the test cannot be satisfied by dropping the field.
+      const env = (report.hardened["env"] ?? {}) as Record<string, unknown>;
+      assert.equal(
+        typeof (env[key] as { redacted?: unknown } | undefined)?.redacted,
+        "string",
+        `${manifest}: ${key} must be shown as a shape — ${JSON.stringify(env)}`,
+      );
+
+      const approved = await loom(ws.dir, ["approve", runId, gate.gateId, "--as", "u:you"]);
+      assert.equal(approved.code, 0, `${approved.out}${approved.err}`);
+
+      // THE REPORT A PERSON READS carries nothing.
+      assert.equal(readFileSync(join(ws.dir, REPORT), "utf8").includes(secret), false, `${manifest}: report.md`);
+
+      // THE HARDENED MANIFEST DOES, and that is deliberate rather than an oversight: it IS the
+      // manifest, the tool could not move this value behind a secretRef, and dropping it would hand
+      // back a file whose service has lost its configuration. Asserted POSITIVELY so the intent is
+      // recorded and a future change that silently starts redacting the file fails here.
+      assert.equal(
+        readFileSync(join(ws.dir, HARDENED), "utf8").includes(secret),
+        true,
+        `${manifest}: the hardened manifest must keep the value it could not repair`,
+      );
+    }
+  } finally {
+    ws.dispose();
+  }
+});
