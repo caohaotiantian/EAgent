@@ -175,6 +175,35 @@ test("an HONEST maxIterations still runs every iteration", async () => {
   assert.deepEqual(p.channels["n"], ["s", "x", "x", "x", "x", "x", "x"]);
 });
 
+test("`maxIterations: 1` legally runs ONE pass — the fact the refusal text leans on", async () => {
+  // THE REFUSAL SAYS "stops the loop after one pass WHATEVER BOUND WAS DECLARED", and the
+  // qualifier is doing real work: one pass is not itself the harm, it is what a bound of 1 asks
+  // for. Unpinned, that distinction is a sentence in a message nobody can check — and the first
+  // cut of the message left the qualifier out and described a legal outcome as the defect.
+  const store = new MemoryStateStore({ now: () => NOW });
+  const engine = engineOn(store);
+  const one = compile({
+    spec: (() => {
+      const s = loopSpec() as unknown as { edges: Record<string, unknown>[] };
+      s.edges.find((x) => x["id"] === "e2")!["maxIterations"] = 1;
+      return s as unknown as GraphSpec;
+    })(),
+    resolver: resolver(),
+    tools: {},
+    tenantCapabilities: [],
+  });
+  assert.equal(one.ok, true, `maxIterations: 1 must COMPILE: ${one.diagnostics.map((d) => d.code).join(", ")}`);
+  assert.ok(one.ok);
+
+  const runId = await engine.submit({ graph: one.graph, inputs: {} });
+  const p = await engine.advance(runId);
+  // One seed and ONE step, and the run really did succeed — the same observable an unreadable
+  // bound produced, reached honestly. That is why the refusal names the DECLARED bound and not
+  // the pass count.
+  assert.equal(p.status, "succeeded");
+  assert.deepEqual(p.channels["n"], ["s", "x"]);
+});
+
 test("every unreadable maxIterations is refused at advance, naming the edge and the value", async () => {
   for (const { what, v, says } of UNREADABLE) {
     const store = new MemoryStateStore({ now: () => NOW });
@@ -287,7 +316,11 @@ test("a run that HAS EXECUTED is refused on every advance and is NOT failed — 
   // sentence: the run is left where it was with no row saying why the advance was refused.
   //
   // IDENTICAL FOR `maxWidth`, measured side by side, so this is the shared pre-existing arm and
-  // not something the §A.81 check introduced.
+  // not something the §A.81 check introduced. **And that is not left as a measurement somebody
+  // once took**: `advance-refusal-is-journaled.test.ts`'s "A PAUSED RUN IS STILL FAILED IF ITS OWN
+  // GRAPH IS UNREADABLE, AND STILL SPARED IF IT RAN" runs its spared-if-it-ran half over all three
+  // `FAULTS` members — `kind`, `maxWidth` and `maxIterations` — so the three staying identical is
+  // asserted on every run rather than claimed here.
   const store = new MemoryStateStore({ now: () => NOW });
   const good = compile({ spec: parkingSpec(), resolver: resolver(), tools: {}, tenantCapabilities: SKELETON_TENANT_CAPS });
   assert.ok(good.ok, `the parking graph must compile: ${good.diagnostics.map((d) => d.code).join(", ")}`);

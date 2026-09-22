@@ -39,9 +39,17 @@
  *   at the same offset, and a branch that moves `i` BACKWARDS never repeats consecutively: with
  *   that injection `i` oscillates 0,1,0,1 and `parseExpr("a+b")` died with `FATAL ERROR:
  *   Ineffective mark-compacts near heap limit` under `--max-old-space-size=200`, which is §A.78's
- *   own heap death restored. **Pin the property, never the operator.** The second mutation runs in
- *   a CHILD PROCESS because the failure it catches is an infinite loop, which would hang the
- *   runner rather than fail it.
+ *   own heap death restored. **Pin the property, never the operator.**
+ *
+ *   BOTH MUTATIONS RUN IN A CHILD PROCESS, and the round that put only ONE of them there is the
+ *   argument for it. The other stayed in-process on a written claim that its shape "provably
+ *   terminates under either form of the test" — a claim that enumerated the two operator spellings
+ *   its author had in mind. `i < lastStart`, one character off the shipped guard, is a third: the
+ *   in-process pin then took the runner's heap and the whole file reported as a single anonymous
+ *   failure, `ℹ tests 1  ℹ pass 0  ℹ fail 1` at 12.4 s, with all seven tests invisible — while the
+ *   sibling pin, the only other one that could have caught it, passed in 52 ms. Whether a mutated
+ *   copy terminates is a property of the GUARD UNDER TEST, so a pin may not assume it. See
+ *   `driveMutated`.
  *
  * AND THE STRING PATH IS UNCHANGED, which is the thing a new guard at the top of a lexer is most
  * likely to break. Asserted here on the syntax and depth messages, and separately by compiling all
@@ -168,27 +176,70 @@ function mutatedCopy(dir: string, tag: string, find: string, replace: string): s
   return file;
 }
 
-test("the progress assertion refuses a branch that CONSUMES NOTHING — by mutation", async () => {
-  // Unreachable from outside while the type test stands, so it is driven by deleting that test
-  // from a copy and handing the copy the value that OOMed: `i` stays at 0, the second iteration
-  // starts where the first did, and the guard fires. In-process is safe here because this shape
-  // provably terminates on the second iteration under either form of the test.
-  const dir = mkdtempSync(join(tmpdir(), "loom-expr-nogress-"));
+/**
+ * Drive a mutated copy IN A CHILD PROCESS and hand back whatever it printed.
+ *
+ * EVERY MUTATION PIN GOES THROUGH HERE, AND THE REASON IS THE ONE THING A MUTATION PIN MAY NOT
+ * ASSUME. What it is testing is the guard that BOUNDS THE LOOP, so whether a mutated copy
+ * terminates at all is a property of the code under test — exactly the thing in question. A pin
+ * that runs such a copy in-process is betting on the answer it is there to check, and when it
+ * loses the bet it does not fail: it takes the runner's heap with it.
+ *
+ * MEASURED, because this file shipped that bet once. The CONSUMES-NOTHING pin below ran in-process
+ * on the argument that its shape "provably terminates under either form of the test" — an
+ * enumeration of the two spellings its author had in mind. Weakening the shipped guard by ONE
+ * CHARACTER, to `i < lastStart`, is a third spelling that terminates under neither, and the whole
+ * FILE died as one unnamed failure with its seven tests reporting nothing:
+ *
+ *     ✖ packages/core/test/graph/expr-non-string-source.test.ts (12437.531084ms)
+ *     ℹ tests 1   ℹ pass 0   ℹ fail 1        ← seven tests, one anonymous result
+ *     FATAL ERROR: Ineffective mark-compacts near heap limit
+ *
+ * and the sibling pin, the only other one that could have caught `<`, PASSED in 52 ms. So the
+ * single mutation that reached the defect reported it by crashing the runner. Under the child
+ * process both pins name themselves and go red in milliseconds.
+ *
+ * THE COMMENT THAT ENUMERATES SPELLINGS IS THE BUG, not the operator it happened to omit: the next
+ * weakening will be a spelling nobody listed either. A child process is correct for any of them.
+ *
+ * A non-zero exit is CAPTURED rather than thrown, so a heap death arrives at the assertion as text
+ * and the test fails with the child's own output in the message.
+ */
+function driveMutated(tag: string, find: string, replace: string, drive: string): string {
+  const dir = mkdtempSync(join(tmpdir(), `loom-expr-${tag}-`));
   try {
-    const file = mutatedCopy(
-      dir,
-      "notype",
-      'if (typeof src !== "string") {',
-      'if ((false as boolean) && typeof src !== "string") {',
-    );
-    const mod = (await import(pathToFileURL(file).href)) as { checkExpr: typeof checkExpr };
-    const r = mod.checkExpr([null] as unknown as string, {});
-    assert.equal(r.ok, false);
-    assert.ok(!r.ok);
-    assert.deepEqual(r.errors, ["lexer made no progress at offset 0 in ``"]);
+    const file = mutatedCopy(dir, tag, find, replace);
+    const driver = join(dir, `driver-${tag}.mjs`);
+    writeFileSync(driver, `const m = await import(${JSON.stringify(pathToFileURL(file).href)});\n${drive}\n`);
+    try {
+      return execFileSync(process.execPath, ["--max-old-space-size=200", driver], {
+        encoding: "utf8",
+        timeout: 30_000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      const c = e as { stdout?: string; stderr?: string; message?: string };
+      return `CHILD DID NOT COMPLETE: ${c.stdout ?? ""}${c.stderr ?? ""} ${c.message ?? ""}`;
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test("the progress assertion refuses a branch that CONSUMES NOTHING — by mutation", () => {
+  // Unreachable from outside while the type test stands, so it is driven by disabling that test in
+  // a copy and handing the copy the value that OOMed: `i` never leaves 0, so no iteration after
+  // the first one advances it.
+  const out = driveMutated(
+    "nogress",
+    'if (typeof src !== "string") {',
+    'if ((false as boolean) && typeof src !== "string") {',
+    `try { console.log("RESULT " + JSON.stringify(m.checkExpr([null], {}))); } catch (e) { console.log("THREW " + e.message); }`,
+  );
+  assert.ok(
+    out.includes(`RESULT {"ok":false,"errors":["lexer made no progress at offset 0 in \`\`"]}`),
+    `a branch consuming nothing was not refused: ${out}`,
+  );
 });
 
 test("the progress assertion refuses a branch that moves `i` BACKWARDS — by mutation", () => {
@@ -198,28 +249,13 @@ test("the progress assertion refuses a branch that moves `i` BACKWARDS — by mu
   // backwards never repeats consecutively. With `i = (i + op.length) % 2` injected into the
   // operator arm, `i` oscillates 0,1,0,1 and `parseExpr("a+b")` died with
   // `FATAL ERROR: Ineffective mark-compacts near heap limit` — §A.78's heap death restored.
-  //
-  // IN A CHILD PROCESS, because the failure this pin exists to catch is an INFINITE LOOP: a
-  // regression to `===` would hang or OOM the test runner rather than fail it. The child gets a
-  // 200 MB heap and a 30s ceiling, so a regression is a captured heap death and a red test.
-  const dir = mkdtempSync(join(tmpdir(), "loom-expr-backwards-"));
-  try {
-    const file = mutatedCopy(dir, "nonmono", "    i += op.length;", "    i = (i + op.length) % 2;");
-    const driver = join(dir, "driver.mjs");
-    writeFileSync(
-      driver,
-      `const { parseExpr } = await import(${JSON.stringify(pathToFileURL(file).href)});\n` +
-        `try { parseExpr("a+b"); console.log("RETURNED"); } catch (e) { console.log("THREW", e.code, e.message); }\n`,
-    );
-    const out = execFileSync(process.execPath, ["--max-old-space-size=200", driver], {
-      encoding: "utf8",
-      timeout: 30_000,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    assert.match(out, /THREW E_EXPR_INVALID lexer made no progress/, `the backwards branch was not refused: ${out}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  const out = driveMutated(
+    "backwards",
+    "    i += op.length;",
+    "    i = (i + op.length) % 2;",
+    `try { m.parseExpr("a+b"); console.log("RETURNED"); } catch (e) { console.log("THREW", e.code, e.message); }`,
+  );
+  assert.match(out, /THREW E_EXPR_INVALID lexer made no progress/, `the backwards branch was not refused: ${out}`);
 });
 
 test("the progress assertion is still in `lex` at all", () => {

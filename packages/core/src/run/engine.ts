@@ -6066,6 +6066,17 @@ export class Engine {
    * `test/run/advance-refusal-is-journaled.test.ts`**, which is the census that makes the claim
    * checkable rather than asserted — §A.81's own check was added to it for exactly that reason.
    *
+   * THE FOURTH ONE THAT IS OWED, NAMED SO THE NEXT READER DOES NOT HAVE TO FIND IT. `when` and
+   * `until` are not checked here for string-ness, so a bent `RunGraph` reaches `#expr` →
+   * `parseExpr` at RUN TIME, mid-commit: measured on this build, `when: [null]` / `{}` / `42` each
+   * throw `E_EXPR_INVALID` out of the first `advance`, leave the run `running` with no terminal
+   * row, and answer a second `advance` with `running`. **Such a check must cover EDGES AND ROUTER
+   * CASES** — `#expr` has three call sites, `e.when` and `e.until` on edges and
+   * `router.cases[].when` on a NODE (`#runRouter`) — which is the same three `graph/validate.ts`
+   * already walks through `checkExpr`. Scoping it to `ctx.graph.spec.edges`, as the three checks
+   * above are, would close two sites of three and leave the asymmetry this paragraph exists to
+   * prevent one node type over.
+   *
    * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
    * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
    * vocabulary checks sit ABOVE the compile-identity check on purpose — so a caller who
