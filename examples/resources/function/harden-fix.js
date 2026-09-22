@@ -91,8 +91,14 @@ function (view, ctx) {
     }
     case "secret-not-declared": {
       // The ref is read back off the manifest rather than out of the finding's prose, so the two
-      // cannot drift. The first env value carrying an undeclared secretRef is the one the auditor
-      // reported — it reports at most one per pass, for exactly this reason.
+      // cannot drift.
+      //
+      // THE FIRST undeclared ref, and this comment used to justify that by saying the auditor "reports
+      // at most one per pass" — which stopped being true when the auditor learned to report every one
+      // of them (F14 #1). The reason it is still correct is different and worth stating properly: this
+      // body applies ONE finding per pass and always the first auto-fixable one, so on any pass where
+      // a `secret-not-declared` is the target, the first undeclared ref in key order IS that target.
+      // The next audit recomputes the whole list against the manifest this pass produced.
       let ref;
       for (const key of Object.keys(env)) {
         const v = env[key];
@@ -129,8 +135,16 @@ function (view, ctx) {
       refuse: {
         reason:
           "the repair for \"" + target.rule + "\" at \"" + target.at + "\" leaves that value unchanged " +
-          "(" + JSON.stringify(was === undefined ? null : was) + "), so the next audit reports it again, " +
-          "and the pass after that, until the budget runs out. The rule's detector and its repair disagree.",
+          // THE SAME SHAPE RENDERING AS THE LOG, and this line used to print `JSON.stringify(was)`
+          // raw. Not reachable with a credential today — the two rules that could carry one here are
+          // `plaintext-secret`, whose repair always changes the value, and a dotted key, which the
+          // auditor now marks non-autofixable — but "no current caller reaches it" is the argument
+          // that put `hunter2` in front of an approver in the first place (F13). A refusal message
+          // travels further than a log: it is the run's `error.message`, printed by `loom run` and
+          // journalled. Route it through the same door.
+          "(" + JSON.stringify(target.sensitiveWas === true ? redactValue(was) : was === undefined ? null : was) +
+          "), so the next audit reports it again, and the pass after that, until the budget runs out. " +
+          "The rule's detector and its repair disagree.",
       },
     };
   }
