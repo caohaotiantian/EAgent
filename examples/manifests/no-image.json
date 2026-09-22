@@ -1,0 +1,6 @@
+{
+  "name": "legacy-cron",
+  "stage": "prod",
+  "schedule": "0 3 * * *",
+  "command": ["/usr/bin/reconcile", "--since=24h"]
+}

@@ -1,0 +1,107 @@
+{
+  "apiVersion": "loom.dev/v1",
+  "kind": "GraphSpec",
+  "metadata": {
+    "name": "harden-config",
+    "project": "examples",
+    "version": 1,
+    "description": "Remediate a service manifest against a deployment policy one finding per pass, re-auditing after every pass so a fix's own consequences are caught, and ask a human before the hardened manifest or its report is written.",
+    "labels": {
+      "shape": "bounded convergence loop — no fan-out, no join",
+      "residue-stop-rule-twice": "the stop rule `settled || len(applied) >= 12` is written on the `again` edge's `until` AND on the `done` edge's `when`, and nothing checks that the two agree. They must: `until` decides when the loop stops and `when` decides whether anything happens next, so a `when` narrower than the `until` is a run that stops short of its own gate. See docs/workflow-port-2026-09-22.md F3.",
+      "residue-single-writer": "`current` is folded from `seed` + `applied` by `audit` alone, rather than rewritten in place by `fix`, because a channel written by a node inside a loop AND by a node before it is GRAPH010_CONCURRENT_WRITE — the concurrency analysis drops loop edges, so `fix` has no ancestors at all. See F2."
+    }
+  },
+  "policy": {
+    "posture": "on",
+    "capabilities": ["fs:read", "fs:write"],
+    "expansion": { "maxNodes": 64, "maxDepth": 1, "maxFanout": 1, "maxLoopIterations": 16 }
+  },
+  "channels": {
+    "manifestPath": { "type": "string", "reduce": "replace" },
+    "source": { "type": "string", "reduce": "replace" },
+    "seed": { "type": "object", "reduce": "replace" },
+    "current": { "type": "object", "reduce": "replace" },
+    "findings": { "type": "array", "reduce": "replace" },
+    "settled": { "type": "boolean", "reduce": "replace" },
+    "applied": { "type": "array", "reduce": "append_ordered" },
+    "report": { "type": "object", "reduce": "replace" },
+    "hardened": { "type": "string", "reduce": "replace" },
+    "summary": { "type": "string", "reduce": "replace" },
+    "wroteManifest": { "type": "object", "reduce": "replace" },
+    "wroteReport": { "type": "object", "reduce": "replace" }
+  },
+  "inputs": ["manifestPath"],
+  "outputs": ["report", "wroteManifest", "wroteReport"],
+  "nodes": [
+    {
+      "id": "load",
+      "type": "tool",
+      "reads": ["manifestPath"],
+      "writes": ["source"],
+      "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "${manifestPath}" } }
+    },
+    {
+      "id": "parse",
+      "type": "function",
+      "reads": ["source", "manifestPath"],
+      "writes": ["seed"],
+      "function": { "ref": "function/harden-parse@stable" }
+    },
+    {
+      "id": "audit",
+      "type": "function",
+      "reads": ["seed", "applied"],
+      "writes": ["current", "findings", "settled"],
+      "function": { "ref": "function/harden-audit@stable" }
+    },
+    {
+      "id": "fix",
+      "type": "function",
+      "reads": ["current", "findings", "applied", "settled"],
+      "writes": ["applied"],
+      "function": { "ref": "function/harden-fix@stable" }
+    },
+    {
+      "id": "collate",
+      "type": "function",
+      "reads": ["current", "manifestPath", "findings", "applied", "settled"],
+      "writes": ["report", "hardened", "summary"],
+      "function": { "ref": "function/harden-collate@stable" }
+    },
+    {
+      "id": "review",
+      "type": "human_gate",
+      "reads": ["report"],
+      "writes": [],
+      "humanGate": {
+        "ref": "oversight/harden@stable",
+        "approval": { "approvers": ["u:you"] }
+      }
+    },
+    {
+      "id": "write-manifest",
+      "type": "tool",
+      "reads": ["hardened"],
+      "writes": ["wroteManifest"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/service.hardened.json", "body": "${hardened}" } }
+    },
+    {
+      "id": "write-report",
+      "type": "tool",
+      "reads": ["summary"],
+      "writes": ["wroteReport"],
+      "tool": { "name": "fs.write", "version": "1.0", "args": { "path": "out/harden-report.md", "body": "${summary}" } }
+    }
+  ],
+  "edges": [
+    { "id": "loaded", "from": "load", "to": "parse", "kind": "seq" },
+    { "id": "first-pass", "from": "parse", "to": "audit", "kind": "seq" },
+    { "id": "repair", "from": "audit", "to": "fix", "kind": "conditional", "when": "!settled && len(applied) < 12" },
+    { "id": "recheck", "from": "fix", "to": "audit", "kind": "loop", "until": "settled", "maxIterations": 16 },
+    { "id": "done", "from": "audit", "to": "collate", "kind": "conditional", "when": "settled || len(applied) >= 12" },
+    { "id": "gate", "from": "collate", "to": "review", "kind": "seq" },
+    { "id": "ship", "from": "review", "to": "write-manifest", "kind": "seq" },
+    { "id": "log", "from": "write-manifest", "to": "write-report", "kind": "seq" }
+  ]
+}

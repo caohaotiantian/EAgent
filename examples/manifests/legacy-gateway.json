@@ -1,0 +1,22 @@
+{
+  "name": "legacy-gateway",
+  "stage": "prod",
+  "release": "3.0.0",
+  "image": "registry.internal/legacy-gateway:3.0.0",
+  "pullPolicy": "IfNotPresent",
+  "user": "app",
+  "workdir": "/srv/app",
+  "ports": [8443],
+  "healthcheck": { "httpGet": { "path": "/healthz", "port": 8443 } },
+  "env": {
+    "UPSTREAM_TOKEN": "gw-9f2c",
+    "SESSION_SECRET": "s3ssion",
+    "DB_PASSWORD": "hunter2",
+    "REDIS_PASSWORD": "r3dis",
+    "SMTP_PASSWORD": "sm7p",
+    "STRIPE_TOKEN": "sk-live-42",
+    "SIGNING_SECRET": "sign-me",
+    "REGION": "eu-west-1"
+  },
+  "secrets": []
+}

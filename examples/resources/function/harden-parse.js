@@ -1,0 +1,69 @@
+/**
+ * `function/harden-parse@stable` — turn the bytes `fs.read` returned into the manifest the loop
+ * will rewrite, or refuse.
+ *
+ * IT EXISTS TO REFUSE. Auditing is a search for absences — no healthcheck, no pinned tag, no
+ * declared secret — and a search for absences run against something that is not a manifest finds
+ * nothing and reports a clean bill of health. That is this workflow's version of the defect §8
+ * names: a document a person is about to approve being wrong with nothing saying so. Both
+ * refusals below are that same sentence.
+ *
+ *  - **The bytes are not JSON.** `JSON.parse` throwing here would normalize to `internal` /
+ *    `E_INTERNAL` — the code a genuine bug in this body wears — so the throw is caught and
+ *    RETURNED as `{refuse:{reason}}`, which is `validation` / `E_FUNCTION_REFUSED` and never
+ *    retried. A file that did not parse will not parse on a second attempt.
+ *  - **The JSON is not a service manifest.** `name` and `image` are what every rule in
+ *    `harden-audit.js` keys off; a document carrying neither is something else (this workspace
+ *    ships `manifests/no-image.json`, a cron entry, to stand for it) and every rule would abstain
+ *    on it. Abstaining on all eight prints "0 findings", which reads as "your manifest is already
+ *    compliant".
+ *
+ * The parse is the ONLY place the loop's state is seeded, which is why it is its own node: `audit`
+ * and `fix` both run many times and neither may reach for `source` again. `manifest` has exactly
+ * two writers — this node once, and `fix` once per pass — and the second is what makes it
+ * `replace` rather than an accumulator.
+ */
+function (view, ctx) {
+  const source = String(view.require("source"));
+  const path = String(view.require("manifestPath"));
+
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch (e) {
+    return {
+      refuse: {
+        reason:
+          "\"" + path + "\" is not JSON (" + String(e && e.message ? e.message : e) + "). This graph " +
+          "audits a JSON service manifest; every rule it holds would abstain on a document it cannot " +
+          "read, and eight abstentions print as a clean bill of health.",
+      },
+    };
+  }
+
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      refuse: {
+        reason:
+          "\"" + path + "\" parsed as " + (Array.isArray(parsed) ? "an array" : String(parsed === null ? "null" : typeof parsed)) +
+          ", not a JSON object. A service manifest is an object with at least \"name\" and \"image\".",
+      },
+    };
+  }
+
+  const missing = [];
+  if (typeof parsed.name !== "string" || parsed.name === "") missing.push("name");
+  if (typeof parsed.image !== "string" || parsed.image === "") missing.push("image");
+  if (missing.length > 0) {
+    return {
+      refuse: {
+        reason:
+          "\"" + path + "\" is JSON but not a service manifest: it declares no " + missing.join(" and no ") +
+          ". Every policy rule keys off those two fields, so all eight would abstain and the report " +
+          "would say this manifest is already compliant.",
+      },
+    };
+  }
+
+  return { writes: { seed: parsed } };
+}
