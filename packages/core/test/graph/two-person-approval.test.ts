@@ -47,18 +47,20 @@
  * written (asserted below, over all six orderings). The shipped `description` gives the boundary.
  *
  * §A.68 offered two closures and said the decision is which behaviour the example is FOR. The
- * measurement took it: `onBranchError: "skip"` was REFUSED, on the same graph with only that
- * field changed —
+ * measurement took it, and then §A.75 MOVED WHAT IT MEASURED — this paragraph is the second
+ * version and the first one is why it is dated. When §A.68 ran, `onBranchError: "skip"` on the
+ * same graph with only that field changed read:
  *
  *     alice REJECT,  bob approve, carol approve  succeeded  wrote ["ship it"]   ← wanted
  *     alice REJECT,  bob REJECT,  carol REJECT   failed     E_QUORUM_UNREACHABLE ← wanted
  *     alice REJECT,  bob REJECT,  carol approve  succeeded  wrote ["ship it"]   ← NOT WANTED
  *
- * — in all three orderings of one approval and two rejections. `#maybeFireJoin` fires `quorum` on
- * `succeeded >= need || noMoreArrivals`, so once every member is terminal the barrier releases
- * whatever `k` was; `#foldJoin` then holds only the `onBranchError === "fail" && skipped > 0` arm
- * and §D.9's, and never re-checks `k`. Under `"fail"` the first arm masks it. Under `"skip"`
- * nothing does, which is why three rejections still fail and two do not.
+ * — in all three orderings of one approval and two rejections, because `#maybeFireJoin` fired
+ * `quorum` on `succeeded >= need || noMoreArrivals` and `#foldJoin` held only the
+ * `onBranchError === "fail" && skipped > 0` arm and §D.9's, never re-checking `k`. That was an
+ * ENGINE defect, it is fixed (§A.75), and the third line now reads
+ * `failed E_QUORUM_UNREACHABLE wrote []` in all three orderings. The last test in this file drives
+ * it; `packages/core/test/run/join-quorum-k-is-a-floor.test.ts` owns the engine-side matrix.
  *
  * §D.9'S ARM IS `succeededMembers === 0` FOR THIS GRAPH, not `succeededWork === 0`. The predicate
  * is `workMembers > 0 ? succeededWork === 0 && terminalWork === workMembers : succeededMembers === 0`
@@ -67,14 +69,23 @@
  * BARRIER, which is `examples/graphs/two-person-approval.json`" — so quoting the work term here
  * would have pointed a reader at the one arm this graph can never reach.
  *
- * So `"skip"` would replace a fail-CLOSED mismatch with a fail-OPEN one: an example saying "two
- * of three" that lets one person land the write. *Refusing is always allowed; loosening never
- * is.* The description was made honest instead, and the four cases are pinned below — including
- * the `"skip"` measurement, so the arm cannot be taken later without re-running it.
+ * So AT THE TIME `"skip"` would have replaced a fail-CLOSED mismatch with a fail-OPEN one: an
+ * example saying "two of three" that lets one person land the write. *Refusing is always allowed;
+ * loosening never is.* The description was made honest instead — and that decision still stands on
+ * its own, because a description that lies is a defect whatever the engine does.
  *
- * THAT `k` IS UNENFORCED ON THE `noMoreArrivals` RELEASE IS AN ENGINE DEFECT AND IS NOT FIXED
- * HERE. `run/engine.ts` is another lane's file. When it is fixed, the last test in this file goes
- * red and says so — at which point §A.68's `"skip"` arm becomes available for the first time.
+ * WHAT §A.75 CHANGED, AND WHAT IT DID NOT. The fold now enforces `k` as a floor whatever
+ * `onBranchError` says, so the fail-OPEN objection is GONE: under `"skip"` one approval of three is
+ * refused at the barrier. The two values now differ only in WHEN a run that will not reach `k` is
+ * refused — `"fail"` at the first rejection, with `E_HUMAN_APPROVAL_REQUIRED` carrying the human's
+ * own reason; `"skip"` at the barrier, once every gate has been answered, with
+ * `E_QUORUM_UNREACHABLE`. Both refuse; neither writes.
+ *
+ * THIS EXAMPLE STILL SHIPS `"fail"`, AND THAT IS A MAINTAINER'S DECISION RATHER THAN A CONSEQUENCE.
+ * Nothing in the fix makes `"skip"` the better default: `"fail"` tells a rejecting approver
+ * immediately and names them in the error, `"skip"` collects every vote before answering. The file
+ * stays as it is until someone picks; what this test owns is that the choice is now a FREE one, and
+ * the last test in this file is the half of that claim the shipped `"fail"` cases cannot make.
  */
 
 import test from "node:test";
@@ -318,7 +329,7 @@ test("§A.68 · ONE REJECTION FAILS THE RUN — the four cases on the shipped fi
   assert.equal(twoReject.error, CODES.E_HUMAN_APPROVAL_REQUIRED);
 });
 
-test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the veto, and a `residue` label carries the refused arm", () => {
+test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the veto, and a `residue` label carries what the other arm now does", () => {
   const description = String((SPEC.metadata as { description?: unknown }).description ?? "");
   const labels = (SPEC.metadata as { labels?: Record<string, string> }).labels ?? {};
   // The defect was a description and a behaviour disagreeing, so the description is what is
@@ -335,9 +346,23 @@ test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the
   // `awaiting_gate`, which the fourth driven case below pins. "Fails the whole run" on its own
   // reads as "fails now" and would send a copier looking for a failure that has not happened yet.
   assert.match(description, /awaiting_gate|until the other people vote/i, `the description must say the run parks until the rest vote: ${description}`);
+  // AND THE LABEL MUST SAY WHAT IS TRUE NOW, not what was true when §A.68 measured it. The old
+  // form of this assertion required the words "skip" and "ONE approval" together, which the old
+  // label supplied in a sentence saying `skip` "lets ONE approval out of three land the write ...
+  // the fold never re-checks `k`" — false since §A.75, and GREEN, because a pattern over two words
+  // cannot tell a measurement from its negation. What a copier needs is the live difference
+  // between the two values, so that is what is asserted.
   assert.ok(
-    Object.values(labels).some((v) => /skip/.test(v) && /ONE approval/.test(v)),
-    `a residue label must carry why "skip" was refused, so the arm cannot be taken later without re-running it: ${JSON.stringify(labels)}`,
+    Object.values(labels).some((v) => /skip/.test(v) && /floor/.test(v) && /E_QUORUM_UNREACHABLE/.test(v)),
+    `a residue label must say that "skip" now refuses at the barrier on the k floor: ${JSON.stringify(labels)}`,
+  );
+  assert.ok(
+    Object.values(labels).some((v) => /differ only in WHEN/i.test(v)),
+    `and that the two values differ in WHEN they refuse, which is the choice a copier is making: ${JSON.stringify(labels)}`,
+  );
+  assert.ok(
+    !Object.values(labels).some((v) => /never re-checks/i.test(v) || /land the write, because/i.test(v)),
+    `no label may still state the defect as current behaviour: ${JSON.stringify(labels)}`,
   );
   // And the veto's own limit, which is the half a reader is likeliest to get wrong.
   assert.ok(
@@ -346,11 +371,21 @@ test("§A.68 · THE FILE SAYS SO IN ITS OWN WORDS — the description states the
   );
 });
 
-test("§A.68 · WHY `onBranchError: \"skip\"` WAS REFUSED — measured, not asserted: it lets ONE approval land the write", async () => {
-  // The same shipped graph with ONE field changed. If this test ever goes red, the engine has
-  // learned to enforce `k` on the `noMoreArrivals` release — at which point §A.68's `"skip"` arm
-  // becomes available for the first time, the example can take it, and this test is deleted with
-  // its row. Until then it is the evidence the description arm was the honest one.
+test("§A.68's `onBranchError: \"skip\"` ARM IS NOW AVAILABLE — §A.75 made `k` a floor, so one approval of three refuses", async () => {
+  // THIS TEST WENT RED ON PURPOSE AND WAS FLIPPED. Its previous form MEASURED the defect §A.75
+  // names — under `"skip"`, ONE approval of three landed the write, so `k: 2` was any-of-3 — and
+  // said in as many words that if the line ever failed, "the engine enforces k on the
+  // noMoreArrivals release and §A.68's skip arm is open". It failed at §A.75's fix: `#foldJoin`
+  // now folds a `quorum` barrier against its own `k` whatever `onBranchError` says, so the release
+  // that happens because no further arrival is possible no longer reports a success the graph did
+  // not ask for.
+  //
+  // SO THE ARM IS AVAILABLE AND THE EXAMPLE STILL DOES NOT TAKE IT: switching the shipped
+  // `examples/graphs/two-person-approval.json` from `"fail"` to `"skip"` is a MAINTAINER's
+  // decision, not a consequence of this fix, and it stays `"fail"` until one is taken. What this
+  // test now owns is that the decision is a FREE one — both values refuse a run that did not reach
+  // `k`, and they differ only in WHEN (`"fail"` at the first rejection, `"skip"` at the barrier),
+  // which is what these assertions and the `"fail"` cases above are together.
   const skip = JSON.parse(JSON.stringify(SPEC)) as GraphSpec;
   const quorum = skip.nodes.find((n) => n.id === ("quorum" as NodeId))!;
   (quorum.join as { onBranchError: string }).onBranchError = "skip";
@@ -366,18 +401,17 @@ test("§A.68 · WHY `onBranchError: \"skip\"` WAS REFUSED — measured, not asse
   assert.equal(allReject.status, "failed");
   assert.equal(allReject.error, CODES.E_QUORUM_UNREACHABLE);
 
-  // NOT WANTED, and delivered anyway, in all three orderings: `k: 2` unmet and the write lands.
+  // WANTED, AND NOW DELIVERED, in all three orderings: `k: 2` unmet, so the write does NOT land.
+  // This is the block that was inverted. The ordering is swept rather than picked because `k` is a
+  // floor and not a race — which approver said yes cannot change the count — and because the defect
+  // it replaces was present in all three orderings, not in one.
   for (const approver of ["alice", "bob", "carol"] as const) {
     const order = (["alice", "bob", "carol"] as const).map(
       (who) => [who, who === approver ? "approve" : "reject"] as const,
     );
     const r = await drive(skip, order);
-    assert.deepEqual(
-      r.wrote,
-      ["ship it"],
-      `MEASURED, not wanted: with only ${approver} approving, k:2 is unmet and the write lands anyway. ` +
-        "If this line now fails, the engine enforces k on the noMoreArrivals release and §A.68's skip arm is open.",
-    );
-    assert.equal(r.status, "succeeded");
+    assert.deepEqual(r.wrote, [], `with only ${approver} approving, k: 2 is unmet, so nothing may be written — §A.75`);
+    assert.equal(r.status, "failed", `${approver}: and the run does not report a success it did not earn`);
+    assert.equal(r.error, CODES.E_QUORUM_UNREACHABLE, `${approver}: named by the barrier, not by a gate`);
   }
 });

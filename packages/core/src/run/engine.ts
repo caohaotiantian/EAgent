@@ -61,7 +61,7 @@ import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
 import { carriesOversight, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
-import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, NodeSpec, RunGraph } from "../graph/spec.ts";
+import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, JoinNode, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
 import { InProcessScheduler, type Scheduler } from "./scheduler.ts";
@@ -2255,6 +2255,18 @@ export class Engine {
     readonly resolveFrom?: RunContext;
     /** Why this run's own steps cannot be dispatched. Read only when `ctx` is absent. */
     readonly why?: string;
+    /**
+     * Every child run whose context this walk BUILT, against the context it built — for a caller
+     * that releases what it installed (§A.76). Absent means nobody is collecting, which is every
+     * caller that goes on to dispatch.
+     *
+     * THE CONTEXT AND NOT A BARE ID, because `planRewind` is async and `attach`, `forget` and
+     * `submit` are all callable in between: the release deletes a run's context only when the one
+     * `#runs` holds is still the object this walk put there. `#forgotten` needs no such bookkeeping
+     * — `#childContextFor` puts the flag back at the moment it builds, so the release has nothing
+     * to restore and nothing to clobber.
+     */
+    readonly installed?: Map<RunId, RunContext>;
   }): Promise<readonly RollbackWalkStep[]> {
     const { runId, log, ctx, p } = input;
     const sinceSeq = input.sinceSeq ?? 0;
@@ -2309,7 +2321,16 @@ export class Engine {
         // <ref>", which is true but sends the operator to attach the CHILD — and the fix for a
         // detached ancestor is to attach the ancestor. A reason that names the wrong run is
         // worse than a generic one, so the ancestor's travels down.
-        out.push(...(await this.#planRollbackChild(resolveFrom, item.child, depth + 1, seen, resolveFrom === undefined ? why : undefined)));
+        out.push(
+          ...(await this.#planRollbackChild(
+            resolveFrom,
+            item.child,
+            depth + 1,
+            seen,
+            resolveFrom === undefined ? why : undefined,
+            input.installed,
+          )),
+        );
         continue;
       }
       const step = item.step!;
@@ -2355,15 +2376,17 @@ export class Engine {
     seen: Set<RunId>,
     /** The ancestor's reason, when there was no context to resolve this child's ref from. */
     inherited?: string,
+    /** Collects every child context this walk BUILT — see `#planRollback`'s `installed` (§A.76). */
+    installed?: Map<RunId, RunContext>,
   ): Promise<readonly RollbackWalkStep[]> {
     // A reference written before `submit` — see `#startSubgraph`, where the order is deliberate.
     // No journal means the child never started, so it did nothing that needs undoing.
     const p = await this.projection(child.runId);
     if (p === undefined) return [];
 
-    const ctx = parent === undefined ? undefined : this.#childContextFor(parent, child.runId, child.ref);
+    const ctx = parent === undefined ? undefined : this.#childContextFor(parent, child.runId, child.ref, installed);
     if (ctx !== undefined) {
-      return this.#planRollback({ runId: child.runId, log: ctx.log, ctx, p, depth, seen });
+      return this.#planRollback({ runId: child.runId, log: ctx.log, ctx, p, depth, seen, ...(installed === undefined ? {} : { installed }) });
     }
 
     // EVERY step, not only the attemptable ones — `#dispatchRollback` journals all of them, which
@@ -2383,6 +2406,7 @@ export class Engine {
       p,
       depth,
       seen,
+      ...(installed === undefined ? {} : { installed }),
       ...(parent === undefined ? {} : { resolveFrom: parent }),
       why:
         inherited ??
@@ -2481,9 +2505,10 @@ export class Engine {
     depth: number,
     seen: Set<RunId>,
     inherited?: string,
+    installed?: Map<RunId, RunContext>,
   ): Promise<readonly RollbackWalkStep[]> {
     try {
-      return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited);
+      return await this.#planRollbackChildSteps(parent, child, depth, seen, inherited, installed);
     } catch (e) {
       // `describeThrown` ON ALL THREE, not on the thrown value alone. The first version of this
       // block ran it on `e` and then coerced `child.runId` and `child.ref` raw, and those two are
@@ -2582,13 +2607,42 @@ export class Engine {
    * run and the `not_attempted` rows the caller writes instead. So the answer is "no context",
    * which is a fact the caller journals, rather than an exception nobody records.
    */
-  #childContextFor(parent: RunContext, childRunId: RunId, ref: string): RunContext | undefined {
+  #childContextFor(
+    parent: RunContext,
+    childRunId: RunId,
+    ref: string,
+    /**
+     * WHERE A BUILT CONTEXT IS REPORTED, and only a BUILT one (§A.76). `#contextFor` REGISTERS
+     * what it builds in `#runs`, and a caller that is only previewing has to be able to hand that
+     * back — `planRewind`'s `finally` says it releases "only what THIS call attached", and until
+     * this argument existed that was true of the parent and false of every child. The live branch
+     * above deliberately reports nothing: a context something else holds on purpose is not the
+     * preview's to release.
+     *
+     * AND IT PUTS `#forgotten` BACK IMMEDIATELY, IN THE SAME TICK AS THE BUILD, rather than leaving
+     * it to whoever releases the context. `#contextFor` clears the flag because binding a graph is
+     * what un-forgets a run — but NOBODY ASKED for this child to be bound: a walk rebuilt it to
+     * answer a question about it. Restoring here rather than in `planRewind`'s `finally` is what
+     * removes the race round 2 found: the `finally` runs after an `await`, so an `attach` landing in
+     * between would have been overwritten by a flag sampled before it. Now the flag is only ever
+     * clear when a caller cleared it, and the release has nothing to restore.
+     *
+     * It is done for EVERY caller and not only the collecting one, because the reason is the same
+     * for all of them: `rewind` and `#compensate` rebuild a child to dispatch an undo in it, which
+     * is not a request to bind that run for anything else either.
+     */
+    installed?: Map<RunId, RunContext>,
+  ): RunContext | undefined {
     const live = this.#runs.get(childRunId);
     if (live !== undefined) return live;
     const spec = parent.graph.subgraphs?.[ref];
     if (spec === undefined) return undefined;
     try {
-      return this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+      const wasForgotten = this.#forgotten.has(childRunId);
+      const built = this.#contextFor(childRunId, this.#compileChild(ref, spec, parent.graph), undefined, parent.grantBound);
+      if (wasForgotten) this.#forgotten.add(childRunId);
+      installed?.set(childRunId, built);
+      return built;
     } catch {
       return undefined;
     }
@@ -4859,8 +4913,10 @@ export class Engine {
   async planRewind(runId: RunId, atSeq: Seq, by: HumanActor): Promise<RewindPlan> {
     this.#requireHumanRewind(runId, atSeq, by, "planning a rewind of");
     const { p, live, ctx, attachedHere } = await this.#rewindRefusals(runId, atSeq);
+    // THE CHILD CONTEXTS THIS PREVIEW WILL BUILD, so the `finally` can hand them back too (§A.76).
+    const installed = new Map<RunId, RunContext>();
     try {
-      const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx);
+      const { plan } = await this.#rewindPlanOf(runId, atSeq, p, live, ctx, installed);
       // AND THE REFUSALS THE PLAN ITSELF DECIDES, BEFORE THE PLAN IS SHOWN OR JOURNALED (§A.74).
       // This is the second half of the paragraph above: `#rewindRefusals` is everything `rewind`
       // refuses BEFORE it plans, and `#refusePlannedRewind` is everything it refuses AFTER.
@@ -4875,6 +4931,52 @@ export class Engine {
       // the leak `#retire` exists to close. Only what THIS call attached: a run something else
       // holds on purpose is not this verb's to release.
       if (attachedHere) this.#retire(runId);
+      // AND THE CHILDREN, WHICH THIS SENTENCE DID NOT COVER UNTIL §A.76. The walk rebuilds a
+      // context for every child whose graph the parent's `subgraphs[ref]` compiles, and
+      // `#contextFor` registers each one in `#runs` — so the preview left the engine holding runs
+      // it had never been asked to hold. That is the leak above, one level down, and it is worse
+      // than a leak: `#contextFor` returns an existing context UNTOUCHED, so the next
+      // `attach(childRunId, correctedGraph)` was a silent no-op and the stale graph the preview
+      // built was what the following verb dispatched under. Measured on a delegated
+      // `pay.refundable` charge whose workflow had been edited since: the operator attached the
+      // child's real graph, rewound, and the refund was journaled `failed` for a capability the
+      // edited graph no longer declares — the money did not come back
+      // (`rewind-preview-releases-child-contexts.test.ts`).
+      //
+      // `#runs.delete` AND NOT `#retire`, deliberately. `#retire` also records the run in
+      // `#retiredRuns` against the graph it retired with, which is what lets `#reattach` rebuild
+      // it later — and the graph THIS call built is the one that should not be believed. Recording
+      // it would make `#retainedGraphOf` compare the preview's rebuild against the child's own
+      // journal hash and decline, so a child that had legitimately retired here earlier with its
+      // real graph would stop being re-attachable: the preview making a later verb worse, which is
+      // exactly the shape §A.76 is about.
+      //
+      // AND `#forgotten` SURVIVES THE PREVIEW, WHICH IS THE OTHER HALF OF "RESTORES" AND WAS
+      // MISSING. This block claimed to leave the engine as it found it while dropping the context
+      // alone, and `#contextFor` clears `#forgotten` — so a child an operator had explicitly
+      // `forget`ten came back as a child this engine had merely never seen, and `#retainedGraphOf`
+      // reads those two differently: `forget`'s own docstring says an explicit release means
+      // "`#reattach` declines it until `attach` says otherwise", and a preview of the PARENT took
+      // that back. Measured on one engine, `forget(child)` then a rewind OF THE CHILD: `refused
+      // E_RESTORE_ILLEGAL` without a preview in between and `proceeded; refunds=[42]` with one.
+      //
+      // THE FLAG IS NOT PUT BACK HERE, and that is the round-2 correction. Restoring it here meant
+      // sampling it before an `await` and writing it after: `planRewind` is async and `attach` is
+      // synchronous and public, so an `attach(child, graph)` landing in between was overwritten by
+      // the older sample — the operator's own request re-forgotten under them. `#childContextFor`
+      // now puts the flag back in the same tick as the build, so by the time this runs the flag is
+      // clear only if a CALLER cleared it, and there is nothing here to clobber.
+      //
+      // AND THE CONTEXT IS DELETED ONLY IF IT IS STILL THE ONE THIS CALL BUILT. Same window, same
+      // reason: `forget` then `attach` in between leaves a DIFFERENT context in `#runs`, which
+      // somebody asked for and this verb did not install.
+      //
+      // The PARENT needs no such arm: it is re-attached through `#reattach`, which reads
+      // `#retainedGraphOf` and therefore declines a forgotten run outright, so `attachedHere` is
+      // false for one and this block never installed it.
+      for (const [child, mine] of installed) {
+        if (this.#runs.get(child) === mine) this.#runs.delete(child);
+      }
     }
   }
 
@@ -4914,8 +5016,21 @@ export class Engine {
     p: RunProjection,
     live: RunContext | undefined,
     ctx: { readonly log: RunLog },
+    /**
+     * WHAT THIS WALK REGISTERED, for a caller that has to hand it back (§A.76). `planRewind`
+     * passes a set and releases it; `rewind` passes none, because it DISPATCHES through those
+     * contexts and the run that owns them is the one it is undoing.
+     */
+    installed?: Map<RunId, RunContext>,
   ): Promise<{ readonly plan: RewindPlan; readonly walk: readonly RollbackWalkStep[] }> {
-    const walk = await this.#planRollback({ runId, log: ctx.log, ...(live === undefined ? {} : { ctx: live }), p, sinceSeq: atSeq });
+    const walk = await this.#planRollback({
+      runId,
+      log: ctx.log,
+      ...(live === undefined ? {} : { ctx: live }),
+      p,
+      sinceSeq: atSeq,
+      ...(installed === undefined ? {} : { installed }),
+    });
     const steps: RewindPlanStep[] = walk.map((item) => {
       // Only where an undo would actually be built, and `detailsOf` is asked rather than
       // second-guessed: it returns `undefined` for exactly the results `#compensateOne` refuses
@@ -6282,6 +6397,17 @@ export class Engine {
    * about at a security boundary.
    */
   #contextFor(runId: RunId, graph: RunGraph, limits?: BudgetLimits, inherited?: readonly string[]): RunContext {
+    // ABOVE THE EARLY RETURN, so BINDING A GRAPH un-forgets the run whether or not a context is
+    // already held. It used to sit below, where it could only ever fire for a run this engine had
+    // no context for — which is every ordinary caller, because `forget` deletes the context as it
+    // sets the flag, so the two states never overlapped. §A.76's preview is what made them
+    // overlap: it installs a child's context and `#childContextFor` puts the flag back, so for the
+    // length of one `planRewind` a run is BOTH held and forgotten. An `attach` landing in that
+    // window is a caller saying "bind this run", and it has to clear the flag even though the
+    // context it hands over is discarded (`#contextFor` returns the existing one untouched — the
+    // §A.76 arm this lane did not take). Otherwise the preview's release would re-forget a run
+    // somebody had just asked for, which is the race round 2 found.
+    this.#forgotten.delete(runId);
     const existing = this.#runs.get(runId);
     if (existing !== undefined) return existing;
     const own = graph.spec.policy?.capabilities;
@@ -6291,7 +6417,6 @@ export class Engine {
         : inherited === undefined
           ? own
           : own.filter((c) => inherited.some((p) => (p.endsWith("*") ? c.startsWith(p.slice(0, -1)) : p === c)));
-    this.#forgotten.delete(runId);
     const ctx: RunContext = {
       runId,
       graph,
@@ -8157,6 +8282,138 @@ export class Engine {
               `folding nothing and carrying on would report a run that did no work as a success`,
         ),
       };
+    }
+
+    // AND A `quorum` BARRIER IS FOLDED AGAINST ITS OWN `k`. §A.75.
+    //
+    // `#maybeFireJoin` releases every mode once no further arrival is possible — that is §A.55's
+    // answer and it is right, because a barrier nothing can still reach must not hang. But a
+    // release taken on "nothing more can arrive" carries no claim that the mode's requirement was
+    // MET, and this method held two arms that could notice — `onBranchError === "fail" && skipped
+    // > 0`, and §D.9's "not one of them succeeded" — and neither of them reads `k`. So under
+    // `onBranchError: "fail"` any loss failed the run before the count mattered, which masked it
+    // in every shipped graph, and under `"skip"` nothing did: measured on
+    // `examples/graphs/two-person-approval.json` with that one word changed, ONE approval of
+    // three met `k: 2`, in all three orderings. k-of-n was any-of-n.
+    //
+    // `k` IS A FLOOR AND NOT MERELY A SHORT-CIRCUIT THRESHOLD, which is the judgement this arm
+    // takes: `k` is the whole of what a quorum join declares, and a graph that writes it is
+    // entitled to read it as the number of branches that have to come through. The alternative —
+    // "`k` means release early, and what you get is whatever arrived" — makes `quorum` and `any`
+    // the same node under `skip`, and leaves an author no way to say "two of these three".
+    //
+    // `need` AND THE COUNT IT IS COMPARED TO COME FROM `#joinArrivals` AND `quorumNeed`, so the
+    // fold cannot disagree with the release about either. `expected` is the fan-out PLAN's width
+    // (or, for static sibling arms, the member count), and `k <= 1` is a FRACTION of it — neither
+    // is re-derived here.
+    //
+    // AND THE COUNT IS `contributed`, NOT `succeeded`, WHICH IS THE ONE JUDGEMENT IN THIS ARM.
+    // `succeeded` is arrivals AT the barrier: `#maybeFireJoin` excludes a member that handed off
+    // inside the branch set, so a branch whose earlier member wrote and whose later member then
+    // threw counts zero. Requiring `k` of THOSE refuses three shapes this runtime decided to fold
+    // — a degraded fan branch (`join-all-branches-fail.test.ts`), a `human_gate` answered `edit`
+    // whose worker then died (`join-evidence-and-work.test.ts`), and any partial loss
+    // `onBranchError: "skip"` exists to absorb — and it would refuse them with the humans' own
+    // writes already in the fold. Measured: all three flip to `failed E_QUORUM_UNREACHABLE` on
+    // `succeeded`, and none of them on `contributed`. So the floor this arm enforces is "at least
+    // `need` of the branches I waited on PRODUCED something", which is `skip`'s own reading of a
+    // degraded branch and is still exactly `k` for every branch that is one node — the shipped
+    // `two-person-approval` shape, where the count is the number of approvals.
+    //
+    // NO QUIESCENCE CONJUNCT, unlike §A.67's arm directly above. That one makes an ABSENCE claim
+    // ("not one of them succeeded") which a still-live member could falsify; this one reads a
+    // count that only ever grows and compares it to a floor, so nothing a still-running member does
+    // later can turn a satisfied `k` back into an unsatisfied one.
+    //
+    // AND THE MESSAGE MAKES NO CLAIM ABOUT WHICH RELEASE BRANCH FIRED, which the first draft did
+    // ("the barrier released because no further arrival is possible"). This method cannot know that:
+    // `#maybeFireJoin` returns a `task.ready` row carrying no reason, and the two sides count
+    // different units — the release counts ARRIVALS and this arm counts branches that PRODUCED — so
+    // a short-circuit release can reach here in principle and the sentence would be false when it
+    // did. What the message says instead is the rule, which is true on every path: `k` is a floor
+    // the fold enforces whatever `onBranchError` says.
+    //
+    // "PRODUCED" AND NOT "SUCCEEDED", for the same reason the count is `contributed`: a degraded
+    // branch this arm deliberately counts did NOT succeed, and a message saying it did would be
+    // false about the very case the unit was chosen for.
+    //
+    // INDEPENDENT OF `onBranchError`, deliberately and for the reason §D.9 already gives: `skip`
+    // says what to do with a branch that DIED, not that the barrier's own declaration is
+    // advisory. It still absorbs every loss the quorum can survive — `k: 2` of three with one
+    // rejection folds exactly as before.
+    //
+    // `members.length > 0` FOR THE SAME REASON THE ARM ABOVE CARRIES IT, and a fractional `k`
+    // hides the need for it. §A.47 requires a fan-out over an EMPTY channel to fold nothing and
+    // SUCCEED — it materialises no member Task, and `#fireEmptyJoin` releases that barrier on its
+    // own path, so the mode's predicate is never consulted and there is no requirement for the
+    // fold to hold it to. `ceil(0.5 * 0)` is 0, so a fractional quorum is satisfied by an empty fan
+    // by accident; an ABSOLUTE `k: 2` is `need: 2` over a width of nothing and was measured failing
+    // `E_QUORUM_UNREACHABLE` before this conjunct existed. "The fan materialised nothing" and "the
+    // fan materialised three and two lost" are different runs and only the second is this arm's.
+    //
+    // AND AN UNSATISFIABLE `k` GETS ITS OWN SENTENCE, because it is a different problem with a
+    // different fix. An ABSOLUTE `k` above the width the fan actually materialised — `k: 2` over a
+    // runtime width of 1 — can be met by no outcome, so a run in which EVERY branch succeeded still
+    // refuses. That is the refusing direction and it is allowed, but "needs 2 of 1 branch(es) and 1
+    // produced something" reads like a lost branch and sends an operator looking for one. This arm
+    // names the real fact, which is about the graph and not about this run.
+    //
+    // WHAT IS AND IS NOT DECIDABLE BEFORE THE RUN, and this comment has now been wrong in BOTH
+    // directions — the version before this one said a static branch list is statically refusable
+    // (too strong), the one after it said no static branch list is (also too strong, and it deleted
+    // a true residue). The line runs between two questions:
+    //
+    //   - "WILL THIS RUN MEET `k`?" is a runtime question even for a branch list written out by
+    //     name. `expected` counts the members that MATERIALISED, and a `kind: "conditional"` edge
+    //     decides that from channel state: `branches: ["a","b","c"]` with `c` behind
+    //     `when: flag == "yes"` and `k: 3` is satisfiable on one input and unsatisfiable on the next,
+    //     from ONE `GraphSpec`. A compile rule for THAT would refuse the graph for every input,
+    //     including the ones where it works. So this arm is the only place it can be answered, and
+    //     both rows are driven in `join-quorum-k-is-a-floor.test.ts`.
+    //
+    //   - "CAN ANY RUN MEET `k`?" is a COMPILE question whenever every member is static and none is
+    //     fanned out, and it is NOT ASKED TODAY. `GRAPH008_QUORUM_K` checks that `k` is positive and
+    //     that a `k > 1` is a whole number, and never that it is `<= branches.length`. Measured:
+    //     three static arms, no conditional, no fan-out, `k: 4` — `compile` returns CLEAN, zero
+    //     diagnostics, and the run reaches this arm with all three arms' writes already in the
+    //     channel. That graph can succeed for no input at all and the compiler passed it.
+    //
+    // THE SECOND ONE BELONGS IN `graph/validate.ts` AND IS NOT THIS ARM'S TO ADD — a fold cannot
+    // refuse a graph, and refusing at the barrier is what this arm is for. It is recorded as a
+    // `TODO.md` line rather than left in a comment nobody greps.
+    //
+    // THE COST OF THAT, STATED: a narrowed STATIC set puts its survivors at the ROOT coordinate,
+    // where `writesHeldForJoin` is false, so their writes are ALREADY IN THE CHANNEL when this arm
+    // refuses — and the advice names neither the conditional nor those writes, because this arm
+    // knows the width and not why the width is what it is. Deliberate: the alternative is folding a
+    // quorum the graph declared and did not get.
+    //
+    // `need > expected` IS THE DISCRIMINATOR AND IT IS EXACT: a fractional `k` is
+    // `ceil(k * expected)`, which cannot exceed `expected`, so this branch is reachable only from an
+    // absolute `k` — no second read of `join.k` is needed to tell the two apart.
+    //
+    // `E_QUORUM_UNREACHABLE`, the code this door already raises for the other way a release can
+    // carry no usable result; the difference is carried by the message, as it is between the two
+    // arms above. A new `CODES` member would be new error vocabulary in the kernel for a
+    // distinction nothing branches on.
+    if (join.mode === "quorum" && members.length > 0) {
+      const { contributed, expected } = this.#joinArrivals(ctx, p, join, w.task.branch);
+      const need = quorumNeed(join, expected);
+      if (contributed < need) {
+        return {
+          status: "failed",
+          writes: {},
+          usage: { ...ZERO_USAGE },
+          error: err.validation(
+            CODES.E_QUORUM_UNREACHABLE,
+            need > expected
+              ? `join "${w.node.id}": mode "quorum" declares k ${need}, which exceeds the ${expected} branch(es) this barrier ` +
+                `materialised — no outcome can meet it, and ${contributed} of them produced something. Lower \`k\` or widen the branch set`
+              : `join "${w.node.id}": mode "quorum" needs ${need} of ${expected} branch(es) to have produced something and ` +
+                `${contributed} did — \`k\` is a floor the fold enforces whatever \`onBranchError\` says`,
+          ),
+        };
+      }
     }
 
     const wave: Record<string, readonly Contribution[]> = {};
@@ -11895,6 +12152,110 @@ export class Engine {
   }
 
   /**
+   * THE ARRIVAL ARITHMETIC A BARRIER'S MODE IS DECIDED ON — one function, two consumers.
+   *
+   * `#maybeFireJoin` asks it to decide WHEN a barrier releases; `#foldJoin` asks it to decide
+   * whether the mode's own requirement was actually met by what arrived. §A.75 is what happens
+   * when only the first asks: `quorum` released on `succeeded >= need || noMoreArrivals` and the
+   * fold never re-checked `k`, so a barrier that released because nothing more could arrive
+   * folded as a SUCCESS with `succeeded < need`. Under `onBranchError: "fail"` the fold's first
+   * arm masked it; under `"skip"` nothing did, and ONE approval of three met `k: 2`.
+   *
+   * A SECOND COPY OF THIS ARITHMETIC IS THE DRIFT HAZARD, NOT THE FIX — the same sentence
+   * `#planRollback` already carries for `rewind` and `planRewind`. `expected` is not a sibling
+   * count and `succeeded` is not "how many member tasks say succeeded", and a fold re-deriving
+   * either by eye would answer a different question from the one the release was taken on. So the
+   * two read the same function and "they agree" is true by construction.
+   *
+   * `self` IS THE COMMITTING TASK'S OUTCOME, which `p` predates: `#maybeFireJoin` passes it so
+   * the arriving task is counted once rather than once as still-running and once as finished.
+   * `#foldJoin` passes none — by the time the barrier's own Task runs, every member it is
+   * counting has committed.
+   *
+   * TWO SUCCESS COUNTS, AND THE DIFFERENCE BETWEEN THEM IS A DECISION AND NOT AN OVERSIGHT.
+   * `succeeded` is ARRIVALS — a member that handed off inside the branch set is excluded, because
+   * its branch is still being handled and firing on it discards the recovery. `contributed` is
+   * BRANCHES THAT PRODUCED SOMETHING, in the unit `expected` is denominated in: coordinates where
+   * the members are fanned out, member tasks where they are static sibling arms, which is
+   * `expected`'s own rule. `#maybeFireJoin` needs the first — it is deciding whether another
+   * arrival could still change the answer. `#foldJoin` reads the second, and the reason is
+   * `onBranchError: "skip"`: a branch whose earlier member wrote and whose later member then died
+   * is a branch `skip` folds ON PURPOSE (§A.67, §D.9), so counting it as nothing at the fold would
+   * refuse a barrier holding real writes — including a human's own `edit` answer. Both are named
+   * here, in one function, so the choice is visible at the site instead of being a second unit
+   * somebody re-derived.
+   *
+   * `contributed` COUNTS COORDINATES AT OR UNDER THIS BARRIER, so on paper a nested fan whose inner
+   * members sit deeper could report more "branches" than the outer plan's width. **That is a
+   * DIRECTION CLAIM AND NOT A MEASUREMENT: it could not be constructed through the compiler.** Two
+   * attempts here and an independent reviewer's third failed the same way — an inner join pops a
+   * level, so every shape that compiles keeps `contributed <= expected`. What is asserted is only
+   * which way it would err if a shape were found: toward FOLDING, never toward refusing a run that
+   * met its `k`. The reverse would be the unsafe direction, and that is why this is a paragraph
+   * rather than a guard.
+   */
+  #joinArrivals(
+    ctx: RunContext,
+    p: RunProjection,
+    join: JoinNode,
+    parent: BranchCoordinate,
+    self?: { readonly taskId: TaskId; readonly status: "succeeded" | "failed"; readonly take: readonly EdgeId[] },
+  ): { readonly succeeded: number; readonly contributed: number; readonly terminal: number; readonly expected: number } {
+    // Members are the DECLARED branch nodes under or at this instance's coordinate — the
+    // same set `#foldJoin` folds. Counting one set and folding another is the shape
+    // invariant 6 forbids for tools, reproduced one subsystem over.
+    //
+    // ONE PASS OVER THE SNAPSHOT'S INDEX, NO STRINGS — see `#topUpFanout`. `members` is a `Set`
+    // because `join.branches` was asked `includes` once per task per commit, and
+    // `isAtOrUnderBranch` replaces an `encodeBranch` per task with a segment walk over the record
+    // the fold already decoded. `all` is the index's one materialised task list, so this scan
+    // shares it instead of allocating `Object.values(p.tasks)`.
+    const members = new Set<string>(join.branches);
+    const siblings = branchIndexOf(p).all.filter((t) => members.has(t.nodeId) && isAtOrUnderBranch(t.branch, parent));
+
+    // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
+    // materialisation a sibling count is "how many have started", so using it would
+    // fire the barrier as soon as the first wave finished — silently dropping every
+    // branch that had not been created yet.
+    const parentPath = encodeBranch(parent);
+    const planned = Object.entries(p.fanouts)
+      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && members.has(plan.nodeId))
+      .reduce((a, [, plan]) => a + plan.width, 0);
+    const expected = planned > 0 ? planned : siblings.length;
+
+    // A Task that HANDED OFF within the join's own branch set has not terminated its
+    // branch: an investigation that failed onto an error edge is still being handled by
+    // the quarantine node behind it. Counting it as terminal fires the barrier before
+    // the handler has run, and the recovery it exists for is silently discarded.
+    //
+    // `join.branches` already carries this: an edge to a node NOT in that set is an
+    // arrival at the join; an edge to a node inside it is a continuation.
+    //
+    // This Task's own hand-off is not in `p` yet, so read it from `self.take`.
+    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
+      (t.taskId === self?.taskId ? self.take : t.take).some((id) => {
+        const to = ctx.index.edgeById.get(id as EdgeId)?.to;
+        return to !== undefined && members.has(to);
+      });
+
+    const producedAt = new Set<string>();
+    let succeededTasks = 0;
+    let succeeded = 0;
+    let terminal = 0;
+    for (const t of siblings) {
+      const state = t.taskId === self?.taskId ? self.status : t.state;
+      if (state === "succeeded") {
+        producedAt.add(encodeBranch(t.branch));
+        succeededTasks++;
+      }
+      if (continuesInBranch(t)) continue;
+      if (state === "succeeded") succeeded++;
+      if (isTerminalTaskState(state)) terminal++;
+    }
+    return { succeeded, contributed: planned > 0 ? producedAt.size : succeededTasks, terminal, expected };
+  }
+
+  /**
    * Decide whether a join's barrier is satisfied. The join Task is created at the
    * PARENT branch — that is what "a join collapses branches back to one instance"
    * means concretely.
@@ -11903,7 +12264,7 @@ export class Engine {
    * routes every `seq`, `conditional` and `error` edge whose target is a join node here too, so
    * that an ordinary edge cannot mint the barrier's Task behind its back. Such a caller is asking
    * "is the barrier satisfiable right now?", not announcing an arrival — it contributes nothing
-   * to `siblings`, `expected` or `terminal`, and the answer is almost always `undefined`, because
+   * to the counts `#joinArrivals` returns, and the answer is almost always `undefined`, because
    * the member edges have already fired the barrier by the time it gets here. `edge` is read for
    * `edge.to` (the join node) and for `edgesIn` on the row; nothing else about its kind is used,
    * which is what makes the extra callers safe.
@@ -11933,43 +12294,14 @@ export class Engine {
     const joinTaskId = makeTaskId(edge.to, parent, 0);
     if (p.tasks[joinTaskId] !== undefined) return undefined; // already fired
 
-    // Members are the DECLARED branch nodes under or at this instance's coordinate — the
-    // same set `#foldJoin` folds. Counting one set and folding another is the shape
-    // invariant 6 forbids for tools, reproduced one subsystem over.
-    //
-    // ONE PASS OVER THE SNAPSHOT'S INDEX, NO STRINGS — see `#topUpFanout`. `members` is a `Set`
-    // because `join.branches` was asked `includes` once per task per commit, and
-    // `isAtOrUnderBranch` replaces an `encodeBranch` per task with a segment walk over the record
-    // the fold already decoded. `all` is the index's one materialised task list, so the two scans
-    // below share it instead of each allocating `Object.values(p.tasks)`.
-    const members = new Set<string>(join.branches);
-    const all = branchIndexOf(p).all;
-    const siblings = all.filter((t) => members.has(t.nodeId) && isAtOrUnderBranch(t.branch, parent));
-
-    // `expected` comes from the fan-out PLAN, not from a sibling count. Under lazy
-    // materialisation a sibling count is "how many have started", so using it would
-    // fire the barrier as soon as the first wave finished — silently dropping every
-    // branch that had not been created yet.
-    const planned = Object.entries(p.fanouts)
-      .filter(([key, plan]) => key.endsWith(`@${parentPath}`) && members.has(plan.nodeId))
-      .reduce((a, [, plan]) => a + plan.width, 0);
-    const expected = planned > 0 ? planned : siblings.length;
-
-    // `p` predates this Task's own commit, so substitute its outcome rather than
-    // counting it twice — once as still-running and once as finished.
-
-    // A Task that HANDED OFF within the join's own branch set has not terminated its
-    // branch: an investigation that failed onto an error edge is still being handled by
-    // the quarantine node behind it. Counting it as terminal fires the barrier before
-    // the handler has run, and the recovery it exists for is silently discarded.
-    //
-    // `join.branches` already carries this: an edge to a node NOT in that set is an
-    // arrival at the join; an edge to a node inside it is a continuation.
-    const continuesInBranch = (t: { taskId: TaskId; take: readonly string[] }): boolean =>
-      (t.taskId === w.task.taskId ? take : t.take).some((id) => {
-        const to = ctx.index.edgeById.get(id as EdgeId)?.to;
-        return to !== undefined && members.has(to);
-      });
+    // THE ARRIVAL COUNTS, AND THEY ARE `#foldJoin`'S TOO — see `#joinArrivals`. `p` predates
+    // this Task's own commit, so its outcome is substituted there rather than counted twice,
+    // once as still-running and once as finished.
+    const { succeeded, terminal, expected } = this.#joinArrivals(ctx, p, join, parent, {
+      taskId: w.task.taskId,
+      status: selfStatus,
+      take,
+    });
 
     // QUIESCENCE: a barrier may not fire while an arrival is still possible.
     //
@@ -11995,22 +12327,13 @@ export class Engine {
       const to = ctx.index.edgeById.get(id)?.to;
       return to !== undefined && reachesMember(to);
     });
-    const stillLive = all.some((t) => {
+    const stillLive = branchIndexOf(p).all.some((t) => {
       if (t.taskId === w.task.taskId) return false;
       if (isTerminalTaskState(t.state)) return false;
       if (!isAtOrUnderBranch(t.branch, parent)) return false;
       return reachesMember(t.nodeId);
     });
     const quiescent = !handingOff && !stillLive;
-
-    let succeeded = 0;
-    let terminal = 0;
-    for (const t of siblings) {
-      const state = t.taskId === w.task.taskId ? selfStatus : t.state;
-      if (continuesInBranch(t)) continue;
-      if (state === "succeeded") succeeded++;
-      if (isTerminalTaskState(state)) terminal++;
-    }
 
     // QUIESCENCE GATES THE "NO" ANSWERS, NOT THE "YES" ONES.
     //
@@ -12070,11 +12393,8 @@ export class Engine {
         case "any":
         case "firstSuccess":
           return succeeded >= 1 || noMoreArrivals;
-        case "quorum": {
-          const k = join.k ?? 1;
-          const need = k <= 1 ? Math.ceil(k * expected) : k;
-          return succeeded >= need || noMoreArrivals;
-        }
+        case "quorum":
+          return succeeded >= quorumNeed(join, expected) || noMoreArrivals;
       }
     })();
 
@@ -12516,6 +12836,21 @@ const VERDICT_SCHEMA: JSONSchema = {
   },
   required: ["pass", "score"],
 };
+
+/**
+ * How many branches a `quorum` join needs, from `k` and the width it was planned over.
+ *
+ * THE ONE PREDICATE, ASKED FROM BOTH SIDES — the same rule `writesHeldForJoin` lives on, and
+ * §A.75 is the bill for not having had it here. `#maybeFireJoin` asks "may this barrier release?"
+ * and `#foldJoin` asks "did what arrived meet the requirement it released under?", and a `need`
+ * computed twice is a `need` that can be computed differently: `k <= 1` is a FRACTION of the
+ * width and anything above it is an absolute count, and nothing about that is obvious enough to
+ * be re-derived by eye in a second method.
+ */
+function quorumNeed(join: JoinNode, expected: number): number {
+  const k = join.k ?? 1;
+  return k <= 1 ? Math.ceil(k * expected) : k;
+}
 
 function pick(obj: Readonly<Record<string, unknown>>, keys: readonly string[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
