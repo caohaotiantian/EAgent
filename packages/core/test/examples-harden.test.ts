@@ -498,7 +498,13 @@ test("RESIDUE — a `done` edge narrower than the loop's exit strands the run, a
     const error = s["error"] as Record<string, unknown>;
     assert.equal(error["code"], "E_OUTPUT_MISSING", r.out);
     assert.equal(error["class"], "internal", r.out);
-    assert.doesNotMatch(String(error["message"]), /loop|audit|repair|done/, "if the message learns to name the loop, this residue is closed");
+    // Word-bounded on purpose: a bare /done/ matches "abandoned", so an improved message using that
+    // word would fail this test for a reason that has nothing to do with the residue it pins.
+    assert.doesNotMatch(
+      String(error["message"]),
+      /\bloop\b|\baudit\b|\brepair\b|\bdone\b/,
+      "if the message learns to name the loop, the edge, or the node that took no edge, this residue is closed — update this test rather than restoring it",
+    );
   } finally {
     ws.dispose();
   }
