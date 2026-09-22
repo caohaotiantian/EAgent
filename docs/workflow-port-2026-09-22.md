@@ -11,14 +11,21 @@ the code.
 
 The first port's own summary of itself is the bar this one is measured against: *"Running it needed
 no source change; making it NATURAL needed eight."* **This one needed no source change either, and
-the count is ten.** Six of them are one mechanism — the compiler and the scheduler disagree with each
-other about whether a `loop` edge is an edge — and that mechanism cost four of the five round trips
-it took to get the graph to run. (**The fifth was mine**, a body still writing the channel name it
-had before the redesign, and it is not in the log: the binary named the node, the channel and the
+the count is eleven** — F1–F11 below. Seven of them are one mechanism, the compiler and the scheduler
+disagreeing about whether a `loop` edge is an edge, and that mechanism cost four of the five round
+trips it took to get the graph to run. (**The fifth was mine**, a body still writing the channel name
+it had before a redesign, and it is not in the log: the binary named the node, the channel and the
 declaration in one line and it was fixed in seconds. That is what the other four should have looked
 like.)
 
-**Nothing in this document is fixed here. It is all recorded.**
+**F12 is a twelfth entry of a different kind and the most useful one to read**: two defects in THIS
+PORT'S OWN workflow, found by a fresh agent told to refute this log *after* the suite was green at
+13/13. One was the exact defect class the workflow exists to prevent. `CLAUDE.md` says a builder's own
+green suite is not evidence; F12 is what that costs when it is taken seriously, and what it would have
+cost if it had not been.
+
+**Nothing in F1–F11 is fixed here — it is recorded.** F12's two are the port's own and are fixed, each
+with a test that fails without the fix.
 
 ---
 
@@ -260,8 +267,8 @@ loom gates "$RUN" 2>/dev/null
 is holding comes down the same call. The three numbers a person decides on:
 
 ```bash
-loom gates "$RUN" 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, open: (.open|length)}'
-# → { "passes": 8, "stoppedBy": "settled", "cascades": 3, "open": 0 }
+loom gates "$RUN" 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, startedWith, open: (.open|length)}'
+# → { "passes": 8, "stoppedBy": "settled", "cascades": 3, "startedWith": 5, "open": 0 }
 
 loom gates "$RUN" 2>/dev/null | jq -r '.[0].reads.report.applied[] | "\(.pass) \(.rule) \(.at)"'
 ```
@@ -398,14 +405,33 @@ thing a person has to decide.
 ```bash
 # 2 · Dirtier than the pass budget. Seven inline credentials is fourteen fixes; the budget is twelve.
 loom run graphs/harden-config.json --input '{"manifestPath":"manifests/legacy-gateway.json"}' 2>/dev/null | jq -r .runId
-loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, open: (.open|length)}'
-# → { "passes": 12, "stoppedBy": "budget", "cascades": 5, "open": 1 }
+loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, stoppedBy, cascades, startedWith, open: (.open|length)}'
+# → { "passes": 12, "stoppedBy": "budget", "cascades": 5, "startedWith": 7, "open": 2 }
 ```
 
 A budget stop parks on a gate and exits 0 exactly like a converged one. The only thing that tells
 them apart is the report's own first paragraph: *"**the pass budget ran out with auto-fixable
 findings still open** — this manifest is better, not done."* A run whose report did not say so would
 be a person approving a manifest they believe is finished.
+
+**`"open": 2` is the number this report used to get wrong**, and it is F12's first defect: the auditor
+reported only the FIRST undeclared secret per pass, so the gate said "Still open — 1" on a manifest
+with two. The check that does not depend on knowing the number is to harden the output again — it must
+need exactly as many passes as there were open auto-fixable findings, and then settle:
+
+```bash
+cp out/service.hardened.json manifests/legacy-round-two.json
+loom run graphs/harden-config.json --input '{"manifestPath":"manifests/legacy-round-two.json"}' 2>/dev/null | jq -r .runId
+loom gates <runId> 2>/dev/null | jq '.[0].reads.report | {passes, startedWith, cascades, stoppedBy}'
+# → { "passes": 2, "startedWith": 2, "cascades": 0, "stoppedBy": "settled" }
+rm manifests/legacy-round-two.json
+```
+
+`"cascades": 0` is F12's second defect, fixed. Both entries here carry a static
+`cascadeOf: "plaintext-secret"`, and counting THAT is what made the old report say *"2 of those 2
+fix(es) closed a finding that DID NOT EXIST when the run started"* about two findings that were in the
+very first audit. `cascades` is now measured against `startedWith` — the first audit's own finding
+list — so it is 0 here and 3 on `orders-api.json`, and the sentence is printed only when it is true.
 
 ```bash
 # 3 · Two refusals, because each is a promise.
@@ -477,15 +503,18 @@ the compile and resource-reachability halves were covered before this suite exis
 ## 3 · Friction log
 
 Every entry is a place the shipped product cost more than it should have, with the command, what
-happened, what was expected, and what it cost. **Ten found.** None is fixed here.
+happened, what was expected, and what it cost. **Eleven found in the product (F1–F11), none fixed
+here.** F12 is a twelfth entry of a different kind: two defects in THIS PORT'S OWN workflow, found by
+an adversarial re-run after the suite was green, and fixed — recorded in the same log because the
+method that found them is the most transferable thing in this document.
 
-**Six of the ten are one mechanism**, stated once so the entries can be read against it:
+**Seven of the eleven are one mechanism**, stated once so the entries can be read against it:
 
 > **A `loop` edge is an edge to the scheduler and not an edge to the compiler.** `graph/validate.ts`
 > filters `kind !== "loop"` out before computing the forward DAG, and every analysis built on that
 > DAG — entry nodes, terminal nodes, ancestry, concurrency, producer-before-consumer — behaves as if
-> the back-edge were not there. `run/engine.ts` then schedules it. F2, F3, F5, F7 and F10 are that
-> disagreement; F1 is nothing having written it down; F6 is the same absence in `ctx.node.out`.
+> the back-edge were not there. `run/engine.ts` then schedules it. F2, F3, F5, F7, F10 and F11 are
+> that disagreement; F1 is nothing having written it down; F6 is the same absence in `ctx.node.out`.
 
 ### F1 · Nothing in the published surface says how to write a loop, and every fact came from reading the source
 
@@ -640,7 +669,7 @@ back-edge running `fix → audit` — which then forces F4's problem onto the `u
 
 ---
 
-### F4 · An `until` on an edge leaving a node that WRITES the channel reads the write, not the channel
+### F4 · An `until` on an edge leaving a node that WRITES the channel measures that pass's contribution, not the channel
 
 **Tried.** The obvious budget on the back-edge, once F3 had moved it to `fix → audit`:
 `"until": "settled || len(applied) >= 12"`. `fix` writes `applied`, which is `append_ordered`.
@@ -650,17 +679,34 @@ back-edge running `fix → audit` — which then forces F4's problem onto the `u
 ```
 $ # probe A — until: "len(applied) >= 1"
 $ loom run … ; loom trace <run> | grep -c 'loom.task fix'
-1
+1                                            # …and the run FAILS E_OUTPUT_MISSING, i.e. F5's
+                                             #    stranding, not a clean stop
 $ # probe B — until: "len(applied) >= 2"
 $ loom run … ; loom trace <run> | grep -c 'loom.task fix'
-8
+8                                            # never fired at all; exited by `settled`
 ```
 
-Probe A stopped the loop after ONE fix; probe B never stopped it at all (the run went the full eight
-passes and exited by `settled`). So `applied` in that `until` is the node's own one-element
-CONTRIBUTION, not the accumulated channel: `len()` of it is 1 on every pass, forever.
-`run/engine.ts`'s `#edgesToTake` builds the scope as `{...scopeFor(p, …), ...outcome.writes}`, and
-for an `append_ordered` channel `outcome.writes` holds the delta.
+**Probe A on its own carries no information** and is shown only because it was the first thing tried:
+the "accumulated channel" reading and the "own contribution" reading both predict a stop after one
+fix. Probe B is the one that discriminates, and `run/engine.ts`'s `#edgesToTake` says why — it builds
+the scope as `{...scopeFor(p, …), ...outcome.writes}`, and for an `append_ordered` channel
+`outcome.writes` holds the pass's DELTA, which `harden-fix.js` makes one entry long.
+
+**The precise statement is about the delta's SIZE, not about the number 1**, and the first version of
+this entry got that wrong by generalising from this workflow's body. A body appending TWO entries per
+call makes `len(applied) >= 2` fire immediately on the same edge — measured on a probe graph whose
+only variable is how many entries its body appends:
+
+```
+$ # same graph, same `until: "len(log) >= 2"`, body appends 1 entry per call
+{"status":"succeeded"}   writer tasks: 20      ← never fired
+$ # same graph, same `until`, body appends 2 entries per call
+{"status":"failed"}      writer tasks: 1       ← fired on the first evaluation
+```
+
+So the honest claim is: **an `until` on an edge leaving a node that writes the channel measures THAT
+PASS'S CONTRIBUTION, not the accumulation.** `len(applied) >= 12` cannot fire on `recheck` because
+`harden-fix.js` appends one entry per pass — a property of the body, not of the engine.
 
 **Probe C isolates the cause, and is the one to re-run if you doubt this.** `findings` is written by
 `audit` and NOT by `fix`, so if the problem were "`until` sees stale or empty state" it would show up
@@ -782,18 +828,39 @@ loop body cannot state its own ceiling the way a fan-out body can.
 `loom audit` is the sixth and the only one of them that does not. Whether a verb not in that list
 prints them is untested.
 
-**Expected.** Silence. All three are false, for the one mechanism above: `fix` is not terminal (it
-has a `loop` edge out of it, which is how the run gets back to `audit`); and `applied` is written by
-`fix`, which reaches both `audit` and `collate` — over that same `loop` edge. Following either
-`fix:` line would make the graph worse: `add "applied" to inputs:` invites a caller to supply a fix
-log the graph is supposed to build.
+**Expected.** Silence — and that expectation is where this entry was overstated, which an adversarial
+re-run caught. **All three are wrong about the REASON and right about a HAZARD, and all three
+remedies are wrong.** Both halves matter:
 
-**Cost.** Low per occurrence and unbounded in total. During the port they were noise that had to be
-re-read on every command to check no NEW diagnostic had appeared under them — twice something was
-missed and re-run. Long term, the first workflow anybody ports with a loop in it prints three
-warnings forever, and every reader has to be told they are false: the port doc says so, the graph's
-`labels` say so, and `examples/README.md` §9 says so, which is three places the product could have
-said nothing instead.
+*Wrong about the reason*, for the one mechanism above: `fix` is not a terminal node (it has a `loop`
+edge out of it, which is how the run gets back to `audit`), and `applied` IS written by an upstream
+node — `fix`, reaching both readers over that same `loop` edge. "which no upstream node writes"
+misdescribes the cause in a way that sends you looking in the wrong place.
+
+*Right about a hazard*, each one reachable on inputs this port itself ships or produces:
+
+| warning | the hazard it is actually naming |
+|---|---|
+| `GRAPH005` on `audit` | `applied` genuinely has NO value on the first pass. `harden-audit.js` reads `view.get("applied") \|\| []` for exactly that reason; swap in `view.require` and the run fails `E_CHANNEL_UNDECLARED` |
+| `GRAPH005` on `collate` | on an already-compliant manifest — which the doc's own idempotence check produces — `settled` is true on the first audit, `fix` NEVER RUNS, and `collate` reads an `applied` nothing wrote. Same failure under `view.require` |
+| `GRAPH002_DEAD_END` on `fix` | `fix` really IS a dead end whenever the loop's `maxIterations` is reached before `repair`'s budget. Lower `maxIterations` to 12 and `legacy-gateway.json` strands on a `fix` that takes no edge — see F11 |
+
+So the three bodies' defensive `view.get(c) || []` is the warning being USEFUL, not noise. What is
+not useful is either `fix:` line: `add "applied" to inputs:` invites a caller to supply a fix log the
+graph exists to build, and the alternative — "have an upstream node write it" — is already true.
+
+**Cost.** Low per occurrence and unbounded in total, and the real cost is not the noise — it is that a
+warning nobody can act on gets read as a warning nobody need read. During the port these were noise
+re-read on every command to check no NEW diagnostic had appeared under them, and twice something was
+missed and re-run. Then, at the end, an adversarial reviewer showed that all three name live hazards
+this graph is one edit away from — and the port had already written them off as false in three places
+(this doc, the graph's `labels`, `examples/README.md` §9). **Crying wolf about the reason is how you
+get a real hazard ignored**, and that is a worse outcome than silence would have been. A diagnostic
+that said "`applied` has no value on the first pass; make sure every reader tolerates that" would have
+been correct, actionable, and would have needed no annotation anywhere.
+
+(One nit on "compiles clean" wherever this doc uses it about a probe: it means exit 0 with no NEW
+diagnostic. These three still print.)
 
 ---
 
@@ -872,9 +939,97 @@ first port's log has an entry of this size too (F6, `examples/.gitignore`).
 
 ---
 
+### F11 · The bound has a THIRD home, `maxIterations`, and matching it to the budget strands the run
+
+**Tried.** F5 says the stop rule is written twice. An adversarial re-run of this log found a third
+writer of the same bound, and the obvious tidy-up on it: the `recheck` edge's `maxIterations` is 16
+while the budget is 12, so "make them the same" looks like removing a redundancy.
+
+**Happened.**
+
+```
+$ # the shipped graph with recheck.maxIterations: 16 → 12
+$ loom compile graphs/harden-config.json ; echo "exit=$?"
+ok
+exit=0
+$ loom run … --input '{"manifestPath":"manifests/orders-api.json"}'    # → awaiting_gate, 8 fixes
+$ loom run … --input '{"manifestPath":"manifests/legacy-gateway.json"}'
+  "error": { "class": "internal", "code": "E_OUTPUT_MISSING", … }      # 12 fixes, then stranded
+```
+
+**Expected.** Either a refusal, or a message naming the bound that stopped the run. The engine's
+`maxIterations` and the graph's `len(applied) >= 12` are two different bounds on the same thing and
+they must be ordered — `maxIterations` strictly greater — with nothing checking it and nothing saying
+so. The failure mode is the worst available: `orders-api.json` needs 8 passes and is unaffected, so
+the edit ships green and only the manifest that actually needs the budget breaks, as F5's
+`E_OUTPUT_MISSING`, which again names neither bound.
+
+**Cost.** Nothing during the build, because the shipped numbers happen to be ordered correctly. It is
+here because it makes F5's "two homes" wrong: there are THREE, and the third is enforced by a
+different layer. Pinned as the second `RESIDUE` test in `examples-harden.test.ts`.
+
+---
+
+### F12 · Two defects in this port's own workflow, and what they say about the method
+
+**Not the product's friction — the port's.** Both were found by a fresh agent told to refute this log
+and to hunt for a wrong result, after the suite was green at 13/13. They are recorded here because
+`CLAUDE.md` says **a builder's own green suite is not evidence**, and this is the price of that being
+true. Both are fixed; both now have a test that fails without the fix.
+
+**1 · The gate undercounted what was still open, by half.** `harden-audit.js` reported only the FIRST
+undeclared `secretRef` per pass, reasoning that two findings claiming the same `at` would have the
+second's `now` computed against a manifest the first had already changed. True of REPAIRING; false of
+REPORTING, and `harden-fix.js` only ever applies one finding per pass, so the hazard never existed.
+
+```
+$ # before: manifests/legacy-gateway.json, which exhausts the budget with two refs undeclared
+{"passes":12,"stoppedBy":"budget","open":1}          ## Still open — 1
+$ # the file it wrote: 7 secretRefs in env, 5 declared in secrets
+$ # after
+{"passes":12,"stoppedBy":"budget","open":2}          ## Still open — 2  (stripe-token, upstream-token)
+```
+
+A person reads "Still open — 1", adds that secret, ships, and the deploy still fails at admission on
+the other. **This is the exact defect class the workflow exists to prevent** — evidence missing from a
+document a person is about to approve, with nothing saying so — committed by the thing built to
+prevent it. The suite asserted `report.open.length > 0`, which passes on 1 and on 2.
+
+**2 · The report's headline sentence was not measured.** `harden-collate.js` computed
+`cascades = applied.filter(a => a.cascadeOf != null)` — counting a STATIC field of the rule table
+("this rule cannot fire until that one is repaired") and printing the total under a sentence that is a
+claim about THIS RUN: *"closed a finding that DID NOT EXIST when the run started"*. On a manifest whose
+first audit already holds a cascade-rule finding, that is simply false — and **the graph's own output
+is such a manifest**, since a budget stop leaves `secret-not-declared` open:
+
+```
+$ # re-harden the legacy-gateway run's own out/service.hardened.json
+### before — its FIRST audit already reports secret-not-declared, twice
+2 of those 2 fix(es) closed a finding that DID NOT EXIST when the run started — each was created
+by an earlier fix, and only a re-audit after every pass could have found it.
+### after
+{"passes":2,"startedWith":2,"cascades":0}     and the sentence is not printed at all
+```
+
+The fix is an `audit`-written `baseline` channel holding the FIRST audit's findings, against which a
+cascade is measured. `cascadeOf` stays as the per-entry annotation, because as a statement about the
+RULE it was always true; only the count and the sentence were the lie.
+
+**What the two have in common, and it is one sentence:** the report asserted something the run had not
+measured. One asserted a completeness it had not checked, the other a novelty it had inferred from a
+constant. The workflow's own doc calls the cascade count *"the argument for the whole workflow"* — and
+an argument that is not measured is the thing this project's property 3 is entirely about.
+
+**Cost.** One reviewer, and the correction round in `eb973c92`…`HEAD`. Cheap, and only because
+somebody was told to look. The method is the finding: three stale prose claims in shipped files were
+caught the same way in the same pass.
+
+---
+
 ## 4 · What is left open
 
-- **All ten entries.** None is fixed here; the brief was to record them.
+- **All eleven product entries, F1–F11.** None is fixed here; the brief was to record them. (F12's
+  two are this port's own and ARE fixed, each with a test that fails without the fix.)
 - **The shipped graph carries two residues in its own `labels`**, `residue-stop-rule-twice` (F5) and
   `residue-single-writer` (F2), because both are things a reader of the graph needs and neither has
   anywhere better to live while F5 and F6 are open.

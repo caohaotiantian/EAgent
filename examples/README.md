@@ -417,6 +417,19 @@ that does not deploy.** `applied` is `append_ordered` and accumulates one entry 
 person at the gate sees the whole chain in the order it was decided — which is the `replace`/`append`
 pair this graph is built on: `current` is where the manifest got to, `applied` is how.
 
+**Two things in that report are MEASURED and were not, which is the correction worth copying into any
+workflow shaped like this.** `cascades` is counted against `baseline` — the FIRST audit's own finding
+list, which `audit` writes once and `report.startedWith` states — and not against the rule table's
+static `cascadeOf` field. The two differ exactly when a manifest's first audit already holds a
+cascade-rule finding, and **the graph's own output is such a manifest** (a budget stop leaves
+`secret-not-declared` open), so re-hardening it used to print "2 of those 2 fix(es) closed a finding
+that DID NOT EXIST when the run started" about findings that were in the very first audit. And `open`
+lists EVERY undeclared secret rather than the first: reporting one per pass is right for the FIXER,
+which applies one finding per pass, and wrong for the REPORT, where it said "Still open — 1" on a
+manifest with two — a person adds that secret, ships, and the deploy still fails at admission on the
+other. Both are F12 of `docs/workflow-port-2026-09-22.md`, both were found by a reviewer after the
+suite was green, and both now have a test that fails without the fix.
+
 **`settled` means "no AUTO-FIXABLE finding remains", not "no finding remains".** `manifests/payments-worker.json`
 declares no port, so a missing healthcheck has no probe target to invent; it is reported, it is
 `autofixable: false`, and it does not stop the loop settling. The other definition spins to the pass
@@ -426,7 +439,7 @@ the one thing a person has to decide. When the budget IS what stopped it —
 twelve — `report.stoppedBy` is `"budget"` and the report says *"this manifest is better, not done"*,
 because a budget stop parks on a gate and exits 0 exactly like a converged one.
 
-**Five things this section exists to save you**, because nothing else in this workspace has a `loop`
+**Six things this section exists to save you**, because nothing else in this workspace has a `loop`
 edge in it and `docs/workflow-port-2026-09-22.md` is the ten things it cost to find them.
 
 - **The loop's target needs a NON-loop inbound edge, or it is an entry node and runs at t=0.**
@@ -452,11 +465,22 @@ edge in it and `docs/workflow-port-2026-09-22.md` is the ten things it cost to f
   channel, and the fix log is the state with the manifest as its projection. Changing the reducer
   instead — the first half of that diagnostic's own `fix:` line — compiles and then meets the
   entry-node bullet above.
-- **Three of the warnings on every command are false**, and they are all the same mechanism:
+- **The bound has a THIRD home and it is `maxIterations`.** `recheck` carries 16 while the budget is
+  12, and the ordering is load-bearing: "tidy" it to 12 and the graph compiles at exit 0,
+  `orders-api.json` (8 passes) still works, and `legacy-gateway.json` — which needs all twelve —
+  strands with the same `E_OUTPUT_MISSING` that names neither bound. Two bounds on one thing,
+  enforced by two layers, checked by nothing.
+- **Three of the warnings on every command are wrong about the REASON and right about a HAZARD**, and
+  the reason half is all the same mechanism:
   `GRAPH002_DEAD_END` on `fix` (which has a `loop` edge out of it) and `GRAPH005_UNPRODUCED_READ`
   twice for `applied` (which `fix` writes, upstream over that same `loop` edge). Following either
   `fix:` line makes the graph worse — `add "applied" to inputs:` invites a caller to supply a fix log
-  the graph is supposed to build.
+  the graph is supposed to build. **But do not write them off, which this section's first draft did**:
+  `applied` really has no value on the first pass, `collate` really reads an unproduced `applied` on an
+  already-compliant manifest (`fix` never runs), and `fix` really is a dead end whenever
+  `maxIterations` binds before the budget. The `view.get(c) || []` in all four bodies is those
+  warnings being useful. They are right about the hazard, wrong about the cause, and their remedies
+  are wrong.
 
 `manifests/` holds five inputs and four of them are there to be refused or to stop short:
 `orders-api.json` converges in eight passes, `payments-worker.json` settles with one unrepairable
