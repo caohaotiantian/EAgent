@@ -2,7 +2,7 @@
 
 **This directory is a Loom workspace** — a directory with `graphs/` and `resources/` in it. Loom
 reads nothing else; `bench-cases.json` at the root is not a workspace file, it is §5's input, and
-neither `reports/` nor `manifests/` is one — they are §8's and §9's.
+neither `reports/`, `manifests/` nor `access/` is one — they are §8's, §9's and §10's.
 
 ```bash
 npm install && npm run build:binary   # → bin/loom
@@ -10,7 +10,7 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Seven graphs, and they do not all run the same way.** Without `--models-file` the only registered
+**Eight graphs, and they do not all run the same way.** Without `--models-file` the only registered
 adapter is the offline mock, and `loom run` says so on stderr before it starts.
 
 | graph | § | needs a model? |
@@ -22,17 +22,21 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
 | `graphs/harden-config.json` | 9 | **no**, and it means something offline — a policy violation is read off the manifest's structure. The only graph here with a `loop` edge in it, and it prints **three warnings that are wrong about their cause and right about a hazard** on every command: see §9 |
+| `graphs/grant-access.json` | 10 | **no**, and it means something offline — the ceremony is read off the resource's tier, the level and the hours. The only graph here with a `router` or a `kind: "error"` edge, and the only one using a reducer other than `replace`/`append_ordered`. It compiles with **no diagnostic at all**, and it reaches three different endings on three different inputs: see §10 |
 
 `packages/core/test/examples-run.test.ts` COMPILES every graph in `graphs/` — the set is the
 directory, so a graph added later is covered without editing the test — and RUNS the three it can
 drive to COMPLETION without a model (§1, §3, §5), asserting §5's six verdict strings and its
-`3/6 assertions passed`. §8 and §9 need no model either and park on a human gate, which is why each
-has its own suite below; `two-person-approval` parks and is never answered. Only §6 is
+`3/6 assertions passed`. §8, §9 and §10 need no model either and each has its own suite below;
+`two-person-approval` parks and is never answered. Only §6 is
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 §8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
 file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately
-copies only `graphs/` and `resources/`. §9 is the same arrangement one graph later:
-`packages/core/test/examples-harden.test.ts`, because it needs `manifests/`.
+copies only `graphs/` and `resources/`. §9 and §10 are the same arrangement one graph later each:
+`packages/core/test/examples-harden.test.ts`, because it needs `manifests/`, and
+`packages/core/test/examples-grant.test.ts`, because it needs `access/`. **§10 is the one that does
+not always park** — its router sends a public-tier read straight to the write with no gate at all,
+and sends a request outside policy to a refusal that exits 1.
 
 ---
 
@@ -543,3 +547,97 @@ that.** `out/service.hardened.json` has its object keys in sorted order and the 
 `git diff` against the original is the whole file rather than the eight fixes. That is what makes a
 state hash comparable across a replay and is not going to change; the consequence is that the fix
 TABLE in the report is the diff, and the file is not.
+
+## 10 · `grant-access` — a decision routed by how much human it needs, ported
+
+Somebody asked for temporary access to a production resource. This graph decides the CEREMONY from
+the resource's tier, the level asked for, the hours asked for and the requester's own history —
+granted automatically, signed by a person first, or denied with the policy rule that said no — and
+appends what it did to an access ledger.
+
+```
+  read-request ─seq─▶ read-policy ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
+                                              │                             ├─▶ weigh ─seq─▶ route
+                                              └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
+                                                                                                │
+  route ─conditional(ceremony == "auto")───────────────────────────▶ record ─┬─seq─▶ write-grant
+  route ─conditional(ceremony == "review")─▶ sign (human gate) ─seq─▶ ───────┘   └─seq─▶ write-ledger
+  route ─fallbackEdge──────────────────────▶ deny (refuses)
+```
+
+```bash
+rm -rf out .loom                                                          # the ledger lives in out/
+loom compile graphs/grant-access.json                                     # ok, NO diagnostics, exit 0
+loom run graphs/grant-access.json --input '{"requestPath":"access/requests/orders-db-backfill.json"}'
+# → "status": "awaiting_gate", and out/ does NOT exist yet.               exit 0
+loom trace   <runId>       # read-ledger [error] inside a run that is [ok] — the error arm
+loom gates   <runId>       # reads.decision: the rule, the tier, the cap, the owners, the reason
+loom approve <runId> <gateId> --as u:you                                  # exit 0
+cat out/grant.json && cat out/access-ledger.json
+loom run graphs/grant-access.json --input '{"requestPath":"access/requests/orders-db-backfill.json"}'
+# → "status": "succeeded" with NO gate: the ledger now exists, so this is a RENEWAL   exit 0
+loom replay  <runId>       # {"match": true, "hermetic": true}
+```
+
+**This is the only graph here with a `router` in it, and the only one with a `kind: "error"` edge.**
+It is also the only one that uses a reducer other than `replace` and `append_ordered`.
+
+**The three parts of a router that have to agree**, which is the step that costs people compiles:
+`router.cases[].when` is an expression over the node's own `reads`; `cases[].take` and
+`fallbackEdge` name **edge ids that leave this node** (`GRAPH005_ROUTE_NOT_OWN_EDGE` otherwise, and
+it lists the ones that do); and a router **may not write** (`GRAPH005_ROUTER_WRITES` — move the
+write into a `function` upstream). `mode` must be `"expression"`: `"model"` is declared in order to
+be refused (`GRAPH005_ROUTER_MODE_UNSUPPORTED`). A router that matches no case takes its
+`fallbackEdge` and never invents a target, which is why `deny` hangs off the fallback here rather
+than off a third case — a ceremony nobody wrote an arm for must decline, not pick the nearest arm.
+
+**A node reached by several exclusive arms runs ONCE, on whichever arm fired.** `record` sits behind
+both `granted` (straight from the router) and `signed` (from the gate), and `weigh` sits behind both
+`prior` and `first-grant`. Nothing in this workspace demonstrated that before, and it is the shape
+every router tree needs.
+
+**An `error` edge is selected by a FAILURE, not by a choice.** It cannot appear in a `take` — a
+router naming one is `E_ROUTE_INVALID` — and `codes` narrows it to named normalized error codes.
+Here `read-ledger` reads a file that need not exist: the ledger is read at the start of the run and
+written at the end, so the two arms are the FIRST run of this command and every later one, and you
+flip between them by running it twice. **`loom trace` shows `read-ledger [error]` inside a run whose
+own status is `[ok]`**, which no other example can show you.
+
+**A tool node whose failure you HANDLE does not need `unhandled: true`.** That flag suppresses
+`GRAPH011_UNHANDLED_IRREVERSIBLE`, which fires only for a tool whose class is `irreversible` or
+`externally_visible`; `fs.write` is `reversible_write`, so neither this graph nor §9 sets it. The
+flag on §1's and §3's write nodes buys nothing and is left alone.
+
+**Two things this graph measured that are worth knowing before you build one like it.**
+
+- **`GRAPH010_CONCURRENT_WRITE` refuses the obvious error-handling shape.** `prior` and
+  `first-grant` are the `seq` and `error` targets of one node and no run can take both — but the
+  concurrency analysis does not know that an `error` edge and a `seq` edge out of the same node are
+  exclusive, so `history` may not be `replace`. It is `merge_object` here, and that is a workaround
+  rather than a design. F1 of `docs/workflow-port-2026-09-22b.md`.
+- **A failed run's already-landed `fs.write` is rolled back automatically, with no `compensation`
+  edge anywhere in the graph.** `fs.write` declares `compensation: {tool: "fs.restore"}`, so when
+  `write-ledger` fails after `write-grant` succeeded the engine undoes the grant write and
+  `loom trace` prints `loom.tool (compensate) [ok]` under it. Measured: `out/grant.json` came back
+  byte-identical to before the failed run. A `compensation` edge is a DECLARATION the compiler
+  proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
+
+**The hazard this example ships with, and why it is not fixed here.** An error arm is handed no
+reason: the failed node writes nothing, no channel carries the code or the message, and `codes`
+narrows by class where every `fs.read` failure is the one code. So `first-grant` cannot tell "there
+is no ledger yet" from "the ledger is there and I could not read it". With
+`chmod 222 out/access-ledger.json` the run reports `succeeded` and the ledger is REPLACED — a prior
+grant destroyed. No hook and no body can close it: neither can reach the filesystem. It is pinned
+as a RESIDUE test in `packages/core/test/examples-grant.test.ts` and written up as F5.
+
+**Why this is a `function` body and not an `agent` node**, the same argument §8 and §9 make: every
+term is read off rather than inferred — the tier is a lookup, the cap is a lookup, the level is an
+index into a declared list, and a renewal is a date comparison. The judgement worth a model is
+whether the stated REASON justifies the access, and this graph deliberately does not pretend to do
+it: it puts the reason in front of the person at the gate.
+
+`access/policy.json` holds three resources at three tiers, and `access/requests/` holds ten files —
+nine JSON requests, one per arm of the decision, and one that is not JSON at all. Two of the ten the
+graph REFUSES rather than denies, because "we decided, and the answer is no" and "we could not
+decide" are different sentences to a requester.
+`packages/core/test/examples-grant.test.ts` drives all of them.
