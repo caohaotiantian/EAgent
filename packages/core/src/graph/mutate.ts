@@ -473,8 +473,12 @@ interface DomSets {
  * (`ran = ["hop", "note.append"]`). An entry is not recomputed from its predecessors, which is
  * what makes a back-edge into it harmless instead of fatal.
  *
- * `entryNodes` is `indexGraph`'s — "no inbound edge of any kind EXCEPT a loop back-edge", which
- * is the set the executor actually starts from, so this asks the same question the run answers.
+ * `entryNodes` is `indexGraph`'s — nodes nothing points at, plus a node whose only inbound edges
+ * are `loop` back-edges and which no such root reaches over the traversable edge set. That second
+ * arm is what keeps a back-edge into the entry harmless here; it was unconditional until §A.84,
+ * where the unconditional form was found to be scheduling reachable loop targets at t=0. Either
+ * way it is the set the executor actually starts from, so this asks the same question the run
+ * answers.
  *
  * Everything that is not an entry starts at "every node dominates me" and shrinks, which is what
  * makes the fixpoint converge from the safe side — a node the walk never reaches keeps the full

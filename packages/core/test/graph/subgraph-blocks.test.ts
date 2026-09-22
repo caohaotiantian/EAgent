@@ -115,7 +115,17 @@ test("`inputs` AND `outputs`: ABSENT, NULL, AND EVERY OTHER NON-OBJECT IS ONE DI
       assert.ok(hit !== undefined, `${field} ${label}: got ${r.errors.map((x) => x.code).join(", ") || "(none)"}`);
       // NAMING THE NODE is the row's own words, and it is checked on the coordinate as well as in
       // the prose: a diagnostic an editor can place is what makes a graph of 40 nodes fixable.
-      assert.match(hit.message, /^subgraph "delegate" declares `(inputs|outputs)`/, hit.message);
+      // ABSENT AND WRONG-SHAPED SAY DIFFERENT THINGS, because they are one mistake to fix and two
+      // different things to report. `describeValue(undefined)` is the word "undefined", so the
+      // absent case used to read `declares \`inputs\` as undefined` — telling an author they wrote
+      // something they did not write.
+      assert.match(
+        hit.message,
+        value === undefined
+          ? /^subgraph "delegate" does not declare `(inputs|outputs)`/
+          : /^subgraph "delegate" declares `(inputs|outputs)` as /,
+        hit.message,
+      );
       assert.deepEqual(hit.at, { nodeId: "delegate" as NodeId }, hit.message);
       // AND THE DIRECTION OF THE ARROW, because `inputs` and `outputs` run OPPOSITE ways and a
       // message that says only "must be an object" leaves an author to guess which key is which.
@@ -210,7 +220,11 @@ test("`sub.ref` IS `REQUIRED_FIELDS`' — measured, not assumed, because this ru
 test("A CHILD WHOSE `channels` IS NOT AN OBJECT IS THE CHILD'S OWN DIAGNOSTIC, re-tagged", () => {
   // `Object.hasOwn(child.channels, …)` threw on both. The child is a resolved RESOURCE — a file —
   // so this is the same "a file decides" as §A.79's own value, one hop further out.
-  for (const channels of [undefined, null] as unknown[]) {
+  // `[]` IS IN THIS CENSUS AND WAS THE HOLE. `typeof [] === "object"` let an array past the
+  // child's own `channels` check, and this rule's guard then read "not a plain object" as a reason
+  // to SKIP its half of the mapping test — so the one reporter it deferred to was silent too and
+  // a child with `channels: []` compiled without either diagnostic base printed.
+  for (const channels of [undefined, null, [], 42, "x"] as unknown[]) {
     const child = { ...CHILD, channels } as unknown as GraphSpec;
     const r = diagnose(parentWith(FULL), child);
     assert.equal(r.ok, false, `channels ${String(channels)} must not compile`);
@@ -218,6 +232,14 @@ test("A CHILD WHOSE `channels` IS NOT AN OBJECT IS THE CHILD'S OWN DIAGNOSTIC, r
     assert.ok(hit !== undefined, r.errors.map((x) => x.code).join(", "));
     assert.equal(hit.message, 'in subgraph "subgraph/child@stable": `channels` must be an object');
     assert.deepEqual(hit.at, { nodeId: "delegate" as NodeId });
+    // AND THE PARENT'S OWN HALF, which is the "refuse, never skip" direction. A child whose
+    // `channels` is not a channel map declares no channel of any name, so every mapping into it
+    // really does name something the child does not declare — and the rule says so instead of
+    // deferring to a reporter that might be silent. Base printed these for `[]`; head did not.
+    const mapping = r.errors.filter((x) => x.code === "GRAPH016_BAD_MAPPING").map((x) => x.message);
+    assert.equal(mapping.length, 2, `channels ${String(channels)}: ${r.errors.map((x) => x.code).join(", ")}`);
+    assert.ok(mapping.some((m) => m.includes('maps to child channel "inp"')), mapping.join(" | "));
+    assert.ok(mapping.some((m) => m.includes('maps output from child channel "out"')), mapping.join(" | "));
   }
 });
 

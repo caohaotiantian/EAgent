@@ -13,9 +13,12 @@
  * and keeps hashing unambiguous (canonical JSON has one representation; YAML has
  * several for the same document).
  *
- * ENTRY NODES are nodes with no inbound non-loop edge. There is no `entry:` field:
- * a second way to say where a graph starts is a second thing that can disagree with
- * the edges.
+ * ENTRY NODES are nodes nothing points at — or whose only inbound edges are `loop`
+ * back-edges AND which no such root reaches, which is the case a cycle with no way
+ * in needs. It was "no inbound non-loop edge" flat, and that scheduled a reachable
+ * loop target at t=0 beside the real first node (TODO.md §A.84); `indexGraph` is the
+ * definition and says why at length. There is no `entry:` field: a second way to say
+ * where a graph starts is a second thing that can disagree with the edges.
  *
  */
 

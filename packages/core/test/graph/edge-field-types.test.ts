@@ -221,31 +221,33 @@ const compileOf = (s: GraphSpec) =>
   compile({ spec: s, resolver: stubResolver(), tools: TOOLS, tenantCapabilities: TENANT_CAPABILITIES });
 
 /**
- * THE ONE EXCLUSION, AND IT IS A CLASS RATHER THAN TWO VALUES — say the set honestly.
+ * THE EXCLUSION THAT USED TO BE HERE, AND THE CHANGE THAT EMPTIED IT — §A.80's residue, closed.
  *
- * `graph/compile.ts`'s `unknownEdgeKinds` has TWO sites that coerce the value, and the class is the
- * union of what each cannot do — measured, one graph per row, in `.agent/spec-a62/probe-kind-class.ts`:
+ * `kind` was the one deferral whose refusal was not total, because `graph/compile.ts`'s
+ * `unknownEdgeKinds` had TWO sites that coerced the value and each had values it could not
+ * survive — measured, one graph per row:
  *
- *     :325 `JSON.stringify(edge.kind)`   10n              TypeError: Do not know how to serialize a BigInt
- *                                        [10n], {a:10n}   the same, at any depth
- *                                        {toJSON throws}  Error: boom
- *                                        a circular object TypeError: Converting circular structure
- *                                        a Proxy whose get trap throws
- *     :317 `Object.hasOwn(…, edge.kind)` [Symbol()]       TypeError: Cannot convert a Symbol value
- *                                        (the KEY coercion, not the message)
+ *     `JSON.stringify(edge.kind)`     10n              TypeError: Do not know how to serialize a BigInt
+ *                                     [10n], {a:10n}   the same, at any depth
+ *                                     {toJSON throws}  Error: boom
+ *                                     a circular object TypeError: Converting circular structure
+ *     `Object.hasOwn(…, edge.kind)`   [Symbol()]       TypeError: Cannot convert a Symbol value
+ *                                     (the KEY coercion, not the message)
  *
- * A BARE `Symbol()` DOES NOT THROW and is a diagnostic — `String(sym)` is legal where a template is
- * not, and `?? String(edge.kind)` is what catches it. So the set is "a `kind` that
- * `JSON.stringify` refuses, plus one that `Object.hasOwn`'s key coercion refuses", and the two
- * values driven below are MEMBERS OF IT, not the whole of it. Naming only those two here would be
- * the same mistake `TYPE_CHECKED_ELSEWHERE` made when it said "total".
+ * This file's old docstring said the repair was "not this lane's to make" because the rule lived in
+ * `compile.ts`. §A.80 moved it into `graph/validate.ts` — and that relocation made the hole WORSE
+ * before it made it better: `rule016Subgraphs` recurses `validateGraph`, so a SUBGRAPH CHILD's edge
+ * now reaches this render too, turning an `ok: true` compile into an exception on a child nobody
+ * had to look at.
  *
- * NOT THIS LANE'S FILE TO FIX — `compile.ts` is outside the owned set, and the repair is the one
- * `unknownEdgeKinds`' own docstring already proposes: move the rule beside GRAPH020, where
- * `describeValue` is. Listing these makes the exclusion a measured fact rather than a hope: if that
- * site ever learns to render safely, this test goes red and the rows come off.
+ * BOTH SITES ARE TOTAL NOW. The guard asks `typeof e.kind !== "string"` before `Object.hasOwn`, so
+ * no key is coerced; and `renderKind` falls back to `describeValue` for anything `JSON.stringify`
+ * throws on, so every value a JSON file can express keeps its exact bytes and the ones it cannot
+ * express render as text instead of crashing. The list is therefore EMPTY, which is what this
+ * docstring predicted would happen — *"if that site ever learns to render safely, this test goes
+ * red and the rows come off"*. It did, and they have.
  */
-const KIND_STILL_THROWS: readonly unknown[] = [10n, { toJSON: () => { throw new Error("boom"); } }];
+const KIND_STILL_THROWS: readonly unknown[] = [];
 
 test("THE SIX DEFERRALS, DRIVEN OVER THE WHOLE `WRONG` TABLE — five total, one excluded by name", () => {
   // The load-bearing pin for `TYPE_CHECKED_ELSEWHERE`. It is a hand-written set, and the reason it
