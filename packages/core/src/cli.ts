@@ -994,18 +994,6 @@ function refuseUnknownCommand(command: string): number {
 }
 
 /**
- * Refuse a flag this verb does not read, naming the verbs that do.
- *
- * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
- * message for a name nothing reads anywhere, and this one would otherwise answer a typo with a
- * list of verbs that do not have it either.
- *
- * NAMING THE READERS rather than saying "not valid here", for `onlyKeys`' reason: a refusal that
- * says an operator is wrong without saying what right looks like has spent their attention and
- * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
- * command they were reaching for.
- */
-/**
  * Refuse a flag neither `--version` nor the default `help` answer reads — TODO.md §H.19.
  *
  * `refuseFlagsThisVerbDoesNotRead` covers every DISPATCHED verb, and returns unmolested for
@@ -1017,9 +1005,14 @@ function refuseUnknownCommand(command: string): number {
  * door over. `loom --version --port 1` is the same hole one flag later — answering the version
  * question does not read `--port` either.
  *
- * Only the two flags THIS path itself reads are exempt: `--help` never reaches here (it answers
- * and returns above), and `--version` is what may have brought us here at all — it names itself,
- * not a flag it failed to read.
+ * `GLOBAL_FLAGS` ARE EXEMPT TOO — a reviewer's fix, TODO.md §A.91 M2. `refuseFlagsThisVerbDoesNotRead`
+ * already exempts them (`.filter((f) => !GLOBAL_FLAGS.includes(f) && ...)`) because every DISPATCHED
+ * verb reads them; this door disagreed, and a plain `loom --workspace .` — no verb, nothing else —
+ * refused with "--workspace is read by no verb this binary dispatches", which is false for all
+ * fourteen of them. The wrapper shape it broke is ordinary: `loom() { command loom --workspace ~/ws
+ * "$@"; }` prepends a global ahead of whatever the caller typed, including `--version` or nothing at
+ * all, and both used to exit 0. `--help` and `--version` are themselves members of `GLOBAL_FLAGS`,
+ * so this filter alone now covers what the old `f !== "help" && f !== "version"` pair covered.
  *
  * `wantsVersion` IS A PARAMETER AND NOT A SECOND READ OF `args.flags["version"]`, on purpose: this
  * function's signature is deliberately not `(args: Args)` alone, because `flag-door.test.ts`
@@ -1029,7 +1022,7 @@ function refuseUnknownCommand(command: string): number {
  */
 function refuseFlagsBeforeAVerb(args: Args, wantsVersion: boolean): void {
   const offenders = Object.keys(args.flags)
-    .filter((f) => f !== "help" && f !== "version")
+    .filter((f) => !GLOBAL_FLAGS.includes(f))
     .sort();
   if (offenders.length === 0) return;
   const readers = (f: string): string => {
@@ -1051,6 +1044,18 @@ function refuseFlagsBeforeAVerb(args: Args, wantsVersion: boolean): void {
   );
 }
 
+/**
+ * Refuse a flag this verb does not read, naming the verbs that do.
+ *
+ * At the door in `main` beside `assertKnownFlags`, and after it: "unknown flag" is the better
+ * message for a name nothing reads anywhere, and this one would otherwise answer a typo with a
+ * list of verbs that do not have it either.
+ *
+ * NAMING THE READERS rather than saying "not valid here", for `onlyKeys`' reason: a refusal that
+ * says an operator is wrong without saying what right looks like has spent their attention and
+ * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
+ * command they were reaching for.
+ */
 function refuseFlagsThisVerbDoesNotRead(args: Args): void {
   if (!dispatchesVerb(args.command)) return;
   const applies = VERB_FLAGS[args.command]!;

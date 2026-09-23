@@ -11,6 +11,13 @@
  * which used to answer and return before `assertKnownFlags` ever ran) both exited 0. The fix moved
  * `assertKnownFlags` ahead of `versionFlag` and added `refuseFlagsBeforeAVerb` for the flags that
  * ARE known but unread by both `--version` and the default `help` answer.
+ *
+ * TODO.md §A.91 M2, the fix round that followed: the FIRST draft of `refuseFlagsBeforeAVerb`
+ * treated every flag as unread, `GLOBAL_FLAGS` included — so `loom --workspace .`, naming no verb,
+ * refused with "--workspace is read by no verb this binary dispatches", which is false for all
+ * fourteen globals, and a wrapper shaped `loom() { command loom --workspace ~/ws "$@"; }` exited 1
+ * on `wrapper --version` and on a bare `wrapper` where the real binary exited 0. Fixed by exempting
+ * `GLOBAL_FLAGS` the way `refuseFlagsThisVerbDoesNotRead` already does for a dispatched verb.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -70,6 +77,20 @@ test("`loom` NAMING NO VERB READS NO FLAG EITHER — TODO.md §H.19's other half
     () => cli(["--port", "1"]),
     (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--port is read by `loom serve`/.test(e.message),
   );
+});
+
+test("A GLOBAL FLAG BESIDE `--version` OR NAMING NO VERB IS ACCEPTED — TODO.md §A.91 M2", async () => {
+  // `--workspace` is read by EVERY verb (`GLOBAL_FLAGS`), including the ones this door answers
+  // before `openWorkspace` is ever reached — a wrapper prepending it ahead of whatever the caller
+  // typed is the ordinary shape, not a misuse `refuseFlagsBeforeAVerb` gets to invent an opinion
+  // about.
+  const withVersion = await cli(["--workspace", "/does/not/need/to/exist", "--version"]);
+  assert.equal(withVersion.code, 0, "a global flag beside --version must not be refused");
+  assert.equal(withVersion.out, `loom ${PKG.version}\n`);
+
+  const bare = await cli(["--workspace", "/does/not/need/to/exist"]);
+  assert.equal(bare.code, 0, "a global flag naming no verb must not be refused — base behaviour: the usage");
+  assert.match(bare.out, /^loom — graph-native multi-agent orchestration/);
 });
 
 test("`--version` GIVEN A VALUE IS REFUSED, not dropped while the verb runs", async () => {
