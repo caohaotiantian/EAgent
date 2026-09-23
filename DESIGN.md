@@ -231,8 +231,30 @@ inversion, which is the argument for the whole decision:** if workflows keep def
 and that teaches the wrong shape. Sequence item 30 is the roadmap entry, and its closing condition
 is the envelope plus this failure producer; `TODO.md` §A.90, §A.83 and §A.82 each keep their own
 half.
-*Enforced by nothing yet — no `packages/core/src` file implements this.* **Decided by the maintainer
-2026-09-22**; `TODO.md` §D.10 (not to be read as `TODO.md` §D.8, a different row one dot away) is
+*Enforced (phase one, 2026-09-23):* `ErrorProjection` and `errorProjectionSource` in
+`graph/spec.ts` — the envelope with all six fields, named in `reads` as `"<nodeId>:error"`, a
+spelling `SAFE_ID` keeps out of every channel name; `viewFor` in `run/projection.ts` FOLDS it out of
+`task.failed` (no new journal event), `ok: true` only from `succeeded`, no value in any other state;
+`checkErrorProjectionRead` in `graph/validate.ts` refuses every misuse the compiler can see
+(`GRAPH005_ERROR_PROJECTION_{READER,UNKNOWN_NODE,UNORDERED,IN_LOOP,BRANCH,CLASSIFIED,WRITE}`);
+`taintedOn` makes every read of it untrusted, which also earns a laundered secret crossing it the
+floor `carriesSecret` would; `fs.read` in `builtin/tools.ts` answers `E_FS_NOT_FOUND` / `E_FS_UNREADABLE` /
+`E_CAP_DENIED`, RETURNED rather than thrown so each is replayable. Tests:
+`test/run/error-projection.test.ts` (the three codes through the engine, a process restart between
+the failure and the read, a replay, the six-field type pin, every compile refusal) and
+`test/examples-grant.test.ts` (one test per `grant-access` ending, each asserting the ledger's
+bytes). *Narrower than this section's words, deliberately:* the READERS are a `function` body and an
+`evaluator{kind: "assertion"}` body only — an `agent`, `human_gate`, `tool` or `router` error arm is
+refused at compile, because this phase has not decided how an untrusted fact appears in a prompt, a
+gate payload, an argument or an expression; widening is additive. *Residue:* a source inside a loop
+body or inside a fan-out the reader is not in is REFUSED rather than served (the reader's iteration
+is not threaded into `viewFor`); `E_CAP_DENIED` is also the code for a capability the policy did not
+grant, so "the jail refused this path" is distinct from missing and unreadable but not from every
+other refusal; `fs.write`, `fs.edit`, `fs.glob`, `net.fetch` and `proc.exec` still THROW their jail
+refusals, which `#invokeTool` flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a
+divergence; `fs.glob`/`fs.grep` still answer `(no matches)` for a directory they could not
+enumerate — an INCOMPLETE listing, which is the `truncated` producer's (§A.83's) kind of fact.
+**Decided by the maintainer 2026-09-22**; `TODO.md` §D.10 (not to be read as `TODO.md` §D.8, a different row one dot away) is
 struck with this answer and carries the options it was chosen from.
 
 ### D9 · The shipped approval example teaches QUORUM, and veto is a second file
@@ -481,6 +503,11 @@ populate the reserved `truncated`/`bytes` and `classification` fields of the SAM
 that only touches `grant-access`'s arm, without the envelope, does NOT close this item**, and
 neither does a per-run ledger alone (D8's option (d)), a wider regex (§A.82's own text) or a bigger
 `maxBytes` (§A.83's) — each of those moves the gap.
+
+**STATUS 2026-09-23: both halves have landed** — the envelope (i) and the failure producer (ii),
+with `grant-access`'s arm branching on the code, `look` deleted and the `KNOWN HAZARD` test deleted
+after it went RED; D8's *Enforced* line names the sites and the tests, and `TODO.md` §A.90 is struck
+with the repro on the shipped binary. §A.83 and §A.82 remain open, as this item says they should.
 
 *That phasing — **the envelope plus the failure producer closes the ITEM**, with §A.83 and §A.82
 closing later on their own rows — **is the orchestrator's READING of the maintainer's four-step

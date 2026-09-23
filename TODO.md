@@ -93,7 +93,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 93 | 61 | 32 | open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two, with §A.90, now wait on an IMPLEMENTATION rather than on a shape, §D.10 having been answered) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 93 | 62 | 31 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro.** open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two, with §A.90, now wait on an IMPLEMENTATION rather than on a shape, §D.10 having been answered) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -2281,6 +2281,8 @@ nobody took (§A.77).
   a key a workflow called a credential and the redactor did not** — still valid, and an allowed
   interim producer, because the decision reserved a FIELD rather than forbidding a warning. A wider
   regex is still not the closure in either arm.
+  **2026-09-23: the reserved field EXISTS** — `ErrorProjection.classification` in `graph/spec.ts`
+  (D8 phase one, which closed §A.90) — with no producer; this row stays OPEN.
 
 - **A.83 · `fs.read` appends its truncation marker INTO the returned content, so a big document
   reads back as a syntax error in the FILE.** *(From the second port's F12.)* File:
@@ -2313,6 +2315,9 @@ nobody took (§A.77).
   turns an observable FACT into a hard failure. **This row does NOT close with §A.90**: phase one
   DECLARES `truncated`/`bytes` on the envelope, and the producer that populates them at the three
   sites is this row's own work.
+  **2026-09-23: the reserved fields EXIST** — `ErrorProjection.truncated` / `.bytes` in
+  `graph/spec.ts` (D8 phase one, which closed §A.90) — with no producer; the marker is still in the
+  content at all three sites and this row stays OPEN.
 
 - ~~**A.84 · A `loop` edge is an edge to the scheduler and not to the compiler, so every DAG
   analysis is wrong about a graph with one in it.**~~ **CLOSED at `731eca44`, `79cab047`
@@ -2485,8 +2490,46 @@ exit code 0.
   apart and what keeps them in agreement. It needs `mutate.ts`, which the lane that built the second
   one did not own.
 
-- **A.90 · An `error` arm is handed no reason, so a workflow rebuilds its own record from an empty
-  history and exits 0 — SILENT DATA LOSS.** *(From the third port's F5 —
+- ~~**A.90 · An `error` arm is handed no reason, so a workflow rebuilds its own record from an empty
+  history and exits 0 — SILENT DATA LOSS.**~~ **CLOSED 2026-09-23 — `DESIGN.md` D8, phase one;
+  Sequence item 30.** Both halves of the closing condition below: (i) the ENVELOPE — `ErrorProjection`
+  in `graph/spec.ts`, all six fields, named in `reads` as `"<nodeId>:error"`, folded out of
+  `task.failed` by `viewFor` (no new journal event; `ok: true` only from `succeeded`, NO value in any
+  other state), every misuse refused by `graph/validate.ts`'s `checkErrorProjectionRead`; (ii) the
+  FAILURE PRODUCER — `fs.read` answers `E_FS_NOT_FOUND` (ENOENT), `E_FS_UNREADABLE` (EACCES, EPERM,
+  EISDIR, ENOTDIR, ELOOP) and `E_CAP_DENIED` (the jail's refusal, now RETURNED rather than thrown so
+  it is replayable), and `grant-access`'s arm reads `read-ledger:error` and proceeds on
+  `E_FS_NOT_FOUND` alone. `look`, its `listing` channel, the `then-look` edge and `weigh`'s glob check
+  are DELETED; `then-ledger` now runs `read-policy → read-ledger`; `no-ledger` is a catch-all error
+  edge. `historySource` stays as a gate DISPLAY and is no longer read as a guard. The `KNOWN HAZARD`
+  test went RED against the change — `first-grant refused: … it failed E_FS_UNREADABLE: cannot read
+  out/access-ledger.json: EACCES`, `1 !== 0` at its `second.r.code` assertion — and was DELETED, not
+  loosened; one test per ending replaces it, each asserting the ledger's bytes. Repro on the SHIPPED
+  graph through `npm run build:binary`'s `bin/loom`, in a fresh copy of `examples/`:
+  ```
+  $ loom run graphs/grant-access.json --input '{"requestPath":"access/requests/docs-site-read.json"}' | jq -c '{status,historySource:.outputs.decision.historySource}'
+  {"status":"succeeded","historySource":"none"}                        ← no ledger: first-grant, exit 0
+  $ jq -c '[.grants[].who]' out/access-ledger.json
+  ["u:sam"]
+  $ chmod 000 out/access-ledger.json;                                    run ravi → exit 1
+  {"status":"failed","code":"E_FUNCTION_REFUSED","why":"it failed E_FS_UNREADABLE"}   ledger bytes unchanged, ["u:sam"]
+  $ chmod 222 out/access-ledger.json && chmod 333 out;                   run ravi → exit 1   ← THIS row's repro
+  {"status":"failed","code":"E_FUNCTION_REFUSED","why":"it failed E_FS_UNREADABLE"}   ledger bytes unchanged, ["u:sam"]
+  $ chmod 000 out;                                                       run ravi → exit 1
+  {"status":"failed","code":"E_FUNCTION_REFUSED","why":"it failed E_CAP_DENIED"}      ledger bytes unchanged, ["u:sam"]
+  $ chmod 333 out   (ledger READABLE);                                   run ravi → exit 0   ← the control
+  {"status":"succeeded","historySource":"ledger"}                                     ["u:sam","u:ravi"]
+  $ loom replay <the chmod-000 run>
+  {"match": true, "hermetic": true}
+  ```
+  **What did NOT close with it, each named at D8's *Enforced* line:** `fs.write`, `fs.edit`,
+  `fs.glob`, `net.fetch` and `proc.exec` still THROW their jail refusals, which `#invokeTool`'s catch
+  flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a divergence; `fs.glob` and `fs.grep`
+  still answer `(no matches)` for a directory their walk could not enumerate
+  (`builtin/search-match.ts`'s bare `catch` around `readdirSync`) — an INCOMPLETE listing, which is
+  §A.83's kind of fact, not this row's; a projection is REFUSED at compile, not served, for a source
+  inside a loop body or inside a fan-out the reader is not in; and `E_CAP_DENIED` also names a
+  capability the policy did not grant. The row as it stood before closing follows. *(From the third port's F5 —
   `docs/workflow-port-2026-09-22b.md`. **The priority row of this settlement.**)* Files:
   `packages/core/src/builtin/tools.ts` (one `try` around the open, returning
   `{content: "cannot read …", isError: true}`) and **`Engine.#runToolNode`** in
