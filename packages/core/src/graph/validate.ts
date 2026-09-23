@@ -6342,6 +6342,42 @@ function rule016Subgraphs(
     const sub = n.subgraph;
     if (sub === undefined) continue;
 
+    // THE PARENT'S HALF FIRST, BEFORE ANY `continue` BELOW (§A.98). `sub.inputs` and
+    // `sub.outputs` are the PARENT's declaration and name the PARENT's channels, so whether they
+    // are well-formed and whether each parent-side name is declared is decidable from this spec
+    // alone. This half used to sit after `if (child === undefined) continue;`, so a ref the
+    // resolver could not expand — a resolver with no `subgraph` hook at all, which is what the
+    // test skeleton and a bare `ResourceResolver` are — skipped it: `inputs: {k: "nope"}` with no
+    // channel `nope` compiled `ok`, and the child was handed `undefined` at run time. The same
+    // was true behind a subgraph CYCLE and past the depth budget. None of those three conditions
+    // is about the parent's own mapping, so none of them may silence it.
+    //
+    // WHY `continue` STILL SKIPS THE CHILD HALF: "which channels does the child declare" needs the
+    // child, and an unresolved child is GRAPH015's to report (or, with no `subgraph` hook, nobody
+    // can answer it here). The child half stays below the resolution, unchanged.
+    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
+    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
+      if (!Object.hasOwn(spec.channels, parentCh as string)) {
+        d.push({
+          severity: "error",
+          code: "GRAPH016_BAD_MAPPING",
+          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
+          at: { nodeId: n.id },
+        });
+      }
+    }
+    for (const parentCh of Object.keys(outputs ?? {})) {
+      if (!Object.hasOwn(spec.channels, parentCh)) {
+        d.push({
+          severity: "error",
+          code: "GRAPH016_BAD_MAPPING",
+          message: `subgraph "${n.id}" maps output to undeclared parent channel "${parentCh}"`,
+          at: { nodeId: n.id },
+        });
+      }
+    }
+
     if (expanding.includes(sub.ref)) {
       d.push({
         severity: "error",
@@ -6391,8 +6427,8 @@ function rule016Subgraphs(
     // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
     // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
     // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
-    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
-    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    // (`inputs`/`outputs` are read at the top of this loop, above every `continue` — §A.98.)
+    //
     // NOT A PLAIN OBJECT IS REFUSE, NEVER SKIP, and that distinction was a defect. This used to
     // hand back `undefined` for a child whose `channels` was not a plain object and the mapping
     // loops below skipped their child half — so `channels: []` lost both `GRAPH016_BAD_MAPPING`s
@@ -6412,15 +6448,7 @@ function rule016Subgraphs(
         ? (rawChildChannels as Readonly<Record<string, unknown>>)
         : {};
 
-    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
-      if (!Object.hasOwn(spec.channels, parentCh as string)) {
-        d.push({
-          severity: "error",
-          code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
-          at: { nodeId: n.id },
-        });
-      }
+    for (const childCh of Object.keys(inputs ?? {})) {
       if (!Object.hasOwn(childChannels, childCh)) {
         d.push({
           severity: "error",
@@ -6430,15 +6458,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const [parentCh, childCh] of Object.entries(outputs ?? {})) {
-      if (!Object.hasOwn(spec.channels, parentCh)) {
-        d.push({
-          severity: "error",
-          code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps output to undeclared parent channel "${parentCh}"`,
-          at: { nodeId: n.id },
-        });
-      }
+    for (const childCh of Object.values(outputs ?? {})) {
       if (!Object.hasOwn(childChannels, childCh as string)) {
         d.push({
           severity: "error",
