@@ -41,7 +41,7 @@
  * person's edit would be refused and that data discarded — a guard refusing a run that did work.
  *
  * THE EVIDENCE-ONLY FALLBACK IS WHAT KEEPS THE SHIPPED GRAPH WHOLE, and it is driven here on the
- * shipped file itself. `examples/graphs/two-person-approval.json` has FIVE nodes — three
+ * shipped file itself. `examples/graphs/two-person-veto.json` has FIVE nodes — three
  * `human_gate`s (`alice`, `bob`, `carol`), the quorum `join` they feed, and an `fs.write` `tool`
  * node `save` BEHIND the join, which is the write the test below counts. What is evidence-only is
  * the BARRIER: `join.branches` names the three gates and nothing else, so no work member exists
@@ -49,9 +49,12 @@
  * verbatim: one approval folds, every member lost refuses. All four of `a68.mjs`'s decision sets
  * read identically before and after this change.
  *
- * WHAT THIS FILE DELIBERATELY DOES NOT DO: it does not touch §A.68. The shipped graph's
- * `onBranchError: "fail"` still fails the run on ONE rejection whatever the other two people say,
- * and the assertion below records that as the CURRENT behaviour rather than endorsing it.
+ * WHAT THIS FILE DELIBERATELY DOES NOT DO: it does not touch §A.68. When this was written the one
+ * shipped file was `two-person-approval.json` declaring `onBranchError: "fail"`; `DESIGN.md` D9
+ * split it, so that file now declares `"skip"` (quorum) and `two-person-veto.json` carries the
+ * `"fail"` half byte-identical apart from `metadata`. The test below drives the VETO file, so its
+ * four lines are the same measurement as before; the quorum file's outcomes are what
+ * `test/graph/two-person-approval.test.ts` teaches.
  *
  * EVERY CASE THAT EXERCISES THE FOLD IS DRIVEN ACROSS A RESTART — the run is parked by one
  * `Engine`, its store closed, and a FRESH `Engine` over the same SQLite file attaches, answers the
@@ -642,17 +645,17 @@ test("§A.47's EMPTY FAN IS UNCHANGED — a barrier with no member tasks folds a
   }
 });
 
-test("THE SHIPPED `examples/graphs/two-person-approval.json`, driven end to end, is unchanged", async () => {
-  // The one committed `GraphSpec` whose join names a `human_gate` in `branches` — scanned over all
-  // nine of them. It is evidence-only, so the fallback covers it, and these four lines are
-  // `a68.mjs`'s output verbatim, before and after.
+test("THE SHIPPED `examples/graphs/two-person-veto.json`, driven end to end, is unchanged", async () => {
+  // When written, the one committed `GraphSpec` whose join names a `human_gate` in `branches` —
+  // scanned over all nine of them. D9 split it in two, and this drives the `"fail"` half, which is
+  // the old file byte for byte outside `metadata`. It is evidence-only, so the fallback covers it,
+  // and these four lines are `a68.mjs`'s output verbatim, before and after.
   //
-  // THE SECOND AND THIRD LINES ARE §A.68 AND ARE NOT ENDORSED HERE. Two of three approving does
-  // not land the write, because `onBranchError: "fail"` is read before `k` ever matters to a
-  // losing arm. That row is open and this file does not answer it; it records the behaviour so a
-  // change to it cannot be silent.
+  // THE SECOND AND THIRD LINES ARE THE VETO, which that file now teaches in its own description:
+  // two of three approving does not land the write, because `onBranchError: "fail"` is read
+  // before `k` ever matters to a losing arm.
   const spec = JSON.parse(
-    readFileSync(new URL("../../../../examples/graphs/two-person-approval.json", import.meta.url), "utf8"),
+    readFileSync(new URL("../../../../examples/graphs/two-person-veto.json", import.meta.url), "utf8"),
   ) as GraphSpec;
   const WRITE: ToolDefinition = {
     name: "fs.write",

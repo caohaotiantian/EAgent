@@ -2,13 +2,13 @@
   "apiVersion": "loom.dev/v1",
   "kind": "GraphSpec",
   "metadata": {
-    "name": "two-person-approval",
+    "name": "two-person-veto",
     "project": "examples",
     "version": 1,
-    "description": "Two of three named people must approve before the write lands, and a lone dissenter is OUTVOTED — this is QUORUM: `join{mode: \"quorum\", k: 2, onBranchError: \"skip\"}`. Two approvals release the barrier and `save` runs, whatever the third person says and whenever they say it: a rejection arriving first, second or third is absorbed, and a run with two approvals succeeds. A run that cannot reach two approvals writes NOTHING — since §A.75 `k` is a floor the fold enforces, so one approval of three is refused AT THE BARRIER with `E_QUORUM_UNREACHABLE`. The barrier hears every gate before it refuses, so a rejection and silence leaves the run `awaiting_gate`, not failed. There is no `approval.mode: quorum` — k-of-n is N gates and a quorum join, which is why the field was deleted. For two-of-three where ONE rejection stops it, copy `two-person-veto.json`, which differs from this file in `onBranchError` and its metadata alone.",
+    "description": "Two of three named people must approve before the write lands, and ONE REJECTION VETOES IT — this is VETO, not quorum: `onBranchError: \"fail\"` on the quorum join is read before `k` ever matters, so THE FIRST REJECT DECIDES and the run fails with `E_HUMAN_APPROVAL_REQUIRED`, whatever the other two say. The verdict is settled by that rejection; the run itself stays `awaiting_gate` until the other people vote, so a single rejection and silence leaves it parked, not failed. PRODUCT LIMIT — THE VETO CANNOT RECOVER AN EFFECT: the barrier short-circuits on two approvals and the write in `save` runs at once, while the third gate stays open and answerable. A LATE REJECT, arriving after the second approval, therefore fails a run whose write has ALREADY LANDED — the effect stays, and the run is only marked failed; nothing in this graph undoes it. Two approvals are the point of no return, so a person who intends to veto must do it before the second approval. For two-of-three where a lone dissenter is outvoted, copy `two-person-approval.json`, which differs from this file in `onBranchError` and its metadata alone.",
     "labels": {
-      "reads-as": "quorum lives in `join`, not in `approval`",
-      "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap. After two approvals the run is still `awaiting_gate` on the third person with the write already landed, and their answer, either way, ends the run `succeeded`"
+      "reads-as": "veto is `onBranchError: \"fail\"` on a quorum join; `k: 2` buys no tolerance for a dissenter, it only short-circuits the wait for the third person",
+      "residue": "a short-circuiting quorum join leaves the unneeded gate OPEN — JoinNode's documented straggler-cancellation gap, and the reason a late reject can still fail a run whose write has landed"
     }
   },
   "policy": { "posture": "out", "capabilities": ["fs:write"] },
@@ -46,7 +46,7 @@
       "type": "join",
       "reads": ["signoffs"],
       "writes": ["signoffs"],
-      "join": { "branches": ["alice", "bob", "carol"], "mode": "quorum", "k": 2, "onBranchError": "skip" }
+      "join": { "branches": ["alice", "bob", "carol"], "mode": "quorum", "k": 2, "onBranchError": "fail" }
     },
     {
       "id": "save",

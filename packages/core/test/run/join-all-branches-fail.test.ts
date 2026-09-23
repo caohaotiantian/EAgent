@@ -542,9 +542,12 @@ test("A FAN-OUT THAT PLANNED ZERO BRANCHES STILL RELEASES AND STILL SUCCEEDS —
  *     err=E_QUORUM_UNREACHABLE`, against a base reading `succeeded`. It is the SAME SHAPE as the
  *     shipped `examples/graphs/two-person-approval.json`, where two-of-three approval lives in a
  *     `quorum` join over three static `human_gate` arms — though NOT a defect on that graph:
- *     it declares `onBranchError: "fail"`, so one rejection fires the PRE-EXISTING arm on both
+ *     it then declared `onBranchError: "fail"` (since `DESIGN.md` D9 that half ships as
+ *     `two-person-veto.json`), so one rejection fires the PRE-EXISTING arm on both
  *     engines and the first cut never got a word in (measured). The shape is what matters; the
- *     graph that happens to ship carries a posture that hides it.
+ *     graph that shipped then carried a posture that hides it. The canonical file now declares
+ *     `"skip"`, which does NOT hide it, and `test/graph/two-person-approval.test.ts` drives it
+ *     over every one-dissenter ordering.
  *   - `degradedSpec` below: a fanned branch of two nodes where the FIRST wrote and succeeded and
  *     the second threw. Every coordinate is lost, so the run failed and discarded `seen`, where
  *     the base read `seen: ["a","b"]` — under a message saying the run "did no work".
