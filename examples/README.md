@@ -18,7 +18,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/fan-out-join.json` | 1 | **no** — `function` nodes only |
 | `graphs/guarded-write.json` | 3 | **no** — one `tool` node and a `preTool` hook |
 | `graphs/two-person-approval.json` | — | **no**, and it does not run to completion: it parks on three human gates and waits for people. **Two-of-three approval lives in `join`, not in `approval`** — three `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k:2}`; `approval.mode: "quorum"` was deleted and is now `GRAPH020_UNKNOWN_FIELD`. **This is the canonical file and it teaches QUORUM**: `onBranchError: "skip"`, so a lone dissenter is outvoted — two approvals land the write whenever the third vote arrives, and a run below two approvals writes nothing and is refused at the barrier with `E_QUORUM_UNREACHABLE` once every gate is answered (§A.75's floor). For a veto, copy the next row instead (`DESIGN.md` D9). A short-circuiting join keeps its remaining branches running, so the third gate stays OPEN — a real gap, recorded in the graph's own `labels`. `packages/core/test/graph/two-person-approval.test.ts` drives it |
-| `graphs/two-person-veto.json` | — | **no**, and it parks the same way. **The same graph with `onBranchError: "fail"`, and it teaches VETO**: `"fail"` is read before `k`, so the first reject decides and fails the run with `E_HUMAN_APPROVAL_REQUIRED` whatever the other two say. **Its description states the product limit**: the barrier short-circuits on two approvals and the write runs, so a LATE reject — after the second approval — fails a run whose write has already landed. The failed run's rollback then runs `fs.restore`, which restores a file that existed before the run and cannot undo one the write CREATED, so on a fresh workspace the effect stays (`TODO.md` §A.99). The two files differ in `onBranchError` and `metadata` alone, and the same test drives both |
+| `graphs/two-person-veto.json` | — | **no**, and it parks the same way. **The same graph with `onBranchError: "fail"`, and it teaches VETO**: `"fail"` is read before `k`, so the first reject decides and fails the run with `E_HUMAN_APPROVAL_REQUIRED` whatever the other two say. **Its description states the product limit**: the barrier short-circuits on two approvals and the write runs, so a LATE reject — after the second approval — fails a run whose write has already landed. The failed run's rollback then runs `fs.restore`, which restores a file that existed before the run and REMOVES one the write created, so the late reject undoes the write either way — unless the file's bytes changed after the write, where the undo refuses and the journal records a FAILED compensation (`TODO.md` §A.99). The two files differ in `onBranchError` and `metadata` alone, and the same test drives both |
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
@@ -527,8 +527,10 @@ own secrets must redact its own projection**; F13 has both regexes and the gap b
 **All FOUR refusals in `harden-parse.js` are one defect wearing four hats, and it is §8's defect** —
 the bytes are not JSON; the JSON parses but is not an OBJECT (`[1,2,3]`, or a manifest somebody wrapped
 in an array); the object declares no `name`/`image`; and the read came back TRUNCATED (`fs.read` caps
-at 200,000 characters unless the node says otherwise and marks the cut inside the content, so a big
-manifest used to be reported as a syntax error; F12). The count was "three" in two places until the
+at 200,000 BYTES unless the node says otherwise, and returns the prefix with no marker in it — the
+fact is `{ok: true, truncated: true, bytes}` on `load`'s reserved projection, which `parse` names in
+`reads` as `"load:error"`; a big manifest used to be reported as a syntax error, F12 and `TODO.md`
+§A.83). The count was "three" in two places until the
 members were enumerated — the not-an-object arm is the one that goes missing when you count from
 memory.
 Auditing is a search for ABSENCES — no pinned tag, no healthcheck, no declared secret — and a search
@@ -633,10 +635,11 @@ nothing today and is left alone.
   edge anywhere in the graph.** `fs.write` declares `compensation: {tool: "fs.restore"}`, so when
   `write-ledger` fails after `write-grant` succeeded the engine undoes the grant write and
   `loom trace` prints `loom.tool (compensate) [ok]` under it. Measured: `out/grant.json` came back
-  byte-identical to before the failed run — a file that EXISTED before it. A write that created its
-  file is not undone: `fs.restore` has no previous content to put back, and the compensation is
-  journaled `failed` (`TODO.md` §A.99) while `loom trace` still prints `(compensate) [ok]` — read
-  the journal's `compensation.recorded` outcome, not the trace line. A `compensation` edge is a DECLARATION the compiler
+  byte-identical to before the failed run — a file that EXISTED before it. A write that CREATED its
+  file is undone by removing it (`TODO.md` §A.99) — unless its bytes changed after the write, where
+  `fs.restore` refuses and the compensation is journaled `failed` while `loom trace` still prints
+  `(compensate) [ok]` (§A.100) — so read the journal's `compensation.recorded` outcome, not the
+  trace line. A `compensation` edge is a DECLARATION the compiler
   proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
 
 **The error arm branches on WHY the read failed, not on the fact that it did** (`DESIGN.md` D8,
@@ -651,8 +654,11 @@ nothing today and is left alone.
 `ok: true` when that node succeeded, `ok: false` with the `code` and `message` its failure journaled
 when it failed, and **no value at all** in every other state — so "no projection" can never be read
 as success. It is folded out of the journal, not stored beside it, so a restart and `loom replay`
-hand the arm the same fact the live run did. The last three fields are reserved and always absent
-today (§A.83's truncation and §A.82's classification land in them later); an absent
+hand the arm the same fact the live run did. `truncated` and `bytes` are served on a SUCCESS by
+`fs.read`, `net.fetch` and (`truncated` only) `proc.exec` — `{ok: true, truncated: false, bytes}`
+for a whole read, `bytes` being the whole source's size — which is how `grant-prior.js` and `grant-weigh.js` refuse a cut document
+without parsing it (§A.83). A task whose effect a rollback undid shows NO value (§A.96).
+`classification` is reserved and always absent today (§A.82 lands in it later); an absent
 `classification` means `untrusted`, and every read of a projection taints what the reader writes.
 
 `fs.read` now reports three different failures under three different codes, and `first-grant`
