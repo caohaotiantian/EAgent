@@ -47,9 +47,12 @@
  * created until every check has passed — TODO.md §A.91, the reviewer's second fix round: creating
  * it up front left an empty directory behind on any early failure, indistinguishable from "packed
  * zero files" to a caller scripting around this. A COMMITTED COMPILE ERROR is caught the same
- * round: `tsc -b --force`'s own diagnostics still print (`stdio: "inherit"`), but the exception
- * `execFileSync` throws for the non-zero exit is caught and turned into a `pack FAILED:` line
- * rather than an uncaught `Error: Command failed …` stack riding on top of them.
+ * round: `tsc -b --force`'s own diagnostics are piped and re-printed on THIS process's stderr
+ * (`stdio: ["ignore", "pipe", "pipe"]` — TODO.md §A.91, the reviewer's third fix round (N5); it was
+ * `"inherit"`, which put them on stdout, the same stream the tarball path is printed to on
+ * success), and the exception `execFileSync` throws for the non-zero exit is caught and turned into
+ * a `pack FAILED:` line rather than an uncaught `Error: Command failed …` stack riding on top of
+ * them.
  *
  * WHAT WAS PACKED IS PRINTED WITH THE BRANCH ("detached" if none) beside the sha, and — NOT A
  * REFUSAL — a working tree with uncommitted changes is counted and named: this row packs `HEAD`
@@ -61,8 +64,12 @@
  * loop. `archiveHeadInto` (step 0's mechanism) is exported and pinned there too, directly: reverting
  * `runPack` to compile the working tree instead — deleting the one call to it — was UNPINNED after
  * the first round, because nothing else in this file asks "is a dirty tree's change absent from
- * what gets archived". The test asks that one question, offline, against a throwaway two-commit
- * repo, with no real `tsc`/`npm pack` anywhere near it.
+ * what gets archived". The test asks that one question, offline, against a throwaway ONE-commit
+ * repo (TODO.md §A.91, the reviewer's third fix round (N1) — this said "two-commit" and the fixture
+ * only ever makes one), with no real `tsc`/`npm pack` anywhere near it. That test does NOT pin that
+ * `runPack` actually calls `archiveHeadInto` on the path that matters, only that the function
+ * itself is correct — see its own docstring in `packages/core/test/scripts-pack.test.ts` for what
+ * closing that gap would cost.
  *
  *     node scripts/pack.mjs --out DIR     → DIR/caohaotiantian-loom-<version>.tgz, path on stdout
  */
