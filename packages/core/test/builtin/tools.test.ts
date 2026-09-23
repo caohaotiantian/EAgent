@@ -13,7 +13,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -1183,4 +1183,25 @@ test("§A.83 — net.fetch still drops a leading UTF-8 BOM, as res.text() did, s
   ).execute({ url: "https://example.com/x" }, ctx());
   assert.deepEqual(JSON.parse(r.content), { ok: true });
   assert.equal((r.details as { bytes: number }).bytes, 11);
+});
+
+test("§A.97 — a UNIX SOCKET and a TERMINAL DEVICE are refused E_FS_UNREADABLE by KIND when their OPEN fails", { skip: process.platform === "win32" }, async (t) => {
+  // Their OPEN fails before the descriptor can be checked — macOS: a socket with errno 102, which
+  // libuv does not name, and /dev/tty with ENXIO — and both used to come back UNTYPED, i.e. the
+  // retryable E_TOOL_SOURCE_UNAVAILABLE. An `lstat` after the failed open classifies them.
+  const dir = mkdtempSync(join(tmpdir(), "sk-"));
+  const server = createNetServer();
+  await new Promise<void>((ok) => server.listen(join(dir, "sock"), ok));
+  t.after(() => {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const socket = await byName(builtinTools({ root: dir, deny: [] }), "fs.read").execute({ path: "sock" }, ctx());
+  assert.equal(socket.error?.code, "E_FS_UNREADABLE", socket.content);
+  assert.match(socket.content, /ENOTREG: a socket, not a regular file/);
+  for (const dev of ["tty", "null"]) {
+    const r = await byName(builtinTools({ root: "/dev", deny: [] }), "fs.read").execute({ path: dev }, ctx());
+    assert.equal(r.error?.code, "E_FS_UNREADABLE", `${dev}: ${r.content}`);
+    assert.match(r.content, /ENOTREG: a character device, not a regular file/, dev);
+  }
 });

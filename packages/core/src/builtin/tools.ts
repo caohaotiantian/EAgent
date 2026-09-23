@@ -213,15 +213,22 @@ const NOT_REGULAR = "ENOTREG";
  * `mkfifo out/access-ledger.json`: the run hung until a 10 s alarm killed it. The same wait
  * sits behind a character device (`/dev/zero` never ends) and a socket. So the open is
  * NON-BLOCKING, which returns at once for a FIFO with no writer, and the descriptor is
- * `fstat`ed before a byte is read: what is not a regular file is refused. Checking the
- * descriptor, not the name, is what keeps it one decision — a `stat` of the path first would be
- * a second look at a name that can be swapped between the two.
+ * `fstat`ed before a byte is read: what is not a regular file is refused.
+ *
+ * AND WHEN THE OPEN ITSELF FAILS, the name is `lstat`ed to say why, because some kinds never
+ * reach the `fstat`: the open fails with an errno that says nothing about what is there — measured
+ * on macOS, a unix socket answers errno 102 (`"Unknown system error -102"`) and `/dev/tty`
+ * `ENXIO`, so both became the retryable `E_TOOL_SOURCE_UNAVAILABLE` (review of §A.97). Something
+ * at the path that is not a regular file is refused by KIND; an absent name keeps `ENOENT`, and a
+ * symlink the `O_NOFOLLOW` open refused keeps `ELOOP`. (The `lstat` looks after the open, so a
+ * name swapped in between is classified as it now is — the refusal is right either way, since
+ * the open did not produce a regular file.)
  *
  * `O_NONBLOCK` changes nothing about a regular file: its reads never block to begin with.
  *
- * A directory is refused here too, with the errno it always had (`EISDIR`); every other kind
- * carries `NOT_REGULAR`. Both read as UNREADABLE — never as NOT FOUND, because something is
- * there.
+ * A directory is refused with the errno it always had (`EISDIR`); every other kind carries
+ * `NOT_REGULAR`. Both read as UNREADABLE — never as NOT FOUND, because something is there. A
+ * symlink at the leaf is left to the open, whose `O_NOFOLLOW` refuses it (`ELOOP`, unreadable).
  */
 function readRegularLeaf(path: string): string {
   return readRegularBytes(path).toString("utf8");
@@ -229,29 +236,41 @@ function readRegularLeaf(path: string): string {
 
 /** `readRegularLeaf`'s bytes, undecoded — what `fs.restore` digests before it removes a file. */
 function readRegularBytes(path: string): Buffer {
-  const fd = openLeaf(path, constants.O_RDONLY | NONBLOCK);
+  let fd: number;
+  try {
+    fd = openLeaf(path, constants.O_RDONLY | NONBLOCK);
+  } catch (e) {
+    // The open failed: say what is there when it is not a regular file, rather than pass on an
+    // errno that names nothing (see above). Absent, or a symlink the open refused, keeps its own.
+    const seen = lstatSync(path, { throwIfNoEntry: false });
+    if (seen !== undefined && !seen.isFile() && !seen.isSymbolicLink()) throw notRegular(seen);
+    throw e;
+  }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) {
-      const directory = st.isDirectory();
-      const kind = directory
-        ? "a directory"
-        : st.isFIFO()
-          ? "a FIFO"
-          : st.isSocket()
-            ? "a socket"
-            : st.isCharacterDevice()
-              ? "a character device"
-              : st.isBlockDevice()
-                ? "a block device"
-                : "not a regular file";
-      const code = directory ? "EISDIR" : NOT_REGULAR;
-      throw Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to read it`), { code });
-    }
+    if (!st.isFile()) throw notRegular(st);
     return readFileSync(fd);
   } finally {
     closeSync(fd);
   }
+}
+
+/** The refusal for something at the path that is not a regular file, naming what it is. */
+function notRegular(st: { isDirectory(): boolean; isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): Error {
+  const directory = st.isDirectory();
+  const kind = directory
+    ? "a directory"
+    : st.isFIFO()
+      ? "a FIFO"
+      : st.isSocket()
+        ? "a socket"
+        : st.isCharacterDevice()
+          ? "a character device"
+          : st.isBlockDevice()
+            ? "a block device"
+            : "not a regular file";
+  const code = directory ? "EISDIR" : NOT_REGULAR;
+  return Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to read it`), { code });
 }
 
 /** The digest `fs.write` records for a file it CREATED, and `fs.restore` checks before removing it. */
