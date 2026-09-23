@@ -1743,6 +1743,20 @@ rather than taken from a lane report.
   this docs lane deliberately did not: the graph's own `labels.residue-veto`, which still says
   *"This example ships `fail` until a maintainer picks between them"*, and `examples/README.md`
   §10's dissection of the `look` node, which the §D.10 build deletes.
+  **BUILT 2026-09-23 — the three sentences above saying what still ships are now history.**
+  `two-person-approval.json` declares `"skip"` and its description teaches quorum; the new
+  `examples/graphs/two-person-veto.json` keeps `"fail"` and its description carries both required
+  halves (the first reject decides; a late reject leaves the effect standing and only marks the run
+  failed). The two files differ in `onBranchError` and `metadata` alone, and the `residue-veto` /
+  `residue-late-veto` labels are gone with the product they described. Driven on the shipped binary
+  (`loom run` + `loom approve`, fresh workspace each): quorum A✓B✓C✗ `succeeded` written, A✗B✓C✓
+  `succeeded` written, A✓B✗C✗ `failed E_QUORUM_UNREACHABLE` nothing written; veto A✓B✓C✗
+  `failed E_HUMAN_APPROVAL_REQUIRED` WRITTEN, A✗B✓C✓ and A✓B✗C✗ `failed E_HUMAN_APPROVAL_REQUIRED`
+  nothing written; a lone reject parks `awaiting_gate` on both. `test/graph/two-person-approval.test.ts`
+  asserts that table over every ordering, plus each description's required sentences, and
+  `test/run/join-evidence-and-work.test.ts`'s shipped-graph test now drives the veto file, whose
+  lines are the old file's. `README.md`'s "Approval modes" row and `examples/README.md` (a row per
+  file) say which file is which. Short-circuit, straggler cancellation, §A.77 and §D.8: untouched.
 
 ### Opened by the 2026-09-15b settlement
 

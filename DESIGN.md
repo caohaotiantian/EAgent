@@ -290,10 +290,18 @@ unchanged by it — whether an irreversible effect may short-circuit, and whethe
 cancelled, is a different question and stays open. Nor may it be absorbed on the way past by §A.77
 (`k > branches.length`) or `TODO.md` §D.8 (a join's inbound edge kind — a TODO row, not this file's
 D8 one dot away): those are compile tightenings, not the product word.
-*Enforced by nothing yet — the graph still declares `"fail"`.* **Decided by the maintainer
-2026-09-22**; the record is `TODO.md` §A.68's addendum, and the change lands with the implementation,
-which updates `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING assertions rather
-than re-testing the engine.
+*Enforced (2026-09-23):* `examples/graphs/two-person-approval.json` declares `"skip"` and its
+description teaches quorum; `examples/graphs/two-person-veto.json` declares `"fail"` and its
+description states both halves — the first reject decides, and a late reject after the
+short-circuited write leaves the effect standing and only marks the run failed. The two files differ
+in `onBranchError` and `metadata` alone. `packages/core/test/graph/two-person-approval.test.ts`
+asserts each file's value, each description's required sentences, that equality, and the vote
+outcomes each teaches over every ordering — quorum: one dissenter succeeds (the late reject
+included), one approval of three is `E_QUORUM_UNREACHABLE` with nothing written; veto: a reject
+before the second approval is `E_HUMAN_APPROVAL_REQUIRED` with nothing written, a late reject is
+`failed` with the write already landed. Short-circuit, straggler cancellation, §A.77 and `TODO.md`
+§D.8 are untouched, as above. **Decided by the maintainer 2026-09-22**; the record is `TODO.md`
+§A.68's addendum.
 
 ---
 
@@ -596,15 +604,15 @@ two units of work, in this sequence and not in parallel:
    is `packages/core/test/examples-grant.test.ts`:995.
 3. **Change §A.68's one word and split the examples** — the canonical file to `skip`, veto into its
    own graph — and update `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING
-   assertions rather than re-testing the engine.
+   assertions rather than re-testing the engine. **Landed 2026-09-23** — D9's *Enforced* line.
 4. **Only then** items 29, 18/24, and 31.
 
 **And the do-not-do-in-parallel list, which is part of the decision rather than advice:** do not
 split D.10 back into three rows fixed a little each; do not add only a per-run ledger for §A.90 and
 declare this item closed; do not *"port a fourth graph with a `human_gate` before
 skip/fail is DECIDED (the friction log would copy the undecided lesson again)"* — his wording, and
-**that one is now SATISFIED by D9**, though the reason he gave still bites while the shipped file
-says `fail`, which is an observation here and not his constraint; and do not absorb §A.68 "on the
+**that one is now SATISFIED by D9**, and the reason he gave stopped biting on 2026-09-23, when the
+shipped file became `skip` and the veto moved to `two-person-veto.json`; and do not absorb §A.68 "on the
 way" through §A.77 or `TODO.md` §D.8 — those are compile tightenings, not the product word.
 
 ---

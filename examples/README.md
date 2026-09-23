@@ -10,14 +10,15 @@ export PATH="$PWD/bin:$PATH"
 cd examples
 ```
 
-**Eight graphs, and they do not all run the same way.** Without `--models-file` the only registered
+**Nine graphs, and they do not all run the same way.** Without `--models-file` the only registered
 adapter is the offline mock, and `loom run` says so on stderr before it starts.
 
 | graph | § | needs a model? |
 |---|---|---|
 | `graphs/fan-out-join.json` | 1 | **no** — `function` nodes only |
 | `graphs/guarded-write.json` | 3 | **no** — one `tool` node and a `preTool` hook |
-| `graphs/two-person-approval.json` | — | **no**, and it does not run to completion: it parks on three human gates and waits for people. **Two-of-three approval lives in `join`, not in `approval`** — three `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k:2}`; `approval.mode: "quorum"` was deleted and is now `GRAPH020_UNKNOWN_FIELD`. **It is two-of-three WITH A VETO, not tolerance of a dissenter**: `onBranchError: "fail"` is read before `k`, so a rejection arriving before the second approval fails the run — the graph's own `description` and `labels.residue-veto` state the boundary, and `labels.residue-late-veto` the case where the write has already landed. A short-circuiting join keeps its remaining branches running, so the third gate stays OPEN — a real gap, recorded in the graph's own `labels`. **DECIDED 2026-09-22 and not yet landed:** this file will teach QUORUM — `onBranchError: "skip"`, so a lone dissenter no longer vetoes and two-of-three means two-of-three — and the veto moves to a second graph that keeps `"fail"` (`DESIGN.md` D9, `TODO.md` §A.68). Everything in this row describes the file as it SHIPS today, which is still `"fail"`. `packages/core/test/graph/two-person-approval.test.ts` drives it |
+| `graphs/two-person-approval.json` | — | **no**, and it does not run to completion: it parks on three human gates and waits for people. **Two-of-three approval lives in `join`, not in `approval`** — three `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k:2}`; `approval.mode: "quorum"` was deleted and is now `GRAPH020_UNKNOWN_FIELD`. **This is the canonical file and it teaches QUORUM**: `onBranchError: "skip"`, so a lone dissenter is outvoted — two approvals land the write whenever the third vote arrives, and a run below two approvals writes nothing and is refused at the barrier with `E_QUORUM_UNREACHABLE` once every gate is answered (§A.75's floor). For a veto, copy the next row instead (`DESIGN.md` D9). A short-circuiting join keeps its remaining branches running, so the third gate stays OPEN — a real gap, recorded in the graph's own `labels`. `packages/core/test/graph/two-person-approval.test.ts` drives it |
+| `graphs/two-person-veto.json` | — | **no**, and it parks the same way. **The same graph with `onBranchError: "fail"`, and it teaches VETO**: `"fail"` is read before `k`, so the first reject decides and fails the run with `E_HUMAN_APPROVAL_REQUIRED` whatever the other two say. **Its description states the product limit**: the barrier short-circuits on two approvals and the write runs, so a LATE reject — after the second approval — fails a run whose write has already landed; the effect stays and the run is only marked failed. The two files differ in `onBranchError` and `metadata` alone, and the same test drives both |
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
@@ -28,7 +29,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 directory, so a graph added later is covered without editing the test — and RUNS the three it can
 drive to COMPLETION without a model (§1, §3, §5), asserting §5's six verdict strings and its
 `3/6 assertions passed`. §8, §9 and §10 need no model either and each has its own suite below;
-`two-person-approval` parks and is never answered. Only §6 is
+`two-person-approval` and `two-person-veto` park and are never answered. Only §6 is
 compiled and not run there: it needs a real model, and there is nothing to gate on canned text.
 §8 is compiled there and RUN by `packages/core/test/examples-triage.test.ts`, which is a separate
 file because it needs `reports/` in the workspace copy and `examples-run.test.ts` deliberately
@@ -617,9 +618,9 @@ own status is `[ok]`**, which no other example can show you.
 **A tool node whose failure you HANDLE does not need `unhandled: true`.** That flag suppresses
 `GRAPH011_UNHANDLED_IRREVERSIBLE`, which fires only for a tool whose class is `irreversible` or
 `externally_visible`; `fs.write` is `reversible_write`, so it is not one, and neither this graph nor
-§8 nor §9 sets the flag. `/usr/bin/grep -al 'unhandled' graphs/*.json` matches exactly two files —
-§3's `guarded-write.json` and `two-person-approval.json` — where it buys nothing today and is left
-alone.
+§8 nor §9 sets the flag. `/usr/bin/grep -al 'unhandled' graphs/*.json` matches exactly three files —
+§3's `guarded-write.json`, `two-person-approval.json` and `two-person-veto.json` — where it buys
+nothing today and is left alone.
 
 **Two things this graph measured that are worth knowing before you build one like it.**
 
