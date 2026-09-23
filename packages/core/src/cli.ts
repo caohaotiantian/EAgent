@@ -670,8 +670,9 @@ export function resourceRefsIn(text: string): readonly string[] {
  *     name and neither costs a directory for being given with no value. Both defaults are pinned
  *     against the JOURNAL in `operator-pause.test.ts`, because this paragraph is the argument for
  *     leaving them open and an argument nothing checks is how `String(true)` gets back in.
- *   - ANSWERED BEFORE THE DOOR: `--help` and `--version`. `main` prints the usage or the version
- *     and returns above every check here, so a reader would never be reached.
+ *   - ANSWERED BEFORE THE DOOR: `--help`. `main` prints the usage and returns above every check
+ *     here, so a reader would never be reached. (`--version` is answered there too, but through
+ *     its reader `versionFlag`, because a VALUE given to it must refuse rather than vanish.)
  *   - ARGV GENUINELY CANNOT DECIDE IT: `--as` and `--cohort` (more readers than one), and
  *     `--scope` — `ceilingScope(args, runId)` refuses a scope naming a different run than the
  *     command did, so the RUN ID is needed and that is a positional. These THREE are what still
@@ -719,7 +720,7 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   take: steerTake,
   to: postureFlag,
   token: serveToken,
-  version: null,
+  version: versionFlag,
   why: justificationFlag,
   workspace: jailFor,
 };
@@ -739,11 +740,32 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * At the door in `main`, not inside `parseArgs`: the parser stays a parser, and `openWorkspace`
  * is called directly by embedders and tests with flag maps they built themselves.
  */
+/**
+ * `--version` ASKS A QUESTION, so it takes no value — and a value is REFUSED, not ignored.
+ *
+ * `parseArgs` stores `--version 1` and `--version=yes` as strings, so a check for `=== true` alone
+ * would skip them and let the verb run with the flag silently dropped — measured on the first
+ * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
+ * flag existed the same line was refused as unknown. (`--help` has that hole and is left as it
+ * was; it is not this flag's to copy.)
+ */
+function versionFlag(args: Args): boolean {
+  const v = args.flags["version"];
+  if (v === undefined) return false;
+  if (v !== true) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--version takes no value (got ${JSON.stringify(v)}) — run \`loom --version\` on its own.`);
+  }
+  return true;
+}
+
 function assertKnownFlags(args: Args): void {
   const unknown = Object.keys(args.flags).filter((f) => !KNOWN_FLAGS.includes(f));
   if (unknown.length === 0) return;
   const near = (f: string): string => {
     const lower = f.toLowerCase();
+    // A bare `--` names nothing, and every flag starts with the empty string: no guess, rather
+    // than a "did you mean" listing every flag there is.
+    if (lower === "") return "";
     const exact = KNOWN_FLAGS.find((k) => k === lower);
     if (exact !== undefined) return ` (did you mean --${exact}? flags are case-sensitive)`;
     // Same first two letters is a cheap stand-in for an edit distance and catches the
@@ -8504,7 +8526,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // `loom --version` USED TO PRINT THE WHOLE USAGE AND EXIT 0, because `parseArgs` defaults a
   // missing verb to `help` and the `help` arm answered before any flag was looked at — so every
   // "is it installed, and which one" probe passed against every build, and said nothing.
-  if (args.flags["version"] === true) {
+  if (versionFlag(args)) {
     process.stdout.write(`loom ${VERSION}\n`);
     return 0;
   }
@@ -12512,28 +12534,34 @@ function assertDeclaredInputs(graph: RunGraph, inputs: Record<string, unknown>):
  *     `package.json`'s `bin` pointed here that meant an installed `loom --help` printed **nothing
  *     at all** and exited 0. `bin` is `bin.ts` now, which IMPORTS this module and calls
  *     `runAsEntryPoint` itself — so for the installed `loom` this function must answer NO, and
- *     does: `argv[1]` resolves to `bin.js`, and its basename `loom` is not this URL's tail.
+ *     does: `argv[1]` resolves to `bin.js`, not to this file.
  *   - The single-file binary: `scripts/build-binary.mjs` defines `import.meta.url` as
- *     `file:///loom`, and a SEA's `argv[1]` is the executable, so the basename test is what
- *     makes the binary run itself. `/loom` is not a path on any machine, so a realpath-only
- *     test would break it.
+ *     `file:///loom`. `/loom` is not a path on any machine, so a realpath test cannot recognise
+ *     it — and inside a SEA the bundle is the program by construction, so that URL is the answer.
  *
- * So: resolve both sides and compare, which is exact for the first two and follows the symlink
- * for the second; fall back to the basename test, which is what the binary needs and what every
- * pre-existing caller already matched on. `realpathSync` throws on a path that does not exist —
- * `/loom`, and an `argv[1]` that is not a file at all — so the throw is the fallback's trigger
- * rather than a failure.
+ * So: the binary by its URL; everything else by resolving both sides and comparing, which is exact
+ * for a direct start and follows a symlink. A path that does not resolve is not this file.
  */
 function startedAsTheEntryPoint(): boolean {
+  // THE BINARY IS ALWAYS ITS OWN ENTRY POINT, and it is recognised by the URL the build gave it,
+  // never by its file name. The basename fallback this replaced — `import.meta.url` ends with
+  // `basename(argv[1])` — made a binary RENAMED from `loom` (`loom-0.1.0-darwin-arm64`,
+  // `loom.exe`) print nothing and exit 0, and made a library consumer whose own entry file was
+  // called `cli.js` (or anything `cli.js` ends with) run loom's `main` on its argv and exit, both
+  // measured on the 2026-09-23 lane. An installed `loom` no longer needs a fallback at all: it
+  // starts at `bin.ts`, which calls `runAsEntryPoint` itself.
+  if (import.meta.url === SEA_ENTRY_URL) return true;
   const entry = process.argv[1];
   if (entry === undefined) return false;
   try {
-    if (realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) return true;
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
   } catch {
-    /* not a path this filesystem has; the basename test below is the answer */
+    return false; // not a path this filesystem has, so not this file
   }
-  return import.meta.url.endsWith(basename(entry));
 }
+
+/** What `scripts/build-binary.mjs` defines `import.meta.url` as inside the single-file binary. */
+const SEA_ENTRY_URL = "file:///loom";
 
 /**
  * EVERYTHING WRITTEN IS ON THE FD BEFORE THE PROCESS GOES, which `process.exit` alone does not

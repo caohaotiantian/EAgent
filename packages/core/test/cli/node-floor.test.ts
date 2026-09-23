@@ -15,7 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFileSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
+import { readFileSync, rmSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -78,6 +78,24 @@ test("...AND THROUGH A SYMLINK named `loom`, which is what npm's `bin` writes on
     const r = await node([link, "--version"]);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout, `loom ${PKG.version}\n`);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("A CONSUMER WHOSE OWN ENTRY FILE IS CALLED `cli` does not run loom by importing it", async () => {
+  // The entry-point test used to fall back to "does this module's URL end with argv[1]'s
+  // basename", so a program named `cli.ts` (or `cli.js`, or anything those end with) that merely
+  // IMPORTED loom's cli module ran loom's `main` on its own argv and then exited. Measured on the
+  // 2026-09-23 lane against an installed tarball: `node cli.js --version` printed `loom 0.1.0`
+  // before the consumer's own line.
+  const d = mkdtempSync(join(tmpdir(), "loom-consumer-"));
+  try {
+    const own = join(d, "cli.ts");
+    writeFileSync(own, `import { main } from ${JSON.stringify(fileURLToPath(new URL("../../src/cli.ts", import.meta.url)))};\nconsole.log("mine", typeof main);\n`);
+    const r = await node([own, "--version"]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, "mine function\n");
   } finally {
     rmSync(d, { recursive: true, force: true });
   }

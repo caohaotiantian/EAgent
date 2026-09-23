@@ -40,6 +40,25 @@ test("`loom --version` prints `loom <version>` and nothing else, with or without
   }
 });
 
+test("`--version` GIVEN A VALUE IS REFUSED, not dropped while the verb runs", async () => {
+  // Before the flag existed `--version 1` was an unknown flag and refused; a first draft that
+  // checked `=== true` only let `loom run g.json --version 1` run the graph and exit 0.
+  for (const argv of [["run", "g.json", "--version", "1"], ["--version=yes"], ["--version", "foo"]]) {
+    await assert.rejects(
+      () => cli(argv),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--version takes no value/.test(e.message),
+      argv.join(" "),
+    );
+  }
+});
+
+test("A BARE `--` is refused without a guess that lists every flag", async () => {
+  await assert.rejects(
+    () => cli(["--"]),
+    (e: unknown) => isLoomError(e) && /unknown flag: --\. /.test(e.message) && !/did you mean/.test(e.message),
+  );
+});
+
 test("AN UNKNOWN FLAG WITH NO VERB IS REFUSED — it used to print the usage and exit 0", async () => {
   for (const argv of [["--bogus"], ["help", "--tokne", "x"]]) {
     await assert.rejects(

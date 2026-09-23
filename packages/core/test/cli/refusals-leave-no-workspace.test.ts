@@ -251,7 +251,7 @@ const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly
 };
 
 /** `null` rows that are not in the set above, each because there is nothing to refuse. */
-const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject", "version"];
+const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject"];
 
 test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the table, not with this file", () => {
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
