@@ -1316,8 +1316,15 @@ function checkProjectionValues(channel: string, projection: Record<string, unkno
   // `project()` reads a `take` that is neither `undefined` nor `null`, and refuses whatever it
   // cannot read — including `""`, `false` and `[]`, which `Number()` would have coerced to a
   // bound of zero. A NEGATIVE take is legal and means "the last N".
+  //
+  // AN EXPLICIT `null` IS REFUSED HERE TOO, although `project()` reads it as absent (§A.88). This
+  // rule refused `"banana"`, `["x"]`, `{a:1}` and `true` and dropped `null` silently, and `take`
+  // is on `CHECKED_BY_A_RULE`, so the typed-field pass deferred to this rule and nothing refused
+  // it. Absent is spelled by leaving the key out; a `null` is a value somebody wrote, and a
+  // compiler stricter than the runtime is the allowed direction. The runtime stays as it is, so
+  // a graph compiled by an older build still runs.
   const take = projection["take"];
-  if (take !== undefined && take !== null && readProjectionBound(take) === undefined) {
+  if (take !== undefined && (take === null || readProjectionBound(take) === undefined)) {
     bad(
       `channel "${channel}"'s \`contextProjection.take\` is not an item count: ${describeProjectionValue(take)}`,
       "use a number, or a quoted number like `take: \"3\"`; remove it to show the whole value",
@@ -3199,6 +3206,32 @@ function rule002Terminals(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): vo
   // OVER `writers`, NOT OVER EVERY NODE: the set is already built two lines up, and scanning
   // `idx.byId` to filter it back down is the same avoidable O(nodes) per terminal that
   // `rule005Dataflow` paid for per read.
+  //
+  // WHAT THIS REACHABILITY IS, AND WHY A WARNING MAY STOP AT IT (§A.86, decided: an argument, not
+  // a new check). `canPrecede` is the full closure over `flowEdges` — every edge kind but
+  // `compensation`, which nothing traverses. It is STRUCTURAL reachability, and it differs from
+  // what a run can REALISE in exactly these ways, each of which only ever makes it LARGER:
+  //   - a `conditional` edge's `when`, a router's cases and a body's or operator's `take` are not
+  //     read, so an edge no input can select still connects;
+  //   - a `loop` edge's `until` and `maxIterations` are not read, so a writer reachable only on a
+  //     pass the bound forbids (the row's `maxIterations: 1` probe) still counts;
+  //   - an `error` edge's `codes` are not read, and neither is whether the node can fail at all;
+  //   - a `fanout` over an empty list and a `join` whose barrier cannot be met still connect.
+  // And one more that is not about realisability at all: the question is EXISTENTIAL. A terminal
+  // is silent when SOME writer is connected to it, so `s -> w -> t` beside `s -> x -> t`, with `w`
+  // the only writer, is silent although the run that takes `x` ends at `t` with no output. That is
+  // not new: the pre-§A.84 rule asked `ancestors(t) ∩ writers` and was existential too.
+  //
+  // So the rule is SOUND FOR WHAT IT SAYS and incomplete for what it does not: every
+  // `GRAPH002_DEAD_END` it prints is true of every run (no writer is connected at all, so none
+  // can have run before `t` or after it through a back-edge), and a dead end it misses is one of
+  // the shapes above. Missing one is the QUIET direction, which a warning may take and an error
+  // may not: this is `severity: "warning"`, it gates nothing (no reader of `GRAPH002_DEAD_END`
+  // exists outside this rule), and the runtime refuses the real fault itself — a run that ends
+  // without a declared output fails `E_OUTPUT_MISSING`. Computing realisable reachability instead
+  // would need the edge conditions and loop bounds evaluated, which is the runtime's job and not a
+  // static analysis's; closing the existential half would warn on every graph with a conditional
+  // output arm, which is the cry-wolf direction.
   const reachesAWriter = (t: NodeId): boolean =>
     [...writers].some((w) => canPrecede(idx, w, t) || canPrecede(idx, t, w));
   for (const t of idx.terminalNodes) {
@@ -3571,16 +3604,16 @@ function checkErrorProjectionRead(
   // "INSIDE" MEANS EVERY NODE THAT RUNS MORE THAN ONCE, not only the cycle's own members: a node
   // hanging off a loop body by a `seq` edge inherits the pass's iteration and runs once per pass
   // too (a reviewer drove one: a reader downstream of pass 0's FAILURE was served pass 2's
-  // `ok: true`). So the source is refused when it is on a cycle or reachable from one.
-  const onOrAfterLoop = idx.loopEdges.some((e) => {
-    const cycle = nodesInCycle(idx, e.from, e.to);
-    return cycle.has(source) || [...cycle].some((c) => canPrecede(idx, c, source));
-  });
-  if (onOrAfterLoop) {
+  // `ok: true`). KEYED ON MULTIPLICITY, NOT ON REACHABILITY FROM A CYCLE (§A.95) — the question
+  // is "can this node run at two iterations of one branch", and `multiRunNodes` answers it. It
+  // is the old set minus exactly the nodes reached from a loop body ONLY through a failure exit
+  // that ends the loop; its docstring says why that is the whole of what may be dropped, and why
+  // a `conditional` exit is NOT in it.
+  if (multiRunNodes(idx).has(source)) {
     d.push({
       severity: "error",
       code: "GRAPH005_ERROR_PROJECTION_IN_LOOP",
-      message: `node "${reader.id}" reads "${name}", but "${source}" is inside or downstream of a loop body and runs once per pass — this phase serves a projection only for a node that runs once per branch`,
+      message: `node "${reader.id}" reads "${name}", but "${source}" is inside or downstream of a loop body and can run on more than one pass — this phase serves a projection only for a node that runs once per branch`,
       at,
       fix: `branch on "${source}" with \`codes\` on its error edge, or read the projection of a node outside the loop`,
     });
@@ -3703,6 +3736,270 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
   for (const [id, anc] of idx.ancestors) {
     if (anc.has(to) && (idx.ancestors.get(from)?.has(id) ?? false)) out.add(id);
   }
+  return out;
+}
+
+const MULTI_RUN = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
+const SINGLE_ARRIVAL = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
+
+/**
+ * The nodes a run can hand AT MOST ONE `task.ready` — so they run at most once, full stop.
+ *
+ * WHY THIS IS A QUESTION AT ALL: the fold's `task.ready` arm sets a Task back to `ready` whatever
+ * state it is in, so an arrival that lands AFTER the Task committed runs it again under the SAME
+ * id. Driven on `a -> b` beside `a -> c -> c2 -> c3 -> b`: `b`'s body ran twice. With `b` failing
+ * first and succeeding second, BOTH its `error` arm and its `seq` arm ran. A node with two inbound
+ * edges therefore runs once only when its arrivals happen to coincide — which is timing, and not a
+ * property of the graph.
+ *
+ * THE SET: a node on no cycle, no `loop` edge into it, and either no inbound edge (an entry) or
+ * exactly one inbound edge — not `join` (a barrier fires on termination) and not `fanout` (one per
+ * branch) — whose source is in the set. One run of the source commits one outcome, which fires each
+ * of its edges at most once.
+ */
+function singleArrival(idx: GraphIndex): ReadonlySet<NodeId> {
+  const cached = SINGLE_ARRIVAL.get(idx);
+  if (cached !== undefined) return cached;
+  const out = new Set<NodeId>();
+  const all = [...idx.byId.keys()];
+  if (new Set(idx.topoOrder).size === all.length) {
+    const onCycle = new Set<NodeId>();
+    for (const l of idx.loopEdges) for (const m of nodesInCycle(idx, l.from, l.to)) onCycle.add(m);
+    for (const id of idx.topoOrder) {
+      if (onCycle.has(id)) continue;
+      const ins = (idx.inbound.get(id) ?? []).filter((e) => e.kind !== "compensation");
+      if (ins.length === 0) out.add(id);
+      else if (ins.length === 1 && ins[0]!.kind !== "loop" && ins[0]!.kind !== "join" && ins[0]!.kind !== "fanout" && out.has(ins[0]!.from)) out.add(id);
+    }
+  }
+  SINGLE_ARRIVAL.set(idx, out);
+  return out;
+}
+
+/**
+ * The nodes that can run at MORE THAN ONE ITERATION of one branch — a Task id is
+ * `node@branch#iteration`, and the iteration only moves on a `loop` edge, so this is the set of
+ * nodes one run may hold two Tasks of on the same branch. §A.95 asked for GRAPH005's loop
+ * refusal to be keyed on this rather than on "reachable from a cycle".
+ *
+ * THE ANSWER IS A CLASS PER NODE, propagated over the forward edges: `zero` (never downstream of
+ * a loop: iteration 0, once), `once:<loop>` (reached from a loop body only through an exit that
+ * fires in that loop's LAST pass: one iteration, once), or `top` (can run at two). Every cycle
+ * member (`nodesInCycle`) is `top`. A node's class is the join of what its inbound edges carry —
+ * two different classes join to `top`, because `#0` and `#k` are two Tasks — and an edge out of a
+ * cycle member carries `top` unless it is a ONCE-EXIT.
+ *
+ * A ONCE-EXIT IS AN `error` EDGE, AND ONLY THAT, because only a failure is an outcome the graph's
+ * own routing cannot overrule. The obvious candidate is a `conditional` exit whose `when` is the
+ * complement of the loop's continuation (`examples/graphs/harden-config.json`'s `done` beside
+ * `repair`) and it is NOT one: `#edgesToTake` honours a `take` WITHOUT evaluating `when`, and a
+ * `function` or `evaluator` body, a `human_gate` redirect and an operator `steer` all produce a
+ * `take`. Driven on that shape, `when: "settled"` against `when: "!settled"`, with the `audit`
+ * body returning `take: ["repair", "done"]` while unsettled: `collate#0`, `collate#1`, `collate#2`,
+ * three Tasks of the exit's target on one branch. A failed Task is different: it routes by
+ * `#errorEdges` alone (a `take` and a `steer` apply to a SUCCEEDED outcome only), so when it
+ * takes no edge back toward the loop's source, nothing from that pass can re-enter the loop.
+ *
+ * An `error` edge `X -> v` out of the cycle `C` of loop edge `L: S -> H` is a once-exit when:
+ *   - `C` is `L`'s alone (it shares no node with another loop's cycle) and `L` is a real
+ *     back-edge, so one counter drives it and the passes are strictly sequential;
+ *   - no member of `C` is a `join` node or has a `fanout` or `join` edge out, and every member
+ *     sits under the same fan-out stack — a join fires on TERMINATION, failures included, and a
+ *     fan-out makes `X` one Task per branch. CONSERVATIVE: driven, a static barrier after a
+ *     failing member fails the run rather than carrying the pass on, so this condition refuses
+ *     more than it has been shown to need (so is the back-edge half of the first condition: a
+ *     `loop` edge that is not a back-edge is simply not reasoned about, and its exits stay `top`);
+ *   - the body is a TREE from `H`: every other member has exactly one inbound edge, from a member,
+ *     and `H` has `L` and at most one more, from a `singleArrival` node — because a `task.ready`
+ *     that lands after a Task committed runs it AGAIN under the same id, so a member reached twice
+ *     can fail (the exit fires) and then succeed (the pass goes on);
+ *   - no `error` edge out of `X` reaches `S` — on failure `X` activates its `error` edges (and its
+ *     `join` edges, excluded above), nothing else;
+ *   - `X` is `S`, or every forward path to `S` from an entry node or from any loop target passes
+ *     through `X` — so pass `k` cannot reach `S` without `X#k`'s success;
+ *   - and `C` is entered at ONE iteration: the classes of its outside predecessors join to
+ *     something other than `top`, since a loop entered twice runs its last pass twice.
+ * THE TREE IMPLIES THREE OF THE OTHERS — "its cycle alone", dominance, and the one entry — and
+ * they are kept as the stated reasons rather than deleted: measured by mutation, removing any one
+ * of those three alone leaves every test green, while removing the tree, the `error`-only rule,
+ * the back-toward-`S` check or the two-arrival rule below each turns exactly one test red.
+ * Then `X#k` failing means no `S#k`, so no pass `k+1`: the exit fires only in the last pass, and
+ * every once-exit of `L` fires at that same `k`, which is why they share one class. And a `once`
+ * class reaching a node by TWO edges is `top` (the late arrival re-runs it), except when every one
+ * of them is a once-exit of the same loop — their sources lie on the tree's one path to `S`, so at
+ * most one fires.
+ *
+ * ONLY EVER QUIETER THAN WHAT IT REPLACED. `top` starts at cycle members and moves only along
+ * forward edges, so every node in this set was already on a cycle or `canPrecede`-reachable from
+ * one — the old refusal's set. What leaves the set is exactly the nodes whose every inbound route
+ * from a loop body is a once-exit of one loop, entered once.
+ *
+ * WHEN IT CANNOT DECIDE — an unmarked forward cycle leaves no topological order — it answers with
+ * the relation it replaced: every node on a loop's cycle or `canPrecede`-reachable from one. That
+ * fails closed for every loop the graph declares, keeps "only ever quieter" true on that branch
+ * too, and keeps GRAPH005's "inside or downstream of a loop body" true of every node it names. (It
+ * answered "every node" first, which put that message on a loop-free node beside GRAPH006.)
+ */
+function multiRunNodes(idx: GraphIndex): ReadonlySet<NodeId> {
+  const cached = MULTI_RUN.get(idx);
+  if (cached !== undefined) return cached;
+  const out = computeMultiRun(idx);
+  MULTI_RUN.set(idx, out);
+  return out;
+}
+
+function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
+  const all = [...idx.byId.keys()];
+  if (idx.loopEdges.length === 0) return new Set();
+  // Undecidable: the old relation, which base refused on — see the docstring.
+  const onOrAfterLoop = (): Set<NodeId> => {
+    const out = new Set<NodeId>();
+    for (const l of idx.loopEdges) {
+      const cycle = nodesInCycle(idx, l.from, l.to);
+      for (const id of all) if (cycle.has(id) || [...cycle].some((c) => canPrecede(idx, c, id))) out.add(id);
+    }
+    return out;
+  };
+  if (new Set(idx.topoOrder).size !== all.length) return onOrAfterLoop();
+  const entries = new Set(idx.entryNodes);
+
+  const cycles = idx.loopEdges.map((l) => ({ loop: l, members: nodesInCycle(idx, l.from, l.to) }));
+  const onCycle = new Set<NodeId>();
+  for (const c of cycles) for (const m of c.members) onCycle.add(m);
+  const loopTargets = idx.loopEdges.map((l) => l.to);
+
+  /** Forward reachability over `dagEdges`, optionally with one node deleted. */
+  const reach = (from: readonly NodeId[], without?: NodeId): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = from.filter((x) => x !== without);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.outbound.get(id) ?? []) {
+        if (e.kind === "loop" || e.kind === "compensation" || e.to === without) continue;
+        stack.push(e.to);
+      }
+    }
+    return seen;
+  };
+  /** Nodes that can reach `to` over `dagEdges` (itself included). */
+  const reaching = (to: NodeId): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = [to];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.inbound.get(id) ?? []) if (e.kind !== "loop" && e.kind !== "compensation") stack.push(e.from);
+    }
+    return seen;
+  };
+
+  // Which loop, if any, an edge is a once-exit of — every condition but the entry class, which
+  // depends on the propagation below and is checked there.
+  const exitLoop = new Map<EdgeId, number>();
+  cycles.forEach(({ loop, members }, i) => {
+    const alone = cycles.every((o, j) => j === i || [...o.members].every((m) => !members.has(m)));
+    const backEdge = loop.from === loop.to || (idx.ancestors.get(loop.from)?.has(loop.to) ?? false);
+    if (!alone || !backEdge) return;
+    const stackKey = (id: NodeId): string | undefined => {
+      const s = idx.fanoutEdgeStack.get(id);
+      return s === undefined ? undefined : s.join("\u0000");
+    };
+    const first = stackKey(loop.to);
+    if (first === undefined) return;
+    for (const m of members) {
+      if (stackKey(m) !== first || idx.byId.get(m)?.type === "join") return;
+      if ((idx.outbound.get(m) ?? []).some((e) => e.kind === "fanout" || e.kind === "join")) return;
+    }
+    // ONE ARRIVAL PER MEMBER PER PASS. A `task.ready` for a Task that already committed readies it
+    // AGAIN — failed or succeeded — so a member reached by two edges whose arrivals land at
+    // different times runs twice under one Task id, and a failure that "ended" the pass is
+    // followed by a success that carries it on (driven: `test/graph/error-projection-multiplicity`).
+    // So the body must be a TREE from `H`: every other member has exactly one inbound edge, from a
+    // member; `H` has `L` and at most one other, from a node that itself arrives once.
+    const single = singleArrival(idx);
+    for (const m of members) {
+      const ins = (idx.inbound.get(m) ?? []).filter((e) => e.kind !== "compensation");
+      if (m === loop.to) {
+        const outside = ins.filter((e) => e.id !== loop.id);
+        if (outside.length > 1 || outside.some((e) => !single.has(e.from) || e.kind === "join" || e.kind === "fanout")) return;
+      } else if (ins.length !== 1 || !members.has(ins[0]!.from) || ins[0]!.kind === "loop") {
+        return;
+      }
+    }
+    const source = loop.from;
+    const toSource = reaching(source);
+    const starts = [...idx.entryNodes, ...loopTargets];
+    for (const x of members) {
+      const errorOut = (idx.outbound.get(x) ?? []).filter((e) => e.kind === "error");
+      if (errorOut.length === 0) continue;
+      // On failure `x` activates its `error` edges (and a `join` edge by termination, which the
+      // loop above already excluded). None of them may lead back toward `S`.
+      if (errorOut.some((e) => toSource.has(e.to))) continue;
+      if (x !== source && reach(starts, x).has(source)) continue;
+      for (const e of errorOut) if (!members.has(e.to)) exitLoop.set(e.id, i);
+    }
+  });
+
+  // THE PROPAGATION. Classes only rise (unset < zero | once:i < top), each node at most twice, and
+  // a round that changes nothing ends it — so there are at most 2n + 1 rounds. The cap sits past
+  // that: a backstop that fails closed, not a bound anything reaches.
+  const cls = new Map<NodeId, string>();
+  for (const m of onCycle) cls.set(m, "top");
+  const join = (vals: readonly string[]): string | undefined => {
+    if (vals.length === 0) return undefined;
+    const first = vals[0]!;
+    return vals.every((v) => v === first) ? first : "top";
+  };
+  const entryClass = (i: number): string | undefined => {
+    const members = cycles[i]!.members;
+    const vals: string[] = [];
+    for (const m of members) {
+      if (entries.has(m)) vals.push("zero");
+      for (const e of idx.inbound.get(m) ?? []) {
+        if (e.kind === "loop" || e.kind === "compensation" || members.has(e.from)) continue;
+        const c = cls.get(e.from);
+        if (c !== undefined) vals.push(c);
+      }
+    }
+    return join(vals);
+  };
+  for (let round = 0; ; round++) {
+    if (round > 2 * all.length + 2) return onOrAfterLoop();
+    let changed = false;
+    for (const id of idx.topoOrder) {
+      if (onCycle.has(id)) continue;
+      const vals: string[] = entries.has(id) ? ["zero"] : [];
+      const ins = (idx.inbound.get(id) ?? []).filter((e) => e.kind !== "loop" && e.kind !== "compensation");
+      for (const e of ins) {
+        if (onCycle.has(e.from)) {
+          const i = exitLoop.get(e.id);
+          vals.push(i !== undefined && entryClass(i) !== "top" ? `once:${String(i)}` : "top");
+          continue;
+        }
+        const c = cls.get(e.from);
+        if (c !== undefined) vals.push(c);
+      }
+      // A `once` CLASS ARRIVING BY TWO EDGES IS NOT ONCE: the second arrival re-readies the Task
+      // (see the tree condition above), so the node runs twice at that one iteration. The one
+      // exception is every inbound edge being a once-exit of the SAME loop — their sources sit on
+      // the tree's one path to `S`, so an earlier one's failure means a later one never runs.
+      // Nodes of class `zero` are left as they were: two arrivals re-run them too, but that is
+      // true of a graph with no loop at all — a defect of its own, not this rule's to widen into.
+      const oneLoopsExits = ins.length > 0 && ins.every((e) => exitLoop.get(e.id) === exitLoop.get(ins[0]!.id) && exitLoop.has(e.id));
+      if (ins.length > 1 && vals.some((v) => v.startsWith("once:")) && !oneLoopsExits) vals.push("top");
+      const next = join(vals);
+      if (next !== undefined && next !== cls.get(id)) {
+        cls.set(id, next);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const out = new Set<NodeId>();
+  for (const [id, c] of cls) if (c === "top") out.add(id);
   return out;
 }
 
@@ -4042,6 +4339,42 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
           message: `join "${n.id}" quorum k=${join.k} must be a fraction ≤ 1 or a whole count`,
           at: { nodeId: n.id },
         });
+      } else if (join.k > 1) {
+        // A WHOLE COUNT ABOVE WHAT THE BARRIER CAN EVER HOLD (§A.77, decided Q11: refuse). The
+        // barrier's width is `#joinArrivals`' `expected`: the fan-out PLAN when a member was
+        // fanned out, and otherwise the member Tasks at or under the join's coordinate. When
+        // every member sits at the join's own fan-out stack (none fanned out beneath it) and runs
+        // at most once per branch (`multiRunNodes`), that count is at most the number of distinct
+        // members — so `k` above it can be met by NO input, and the run finds out only at the
+        // barrier, after every arm has run and applied its writes.
+        //
+        // THE UNDECIDABLE SHAPES ARE LEFT ALONE, named: a FANNED member (its width is data, the
+        // plan), a member that can run on more than one pass (each pass is another Task the count
+        // includes), a member whose stack is ambiguous, and an unknown member (refused on its own
+        // above). A member behind a `conditional` edge is NOT one of them: narrowing only makes
+        // the width smaller, so a `k` above the whole list is unmeetable either way, while `k` at
+        // or below it stays the runtime's question (`join-quorum-k-is-a-floor.test.ts`).
+        const joinStack = idx.fanoutEdgeStack.get(n.id);
+        const members = [...new Set(join.branches)];
+        const multi = multiRunNodes(idx);
+        const decidable =
+          joinStack !== undefined &&
+          members.every((m) => {
+            if (!idx.byId.has(m) || multi.has(m)) return false;
+            const s = idx.fanoutEdgeStack.get(m);
+            return s !== undefined && s.length === joinStack.length && s.every((e, i) => joinStack[i] === e);
+          });
+        if (decidable && join.k > members.length) {
+          d.push({
+            severity: "error",
+            code: "GRAPH008_QUORUM_K",
+            message:
+              `join "${n.id}" quorum k=${join.k} exceeds its ${members.length} branch(es), and every one is static and unfanned — ` +
+              `no run can materialise more, so every run would reach this barrier, run all ${members.length}, and be refused there`,
+            at: { nodeId: n.id },
+            fix: `lower k to at most ${members.length} (or use a fraction ≤ 1), or add the missing branches`,
+          });
+        }
       }
     }
 
@@ -4916,6 +5249,10 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
         // is pushed into a per-arm channel per arm, which is worse modelling forced by
         // an over-approximation.
         if (routerExclusive(spec, idx, a, b)) continue;
+        // One node's SUCCESS arm and the same node's FAILURE arm cannot both run (§A.94): a Task
+        // commits one outcome, and a failed one routes by `#errorEdges` alone. See
+        // `outcomeExclusive` for the graph property this rests on and what it does not cover.
+        if (outcomeExclusive(idx, a, b)) continue;
         d.push({
           severity: "error",
           code: "GRAPH010_CONCURRENT_WRITE",
@@ -5309,6 +5646,115 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
   if (router === undefined) return false;
   // Two edges in the SAME case fire together; two edges in different cases never do.
   return !router.cases.some((c) => c.take.includes(armA.edge) && c.take.includes(armB.edge));
+}
+
+/**
+ * Are `a` and `b` on the success arm and the failure arm of ONE node — as a property of the graph?
+ *
+ * `grant-access.json`'s `prior` (behind `read-ledger`'s `seq` edge) and `first-grant` (behind its
+ * `error` edge) both write `history`, and GRAPH010 called them concurrent writers of a `replace`
+ * channel (§A.94). They are exclusive by construction: `#commit` routes a failed outcome by
+ * `#errorEdges` and a succeeded one by `#edgesToTake`, a `take` or a `steer` applies to a
+ * SUCCEEDED outcome only, and a Task that runs ONCE commits one outcome. The workaround that
+ * shipped — `merge_object` with `onConflict: "last_by_branch"` — bought a conflict arm that
+ * cannot fire.
+ *
+ * "RUNS ONCE" IS NOT "IS ONE TASK", and the first cut of this rule confused them. A second
+ * `task.ready` that lands after a Task committed runs it again under the same id, so `X` reached by
+ * two edges can fail (its `error` arm runs) and then succeed (its `seq` arm runs). A seeded
+ * random-graph oracle found it — `X` reached from `s` directly and from `s -> m -> m1 -> m3` — and
+ * `singleArrival` is the fix: `X` must be reachable by exactly one chain of single edges.
+ *
+ * THE PROPERTY, over `flowEdges` from the entry nodes, for some node `X`:
+ *   - every path to `a` crosses a SUCCESS arm of `X` (`seq`, `conditional`, `fanout` — the kinds
+ *     `#edgesToTake` takes and `#errorEdges` never does), so deleting those edges leaves `a`
+ *     unreachable;
+ *   - every path to `b` crosses an `error` edge of `X`, so deleting those leaves `b` unreachable;
+ *   - `X` is handed at most one `task.ready` (`singleArrival`: on no cycle, and one inbound edge
+ *     back to an entry) and is inside no fan-out (an empty fan-out stack) — so there is ONE
+ *     outcome, not one per pass, per branch or per arrival;
+ *   - and no `join` node lies between `X` and either of them: a barrier fires on TERMINATION,
+ *     failures included, so it can carry a path onward without `X`'s arm having been taken.
+ * `join` edges out of `X` are in neither arm for the same reason, and a `loop` edge out of `X`
+ * would put `X` on a cycle, which the third condition already refuses.
+ *
+ * NARROWER THAN `routerExclusive` ON PURPOSE: that one rests on a router taking one case, which an
+ * operator `steer` can overrule; this rests on success and failure, which nothing overrules.
+ */
+function outcomeExclusive(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  const { candidates, joinReach } = outcomeArms(idx);
+  // No `join` node on a path from `x` to `target`: none that `x` reaches and that reaches `target`.
+  const noJoinBetween = (after: ReadonlySet<NodeId>, target: NodeId): boolean =>
+    !after.has(target) || [...joinReach].every(([j, reach]) => !after.has(j) || !reach.has(target));
+  for (const c of candidates) {
+    for (const [s, f] of [[a, b], [b, a]] as const) {
+      if (c.withoutSuccess.has(s) || c.withoutFailure.has(f)) continue;
+      if (noJoinBetween(c.after, s) && noJoinBetween(c.after, f)) return true;
+    }
+  }
+  return false;
+}
+
+interface OutcomeArms {
+  /** Every `X` that could decide a pair, with the three reachability sets that decide it. */
+  readonly candidates: readonly {
+    readonly withoutSuccess: ReadonlySet<NodeId>;
+    readonly withoutFailure: ReadonlySet<NodeId>;
+    readonly after: ReadonlySet<NodeId>;
+  }[];
+  /** Each `join` node (itself included) and every node it reaches over `flowEdges`. */
+  readonly joinReach: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
+}
+
+const OUTCOME_ARMS = new WeakMap<GraphIndex, OutcomeArms>();
+
+/**
+ * `outcomeExclusive`'s graph-wide searches, ONCE PER COMPILE and not once per writer pair. None of
+ * them depends on the pair: the first cut recomputed two whole-graph reachabilities per candidate
+ * `X` for every unordered pair of writers, and a reviewer measured 80 writers beside 80 `error`
+ * nodes (241 nodes, under the default `maxNodes`) at 5,965 ms against base's 30 ms, and 150/150 at
+ * 71 s. Precomputed, the per-pair work is set lookups.
+ */
+function outcomeArms(idx: GraphIndex): OutcomeArms {
+  const cached = OUTCOME_ARMS.get(idx);
+  if (cached !== undefined) return cached;
+  const single = singleArrival(idx);
+  const walk = (from: readonly NodeId[], cut?: ReadonlySet<EdgeId>): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = [...from];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation" && cut?.has(e.id) !== true) stack.push(e.to);
+    }
+    return seen;
+  };
+  const candidates: OutcomeArms["candidates"][number][] = [];
+  for (const [x, outs] of idx.outbound) {
+    const failure = outs.filter((e) => e.kind === "error");
+    if (failure.length === 0 || !single.has(x)) continue;
+    // CONSERVATIVE, NOT SHOWN NECESSARY: an `X` inside a fan-out is refused. Its writers sit in the
+    // fan too and GRAPH010's per-writer check refuses each of them anyway, so no pin can see this.
+    const stack = idx.fanoutEdgeStack.get(x);
+    if (stack === undefined || stack.length > 0) continue;
+    const success = outs.filter((e) => e.kind === "seq" || e.kind === "conditional" || e.kind === "fanout");
+    const next = outs.filter((e) => e.kind !== "compensation").map((e) => e.to);
+    candidates.push({
+      withoutSuccess: walk(idx.entryNodes, new Set(success.map((e) => e.id))),
+      withoutFailure: walk(idx.entryNodes, new Set(failure.map((e) => e.id))),
+      after: walk(next),
+    });
+  }
+  // CONSERVATIVE, NOT SHOWN NECESSARY: a `join` between `X` and a writer refuses the exemption.
+  // Driven without it, the runs stayed exclusive (a static barrier whose member never ran does not
+  // fire), so no pin distinguishes it; it stays because a barrier fires on TERMINATION, which is
+  // not an arm of `X`, and the argument above does not cover it.
+  const joinReach = new Map<NodeId, ReadonlySet<NodeId>>();
+  if (candidates.length > 0) for (const j of idx.joinNodes) joinReach.set(j, walk([j]));
+  const out = { candidates, joinReach };
+  OUTCOME_ARMS.set(idx, out);
+  return out;
 }
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────
@@ -6342,6 +6788,47 @@ function rule016Subgraphs(
     const sub = n.subgraph;
     if (sub === undefined) continue;
 
+    // THE PARENT-CHANNEL HALF FIRST, BEFORE ANY `continue` BELOW (§A.98). The VALUES of
+    // `sub.inputs` and the KEYS of `sub.outputs` name the PARENT's channels, so whether each is
+    // declared is decidable from this spec alone. This half used to sit after
+    // `if (child === undefined) continue;`, so a ref the resolver could not expand — a resolver
+    // with no `subgraph` hook at all, which is what the test skeleton and a bare
+    // `ResourceResolver` are — skipped it: `inputs: {k: "nope"}` with no channel `nope` compiled
+    // `ok`, and the child was handed `undefined` at run time. The same was true behind a subgraph
+    // CYCLE and past the depth budget. None of those is about the parent's own channel names.
+    //
+    // ONLY THE NAMES MOVE, NOT `requiredMapping`'s SHAPE REFUSAL. A mapping that is absent or not
+    // an object is read here as "maps nothing" and left to `requiredMapping` below, which still
+    // runs only for a resolved child — so hoisting this adds no GRAPH003 to a graph that compiled
+    // before. (An ABSENT mapping on an unresolved child is therefore still silent, and still a
+    // crash at run time — `TODO.md` residue, not this row's closing condition.)
+    //
+    // WHY `continue` STILL SKIPS THE CHILD HALF: "which channels does the child declare" needs the
+    // child, and an unresolved child is GRAPH015's to report (or, with no `subgraph` hook, nobody
+    // can answer it here). The child half stays below the resolution, unchanged.
+    const asMapping = (v: unknown): Readonly<Record<string, unknown>> =>
+      typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Readonly<Record<string, unknown>>) : {};
+    for (const [childCh, parentCh] of Object.entries(asMapping(sub.inputs))) {
+      if (!Object.hasOwn(spec.channels, parentCh as string)) {
+        d.push({
+          severity: "error",
+          code: "GRAPH016_BAD_MAPPING",
+          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
+          at: { nodeId: n.id },
+        });
+      }
+    }
+    for (const parentCh of Object.keys(asMapping(sub.outputs))) {
+      if (!Object.hasOwn(spec.channels, parentCh)) {
+        d.push({
+          severity: "error",
+          code: "GRAPH016_BAD_MAPPING",
+          message: `subgraph "${n.id}" maps output to undeclared parent channel "${parentCh}"`,
+          at: { nodeId: n.id },
+        });
+      }
+    }
+
     if (expanding.includes(sub.ref)) {
       d.push({
         severity: "error",
@@ -6391,8 +6878,11 @@ function rule016Subgraphs(
     // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
     // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
     // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
+    // (Their PARENT-channel names are checked at the top of this loop, above every `continue` —
+    // §A.98; this is the shape refusal and the child half.)
     const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
     const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
+    //
     // NOT A PLAIN OBJECT IS REFUSE, NEVER SKIP, and that distinction was a defect. This used to
     // hand back `undefined` for a child whose `channels` was not a plain object and the mapping
     // loops below skipped their child half — so `channels: []` lost both `GRAPH016_BAD_MAPPING`s
@@ -6412,15 +6902,7 @@ function rule016Subgraphs(
         ? (rawChildChannels as Readonly<Record<string, unknown>>)
         : {};
 
-    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
-      if (!Object.hasOwn(spec.channels, parentCh as string)) {
-        d.push({
-          severity: "error",
-          code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps input "${childCh}" from undeclared parent channel "${String(parentCh)}"`,
-          at: { nodeId: n.id },
-        });
-      }
+    for (const childCh of Object.keys(inputs ?? {})) {
       if (!Object.hasOwn(childChannels, childCh)) {
         d.push({
           severity: "error",
@@ -6430,15 +6912,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const [parentCh, childCh] of Object.entries(outputs ?? {})) {
-      if (!Object.hasOwn(spec.channels, parentCh)) {
-        d.push({
-          severity: "error",
-          code: "GRAPH016_BAD_MAPPING",
-          message: `subgraph "${n.id}" maps output to undeclared parent channel "${parentCh}"`,
-          at: { nodeId: n.id },
-        });
-      }
+    for (const childCh of Object.values(outputs ?? {})) {
       if (!Object.hasOwn(childChannels, childCh as string)) {
         d.push({
           severity: "error",

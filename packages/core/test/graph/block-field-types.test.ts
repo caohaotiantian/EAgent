@@ -181,24 +181,16 @@ test("NO WRONG-TYPED VALUE IN ANY SCOPE CRASHES THE COMPILER — five did, all o
   assert.ok(drove > 200, `only ${String(drove)} cases driven — the tables shrank, re-read this file`);
 });
 
-/**
- * THE ONE PAIR THAT STILL COMPILES CLEAN, named rather than counted.
- *
- * `contextProjection.take` is on `CHECKED_BY_A_RULE` — `checkProjectionValues` refuses `"banana"`,
- * `["x"]`, `{a:1}` and `true` with `GRAPH003_MALFORMED` — and that rule reads `null` as ABSENT, so
- * `take: null` is silently dropped rather than refused. Taking `take` off the opt-out list would
- * close this one value and give the other four TWO diagnostics for one mistake, which is the trade
- * `CHECKED_BY_A_RULE` exists to refuse. Closing it properly is one line in that rule, and it is a
- * different change from typing a table. Listed here so it is a measured fact and not a hope: if
- * the rule ever learns about `null`, this row comes off and the loop below goes green without it.
- */
-const STILL_ACCEPTED: ReadonlySet<string> = new Set(["contextProjection.take:null"]);
-
 test("EVERY WRONG-TYPED VALUE IS REFUSED — by this pass or by the rule that owns the field", () => {
   // The other half, and it is the one that makes the tag column load-bearing rather than
   // decorative: a field whose tag says `count` and which accepts `"banana"` is a tag nobody reads.
   // WHICH refusal is deliberately not asserted here — `CHECKED_BY_A_RULE`'s own test below owns
   // that — because this one is about the hole being closed, not about who closed it.
+  //
+  // NO EXCEPTIONS LEFT. `contextProjection.take: null` was the one pair that still compiled clean,
+  // held in a `STILL_ACCEPTED` set that asserted its acceptance so it could not stop existing in
+  // silence (§A.88). `checkProjectionValues` refuses it now, the set went red as it was written to,
+  // and it is deleted with the row.
   for (const [scope, at] of Object.entries(SCOPES)) {
     for (const [field, tag] of Object.entries(TABLE[scope]!)) {
       if (tag === "unknown") continue; // `channel.initial` and `metadata.version`: see the table
@@ -207,14 +199,6 @@ test("EVERY WRONG-TYPED VALUE IS REFUSED — by this pass or by the rule that ow
         const s = base();
         at(s)[field] = v;
         const r = diagnose(s);
-        if (STILL_ACCEPTED.has(`${scope}.${field}:${label === "null" ? "null" : label}`)) {
-          assert.equal(
-            r.codes.length,
-            0,
-            `${scope}.${field} = ${label} is refused now — take it off STILL_ACCEPTED and off the docstring`,
-          );
-          continue;
-        }
         assert.ok(
           r.codes.length > 0,
           `${scope}.${field} (${tag}) = ${label} compiled with ZERO diagnostics — the tag is not enforced`,

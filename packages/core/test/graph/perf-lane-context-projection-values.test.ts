@@ -11,7 +11,8 @@
  * reader is exactly the thing that drifts. Every value below is driven through BOTH — `compile`
  * and the runtime that would have caught it — and the assertion is that they answer the same.
  *
- * The one deliberate disagreement is pinned at the bottom, so it is a decision rather than a gap.
+ * The two deliberate disagreements are pinned — `take: null` (refused here, absent at run time,
+ * §A.88) and an absent `maxTokens`/`overflow` at the bottom — so each is a decision rather than a gap.
  */
 
 import test from "node:test";
@@ -76,8 +77,9 @@ const READABLE = { maxTokens: 10, overflow: "truncate_tail" } as const;
 
 test("`take`: compile refuses exactly the item counts the runtime refuses", async () => {
   // A NEGATIVE take is legal — "the last N findings" — and `0` is a slice of zero rather than
-  // the absence of one, so both must pass. `null` is one of the two ways to declare no bound.
-  const good: unknown[] = [3, -2, 0, 2.5, "3", " 3 ", "-2", null];
+  // the absence of one, so both must pass. (`null` is not in either list: it is the one value the
+  // two layers answer differently ON PURPOSE — see the test after this one.)
+  const good: unknown[] = [3, -2, 0, 2.5, "3", " 3 ", "-2"];
   const bad: unknown[] = ["abc", "", "   ", [], false, true, {}, NaN, Infinity];
   for (const take of good) {
     assert.equal(refusedAtCompile({ ...READABLE, take }, "take"), false, `take ${JSON.stringify(take)} must compile`);
@@ -87,6 +89,15 @@ test("`take`: compile refuses exactly the item counts the runtime refuses", asyn
     assert.equal(await refusedAtRunTime({ ...READABLE, take }, "take"), true, `take ${JSON.stringify(take)} must refuse at run time`);
     assert.equal(refusedAtCompile({ ...READABLE, take }, "take"), true, `take ${JSON.stringify(take)} must refuse at compile`);
   }
+});
+
+test("`take: null` — compile REFUSES what the runtime reads as absent, the second deliberate disagreement (§A.88)", async () => {
+  // `project()` treats `null` as "no slice", and keeps doing so, so a graph an older build compiled
+  // still runs. The compiler refuses it: absent is spelled by leaving the key out, and a `null` is
+  // a value somebody wrote — `checkProjectionValues` refused `"banana"`, `["x"]`, `{a:1}` and
+  // `true` and dropped this one silently. Stricter at compile is the allowed direction.
+  assert.equal(refusedAtCompile({ ...READABLE, take: null }, "take"), true, "take null is refused at compile");
+  assert.equal(await refusedAtRunTime({ ...READABLE, take: null }, "take"), false, "and still reads as absent at run time");
 });
 
 test("`maxTokens`: compile refuses exactly the bounds the runtime refuses", async () => {
