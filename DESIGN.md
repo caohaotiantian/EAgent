@@ -578,7 +578,8 @@ channel shape is **`DESIGN.md` D8** — one reserved error projection per node, 
 half only, truncation and classification optional fields of the same envelope; `TODO.md` §D.10 is
 struck with it. §A.68 is **`DESIGN.md` D9** — the canonical `two-person-approval.json` teaches QUORUM
 (`onBranchError: "skip"`) and veto moves to a second file; the record is that row's own 2026-09-22
-addendum. Both are now IMPLEMENTATION, and neither graph nor source has changed yet. **Four of the rows above are still
+addendum. Both have now LANDED — D8 phase one at `83f86bec`, D9 on 2026-09-23 (each section's
+*Enforced* line). **Four of the rows above are still
 owed into a fifth wave** (§A.71, `TODO.md` §D.8, §A.70, §A.72).
 
 **And the ordering argument, which is the only thing that makes this a list rather than a

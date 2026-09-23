@@ -28,8 +28,9 @@ reserved error projection per node — §D.10 is struck with it) and the shipped
 `DESIGN.md` **D9** (`skip`, with veto as a second file — §A.68's addendum); both are that file's
 Decisions section, and `TODO.md` §D.8 / §D.9 are different rows one dot away. The decided ORDER is:
 the projection and `grant-access`'s `error` arm branching by code, deleting `look` and the
-`KNOWN HAZARD` test → then §A.68's word and the example split → then items 29, 18/24, 31. Nothing in
-`packages/` or `examples/` has moved yet.
+`KNOWN HAZARD` test → then §A.68's word and the example split → then items 29, 18/24, 31. **The
+first two steps have landed** (D8 phase one at `83f86bec`, D9 on 2026-09-23 — §A.90 and §A.68's
+addendum); items 29, 18/24 and 31 are next.
 
 ---
 
@@ -1743,7 +1744,8 @@ rather than taken from a lane report.
   this docs lane deliberately did not: the graph's own `labels.residue-veto`, which still says
   *"This example ships `fail` until a maintainer picks between them"*, and `examples/README.md`
   §10's dissection of the `look` node, which the §D.10 build deletes.
-  **BUILT 2026-09-23 — the three sentences above saying what still ships are now history.**
+  **BUILT 2026-09-23 — the sentences above saying the graph and both READMEs "still describe
+  `fail`" and that its `labels.residue-veto` still says "ships `fail`" are now history.**
   `two-person-approval.json` declares `"skip"` and its description teaches quorum; the new
   `examples/graphs/two-person-veto.json` keeps `"fail"` and its description carries both required
   halves (the first reject decides; a late reject leaves the effect standing and only marks the run
