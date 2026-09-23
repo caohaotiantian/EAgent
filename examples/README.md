@@ -18,7 +18,7 @@ adapter is the offline mock, and `loom run` says so on stderr before it starts.
 | `graphs/fan-out-join.json` | 1 | **no** — `function` nodes only |
 | `graphs/guarded-write.json` | 3 | **no** — one `tool` node and a `preTool` hook |
 | `graphs/two-person-approval.json` | — | **no**, and it does not run to completion: it parks on three human gates and waits for people. **Two-of-three approval lives in `join`, not in `approval`** — three `human_gate` nodes joined by `join{branches:[…], mode:"quorum", k:2}`; `approval.mode: "quorum"` was deleted and is now `GRAPH020_UNKNOWN_FIELD`. **This is the canonical file and it teaches QUORUM**: `onBranchError: "skip"`, so a lone dissenter is outvoted — two approvals land the write whenever the third vote arrives, and a run below two approvals writes nothing and is refused at the barrier with `E_QUORUM_UNREACHABLE` once every gate is answered (§A.75's floor). For a veto, copy the next row instead (`DESIGN.md` D9). A short-circuiting join keeps its remaining branches running, so the third gate stays OPEN — a real gap, recorded in the graph's own `labels`. `packages/core/test/graph/two-person-approval.test.ts` drives it |
-| `graphs/two-person-veto.json` | — | **no**, and it parks the same way. **The same graph with `onBranchError: "fail"`, and it teaches VETO**: `"fail"` is read before `k`, so the first reject decides and fails the run with `E_HUMAN_APPROVAL_REQUIRED` whatever the other two say. **Its description states the product limit**: the barrier short-circuits on two approvals and the write runs, so a LATE reject — after the second approval — fails a run whose write has already landed; the effect stays and the run is only marked failed. The two files differ in `onBranchError` and `metadata` alone, and the same test drives both |
+| `graphs/two-person-veto.json` | — | **no**, and it parks the same way. **The same graph with `onBranchError: "fail"`, and it teaches VETO**: `"fail"` is read before `k`, so the first reject decides and fails the run with `E_HUMAN_APPROVAL_REQUIRED` whatever the other two say. **Its description states the product limit**: the barrier short-circuits on two approvals and the write runs, so a LATE reject — after the second approval — fails a run whose write has already landed. The failed run's rollback then runs `fs.restore`, which restores a file that existed before the run and cannot undo one the write CREATED, so on a fresh workspace the effect stays (`TODO.md` §A.99). The two files differ in `onBranchError` and `metadata` alone, and the same test drives both |
 | `graphs/review-bench.json` | 5 | **runs offline, means nothing offline** — see §5 |
 | `graphs/self-review.json` | 6 | **yes** — it is the workflow this project ported first |
 | `graphs/triage-failures.json` | 8 | **no**, and it means something offline — the classification is read off an error signature, not inferred |
@@ -633,7 +633,10 @@ nothing today and is left alone.
   edge anywhere in the graph.** `fs.write` declares `compensation: {tool: "fs.restore"}`, so when
   `write-ledger` fails after `write-grant` succeeded the engine undoes the grant write and
   `loom trace` prints `loom.tool (compensate) [ok]` under it. Measured: `out/grant.json` came back
-  byte-identical to before the failed run. A `compensation` edge is a DECLARATION the compiler
+  byte-identical to before the failed run — a file that EXISTED before it. A write that created its
+  file is not undone: `fs.restore` has no previous content to put back, and the compensation is
+  journaled `failed` (`TODO.md` §A.99) while `loom trace` still prints `(compensate) [ok]` — read
+  the journal's `compensation.recorded` outcome, not the trace line. A `compensation` edge is a DECLARATION the compiler
   proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
 
 **The error arm branches on WHY the read failed, not on the fact that it did** (`DESIGN.md` D8,

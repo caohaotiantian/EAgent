@@ -31,7 +31,8 @@ the projection and `grant-access`'s `error` arm branching by code, deleting `loo
 `KNOWN HAZARD` test → then §A.68's word and the example split → then items 29, 18/24, 31. **The
 first two steps have landed** (D8 phase one at `83f86bec`, D9 on 2026-09-23 — §A.90 and §A.68's
 addendum), and item 29 is built short of its publish (`48de87f6`, §H.15) — so what is next is the
-maintainer's publish, then 18/24, then 31 (`docs/handoff-2026-09-23.md` §6).
+maintainer's publish, then 18/24, then 31 (`docs/handoff-2026-09-23.md` §6; §7 is the accepted
+lane plan and the owed-decision table).
 
 ---
 
@@ -2307,7 +2308,7 @@ nobody took (§A.77).
 
 - **A.83 · `fs.read` appends its truncation marker INTO the returned content, so a big document
   reads back as a syntax error in the FILE.** *(From the second port's F12.)* File:
-  `packages/core/src/builtin/tools.ts:370` and `:385`. `maxBytes` defaults to `200_000` — and is
+  `packages/core/src/builtin/tools.ts:417` and `:432`. `maxBytes` defaults to `200_000` — and is
   compared against `text.length`, so it bounds CHARACTERS and not bytes — and the return is
   `` `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` ``. `details` beside it does
   carry `{bytes, truncated}`, but a `tool` node writes the tool's `content` to its declared channel
@@ -2321,7 +2322,7 @@ nobody took (§A.77).
   **The dangerous case is the one that does NOT break.** JSON happens to fail, which is why this
   surfaced at all; a format whose truncated prefix still parses hands the body a third of a document
   with no signal, and any workflow that searches for ABSENCES — an audit, a policy check, a lint —
-  reads the missing part as compliance. Same shape at `:305` (`proc.exec`) and `:1179` (`net.fetch`,
+  reads the missing part as compliance. Same shape at `:305` (`proc.exec`) and `:1228` (`net.fetch`,
   default `100_000`).
   **Closes when** a truncated read is distinguishable from a complete one without parsing the
   content: the marker out of the string and the fact on the channel a body can read, or a refusal
@@ -2331,8 +2332,8 @@ nobody took (§A.77).
   file's §D.8 — from §D.10), and it is the FIRST of the two arms, not the refusal**:
   `truncated?: boolean` and `bytes?: number` are optional fields of the one reserved error
   projection — the same envelope §A.90 gets, never a second shape — and the marker comes OUT of the
-  content string at **all three sites** (`builtin/tools.ts:385` for `fs.read`, `:305` for
-  `proc.exec`, `:1179` for `net.fetch`). Option (c), refusing instead of truncating, was refused: it
+  content string at **all three sites** (`builtin/tools.ts:432` for `fs.read`, `:305` for
+  `proc.exec`, `:1228` for `net.fetch`). Option (c), refusing instead of truncating, was refused: it
   turns an observable FACT into a hard failure. **This row does NOT close with §A.90**: phase one
   DECLARES `truncated`/`bytes` on the envelope, and the producer that populates them at the three
   sites is this row's own work.
@@ -2402,8 +2403,8 @@ the four compiler rows this wave closed, four come out of the THIRD workflow por
 ancestor. The probes are in `.agent/wave-2026-09-22b/probes/` (gitignored), copied out of the lane
 worktrees and the reviewers' extracts and re-pointed at this checkout.
 
-**§A.90 is the one to read first.** It is the only row in this file that ends in destroyed data with
-exit code 0.
+**§A.90 is the one to read first.** It was the only row in this file that ended in destroyed data
+with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
 
 - **A.85 · A `RunGraph` whose `when`, `until` or router-case `when` is not a string is refused at
   RUN time, mid-`#commit`, and the run is left `running` with NO terminal row.** *(§A.78's residue —
@@ -2462,7 +2463,7 @@ exit code 0.
   so that somebody decides rather than discovers.
 
 - **A.87 · `GraphMetadata.version` is declared `number` and an IN-TREE fixture writes `"1.0.0"` and
-  runs.** File: `packages/core/src/graph/spec.ts:629` (the type) against `:1144` (the tag), and
+  runs.** File: `packages/core/src/graph/spec.ts:633` (the type) against `:1157` (the tag), and
   `packages/core/test/cli/guards-lane-extension-engine-seams.test.ts:90` (the fixture). §A.81(a)
   tagged the field `unknown` rather than `number`, and said why in place: tagging it `number`
   refuses a graph that compiles and RUNS today, and *"a guard that cries wolf on correct code is
@@ -2470,7 +2471,7 @@ exit code 0.
   `String(g.spec.metadata.version)` in a display line. Repro is the disagreement itself:
   ```
   $ /usr/bin/grep -an 'readonly version: number' packages/core/src/graph/spec.ts
-  629:  readonly version: number;
+  633:  readonly version: number;
   $ /usr/bin/grep -an 'version: "1.0.0"' packages/core/test/cli/guards-lane-extension-engine-seams.test.ts
   90:  metadata: { name: "stamp", version: "1.0.0" },
   ```
@@ -2788,7 +2789,8 @@ exit code 0.
   tries, and over an existing file it succeeds.** *(Opened 2026-09-23 by the settlement's
   reviewer.)* `examples/graphs/two-person-veto.json`'s description says *"the effect stays … nothing
   in this graph undoes it"*. `README.md`'s "Approval modes" row, `examples/README.md`'s veto row and
-  D9's *Enforced* line all say the effect stays. In fact a failed run compensates from the journal,
+  D9's *Enforced* line all said the effect stays (the two READMEs now name both cases, pointing
+  here; the description, which the test below asserts, and D9's line wait on the answer). In fact a failed run compensates from the journal,
   with no edge needed (`#failRun` → `#compensate(…, "run_failed")`), so a late veto runs
   `fs.restore` on `save`'s write. On the packed `dist/bin.js` at `48de87f6` (alice approve, bob
   approve, carol reject, each `loom approve` in its own process), the result depends on whether the
@@ -2988,7 +2990,7 @@ a decision's argument is the thing a future reader needs.
       | /usr/bin/grep -a -c '^- \*\*'
   3
   $ node -e "import('./packages/core/src/errors.ts').then(m=>console.log(Object.keys(m.CODES).length))"
-  60      # 59 at 2309d3a — `E_FUNCTION_REFUSED` (f7f74d5)
+  62      # 60 before D8's `E_FS_NOT_FOUND`, `E_FS_UNREADABLE` (6a03694d); 59 at 2309d3a — `E_FUNCTION_REFUSED` (f7f74d5)
   ```
   The three listed are a node type, a reducer and a ninth hook point, and README's argument for all
   three is REPLAY: *"a fold can only reproduce a decision whose vocabulary the folding binary
@@ -3000,7 +3002,7 @@ a decision's argument is the thing a future reader needs.
   add a fourth bullet: the list is written as *"each is a CLOSED SET whose refusal NAMES ITS
   MEMBERS — quoted, because a row nobody can reproduce by running the thing does not belong on this
   list"*, and `GRAPH003_UNKNOWN_ERROR_CODE` does NOT name its members — it prints
-  `did you mean one of: E_NOT_AUTHORIZED`, a prefix-matched suggestion over 60 codes
+  `did you mean one of: E_NOT_AUTHORIZED`, a prefix-matched suggestion over the whole of `CODES`
   (`validate.ts`'s `nearest()`). So adding it either weakens the list's own quoting rule or needs the
   refusal changed first. And CLAUDE.md §2 says the list *"moving the other way is the alarm"*, so
   growing it from three to four is a claim about the product that a settlement pass may not make on
@@ -3150,7 +3152,7 @@ a decision's argument is the thing a future reader needs.
   the guard agreeing that nothing moved, and then what an out-of-tree reader gets:
   ```
   $ node scripts/check-surface.mjs
-  surface guard ok: 542 public exports, unchanged
+  surface guard ok: 544 public exports, unchanged     # 542 when this row opened; re-run on b8aee365
   $ node -e "import('./packages/core/src/index.ts').then(m=>{for(const n of ['EDGE_FIELDS','POLICY_FIELDS','NESTED_FIELDS']){
       const v=m[n];let inc;try{inc=String(v.includes('kind'))}catch(e){inc='THROWS: '+e.message}
       console.log(n,'array?',Array.isArray(v),'| .includes ->',inc,'| .length ->',String(v.length))}})"
@@ -3740,12 +3742,13 @@ Each traces to a decision in `DESIGN.md`.
   exit=0
   npm warn publish Skipping workspace @loom/core, marked as private
   ```
-  **`README.md`:69–72 already states the second half and nothing in the tree acts on it** — *"`@loom/core`
-  is `private: true`, and `npm publish` does not REFUSE — it exits 0 and quietly does nothing, which
-  a CI step checking only the exit code would report as a successful release."* Line 55 states the
-  first: *"`loom` is not published; the binary IS the install."* So today a stranger must clone this
-  repository and run `npm install && npm run build:binary`, and `npm pack packages/core` plus a tgz
-  install is the documented substitute (README:71–72). **This is housekeeping only in that nothing
+  **`README.md`:69–72 stated the second half at `29c8b9ec`, and nothing in the tree acted on it** —
+  *"`@loom/core` is `private: true`, and `npm publish` does not REFUSE — it exits 0 and quietly does
+  nothing, which a CI step checking only the exit code would report as a successful release."* Line
+  55 stated the first: *"`loom` is not published; the binary IS the install."* So a stranger had to
+  clone this repository and run `npm install && npm run build:binary`, and `npm pack packages/core`
+  plus a tgz install was the documented substitute (README:71–72). That text is now README's
+  "Install it", and the substitute is `scripts/pack.mjs` (the 2026-09-23 paragraph below). **This is housekeeping only in that nothing
   is broken**; what it blocks is the bar `CLAUDE.md` sets.
   **Closes with `DESIGN.md` Sequence item 29** — when a stranger who has not cloned this repository
   can install and run `loom`. **It is NOT closed by making `npm publish` refuse**: that is a guard

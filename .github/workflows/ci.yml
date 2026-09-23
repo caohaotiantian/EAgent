@@ -35,7 +35,7 @@ jobs:
       # THE THIRD GUARD, which CI ran none of until now. `package.json`'s `check` script runs
       # all three and this workflow ran two, so the kernel seam ledger — the one guard whose
       # output is a public count nobody may quietly reset — was exercised by nothing outside a
-      # maintainer's own shell. That is the same gap the binary job above exists to close, one
+      # maintainer's own shell. That is the same gap the binary job below exists to close, one
       # file over.
       #
       # `fetch-depth: 0` on this job's checkout is REQUIRED and is not tidiness:
