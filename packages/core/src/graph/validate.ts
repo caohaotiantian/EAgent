@@ -2521,6 +2521,35 @@ function checkStructure(spec: GraphSpec, d: Diagnostic[]): boolean {
   // name an id, before anything has said whether it is one. See the edge loop below for the rest of
   // the argument; a string id renders identically, quotes included.
   for (const e of spec.edges) checkCodes(e.codes, { edgeId: e.id }, `edge ${describeValue(e.id)}`);
+  // A FILTER WRITTEN BEFORE `fs.read`'s ONE CODE BECAME THREE (`DESIGN.md` D8). Until then every
+  // `fs.read` failure — a missing file included — was `E_TOOL_SOURCE_UNAVAILABLE`, so an `error`
+  // edge filtering on that code was how a graph handled "no such file yet" (`grant-access` did,
+  // at `ab1654f7`). A missing file is now `E_FS_NOT_FOUND`, the edge no longer matches it, and
+  // the run fails where it used to route — closed, but with nothing at compile time to say so.
+  //
+  // A WARNING, NOT AN ERROR: the old code still arises from `fs.read` for an errno outside the
+  // three it names (EIO, EMFILE, …), so a filter on it is not wrong, only probably stale. It
+  // fires only when NONE of the three new codes is listed beside it — naming any of them is an
+  // author who has seen the split. Keyed on the builtin's NAME, which couples the compiler to one
+  // tool; that is the price of telling the graphs written against the old answer.
+  const FS_READ_CODES: readonly string[] = [CODES.E_FS_NOT_FOUND, CODES.E_FS_UNREADABLE, CODES.E_CAP_DENIED];
+  for (const e of spec.edges) {
+    if (e.kind !== "error" || !Array.isArray(e.codes) || !e.codes.includes(CODES.E_TOOL_SOURCE_UNAVAILABLE)) continue;
+    if (e.codes.some((c) => FS_READ_CODES.includes(c))) continue;
+    const from = spec.nodes.find((n) => n.id === e.from);
+    if (from?.type !== "tool" || from.tool?.name !== "fs.read") continue;
+    d.push({
+      severity: "warning",
+      code: "GRAPH003_STALE_FS_READ_CODE",
+      message:
+        `edge ${describeValue(e.id)} handles "${e.from}" (fs.read) only on E_TOOL_SOURCE_UNAVAILABLE, which fs.read no ` +
+        `longer raises for a missing file, an unreadable file or a refused path — those three now fail the run`,
+      at: { edgeId: e.id },
+      fix:
+        `list the codes the edge is for: E_FS_NOT_FOUND (no such file), E_FS_UNREADABLE (there, but not readable), ` +
+        `E_CAP_DENIED (the jail refused the path) — or drop \`codes\` and branch on "${e.from}:error" in the target's body`,
+    });
+  }
   for (const n of spec.nodes) checkCodes(n.retry?.onlyIf, { nodeId: n.id }, `node "${n.id}".retry.onlyIf`);
   for (const n of spec.nodes) checkRetryable(n.retry?.onlyIf, n.id);
 

@@ -678,6 +678,15 @@ that copied it would have copied the hole; `look` is deleted, and the test that 
 replaced by one test per ending, each asserting the ledger's bytes. `chmod 333 out` over a READABLE
 ledger is not a failure at all — the read works, and u:ravi is appended beside u:sam.
 
+**Migrating a graph written before D8.** If an `error` edge off an `fs.read` node says
+`codes: ["E_TOOL_SOURCE_UNAVAILABLE"]` — as this graph's `no-ledger` did until D8 — it no longer
+catches a missing file: that is `E_FS_NOT_FOUND` now, the edge does not match, and the run FAILS
+where it used to route. `loom compile` warns about exactly this shape
+(`GRAPH003_STALE_FS_READ_CODE`, silent once any of the three new codes is listed). Either list the
+codes the edge is for — `E_FS_NOT_FOUND`, `E_FS_UNREADABLE`, `E_CAP_DENIED` — or drop `codes` and
+branch on `"<node>:error"` in the target's body, which is what this graph does. A missing file is
+also `not_found` now and is no longer retried.
+
 **A renewal skips the person, so it is bounded three ways**, all in `grant-weigh.js`'s
 `findRenewal`, and each has its own test with a control: only a `decidedByKind: "human"` grant
 starts a window (an auto-renewal must not restart the clock, or one approval becomes indefinite

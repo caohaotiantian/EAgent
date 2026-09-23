@@ -18,9 +18,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { builtinTools } from "../../src/builtin/tools.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
@@ -162,6 +163,9 @@ function codes(s: GraphSpec): string[] {
 }
 
 const FS_TOOLS = { "fs.read": builtinTools({ root: tmpdir(), deny: [] }).find((t) => t.name === "fs.read")! };
+const FS_TOOLS_WITH_WRITE = Object.fromEntries(
+  builtinTools({ root: tmpdir(), deny: [] }).filter((t) => ["fs.read", "fs.write", "fs.glob"].includes(t.name)).map((t) => [t.name, t]),
+);
 
 test("the ordinary shape compiles clean: an error arm and a seq arm each reading the source's projection", () => {
   assert.deepEqual(codes(spec([READ, OK, ARM()], EDGES)), []);
@@ -334,6 +338,76 @@ test("a source INSIDE A LOOP BODY, or inside a fan-out the reader is not in, is 
     { items: { type: "array", reduce: "replace" }, item: { type: "string", reduce: "replace" }, doc: { type: "array", reduce: "append_ordered" } },
   );
   assert.ok(codes(fan).includes("GRAPH005_ERROR_PROJECTION_BRANCH"), JSON.stringify(codes(fan)));
+});
+
+test("an AMBIGUOUS fan-out stack is refused, and the compile does not throw on it", () => {
+  // A reviewer's graph. `br` is reached both through the fan-out and through `r`'s error edge, so
+  // its enclosing fan-outs disagree and `fanoutEdgeStack` holds `undefined` for `arm`. Without the
+  // `=== undefined` arms of the BRANCH check, `compile` THREW (`Cannot read properties of
+  // undefined (reading 'length')`) instead of reporting anything.
+  //
+  // IT OVER-REFUSES HERE, and that is recorded rather than loosened: `r` runs at the root, so its
+  // projection IS on `arm`'s branch chain. An ambiguous stack is a question the compiler cannot
+  // answer, and refusing is the failing-closed answer to it.
+  const s = spec(
+    [
+      READ,
+      { id: "plan", type: "function", reads: ["doc"], writes: ["items"], function: { ref: "function/plan@stable" } },
+      { id: "br", type: "function", reads: ["item"], writes: ["doc2"], function: { ref: "function/br@stable" } },
+      { id: "J", type: "join", reads: ["doc2"], writes: ["doc2"], join: { branches: ["br"], mode: "all", onBranchError: "skip" } },
+      ARM(),
+    ],
+    [
+      { id: "rp", from: "r", to: "plan", kind: "seq" },
+      { id: "fo", from: "plan", to: "br", kind: "fanout", over: "items", as: "item", maxWidth: 4 },
+      { id: "in", from: "br", to: "J", kind: "join", branches: ["br"] },
+      { id: "after", from: "J", to: "arm", kind: "seq" },
+      { id: "brerr", from: "br", to: "arm", kind: "error" },
+      { id: "rerr", from: "r", to: "arm", kind: "error" },
+    ],
+    { items: { type: "array", reduce: "replace" }, item: { type: "string", reduce: "replace" }, doc2: { type: "array", reduce: "append_ordered" } },
+  );
+  let diags: readonly { severity: string; code: string; at?: { nodeId?: string } }[] = [];
+  assert.doesNotThrow(() => {
+    diags = compile({ spec: s, resolver: resolver(), tools: FS_TOOLS, tenantCapabilities: ["fs:read"] }).diagnostics;
+  });
+  const onArm = diags.filter((d) => d.severity === "error" && d.at?.nodeId === "arm" && d.code.startsWith("GRAPH005_ERROR_PROJECTION"));
+  assert.deepEqual(onArm.map((d) => d.code), ["GRAPH005_ERROR_PROJECTION_BRANCH"]);
+});
+
+test("an error edge still filtering fs.read on E_TOOL_SOURCE_UNAVAILABLE alone is WARNED about — the ab1654f7 grant-access", () => {
+  // Before D8 a missing file was `E_TOOL_SOURCE_UNAVAILABLE`, and `grant-access` handled "no ledger
+  // yet" with exactly this filter. After, the edge no longer matches a missing file and the run
+  // fails where it routed — so a graph written the old way hears about it at compile time.
+  //
+  // The shipped graph with its `no-ledger` edge put back to its `ab1654f7` line 139,
+  // `codes: ["E_TOOL_SOURCE_UNAVAILABLE"]` — the one line this rule reads. (The rest of that
+  // revision differs by the deleted `look` node, which the rule does not look at; read out of git
+  // history it would make this suite depend on a full clone.)
+  const shipped = JSON.parse(readFileSync(fileURLToPath(new URL("../../../../examples/graphs/grant-access.json", import.meta.url)), "utf8")) as GraphSpec;
+  const old = {
+    ...shipped,
+    edges: shipped.edges.map((e) => (e.id === "no-ledger" ? { ...e, codes: ["E_TOOL_SOURCE_UNAVAILABLE"] } : e)),
+  } as GraphSpec;
+  const warned = (g: GraphSpec) =>
+    compile({ spec: g, resolver: resolver(), tools: FS_TOOLS_WITH_WRITE, tenantCapabilities: ["fs:read", "fs:write"] })
+      .diagnostics.filter((d) => d.code === "GRAPH003_STALE_FS_READ_CODE");
+  assert.deepEqual(warned(shipped), [], "the shipped graph has no `codes` filter and is silent");
+  const got = warned(old);
+  assert.equal(got.length, 1, JSON.stringify(got));
+  assert.equal(got[0]!.severity, "warning");
+  assert.equal(got[0]!.at?.edgeId, "no-ledger");
+  for (const code of ["E_FS_NOT_FOUND", "E_FS_UNREADABLE", "E_CAP_DENIED"]) assert.match(String(got[0]!.fix), new RegExp(code));
+
+  // Naming ANY of the three new codes beside it is an author who has seen the split: silent.
+  const updated = {
+    ...old,
+    edges: old.edges.map((e) => (e.id === "no-ledger" ? { ...e, codes: ["E_TOOL_SOURCE_UNAVAILABLE", "E_FS_NOT_FOUND"] } : e)),
+  } as GraphSpec;
+  assert.deepEqual(warned(updated), []);
+  // And a filter off a node that is NOT fs.read is none of this rule's business.
+  const other = { ...old, nodes: old.nodes.map((n) => (n.id === "read-ledger" ? { ...n, tool: { ...n.tool!, name: "fs.glob" } } : n)) } as GraphSpec;
+  assert.deepEqual(warned(other), []);
 });
 
 // ── the engine: fs.read's three codes, read by the arm ───────────────────────
