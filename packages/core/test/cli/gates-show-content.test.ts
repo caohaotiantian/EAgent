@@ -184,16 +184,16 @@ test("a workspace whose graph is gone still lists its gates, without the content
     // "this gate reads nothing" — this command's own `absence is not zero` trap, one field
     // over from the `?? {}` that used to answer "no such run" with "you are clear".
     assert.match(listed.err, /! CONTENT NOT SHOWN — 1 open gate\(s\) below print no `reads`/, listed.err);
-    // AND IT NAMES EVERY DIRECTORY THE SEARCH WALKED, not just `graphs/` — `graphsByHash` is
-    // that plus one per spec resource kind, and sending an operator to one of three places is a
-    // correction that replaces a false claim with a differently-false one.
+    // AND IT NAMES ONLY THE DIRECTORIES THAT EXIST — TODO.md §A.91, the reviewer's third fix
+    // round (N3): this workspace never published a `resources/subgraph/` or `resources/graph/`,
+    // so naming them as "searched" would itself be the false claim a fix round already found once.
     //
-    // "COMPILES TO HASH", not "has that hash" — TODO.md §A.91, the reviewer's second fix round:
-    // a candidate that fails to compile never learns its own hash, so "no graph has that hash" is
-    // not a claim this search can make; `resolveRecordedGraph`'s one shared refusal fragment says
-    // so instead. Here there IS no other candidate (the file was deleted, not merely broken), so
-    // the wording reads as a plain absence, with no failed-candidates clause appended.
-    assert.match(listed.err, /no graph among .*\/graphs, .*\/resources\/subgraph.* compiles to hash sha256:/, listed.err);
+    // "COMPILES TO HASH", not "has that hash" — a candidate that fails to compile never learns
+    // its own hash, so "no graph has that hash" is not a claim this search can make;
+    // `resolveRecordedGraph`'s one shared refusal fragment says so instead. Here there IS no
+    // other candidate (the file was deleted, not merely broken), so the wording reads as a plain
+    // absence, with no failed-candidates clause appended.
+    assert.match(listed.err, /searching .*\/graphs: no graph compiles to hash sha256:.*nothing there compiles at all/, listed.err);
     // ON STDERR, so `loom gates | jq` is untouched by it — the assertion above already parsed
     // stdout, and this names the property rather than leaving it to that parse.
     assert.ok(!/CONTENT NOT SHOWN/.test(listed.out), listed.out);

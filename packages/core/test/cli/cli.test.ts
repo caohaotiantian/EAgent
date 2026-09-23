@@ -583,7 +583,7 @@ test("A PUBLISHED GRAPH THAT IS NOT THIS RUN'S IS A DIFFERENT ANSWER FROM NO GRA
       (e: unknown) =>
         isLoomError(e) &&
         e.code === CODES.E_RUN_NOT_FOUND &&
-        /it publishes 1, and none is this run's/.test(e.message) &&
+        /1 compile to a different hash/.test(e.message) &&
         /graphs\/other\.json other-graph v1/.test(e.message),
       "a workspace full of other people's graphs must name them, not report emptiness",
     );
@@ -592,7 +592,7 @@ test("A PUBLISHED GRAPH THAT IS NOT THIS RUN'S IS A DIFFERENT ANSWER FROM NO GRA
     rmSync(join(d.dir, "graphs", "other.json"));
     await assert.rejects(
       () => run(["trace", runId, "--workspace", d.dir]),
-      (e: unknown) => isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND && /publishes no graph this process can compile/.test(e.message),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_RUN_NOT_FOUND && /nothing there compiles at all/.test(e.message),
       "an empty graphs/ is its own sentence",
     );
   } finally {

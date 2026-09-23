@@ -5964,21 +5964,31 @@ function announceResolvedGraph(files: ReadonlyMap<string, string>, diagnostics: 
  * candidate was reported as if it sat in `graphs/`.
  *
  * So there is one function now, and every by-hash caller — `trace`, `replay` (`recordedGraph`),
- * `approve`, `steer`, `deescalate`, `gates`, `score`, `exam attest`, `suite freeze`, `promote
- * --against-cohort`, `promote --suite` — goes through it. It does the sweep SILENTLY
- * (`graphsByHash(ws)`, `loud` defaulted false — nobody here is the clock or the gate-arming sweep),
- * ANNOUNCES the matched candidate's own diagnostics when one is found (never skippable by a caller
- * forgetting to call a second function), and builds the ONE refusal FRAGMENT when none is —
- * naming the directories actually searched and quoting `failed`'s entries verbatim, which already
- * carry each candidate's real relative path (`indexGraphs` builds them as `join(rel, file)` over
- * every directory in the sweep, `resources/subgraph/` included).
+ * `approve`, `steer`, `deescalate`, `gates`, `score`, `exam attest`, `suite freeze` and `promote
+ * --against-cohort` — goes through it. It does the sweep SILENTLY (`graphsByHash(ws)`, `loud`
+ * defaulted false — nobody here is the clock or the gate-arming sweep), ANNOUNCES the matched
+ * candidate's own diagnostics when one is found (never skippable by a caller forgetting to call a
+ * second function), and builds the ONE refusal FRAGMENT when none is — naming the directories
+ * actually searched and quoting `failed`'s entries verbatim, which already carry each candidate's
+ * real relative path (`indexGraphs` builds them as `join(rel, file)` over every directory in the
+ * sweep, `resources/subgraph/` included).
+ *
+ * `promote --suite` IS NOT IN THAT LIST — TODO.md §A.91, the reviewer's third fix round (B2). Its
+ * baseline is named explicitly, `loadGraph(ws, promoteBaseline(args), false)` off `--baseline
+ * <file>`, the same door `--graph` is everywhere else — loud, and never a by-hash search at all.
+ * It still calls `graphsByHash(ws)` once, but only to build the `published` set `scanForExam`
+ * checks a workflow's attestation against for the "is this exam-backed at all" certificate on the
+ * printed report — a set-membership read, not a resolution, and nothing there is ever announced or
+ * refused. Naming it as a caller of this resolver was itself the false claim a fix round found; the
+ * earlier draft of this docstring is why the mistake carries its own remark rather than a silent
+ * edit.
  *
  * IT RETURNS RATHER THAN THROWS, deliberately: `gates` and `score` fold a miss into their own
- * non-refusing output, `recordedGraph`/`approve`/`steer`/`deescalate`/`attestExam` wrap `.refusal`
- * in their own `err.notFound` with their own verb-specific follow-up advice (a replay's advice
- * about `--graph` is not a gate's advice about `loom cancel`) — the CORE claim about what was
- * searched and what failed is shared; what a caller tells the operator to DO about it is not, and
- * folding those together was never this row's ask.
+ * non-refusing output, `recordedGraph`/`approve`/`steer`/`deescalate`/`attestExam`/`freezeSuite`/
+ * `promoteAgainstCohort` wrap `.refusal` in their own `err.notFound` with their own verb-specific
+ * follow-up advice (a replay's advice about `--graph` is not a gate's advice about `loom cancel`)
+ * — the CORE claim about what was searched and what failed is shared; what a caller tells the
+ * operator to DO about it is not, and folding those together was never this row's ask.
  *
  * `index`/`files` come back too, because `score`, `attestExam`, `freezeSuite` and
  * `promoteAgainstCohort` all build `promotedGraphHashes = new Set(index.keys())` from the SAME
@@ -5993,29 +6003,48 @@ interface RecordedGraphResolution {
   readonly index: ReadonlyMap<string, RunGraph>;
   readonly files: ReadonlyMap<string, string>;
   readonly failed: readonly string[];
+  /**
+   * Whether ANY failed candidate's own diagnostic is a capability refusal (`GRAPH017`) — TODO.md
+   * §A.91, the reviewer's third fix round (N4). A caller's own "--allow-exec/--egress might fix
+   * this" advice is true for a capability the compiler here was not granted; it is not true for a
+   * `GRAPH015` missing resource, and saying it anyway was measured on exactly that diagnostic.
+   */
+  readonly capabilityIssue: boolean;
 }
 
 function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResolution {
   const { index, files, failed, diagnostics } = graphsByHash(ws);
+  const capabilityIssue = failed.some((f) => f.includes("GRAPH017"));
   const found = index.get(wanted);
   if (found !== undefined) {
     announceResolvedGraph(files, diagnostics, wanted);
-    return { graph: found, index, files, failed };
+    return { graph: found, index, files, failed, capabilityIssue };
   }
-  const dirs = ["graphs", ...subgraphDirs()];
-  const searched = dirs.map((d) => join(ws.root, d)).join(", ");
+  // ONLY THE DIRECTORIES THAT EXIST — TODO.md §A.91, the reviewer's third fix round (N3).
+  // `indexGraphs` already skips a directory that is not there (`existsSync` guards its walk);
+  // naming `resources/graph` as "searched" when this workspace never published one is the same
+  // false claim the row's own history keeps finding a new shape of.
+  const dirs = ["graphs", ...subgraphDirs()].filter((d) => existsSync(join(ws.root, d)));
+  const searched = dirs.length === 0 ? `${ws.root} (no graphs/ or resources/{subgraph,graph} directory exists)` : dirs.map((d) => join(ws.root, d)).join(", ");
   const others = [...index.values()].map(
     (g) => `${files.get(g.graphHash) ?? "?"} ${g.spec.metadata.name} v${String(g.spec.metadata.version)} (${g.graphHash})`,
   );
+  // "SEARCHING X: ..." RATHER THAN "X ... IT ...", so the sentence needs no pronoun standing in
+  // for a comma-joined list of paths — TODO.md §A.91, the reviewer's third fix round (N3's other
+  // half): the antecedent-less "it publishes no graph…" this replaces read as though `searched`
+  // named one place, always false once a second or third directory is in the list.
   const refusal =
-    (others.length === 0
-      ? `no graph among ${searched} compiles to hash ${wanted} — it publishes no graph this process can compile`
-      : `no graph among ${searched} compiles to hash ${wanted} — it publishes ${String(others.length)}, and none is this run's: ${others.join("; ")}`) +
+    `searching ${searched}: no graph compiles to hash ${wanted}` +
+    (others.length === 0 ? " — nothing there compiles at all" : ` — ${String(others.length)} compile to a different hash: ${others.join("; ")}`) +
     (failed.length === 0
       ? ""
-      : ` (${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} do${failed.length === 1 ? "es" : ""} not compile under this ` +
-        `invocation's grants and may be this run's graph, unprovable either way until it compiles: ${failed.join("; ")})`);
-  return { refusal, index, files, failed };
+      : // NEUTRAL — TODO.md §A.91, the reviewer's third fix round (N4). "does not compile under
+        // this invocation's grants" was said even for a GRAPH015 missing resource, which no grant
+        // this process could hold would have fixed; a caller mentions --allow-exec/--egress itself,
+        // and only when `capabilityIssue` says the diagnostic was actually a capability refusal.
+        ` (${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} do${failed.length === 1 ? "es" : ""} not compile here and may be ` +
+        `this run's graph, unprovable either way until it compiles: ${failed.join("; ")})`);
+  return { refusal, index, files, failed, capabilityIssue };
 }
 
 /**
@@ -6031,7 +6060,7 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
  */
 function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string | undefined): void {
   if (wanted === undefined) return;
-  const { graph, refusal, failed } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, failed, capabilityIssue } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     ws.engine.attach(runId, graph);
     return;
@@ -6041,9 +6070,13 @@ function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string 
   if (failed.length === 0) return;
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
-    `run ${runId} compiled graph ${wanted}, and ${refusal}. Publish the graph this run used, or pass the flags it needs ` +
-      `to compile here — a graph is compiled with THIS invocation's grants, so one declaring net:fetch needs the same ` +
-      `--egress this run had, and one declaring proc:exec the same --allow-exec.`,
+    `run ${runId} compiled graph ${wanted}, and ${refusal}. Publish the graph this run used` +
+      // --allow-exec/--egress ONLY WHEN THE DIAGNOSTIC IS ACTUALLY A CAPABILITY REFUSAL — TODO.md
+      // §A.91, the reviewer's third fix round (N4). A GRAPH015 missing resource needs neither.
+      (capabilityIssue
+        ? `, or pass the flags it needs to compile here — a graph is compiled with THIS invocation's grants, so one ` +
+          `declaring net:fetch needs the same --egress this run had, and one declaring proc:exec the same --allow-exec.`
+        : "."),
     { details: { runId, graphHash: wanted, failed } },
   );
 }
@@ -7138,7 +7171,7 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       { details: { runId } },
     );
   }
-  const { graph, refusal, files, failed } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, files, failed, capabilityIssue } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
@@ -7156,13 +7189,14 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       // which drops it out of the index and produces this message about a graph that is published, is
       // unedited, and needs no `--graph`. Measured through the binary: `loom trace <that run>` exits 1
       // with the parenthetical above naming GRAPH017, and the same command with `--egress 127.0.0.1`
-      // exits 0. Only said when something actually failed to compile, so the ordinary refusal is
-      // unchanged.
-      (failed.length === 0
-        ? ""
-        : ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
+      // exits 0. Only said when something FAILED TO COMPILE FOR A CAPABILITY REASON — TODO.md §A.91,
+      // the reviewer's third fix round (N4): a GRAPH015 missing-resource failure is not fixed by
+      // --egress or --allow-exec, and saying so anyway was measured on exactly that diagnostic.
+      (capabilityIssue
+        ? ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
           `flags on THIS command line, so a graph declaring net:fetch needs the same --egress, and one declaring ` +
-          `proc:exec the same --allow-exec.`),
+          `proc:exec the same --allow-exec.`
+        : ""),
     { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed }) } },
   );
 }
