@@ -416,6 +416,9 @@ test("A MUTATED RUN'S SUCCESSOR IS REFUSED WHEN THE RESOURCES BEHIND ITS REFS HA
     () => approveAs(second, runId, gateId, "mut-approve"),
     (e: unknown) => {
       assert.ok(onResources(e), `refused on the RESOURCE axis: ${String((e as Error).message)}`);
+      // THE SUCCESSOR'S manifest was recorded when the mutation was ADOPTED, not at compile, and
+      // the message says which, so an operator is not sent to look at the compile.
+      assert.match((e as Error).message, /since that mutation was adopted/, "the message names the adoption");
       // THE PAIR IS THE SUCCESSOR'S: `expected` is the manifest the `graph.mutated` row recorded,
       // which names the ADDED gate's ref — `run.compiled`'s manifest could not.
       const d = (e as { details: { expected: string; actual: string } }).details;

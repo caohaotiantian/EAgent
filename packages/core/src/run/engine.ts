@@ -1080,6 +1080,8 @@ interface IdentityMismatch {
   readonly expected: string | undefined;
   readonly actual: string;
   readonly unrecorded?: true;
+  /** Found on the SUCCESSOR arm: `expected` was recorded when a mutation was ADOPTED, not compiled. */
+  readonly successor?: true;
 }
 
 /**
@@ -6085,18 +6087,23 @@ export class Engine {
     // predates the field, and "there is nothing to compare against" is the undecidable case a
     // guard must not answer with the passing value. `cancel` binds no graph and is the exit.
     if (successor === undefined) return { differs: "resources", expected: undefined, actual, unrecorded: true };
-    return successor === actual ? undefined : { differs: "resources", expected: successor, actual };
+    return successor === actual ? undefined : { differs: "resources", expected: successor, actual, successor: true };
   }
 
   /**
    * The recorded manifest key of the graph `hash` names, from the LAST `graph.mutated` that adopted
    * it — or `undefined` when no row adopted it or the row predates the field.
    *
-   * The LAST row, because a rewind can suppress a mutation and a later one re-adopt the same spec
-   * over different resources; the raw log is read, as `#compiledIdentity` reads it, and the latest
-   * adoption is the one the fold's `graphHash` points at. An earlier row for the same hash can only
-   * be live if no rewind ever took the run back past it, and then no later row adopts that hash:
-   * mutation is additive, so returning to a spec needs a rewind that suppresses the first row.
+   * THE LAST ROW IS DEFENSIVE, AND NO PATH TODAY TELLS IT FROM THE FIRST. Mutation is additive, so
+   * a later mutation adopts a new spec and a new hash; two rows can name one hash only if a rewind
+   * suppressed the first and the run re-mutated to the same spec — and that path is wedged before
+   * it gets here: `#rehydrateGraph` replays every raw row, suppressed or not, and a rewind past a
+   * `graph.mutated` was measured refusing at `2af9716a` and at this fix alike (same process:
+   * `E_GRAPH_MISMATCH` on the spec; fresh process: `E_EXPANSION_EXHAUSTED` at base,
+   * `E_GRAPH_MISMATCH` on resources here). A mutant reading the FIRST row survives the suite for
+   * that reason. The last row is kept because, if rewinding past a mutation is ever made to work,
+   * the latest adoption is the one the fold's `graphHash` points at — and whoever makes it work
+   * owes the test that tells the two apart.
    */
   async #successorManifest(runId: RunId, hash: string): Promise<string | undefined> {
     let found: string | undefined;
@@ -6500,7 +6507,9 @@ export class Engine {
           : mismatch.unrecorded === true
             ? `the graph supplied for ${why} is the successor run ${ctx.runId} mutated to, and its journal recorded no manifest for it — ` +
               `the row predates \`graph.mutated.resolutionManifest\`, so the resources behind its refs cannot be checked; cancel is the exit`
-            : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
+            : mismatch.successor === true
+              ? `the graph supplied for ${why} is the successor run ${ctx.runId} mutated to, but the resources behind its refs have changed since that mutation was adopted`
+              : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
         {
           // REPORT THE PAIR THAT ACTUALLY DIFFERS. On the `resources` branch the spec hashes are
           // equal by construction, so printing them printed the same string twice under a message
