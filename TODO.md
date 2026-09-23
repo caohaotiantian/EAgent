@@ -97,7 +97,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 98 | 62 | 36 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 99 | 62 | 37 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -2806,6 +2806,38 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   answered. Either `fs.restore` learns to undo a create, and the late veto then rolls back in both
   cases. Or the description, both READMEs and D9's *Enforced* line name both cases. Whichever lands,
   `test/graph/two-person-approval.test.ts` asserts the pre-existing-file case.
+
+- **A.100 · `loom trace` draws a FAILED compensation as `[ok]`.** *(Opened 2026-09-23 by the docs
+  lane's reviewer, re-driven by the lane.)* File: `telemetry/spans.ts`. A compensating call's span
+  is closed by its `effect.completed`, and that arm closes every effect span `"ok"`. `fs.restore`
+  RETURNS its refusal (`isError: true`) rather than throwing, so `effect.completed` is what the
+  journal holds. Neither `tool.called.ok` nor `compensation.recorded` is read: the fold has no arm
+  for the latter. Repro on `0157fe0a`, `packages/core/dist/bin.js` after `npm run build`, a fresh
+  copy of `examples/` with the late veto on `two-person-veto.json`, each `loom` call its own
+  process:
+  ```
+  $ loom run graphs/two-person-veto.json --input '{"request":"NEW"}'   → exit=0 status=awaiting_gate
+  $ loom approve <runId> <gate:alice> --as u:alice             → exit=0 status=awaiting_gate
+  $ loom approve <runId> <gate:bob> --as u:bob                 → exit=0 status=awaiting_gate
+  $ loom approve <runId> <gate:carol> --as u:carol --reject    → exit=1 status=failed
+  approved/request.txt after: "NEW"
+  $ loom trace <runId> | /usr/bin/grep -a -E 'compensate|save'
+      loom.task save root [ok] 2ms
+        loom.tool (compensate) [ok] 1ms
+  journal, the same run:
+    effect.completed {"key":"save@root#0:compensate:37","result":{"content":"no previous content recorded for approved/request.txt","isError":true},…}
+    tool.called {…,"key":"save@root#0:compensate:37",…,"name":"fs.restore","ok":false,…}
+    compensation.recorded {…,"outcome":"failed","reason":"\"fs.restore\" did not undo \"fs.write\": no previous content recorded for approved/request.txt","trigger":"run_failed","undo":"fs.restore"}
+  ```
+  **The trace line has been cited as evidence of an undo.** `examples/graphs/grant-access.json`'s
+  `compensation-fires-without-an-edge` label offers *"`loom trace` shows `loom.tool (compensate)
+  [ok]` under `write-grant`"* as the sign the grant write was rolled back. That was measured over a
+  file that already existed, where the undo did happen, but the trace would have printed the same
+  line if it had not. `examples/README.md` §10 now says to read the journal instead. The same holds
+  for the OTLP export and `GET /runs/:id/trace`, which share the fold.
+  **Closes when** the trace shows the compensation's real outcome: a compensation span whose
+  `compensation.recorded` says `failed` (or whose `tool.called.ok` is `false`) closes `error`,
+  carries the outcome as an attribute, and a test drives the created-file late veto and asserts it.
 
 
 ---
