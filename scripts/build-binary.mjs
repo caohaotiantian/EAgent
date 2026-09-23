@@ -39,7 +39,7 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
  * exists is a shipped copy and runs unchecked — which is the point of building one elsewhere.
  */
 function outDir(argv) {
-  const unknown = argv.filter((a) => a.startsWith("--") && a !== "--out" && !a.startsWith("--out="));
+  const unknown = argv.filter((a, i) => !(a === "--out" || a.startsWith("--out=") || argv[i - 1] === "--out"));
   if (unknown.length > 0) {
     console.error(`build FAILED: unknown argument ${unknown.join(" ")} — the only one is --out DIR.`);
     process.exit(2);

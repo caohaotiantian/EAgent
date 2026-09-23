@@ -38,6 +38,11 @@ function fail(message) {
 }
 
 const argv = process.argv.slice(2);
+const stray = argv.filter((a, i) => !(a === "--out" || a.startsWith("--out=") || argv[i - 1] === "--out"));
+if (stray.length > 0) {
+  console.error(`pack FAILED: unknown argument ${stray.join(" ")} — the only one is --out DIR.`);
+  process.exit(2);
+}
 const at = argv.indexOf("--out");
 const eq = argv.find((a) => a.startsWith("--out="));
 const outArg = eq !== undefined ? eq.slice("--out=".length) : at === -1 ? undefined : argv[at + 1];

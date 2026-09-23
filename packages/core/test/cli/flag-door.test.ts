@@ -288,8 +288,8 @@ test("EVERY FLAG `FLAGS` NAMES A READER FOR REFUSES A MISSING VALUE WITH NOTHING
     const argv = TAKES_NO_VALUE.has(flag) ? [verb, `--${flag}`, "x"] : [verb, `--${flag}`];
     const { code, err, left } = await inAnEmptyDirectory(argv);
     assert.deepEqual(left, [], `\`loom ${argv.join(" ")}\` created ${left.join(", ")} — stderr was:\n${err}`);
-    assert.equal(code, 1, `\`loom ${verb} --${flag}\` (no value), stderr:\n${err}`);
-    assert.match(err, /E_CONFIG_INVALID/, `\`loom ${verb} --${flag}\` (no value) is an operator's mistake, not an internal error:\n${err}`);
+    assert.equal(code, 1, `\`loom ${argv.join(" ")}\`, stderr:\n${err}`);
+    assert.match(err, /E_CONFIG_INVALID/, `\`loom ${argv.join(" ")}\` is an operator's mistake, not an internal error:\n${err}`);
     assert.match(err, new RegExp(`--${flag}`), `the refusal for --${flag} does not name the flag:\n${err}`);
   }
 });
