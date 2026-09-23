@@ -302,16 +302,23 @@ before the second approval is `E_HUMAN_APPROVAL_REQUIRED` with nothing written, 
 `failed` with the write already landed. Short-circuit, straggler cancellation, §A.77 and `TODO.md`
 §D.8 are untouched, as above. **Decided by the maintainer 2026-09-22**; the record is `TODO.md`
 §A.68's addendum.
-*Flagged for the maintainer, 2026-09-23 (settlement) — two words above that the build measured
-otherwise; the decision text is left as he wrote it.* (1) **"they differ only in WHEN"**: driven on
-both shipped files (`TODO.md` §A.68's BUILT note), each marks a run failed only once every gate is
-answered — a lone reject parks `awaiting_gate` on both — so they differ in WHICH runs they refuse:
-`skip` only a run below `k`, `fail` any run holding a rejection, two approvals over one dissenter
-included. `README.md`'s "Approval modes" row says so already. (2) **"irreversible write"**: `save`
-is `fs.write`, declared `reversible_write` with `fs.restore` as its compensation
-(`builtin/tools.ts`); a late veto leaves the write standing because the veto graph declares no
-`compensation` edge, not because the tool cannot be undone. Whether a late veto should roll back,
-or the word should change, is his.
+*Flagged for the maintainer, 2026-09-23 (settlement): two phrases above that the build measured
+otherwise. The recorded decision text is left as it stands. The WHEN framing predates his answer;
+it first appears in `TODO.md` §A.68's 2026-09-22 addendum.*
+(1) **"they differ only in WHEN"**: driven on both shipped files, each marks a run failed only once
+every gate is answered. A lone reject parks `awaiting_gate` on both (§A.68's BUILT note). So they
+differ in WHICH runs they refuse: `skip` refuses only a run below `k`; `fail` refuses any run
+holding a rejection, including two approvals over one dissenter. `README.md`'s "Approval modes"
+row already says so.
+(2) **"cannot recover the effect"**, after an **"irreversible write"**: `save` is `fs.write`, which
+is declared `reversible_write`, and a FAILED run compensates from the journal, with no edge needed
+(`#failRun` → `#compensate(…, "run_failed")`). A late veto therefore does run `fs.restore`. On the
+shipped path, a file that did not exist before, the restore fails with *"no previous content
+recorded"* (`compensation.recorded outcome: "failed"`), and the write stays. Over a file that
+already existed, the restore puts the old bytes back (`outcome: "compensated"`). The veto file's
+"nothing in this graph undoes it" holds only for the first case (`TODO.md` §A.99). Which he wants
+is his call: undo a create (delete what was made), or keep "irreversible" and let the description
+name both cases.
 
 ---
 
@@ -646,8 +653,8 @@ value is the friction it logs, and friction met by a stranger who could not inst
 friction nobody logs.
 *Where that order stands, 2026-09-23:* item 30's phase one landed at `83f86bec`, D9 at `e9f7fae4`,
 and item 29 was built short of the publish at `48de87f6` — so what is next is the maintainer's
-publish (29's closing receipt), then 24 and 18, then 31. Both conditions the fourth port waited on
-are now met in the tree; the one that still bites is the stranger, who needs the publish.
+publish (29's closing receipt), then 24 and 18, then 31. Of the fourth port's two conditions, 30 is
+met; 29 waits on that same publish, and so does the stranger whose friction the port exists to log.
 
 **The ORDER inside item 30, decided with D8 on 2026-09-22** — the two decisions above are the first
 two units of work, in this sequence and not in parallel:

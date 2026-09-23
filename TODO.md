@@ -42,7 +42,7 @@ maintainer's publish, then 18/24, then 31 (`docs/handoff-2026-09-23.md` §6).
 | the gate | **exit 0** | `npm run check` |
 | tests on `loom` | **4,162 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,117 → 4,162) | `npm test` |
 | pinned exports | **544** (542 → 544): `ErrorProjection` and `errorProjectionSource`, D8's envelope and its `"<nodeId>:error"` parser, added to `scripts/surface.json` by the D8 lane — the guard's list moved with the name set, which is what it is for. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, **17 declared seams** (16 → 17): `6a03694d`, the D8 `feat:`, touched `graph/spec.ts`, `run/projection.ts` and `run/engine.ts` and carries a `Kernel-seam:` trailer — *"there is none for a fact about a node's outcome that a later node may read"*. The wave's other kernel edits: `c153566e` (`run/engine.ts`, `fix:`) and `2f1c19ff` (`graph/spec.ts`, `run/gates.ts`, `docs:` — the package rename in prose), owing none | `node scripts/check-kernel.mjs` |
+| kernel | 10 files pinned, **17 declared seams** (16 → 17): `6a03694d`, the D8 `feat:`, touched `graph/spec.ts`, `run/projection.ts` and `run/engine.ts` and carries a `Kernel-seam:` trailer — `there is none for "a fact about a node's outcome that a later node may read"`. The wave's other kernel edits: `c153566e` (`run/engine.ts`, `fix:`) and `2f1c19ff` (`graph/spec.ts`, `run/gates.ts`, `docs:` — the package rename in prose), owing none | `node scripts/check-kernel.mjs` |
 | zero runtime deps | ok, **69 files** (67 → 69): `src/bin.ts` (the Node-floor entry with no static imports) and `src/version.ts`. Of the wave's ten new files, three are test suites, one a graph (`two-person-veto.json`), two scripts (`pack.mjs`, `smoke-install.mjs`), and `packages/core`'s README and LICENSE | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved. The denominator is deliberately not a cell (rule 3) | read every `git ls-files` path; see CLAUDE.md |
 | journal vocabulary | 51 event types, unmoved — D8 folds its projection out of `task.failed` and added no event | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
@@ -72,7 +72,7 @@ the one before it.
 to it, this sentence's own included (rule 3). Run the commands. What IS fixed enough to write down
 is the settlement-to-settlement series, because each term is pinned to a commit: **46 → 51 → 56**
 at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — and **62** at
-`48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §H.17–§H.20. The 2026-09-22b
+`48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §A.99 and §H.17–§H.20. The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -96,7 +96,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 97 | 62 | 35 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 98 | 62 | 36 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -2784,6 +2784,27 @@ exit code 0.
   declared parent channel is refused, as `GRAPH005_UNDECLARED_READ` refuses the same mistake in
   `reads`.
 
+- **A.99 · The veto example says a late reject's write stays and nothing undoes it. The runtime
+  tries, and over an existing file it succeeds.** *(Opened 2026-09-23 by the settlement's
+  reviewer.)* `examples/graphs/two-person-veto.json`'s description says *"the effect stays … nothing
+  in this graph undoes it"*. `README.md`'s "Approval modes" row, `examples/README.md`'s veto row and
+  D9's *Enforced* line all say the effect stays. In fact a failed run compensates from the journal,
+  with no edge needed (`#failRun` → `#compensate(…, "run_failed")`), so a late veto runs
+  `fs.restore` on `save`'s write. On the packed `dist/bin.js` at `48de87f6` (alice approve, bob
+  approve, carol reject, each `loom approve` in its own process), the result depends on whether the
+  file existed:
+  - Fresh workspace: `status: failed`, the file written, and
+    `compensation.recorded {"outcome":"failed","reason":"\"fs.restore\" did not undo \"fs.write\": no previous content recorded for approved/request.txt"}`.
+    `fs.restore` cannot undo a create.
+  - With `approved/request.txt` present beforehand: the file holds its OLD bytes, and
+    `compensation.recorded {"outcome":"compensated"}`.
+
+  So the shipped sentence is true of the first case only, and the journal records a FAILED
+  compensation for the one the example teaches. **Closes when** `DESIGN.md` D9's second flag is
+  answered. Either `fs.restore` learns to undo a create, and the late veto then rolls back in both
+  cases. Or the description, both READMEs and D9's *Enforced* line name both cases. Whichever lands,
+  `test/graph/two-person-approval.test.ts` asserts the pre-existing-file case.
+
 
 ---
 
@@ -3786,25 +3807,32 @@ Each traces to a decision in `DESIGN.md`.
   `dist/mcp/client.d.ts` `TS2591: Cannot find name 'Buffer'` and `dist/sandbox/subprocess.d.ts`
   `TS2503: Cannot find namespace 'NodeJS'` (measured on `48de87f6`: the tarball copied into a scratch
   project's `node_modules/@caohaotiantian/loom`, `import * as loom from "@caohaotiantian/loom"`,
-  this repo's `tsc -p .` under `module: nodenext`). The package has no dependencies by rule, so the
+  this repo's `tsc -p .` under `module: nodenext`). The count depends on the consumer: with
+  `target: es2022` a third appears, `dist/bus.d.ts` `TS2304: Cannot find name 'Disposable'`. The package has no dependencies by rule, so the
   answer is not a `dependency` on `@types/node`. **Closes when** either the two declarations stop
   naming Node's ambient types, or `packages/core/README.md` states the requirement — a decision
   about which, and neither is behaviour.
 
 - **H.19 · Two CLI doors answer 0 to a flag they never read.** *(Opened 2026-09-23 by the
-  settlement, from the item-29 lane's open list — the class §H.4 closed for three verbs.)* On the
+  settlement, from the item-29 lane's open list — the class §H.4 closed per verb, one door over.)* On the
   packed `dist/bin.js` at `48de87f6`: `loom --port 1` (a flag, no verb) prints the usage and exits
   **0**, where `loom --bogus` exits 1 — the item-29 lane refused an UNKNOWN flag with no verb and
   left a KNOWN one accepted and ignored; and `loom --version --tokne x` prints `loom 0.1.0` and
   exits **0**, the misspelt `--token` never reaching a refusal. **Closes when** both exit non-zero
   naming the flag, pinned beside `test/cli/version.test.ts` and `test/cli/flag-door.test.ts`.
 
-- **H.20 · `readme-gaps.test.ts` leaves four `loom-dist-*` directories in `$TMPDIR` on every run.**
-  *(Opened 2026-09-23 by the settlement; pre-existing since `81b42586`, 2026-08-28.)* Its four
-  `distIsBehindSources` tests each `mkdtempSync(join(tmpdir(), "loom-dist-"))` and never remove it.
-  `node -e 'const fs=require("fs"),os=require("os");console.log(fs.readdirSync(os.tmpdir()).filter(n=>n.startsWith("loom-dist-")).length)'`
-  → **388** on the machine that settled this wave. **Closes when** each test removes its root (a
-  `t.after` `rmSync`), and a second `npm test` leaves the count where the first left it.
+- **H.20 · `npm test` leaves 22 `loom-*` directories in `$TMPDIR` on every run.** *(Opened
+  2026-09-23 by the settlement. The item-29 lane reported the `loom-dist-*` quarter of it; the
+  settlement's reviewer found the rest.)* Measured on this settlement's HEAD by running `npm test`
+  with `TMPDIR` pointed at an empty directory. Afterwards the directory holds, by prefix:
+  - `readme-gaps.test.ts`: 4 `loom-dist-*`, from its four `distIsBehindSources` tests, pre-existing
+    since `81b42586` (2026-08-28); 11 `loom-freshness-*` and 1 `loom-freshness-moved-*`.
+  - `binary-freshness-absent-or-unreadable.test.ts`: 5 `loom-fresh-edge-*`.
+  - `cli/promote-live-gates.test.ts`: 1 `loom-gated-template-*`.
+
+  Each is a `mkdtempSync(join(tmpdir(), …))` with no removal. The machine that settled this wave had
+  **388** `loom-dist-*` alone. **Closes when** the same measurement leaves no `loom-*` entry (a
+  `t.after` `rmSync` per root). Counting one prefix is not enough.
 
 ---
 
