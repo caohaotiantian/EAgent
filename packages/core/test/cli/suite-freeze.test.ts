@@ -555,6 +555,90 @@ test("(b) A COHORT GRAPH THAT NO LONGER COMPILES IS DIAGNOSED HONESTLY, not blam
     // workflow first" — blaming the operator's corpus for the operator's graphs/ directory.
     assert.doesNotMatch(r.out + r.err, /n = 0 comparable runs/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
     assert.doesNotMatch(r.out + r.err, /Record more runs of this workflow first/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
+    // THE HONEST SENTENCE, WITH NO GUESS — TODO.md §A.91, the reviewer's fifth fix round (B1). The
+    // graph FILE is present here (only its resource is gone), so "restore the bytes" alone would be
+    // wrong advice too — the sentence must name BOTH possibilities and assert neither.
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice:\n${r.out}${r.err}`,
+    );
+    // THE FALSE CLAIM THIS ROUND REMOVES: `missingGraphAdvice`'s branch for this exact case said
+    // "the file is already there, and restoring it changes nothing" — an assertion the resolver has
+    // no way to know is true, since it cannot tell this candidate apart from an edited or replaced
+    // one a `restore` WOULD fix.
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// B1 (fifth fix round) · the advice must not guess which candidate is the run's own graph
+// ---------------------------------------------------------------------------
+
+test("(B1-deleted+unrelated) THE RUN'S GRAPH WAS DELETED, AND AN UNRELATED BROKEN CANDIDATE MUST NOT CHANGE THE ADVICE", async () => {
+  // THE REVIEWER'S OWN REPRO: record and score a run, delete ITS graph file, and publish an
+  // UNRELATED broken candidate elsewhere. `missingGraphAdvice` read `failed.length > 0` — true here,
+  // because the UNRELATED candidate fails to compile — as proof the run's own path held a broken
+  // file, and said "fix why it does not compile ... restoring it changes nothing". Both halves are
+  // false: the run's own file was DELETED, not broken, and restoring it is exactly the fix.
+  const c = await corpus(1, { score: true });
+  try {
+    rmSync(join(c.dir, "graphs", "pick.json"));
+    // An unrelated candidate, broken for an unrelated reason (a missing resource of its own),
+    // published in `graphs/` where the sweep will find it but never resolve it as this cohort's
+    // graph — the reviewer's own repro names this file `graphs/draft.json`.
+    writeFileSync(
+      join(c.dir, "graphs", "draft.json"),
+      JSON.stringify({
+        apiVersion: "loom.dev/v1",
+        kind: "GraphSpec",
+        metadata: { name: "unrelated", project: "demo", version: 1 },
+        policy: { posture: "out", capabilities: [] },
+        channels: { items: { type: "array", reduce: "replace" }, picked: { type: "array", reduce: "replace" } },
+        inputs: ["items"],
+        outputs: ["picked"],
+        nodes: [{ id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/does-not-exist@stable" } }],
+        edges: [],
+      }),
+    );
+
+    const out = join(c.dir, "deleted-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice even with an unrelated broken candidate present:\n${r.out}${r.err}`,
+    );
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing — the file was DELETED:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+test("(B1-edited) THE RUN'S GRAPH WAS EDITED INTO BROKENNESS, AND THE ADVICE STILL DOES NOT GUESS", async () => {
+  // Same path, new bytes: the file is not gone, but the edit itself is what broke it — "restoring"
+  // (reverting the edit) WOULD fix this, which is exactly what "restoring it changes nothing" denied.
+  const c = await corpus(1, { score: true });
+  try {
+    const edited = JSON.parse(readFileSync(join(c.dir, "graphs", "pick.json"), "utf8")) as {
+      nodes: { function?: { ref: string } }[];
+    };
+    edited.nodes[0]!.function = { ref: "function/does-not-exist-after-the-edit@stable" };
+    writeFileSync(join(c.dir, "graphs", "pick.json"), JSON.stringify(edited));
+
+    const out = join(c.dir, "edited-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND/, `the true reason must reach the operator:\n${r.out}${r.err}`);
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice for an edited-and-broken graph:\n${r.out}${r.err}`,
+    );
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing — reverting the edit fixes this:\n${r.out}${r.err}`);
     assert.equal(existsSync(out), false);
   } finally {
     c.dispose();

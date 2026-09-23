@@ -6088,25 +6088,36 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
 }
 
 /**
- * ADVICE FOR A COHORT/BASELINE GRAPH THAT DID NOT RESOLVE — TODO.md §A.91, the reviewer's fourth
- * fix round (X1's GRAPH015 follow-up). `attestExam`, `freezeSuite` and `promoteAgainstCohort` all
- * derive their graph from a run's journaled hash rather than take one on the command line, and all
- * three ended their refusal with "restore those bytes to graphs/" UNCONDITIONALLY. That is right
- * when nothing there compiles to the wanted hash at all — the file is genuinely gone or was never
- * published — and WRONG when a candidate at that path WAS found and failed to compile (a missing
- * resource under `resources/`, a capability this invocation lacks): the graph's own bytes are
- * right there, and "restore" tells an operator to do something that changes nothing. Reproduced:
- * `graphs/x.json` present, `resources/function/pre.js` deleted — before, `suite freeze` and `exam
- * attest` both ended "Restore those bytes to graphs/"; the bytes were never the problem.
+ * THE HONEST NEXT STEP, WITH NO GUESS ABOUT WHICH CASE APPLIES — TODO.md §A.91, the reviewer's
+ * fifth fix round (B1, BLOCKING — a regression the fourth round introduced).
  *
- * `failed.length > 0` is exactly the second case (`resolveRecordedGraph`'s own `refusal`, quoted
- * ahead of this in every caller, already names WHICH candidate and WHY) — this only says what to
- * DO about it, not what went wrong.
+ * `missingGraphAdvice`, which this replaces, picked its branch on `failed.length > 0`, reading a
+ * NONEMPTY `failed` as proof that the candidate AT THE RUN'S OWN PATH was found and is broken. That
+ * is not what `failed` says: it is every candidate anywhere in the sweep that did not compile, and
+ * `resolveRecordedGraph`'s own `refusal` already calls each one "unprovable either way" — the
+ * resolver cannot tell "this run's own graph, edited or broken" from "an unrelated candidate,
+ * broken, that this run never touched" apart from a hash match, which is exactly the thing that did
+ * NOT happen. Reproduced: record and score a run of `graphs/pick.json`, `rm graphs/pick.json`, then
+ * publish an UNRELATED broken candidate elsewhere (`resources/subgraph/unrelated.json`, GRAPH015,
+ * or `graphs/draft.json`, GRAPH017) — `suite freeze`, `promote --against-cohort` and `exam attest`
+ * all said "fix why it does not compile … the file is already there, and restoring it changes
+ * nothing", false on both counts: the run's own file was DELETED, not present-but-broken, and
+ * `e44c9b30` (before this branching existed) correctly said "restore those bytes to graphs/". The
+ * same false advice fires when the run's own file was EDITED rather than deleted, for the same
+ * reason: an edit changes the hash, so the edited file no longer resolves as "the run's graph" any
+ * more than a stranger's file would, and `failed` cannot distinguish the two.
+ *
+ * THE FIX IS TO STOP GUESSING: one sentence naming both cases, used with no branching everywhere a
+ * caller's refusal is followed by next-step advice — including `trace`, `replay`, `approve`,
+ * `steer`, `deescalate` and `score`, which said "Publish the graph this run used" / "publish those
+ * bytes" unconditionally (the SAME false claim in the OTHER direction: true when the file is gone,
+ * false when a candidate at that path is present and simply will not compile).
  */
-function missingGraphAdvice(failed: readonly string[]): string {
-  return failed.length === 0
-    ? "restore those bytes to graphs/"
-    : "fix why it does not compile (named above) — the file is already there, and restoring it changes nothing";
+function noGuessAdvice(): string {
+  return (
+    "If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate " +
+    "named above is that file, fix why it does not compile."
+  );
 }
 
 /**
@@ -6133,12 +6144,13 @@ function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string 
   // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
   // fourth fix round (X1). `resolveRecordedGraph` itself now appends the --egress/--allow-exec
   // sentence when a failed candidate's own diagnostic is GRAPH017, so this call site no longer
-  // repeats it (or omits it) on its own; "Publish the graph this run used" is this verb's own
-  // action regardless of why the candidate failed.
+  // repeats it (or omits it) on its own. The remaining action is `noGuessAdvice()` — TODO.md
+  // §A.91's fifth fix round (B1) — never "Publish the graph this run used" unconditionally, which
+  // was false whenever the candidate named in `refusal` was present and simply would not compile.
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
-    `run ${runId} compiled graph ${wanted}, and ${refusal}. Publish the graph this run used.`,
-    { details: { runId, graphHash: wanted, failed } },
+    `run ${runId} compiled graph ${wanted}, and ${refusal}. ${noGuessAdvice()}`,
+    { details: { runId, graphHash: wanted, failed: failed.map((f) => f.text) } },
   );
 }
 
@@ -7255,14 +7267,16 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
   // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
   // fourth fix round (X1). It used to live only here (and in `bindRecordedGraphOrExplain`), so
   // seven of the resolver's nine callers named neither the capability nor the fix; it is now said
-  // ONCE, inside `resolveRecordedGraph` itself, and every caller inherits it for free. This verb's
-  // own remaining action — publish, or name the file with --graph — is unconditional.
+  // ONCE, inside `resolveRecordedGraph` itself, and every caller inherits it for free. The
+  // remaining action is `noGuessAdvice()` — TODO.md §A.91's fifth fix round (B1) — never "Publish
+  // the graph this run used" unconditionally, which was false whenever a candidate named in
+  // `refusal` was present and simply would not compile. `--graph` is still named separately: it is
+  // always a real option, never an inference about which case applies.
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
     `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
-      `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
-      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.`,
-    { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed }) } },
+      `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without publishing it.`,
+    { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
   );
 }
 
@@ -9191,15 +9205,18 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
               // NAMING THE FIX, because "is not attached" named none. An operator who has just
               // been told to run this command needs to know that the graph is what is missing,
               // not the run.
+              // `noGuessAdvice()`, NOT "Publish the graph this run used" — TODO.md §A.91's fifth
+              // fix round (B1). Unconditional publish advice was false whenever a candidate named
+              // in `refusal` was present and simply would not compile (an edit since the run
+              // started, or a capability this invocation lacks) — the resolver cannot tell that
+              // apart from a genuinely deleted file, so this door may not guess either.
               throw err.notFound(
                 CODES.E_RUN_NOT_FOUND,
                 `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
-                  `Publish the graph this run used, or pass --graph explicitly. ` +
-                  `A graph EDITED since the run started no longer matches, which is the point — the approver ` +
-                  `approved those bytes. Restore them to answer the gate, or \`loom cancel ${runId} --as ID\` ` +
-                  `to stop the run, which needs no graph. NOT --reject: a rejected gate runs the graph's ` +
-                  `error edges, so it binds like an approval does`,
-                { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed }) } },
+                  `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without ` +
+                  `publishing it, or \`loom cancel ${runId} --as ID\` to stop the run, which needs no graph. ` +
+                  `NOT --reject: a rejected gate runs the graph's error edges, so it binds like an approval does`,
+                { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
               );
             }
           }
@@ -9681,14 +9698,16 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           const resolved = resolveRecordedGraph(ws, ranHash);
           graph = resolved.graph;
           if (graph === undefined) {
+            // `noGuessAdvice()`, NOT "publish those bytes" unconditionally — TODO.md §A.91's fifth
+            // fix round (B1). That was false whenever a candidate at `ranHash`'s path was present
+            // and simply would not compile, which `refusal` (quoted above) already names.
             process.stderr.write(
               `run ${runId} ran graph ${ranHash}, and ${resolved.refusal}. ` +
                 `Without the spec this run's assertion, rubric and agent nodes cannot be identified, so every ` +
                 `signal would read as absent and the verdict would be outcome 0 — the same number a run that ` +
                 `failed every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. ` +
-                `fix: pass --graph <file> with the graph this run ran (a candidate lives in candidates/, and ` +
-                `--graph scores it without publishing it), or publish those bytes into ${join(ws.root, "graphs")}. ` +
-                `A graph EDITED since the run no longer matches, which is the point — this run executed the old bytes.\n`,
+                `${noGuessAdvice()} fix: pass --graph <file> with the graph this run ran (a candidate lives in ` +
+                `candidates/, and --graph scores it without publishing it).\n`,
             );
             return 1;
           }
@@ -10894,8 +10913,8 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
       CODES.E_RUN_NOT_FOUND,
       `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and ${resolved.refusal}. ` +
         `--cohort names a RECORDING — a run of a graph published in graphs/ — because the exam's inputs are checked ` +
-        `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a recording, ` +
-        `or ${missingGraphAdvice(resolved.failed)}.`,
+        `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a ` +
+        `recording. ${noGuessAdvice()}`,
     );
   }
   const problems = attestationProblems(exam.spec, baseline.spec);
@@ -11526,7 +11545,7 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       CODES.E_RUN_NOT_FOUND,
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The ` +
         `expectations exclude every channel an evaluator node wrote, and node types live in the spec — without it ` +
-        `this would freeze an exam that grades the grader — ${missingGraphAdvice(resolvedBaseline.failed)}.`,
+        `this would freeze an exam that grades the grader. ${noGuessAdvice()}`,
     );
   }
   // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
@@ -12061,8 +12080,7 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     throw err.notFound(
       CODES.E_RUN_NOT_FOUND,
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The baseline is ` +
-        `derived from the cohort rather than passed in, so it has to be publishable: ${missingGraphAdvice(resolvedBaseline.failed)}. A ` +
-        `graph EDITED since the cohort ran no longer matches, which is the point — those runs were produced by the old bytes.`,
+        `derived from the cohort rather than passed in, so it has to be publishable. ${noGuessAdvice()}`,
     );
   }
   // NO MEASUREMENT THE CANDIDATE CANNOT WRITE, NO LIVE PROMOTION. Both sides of every pair below
