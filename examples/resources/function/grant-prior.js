@@ -11,17 +11,25 @@
 (view, ctx) => {
   const raw = view.require("ledgerDoc");
 
-  // §A.83: `fs.read` puts its truncation marker INSIDE the content, so a ledger over the cap
-  // comes back as a prefix that may still parse. A prefix of a ledger is a ledger with grants
-  // missing from it, and every missing grant reads as "never granted before".
-  if (/\n…\[truncated \d+ chars\]$/.test(raw)) {
+  // §A.83: a ledger over the cap comes back as a bare PREFIX that may still parse — `fs.read` no
+  // longer marks the cut inside the content, and says so on `read-ledger`'s reserved projection
+  // instead (`"read-ledger:error"` in this node's `reads`: `{ok: true, truncated, bytes}`). A
+  // prefix of a ledger is a ledger with grants missing from it, and every missing grant reads as
+  // "never granted before". The FACT is read, never the content, and a projection that cannot say
+  // the read was complete is a refusal too.
+  const read = view.get("read-ledger:error");
+  if (read === null || typeof read !== "object" || read.ok !== true || read.truncated !== false) {
+    const cut = read !== null && typeof read === "object" && read.truncated === true;
     return {
       refuse: {
-        reason:
-          `the access ledger was read back TRUNCATED (${raw.length} chars). A prefix of a ledger is ` +
-          `a ledger with grants missing from it, and a missing grant reads here as "never granted ` +
-          `before" — so a renewal would be re-reviewed and, worse, the append would overwrite the ` +
-          `entries that were cut. Raise maxBytes on the "read-ledger" node.`,
+        reason: cut
+          ? `the access ledger was read back TRUNCATED (${raw.length} chars of ${String(read.bytes)} bytes). A ` +
+            `prefix of a ledger is a ledger with grants missing from it, and a missing grant reads here as ` +
+            `"never granted before" — so a renewal would be re-reviewed and, worse, the append would ` +
+            `overwrite the entries that were cut. Raise maxBytes on the "read-ledger" node.`
+          : `cannot tell whether the access ledger was read in full: "read-ledger"'s projection says ` +
+            `${JSON.stringify(read === undefined ? null : read)}, not {ok: true, truncated: false}. This graph ` +
+            `rewrites the whole ledger, so appending to a document that may be partial would drop grants.`,
       },
     };
   }

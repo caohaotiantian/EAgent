@@ -44,7 +44,7 @@ const NOW = 1_700_000_000_000;
 
 // ── the envelope ─────────────────────────────────────────────────────────────
 
-test("the envelope declares exactly its SIX fields — three of them reserved, with no producer yet", () => {
+test("the envelope declares exactly its SIX fields — `classification` still reserved, with no producer yet", () => {
   // `Record<keyof ErrorProjection, true>` is the pin: a field removed is a missing key and a field
   // added is an excess one, and either is a TYPE ERROR in `npm run typecheck`, before any runtime.
   const fields: Record<keyof ErrorProjection, true> = {
@@ -482,7 +482,8 @@ test("MISSING, UNREADABLE and PATH-REFUSED reach the arm as THREE DIFFERENT code
       assert.equal(got.arm?.ok, false, `${path}: ${JSON.stringify(got)}`);
       assert.equal(got.arm?.code, want, `${path}: ${JSON.stringify(got)}`);
       assert.match(String(got.arm?.message), /./, `${path}: the message travels with the code`);
-      // THE RESERVED FIELDS HAVE NO PRODUCER YET, and are absent rather than defaulted.
+      // A FAILURE CARRIES NO COMPLETENESS: `truncated`/`bytes` ride `ok: true` only (§A.83), and
+      // `classification` still has no producer — absent rather than defaulted.
       assert.deepEqual(Object.keys(got.arm ?? {}).sort(), ["code", "message", "ok"], path);
       seen[path] = got.arm?.code;
     }
@@ -500,7 +501,8 @@ test("the SEQ arm reads ok:true, and the error arm does not run", async () => {
     const r = rig(ws.root);
     const p = await drive(r, await r.engine.submit({ graph: r.graph, inputs: { path: "out/present.json" } }));
     assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
-    assert.deepEqual(p.channels["out"], { ok: { ok: true } });
+    // §A.83: a successful read carries its completeness — the file is two bytes, all of them read.
+    assert.deepEqual(p.channels["out"], { ok: { ok: true, truncated: false, bytes: 2 } });
   } finally {
     ws.dispose();
   }
@@ -840,4 +842,68 @@ test("§A.96 — `not_attempted` leaves ok:true (the effect STANDS), and a FAILE
     at(projectionWith([{ ...task, state: "failed", undoneAtSeq: 5, error: { class: "unavailable", code: "E_X", message: "m", retryable: true } }])),
     { ok: false, code: "E_X", message: "m" },
   );
+});
+
+// ── §A.83: the truncation producer — `truncated`/`bytes` on `ok: true` ────────
+
+test("§A.83 — a CAPPED read reaches the reader as {ok: true, truncated: true, bytes}, the channel holds a bare prefix, and a restart and a replay agree", async () => {
+  const ws = workspace();
+  try {
+    writeFileSync(join(ws.root, "out", "big.json"), `{}${" ".repeat(10)}`);
+    const capped = { ...READ, tool: { name: "fs.read", version: "1.0", args: { path: "${path}", maxBytes: 4 } } };
+    const r = rig(ws.root, undefined, [capped, OK, ARM()], EDGES);
+    const runId = await r.engine.submit({ graph: r.graph, inputs: { path: "out/big.json" } });
+    const p = await drive(r, runId);
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+    // The reader was handed the FACT, and the channel the content — with no marker in it.
+    assert.deepEqual(p.channels["out"], { ok: { ok: true, truncated: true, bytes: 12 } });
+    assert.equal(p.channels["doc"], "{}  ");
+
+    // A RESTART: a fold of the journal alone serves the same projection.
+    const events: JournalEvent[] = [];
+    for await (const e of r.store.read(runId, 1 as Seq)) events.push(e);
+    assert.deepEqual(viewFor(foldRun(events)!, {}, { segments: [] }, ["r:error"]).get("r:error"), { ok: true, truncated: true, bytes: 12 });
+    // The fact came out of `effect.completed.result.details`, which is journaled INLINE.
+    const done = events.find((e) => e.type === "effect.completed" && (e.payload as { key: string }).key === "r@root#0:tool:0");
+    assert.deepEqual((done?.payload as { result: { details: unknown } }).result.details, { path: "out/big.json", bytes: 12, truncated: true });
+
+    // A REPLAY serves the recorded tool result, so the reader is handed the identical fact.
+    const report = await replayRun({ store: r.store, runId, graph: r.graph, engine: { tools: r.tools, functions: r.functions, models: new ModelRegistry() } });
+    assert.equal(report.match, true, JSON.stringify(report.frames.filter((f) => !f.match)));
+    assert.deepEqual(report.replayed.channels["out"], p.channels["out"]);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.83 — completeness is folded from TOOL calls only, well-formed values only, and `bytes` only when one call gave it", async () => {
+  const ws = workspace();
+  try {
+    writeFileSync(join(ws.root, "out", "big.json"), `{}${" ".repeat(10)}`);
+    const r = rig(ws.root);
+    const runId = await r.engine.submit({ graph: r.graph, inputs: { path: "out/present.json" } });
+    await drive(r, runId);
+    const events: JournalEvent[] = [];
+    for await (const e of r.store.read(runId, 1 as Seq)) events.push(e);
+    const real = events.find((e) => e.type === "effect.completed" && (e.payload as { key: string }).key === "r@root#0:tool:0")!;
+    const last = events[events.length - 1]!.seq;
+    const extra = (n: number, key: string, details: unknown): JournalEvent =>
+      ({ ...real, seq: (last + n) as Seq, payload: { key, result: { content: "", details }, resultDigest: "x" } }) as unknown as JournalEvent;
+    const serve = (...more: JournalEvent[]): unknown => viewFor(foldRun([...events, ...more])!, {}, { segments: [] }, ["r:error"]).get("r:error");
+
+    assert.deepEqual(serve(), { ok: true, truncated: false, bytes: 2 }, "the control: one complete read");
+    // A second TOOL call that was cut: truncated, and no single size to report.
+    assert.deepEqual(serve(extra(1, "r@root#0:tool:1", { truncated: true, bytes: 900 })), { ok: true, truncated: true });
+    // An undo, a model turn, or ANOTHER task's call says nothing about this node's read.
+    assert.deepEqual(serve(extra(1, "r@root#0:compensate:3", { truncated: true, bytes: 9 })), { ok: true, truncated: false, bytes: 2 });
+    assert.deepEqual(serve(extra(1, "r@root#0:model:0", { truncated: true })), { ok: true, truncated: false, bytes: 2 });
+    assert.deepEqual(serve({ ...extra(1, "ok@root#0:tool:0", { truncated: true }), taskId: "ok@root#0" } as JournalEvent), { ok: true, truncated: false, bytes: 2 });
+    // Values a journal can hold but a fact cannot be: dropped, not coerced.
+    assert.deepEqual(serve(extra(1, "r@root#0:tool:1", { truncated: "yes", bytes: -1 })), { ok: true, truncated: false, bytes: 2 });
+    assert.deepEqual(serve(extra(1, "r@root#0:tool:1", { bytes: Number.NaN })), { ok: true, truncated: false, bytes: 2 });
+    // A REDO of the same call REPLACES its fact rather than adding a second one.
+    assert.deepEqual(serve(extra(1, "r@root#0:tool:0", { truncated: true, bytes: 40 })), { ok: true, truncated: true, bytes: 40 });
+  } finally {
+    ws.dispose();
+  }
 });

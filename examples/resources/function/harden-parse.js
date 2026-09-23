@@ -30,23 +30,31 @@ function (view, ctx) {
   const source = String(view.require("source"));
   const path = String(view.require("manifestPath"));
 
-  // A TRUNCATED READ IS NOT A SYNTAX ERROR, and this check exists because the product reports it as
-  // one. `fs.read` caps at 200,000 characters unless the node says otherwise and appends its marker
-  // INTO the content rather than beside it, so a 1.2 MB manifest arrives as 200,000 valid characters
-  // plus `…[truncated 1000000 chars]` — and `JSON.parse` then blames a "Bad control character at
-  // position 200000". The graph now passes an explicit `maxBytes`, which moves the cliff; this moves
-  // the DIAGNOSIS, which is the half that survives somebody's manifest being bigger than whatever
-  // number is in the graph. (F12.)
-  const cut = /\n…\[truncated (\d+) chars\]$/.exec(source);
-  if (cut !== null) {
+  // A TRUNCATED READ IS NOT A SYNTAX ERROR, and this check exists because the product used to report
+  // it as one. `fs.read` caps at `maxBytes` (200,000 bytes unless the node says otherwise), and it
+  // once appended a marker INTO the content, so a 1.2 MB manifest arrived as JSON plus
+  // `…[truncated N chars]` and `JSON.parse` blamed a "Bad control character". The marker is gone
+  // (TODO.md §A.83): the content is now a bare PREFIX, and the fact that it is one travels beside it,
+  // on `load`'s reserved projection — `"load:error"` in this node's `reads`, `{ok: true, truncated,
+  // bytes}` on a read that succeeded. A prefix of a manifest is the dangerous case, since a prefix
+  // that happens to parse audits as a whole manifest with its missing half read as compliance. So
+  // the FACT is read, never the content: truncated is a refusal, and a projection that cannot say
+  // the read was complete is one too. The graph passes an explicit `maxBytes`, which moves the
+  // cliff; this moves the DIAGNOSIS. (F12.)
+  const read = view.get("load:error");
+  if (read === null || typeof read !== "object" || read.ok !== true || read.truncated !== false) {
+    const cut = read !== null && typeof read === "object" && read.truncated === true;
     return {
       refuse: {
-        reason:
-          "\"" + path + "\" was read back TRUNCATED: " + source.length + " characters arrived and " +
-          cut[1] + " more were dropped, because `fs.read` caps its output and marks the cut inside the " +
-          "content. What is here is not the manifest, and auditing part of a manifest reports the " +
-          "absences of the part that is missing as compliance. Raise `maxBytes` on this graph's " +
-          "\"load\" node above the file's size.",
+        reason: cut
+          ? "\"" + path + "\" was read back TRUNCATED: the file is " + String(read.bytes) + " bytes, " +
+            source.length + " characters of it arrived and the rest were dropped, because `fs.read` caps " +
+            "its output. What is here is not the manifest, and auditing part of a manifest reports the " +
+            "absences of the part that is missing as compliance. Raise `maxBytes` on this graph's " +
+            "\"load\" node above the file's size."
+          : "cannot tell whether \"" + path + "\" was read in full: the \"load\" node's projection says " +
+            JSON.stringify(read === undefined ? null : read) + ", not {ok: true, truncated: false}. Auditing a " +
+            "manifest that may be partial reports what is missing as compliance.",
       },
     };
   }

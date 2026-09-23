@@ -123,6 +123,19 @@ export interface TaskRecord {
    */
   readonly undoneAtSeq?: number;
   /**
+   * What each of this Task's tool calls said about the COMPLETENESS of what it returned — the
+   * `truncated` and `bytes` its recorded `details` carried — keyed by effect key, folded from
+   * `effect.completed` (`DESIGN.md` D8, `TODO.md` §A.83).
+   *
+   * The producers are the tools that cap what they return (`fs.read`, `net.fetch`, `proc.exec`,
+   * and `fs.glob`/`fs.grep`'s capped listings), which used to write the fact into `content` as a
+   * marker. It is folded, not stored anywhere new: `effect.completed.result` is journaled inline
+   * with its `details` (only channel values are externalised), so a restart and a replay reach the
+   * same answer from the same rows. Keyed by effect key so a redo's completion REPLACES the call
+   * it redid rather than adding a second opinion about it.
+   */
+  readonly readFacts?: Readonly<Record<string, { readonly truncated?: boolean; readonly bytes?: number }>>;
+  /**
    * WHAT THIS TASK HAS SPENT ACROSS ALL ITS ATTEMPTS, not what its last commit said.
    *
    * It used to be `task.committed.usage` assigned verbatim, which is a per-ATTEMPT summary
@@ -901,6 +914,29 @@ function foldRollback(p: MutableProjection, e: JournalEvent): void {
   p.tasks[e.taskId] = { ...t, undoneAtSeq: Math.max(t.undoneAtSeq ?? -1, at) };
 }
 
+/**
+ * A tool call's `truncated`/`bytes`, onto the Task that made it — see `TaskRecord.readFacts`.
+ *
+ * Only a TOOL effect of the Task the event names (`<taskId>:tool:<n>`): a model turn, an undo
+ * (`:compensate:`) or a subgraph says nothing about what the node read. Only well-formed values
+ * are kept — a boolean, a finite non-negative number — because a journal is an input, and a
+ * `bytes` of `"12"` or `NaN` handed to a body as a fact is a lie with the fold's name on it.
+ */
+function foldReadFacts(p: MutableProjection, e: JournalEvent): void {
+  if (!isEvent(e, "effect.completed") || e.taskId === undefined) return;
+  const t = p.tasks[e.taskId];
+  if (t === undefined || !e.payload.key.startsWith(`${e.taskId}:tool:`)) return;
+  const details = (e.payload.result as { readonly details?: unknown } | null | undefined)?.details;
+  if (details === null || typeof details !== "object") return;
+  const { truncated, bytes } = details as { readonly truncated?: unknown; readonly bytes?: unknown };
+  const fact = {
+    ...(typeof truncated === "boolean" ? { truncated } : {}),
+    ...(typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 ? { bytes } : {}),
+  };
+  if (Object.keys(fact).length === 0) return;
+  p.tasks[e.taskId] = { ...t, readFacts: { ...t.readFacts, [e.payload.key]: fact } };
+}
+
 function apply(p: MutableProjection, e: JournalEvent): void {
   // The one place a fold can change, so the one place the snapshot cache is dropped. Before the
   // guard below rather than after it: an event this function ignores has changed nothing and
@@ -1129,6 +1165,7 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "effect.completed") || isEvent(e, "effect.failed")) {
     p.openEffects.delete(e.payload.key);
     p.sortedOpenEffects = undefined;
+    if (isEvent(e, "effect.completed")) foldReadFacts(p, e);
     return;
   }
   if (isEvent(e, "compensation.recorded")) {
@@ -1483,6 +1520,26 @@ export function viewFor(
  * no reading can mistake for success. A `succeeded` Task whose call was since ROLLED BACK is no
  * value either (`TaskRecord.undoneAtSeq`, §A.96): what it did no longer stands.
  */
+/**
+ * `truncated` and `bytes` for a SUCCEEDED Task, from its tool calls' recorded facts (§A.83).
+ *
+ * `truncated` is present when any call reported it, and TRUE when any call was cut: a node that
+ * read two documents and got one of them short did not read what it was asked to. `bytes` is
+ * present only when exactly ONE call reported a size — a `tool` node's one call, the case the
+ * field is for — because a sum or a maximum over several sources is a number that is the size of
+ * nothing. Absent facts stay absent; nothing here is defaulted, so a Task whose tools say nothing
+ * about completeness is `{ok: true}` exactly as before.
+ */
+function completeness(t: TaskRecord): { truncated?: boolean; bytes?: number } {
+  const facts = Object.values(t.readFacts ?? {});
+  const said = facts.filter((f) => f.truncated !== undefined);
+  const sized = facts.filter((f) => f.bytes !== undefined);
+  return {
+    ...(said.length === 0 ? {} : { truncated: said.some((f) => f.truncated === true) }),
+    ...(sized.length === 1 ? { bytes: sized[0]!.bytes! } : {}),
+  };
+}
+
 function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: NodeId): ErrorProjection | undefined {
   const chain = branchChain(branch);
   let best: TaskRecord | undefined;
@@ -1503,7 +1560,7 @@ function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: N
   // the honest answer is no projection, never `ok: true`. A FAILED Task's `ok: false` stays: an
   // undo does not make a failure less true.
   const undone = best.undoneAtSeq !== undefined && best.undoneAtSeq >= (best.lease?.fencingToken ?? -1);
-  if (best.state === "succeeded") return undone ? undefined : { ok: true };
+  if (best.state === "succeeded") return undone ? undefined : { ok: true, ...completeness(best) };
   if (best.state === "failed" && best.error !== undefined && typeof best.error.code === "string") {
     const { code, message } = best.error;
     return typeof message === "string" ? { ok: false, code, message } : { ok: false, code };

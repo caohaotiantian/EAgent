@@ -411,8 +411,11 @@ function procExec(opts: BuiltinOptions): ToolDefinition {
       // `irreversible` class already means `CLASS_AUTO_RETRYABLE` will not act on it.
       const head = `exit=${String(result.code ?? "null")}${result.signal === null ? "" : ` signal=${result.signal}`}`;
       const body = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n");
+      // A capped output is `details.truncated`, never a marker appended to `content` (§A.83,
+      // `capBytes`). `bytes` is not reported: the sandbox discards what it does not keep, so the
+      // size of the whole output is not known here.
       return {
-        content: `${head}\n${body}${result.truncated ? "\n…[output truncated]" : ""}`,
+        content: `${head}\n${body}`,
         details: {
           command,
           code: result.code,
@@ -494,6 +497,39 @@ function readFailure(rel: string, e: unknown): ToolResult {
   return { content, isError: true };
 }
 
+/**
+ * A SHORT READ IS A FACT BESIDE THE CONTENT, NEVER A MARKER INSIDE IT (`DESIGN.md` D8, `TODO.md`
+ * §A.83).
+ *
+ * `fs.read`, `net.fetch` and `proc.exec` each appended their marker to `content` —
+ * `…[truncated N chars]`, `…[truncated]`, `…[output truncated]` — and a `tool` node writes
+ * `content` to its channel. So a capped JSON document reached the next body as a syntax error in
+ * the FILE, and a format whose prefix still parses reached it as a whole document with part of it
+ * missing, which is worse: a search for absences reads the missing part as compliance. The text is
+ * now the prefix and nothing else; `truncated` and `bytes` go into `details`, which the journal
+ * keeps and the fold turns into the node's reserved projection (`"<id>:error"` → `{ok: true,
+ * truncated, bytes}`), where a body can read them without parsing anything.
+ *
+ * `max` COUNTS BYTES, as `maxBytes` always said and `bytes` always claimed. It compared
+ * `text.length` — UTF-16 units — so a file of multi-byte text read back `bytes` that were not its
+ * size and a cap that was not the one asked for. The cut is moved back to a UTF-8 character
+ * boundary, so the prefix never ends in half a character (it may be up to three bytes short of
+ * `max`); `bytes` is the size of the WHOLE source.
+ *
+ * WHAT A MODEL LOSES: an agent is handed `content` and nothing else (`run/engine.ts`, the tool
+ * message of an agent turn), so an agent reading an over-cap file is no longer told in-band that
+ * it is short. That is the cost D8 accepted in writing "never again into `content`"; telling the
+ * model belongs where the transcript is built, from `details`, and is not this file's.
+ */
+function capBytes(all: Buffer, max: number): { readonly text: string; readonly bytes: number; readonly truncated: boolean } {
+  if (!(all.length > max)) return { text: all.toString("utf8"), bytes: all.length, truncated: false };
+  let end = Math.max(0, Math.floor(max));
+  // A continuation byte (10xxxxxx) at the cut means a character straddles it: step back to its
+  // first byte and leave the whole character out.
+  while (end > 0 && (all[end]! & 0xc0) === 0x80) end -= 1;
+  return { text: all.subarray(0, end).toString("utf8"), bytes: all.length, truncated: true };
+}
+
 function fsRead(opts: BuiltinOptions): ToolDefinition {
   return {
     name: "fs.read",
@@ -524,20 +560,14 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
         if (isLoomError(e) && e.code === CODES.E_CAP_DENIED) return { content: e.message, isError: true, error: e };
         throw e;
       }
-      const max = Number(args["maxBytes"] ?? 200_000);
-      let text: string;
+      let bytes: Buffer;
       try {
-        text = readRegularLeaf(path);
+        bytes = readRegularBytes(path);
       } catch (e) {
         return readFailure(String(args["path"]), e);
       }
-      // Truncation is FLAGGED in the content, so a model reasoning over the result
-      // is told it is not seeing everything.
-      const truncated = text.length > max;
-      return {
-        content: truncated ? `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` : text,
-        details: { path: String(args["path"]), bytes: text.length, truncated },
-      };
+      const cut = capBytes(bytes, Number(args["maxBytes"] ?? 200_000));
+      return { content: cut.text, details: { path: String(args["path"]), bytes: cut.bytes, truncated: cut.truncated } };
     },
   };
 }
@@ -1303,13 +1333,14 @@ function netFetch(opts: BuiltinOptions): ToolDefinition {
         res = await doFetch(url, { signal: ctx.signal, redirect: "manual" });
       }
 
-      const text = await res.text();
-      const max = Number(args["maxBytes"] ?? 100_000);
+      // Bytes, then decoded as UTF-8 — what `res.text()` did — so `maxBytes` and `bytes` count
+      // bytes, and the cut is `fs.read`'s (`capBytes`): no marker in `content`.
+      const cut = capBytes(Buffer.from(await res.arrayBuffer()), Number(args["maxBytes"] ?? 100_000));
       return {
-        content: text.length > max ? `${text.slice(0, max)}\n…[truncated]` : text,
+        content: cut.text,
         // `url` is where the bytes CAME FROM, which after a redirect is not what was
         // asked for. The journal records the host that answered, not the one that was named.
-        details: { status: res.status, bytes: text.length, url: url.href, hops },
+        details: { status: res.status, bytes: cut.bytes, truncated: cut.truncated, url: url.href, hops },
         isError: !res.ok,
       };
     },

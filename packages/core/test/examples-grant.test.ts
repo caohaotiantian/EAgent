@@ -1169,3 +1169,68 @@ test("every hostile request fails CLOSED — nothing reaches `record`, nothing r
     ws.dispose();
   }
 });
+
+// ── §A.83: a TRUNCATED read is refused on the FACT, never parsed out of the content ───────────
+
+/**
+ * Past the shipped 200,000-byte `maxBytes`, with the padding AFTER the JSON — so the prefix
+ * `fs.read` hands back still PARSES. That is the case §A.83 calls dangerous: nothing in the
+ * content says anything is missing, and only the reading node's projection (`truncated: true`)
+ * does. A body that stopped reading it would proceed.
+ */
+const pad = (json: string): string => `${json}${" ".repeat(250_000)}`;
+
+test("§A.83 — a LEDGER read back truncated is refused at `prior`, and the ledger's bytes are untouched", async () => {
+  const ws = workspace();
+  try {
+    const first = await run(ws.dir, "docs-site-read.json");
+    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
+    const padded = pad(readFileSync(join(ws.dir, LEDGER), "utf8"));
+    writeFileSync(join(ws.dir, LEDGER), padded);
+    const second = await run(ws.dir, "docs-site-read-ravi.json");
+    assert.equal(second.r.code, 1, `${second.r.out}${second.r.err}`);
+    const e = errorOf(second.s);
+    assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+    assert.match(String(e.message), /on node "prior" refused/, String(e.message));
+    assert.match(String(e.message), /the access ledger was read back TRUNCATED \(200000 chars of \d+ bytes\)/, String(e.message));
+    assert.equal(readFileSync(join(ws.dir, LEDGER), "utf8"), padded, "nothing rewrote the ledger");
+    const counts = await taskCounts(ws.dir, String(second.s["runId"]));
+    assert.equal(counts["weigh"], undefined, JSON.stringify(counts));
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.83 — a REQUEST or a POLICY read back truncated is refused at `weigh`, before the router", async () => {
+  const ws = workspace();
+  try {
+    const request = join(ws.dir, "access", "requests", "docs-site-read.json");
+    const policy = join(ws.dir, "access", "policy.json");
+    for (const [file, what] of [
+      [request, /the request was read back TRUNCATED/],
+      [policy, /access\/policy\.json was read back TRUNCATED/],
+    ] as const) {
+      const original = readFileSync(file, "utf8");
+      writeFileSync(file, pad(original));
+      let got: { r: Result; s: Record<string, unknown> };
+      try {
+        got = await run(ws.dir, "docs-site-read.json");
+      } finally {
+        writeFileSync(file, original);
+      }
+      assert.equal(got.r.code, 1, `${file}: ${got.r.out}${got.r.err}`);
+      const e = errorOf(got.s);
+      assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+      assert.match(String(e.message), /on node "weigh" refused/, String(e.message));
+      assert.match(String(e.message), what, String(e.message));
+      const counts = await taskCounts(ws.dir, String(got.s["runId"]));
+      assert.equal(counts["route"], undefined, `${file}: ${JSON.stringify(counts)}`);
+      assert.equal(existsSync(join(ws.dir, GRANT)), false, `${file}: no grant was written`);
+    }
+    // And the control: the same files, unpadded, are granted — the refusal is the truncation's.
+    const ok = await run(ws.dir, "docs-site-read.json");
+    assert.equal(ok.s["status"], "succeeded", `${ok.r.out}${ok.r.err}`);
+  } finally {
+    ws.dispose();
+  }
+});

@@ -854,3 +854,81 @@ test("§A.99 — a path that already existed is NEVER recorded as a create, even
     s.cleanup();
   }
 });
+
+// ── §A.83: a short read is a FACT in `details`, never a marker in `content` ────────────────
+
+test("§A.83 — fs.read past maxBytes returns a bare PREFIX, and says so in details: truncated, and the WHOLE size in bytes", async () => {
+  const s = sandbox();
+  try {
+    const doc = `${JSON.stringify({ a: 1 })}${" ".repeat(50)}`;
+    writeFileSync(join(s.root, "doc.json"), doc);
+    const read = byName(builtinTools({ root: s.root, deny: [] }), "fs.read");
+    const cut = await read.execute({ path: "doc.json", maxBytes: 20 }, ctx());
+    assert.equal(cut.content, doc.slice(0, 20), "the prefix and nothing else");
+    assert.doesNotMatch(cut.content, /truncated/);
+    assert.deepEqual(JSON.parse(cut.content), { a: 1 }, "a prefix that still parses — which is why the fact must be elsewhere");
+    assert.deepEqual(cut.details, { path: "doc.json", bytes: doc.length, truncated: true });
+    const whole = await read.execute({ path: "doc.json" }, ctx());
+    assert.equal(whole.content, doc);
+    assert.deepEqual(whole.details, { path: "doc.json", bytes: doc.length, truncated: false });
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — maxBytes counts BYTES, and the cut never splits a UTF-8 character", async () => {
+  // It compared `text.length` — UTF-16 units — so `bytes` was not the file's size and the cap was
+  // not the one asked for. `é` is two bytes, `€` three.
+  const s = sandbox();
+  try {
+    const text = "éé€x";
+    writeFileSync(join(s.root, "u.txt"), text);
+    const read = byName(builtinTools({ root: s.root, deny: [] }), "fs.read");
+    const all = await read.execute({ path: "u.txt" }, ctx());
+    assert.deepEqual(all.details, { path: "u.txt", bytes: Buffer.byteLength(text), truncated: false });
+    assert.equal(Buffer.byteLength(text), 8);
+    // 6 bytes lands inside `€` (bytes 4..6): the character is left out whole.
+    const cut = await read.execute({ path: "u.txt", maxBytes: 6 }, ctx());
+    assert.equal(cut.content, "éé");
+    assert.equal((cut.details as { truncated: boolean }).truncated, true);
+    assert.equal((await read.execute({ path: "u.txt", maxBytes: 7 }, ctx())).content, "éé€");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — net.fetch past maxBytes: a bare prefix, with truncated and the body's size in bytes", async () => {
+  const body = `{"ok":true}${" ".repeat(40)}`;
+  const fetchTool = byName(
+    builtinTools({
+      root: "/tmp",
+      deny: [],
+      egressAllowlist: ["example.com"],
+      fetch: (async () => new Response(body, { status: 200 })) as unknown as typeof fetch,
+    }),
+    "net.fetch",
+  );
+  const r = await fetchTool.execute({ url: "https://example.com/x", maxBytes: 11 }, ctx());
+  assert.equal(r.content, '{"ok":true}');
+  assert.doesNotMatch(r.content, /truncated/);
+  const d = r.details as { bytes: number; truncated: boolean };
+  assert.equal(d.bytes, body.length);
+  assert.equal(d.truncated, true);
+  const whole = await fetchTool.execute({ url: "https://example.com/x" }, ctx());
+  assert.equal(whole.content, body);
+  assert.equal((whole.details as { truncated: boolean }).truncated, false);
+});
+
+test("§A.83 — proc.exec past its output cap: no marker appended, and details.truncated says so", async () => {
+  const s = sandbox();
+  try {
+    const exec = byName(builtinTools({ root: s.root, deny: [], execAllowlist: [process.execPath] }), "proc.exec");
+    // Past the sandbox's 1 MiB default capture.
+    const r = await exec.execute({ command: process.execPath, args: ["-e", "process.stdout.write('y'.repeat(1_200_000))"] }, ctx());
+    assert.equal((r.details as { truncated: boolean }).truncated, true);
+    assert.doesNotMatch(r.content, /truncated/, "the output ends in the program's bytes, not in a marker");
+    assert.match(r.content, /^exit=0\ny+$/);
+  } finally {
+    s.cleanup();
+  }
+});

@@ -783,8 +783,8 @@ test("two manifests that used to reach the unreachable refusal now report instea
 });
 
 test("a manifest read back TRUNCATED refuses, instead of being reported as invalid JSON", async () => {
-  // `fs.read` caps its output — 200,000 characters unless the node says otherwise — and appends its
-  // marker INSIDE the content rather than beside it. So a large manifest arrived as valid JSON plus
+  // `fs.read` caps its output — 200,000 BYTES unless the node says otherwise — and it used to append
+  // its marker INSIDE the content. So a large manifest arrived as valid JSON plus
   // `…[truncated N chars]`, and `harden-parse.js` blamed a "Bad control character at position
   // 200000": a report of a SYNTAX error on a file whose syntax is fine. Auditing the part that fits
   // reports the absences of the part that is missing as compliance, which is this workflow's whole
@@ -792,7 +792,9 @@ test("a manifest read back TRUNCATED refuses, instead of being reported as inval
   //
   // Two halves, and the second is the one that survives somebody's manifest being bigger than
   // whatever number is in the graph: the shipped `load` node now passes an explicit `maxBytes`, AND
-  // the parse body recognises the marker and says what actually happened.
+  // the parse body reads `load`'s reserved projection — `{ok: true, truncated, bytes}` — and says
+  // what actually happened. The marker is gone from the content (§A.83), so the FACT is the only
+  // thing the body can go on; a body still looking for the marker would see a bare prefix.
   const ws = workspace();
   try {
     // A COMPLIANT manifest, padded past the cap. Compliant on purpose: this test is about the READ,
@@ -851,9 +853,21 @@ test("a manifest read back TRUNCATED refuses, instead of being reported as inval
     assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
     assert.equal(error["class"], "validation", r.out);
     assert.match(String(error["message"]), /was read back TRUNCATED/, r.out);
-    assert.match(String(error["message"]), /more were dropped/, r.out);
+    assert.match(String(error["message"]), new RegExp(`the file is ${String(Buffer.byteLength(huge))} bytes`), r.out);
+    assert.match(String(error["message"]), /the rest were dropped/, r.out);
     // The old, false diagnosis must be gone.
     assert.doesNotMatch(String(error["message"]), /is not JSON/, r.out);
+
+    // AND THE CASE THAT DOES NOT BREAK, which is the dangerous one (§A.83): a manifest whose cut
+    // PREFIX STILL PARSES. Here the manifest is small and followed by a quarter-megabyte of
+    // whitespace, so the default cap drops only whitespace and the prefix is valid JSON — nothing in
+    // the CONTENT says anything is missing. Only the projection does, and the body must refuse on it.
+    writeFileSync(join(ws.dir, "manifests", "padded.json"), `${JSON.stringify({ ...big, annotations: {} }, null, 2)}${" ".repeat(250_000)}`);
+    const padded = await loom(ws.dir, ["run", path, "--input", input("padded.json")]);
+    assert.equal(padded.code, 1, `${padded.out}${padded.err}`);
+    const perr = summary(padded)["error"] as Record<string, unknown>;
+    assert.equal(perr["code"], "E_FUNCTION_REFUSED", padded.out);
+    assert.match(String(perr["message"]), /was read back TRUNCATED/, padded.out);
   } finally {
     ws.dispose();
   }

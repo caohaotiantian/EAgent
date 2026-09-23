@@ -14,9 +14,9 @@
 // and carrying the policy rule that said so. Answering "cannot decide" with a denial would tell a
 // requester their access was refused on the merits when in fact nobody looked.
 (view, ctx) => {
-  const request = parse(view.require("request"), "the request", 'the "read-request" node');
+  const request = parse(view.require("request"), view.get("read-request:error"), "the request", 'the "read-request" node');
   if (request.refuse !== undefined) return request;
-  const policy = parse(view.require("policyDoc"), "access/policy.json", 'the "read-policy" node');
+  const policy = parse(view.require("policyDoc"), view.get("read-policy:error"), "access/policy.json", 'the "read-policy" node');
   if (policy.refuse !== undefined) return policy;
 
   const req = request.value;
@@ -192,14 +192,22 @@
     return Math.round((ctx.now() - Number(g.grantedAt)) / 3_600_000);
   }
 
-  function parse(raw, what, who) {
-    if (/\n…\[truncated \d+ chars\]$/.test(raw)) {
+  // `read` is the reading node's reserved projection (`"<id>:error"` in this node's `reads`), and
+  // it is what says whether `raw` is the WHOLE document (TODO.md §A.83): `fs.read` once marked a
+  // cut inside the content, and now returns a bare prefix with `{ok: true, truncated, bytes}`
+  // beside it. The fact is read, never the content — and a projection that cannot say the read
+  // was complete refuses too, since a prefix that happens to parse is a policy with rules missing.
+  function parse(raw, read, what, who) {
+    if (read === null || typeof read !== "object" || read.ok !== true || read.truncated !== false) {
+      const cut = read !== null && typeof read === "object" && read.truncated === true;
       return {
         refuse: {
-          reason:
-            `${what} was read back TRUNCATED (${raw.length} chars). A prefix of a policy document is a ` +
-            `policy with rules missing from it, and every missing rule reads here as "no such rule" — ` +
-            `which is the permissive direction. Raise maxBytes on ${who}.`,
+          reason: cut
+            ? `${what} was read back TRUNCATED (${raw.length} chars of ${String(read.bytes)} bytes). A prefix of a ` +
+              `policy document is a policy with rules missing from it, and every missing rule reads here as ` +
+              `"no such rule" — which is the permissive direction. Raise maxBytes on ${who}.`
+            : `cannot tell whether ${what} was read in full: ${who}'s projection says ` +
+              `${JSON.stringify(read === undefined ? null : read)}, not {ok: true, truncated: false}.`,
         },
       };
     }
