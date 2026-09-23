@@ -545,7 +545,9 @@ test("A FAN-OUT THAT PLANNED ZERO BRANCHES STILL RELEASES AND STILL SUCCEEDS —
  *     it then declared `onBranchError: "fail"` (since `DESIGN.md` D9 that half ships as
  *     `two-person-veto.json`), so one rejection fires the PRE-EXISTING arm on both
  *     engines and the first cut never got a word in (measured). The shape is what matters; the
- *     graph that happens to ship carries a posture that hides it.
+ *     graph that shipped then carried a posture that hides it. The canonical file now declares
+ *     `"skip"`, which does NOT hide it, and `test/graph/two-person-approval.test.ts` drives it
+ *     over every one-dissenter ordering.
  *   - `degradedSpec` below: a fanned branch of two nodes where the FIRST wrote and succeeded and
  *     the second threw. Every coordinate is lost, so the run failed and discarded `seen`, where
  *     the base read `seen: ["a","b"]` — under a message saying the run "did no work".

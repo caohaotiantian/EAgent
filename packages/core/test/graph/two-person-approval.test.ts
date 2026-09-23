@@ -327,27 +327,30 @@ test("QUORUM · THE FILE SAYS SO IN ITS OWN WORDS — quorum, outvoted, the floo
 // ── two-person-veto.json: VETO ──────────────────────────────────────────────
 
 test("VETO · THE FIRST REJECT DECIDES — any rejection before the second approval fails the run with nothing written, in every ordering", async () => {
-  // `onBranchError: "fail"` is read before `k` ever matters. Every position where the dissenter
-  // votes before the second approval is here, by WHO dissents and by WHERE their vote falls — the
-  // veto must not depend on which of the three it is.
+  // `onBranchError: "fail"` is read before `k` ever matters. Swept over every ordering and every
+  // dissenter, so the veto does not depend on which of the three it is or where their vote falls;
+  // the orderings where the dissenter votes LAST are the product limit, asserted in the next test.
   for (const dissenter of PEOPLE) {
-    const others = PEOPLE.filter((w) => w !== dissenter);
-    for (const votes of [
-      [[dissenter, "reject"], [others[0]!, "approve"], [others[1]!, "approve"]],
-      [[others[0]!, "approve"], [dissenter, "reject"], [others[1]!, "approve"]],
-    ] as readonly (readonly Vote[])[]) {
+    for (const order of ORDERS) {
+      if (order[2] === dissenter) continue;
+      const votes = order.map((who): Vote => [who, who === dissenter ? "reject" : "approve"]);
       const r = await drive(VETO, votes);
       const where = votes.map(([w, h]) => `${w}:${h}`).join(" ");
-      assert.deepEqual(r.wrote, [], `${where}: ${dissenter} rejecting before the quorum must stop the write, not be outvoted`);
+      assert.deepEqual(r.wrote, [], `${where}: ${dissenter} rejecting before the second approval must stop the write, not be outvoted`);
       assert.equal(r.status, "failed", where);
       assert.equal(r.error, CODES.E_HUMAN_APPROVAL_REQUIRED, `${where}: named by the rejecting gate, not by the barrier`);
     }
   }
+  // Two rejections and one approval, every ordering: fails for the same reason and NOT because
+  // the quorum was short — the first rejection decided, so the code is the gate's, not the barrier's.
+  for (const approver of PEOPLE) {
+    for (const order of ORDERS) {
+      const votes = order.map((who): Vote => [who, who === approver ? "approve" : "reject"]);
+      const where = votes.map(([w, h]) => `${w}:${h}`).join(" ");
+      assert.deepEqual(await drive(VETO, votes), { status: "failed", wrote: [], error: CODES.E_HUMAN_APPROVAL_REQUIRED }, where);
+    }
+  }
   assert.deepEqual(await drive(VETO, [["alice", "reject"], ["bob", "reject"], ["carol", "reject"]]), {
-    status: "failed", wrote: [], error: CODES.E_HUMAN_APPROVAL_REQUIRED,
-  });
-  // Fails for the same reason and NOT because the quorum was short: the first rejection decided.
-  assert.deepEqual(await drive(VETO, [["alice", "approve"], ["bob", "reject"], ["carol", "reject"]]), {
     status: "failed", wrote: [], error: CODES.E_HUMAN_APPROVAL_REQUIRED,
   });
 
@@ -362,10 +365,11 @@ test("VETO · PRODUCT LIMIT — a late reject, after the short-circuited write, 
   // The barrier short-circuits on two approvals, `save` runs, and the gate the short-circuit left
   // open is still answerable — so the third vote fails a run whose effect already happened. Two
   // approvals are the point of no return. This is what the file SAYS, not a defect it waits on;
-  // whether an irreversible effect may short-circuit is a separate question D9 did not decide.
-  for (const late of PEOPLE) {
-    const first = PEOPLE.filter((w) => w !== late);
-    const votes: readonly Vote[] = [[first[0]!, "approve"], [first[1]!, "approve"], [late, "reject"]];
+  // whether an effect may short-circuit is a separate question D9 did not decide. Every ordering
+  // in which the dissenter votes last.
+  for (const order of ORDERS) {
+    const late = order[2]!;
+    const votes = order.map((who): Vote => [who, who === late ? "reject" : "approve"]);
     const r = await drive(VETO, votes);
     const where = votes.map(([w, h]) => `${w}:${h}`).join(" ");
     assert.equal(r.status, "failed", `${where}: the run is marked failed`);
