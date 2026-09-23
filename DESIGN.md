@@ -437,9 +437,10 @@ refusing a real commit this wave — `check-surface.mjs` printed `added: BlockFi
 union was made module-private. The open-row count ROSE across three settlements — **46 → 51 → 56**,
 counted with `TODO.md`'s own census command at `bde693e2`, `0a9483c0` and `279b5c73` — because
 strangers drove the binary, not because anything decayed. **What is not started is the product.**
-These three items are what a maintainer does next. **Items 29 and 31 wait on the owed-decision list
-after item 31; item 30 no longer does — it was DECIDED on 2026-09-22 as D8 above and now waits on
-its BUILD.** Items 18 and 24 wait on none of it; each closes on the terms written in its own row and
+These three items are what a maintainer does next. **Item 31 waits on the owed-decision list after
+item 31; item 30 no longer does — it was DECIDED on 2026-09-22 as D8 above and now waits on its
+BUILD — and item 29 no longer does either: DECIDED 2026-09-23 and built short of the publish, it
+waits on the maintainer's publish alone.** Items 18 and 24 wait on none of it; each closes on the terms written in its own row and
 cell.
 
 **29 · Distribution — a published binary and a stranger-facing install.** *Moved here out of
@@ -481,6 +482,39 @@ not discovered later: `TODO.md` §H.1 says verbatim *"Reopens on more than one o
 published binary"*. §D's single-operator framing is not disturbed by publishing as such — of the
 things that rest on it, the one that names a published artifact is §H.1, and the permanent
 admission refusal rests on the run RATE rather than on who can obtain the binary.
+
+**DECIDED 2026-09-23 by the maintainer, and BUILT short of the publish.** The package is
+**`@caohaotiantian/loom`** — the `@loom` npm scope belongs to a third party, so the first repro above
+can never pass as written — with the `loom` bin name kept, version `0.1.0`, Node floor `>=24`; and
+everything is built and verified LOCALLY: no `npm publish`, no release, no tag. `private: true`
+STAYS, because removing it IS the publish act and that act is the maintainer's. What landed:
+
+- **The package**: name, version, `repository`/`homepage`/`bugs`, `publishConfig` for the public
+  registry, a README and LICENSE in `packages/core`, and `files` shipping `dist/**/*.js` and
+  `*.d.ts` only — no source maps pointing at a `src/` the tarball does not carry, no `.tsbuildinfo`.
+  Examples stay in the repository.
+- **`loom --version`** prints `loom 0.1.0` (it used to print the usage, exit 0, on every build —
+  which also made the first repro above pass against ANY build once the name resolved), and an
+  unknown flag with no verb is refused, exit 1, instead of printing the usage.
+- **An installed `loom` below the floor refuses in one sentence, exit 2.** `bin` is `dist/bin.js`,
+  which has no static imports: Node 22.1 used to die at ESM link time on the static `node:sqlite`
+  import, before any check in `cli.ts` could run.
+- **`scripts/pack.mjs --out DIR`** compiles, refuses a `dist` file with no source, and packs;
+  **`scripts/smoke-install.mjs <tgz|binary>`** installs it offline in a temp HOME — project and
+  `-g --prefix` — asserts the `loom` it runs resolves outside the repo, and runs README's
+  `copy.json` (with `replay` → `match: true`) and gated example through it. CI's `install` job runs
+  both on Linux and macOS; the `binary` job smokes its binary. Neither is in `npm run check`.
+
+**Item 29 CLOSES only on a publish receipt from a machine with no clone**, pasted into this item:
+
+```
+docker run --rm node:24-slim sh -c 'npm i -g @caohaotiantian/loom@0.1.0 && loom --version'
+```
+
+printing `loom 0.1.0`. **After that, and not before**, come the two things this item deliberately
+did not build: a release workflow (tarball to npm, SEA binaries to a GitHub release — the `binary`
+job builds one per commit and uploads nothing), and `TODO.md` §H.1's reopening, which the publish
+triggers. `TODO.md` §H.15 carries the same closing condition.
 
 **30 · The channel-shape decision: what a channel carries when a tool fails, truncates, or holds a
 secret — DECIDED 2026-09-22 as D8, and the item is now its IMPLEMENTATION.** §A.82, §A.83 and §A.90

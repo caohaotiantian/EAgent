@@ -101,7 +101,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 16 | 14 | 2 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the other, opened 2026-09-22b and closing with `DESIGN.md` item 29**. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
+| §H | 17 | 14 | 3 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -477,7 +477,7 @@ through `#invokeTool`, journaled `compensation.recorded` in three states. What i
   ran.
   **RESIDUE — the decision this row asked for is still OPEN, and is now the whole of what it carries.**
   `stripControlChars` is an INTERNAL export (`declared-inputs.ts` is not re-exported from `index.ts`),
-  but `truncate` itself is still in `@loom/core`'s public surface, because `index.ts:64` is
+  but `truncate` itself is still in `@caohaotiantian/loom`'s public surface, because `index.ts:64` is
   `export * from "./server/http.ts"` and a `export *` barrel has no narrower way to keep a name
   importable by its own test. `scripts/surface.json` is unchanged at 541 — the name did not move, the
   reason for it did. **Closes when** somebody decides whether `truncate` should be public at all;
@@ -3355,6 +3355,12 @@ Each traces to a decision in `DESIGN.md`.
   cannot check an artifact: a binary built before the guard existed does not carry it and cannot say
   so — measured 8 days and 48 files behind, exit 0, silent. Deliberately NOT in `npm run check`.
   **Reopens on** more than one operator, or a published binary.
+  **2026-09-23: that reopening is now one act away** — `DESIGN.md` item 29 made the npm package
+  publishable (`private: true` is all that stops it), so the maintainer's publish reopens this row.
+  What it reopens ON is narrower than "a binary": an npm-installed `loom` is `dist/`, not the SEA,
+  and has no sources beside it, so the freshness guard never applies to it; what goes stale there
+  is a user's installed VERSION, which `loom --version` now answers. A SEA binary published to a
+  release would reopen the row in its original sense.
 - ~~**H.2 · The 2026-08-29 renumber broke FOURTEEN in-tree citations of this file.**~~ CLOSED —
   thirteen by `814e283` and a fourteenth its own command could not see (`cli.ts` wrote `TODO §D.19`
   with no `.md`, and the published grep hard-required `TODO\.md`). Two resolved after the renumber to
@@ -3726,6 +3732,32 @@ Each traces to a decision in `DESIGN.md`.
   refusal rests on the run RATE (§Z, and `DESIGN.md`'s "Deliberately not sequenced") and §E.1 on
   team size, and a registry entry moves neither. §H.0 does not rest on it at all — it is a
   delegation-gate decision the maintainer already took.
+  **2026-09-23 — everything short of the publish landed, and the row stays OPEN.** The maintainer
+  decided the name (`@caohaotiantian/loom` — the `@loom` scope belongs to someone else, so the
+  `npx @loom/core` repro above can never pass) and that nothing goes outward from a lane. What
+  exists now: `node scripts/pack.mjs --out DIR` packs `caohaotiantian-loom-0.1.0.tgz` from a fresh
+  compile, and `node scripts/smoke-install.mjs <tgz|binary>` installs it outside the repository and
+  runs README's first two examples through it (CI's `install` job, Linux and macOS); a real
+  `loom --version`; and an installed `loom` that refuses below Node 24 in one sentence, exit 2.
+  **`private: true` STAYS, so the silence above still holds** — `npm publish` in `packages/core`
+  still exits 0 and publishes nothing — and it still matters until the maintainer removes that
+  line and publishes, because until then a CI step checking only the exit code would report a
+  release that did not happen. **Closes on a publish receipt from a machine with no clone**:
+  ```
+  docker run --rm node:24-slim sh -c 'npm i -g @caohaotiantian/loom@0.1.0 && loom --version'
+  ```
+  printing `loom 0.1.0`.
+
+- **H.16 · The OTLP instrumentation scope still says `@loom/core/telemetry`.** *(Opened 2026-09-23
+  by the item-29 lane, which renamed the package everywhere prose names it and deliberately left
+  this.)* `telemetry/otlp.ts`'s `SCOPE_NAME` is written into every `ExportTraceServiceRequest` as
+  `scopeSpans[].scope.name`, which is what a collector groups spans by — so renaming it is a WIRE
+  change to a value an operator's dashboards may already filter on, not a doc edit. Repro:
+  `/usr/bin/grep -an 'SCOPE_NAME = ' packages/core/src/telemetry/otlp.ts` →
+  `const SCOPE_NAME = "@loom/core/telemetry";`. **Closes when** somebody decides whether it becomes
+  `@caohaotiantian/loom/telemetry` (most naturally at the first publish, before anyone outside has
+  a dashboard on it) or stays as an opaque name. The `Symbol.for("@loom/core:…")` keys are NOT this
+  row: they never leave the process and must only agree with each other.
 
 ---
 
