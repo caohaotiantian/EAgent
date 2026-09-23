@@ -10629,7 +10629,23 @@ export class Engine {
     // a secret out of a tool result after the result is durable has redacted nothing. This is
     // also where an output-size projection would live, since the journal keeps the whole thing
     // and only the transcript needs bounding.
+    const beforeHook = result.content;
     result = await this.#filterHook(ctx, task, "postTool", result);
+    // A HOOK THAT REWROTE THE CONTENT REWROTE THE FAILURE'S MESSAGE TOO. Before a tool could
+    // return a typed `error`, `#runToolNode` built the failure FROM `content`, so a `postTool`
+    // redactor covered the message a later node reads through the error projection (D8). A typed
+    // error carries its own copy of the text; if the hook changed `content` and left `error`
+    // alone, the unredacted copy would reach `task.failed` and the projection. The hook's word wins.
+    if (result.error !== undefined && result.content !== beforeHook) {
+      const e = toLoomError(result.error);
+      result = {
+        ...result,
+        error: new LoomError(e.class, e.code, String(result.content), {
+          ...(e.details === undefined ? {} : { details: e.details }),
+          ...(e.retryAfterMs === undefined ? {} : { retryAfterMs: e.retryAfterMs }),
+        }),
+      };
+    }
     const recorded = recordedToolResult(result);
 
     await this.#serialize(ctx.runId, () =>

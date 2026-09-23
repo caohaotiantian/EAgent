@@ -93,7 +93,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 93 | 62 | 31 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro.** open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two, with §A.90, now wait on an IMPLEMENTATION rather than on a shape, §D.10 having been answered) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 93 | 62 | 31 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro.** open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -2522,14 +2522,18 @@ exit code 0.
   $ loom replay <the chmod-000 run>
   {"match": true, "hermetic": true}
   ```
-  **What did NOT close with it, each named at D8's *Enforced* line:** `fs.write`, `fs.edit`,
-  `fs.glob`, `net.fetch` and `proc.exec` still THROW their jail refusals, which `#invokeTool`'s catch
-  flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a divergence; `fs.glob` and `fs.grep`
+  **What did NOT close with it, each named at D8's *Enforced* line:** `fs.write`, `fs.edit` and
+  `fs.glob` still THROW their jail refusals (and `net.fetch` its egress refusal), which `#invokeTool`'s
+  catch flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a divergence, and `proc.exec`
+  returns its allow-list refusal untyped; `fs.glob` and `fs.grep`
   still answer `(no matches)` for a directory their walk could not enumerate
   (`builtin/search-match.ts`'s bare `catch` around `readdirSync`) — an INCOMPLETE listing, which is
   §A.83's kind of fact, not this row's; a projection is REFUSED at compile, not served, for a source
-  inside a loop body or inside a fan-out the reader is not in; and `E_CAP_DENIED` also names a
-  capability the policy did not grant. The row as it stood before closing follows. *(From the third port's F5 —
+  inside or downstream of a loop body or inside a fan-out the reader is not in; `E_CAP_DENIED` also
+  names a capability the policy did not grant; and `grant-none.js` and `grant-weigh.js` were edited
+  IN PLACE under `@stable`, so replaying a grant-access journal recorded BEFORE this change through a
+  path that reached `first-grant` now refuses there (the old graph declares no `read-ledger:error`) —
+  inherent to editing a stable ref in place, recorded here so it is not rediscovered. The row as it stood before closing follows. *(From the third port's F5 —
   `docs/workflow-port-2026-09-22b.md`. **The priority row of this settlement.**)* Files:
   `packages/core/src/builtin/tools.ts` (one `try` around the open, returning
   `{content: "cannot read …", isError: true}`) and **`Engine.#runToolNode`** in

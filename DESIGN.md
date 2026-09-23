@@ -245,14 +245,17 @@ the failure and the read, a replay, the six-field type pin, every compile refusa
 `test/examples-grant.test.ts` (one test per `grant-access` ending, each asserting the ledger's
 bytes). *Narrower than this section's words, deliberately:* the READERS are a `function` body and an
 `evaluator{kind: "assertion"}` body only — an `agent`, `human_gate`, `tool` or `router` error arm is
-refused at compile, because this phase has not decided how an untrusted fact appears in a prompt, a
-gate payload, an argument or an expression; widening is additive. *Residue:* a source inside a loop
-body or inside a fan-out the reader is not in is REFUSED rather than served (the reader's iteration
-is not threaded into `viewFor`); `E_CAP_DENIED` is also the code for a capability the policy did not
-grant, so "the jail refused this path" is distinct from missing and unreadable but not from every
-other refusal; `fs.write`, `fs.edit`, `fs.glob`, `net.fetch` and `proc.exec` still THROW their jail
-refusals, which `#invokeTool` flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a
-divergence; `fs.glob`/`fs.grep` still answer `(no matches)` for a directory they could not
+refused at compile, because this phase has not decided how an untrusted fact should be put into a
+prompt, an argument or an expression; widening is additive. (A `function` reader that is itself
+GATED does show the projection in its gate payload — `#gatePayload` builds the same view — bound by
+the view's hash like any read.) *Residue:* a source inside or downstream of a loop body, or inside a
+fan-out the reader is not in, is REFUSED rather than served (the reader's iteration is not threaded
+into `viewFor`); `E_CAP_DENIED` is also the code for a capability the policy did not grant, so "the
+jail refused this path" is distinct from missing and unreadable but not from every other refusal;
+`fs.write`, `fs.edit` and `fs.glob` still THROW their jail refusals (and `net.fetch` its egress
+refusal), which `#invokeTool` flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a
+divergence, and `proc.exec` returns its allow-list refusal untyped; a `postTool` hook that rewrites a
+failed result's `content` rewrites its typed error's `message` with it, but not its `details`; `fs.glob`/`fs.grep` still answer `(no matches)` for a directory they could not
 enumerate — an INCOMPLETE listing, which is the `truncated` producer's (§A.83's) kind of fact.
 **Decided by the maintainer 2026-09-22**; `TODO.md` §D.10 (not to be read as `TODO.md` §D.8, a different row one dot away) is
 struck with this answer and carries the options it was chosen from.

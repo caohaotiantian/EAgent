@@ -3477,12 +3477,12 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
  * reader on some path the executor takes (`canPrecede`, over `flowEdges`, which keeps `error`
  * edges). A projection of a node that can never have finished when the reader runs is always
  * absent — `ok` would never be readable at all, which is a graph bug, not a runtime condition.
- * Nor a node inside a loop body (it has one outcome per pass, and the runtime would not know
- * which pass the reader means), nor one inside a fan-out the reader is not inside (its outcomes
+ * Nor a node inside or downstream of a loop body (it has one outcome per pass, and the runtime
+ * would not know which pass the reader means), nor one inside a fan-out the reader is not inside (its outcomes
  * live on branches the reader never sees).
  *
- * AND NOT a node that observes a `pii` or `secret_ref` channel, directly or through a projection
- * it reads in turn. A failure message can quote the
+ * AND NOT a node that observes a `pii` or `secret_ref` channel, directly, through a projection
+ * it reads in turn, or by handing it to a subgraph child in `subgraph.inputs`. A failure message can quote the
  * failing node's input, and the classification field that would carry that fact across is
  * RESERVED with no producer yet (§A.82) — so the only honest answer this phase has is to refuse
  * the hop the compiler can see. The laundered case, which only a run can see, is covered by the
@@ -3538,11 +3538,20 @@ function checkErrorProjectionRead(
   // runs once per pass, so a reader in pass k+1 whose path skipped the source would be handed
   // pass k's outcome as if it were current. Serving the reader's own iteration is the fix that
   // would lift this, and it needs the iteration threaded into `viewFor`; until then, refused.
-  if (idx.loopEdges.some((e) => nodesInCycle(idx, e.from, e.to).has(source))) {
+  //
+  // "INSIDE" MEANS EVERY NODE THAT RUNS MORE THAN ONCE, not only the cycle's own members: a node
+  // hanging off a loop body by a `seq` edge inherits the pass's iteration and runs once per pass
+  // too (a reviewer drove one: a reader downstream of pass 0's FAILURE was served pass 2's
+  // `ok: true`). So the source is refused when it is on a cycle or reachable from one.
+  const onOrAfterLoop = idx.loopEdges.some((e) => {
+    const cycle = nodesInCycle(idx, e.from, e.to);
+    return cycle.has(source) || [...cycle].some((c) => canPrecede(idx, c, source));
+  });
+  if (onOrAfterLoop) {
     d.push({
       severity: "error",
       code: "GRAPH005_ERROR_PROJECTION_IN_LOOP",
-      message: `node "${reader.id}" reads "${name}", but "${source}" is inside a loop body and runs once per pass — this phase serves a projection only for a node that runs once per branch`,
+      message: `node "${reader.id}" reads "${name}", but "${source}" is inside or downstream of a loop body and runs once per pass — this phase serves a projection only for a node that runs once per branch`,
       at,
       fix: `branch on "${source}" with \`codes\` on its error edge, or read the projection of a node outside the loop`,
     });
@@ -3589,7 +3598,10 @@ function classifiedVia(spec: GraphSpec, idx: GraphIndex, id: NodeId, seen: Set<N
   seen.add(id);
   const node = idx.byId.get(id);
   if (node === undefined) return [];
-  return observedChannels(node).flatMap((c) => {
+  // AND a delegated subgraph's inputs: `E_SUBGRAPH_FAILED` carries the child's message verbatim,
+  // so a child quoting an input it was handed puts that input into this node's failure.
+  const handed = Object.values(node.subgraph?.inputs ?? {}).filter((c): c is string => typeof c === "string");
+  return [...observedChannels(node), ...handed].flatMap((c) => {
     const via = errorProjectionSource(c);
     if (via !== undefined) return classifiedVia(spec, idx, via, seen);
     const cls = spec.channels[c]?.classification;

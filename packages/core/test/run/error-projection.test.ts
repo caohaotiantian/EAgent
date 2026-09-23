@@ -33,6 +33,7 @@ import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { viewFor, type RunProjection, type TaskRecord } from "../../src/run/projection.ts";
+import { HookRegistry } from "../../src/run/hooks.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { resolver } from "./skeleton.ts";
@@ -215,6 +216,92 @@ test("a source that observes a secret only THROUGH another projection is refused
     .diagnostics.filter((d) => d.severity === "error" && d.at?.nodeId === "arm")
     .map((d) => d.code);
   assert.deepEqual(onArm, ["GRAPH005_ERROR_PROJECTION_CLASSIFIED"]);
+});
+
+test("a source hanging OFF a loop body runs once per pass too, and is refused like one inside it", () => {
+  // A reviewer's graph: `S` is not ON the cycle A->B->A, it hangs off `B` by a `seq` edge — and
+  // still runs once per pass, because the iteration travels along the edge. Served "highest
+  // iteration", a reader downstream of pass 0's FAILURE was handed pass 2's `ok: true`. This
+  // compiled clean until the refusal covered every node reachable from a cycle.
+  const s = spec(
+    [
+      { id: "A", type: "function", reads: ["path"], writes: ["doc"], function: { ref: "function/a@stable" } },
+      { id: "B", type: "function", reads: ["doc"], writes: ["path"], function: { ref: "function/b@stable" } },
+      { id: "r", type: "tool", reads: ["path"], writes: ["doc"], tool: { name: "fs.read", version: "1.0", args: { path: "${path}" } } },
+      ARM(),
+    ],
+    [
+      { id: "ab", from: "A", to: "B", kind: "seq" },
+      { id: "back", from: "B", to: "A", kind: "loop", until: "doc == \"x\"", maxIterations: 3 },
+      { id: "off", from: "B", to: "r", kind: "seq" },
+      { id: "failed", from: "r", to: "arm", kind: "error" },
+    ],
+  );
+  assert.ok(codes(s).includes("GRAPH005_ERROR_PROJECTION_IN_LOOP"), JSON.stringify(codes(s)));
+});
+
+test("a SUBGRAPH handed a secret in `inputs` is a classified source, whatever it declares in `reads`", () => {
+  // `E_SUBGRAPH_FAILED` carries the child's message verbatim, so a child quoting an input it was
+  // handed puts that input into the projection. `observedChannels` does not see `subgraph.inputs`.
+  const s = {
+    ...spec(
+      [
+        { id: "sub", type: "subgraph", reads: [], writes: ["doc"], subgraph: { ref: "graph/child@stable", inputs: { k: "key" }, outputs: { doc: "r" } } },
+        { id: "arm", type: "function", reads: ["sub:error"], writes: ["out"], function: { ref: "function/arm@stable" } },
+      ],
+      [{ id: "failed", from: "sub", to: "arm", kind: "error" }],
+      { key: { type: "string", reduce: "replace", classification: "secret_ref" } },
+    ),
+    inputs: ["path", "key"],
+  } as GraphSpec;
+  const onArm = compile({ spec: s, resolver: resolver(), tools: FS_TOOLS, tenantCapabilities: ["fs:read"] })
+    .diagnostics.filter((d) => d.severity === "error" && d.at?.nodeId === "arm")
+    .map((d) => d.code);
+  assert.deepEqual(onArm, ["GRAPH005_ERROR_PROJECTION_CLASSIFIED"]);
+});
+
+test("a `postTool` hook that redacts a failed read's CONTENT redacts the MESSAGE the arm reads too", async () => {
+  // Before `fs.read` returned a typed error, the failure was built FROM `content`, so a redactor
+  // covered it. A typed error carries its own copy of the text, which the hook never sees.
+  const ws = workspace();
+  try {
+    const hooks = new HookRegistry();
+    hooks.register("hook/redact@stable", (input) => ({ ...(input as object), content: "[redacted]" }));
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: ws.root, deny: [] })) if (t.name === "fs.read") tools.register(t);
+    const functions = new FunctionRegistry();
+    functions.register("function/arm@stable", ((view: { get: (c: string) => unknown }) => ({ writes: { out: { arm: view.get("r:error") ?? "ABSENT" } } })) as never);
+    functions.register("function/ok@stable", (() => ({ writes: { out: { ok: true } } })) as never);
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models: new ModelRegistry(),
+      hooks,
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: ["fs:read"], systemFloor: "out", budget: { runUsd: 1 } },
+    });
+    const s = { ...spec([READ, OK, ARM()], EDGES), hooks: { postTool: ["hook/redact@stable"] } } as unknown as GraphSpec;
+    const graph = compileOrThrow({ spec: s, resolver: resolver(), tools: FS_TOOLS, tenantCapabilities: ["fs:read"] });
+    const runId = await engine.submit({ graph, inputs: { path: "out/SECRET-NAME.json" } });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+    assert.deepEqual(p.channels["out"], { arm: { ok: false, code: CODES.E_FS_NOT_FOUND, message: "[redacted]" } });
+    // AND DURABLY: both journaled copies of the message are the hook's. (`details.path` and the run's
+    // own input still name the path — the hook rewrote `content`, which is all it asked to.)
+    const messages: string[] = [];
+    for await (const e of store.read(runId, 1)) {
+      if (e.type === "effect.completed" && String(e.payload.key).includes(":tool:")) messages.push(String((e.payload as unknown as { result: { error: { message: string } } }).result.error.message));
+      if (e.type === "task.failed") messages.push(String((e.payload as unknown as { error: { message: string } }).error.message));
+    }
+    assert.deepEqual(messages, ["[redacted]", "[redacted]"]);
+  } finally {
+    ws.dispose();
+  }
 });
 
 test("a source INSIDE A LOOP BODY, or inside a fan-out the reader is not in, is refused", () => {
