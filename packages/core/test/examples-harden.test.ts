@@ -38,6 +38,7 @@ import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 import { main } from "../src/cli.ts";
 import { isLoomError, toLoomError } from "../src/errors.ts";
@@ -1053,4 +1054,33 @@ test("a credential the RUNTIME's redactor does not recognise still never reaches
   } finally {
     ws.dispose();
   }
+});
+
+test("§A.83 — `parse` refuses every `load` projection short of {ok: true, truncated: false}, on a manifest that parses", () => {
+  // The engine hands a successful read's reader exactly `{ok: true, truncated, bytes}`, so a run
+  // cannot reach these; a guard refusing only on `truncated === true`, or ignoring `ok`, would
+  // pass every run-level test in this file. The body is called directly, on a VALID manifest, so
+  // the only thing that can refuse is the completeness guard.
+  const parse = runInNewContext(`(${readFileSync(join(EXAMPLES, "resources", "function", "harden-parse.js"), "utf8")})`) as (
+    view: { get: (c: string) => unknown; require: (c: string) => unknown },
+    ctx: unknown,
+  ) => { writes?: unknown; refuse?: { reason: string } };
+  const source = JSON.stringify({ name: "svc", image: "registry.internal/svc:1.0.0" });
+  const call = (fact: unknown) => {
+    const values: Record<string, unknown> = { source, manifestPath: "manifests/svc.json", "load:error": fact };
+    return parse({ get: (c) => values[c], require: (c) => values[c] }, {});
+  };
+  for (const [what, fact] of [
+    ["no projection", undefined],
+    ["null", null],
+    ["ok: true with no `truncated`", { ok: true, bytes: 10 }],
+    ["a non-boolean `truncated`", { ok: true, truncated: "false" }],
+    ["ok: false that says not truncated", { ok: false, truncated: false }],
+    ["a non-boolean `ok`", { ok: "true", truncated: false }],
+  ] as const) {
+    const out = call(fact);
+    assert.equal(out.writes, undefined, `${what}: must not seed the loop`);
+    assert.match(String(out.refuse?.reason), /read in full|TRUNCATED/, what);
+  }
+  assert.notEqual(call({ ok: true, truncated: false, bytes: source.length }).writes, undefined, "the control: a complete read seeds");
 });

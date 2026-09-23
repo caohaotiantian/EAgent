@@ -1234,3 +1234,66 @@ test("§A.83 — a REQUEST or a POLICY read back truncated is refused at `weigh`
     ws.dispose();
   }
 });
+
+// ── §A.83 review M-d: the completeness guards refuse what the engine never hands them ─────────
+
+/**
+ * The projections a body must REFUSE on — every one short of `{ok: true, truncated: false}`.
+ * The engine hands a successful `fs.read`'s reader exactly `{ok: true, truncated, bytes}`, so a
+ * graph run cannot pin these; a guard that refused only on `truncated === true`, or that ignored
+ * `ok`, would pass every run-level test in this file. So the bodies are called directly.
+ */
+const NOT_COMPLETE: readonly (readonly [string, unknown])[] = [
+  ["no projection", undefined],
+  ["null", null],
+  ["ok: true with no `truncated`", { ok: true, bytes: 10 }],
+  ["a non-boolean `truncated`", { ok: true, truncated: "false", bytes: 10 }],
+  ["ok: false that says not truncated", { ok: false, truncated: false, code: "E_X" }],
+  ["a non-boolean `ok`", { ok: "true", truncated: false }],
+];
+const COMPLETE = { ok: true, truncated: false, bytes: 10 };
+
+type Body = (view: { get: (c: string) => unknown; require: (c: string) => unknown }, ctx: { now: () => number }) => {
+  writes?: unknown;
+  refuse?: { reason: string };
+};
+const bodyOf = (name: string): Body => runInNewContext(`(${readFileSync(join(EXAMPLES, "resources", "function", name), "utf8")})`) as Body;
+const viewOf = (values: Record<string, unknown>) => ({
+  get: (c: string) => values[c],
+  require: (c: string) => {
+    if (!(c in values)) throw new Error(`no ${c}`);
+    return values[c];
+  },
+});
+const CTX = { now: () => Date.UTC(2026, 8, 23) };
+
+test("§A.83 — `prior` refuses every ledger projection short of {ok: true, truncated: false}", () => {
+  const prior = bodyOf("grant-prior.js");
+  const ledgerDoc = JSON.stringify({ grants: [] });
+  const request = readFileSync(join(EXAMPLES, "access", "requests", "docs-site-read.json"), "utf8");
+  for (const [what, fact] of NOT_COMPLETE) {
+    const out = prior(viewOf({ ledgerDoc, request, "read-ledger:error": fact }), CTX);
+    assert.equal(out.writes, undefined, `${what}: must not produce a history`);
+    assert.match(String(out.refuse?.reason), /read in full|TRUNCATED/, what);
+  }
+  assert.notEqual(prior(viewOf({ ledgerDoc, request, "read-ledger:error": COMPLETE }), CTX).writes, undefined, "the control: a complete read proceeds");
+});
+
+test("§A.83 — `weigh` refuses every request or policy projection short of {ok: true, truncated: false}", () => {
+  const weigh = bodyOf("grant-weigh.js");
+  const base = {
+    request: readFileSync(join(EXAMPLES, "access", "requests", "docs-site-read.json"), "utf8"),
+    policyDoc: readFileSync(join(EXAMPLES, "access", "policy.json"), "utf8"),
+    history: { source: "none", grants: [], ledger: [] },
+    "read-request:error": COMPLETE,
+    "read-policy:error": COMPLETE,
+  };
+  assert.notEqual(weigh(viewOf(base), CTX).writes, undefined, "the control: both reads complete, a decision is written");
+  for (const source of ["read-request:error", "read-policy:error"]) {
+    for (const [what, fact] of NOT_COMPLETE) {
+      const out = weigh(viewOf({ ...base, [source]: fact }), CTX);
+      assert.equal(out.writes, undefined, `${source} ${what}: must not decide`);
+      assert.match(String(out.refuse?.reason), /read in full|TRUNCATED/, `${source} ${what}`);
+    }
+  }
+});
