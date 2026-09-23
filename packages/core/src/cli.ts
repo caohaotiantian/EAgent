@@ -6011,29 +6011,46 @@ function announceResolvedGraph(files: ReadonlyMap<string, string>, diagnostics: 
  * (`compileMemo` makes it a cache hit) but would be a second place "the three directories" is
  * spelled, which is the exact drift this function exists to end.
  */
+/**
+ * ONE FAILED CANDIDATE, STRUCTURED — TODO.md §A.91, the reviewer's fifth fix round. `failed` used
+ * to be `readonly string[]`, a pre-joined display line per candidate, and `capabilityIssue` read it
+ * back with `f.includes("GRAPH017")` — a substring match over a string that ALSO carries the
+ * diagnostic's own MESSAGE (TODO.md §A.91's fourth round appended it). That produced a false
+ * positive (a ref named `function/GRAPH017-fix@stable` makes ANY refusal about it "capability
+ * advice"-worthy) and a false negative in the other direction the SAME substring test cannot see:
+ * `GRAPH017_CAPABILITY_NOT_DECLARED` also contains "GRAPH017" and needs no grant at all — the
+ * capability is undeclared, not denied, and no flag on this command line writes a graph's own
+ * `policy.capabilities`. `codes` is every ERROR diagnostic's code for this candidate — the FULL
+ * array `compile()` attaches (`{ details: { diagnostics: errors } }`), not the first three the
+ * thrown message's own text joins for display — so a GRAPH017 fourth in line is not lost either.
+ */
+interface FailedCandidate {
+  readonly path: string;
+  /** The display line — unchanged in shape from the pre-structuring `failed[i]`. */
+  readonly text: string;
+  readonly codes: readonly string[];
+}
+
 interface RecordedGraphResolution {
   readonly graph?: RunGraph;
   /** The ONE fragment naming why no graph resolved — present iff `graph` is undefined. */
   readonly refusal?: string;
   readonly index: ReadonlyMap<string, RunGraph>;
   readonly files: ReadonlyMap<string, string>;
-  readonly failed: readonly string[];
+  readonly failed: readonly FailedCandidate[];
   /**
-   * Whether ANY failed candidate's own diagnostic is a capability refusal (`GRAPH017`) — TODO.md
-   * §A.91, the reviewer's third fix round (N4). No caller branches on this any more: the fourth
-   * fix round (X1) moved the grant advice it gated INTO `refusal` itself, so every by-hash caller
-   * gets it from the one string they already quote rather than from a caller-specific conditional
-   * two of nine remembered to write. Kept on the return value anyway — it is a fact about WHY the
-   * resolution failed that a future caller may want to act on differently than prose in `refusal`
-   * allows (a structured field, not a string to parse), and it costs nothing `failed` was not
-   * already computing.
+   * Whether ANY failed candidate carries `GRAPH017_CAPABILITY_NOT_GRANTED` — TODO.md §A.91, the
+   * reviewer's third fix round (N4), keyed structurally since the fifth (see `FailedCandidate`).
+   * No caller branches on this any more: the fourth fix round (X1) moved the grant advice it gated
+   * INTO `refusal` itself, so every by-hash caller gets it from the one string they already quote.
+   * Kept on the return value anyway — a structured fact a future caller may still act on.
    */
   readonly capabilityIssue: boolean;
 }
 
 function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResolution {
   const { index, files, failed, diagnostics } = graphsByHash(ws);
-  const capabilityIssue = failed.some((f) => f.includes("GRAPH017"));
+  const capabilityIssue = failed.some((f) => f.codes.includes("GRAPH017_CAPABILITY_NOT_GRANTED"));
   const found = index.get(wanted);
   if (found !== undefined) {
     announceResolvedGraph(files, diagnostics, wanted);
@@ -6075,12 +6092,15 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
         // this process could hold would have fixed; the capability advice below is separate and
         // conditional on `capabilityIssue`, never folded into this clause.
         ` (${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} do${failed.length === 1 ? "es" : ""} not compile here and may be ` +
-        `this run's graph, unprovable either way until it compiles: ${failed.join("; ")})`) +
+        `this run's graph, unprovable either way until it compiles: ${failed.map((f) => f.text).join("; ")})`) +
     (capabilityIssue
-      ? // NO TRAILING PERIOD — every caller interpolates this as `${refusal}. <next sentence>`,
-        // so a period here produced ".. " at the join (measured: `approve`'s own repro). `refusal`
-        // ends mid-sentence throughout; the caller's own period closes it.
-        ` A candidate refused for a capability this invocation was not granted may compile with the grants the ` +
+      ? // A FULL STOP BEFORE THIS SENTENCE, NOT JUST A SPACE — TODO.md §A.91, the reviewer's fifth
+        // fix round: the failed-candidates clause above closes on `)`, and " A candidate…" right
+        // after it read as "…does not hold) A candidate…", one sentence bleeding into the next
+        // with no punctuation between them. NO TRAILING PERIOD AT THE END, still: every caller
+        // interpolates this as `${refusal}. <next sentence>`, so a period there produced ".. " at
+        // the join (measured: `approve`'s own repro, TODO.md §A.91's fourth round).
+        `. A candidate refused for a capability this invocation was not granted may compile with the grants the ` +
         `RUN had: a graph declaring net:fetch needs the same --egress, and one declaring proc:exec the same ` +
         `--allow-exec`
       : "");
@@ -6956,7 +6976,7 @@ function gateReadBound(args: Args): number {
 interface GraphIndex {
   index: Map<string, RunGraph>;
   files: Map<string, string>;
-  failed: readonly string[];
+  failed: readonly FailedCandidate[];
   /**
    * EVERY SUCCESSFUL CANDIDATE'S OWN WARNINGS, keyed by the hash it compiled to — TODO.md §A.91
    * M1. Populated even under `silent`, which only stops them reaching stderr as the sweep runs;
@@ -6965,6 +6985,29 @@ interface GraphIndex {
    * candidate along the way.
    */
   diagnostics: Map<string, readonly Diagnostic[]>;
+}
+
+/** The longest a sanitized diagnostic message may run before `sanitizeDiagnosticMessage` truncates it. */
+const MAX_DIAGNOSTIC_MESSAGE_LEN = 200;
+
+/**
+ * STRIP CONTROL CHARACTERS AND CAP LENGTH before a diagnostic's own message rides into a refusal an
+ * operator reads on a terminal — TODO.md §A.91, the reviewer's fifth fix round.
+ *
+ * A `Diagnostic.message` can quote GRAPH-AUTHOR-CONTROLLED text verbatim: `rule015Resources`
+ * interpolates a `subgraph.ref`/resource ref straight into `resource "${ref}" does not resolve`,
+ * and node ids, channel names and edge ids reach other messages the same way. Untrusted content
+ * did not stop being untrusted because it is now inside an error string this binary prints — a ref
+ * holding a newline or an ANSI escape (`\x1B[...`) would ride unescaped into this process's own
+ * stderr, letting a graph file forge extra lines or terminal control sequences inside a message the
+ * binary appears to have written itself. C0 (`\x00`–`\x1F`, and DEL `\x7F`) and C1 (`\x80`–`\x9F`)
+ * are stripped outright — none of them have a legitimate use inside a one-line refusal — and the
+ * result is capped at `MAX_DIAGNOSTIC_MESSAGE_LEN` so one candidate's message cannot dominate a
+ * summary meant to name several.
+ */
+function sanitizeDiagnosticMessage(s: string): string {
+  const stripped = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  return stripped.length > MAX_DIAGNOSTIC_MESSAGE_LEN ? `${stripped.slice(0, MAX_DIAGNOSTIC_MESSAGE_LEN)}…` : stripped;
 }
 
 /**
@@ -6985,7 +7028,7 @@ interface GraphIndex {
 function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
-  const failed: string[] = [];
+  const failed: FailedCandidate[] = [];
   const diagnostics = new Map<string, readonly Diagnostic[]>();
   const memo = compileMemo(ws);
   const seen = new Set<string>();
@@ -7010,14 +7053,22 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
         // wrong but not WHICH resource, node or channel — base's loud sweep printed the
         // diagnostic's own sentence (`resource "function/pre@stable" does not resolve …
         // resources/function/pre.js`) and this resolver's refusal fragment quoted only the code,
-        // a real loss the reviewer measured against base. `details.diagnostics[0]` is the same
-        // array `compile()` attaches for exactly this reason (`graph/compile.ts`'s own
-        // `{ details: { diagnostics: errors } }`); appended when present, and the bare message
-        // stands alone for a throw this shape does not cover (an unreadable file, a YAML parse
-        // error).
+        // a real loss the reviewer measured against base. `details.diagnostics` is the same array
+        // `compile()` attaches for exactly this reason (`graph/compile.ts`'s own
+        // `{ details: { diagnostics: errors } }`) — the FULL array, unsliced, never the first three
+        // the thrown message's own text joins for display, so a capability error fourth in line is
+        // still counted below. `first.message` is sanitized before it rides into a refusal an
+        // operator reads on a terminal — TODO.md §A.91's fifth fix round, `sanitizeDiagnosticMessage`
+        // — because it can quote graph-author-controlled text verbatim (a resource ref, a node id).
         const details = isLoomError(e) ? (e.details as { diagnostics?: readonly Diagnostic[] } | undefined) : undefined;
-        const first = details?.diagnostics?.[0];
-        failed.push(`${join(rel, file)}: ${(e as Error).message}${first === undefined ? "" : ` — ${first.message}`}`);
+        const allDiagnostics = details?.diagnostics ?? [];
+        const first = allDiagnostics[0];
+        // ALL CODES, NOT JUST THE FIRST — TODO.md §A.91's fifth fix round. The grant advice keys on
+        // WHETHER ANY of a candidate's error diagnostics is GRAPH017_CAPABILITY_NOT_GRANTED, and a
+        // candidate can carry several; keying on `codes[0]` alone would miss one listed second.
+        const codes = allDiagnostics.map((d) => d.code);
+        const text = `${join(rel, file)}: ${(e as Error).message}${first === undefined ? "" : ` — ${sanitizeDiagnosticMessage(first.message)}`}`;
+        failed.push({ path: join(rel, file), text, codes });
       }
     }
   }
