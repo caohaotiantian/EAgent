@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,7 +36,7 @@ import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { RunFolder, foldRun, viewFor, type RunProjection, type TaskRecord } from "../../src/run/projection.ts";
 import { HookRegistry } from "../../src/run/hooks.ts";
-import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
 import { resolver } from "./skeleton.ts";
 
@@ -903,6 +903,95 @@ test("§A.83 — completeness is folded from TOOL calls only, well-formed values
     assert.deepEqual(serve(extra(1, "r@root#0:tool:1", { bytes: Number.NaN })), { ok: true, truncated: false, bytes: 2 });
     // A REDO of the same call REPLACES its fact rather than adding a second one.
     assert.deepEqual(serve(extra(1, "r@root#0:tool:0", { truncated: true, bytes: 40 })), { ok: true, truncated: true, bytes: 40 });
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.96 — a RETRIED task whose served call is rolled back projects NO value: the mark is the row's seq, not the call's", async () => {
+  // Attempt 1 of an agent calls fs.write, then its next turn is rate-limited; attempt 2 is SERVED
+  // attempt 1's recorded call rather than writing again, and succeeds. So the call's seq is BEFORE
+  // attempt 2's lease. The run then fails and the rollback undoes that call. Keyed on the undone
+  // call's seq, the mark read as an older execution's and the projection said `ok: true` over a
+  // file that was gone (review probe `zz-review-a96-retry`).
+  const ws = workspace();
+  try {
+    let clock = NOW;
+    const store = new MemoryStateStore({ now: () => clock });
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: ws.root, deny: [] })) if (t.name === "fs.write") tools.register(t);
+    tools.register(fsRestore({ root: ws.root, deny: [] }));
+    const functions = new FunctionRegistry();
+    functions.register("function/boom@stable", (() => ({ refuse: { reason: "no" } })) as never);
+    let limited = false;
+    const models = new ModelRegistry();
+    models.register(
+      new MockModelAdapter({
+        pricePerMTok: 1,
+        script: (_req, turn) => {
+          if (turn === 0) return { toolCalls: [{ id: "w", name: "fs.write", arguments: { path: "out/w.txt", body: "hello" } }], finishReason: "tool_use" };
+          if (!limited) {
+            limited = true;
+            throw err.exhausted(CODES.E_PROVIDER_RATE_LIMIT, "429", { retryAfterMs: 10 });
+          }
+          return { text: "done", finishReason: "stop" };
+        },
+      }),
+      true,
+    );
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models,
+      now: () => clock,
+      sleep: async () => {},
+      resolver: resolver(),
+      policy: { granted: ["fs:write"], systemFloor: "out", budget: { runUsd: 5 } },
+    });
+    const base = spec(
+      [
+        {
+          id: "pay",
+          type: "agent",
+          writes: ["doc"],
+          unhandled: true,
+          retry: { maxAttempts: 3, backoff: "fixed", initialMs: 10 },
+          agent: { profile: "agent_profile/a@stable", prompt: "prompt/p@v1", maxTurns: 4, tools: ["fs.write"] },
+        },
+        { id: "boom", type: "function", reads: ["doc"], writes: ["out"], function: { ref: "function/boom@stable" } },
+      ],
+      [{ id: "then", from: "pay", to: "boom", kind: "seq" }],
+    );
+    const s = { ...base, policy: { ...base.policy, capabilities: ["fs:write"], budget: { costUsd: 5 } } } as GraphSpec;
+    const graph = compileOrThrow({ spec: s, resolver: resolver(), tools: Object.fromEntries(tools.list().map((t) => [t.name, t])), tenantCapabilities: ["fs:write"] });
+    const runId = await engine.submit({ graph, inputs: { path: "unused" } });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 10 && p.status === "running"; i++) {
+      clock += 60_000;
+      p = await engine.advance(runId);
+    }
+    const events: JournalEvent[] = [];
+    for await (const e of store.read(runId, 1 as Seq)) events.push(e);
+    // The shape this test exists for, asserted rather than assumed.
+    assert.equal(p.status, "failed", JSON.stringify(p.error ?? {}));
+    assert.ok(events.some((e) => e.type === "task.retry_scheduled" && e.taskId === ("pay@root#0" as TaskId)), "pay was retried");
+    const leases = events.filter((e) => e.type === "task.leased" && e.taskId === ("pay@root#0" as TaskId)).map((e) => e.seq);
+    const calls = events
+      .filter((e) => e.type === "tool.called" && (e.payload as { key: string }).key.startsWith("pay@root#0:tool:"))
+      .map((e) => e.seq);
+    assert.equal(calls.length, 1, "attempt 2 was SERVED the call, not handed a second one");
+    assert.ok(calls[0]! < leases[leases.length - 1]!, `the served call ${String(calls)} predates the last lease ${String(leases)}`);
+    const rows = events.filter((e) => e.type === "compensation.recorded");
+    assert.deepEqual(rows.map((e) => (e.payload as { outcome: string }).outcome), ["compensated"]);
+    assert.equal(existsSync(join(ws.root, "out", "w.txt")), false, "the write was rolled back");
+
+    const at = (q: RunProjection | undefined): unknown => viewFor(q!, {}, { segments: [] }, ["pay:error"]).get("pay:error");
+    assert.equal(at(p), undefined);
+    const { full, incremental } = folded(events);
+    assert.equal(at(full), undefined);
+    assert.equal(at(incremental), undefined);
   } finally {
     ws.dispose();
   }

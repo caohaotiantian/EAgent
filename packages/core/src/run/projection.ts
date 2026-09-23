@@ -103,16 +103,21 @@ export interface TaskRecord {
    */
   readonly lease?: { readonly workerId: string; readonly at: number; readonly fencingToken: number };
   /**
-   * The highest `compensatesSeq` among this Task's calls whose rollback was ATTEMPTED — a
-   * `compensation.recorded` with outcome `compensated` or `failed` — folded WITHOUT suppression.
+   * The seq of the latest `compensation.recorded` ROW naming this Task whose rollback was
+   * ATTEMPTED — outcome `compensated` or `failed` — folded WITHOUT suppression.
    *
    * It exists so the Task's error projection stops saying `ok: true` about an effect that no
    * longer stands (`TODO.md` §A.96). Rollback folds nothing else onto the Task: its state stays
    * `succeeded`, which is true of what the Task DID and false of what is left of it.
    *
-   * A SEQ AND NOT A FLAG, so a redo is not marked by the rollback of the run it replaced: the
-   * mark counts only when it is at or after the Task's current lease (`errorProjectionOf`), and a
-   * Task re-leased after a rewind holds a lease newer than every call the rewind undid.
+   * THE ROW'S OWN SEQ, NOT THE UNDONE CALL'S (`compensatesSeq`), and the difference is a RETRY:
+   * an attempt that is retried is SERVED the first attempt's recorded call (`#servedToolEffect`),
+   * so the call's seq sits BEFORE the lease that finally succeeded, and comparing it to that lease
+   * read the rollback as belonging to an older execution — measured, `{ok: true}` over a rolled-back
+   * file (review probe `zz-review-a96-retry`). A rollback row is appended after the execution it
+   * undoes, whichever attempt made the call; so the mark counts when the ROW is later than the
+   * Task's current lease (`errorProjectionOf`). A redo after a rewind leases again AFTER the rows
+   * the rollback wrote, and is not marked by them.
    *
    * UNSUPPRESSED, the rule `run/compensation.ts` states for its own read of these rows: a record
    * of an undo is not a thing a rewind undoes. A run that FAILED, rolled back a Task committed
@@ -903,15 +908,12 @@ const RUN_STATUS_EVENTS: ReadonlySet<string> = new Set([
  */
 function foldRollback(p: MutableProjection, e: JournalEvent): void {
   if (!isEvent(e, "compensation.recorded") || e.taskId === undefined) return;
-  const { outcome, compensatesSeq } = e.payload;
+  const { outcome } = e.payload;
   if (outcome !== "compensated" && outcome !== "failed") return;
   const t = p.tasks[e.taskId];
   if (t === undefined) return;
-  // A seq the payload does not carry as a number still marks the Task, at the highest seq there
-  // is: an undo the fold cannot place is read as covering the current execution, never as absent.
-  const at = typeof compensatesSeq === "number" && Number.isFinite(compensatesSeq) ? compensatesSeq : Number.MAX_SAFE_INTEGER;
   p.snapshot = undefined;
-  p.tasks[e.taskId] = { ...t, undoneAtSeq: Math.max(t.undoneAtSeq ?? -1, at) };
+  p.tasks[e.taskId] = { ...t, undoneAtSeq: Math.max(t.undoneAtSeq ?? -1, e.seq) };
 }
 
 /**
@@ -1555,11 +1557,11 @@ function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: N
   }
   if (best === undefined) return undefined;
   // ROLLED BACK IS NOT SUCCEEDED (§A.96). The state stays `succeeded` — rollback folds nothing
-  // else onto the Task — so the mark is read here: an undo attempted on a call this execution made
-  // (at or after its lease; any, when it holds none) means the effect may no longer stand, and
-  // the honest answer is no projection, never `ok: true`. A FAILED Task's `ok: false` stays: an
-  // undo does not make a failure less true.
-  const undone = best.undoneAtSeq !== undefined && best.undoneAtSeq >= (best.lease?.fencingToken ?? -1);
+  // else onto the Task — so the mark is read here: a rollback row written after this execution's
+  // lease (any, when it holds none) means the effect may no longer stand, and the honest answer
+  // is no projection, never `ok: true`. A FAILED Task's `ok: false` stays: an undo does not make a
+  // failure less true.
+  const undone = best.undoneAtSeq !== undefined && best.undoneAtSeq > (best.lease?.fencingToken ?? -1);
   if (best.state === "succeeded") return undone ? undefined : { ok: true, ...completeness(best) };
   if (best.state === "failed" && best.error !== undefined && typeof best.error.code === "string") {
     const { code, message } = best.error;
