@@ -748,21 +748,12 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
  * flag existed the same line was refused as unknown.
  *
- * `--help` HAS THE SAME HOLE, AND IT IS STILL OPEN — the fourth fix round's own correction of an
- * earlier false claim here (that it was "closed the same way") cited "TODO.md §H.19's N7", which
- * does not exist, and the fifth round's correction of THAT cited "TODO.md §A.91" — the by-hash
- * graph-resolution row this whole file's other fixes belong to, which has no row for a CLI flag
- * parsing hole either. Cited here as residue — to be filed — rather than a third guess at a row
- * number. N7 (TODO.md §H.19) closed a DIFFERENT hole: an UNKNOWN flag riding beside `--help` (`loom
- * --help --tokne x`) now refuses, because `assertKnownFlags` runs before `--help` is answered. That
- * is not this hole. `main` checks `args.flags["help"] === true` and nothing else — there is no
- * `helpFlag`-shaped reader that refuses a VALUE the way `versionFlag` does here — so `loom run
- * g.json --input … --help 1` and `--help=yes` both still RUN THE GRAPH AND EXIT 0: `args.flags
- * ["help"]` is the string `"1"` or `"yes"`, `=== true` is false, the early return is skipped, and
- * nothing downstream refuses a KNOWN flag holding a value nobody reads. Measured directly: both
- * exit 0 and print the run's JSON, where `loom --version 1` refuses. Not closed here — it needs the
- * same `helpFlag` shape this function already is, a real (if small) code change outside every
- * round's scope so far.
+ * `--help` HAS THE SAME HOLE, AND IT IS STILL OPEN. `main` checks `args.flags["help"] === true` and
+ * nothing else — there is no `helpFlag`-shaped reader that refuses a VALUE the way `versionFlag`
+ * does here — so `loom run g.json --input … --help 1` and `--help=yes` both still RUN THE VERB AND
+ * EXIT 0: `args.flags["help"]` is the string `"1"` or `"yes"`, `=== true` is false, and nothing
+ * downstream refuses a KNOWN flag holding a value nobody reads. `loom --version 1` refuses the same
+ * shape of value; `--help` does not. Residue, to be filed.
  */
 function versionFlag(args: Args): boolean {
   const v = args.flags["version"];
