@@ -198,6 +198,30 @@ test.after(async () => {
   if (shared !== undefined) (await shared).dispose();
 });
 
+/**
+ * Like `freeze`/`cli`, but folds a THROW into the same shape — TODO.md §A.91's B1 fixture needs
+ * this, because `resolveRecordedGraph`'s warning/refusal text is printed to stderr from INSIDE
+ * `freezeSuite`, before a later, unrelated refusal (no exam; cohort too small) throws and unwinds
+ * past `cli`'s own return — which would otherwise discard everything captured on the way there.
+ */
+async function freezeCapture(dir: string, anchor: string, out: string, extra: string[] = []): Promise<{ code: number; out: string; err: string }> {
+  const outArr: string[] = [];
+  const errArr: string[] = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((c: string) => (outArr.push(String(c)), true)) as typeof process.stdout.write;
+  process.stderr.write = ((c: string) => (errArr.push(String(c)), true)) as typeof process.stderr.write;
+  try {
+    const code = await main(["suite", "freeze", "--cohort", anchor, "--workspace", dir, "--out", out, ...extra]);
+    return { code, out: outArr.join(""), err: errArr.join("") };
+  } catch (e) {
+    return { code: 1, out: outArr.join(""), err: `${errArr.join("")}${(e as Error).message}\n` };
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+}
+
 async function freeze(dir: string, anchor: string, out: string, extra: string[] = []): Promise<{ code: number; out: string; err: string }> {
   return await cli(["suite", "freeze", "--cohort", anchor, "--workspace", dir, "--out", out, ...extra]);
 }
@@ -432,6 +456,108 @@ test("CONTROL · A COHORT NOBODY JUDGED IS REFUSED, and refused DIFFERENTLY from
     );
   } finally {
     small.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// B1 · TODO.md §A.91 — the cohort's own graph is resolved BEFORE it is measured
+// ---------------------------------------------------------------------------
+
+/**
+ * A single scored run of a graph whose one non-input channel uses `last_write_wins_by_ts` —
+ * GRAPH013_CLOCK_DEPENDENT, a WARNING rather than a refusal, so the graph still compiles and the
+ * run still succeeds. Cheap on purpose: `resolveRecordedGraph` now runs before `examFor` and the
+ * `MIN_COHORT_SIZE` floor, so pinning that it announces a warning needs neither an attested exam
+ * nor thirty runs — one is enough to reach the resolver, which is the only thing under test.
+ */
+async function warnCorpus(): Promise<Fixture> {
+  const dir = mkdtempSync(join(tmpdir(), "loom-freeze-warn-"));
+  mkdirSync(join(dir, "graphs"), { recursive: true });
+  mkdirSync(join(dir, "resources", "function"), { recursive: true });
+  writeFileSync(join(dir, "resources", "function", "pick.js"), `(view) => ({ writes: { picked: (view.get("items") ?? []).slice() } })`);
+  writeFileSync(
+    join(dir, "resources", "function", "check.js"),
+    `(view) => {
+      const items = view.get("items") ?? [];
+      const picked = view.get("picked") ?? [];
+      return { writes: { verdict: { pass: picked.length === items.length, confidence: 1, detail: picked.length + "/" + items.length } } };
+    }`,
+  );
+  writeFileSync(
+    join(dir, "graphs", "pick.json"),
+    JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "pick-bench-warn", project: "demo", version: 1 },
+      policy: { posture: "out", capabilities: [] },
+      channels: {
+        items: { type: "array", reduce: "replace" },
+        // THE WARNING: a clock-dependent reducer on an ordinary function-node output, nothing
+        // to do with gates or tools — GRAPH013 fires on the channel declaration alone.
+        picked: { type: "array", reduce: "last_write_wins_by_ts" },
+        verdict: { type: "object", reduce: "replace" },
+      },
+      inputs: ["items"],
+      outputs: ["picked", "verdict"],
+      nodes: [
+        { id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+        {
+          id: "check",
+          type: "evaluator",
+          reads: ["items", "picked"],
+          writes: ["verdict"],
+          evaluator: { kind: "assertion", ref: "function/check@stable", threshold: 0.5 },
+        },
+      ],
+      edges: [{ id: "e", from: "pick", to: "check", kind: "seq" }],
+    }),
+  );
+  const r = await cli(["run", join(dir, "graphs", "pick.json"), "--workspace", dir, "--input", JSON.stringify({ items: ["a", "b"] })]);
+  assert.equal(r.code, 0, r.err);
+  const p = JSON.parse(r.out) as { runId: string; status: string };
+  assert.equal(p.status, "succeeded", r.out);
+  const scored = await cli(["score", p.runId, "--workspace", dir]);
+  assert.equal(scored.code, 0, `${scored.out}${scored.err}`);
+  return { dir, ids: [p.runId], dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("(a) A COHORT GRAPH THAT COMPILES WITH A WARNING IS ANNOUNCED, not silently frozen — TODO.md §A.91 B1", async () => {
+  const c = await warnCorpus();
+  try {
+    const out = join(c.dir, "warn-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    // The cohort is one run — no exam is attested and it is nowhere near MIN_COHORT_SIZE, so the
+    // command still fails downstream. What is pinned here is EARLIER: `resolveRecordedGraph`
+    // resolves the cohort's own graph before either of those refusals, and announces its warning
+    // when it does — the reviewer's case (a), reported gone in round 3.
+    assert.match(r.out + r.err, /GRAPH013_CLOCK_DEPENDENT/, `the resolved baseline's own warning must be announced:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+test("(b) A COHORT GRAPH THAT NO LONGER COMPILES IS DIAGNOSED HONESTLY, not blamed on the corpus — TODO.md §A.91 B1", async () => {
+  // ONE recorded, scored run — not thirty. `resolveRecordedGraph` now runs before `measureCohort`
+  // and the `MIN_COHORT_SIZE` floor, so a broken cohort graph is diagnosed as itself rather than
+  // as an empty population; a single run is enough to reach that diagnosis, which is the whole
+  // point of the fix (it used to require the reviewer's 30-run corpus to even notice the bug).
+  const c = await corpus(1, { score: true });
+  try {
+    // THE REVIEWER'S OWN REPRO: the cohort's own function resource, deleted out from under it.
+    rmSync(join(c.dir, "resources", "function", "pick.js"));
+    const out = join(c.dir, "broken-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND/, `the true reason must reach the operator:\n${r.out}${r.err}`);
+    assert.match(r.out + r.err, /graphs[\\/]pick\.json/, `it must name the broken file:\n${r.out}${r.err}`);
+    // THE FALSE DIAGNOSIS THIS FIX REMOVES: before B1, a broken cohort graph made `measureCohort`
+    // drop the (only) member as specless, and freeze reported "n = 0 ... Record more runs of this
+    // workflow first" — blaming the operator's corpus for the operator's graphs/ directory.
+    assert.doesNotMatch(r.out + r.err, /n = 0 comparable runs/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
+    assert.doesNotMatch(r.out + r.err, /Record more runs of this workflow first/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
   }
 });
 

@@ -11435,12 +11435,36 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     ...(bucketInput === undefined ? {} : { bucketInput }),
   });
   const key = cohortKeyOf(anchorT);
+  // RESOLVED BEFORE THE COHORT IS MEASURED, not after — TODO.md §A.91, the reviewer's third fix
+  // round (B1). This block used to sit below the `n < MIN_COHORT_SIZE` refusal, and
+  // `measureCohort` drops a member it could not measure — so an unpublished (or broken) cohort
+  // graph made every member specless and the FIRST thing an operator heard was "record more runs
+  // of this workflow", blaming their corpus for their `graphs/` directory. Driven on a 30-run
+  // corpus with the cohort's own resource deleted: the true reason (a GRAPH015 the resolver
+  // reports) never reached the operator at all. `promoteAgainstCohort` already gets this order
+  // right; this is the same fix, one verb over.
+  //
+  // THE COHORT'S OWN GRAPH HAS TO BE PUBLISHED — and not only for the reason
+  // `promoteAgainstCohort` needs it. The grader-channel exclusion below reads NODE TYPES, and
+  // without the spec every channel an `evaluator` wrote would be pinned as though it were the
+  // work. A suite that grades on the grader is the failure this whole verb is aimed at, so a
+  // missing spec is a refusal rather than a degraded freeze.
+  const resolvedBaseline = resolveRecordedGraph(ws, anchorT.cohort.graphHash);
+  const baseline = resolvedBaseline.graph;
+  if (baseline === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The ` +
+        `expectations exclude every channel an evaluator node wrote, and node types live in the spec — without it ` +
+        `this would freeze an exam that grades the grader. Restore those bytes to graphs/.`,
+    );
+  }
   // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
   // `golden` rests on this graph's own evaluator — which is what let a rigged grader write its
   // wrong outputs into the next exam as ground truth. The exam also FREEZES THE QUESTIONS:
   // recordings after `corpusThrough` are not cases until a human re-attests, and the corpus is
   // assembled from the attestation's own scan rather than from a listing window (`examCorpus`).
-  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], index.get(anchorT.cohort.graphHash)?.spec, { corpusOnly: true });
+  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], baseline.spec, { corpusOnly: true });
   if (exam === undefined) throw noExamRefusal(anchorT.cohort.workflow, anchorId, "freeze a suite from");
   const inCorpus = await examCorpus(ws, exam, anchorT, key, promotedGraphHashes, index, bucketInput);
   const afterCorpus = exam.recordings.filter((r) => r.graphHash === anchorT.authoredGraphHash && r.runId > exam.attestation.corpusThrough).length;
@@ -11471,23 +11495,8 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     );
   }
 
-  // THE COHORT'S OWN GRAPH, WHICH HAS TO BE PUBLISHED — and not for the reason
-  // `promoteAgainstCohort` needs it. The grader-channel exclusion below reads NODE TYPES, and
-  // without the spec every channel an `evaluator` wrote would be pinned as though it were the
-  // work. A suite that grades on the grader is the failure this whole verb is aimed at, so a
-  // missing spec is a refusal rather than a degraded freeze.
-  const graph = index.get(anchorT.cohort.graphHash);
-  if (graph === undefined) {
-    throw err.notFound(
-      CODES.E_RUN_NOT_FOUND,
-      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} ` +
-        `has that hash (${String(index.size)} searched). The expectations exclude every channel an evaluator node ` +
-        `wrote, and node types live in the spec — without it this would freeze an exam that grades the grader. ` +
-        `Restore those bytes to graphs/.`,
-    );
-  }
-  const evaluatorNodes = new Set(graph.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
-  const inputChannels = new Set<string>(graph.spec.inputs);
+  const evaluatorNodes = new Set(baseline.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
+  const inputChannels = new Set<string>(baseline.spec.inputs);
 
   interface Selectable {
     readonly runId: RunId;
