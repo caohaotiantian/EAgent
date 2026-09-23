@@ -66,9 +66,12 @@ jobs:
   # parallel with `check` and blocks nothing it does. Measured on the maintainer's machine,
   # 2026-09-02: `tsc` 2s, bundle+SEA+inject 5s, verify 4s.
   #
-  # The artifact is NOT uploaded. Building it proves it is reproducible from a known tree and
-  # that the guard survives the build; publishing 115 MB per commit is a distribution decision
-  # nobody has asked for.
+  # The artifact is NOT uploaded, and that is now a sequencing decision rather than an absence of
+  # one. `DESIGN.md` Sequence item 29 decided distribution on 2026-09-23: the package is
+  # `@caohaotiantian/loom`, built and verified locally, and the maintainer publishes it by hand.
+  # A release workflow — tarball to npm, binaries to a GitHub release — is the step AFTER that first
+  # publish, not a per-commit upload from this job. What this job proves is unchanged: the binary is
+  # reproducible from a known tree and the guard survives the build.
   binary:
     runs-on: ubuntu-latest
     steps:
@@ -85,3 +88,30 @@ jobs:
       # contain. `dist` is now a function of `src` by construction — see build-binary.mjs §0.
       - run: npm run build:binary
       - run: node scripts/verify-binary.mjs
+      # And the binary as a stranger gets it: copied out of the tree, the README's examples run.
+      - run: node scripts/smoke-install.mjs bin/loom
+
+  # THE INSTALL, DRIVEN — `DESIGN.md` Sequence item 29. Every other job runs `loom` out of the
+  # checkout, which cannot see the defects that live only in an installed copy: a `bin` that printed
+  # nothing through npm's symlink, a `--version` that printed the usage, a tarball that died at ESM
+  # link time on the wrong Node. `pack.mjs` compiles and refuses a `dist` file with no source;
+  # `smoke-install.mjs` installs the tarball offline into a temp HOME, locally and with
+  # `-g --prefix`, and runs the README's first two examples through it. Both platforms, because
+  # the install path is where they differ (npm's bin links, `#!/usr/bin/env node`).
+  #
+  # NOT in `npm run check`, which must not spawn npm or need a packed artifact. NOTHING IS
+  # PUBLISHED: `packages/core` stays `private: true` until the maintainer publishes by hand.
+  install:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: node scripts/pack.mjs --out out
+      - run: node scripts/smoke-install.mjs out/*.tgz

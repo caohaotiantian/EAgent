@@ -19,7 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as esbuild from "esbuild";
@@ -28,7 +28,28 @@ const require = createRequire(import.meta.url);
 const freshness = require("./binary-freshness.cjs");
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const OUT = "bin";
+/**
+ * WHERE THE BINARY GOES: `--out DIR`, resolved against the caller's cwd like any path argument, or
+ * `<repo>/bin` without it. Every OTHER path in this script is anchored at the repo root — the
+ * entry point, `node_modules/postject` — so running it from another directory builds the same
+ * thing instead of failing to find its inputs or leaving a `bin/` wherever it was started.
+ *
+ * The freshness guard looks for sources at `<parent of the binary's directory>/packages/core/src`,
+ * so `<repo>/bin` is checked against this tree, and a binary written where no such directory
+ * exists is a shipped copy and runs unchecked — which is the point of building one elsewhere.
+ */
+function outDir(argv) {
+  const at = argv.indexOf("--out");
+  if (at === -1) return join(repoRoot, "bin");
+  const dir = argv[at + 1];
+  if (dir === undefined || dir.startsWith("--")) {
+    console.error("build FAILED: --out needs a directory.");
+    process.exit(2);
+  }
+  return resolve(dir);
+}
+const OUT = outDir(process.argv.slice(2));
+const ENTRY = join(repoRoot, "packages", "core", "dist", "cli.js");
 const NAME = process.platform === "win32" ? "loom.exe" : "loom";
 const BUNDLE = join(OUT, "loom.bundle.cjs");
 const BLOB = join(OUT, "loom.blob");
@@ -72,7 +93,7 @@ const stamp = freshness.stampFor(repoRoot);
 // CJS, because Node's SEA loads a single CommonJS script. The ESM source is
 // converted here rather than in the package, so `dist/` stays standard ESM.
 await esbuild.build({
-  entryPoints: ["packages/core/dist/cli.js"],
+  entryPoints: [ENTRY],
   bundle: true,
   platform: "node",
   target: "node24",
@@ -97,7 +118,7 @@ const bundleBytes = statSync(BUNDLE).size;
 
 // ── 2. verify the bundle pulled in nothing ───────────────────────────────────
 const bundled = await esbuild.build({
-  entryPoints: ["packages/core/dist/cli.js"],
+  entryPoints: [ENTRY],
   bundle: true,
   platform: "node",
   format: "cjs",
@@ -139,7 +160,7 @@ if (process.platform === "darwin") {
 execFileSync(
   process.execPath,
   [
-    join("node_modules", "postject", "dist", "cli.js"),
+    join(repoRoot, "node_modules", "postject", "dist", "cli.js"),
     TARGET,
     "NODE_SEA_BLOB",
     BLOB,
@@ -165,5 +186,8 @@ rmSync(seaConfig, { force: true });
 const mb = (statSync(TARGET).size / 1024 / 1024).toFixed(1);
 console.log(`built ${TARGET} — ${mb} MB (application bundle: ${(bundleBytes / 1024).toFixed(0)} KB, 0 third-party modules)`);
 console.log(
-  `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — it refuses to run once ${stamp.dir} moves`,
+  OUT === join(repoRoot, "bin")
+    ? `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — it refuses to run once ${stamp.dir} moves`
+    : `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — from ${OUT} it checks ` +
+        `${join(dirname(OUT), stamp.dir)}, and runs unchecked where no such directory exists`,
 );

@@ -4,6 +4,9 @@ dist/
 build/
 bin/
 *.tsbuildinfo
+# scripts/pack.mjs --out out (what CI's install job writes), and any packed tarball
+/out/
+*.tgz
 
 # local runtime state (Loom data dir)
 .loom/
