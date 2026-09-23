@@ -1343,3 +1343,26 @@ test("§A.99 — a CASE ALIAS of a denied subtree is still denied (case-insensit
     s.cleanup();
   }
 });
+
+test("§A.99 — a workspace ROOT reached by a CASE ALIAS still undoes its own create (case-insensitive volumes)", async (t) => {
+  // `fs.write` records `at` in the filesystem's own spelling; the undo compares it with the root.
+  // Resolved with `realpath` (not `.native`) a case-aliased root keeps the alias's spelling, the
+  // recorded path is not "under" it, and the run's own create is refused — review round 3's N3.
+  const s = sandbox();
+  try {
+    const real = realpathSync(s.root);
+    const base = real.split("/").pop()!;
+    const alias = join(dirname(real), base.toUpperCase());
+    if (alias === real || !existsSync(alias)) {
+      t.skip("this volume is case-sensitive: the alias names nothing");
+      return;
+    }
+    const jail = { root: alias, deny: [".loom"] };
+    const w = await byName(builtinTools(jail), "fs.write").execute({ path: "f.txt", body: "B" }, ctx());
+    const r = await fsRestore(jail).execute(w.details as Record<string, unknown>, ctx());
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(join(real, "f.txt")), false, "the created file is removed");
+  } finally {
+    s.cleanup();
+  }
+});

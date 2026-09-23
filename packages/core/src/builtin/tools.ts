@@ -294,10 +294,14 @@ function bytesDigest(bytes: Buffer): string {
  * refusing if the bytes differ"). A change time moves on every later write, so it refused the
  * run's OWN rollback: create then overwrite one path in one run, and the reverse rollback first
  * puts the create's bytes back — which moves the change time — and then the create's undo
- * refused a file whose bytes were exactly what it wrote, leaving it standing. The consequence of
- * dropping it is recorded, not guarded: a second run that overwrote this run's file with the SAME
- * bytes is removed by this run's rollback, since the file is then the inode this run created
- * holding exactly the bytes this run wrote (residue).
+ * refused a file whose bytes were exactly what it wrote, leaving it standing.
+ *
+ * THE SET THIS REMOVES, named rather than exemplified (recorded, not guarded — residue): ANY file
+ * at the recorded path with the same device and inode, exactly one link, and bytes digesting to
+ * what this write wrote. That includes a file whose mode was changed after the create, one
+ * renamed away and back, one that was hard-linked and had the extra name unlinked again, and one
+ * that another writer — a later node, a person, a second run — rewrote with the SAME bytes. Each
+ * is this write's inode holding exactly this write's bytes, which is the maintainer's rule.
  */
 interface FileIdentity {
   readonly dev: string;
