@@ -1188,6 +1188,12 @@ different layer. Pinned by the FIRST of the two `RESIDUE` tests in `examples-har
 
 ### F12 · `fs.read` truncates at 200,000 characters and puts the marker INSIDE the content, so a big manifest reads as a syntax error
 
+*Note, 2026-09-24 (settlement): CLOSED as `TODO.md` §A.83 at `26a4f358`. `maxBytes` now counts
+bytes, the content is the prefix with no marker, and the fact is `{ok: true, truncated, bytes}` on
+`load`'s reserved projection, which `parse` reads as `"load:error"` — so the refusal quoted at the end
+of this entry is now worded from the projection, not from the marker. The entry below is the record
+as it stood.*
+
 **Tried.** Point the graph at a 1.2 MB manifest — an ordinary size for a real service definition with
 annotations on it.
 

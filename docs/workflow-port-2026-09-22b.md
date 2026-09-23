@@ -813,6 +813,10 @@ That run is parked on its gate, which is all F2 and F3 need — neither answers 
 
 ### F1 · `GRAPH010_CONCURRENT_WRITE` refuses the canonical error-handling shape
 
+*Note, 2026-09-24 (settlement): CLOSED as `TODO.md` §A.94 at `b7b44eda`/`5db93cf6`/`3731883a` —
+`grant-access` with `history: replace` now compiles clean. The shipped graph still uses
+`merge_object`; the entry below is the record as it stood.*
+
 **Tried.** The obvious graph. One node reads a file; on success a body parses it, on failure a body
 supplies the empty case. Both write the same channel, because they are two ways of producing one
 value.
@@ -885,6 +889,10 @@ at the one route that is wrong.
 ---
 
 ### F2 · A by-hash graph lookup COMPILES every graph in `graphs/` and prints the others' diagnostics
+
+*Note, 2026-09-24 (settlement): CLOSED as `TODO.md` §A.91 at `96c71bd6` … `6b1a47eb` — one
+resolver for every by-hash verb, silent about candidates the operator did not name. The entry below
+is the record as it stood.*
 
 **Tried.** Approve this graph's gate, in a workspace that also holds `harden-config.json`.
 
