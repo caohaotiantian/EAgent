@@ -3733,6 +3733,41 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
 }
 
 const MULTI_RUN = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
+const SINGLE_ARRIVAL = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
+
+/**
+ * The nodes a run can hand AT MOST ONE `task.ready` — so they run at most once, full stop.
+ *
+ * WHY THIS IS A QUESTION AT ALL: the fold's `task.ready` arm sets a Task back to `ready` whatever
+ * state it is in, so an arrival that lands AFTER the Task committed runs it again under the SAME
+ * id. Driven on `a -> b` beside `a -> c -> c2 -> c3 -> b`: `b`'s body ran twice. With `b` failing
+ * first and succeeding second, BOTH its `error` arm and its `seq` arm ran. A node with two inbound
+ * edges therefore runs once only when its arrivals happen to coincide — which is timing, and not a
+ * property of the graph.
+ *
+ * THE SET: a node on no cycle, no `loop` edge into it, and either no inbound edge (an entry) or
+ * exactly one inbound edge — not `join` (a barrier fires on termination) and not `fanout` (one per
+ * branch) — whose source is in the set. One run of the source commits one outcome, which fires each
+ * of its edges at most once.
+ */
+function singleArrival(idx: GraphIndex): ReadonlySet<NodeId> {
+  const cached = SINGLE_ARRIVAL.get(idx);
+  if (cached !== undefined) return cached;
+  const out = new Set<NodeId>();
+  const all = [...idx.byId.keys()];
+  if (new Set(idx.topoOrder).size === all.length) {
+    const onCycle = new Set<NodeId>();
+    for (const l of idx.loopEdges) for (const m of nodesInCycle(idx, l.from, l.to)) onCycle.add(m);
+    for (const id of idx.topoOrder) {
+      if (onCycle.has(id)) continue;
+      const ins = (idx.inbound.get(id) ?? []).filter((e) => e.kind !== "compensation");
+      if (ins.length === 0) out.add(id);
+      else if (ins.length === 1 && ins[0]!.kind !== "loop" && ins[0]!.kind !== "join" && ins[0]!.kind !== "fanout" && out.has(ins[0]!.from)) out.add(id);
+    }
+  }
+  SINGLE_ARRIVAL.set(idx, out);
+  return out;
+}
 
 /**
  * The nodes that can run at MORE THAN ONE ITERATION of one branch — a Task id is
@@ -3766,16 +3801,26 @@ const MULTI_RUN = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
  *     fan-out makes `X` one Task per branch. CONSERVATIVE: driven, a static barrier after a
  *     failing member fails the run rather than carrying the pass on, so this condition refuses
  *     more than it has been shown to need (so is the back-edge half of the first condition: a
- *     `loop` edge that is not a back-edge is simply not reasoned about, and its exits stay `top`). `test/graph/error-projection-multiplicity.test.ts` shows each of the
- *     OTHER conditions necessary, and the `error`-only rule too;
+ *     `loop` edge that is not a back-edge is simply not reasoned about, and its exits stay `top`);
+ *   - the body is a TREE from `H`: every other member has exactly one inbound edge, from a member,
+ *     and `H` has `L` and at most one more, from a `singleArrival` node — because a `task.ready`
+ *     that lands after a Task committed runs it AGAIN under the same id, so a member reached twice
+ *     can fail (the exit fires) and then succeed (the pass goes on);
  *   - no `error` edge out of `X` reaches `S` — on failure `X` activates its `error` edges (and its
  *     `join` edges, excluded above), nothing else;
  *   - `X` is `S`, or every forward path to `S` from an entry node or from any loop target passes
  *     through `X` — so pass `k` cannot reach `S` without `X#k`'s success;
  *   - and `C` is entered at ONE iteration: the classes of its outside predecessors join to
  *     something other than `top`, since a loop entered twice runs its last pass twice.
+ * THE TREE IMPLIES THREE OF THE OTHERS — "its cycle alone", dominance, and the one entry — and
+ * they are kept as the stated reasons rather than deleted: measured by mutation, removing any one
+ * of those three alone leaves every test green, while removing the tree, the `error`-only rule,
+ * the back-toward-`S` check or the two-arrival rule below each turns exactly one test red.
  * Then `X#k` failing means no `S#k`, so no pass `k+1`: the exit fires only in the last pass, and
- * every once-exit of `L` fires at that same `k`, which is why they share one class.
+ * every once-exit of `L` fires at that same `k`, which is why they share one class. And a `once`
+ * class reaching a node by TWO edges is `top` (the late arrival re-runs it), except when every one
+ * of them is a once-exit of the same loop — their sources lie on the tree's one path to `S`, so at
+ * most one fires.
  *
  * ONLY EVER QUIETER THAN WHAT IT REPLACED. `top` starts at cycle members and moves only along
  * forward edges, so every node in this set was already on a cycle or `canPrecede`-reachable from
@@ -3848,6 +3893,22 @@ function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
       if (stackKey(m) !== first || idx.byId.get(m)?.type === "join") return;
       if ((idx.outbound.get(m) ?? []).some((e) => e.kind === "fanout" || e.kind === "join")) return;
     }
+    // ONE ARRIVAL PER MEMBER PER PASS. A `task.ready` for a Task that already committed readies it
+    // AGAIN — failed or succeeded — so a member reached by two edges whose arrivals land at
+    // different times runs twice under one Task id, and a failure that "ended" the pass is
+    // followed by a success that carries it on (driven: `test/graph/error-projection-multiplicity`).
+    // So the body must be a TREE from `H`: every other member has exactly one inbound edge, from a
+    // member; `H` has `L` and at most one other, from a node that itself arrives once.
+    const single = singleArrival(idx);
+    for (const m of members) {
+      const ins = (idx.inbound.get(m) ?? []).filter((e) => e.kind !== "compensation");
+      if (m === loop.to) {
+        const outside = ins.filter((e) => e.id !== loop.id);
+        if (outside.length > 1 || outside.some((e) => !single.has(e.from) || e.kind === "join" || e.kind === "fanout")) return;
+      } else if (ins.length !== 1 || !members.has(ins[0]!.from) || ins[0]!.kind === "loop") {
+        return;
+      }
+    }
     const source = loop.from;
     const toSource = reaching(source);
     const starts = [...idx.entryNodes, ...loopTargets];
@@ -3862,8 +3923,9 @@ function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
     }
   });
 
-  // THE PROPAGATION. Classes only rise (unset < zero | once:i < top), so rounds converge; the
-  // cap is a backstop that fails closed rather than a bound anything relies on.
+  // THE PROPAGATION. Classes only rise (unset < zero | once:i < top), each node at most twice, and
+  // a round that changes nothing ends it — so there are at most 2n + 1 rounds. The cap sits past
+  // that: a backstop that fails closed, not a bound anything reaches.
   const cls = new Map<NodeId, string>();
   for (const m of onCycle) cls.set(m, "top");
   const join = (vals: readonly string[]): string | undefined => {
@@ -3885,13 +3947,13 @@ function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
     return join(vals);
   };
   for (let round = 0; ; round++) {
-    if (round > all.length + 2) return new Set(all);
+    if (round > 2 * all.length + 2) return new Set(all);
     let changed = false;
     for (const id of idx.topoOrder) {
       if (onCycle.has(id)) continue;
       const vals: string[] = entries.has(id) ? ["zero"] : [];
-      for (const e of idx.inbound.get(id) ?? []) {
-        if (e.kind === "loop" || e.kind === "compensation") continue;
+      const ins = (idx.inbound.get(id) ?? []).filter((e) => e.kind !== "loop" && e.kind !== "compensation");
+      for (const e of ins) {
         if (onCycle.has(e.from)) {
           const i = exitLoop.get(e.id);
           vals.push(i !== undefined && entryClass(i) !== "top" ? `once:${String(i)}` : "top");
@@ -3900,6 +3962,14 @@ function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
         const c = cls.get(e.from);
         if (c !== undefined) vals.push(c);
       }
+      // A `once` CLASS ARRIVING BY TWO EDGES IS NOT ONCE: the second arrival re-readies the Task
+      // (see the tree condition above), so the node runs twice at that one iteration. The one
+      // exception is every inbound edge being a once-exit of the SAME loop — their sources sit on
+      // the tree's one path to `S`, so an earlier one's failure means a later one never runs.
+      // Nodes of class `zero` are left as they were: two arrivals re-run them too, but that is
+      // true of a graph with no loop at all — a defect of its own, not this rule's to widen into.
+      const oneLoopsExits = ins.length > 0 && ins.every((e) => exitLoop.get(e.id) === exitLoop.get(ins[0]!.id) && exitLoop.has(e.id));
+      if (ins.length > 1 && vals.some((v) => v.startsWith("once:")) && !oneLoopsExits) vals.push("top");
       const next = join(vals);
       if (next !== undefined && next !== cls.get(id)) {
         cls.set(id, next);
@@ -5529,16 +5599,24 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
  * `error` edge) both write `history`, and GRAPH010 called them concurrent writers of a `replace`
  * channel (§A.94). They are exclusive by construction: `#commit` routes a failed outcome by
  * `#errorEdges` and a succeeded one by `#edgesToTake`, a `take` or a `steer` applies to a
- * SUCCEEDED outcome only, and a Task commits exactly one outcome. The workaround that shipped —
- * `merge_object` with `onConflict: "last_by_branch"` — bought a conflict arm that cannot fire.
+ * SUCCEEDED outcome only, and a Task that runs ONCE commits one outcome. The workaround that
+ * shipped — `merge_object` with `onConflict: "last_by_branch"` — bought a conflict arm that
+ * cannot fire.
+ *
+ * "RUNS ONCE" IS NOT "IS ONE TASK", and the first cut of this rule confused them. A second
+ * `task.ready` that lands after a Task committed runs it again under the same id, so `X` reached by
+ * two edges can fail (its `error` arm runs) and then succeed (its `seq` arm runs). A seeded
+ * random-graph oracle found it — `X` reached from `s` directly and from `s -> m -> m1 -> m3` — and
+ * `singleArrival` is the fix: `X` must be reachable by exactly one chain of single edges.
  *
  * THE PROPERTY, over `flowEdges` from the entry nodes, for some node `X`:
  *   - every path to `a` crosses a SUCCESS arm of `X` (`seq`, `conditional`, `fanout` — the kinds
  *     `#edgesToTake` takes and `#errorEdges` never does), so deleting those edges leaves `a`
  *     unreachable;
  *   - every path to `b` crosses an `error` edge of `X`, so deleting those leaves `b` unreachable;
- *   - `X` runs at most once per branch and is inside no fan-out (`multiRunNodes`, and an empty
- *     fan-out stack) — so there is ONE outcome, not one per pass or per branch;
+ *   - `X` is handed at most one `task.ready` (`singleArrival`: on no cycle, and one inbound edge
+ *     back to an entry) and is inside no fan-out (an empty fan-out stack) — so there is ONE
+ *     outcome, not one per pass, per branch or per arrival;
  *   - and no `join` node lies between `X` and either of them: a barrier fires on TERMINATION,
  *     failures included, so it can carry a path onward without `X`'s arm having been taken.
  * `join` edges out of `X` are in neither arm for the same reason, and a `loop` edge out of `X`
@@ -5548,7 +5626,7 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
  * operator `steer` can overrule; this rests on success and failure, which nothing overrules.
  */
 function outcomeExclusive(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
-  const multi = multiRunNodes(idx);
+  const single = singleArrival(idx);
   const reachableWithout = (cut: ReadonlySet<EdgeId>): Set<NodeId> => {
     const seen = new Set<NodeId>();
     const stack = [...idx.entryNodes];
@@ -5582,7 +5660,7 @@ function outcomeExclusive(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
   };
   for (const [x, outs] of idx.outbound) {
     const failure = outs.filter((e) => e.kind === "error");
-    if (failure.length === 0 || multi.has(x)) continue;
+    if (failure.length === 0 || !single.has(x)) continue;
     const stack = idx.fanoutEdgeStack.get(x);
     if (stack === undefined || stack.length > 0) continue;
     const success = outs.filter((e) => e.kind === "seq" || e.kind === "conditional" || e.kind === "fanout");

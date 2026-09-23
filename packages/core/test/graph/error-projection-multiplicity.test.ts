@@ -7,10 +7,13 @@
  * answers the question itself; these tests hold it to RUNS, not to its docstring:
  *
  *  - the ones it lets through run once, driven with bodies that fail and succeed on purpose;
- *  - the ones it still refuses really do run more than once — five conditions of a once-exit are
- *    each shown necessary by a graph that breaks only that one and runs the exit's target more
- *    than once (each goes green-to-red when its condition is deleted from `multiRunNodes`); the
- *    barrier condition is pinned as CONSERVATIVE, with the run that shows it;
+ *  - the ones it still refuses really do run more than once. Four rules are each NECESSARY — delete
+ *    one from `multiRunNodes` and exactly its test here goes red: `error` exits only, no error edge
+ *    back toward the source, the body is a tree (one arrival per member per pass), and a `once`
+ *    class arriving by two edges is `top`. Three more (one loop per cycle, the loop entered once,
+ *    dominance) are IMPLIED by the tree and kept as stated reasons: their graphs are refused and
+ *    shown to run twice, but deleting any one of them alone leaves everything green. The barrier
+ *    condition is pinned as CONSERVATIVE, with the run that shows it;
  *  - the row's own repro, a `conditional` exit, is one of those: a body's `take` bypasses `when`.
  */
 
@@ -73,10 +76,17 @@ function inLoop(ids: readonly string[], edges: readonly Edge[], source: string):
 }
 
 const FAIL = { refuse: { reason: "on purpose" } };
+const FAIL_ALWAYS: Body = () => FAIL;
 const ok = (writes: Record<string, unknown> = {}): unknown => ({ writes });
 
-/** Runs the graph with these bodies (default: succeed, and a loop source never settles). */
-async function run(spec: GraphSpec, bodies: Readonly<Record<string, Body>>): Promise<{ status: string; tasks: Record<string, number>; out: unknown }> {
+/**
+ * Runs the graph with these bodies (default: succeed, and a loop source never settles). `tasks`
+ * counts Task ids per node; `calls` counts BODY RUNS, which is larger when a Task is re-readied.
+ */
+async function run(
+  spec: GraphSpec,
+  bodies: Readonly<Record<string, Body>>,
+): Promise<{ status: string; tasks: Record<string, number>; calls: Record<string, number>; out: unknown }> {
   const functions = new FunctionRegistry();
   const calls = new Map<string, number>();
   for (const n of spec.nodes) {
@@ -107,7 +117,7 @@ async function run(spec: GraphSpec, bodies: Readonly<Record<string, Body>>): Pro
   for (let i = 0; i < 100 && p.status === "running"; i++) p = await engine.advance(runId);
   const tasks: Record<string, number> = {};
   for (const t of Object.values(p.tasks)) tasks[t.nodeId] = (tasks[t.nodeId] ?? 0) + 1;
-  return { status: p.status, tasks, out: p.channels["out"] };
+  return { status: p.status, tasks, calls: Object.fromEntries(calls), out: p.channels["out"] };
 }
 
 // ── the shape it lets through ────────────────────────────────────────────────
@@ -176,13 +186,39 @@ test("c153566e's HOLE STAYS CLOSED: a node hanging off the body by `seq` runs on
 });
 
 test("NECESSARY: an `error` edge from the exiting node back toward the loop's source continues the loop", async () => {
-  // audit's failure takes BOTH of its error edges — the exit and one straight into `fix`.
-  const edges: Edge[] = [...BODY_EDGES, { id: "retry-anyway", from: "audit", to: "fix", kind: "error" }];
+  // audit's failure takes BOTH of its error edges — the exit, and the body's only way on to `fix`.
+  const edges: Edge[] = [
+    { id: "repair-on-failure", from: "audit", to: "fix", kind: "error" },
+    LOOP("fix", "audit"),
+    { id: "gave-up", from: "audit", to: "r", kind: "error" },
+  ];
   assert.equal(inLoop(BODY, edges, "r"), true);
   assert.equal((await run(graph(BODY, edges), { audit: () => FAIL })).tasks["r"], 3);
 });
 
-test("NECESSARY: a path to the loop's source that bypasses the exiting node carries the pass on", async () => {
+test("NECESSARY: a member reached by TWO edges runs twice in one pass — its failure is followed by a success", async () => {
+  // A `task.ready` that lands after a Task committed readies it AGAIN, under the same id. `X` is on
+  // the only path to `fix`, so it dominates the loop's source — and still: its first arrival (from
+  // `head`) fails and takes the exit, its second (via m1 -> m2) succeeds and carries the pass on.
+  const ids = ["head", "X", "m1", "m2", "fix", "r"];
+  const edges: Edge[] = [
+    { id: "hx", from: "head", to: "X", kind: "seq" },
+    { id: "hm1", from: "head", to: "m1", kind: "seq" },
+    { id: "m1m2", from: "m1", to: "m2", kind: "seq" },
+    { id: "m2x", from: "m2", to: "X", kind: "seq" },
+    { id: "xf", from: "X", to: "fix", kind: "seq" },
+    LOOP("fix", "head"),
+    { id: "gave-up", from: "X", to: "r", kind: "error" },
+  ];
+  assert.equal(inLoop(ids, edges, "r"), true);
+  const res = await run(graph(ids, edges), { X: (_v, call) => (call % 2 === 0 ? FAIL : ok()) });
+  assert.equal(res.tasks["r"], 3, `r ran once per pass: ${JSON.stringify(res.tasks)}`);
+});
+
+test("REFUSED, TWO WAYS: a path to the loop's source that bypasses the exiting node carries the pass on", async () => {
+  // Both the tree condition (`fix` has two inbound edges) and dominance (`head -> fix` skips `audit`)
+  // refuse this; dominance is implied by the tree whenever the exit's source is a body member, so
+  // it is kept as the stated reason and not as a separately necessary one.
   const ids = ["head", "audit", "fix", "r"];
   const edges: Edge[] = [
     { id: "a", from: "head", to: "audit", kind: "seq" },
@@ -195,7 +231,27 @@ test("NECESSARY: a path to the loop's source that bypasses the exiting node carr
   assert.equal((await run(graph(ids, edges), { audit: () => FAIL })).tasks["r"], 3);
 });
 
-test("NECESSARY: a loop ENTERED once per pass of another loop runs its last pass once per entry", async () => {
+test("A ONCE-CLASS ARRIVING BY TWO EDGES is refused: the late arrival re-runs the node at the same iteration", async () => {
+  // r is a clean exit target; r -> a -> z and r -> b1 -> b2 -> b3 -> z reach `z` twice, the second
+  // arrival after `z` has committed.
+  const ids = [...BODY, "a", "b1", "b2", "b3", "z"];
+  const edges: Edge[] = [
+    ...BODY_EDGES,
+    { id: "ra", from: "r", to: "a", kind: "seq" },
+    { id: "rb1", from: "r", to: "b1", kind: "seq" },
+    { id: "b1b2", from: "b1", to: "b2", kind: "seq" },
+    { id: "b2b3", from: "b2", to: "b3", kind: "seq" },
+    { id: "az", from: "a", to: "z", kind: "seq" },
+    { id: "b3z", from: "b3", to: "z", kind: "seq" },
+  ];
+  assert.equal(inLoop(ids, edges, "r"), false, "r itself is still let through");
+  assert.equal(inLoop(ids, edges, "z"), true);
+  const res = await run(graph(ids, edges), { audit: FAIL_ALWAYS, z: (_v, call) => (call === 0 ? FAIL : ok()) });
+  assert.equal(res.tasks["z"], 1, "one Task id…");
+  assert.equal(res.calls["z"], 2, `…run twice: ${JSON.stringify(res.calls)}`);
+});
+
+test("REFUSED, AND RUNS TWICE (implied by the tree): a loop ENTERED once per pass of another loop runs its last pass once per entry", async () => {
   // Loop 1 (a <-> b) hands off to loop 2 (h2 <-> x2) by `seq` on every pass; x2's failure exits.
   const ids = ["a", "b", "h2", "x2", "r"];
   const edges: Edge[] = [
@@ -211,7 +267,7 @@ test("NECESSARY: a loop ENTERED once per pass of another loop runs its last pass
   assert.ok((res.tasks["r"] ?? 0) > 1, `r ran ${String(res.tasks["r"])} times: ${JSON.stringify(res.tasks)}`);
 });
 
-test("NECESSARY: a node on TWO loops' cycles — its failure ends one loop and drives the other", async () => {
+test("REFUSED, AND RUNS TWICE (implied by the tree): a node on TWO loops' cycles — its failure ends one loop and drives the other", async () => {
   // `h` heads two loops. For `s2 -> h` every condition holds on its own; but `h`'s failure also
   // takes `h -> s1`, and `s1 -> h` is the other loop's back-edge — one iteration counter, so the
   // failure that "exits" loop 2 starts the next pass. (The random-graph oracle found this shape.)

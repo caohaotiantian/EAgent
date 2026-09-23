@@ -153,6 +153,27 @@ test("STILL REFUSED, AND BOTH RUN: the deciding node on a loop decides once per 
   assert.deepEqual(res.ran, ["X", "a", "b", "fix"]);
 });
 
+test("STILL REFUSED, AND BOTH RUN: X reached by TWO edges fails on the first arrival and succeeds on the second", async () => {
+  // A `task.ready` landing after X committed readies it AGAIN under the same Task id. Found by the
+  // lane's seeded random-graph oracle against the runtime, on this rule's first cut, which asked
+  // only that X run once per pass: `s -> X` beside `s -> m -> m1 -> m3 -> X`.
+  const ids = ["s", "m", "m1", "m3", ...IDS];
+  const edges: Edge[] = [
+    { id: "sx", from: "s", to: "X", kind: "seq" },
+    { id: "sm", from: "s", to: "m", kind: "seq" },
+    { id: "mm1", from: "m", to: "m1", kind: "seq" },
+    { id: "m1m3", from: "m1", to: "m3", kind: "seq" },
+    { id: "m3x", from: "m3", to: "X", kind: "seq" },
+    ...ARMS,
+  ];
+  assert.equal(concurrent(graph(ids, ["a", "b"], edges)).length, 1);
+  const safe = graph(ids, ["a", "b"], edges, { h: { type: "array", reduce: "append_ordered" } });
+  let xRuns = 0;
+  const res = await run(safe, (id) => id === "X" && xRuns++ === 0);
+  assert.deepEqual(res.ran, ["X", "a", "b", "m", "m1", "m3", "s"]);
+  assert.deepEqual(res.h, ["b", "a"], "the failure arm, then the success arm");
+});
+
 test("STILL REFUSED: a join edge is in neither arm — a barrier fires on termination, failures included", () => {
   const spec = {
     ...graph(IDS, ["a", "b"], []),
