@@ -44,6 +44,19 @@ As a library:
 import { agent } from "@caohaotiantian/loom";
 ```
 
+The shipped `.d.ts` needs no `@types/node` — `Buffer`/`NodeJS.*` in a public signature would have
+forced every consumer to install it, so none remain. One TypeScript LIBRARY requirement does
+remain, and only surfaces if your own `tsconfig.json` sets an explicit `"target"`/`"lib"` older
+than the default `nodenext` infers (`esnext`): `bus.ts`'s `Subscription` uses `Disposable` (the
+TC39 explicit-resource-management interface, `using`/`Symbol.dispose`), which needs the
+`ESNext.Disposable` lib. `moduleResolution: "nodenext"` with no `"target"` set already gets it for
+free; a project pinning `"target": "es2022"` (or older) needs it added explicitly, alongside
+whatever else the target implies — it is additive, not a replacement for `"lib"`:
+
+```json
+{ "compilerOptions": { "target": "es2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"] } }
+```
+
 The human-gate walkthrough, the graph language, the extension points and what does not work yet
 are in the repository README: <https://github.com/caohaotiantian/EAgent#readme>.
 
