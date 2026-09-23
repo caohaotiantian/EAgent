@@ -17,7 +17,14 @@
  *   - DESCRIBE WHAT YOU WANT. A misspelled `--input` channel was submitted, spent and failed four
  *     layers down as `E_INTERNAL`, naming a channel the operator never typed.
  *   - TRUST WHAT IT DID. Compile diagnostics named no file, so `loom approve` printed a red `✗`
- *     about an unrelated graph above a successful approval and exited 0.
+ *     about an unrelated graph above a successful approval and exited 0 — fixed by attributing
+ *     every diagnostic to its file. That fix was necessary and not sufficient: TODO.md §A.91 found
+ *     the file `loom trace`/`replay`/`approve` attributed a candidate's diagnostics TO was still
+ *     one the operator never named at all — the by-hash sweep behind those verbs compiles every
+ *     file in `graphs/` to find the one hash match, and printed every OTHER candidate's warnings
+ *     along the way. Attribution made the noise readable; it did not stop it being noise. Fixed by
+ *     making that sweep silent about a candidate it rejects, while an explicit `loom compile` or
+ *     `--graph` — a graph the operator DID name — stays exactly as loud as attribution left it.
  *
  * Offline and deterministic: temp directories, a graph of built-in tools, and — for the MCP arm —
  * a few lines of Node spawned as a child, the same device `test/mcp/client.test.ts` uses. The one
@@ -82,6 +89,34 @@ const UNCOMPILABLE = {
       writes: ["body"],
       unhandled: true,
       tool: { name: "net.fetch", version: "1.0", args: { url: "${url}" } },
+    },
+  ],
+  edges: [],
+};
+
+/**
+ * A graph that compiles only with a flag this file's other invocations of `run()` omit — so the
+ * SAME bytes, the SAME hash, compile under one CLI invocation and refuse under another. `proc:exec`
+ * over `--allow-exec`, rather than `net:fetch` over `--egress`, because a granted `proc.exec` still
+ * GATES before it ever spawns anything (irreversible tools gate once, before the first call) — so
+ * `run()` reaches `awaiting_gate` with no child process started and no network touched.
+ */
+const SOLE_CANDIDATE = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "sole-candidate", project: "lane-p", version: 1 },
+  policy: { posture: "out", capabilities: ["proc:exec"], expansion: { maxNodes: 4, maxDepth: 1, maxFanout: 2, maxLoopIterations: 1 } },
+  channels: { seed: { type: "string", reduce: "replace" }, out: { type: "object", reduce: "replace" } },
+  inputs: ["seed"],
+  outputs: ["out"],
+  nodes: [
+    {
+      id: "x",
+      type: "tool",
+      reads: ["seed"],
+      writes: ["out"],
+      unhandled: true,
+      tool: { name: "proc.exec", version: "1.0", args: { command: "echo", args: ["hi"] } },
     },
   ],
   edges: [],
@@ -312,29 +347,89 @@ test("AN UNDECLARED `--input` CHANNEL IS REFUSED BEFORE THE RUN, naming the key 
 
 // ── trust what it did ────────────────────────────────────────────────────────
 
-test("A COMPILE DIAGNOSTIC NAMES ITS FILE — an unattributed ✗ above a successful approval teaches an operator to ignore stderr", async () => {
+test("A DIAGNOSTIC STILL NAMES ITS FILE ON A DOOR THE OPERATOR OPENED, AND THE BY-HASH SWEEP BEHIND `trace` IS SILENT ABOUT ONE IT DID NOT — TODO.md §A.91", async () => {
   const d = workspace();
   try {
     writeFileSync(join(d.dir, "graphs", "needs-net.json"), JSON.stringify(UNCOMPILABLE));
+
+    // ── the earlier fix, still true: a graph the operator NAMED is narrated loudly ──────────────
+    // `loom compile` on `needs-net.json` directly is exactly the door attribution was fixed for —
+    // this file, given no capability to compile it, still fails with every diagnostic naming it.
+    const c = await run(["compile", join(d.dir, "graphs", "needs-net.json"), "--workspace", d.dir]);
+    assert.notEqual(c.code, 0, `an explicit compile of a broken graph must still refuse:\n${c.out}${c.err}`);
+    assert.match(c.err, /GRAPH017_CAPABILITY_NOT_GRANTED/, `an explicit compile must still report what would not compile:\n${c.err}`);
+    // EVERY diagnostic line carries the file it came from. Asserting on the whole set rather than
+    // on one line is the point: the earlier defect was that a reader could not tell which file ANY
+    // of them belonged to.
+    const named = c.err.split("\n").filter((l) => /^[✗!] /.test(l));
+    assert.ok(named.length > 0, `expected diagnostics on stderr:\n${c.err}`);
+    for (const line of named) {
+      assert.match(line, /^[✗!] [\w.-]+\.(json|ya?ml): /, `every diagnostic must name its file, not just its code: ${line}`);
+    }
+
+    // ── the row this test now pins: a graph the operator did NOT name stays off stderr ──────────
     const r = await run(["run", join(d.dir, "graphs", "copy.json"), "--workspace", d.dir, "--input", '{"source":"input.txt"}']);
     assert.equal(r.code, 0, r.err);
     const id = (JSON.parse(r.out) as { runId: string }).runId;
 
-    // `trace` resolves the run's graph by scanning the whole directory, so it compiles
-    // `needs-net.json` too and writes its diagnostics to stderr.
+    // `trace` resolves the run's graph by HASH, which sweeps every file in `graphs/` — including
+    // `needs-net.json` — to find it. Before §A.91 closed, that sweep's own diagnostics reached
+    // stderr for every candidate it rejected, attributed or not; the sweep is an internal question
+    // ("which of these files is this run's graph") and its answer belongs to nobody but the search.
     const t = await run(["trace", id, "--workspace", d.dir]);
     assert.equal(t.code, 0, t.err);
-    assert.match(t.err, /GRAPH017_CAPABILITY_NOT_GRANTED/, `the scan must still report what would not compile:\n${t.err}`);
-    // EVERY diagnostic line carries the file it came from. Asserting on the whole set rather than
-    // on one line is the point: the defect was that a reader could not tell which file ANY of
-    // them belonged to.
-    const diagnostics = t.err.split("\n").filter((l) => /^[✗!] /.test(l));
-    assert.ok(diagnostics.length > 0, `expected diagnostics on stderr:\n${t.err}`);
-    for (const line of diagnostics) {
-      assert.match(line, /^[✗!] [\w.-]+\.(json|ya?ml): /, `every diagnostic must name its file, not just its code: ${line}`);
-    }
+    assert.doesNotMatch(
+      t.err,
+      /GRAPH017_CAPABILITY_NOT_GRANTED|needs-net\.json/,
+      `a candidate the operator did not name leaked onto stderr:\n${t.err}`,
+    );
+    // AND IT STILL SAYS WHAT IT FOUND — silence is about the REJECTED candidate, not the resolved
+    // one.
+    assert.match(t.err, /graph copy-file v1/, `trace must still say which graph it resolved:\n${t.err}`);
   } finally {
     d.dispose();
+  }
+});
+
+test("SILENCE DOES NOT HIDE THE REASON WHEN THE ONLY CANDIDATE IS THE ONE THAT WOULD HAVE MATCHED", async () => {
+  // §A.91's fix makes the by-hash sweep silent about a REJECTED candidate. The question this test
+  // answers: when the run's OWN graph is the one that now fails to compile — the same bytes, same
+  // hash, a capability this invocation was not given — does the operator still learn why, or does
+  // "silent about rejected candidates" also swallow the one case where the rejected candidate WAS
+  // the answer? It does not: `indexGraphs` catches the compile failure into its own `failed` list
+  // independently of `silent` (`silent` only gates the raw `writeDiagnostic` lines), and every
+  // caller's own "not found" message already reports `failed` regardless.
+  const d = mkdtempSync(join(tmpdir(), "loom-lane-p-sole-"));
+  try {
+    mkdirSync(join(d, "graphs"), { recursive: true });
+    writeFileSync(join(d, "graphs", "sole.json"), JSON.stringify(SOLE_CANDIDATE));
+
+    // Compiles and gates — `--allow-exec` grants `proc:exec` for THIS invocation only, and the
+    // tool never actually runs: an irreversible tool gates once before its first call.
+    const started = await run(["run", join(d, "graphs", "sole.json"), "--workspace", d, "--input", '{"seed":"hi"}', "--allow-exec", "echo"]);
+    assert.equal(started.code, 0, started.err);
+    const id = (JSON.parse(started.out) as { runId: string; status: string }).runId;
+    assert.equal((JSON.parse(started.out) as { status: string }).status, "awaiting_gate", "the fixture must gate for this to mean anything");
+
+    // A LATER INVOCATION, NO `--allow-exec`. Same file, same bytes, same hash — the only candidate
+    // in `graphs/` — and it no longer compiles here.
+    const traced = await run(["trace", id, "--workspace", d]);
+    assert.notEqual(traced.code, 0, `trace must refuse when it cannot resolve a graph:\n${traced.out}${traced.err}`);
+    assert.match(
+      traced.err,
+      /GRAPH017_CAPABILITY_NOT_GRANTED/,
+      `the ONLY candidate failing to compile must still explain why, not just that nothing resolved:\n${traced.err}`,
+    );
+
+    const approved = await run(["approve", id, "does-not-matter", "--as", "u:alice", "--workspace", d]);
+    assert.notEqual(approved.code, 0, `approve must refuse when it cannot resolve a graph:\n${approved.out}${approved.err}`);
+    assert.match(
+      approved.err,
+      /GRAPH017_CAPABILITY_NOT_GRANTED/,
+      `approve's own resolution must explain the SAME reason, not just "not found":\n${approved.err}`,
+    );
+  } finally {
+    rmSync(d, { recursive: true, force: true });
   }
 });
 
