@@ -514,10 +514,12 @@ docker run --rm node:24-slim sh -c 'npm i -g @caohaotiantian/loom@0.1.0 && loom 
 printing `loom 0.1.0`. **The publish is the TARBALL, not the directory**: remove `"private": true`
 from `packages/core/package.json` (it is copied into the tarball, and npm refuses a private one
 with `EPRIVATE`), run `node scripts/pack.mjs --out out`, then `npm publish
-out/caohaotiantian-loom-0.1.0.tgz`. `npm publish` inside `packages/core` re-packs whatever `dist`
-holds — no compile, no orphan check, and no lifecycle script can add one, because
-`check-zero-dep.mjs` forbids them — and with `dist` absent it drops `bin` and still exits 0
-(measured by the lane's reviewer against a dead loopback registry). **After that, and not before**, come the two things this item deliberately
+./out/caohaotiantian-loom-0.1.0.tgz` — the `./` is load-bearing: without it npm reads `out/<name>`
+as the GitHub shorthand `github:out/<name>` and refuses (`EALLOWGIT`). `npm publish` inside
+`packages/core` instead re-packs whatever `dist` holds — no compile, no orphan check, and no
+lifecycle script can add one, because `check-zero-dep.mjs` forbids them — and with `dist` absent
+it drops `bin` with a one-line warning and publishes a three-file package (measured by the lane's
+reviewer with `--dry-run`: exit 0, `total files: 3`). **After that, and not before**, come the two things this item deliberately
 did not build: a release workflow (tarball to npm, SEA binaries to a GitHub release — the `binary`
 job builds one per commit and uploads nothing), and `TODO.md` §H.1's reopening, which the publish
 triggers. `TODO.md` §H.15 carries the same closing condition.

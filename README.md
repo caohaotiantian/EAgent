@@ -57,7 +57,7 @@ tarball you pack from a clone; the tarball has no dependencies, so the install n
 ```bash
 git clone https://github.com/caohaotiantian/EAgent && cd EAgent
 npm install && node scripts/pack.mjs --out out     # → out/caohaotiantian-loom-0.1.0.tgz
-npm install -g out/caohaotiantian-loom-0.1.0.tgz   # puts `loom` on PATH. Needs Node.js 24+
+npm install -g ./out/caohaotiantian-loom-0.1.0.tgz # puts `loom` on PATH. Needs Node.js 24+
 cd "$(mktemp -d)" && loom --version                # loom 0.1.0 — from anywhere, no clone needed
 ```
 

@@ -4,9 +4,9 @@ A multi-agent runtime where every durable fact about a run is an append-only jou
 parallelism, human gates, replay and tracing are one mechanism rather than four. Zero runtime
 dependencies; Node.js 24 or newer (it keeps its journal in `node:sqlite`).
 
-**Not yet published to npm.** Until it is, pack it from a clone — `node scripts/pack.mjs --out DIR`
-— and install the tarball in its place (`npm install -g DIR/caohaotiantian-loom-0.1.0.tgz`). Once
-published:
+**Not yet published to npm.** Until it is, pack it from a clone — `node scripts/pack.mjs --out out`
+— and install the tarball in its place: `npm install -g ./out/caohaotiantian-loom-0.1.0.tgz`. Keep
+the `./`: npm reads `out/<name>` as a GitHub repository. Once published:
 
 ```bash
 npm install -g @caohaotiantian/loom
