@@ -583,7 +583,7 @@ test("A PUBLISHED GRAPH THAT IS NOT THIS RUN'S IS A DIFFERENT ANSWER FROM NO GRA
       (e: unknown) =>
         isLoomError(e) &&
         e.code === CODES.E_RUN_NOT_FOUND &&
-        /It publishes 1, and none is this run's/.test(e.message) &&
+        /it publishes 1, and none is this run's/.test(e.message) &&
         /graphs\/other\.json other-graph v1/.test(e.message),
       "a workspace full of other people's graphs must name them, not report emptiness",
     );

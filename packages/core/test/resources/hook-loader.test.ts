@@ -331,7 +331,7 @@ test("DELETING A HOOK BODY UNDER A LIVE GATE NAMES THE FILE, not just the run", 
       () => cli(["approve", summary.runId, gateId, "--workspace", w.dir, "--as", "u:alice"]),
       (e: unknown) => {
         assert.ok(isLoomError(e), String(e));
-        assert.match(e.message, /would not compile/, "the index must say what it could not build");
+        assert.match(e.message, /does not compile under this invocation's grants/, "the index must say what it could not build");
         assert.match(e.message, /gated\.json/, "and name the graph file");
         assert.deepEqual((e.details as { failed?: readonly string[] }).failed?.length, 1);
         return true;

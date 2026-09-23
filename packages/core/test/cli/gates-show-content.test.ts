@@ -188,11 +188,12 @@ test("a workspace whose graph is gone still lists its gates, without the content
     // that plus one per spec resource kind, and sending an operator to one of three places is a
     // correction that replaces a false claim with a differently-false one.
     //
-    // "AMONG THE ONES THAT COMPILE" — TODO.md §A.91 M1: a candidate that fails to compile never
-    // learns its own hash, so "no graph has that hash" is not a claim this search can make; here
-    // there IS no other candidate (the file was deleted, not merely broken), so the wording still
-    // reads as a plain absence, with nothing appended by `candidatesThatDidNotCompile`.
-    assert.match(listed.err, /no graph among the ones that compile under .*\/graphs, .*\/resources\/subgraph.* has the hash this run compiled/, listed.err);
+    // "COMPILES TO HASH", not "has that hash" — TODO.md §A.91, the reviewer's second fix round:
+    // a candidate that fails to compile never learns its own hash, so "no graph has that hash" is
+    // not a claim this search can make; `resolveRecordedGraph`'s one shared refusal fragment says
+    // so instead. Here there IS no other candidate (the file was deleted, not merely broken), so
+    // the wording reads as a plain absence, with no failed-candidates clause appended.
+    assert.match(listed.err, /no graph among .*\/graphs, .*\/resources\/subgraph.* compiles to hash sha256:/, listed.err);
     // ON STDERR, so `loom gates | jq` is untouched by it — the assertion above already parsed
     // stdout, and this names the property rather than leaving it to that parse.
     assert.ok(!/CONTENT NOT SHOWN/.test(listed.out), listed.out);
