@@ -126,6 +126,12 @@ test("`--help` READS NO FLAG BESIDE ITSELF EITHER — TODO.md §A.91 N7, the hol
   // `loom --help --tokne x` used to answer `--help` before `assertKnownFlags` ever ran, the exact
   // shape `--version` was fixed for in §H.19 above — an unknown flag riding beside it was silently
   // accepted and read by nothing.
+  //
+  // THIS REVERSES `ad83204d`'s OWN ORDERING ON PURPOSE — "assertKnownFlags refuses at the door —
+  // after help, so a reader who typo'd still gets the list" — and the maintainer AFFIRMED the
+  // reversal on 2026-09-24 rather than restoring the original order, having weighed both: the
+  // usage text is not the list a typo needs (`assertKnownFlags`'s own "did you mean --token?" is),
+  // and a flag silently accepted and read by nothing is the worse failure of the two.
   await assert.rejects(
     () => cli(["--help", "--tokne", "x"]),
     (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag: --tokne/.test(e.message),

@@ -225,12 +225,15 @@ test("`loom help` still works, and every real flag is accepted", async () => {
   // A false positive here would be worse than the bug: every advertised flag must pass.
   assert.equal(await cli(["help"]), 0);
   assert.equal(await cli(["--help"]), 0);
-  // `--help` BESIDE A TYPO NOW REFUSES — TODO.md §A.91, the reviewer's third fix round (N7). The
-  // refusal used to run AFTER `--help` on the theory that "a reader who typo'd can still get the
-  // list", but the usage text is not the list a misspelling needs — `assertKnownFlags`'s own "did
-  // you mean --token?" is — and ordering it after `--help` meant `loom --help --tokne x` exited 0
-  // with `--tokne` silently accepted and read by nothing, the same hole `--version` was fixed for
-  // in §H.19. `assertKnownFlags` now runs before `--help` is answered, mirroring `--version`.
+  // `--help` BESIDE A TYPO NOW REFUSES — TODO.md §A.91, the reviewer's third fix round (N7),
+  // AFFIRMED as the maintainer's decision on 2026-09-24 (the fourth fix round considered reverting
+  // it back and did not). The refusal used to run AFTER `--help`, by `ad83204d`'s own design —
+  // "after help, so a typo still gets the list" — on the theory that a reader who typo'd should
+  // still see the usage. That ordering meant `loom --help --tokne x` exited 0 with `--tokne`
+  // silently accepted and read by nothing, the same hole `--version` was fixed for in §H.19; the
+  // usage text is not the list a misspelling needs — `assertKnownFlags`'s own "did you mean
+  // --token?" is. `assertKnownFlags` now runs before `--help` is answered, mirroring `--version`,
+  // and this is a DELIBERATE reversal of `ad83204d`'s ordering, not an oversight of it.
   await assert.rejects(
     () => cli(["--help", "--tokne", "x"]),
     (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag: --tokne/.test(e.message),
