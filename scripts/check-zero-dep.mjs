@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Guard: @loom/core has ZERO runtime dependencies.
+ * Guard: @caohaotiantian/loom has ZERO runtime dependencies.
  *
  * This is the constraint that keeps the single-binary deployment possible and keeps a
  * library embedder from downloading a UI framework. It is the ONLY automatic enforcement of

@@ -3,13 +3,13 @@
  * Build `bin/loom` — one file, no Node installation required to run it.
  *
  * This is what turns "zero runtime dependencies" from a discipline into a deliverable.
- * The bundle is `dist/cli.js` plus nothing: because `@loom/core` imports only
+ * The bundle is `dist/cli.js` plus nothing: because `@caohaotiantian/loom` imports only
  * `node:` builtins, esbuild has no third-party code to pull in, and the SEA blob is
  * the application and the runtime and nothing else.
  *
  * esbuild and postject are BUILD-only dependencies. They never appear in
  * `packages/core/package.json`, which is what `check-zero-dep.mjs` enforces — so a
- * library consumer of `@loom/core` downloads neither.
+ * library consumer of `@caohaotiantian/loom` downloads neither.
  *
  * The build also stamps the binary with a digest of the sources it compiled, so the
  * thing it produces knows when it has gone stale — see `binary-freshness.cjs` for why
@@ -19,7 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import * as esbuild from "esbuild";
@@ -28,7 +28,34 @@ const require = createRequire(import.meta.url);
 const freshness = require("./binary-freshness.cjs");
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const OUT = "bin";
+/**
+ * WHERE THE BINARY GOES: `--out DIR`, resolved against the caller's cwd like any path argument, or
+ * `<repo>/bin` without it. Every OTHER path in this script is anchored at the repo root — the
+ * entry point, `node_modules/postject` — so running it from another directory builds the same
+ * thing instead of failing to find its inputs or leaving a `bin/` wherever it was started.
+ *
+ * The freshness guard looks for sources at `<parent of the binary's directory>/packages/core/src`,
+ * so `<repo>/bin` is checked against this tree, and a binary written where no such directory
+ * exists is a shipped copy and runs unchecked — which is the point of building one elsewhere.
+ */
+function outDir(argv) {
+  const unknown = argv.filter((a, i) => !(a === "--out" || a.startsWith("--out=") || argv[i - 1] === "--out"));
+  if (unknown.length > 0) {
+    console.error(`build FAILED: unknown argument ${unknown.join(" ")} — the only one is --out DIR.`);
+    process.exit(2);
+  }
+  const eq = argv.find((a) => a.startsWith("--out="));
+  const at = argv.indexOf("--out");
+  if (eq === undefined && at === -1) return join(repoRoot, "bin");
+  const dir = eq !== undefined ? eq.slice("--out=".length) : argv[at + 1];
+  if (dir === undefined || dir === "" || dir.startsWith("--")) {
+    console.error("build FAILED: --out needs a directory.");
+    process.exit(2);
+  }
+  return resolve(dir);
+}
+const OUT = outDir(process.argv.slice(2));
+const ENTRY = join(repoRoot, "packages", "core", "dist", "cli.js");
 const NAME = process.platform === "win32" ? "loom.exe" : "loom";
 const BUNDLE = join(OUT, "loom.bundle.cjs");
 const BLOB = join(OUT, "loom.blob");
@@ -72,7 +99,7 @@ const stamp = freshness.stampFor(repoRoot);
 // CJS, because Node's SEA loads a single CommonJS script. The ESM source is
 // converted here rather than in the package, so `dist/` stays standard ESM.
 await esbuild.build({
-  entryPoints: ["packages/core/dist/cli.js"],
+  entryPoints: [ENTRY],
   bundle: true,
   platform: "node",
   target: "node24",
@@ -97,7 +124,7 @@ const bundleBytes = statSync(BUNDLE).size;
 
 // ── 2. verify the bundle pulled in nothing ───────────────────────────────────
 const bundled = await esbuild.build({
-  entryPoints: ["packages/core/dist/cli.js"],
+  entryPoints: [ENTRY],
   bundle: true,
   platform: "node",
   format: "cjs",
@@ -139,7 +166,7 @@ if (process.platform === "darwin") {
 execFileSync(
   process.execPath,
   [
-    join("node_modules", "postject", "dist", "cli.js"),
+    join(repoRoot, "node_modules", "postject", "dist", "cli.js"),
     TARGET,
     "NODE_SEA_BLOB",
     BLOB,
@@ -165,5 +192,8 @@ rmSync(seaConfig, { force: true });
 const mb = (statSync(TARGET).size / 1024 / 1024).toFixed(1);
 console.log(`built ${TARGET} — ${mb} MB (application bundle: ${(bundleBytes / 1024).toFixed(0)} KB, 0 third-party modules)`);
 console.log(
-  `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — it refuses to run once ${stamp.dir} moves`,
+  OUT === join(repoRoot, "bin")
+    ? `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — it refuses to run once ${stamp.dir} moves`
+    : `stamped ${stamp.count} source file(s), ${stamp.digest.slice(0, 12)} — from ${OUT} it checks ` +
+        `${join(dirname(OUT), stamp.dir)}, and runs unchecked where no such directory exists`,
 );

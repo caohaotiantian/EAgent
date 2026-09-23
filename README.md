@@ -10,7 +10,7 @@ workflow language stay ordinary TypeScript instead of WASM components or a DSL.
 ## Thirty seconds
 
 ```ts
-import { agent } from "@loom/core";
+import { agent } from "@caohaotiantian/loom";
 
 const summarise = agent({ prompt: "Summarise the input in two sentences.", adapter: myAnthropicAdapter });
 
@@ -48,11 +48,34 @@ same route a tool node's name travels: **declaring a capability and declaring a 
 are one act**, which keeps "every nondeterministic call is journaled" a property of the schema
 rather than a rule somebody has to remember.
 
+## Install it
+
+**Not yet on npm.** The package is `@caohaotiantian/loom`, and `npm install -g @caohaotiantian/loom`
+is the install once it is published — until then that command 404s. Today it installs from a
+tarball you pack from a clone; the tarball has no dependencies, so the install needs no registry:
+
+```bash
+git clone https://github.com/caohaotiantian/EAgent && cd EAgent
+npm install && node scripts/pack.mjs --out out     # → out/caohaotiantian-loom-0.1.0.tgz
+npm install -g ./out/caohaotiantian-loom-0.1.0.tgz # puts `loom` on PATH. Needs Node.js 24+
+cd "$(mktemp -d)" && loom --version                # loom 0.1.0 — from anywhere, no clone needed
+```
+
+On a Node below 24 the installed `loom` says so in one sentence and exits 2, instead of a stack
+trace. `pack.mjs` compiles first and refuses to pack a `dist/` file that has no source, and
+`node scripts/smoke-install.mjs <tgz>` installs it into a temp directory and runs the two examples
+under "Try it" below through it — which is what CI's `install` job does on Linux and macOS.
+**`packages/core` stays `private: true` until the maintainer publishes it**, and `npm publish` run
+in `packages/core` does not REFUSE — as a workspace member it exits 0 with one warning line and
+publishes nothing, which a CI step checking only the exit code would report as a successful
+release. (A standalone private package is refused, `EPRIVATE`; it is the workspace that makes it a
+skip.)
+
 ## Or run it as a service
 
 ```bash
-npm install && npm run build:binary   # → bin/loom, one file, 0 third-party modules
-export PATH="$PWD/bin:$PATH"          # `loom` is not published; the binary IS the install
+npm install && npm run build:binary   # → bin/loom, one file, 0 third-party modules, no Node needed
+export PATH="$PWD/bin:$PATH"          # or copy bin/loom anywhere on PATH
 loom serve                            # console + API on :8787, from an empty directory
 ```
 
@@ -64,12 +87,8 @@ still prints the report; an installed copy with no sources beside it has nothing
 **So after editing `packages/core/src`, run `npm run build:binary` before trusting `bin/loom`.**
 That refusal ships INSIDE the binary, so one built before it existed cannot report itself missing;
 the check outside the artifact is `node scripts/verify-binary.mjs [path]`, driving a binary through
-all four cases (current, stale, overridden, no-sources). CI runs it on `ubuntu-latest`.
-
-**`@loom/core` is `private: true`, and `npm publish` does not REFUSE** — it exits 0 and quietly
-does nothing, which a CI step checking only the exit code would report as a successful release. A
-tarball installs and works: `npm pack packages/core`, install the tgz, and
-`./node_modules/.bin/loom --help` runs in a fresh directory with no build.
+all four cases (current, stale, overridden, no-sources). CI runs it on `ubuntu-latest`, and then
+`smoke-install.mjs bin/loom` on a copy moved out of the tree.
 
 ## What works today
 

@@ -1,5 +1,5 @@
 /**
- * The public surface of @loom/core.
+ * The public surface of @caohaotiantian/loom.
  *
  * This barrel IS the contract. `scripts/check-surface.mjs` snapshots every exported
  * name, so adding one is a deliberate, reviewed act. (Loom pins the interface

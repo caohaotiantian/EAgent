@@ -9,7 +9,7 @@
  * asserts the folded journal reproduces the same hash.
  *
  * The canonical on-disk form is JSON. YAML is authoring sugar handled outside
- * `@loom/core` — the core never parses YAML, which is what keeps it zero-dependency
+ * `@caohaotiantian/loom` — the core never parses YAML, which is what keeps it zero-dependency
  * and keeps hashing unambiguous (canonical JSON has one representation; YAML has
  * several for the same document).
  *

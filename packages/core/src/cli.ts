@@ -6,7 +6,7 @@
  * binary with an empty data directory and no external service.** Everything else the
  * CLI does is in service of being able to prove that by running a real graph.
  *
- * Graphs are JSON here, not YAML: `@loom/core` never parses YAML, which is what keeps
+ * Graphs are JSON here, not YAML: `@caohaotiantian/loom` never parses YAML, which is what keeps
  * it zero-dependency and keeps hashing unambiguous (canonical JSON has exactly one
  * representation of a document; YAML has several). A `loom fmt` that converts YAML to
  * JSON belongs in a CLI-only package that may take the dependency.
@@ -86,6 +86,7 @@ import { ResourceStore, type ResourceKind } from "./resources/store.ts";
 import { OTLP_RUN_ID_ATTR, childRunIdsOf, conformsToGraph, reconstructGraph, spansFrom, spliceSubgraph, type Span } from "./telemetry/spans.ts";
 import { OtlpHttpExporter } from "./telemetry/otlp.ts";
 import { encodeBranch } from "./ids.ts";
+import { VERSION } from "./version.ts";
 import type { EdgeId, GateId, NodeId, RunId, Seq, TaskId } from "./ids.ts";
 import { isEvent, SYSTEM_ACTOR, type EventPayloads, type HumanActor, type JournalEvent, type SubmittedBy } from "./journal/events.ts";
 import { digest, digestOf, sameContent, shapeOf, type Digest } from "./canonical.ts";
@@ -350,6 +351,7 @@ const USAGE = `loom — graph-native multi-agent orchestration
                                              by either graph's own evaluator
 
   --help            print this and exit — also "loom help", and valid after any command
+  --version         print "loom <version>" and exit — valid after any command
   --workspace DIR   root for graphs/, data, and the tool jail (default: cwd)
   --egress HOSTS    comma-separated allowlist. WITHOUT IT net.fetch is not registered at
                     all: a graph naming it still COMPILES (GRAPH013 is a warning) and
@@ -669,7 +671,8 @@ export function resourceRefsIn(text: string): readonly string[] {
  *     against the JOURNAL in `operator-pause.test.ts`, because this paragraph is the argument for
  *     leaving them open and an argument nothing checks is how `String(true)` gets back in.
  *   - ANSWERED BEFORE THE DOOR: `--help`. `main` prints the usage and returns above every check
- *     here, so a reader would never be reached.
+ *     here, so a reader would never be reached. (`--version` is answered there too, but through
+ *     its reader `versionFlag`, because a VALUE given to it must refuse rather than vanish.)
  *   - ARGV GENUINELY CANNOT DECIDE IT: `--as` and `--cohort` (more readers than one), and
  *     `--scope` — `ceilingScope(args, runId)` refuses a scope naming a different run than the
  *     command did, so the RUN ID is needed and that is a positional. These THREE are what still
@@ -717,6 +720,7 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   take: steerTake,
   to: postureFlag,
   token: serveToken,
+  version: versionFlag,
   why: justificationFlag,
   workspace: jailFor,
 };
@@ -736,11 +740,32 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * At the door in `main`, not inside `parseArgs`: the parser stays a parser, and `openWorkspace`
  * is called directly by embedders and tests with flag maps they built themselves.
  */
+/**
+ * `--version` ASKS A QUESTION, so it takes no value — and a value is REFUSED, not ignored.
+ *
+ * `parseArgs` stores `--version 1` and `--version=yes` as strings, so a check for `=== true` alone
+ * would skip them and let the verb run with the flag silently dropped — measured on the first
+ * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
+ * flag existed the same line was refused as unknown. (`--help` has that hole and is left as it
+ * was; it is not this flag's to copy.)
+ */
+function versionFlag(args: Args): boolean {
+  const v = args.flags["version"];
+  if (v === undefined) return false;
+  if (v !== true) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--version takes no value (got ${JSON.stringify(v)}) — run \`loom --version\` on its own.`);
+  }
+  return true;
+}
+
 function assertKnownFlags(args: Args): void {
   const unknown = Object.keys(args.flags).filter((f) => !KNOWN_FLAGS.includes(f));
   if (unknown.length === 0) return;
   const near = (f: string): string => {
     const lower = f.toLowerCase();
+    // A bare `--` names nothing, and every flag starts with the empty string: no guess, rather
+    // than a "did you mean" listing every flag there is.
+    if (lower === "") return "";
     const exact = KNOWN_FLAGS.find((k) => k === lower);
     if (exact !== undefined) return ` (did you mean --${exact}? flags are case-sensitive)`;
     // Same first two letters is a cheap stand-in for an edit distance and catches the
@@ -826,6 +851,7 @@ const GLOBAL_FLAGS: readonly string[] = [
   "max-parallelism",
   "mcp-file",
   "models-file",
+  "version",
   "workspace",
 ];
 
@@ -8493,12 +8519,26 @@ export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clo
  */
 export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fetch"]): Promise<number> {
   const args = parseArgs(argv);
-  if (args.command === "help" || args.flags["help"] === true) {
+  if (args.flags["help"] === true) {
     process.stdout.write(USAGE);
     return 0;
   }
-  // AFTER `help`, so `loom --help` still prints the list a reader needs to fix the typo.
+  // `loom --version` USED TO PRINT THE WHOLE USAGE AND EXIT 0, because `parseArgs` defaults a
+  // missing verb to `help` and the `help` arm answered before any flag was looked at — so every
+  // "is it installed, and which one" probe passed against every build, and said nothing.
+  if (versionFlag(args)) {
+    process.stdout.write(`loom ${VERSION}\n`);
+    return 0;
+  }
+  // AFTER `--help`, so `loom --help --tokne x` still prints the list a reader needs to fix the
+  // typo — and BEFORE the `help` VERB, which is also what a bare `loom` defaults to. With the
+  // verb answered first, `loom --bogus` printed the usage and exited 0: an unknown flag refused
+  // after every verb and accepted before none of them.
   assertKnownFlags(args);
+  if (args.command === "help") {
+    process.stdout.write(USAGE);
+    return 0;
+  }
   // THE VERB IS DECIDED BEFORE ANY DIRECTORY EXISTS — TODO.md §H.11. `openWorkspace` creates
   // `.loom/`, `graphs/` and `resources/`, and `--workspace` defaults to the cwd, so until this line
   // `loom nonsense` left three directories in whatever directory a stranger happened to be standing
@@ -12489,32 +12529,39 @@ function assertDeclaredInputs(graph: RunGraph, inputs: Record<string, unknown>):
  * genuinely awkward, because the same file is started three ways.
  *
  *   - `node packages/core/src/cli.ts` and `node dist/cli.js`: `argv[1]` IS this file.
- *   - `node_modules/.bin/loom`, which is what `package.json`'s `bin` field produces: on POSIX
- *     npm writes a SYMLINK, so `argv[1]` is `…/.bin/loom` and its basename is `loom`. The old
- *     test — does `import.meta.url` end with `basename(argv[1])` — compared "loom" against a
- *     URL ending in "cli.js" and answered no, so an installed `loom --help` printed **nothing
- *     at all** and exited 0. That is the whole of "Install it" failing quietly.
+ *   - A SYMLINK to this file: `argv[1]` is the link, whose basename is not `cli.js`. The old
+ *     test — does `import.meta.url` end with `basename(argv[1])` — answered no, and while
+ *     `package.json`'s `bin` pointed here that meant an installed `loom --help` printed **nothing
+ *     at all** and exited 0. `bin` is `bin.ts` now, which IMPORTS this module and calls
+ *     `runAsEntryPoint` itself — so for the installed `loom` this function must answer NO, and
+ *     does: `argv[1]` resolves to `bin.js`, not to this file.
  *   - The single-file binary: `scripts/build-binary.mjs` defines `import.meta.url` as
- *     `file:///loom`, and a SEA's `argv[1]` is the executable, so the basename test is what
- *     makes the binary run itself. `/loom` is not a path on any machine, so a realpath-only
- *     test would break it.
+ *     `file:///loom`. `/loom` is not a path on any machine, so a realpath test cannot recognise
+ *     it — and inside a SEA the bundle is the program by construction, so that URL is the answer.
  *
- * So: resolve both sides and compare, which is exact for the first two and follows the symlink
- * for the second; fall back to the basename test, which is what the binary needs and what every
- * pre-existing caller already matched on. `realpathSync` throws on a path that does not exist —
- * `/loom`, and an `argv[1]` that is not a file at all — so the throw is the fallback's trigger
- * rather than a failure.
+ * So: the binary by its URL; everything else by resolving both sides and comparing, which is exact
+ * for a direct start and follows a symlink. A path that does not resolve is not this file.
  */
 function startedAsTheEntryPoint(): boolean {
+  // THE BINARY IS ALWAYS ITS OWN ENTRY POINT, and it is recognised by the URL the build gave it,
+  // never by its file name. The basename fallback this replaced — `import.meta.url` ends with
+  // `basename(argv[1])` — made a binary RENAMED from `loom` (`loom-0.1.0-darwin-arm64`,
+  // `loom.exe`) print nothing and exit 0, and made a library consumer whose own entry file was
+  // called `cli.js` (or anything `cli.js` ends with) run loom's `main` on its argv and exit, both
+  // measured on the 2026-09-23 lane. An installed `loom` no longer needs a fallback at all: it
+  // starts at `bin.ts`, which calls `runAsEntryPoint` itself.
+  if (import.meta.url === SEA_ENTRY_URL) return true;
   const entry = process.argv[1];
   if (entry === undefined) return false;
   try {
-    if (realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url))) return true;
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
   } catch {
-    /* not a path this filesystem has; the basename test below is the answer */
+    return false; // not a path this filesystem has, so not this file
   }
-  return import.meta.url.endsWith(basename(entry));
 }
+
+/** What `scripts/build-binary.mjs` defines `import.meta.url` as inside the single-file binary. */
+const SEA_ENTRY_URL = "file:///loom";
 
 /**
  * EVERYTHING WRITTEN IS ON THE FD BEFORE THE PROCESS GOES, which `process.exit` alone does not
@@ -12587,19 +12634,29 @@ async function flushStdio(): Promise<void> {
   }
 }
 
-if (startedAsTheEntryPoint()) {
-  main(process.argv.slice(2))
-    .then(async (code) => {
-      await flushStdio();
-      process.exit(code);
-    })
-    .catch(async (e: unknown) => {
-      const le = isLoomError(e) ? e : toLoomError(e);
-      process.stderr.write(`${le.code}: ${le.message}\n`);
-      // THE REFUSAL PATH DRAINS TOO. It is the shorter output, so it is the one least likely to
-      // be truncated and the one whose truncation would be hardest to explain: a diagnostic cut
-      // in half, on the path an operator reaches only when something already went wrong.
-      await flushStdio();
-      process.exit(1);
-    });
+/**
+ * RUN `main` AS A PROCESS: print a refusal as `CODE: message`, drain both streams, exit.
+ *
+ * Exported because this module has TWO entry doors and both must end the same way. The single
+ * file binary and `node dist/cli.js` start here through `startedAsTheEntryPoint` below; an
+ * installed `loom` starts at `bin.ts`, which checks the Node floor with no static imports and only
+ * then loads this module and calls this — a module that is imported is not the entry point, so
+ * without this export the installed door would have had to restate the exit and the drain.
+ */
+export async function runAsEntryPoint(argv: readonly string[]): Promise<never> {
+  let code: number;
+  try {
+    code = await main(argv);
+  } catch (e: unknown) {
+    const le = isLoomError(e) ? e : toLoomError(e);
+    process.stderr.write(`${le.code}: ${le.message}\n`);
+    // THE REFUSAL PATH DRAINS TOO. It is the shorter output, so it is the one least likely to
+    // be truncated and the one whose truncation would be hardest to explain: a diagnostic cut
+    // in half, on the path an operator reaches only when something already went wrong.
+    code = 1;
+  }
+  await flushStdio();
+  process.exit(code);
 }
+
+if (startedAsTheEntryPoint()) void runAsEntryPoint(process.argv.slice(2));

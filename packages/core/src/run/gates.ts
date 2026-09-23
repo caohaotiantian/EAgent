@@ -1596,7 +1596,7 @@ export class HumanGateBroker {
    * WHAT DRIVES IT: an embedder, through `Engine.sweepGates` and the `GateSweeper` behind
    * it. This docstring used to open "driven by the scheduler tick locally, a delay queue
    * when distributed", and there was no scheduler tick and no delay queue — four design
-   * documents were corrected to stop saying it and this was the last copy. `@loom/core`
+   * documents were corrected to stop saying it and this was the last copy. `@caohaotiantian/loom`
    * starts no timer and reads no wall clock on its own: a library that schedules work on
    * import keeps its embedder's process alive and puts a clock inside the determinism
    * boundary. So `now` is a parameter, the interval belongs to the deployment, and a test

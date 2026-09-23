@@ -12,7 +12,7 @@
  *     not about the tracer.
  *
  * The shape mirrors OpenTelemetry (and `gen_ai.*` semantic conventions for model
- * calls) without importing it, so `@loom/core` stays zero-dependency. An exporter
+ * calls) without importing it, so `@caohaotiantian/loom` stays zero-dependency. An exporter
  * package maps these to OTLP.
  *
  * EDGES ARE LINKS, NOT SPANS: a 500-node run with 2,000 edges produces ~500 task

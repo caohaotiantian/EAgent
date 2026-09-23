@@ -16,7 +16,7 @@
  *
  * Channels are injected and the built-ins use only `fetch` and a callback, so this stays
  * zero-dependency. A real Slack or PagerDuty integration is a `DeliveryChannel` living
- * outside `@loom/core`, which is where a vendor SDK belongs.
+ * outside `@caohaotiantian/loom`, which is where a vendor SDK belongs.
  *
  * The second half of the file is the RETURN path — a button click coming back as a
  * decision. It is arranged around a second rule:
@@ -966,7 +966,7 @@ export interface WebhookChannelOptions {
  *
  * A Slack incoming webhook, a PagerDuty Events endpoint, and an internal approvals
  * service are all this shape, so one implementation covers the realistic cases without
- * `@loom/core` learning any vendor's API.
+ * `@caohaotiantian/loom` learning any vendor's API.
  */
 export class WebhookChannel implements DeliveryChannel {
   readonly name: string;
@@ -1492,7 +1492,7 @@ export interface SignedWebhookChannelOptions extends WebhookChannelOptions {
    * path prefix, nothing more. `deliver` appends `/runs/{runId}/callbacks/{channel}` to
    * it, which is `ControlPlane`'s route, and puts the result in the outbound body.
    *
-   * ABSENT IS A WORKING CONFIGURATION and is silent here: `@loom/core` cannot know its own
+   * ABSENT IS A WORKING CONFIGURATION and is silent here: `@caohaotiantian/loom` cannot know its own
    * public origin behind a proxy or a tunnel, and an internal approvals service that was
    * told the address out of band is exactly the deployment this shipped as for nine waves.
    * What the absence costs is that the round trip is undocumentable from the payload

@@ -2318,7 +2318,7 @@ test("AN ANSWERABLE CHANNEL PUBLISHES ITS CALLBACK ADDRESS, and never the secret
 });
 
 test("a channel with no base URL publishes NOTHING rather than a guess", async () => {
-  // `@loom/core` cannot know its own public origin behind a proxy, a tunnel or a load
+  // `@caohaotiantian/loom` cannot know its own public origin behind a proxy, a tunnel or a load
   // balancer, so absence is a working configuration and the field is simply absent — a
   // receiver can tell "no address published" from "a broken address published".
   const cap = capture();

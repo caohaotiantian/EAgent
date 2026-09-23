@@ -14,7 +14,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,6 +22,7 @@ import { McpClient, createBoundedLineReader } from "../../src/mcp/client.ts";
 import { mcpToolName, mcpTools } from "../../src/mcp/tools.ts";
 import { openWorkspace, parseArgs, readMcpServers, startMcp, type ConnectedMcpServer } from "../../src/cli.ts";
 import { compile } from "../../src/graph/compile.ts";
+import { VERSION } from "../../src/version.ts";
 
 function serverFile(body: string): { path: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "loom-mcp-"));
@@ -54,6 +55,28 @@ process.stdin.on("data", (c) => {
 });
 function reply(id, result) { process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n"); }
 `;
+
+test("THE HANDSHAKE NAMES THIS BUILD'S VERSION, not a placeholder", async () => {
+  // `clientInfo.version` said "0.0.0" in every build until the 2026-09-23 packaging lane gave
+  // loom a version to report (`src/version.ts`); a server's own logs are where it is read.
+  // The server records what it was sent into the file named by its first argument.
+  const s = serverFile(
+    `import { writeFileSync } from "node:fs";\n` +
+      GOOD.replace(
+        'if (msg.method === "initialize") reply(msg.id,',
+        'if (msg.method === "initialize") writeFileSync(process.argv[2], JSON.stringify(msg.params.clientInfo)), reply(msg.id,',
+      ),
+  );
+  const seen = join(s.path, "..", "client-info.json");
+  const c = new McpClient({ name: "demo", command: process.execPath, args: [s.path, seen], timeoutMs: 10_000 });
+  try {
+    await c.start();
+    assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { name: "loom", version: VERSION });
+  } finally {
+    c.close();
+    s.cleanup();
+  }
+});
 
 // ── the line reader, which is the part a hostile server attacks ──────────────
 

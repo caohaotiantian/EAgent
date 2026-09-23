@@ -3,7 +3,7 @@
  *
  * WHY THIS FILE EXISTS: to be the thing a stranger copies. `--models-file` speaks two wires,
  * Anthropic's and OpenAI's, and `provider` is a closed set of exactly those two. Everything
- * else is this file. It imports NOTHING from `@loom/core` — it is handed four registries and
+ * else is this file. It imports NOTHING from `@caohaotiantian/loom` — it is handed four registries and
  * registers a plain object into one of them — which is the shape of the claim that the runtime
  * has no privileged built-ins.
  *
@@ -47,7 +47,7 @@ const PRICES = {
 /**
  * SUPPLY THIS. It must return the headers Bedrock requires for `body` at `url`, which for
  * AWS means a SigV4 `Authorization` over the canonical request. It is a parameter and not a
- * built-in because a signature is a credential operation: `@loom/core` takes no runtime
+ * built-in because a signature is a credential operation: `@caohaotiantian/loom` takes no runtime
  * dependencies, so it cannot ship an AWS SDK, and a hand-rolled SigV4 nobody has driven
  * against the real service is worse than an honest hole.
  */
