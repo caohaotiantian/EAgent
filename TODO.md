@@ -81,8 +81,9 @@ is the settlement-to-settlement series, because each term is pinned to a commit:
 at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — and **62** at
 `48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §A.99 and §H.17–§H.20; **67** at
 `7f576a47` (170 rows, 103 struck), the 2026-09-24 wave's merge, whose lanes closed seventeen rows
-but struck none — every strike is the settlement's — and **83** after that settlement
-(203 rows, 120 struck: seventeen struck, thirty-three opened). The 2026-09-22b
+but struck none — every strike is the settlement's — and **82** after that settlement
+(203 rows, 121 struck: seventeen closed, thirty-three opened, and one of those, §A.124, withdrawn
+by the settlement's review as a false premise). The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -106,7 +107,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 126 | 74 | 52 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself), so open went 37 → 52 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** §A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 126 | 75 | 51 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself; §A.124 then WITHDRAWN, its premise false), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -2715,7 +2716,7 @@ the four still open; of §A.95–§A.100, filed below by the 2026-09-23 settleme
   `warnPromotedSetShrunk` is removed. Repro:
   `node --test packages/core/test/cli/resolve-recorded-graph.test.ts` → 6 pass (with
   `capability-advice-keying`, `suite-freeze`, `graph-lookup-*` and `product-lane-doors` beside it).
-  Residue: §A.124–§A.126. The row as it stood follows. *(From the third port's F2.)* Files: the
+  Residue: §A.125, §A.126 (§A.124 withdrawn). The row as it stood follows. *(From the third port's F2.)* Files: the
   graph-by-hash resolution behind
   `loom replay`, `loom trace` and `loom approve`. These verbs find the graph by the hash the journal
   recorded and compile the candidates in `graphs/` to compare hashes; every candidate's diagnostics
@@ -3055,18 +3056,22 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   only its boundary. **Closes when** both are checked at the door, or the boundary is argued at
   `#assertBound`'s docstring.
 
-- **A.105 · `fs.glob` and `fs.grep` still write their cap marker INTO the content.** *(Lane A, §A.83's
-  residue; re-run.)* File: `packages/core/src/builtin/tools.ts`.
+- **A.105 · `fs.glob` and `fs.grep` still write their cap LINE into the content, beside the fact.**
+  *(Lane A, §A.83's residue; re-run, and restated in the settlement's review round.)* File:
+  `packages/core/src/builtin/tools.ts`. The FACT is already where §A.83 put the others': both tools
+  have carried `details.truncated` since `98133524` (`:1130`, `:1284`; asserted at
+  `fs-search.test.ts:213`), and the fold serves it — a driven `fs.glob` node's `"g:error"` is
+  `{"ok":true,"truncated":false}`. What is left is the LINE:
   ```
   $ /usr/bin/grep -an 'truncated at' packages/core/src/builtin/tools.ts
   1128:  … `${matches.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} files; narrow the pattern to see more)`
   1282:  … `${hits.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} matches; narrow the search to see more)`
   ```
-  An agent reading one gets the marker AND `modelToolContent`'s note. `triage-plan.js:53` parses the
-  marker (pinned at `examples-triage.test.ts:548–577` and `fs-search.test.ts:212`), which is why it
-  was left: removing it without migrating that body deletes a guard silently — the §A.83 lesson.
-  **Closes when** both tools put `truncated` in `details`, as §A.83's three do, and `triage-plan.js`
-  reads the glob node's `"<id>:error"` projection instead of the line.
+  So an agent reading a capped listing gets TWO signals — the line and `modelToolContent`'s note —
+  and `triage-plan.js:53` parses the line (pinned at `examples-triage.test.ts:548–577` and
+  `fs-search.test.ts:212`), which is why it was left: removing it without migrating that body
+  deletes a guard silently — the §A.83 lesson. **Closes when** the line leaves `content` and
+  `triage-plan.js` reads the glob node's `"<id>:error"` projection instead, in the same change.
 
 - **A.106 · `fs.restore`'s create-undo removes ANY file at the recorded path with the same inode, one
   link and the same bytes.** *(Lane A, §A.99's residue; not re-run here.)* File:
@@ -3083,7 +3088,8 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   journal distinguishes "removed" from "was already gone".
 
 - **A.108 · A redo after a rewind is SERVED a call the rollback undid, and the run ends
-  `succeeded` with the effect absent.** *(Lane A, §A.96's review; engine rewind semantics.)* File:
+  `succeeded` with the effect absent.** *(Lane A, §A.96's review — engine rewind semantics; not
+  re-run here.)* File:
   `packages/core/src/run/engine.ts`, the served-effect path after a rewind. §A.96's projection now
   says undone (no value), so no reader is told `ok: true` — but the RUN reports success with the
   write gone. **Closes when** a rewind past a compensated effect re-performs it or refuses, pinned
@@ -3134,7 +3140,8 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   **Closes when** the create is recorded before the attempt can be retried, or the retry recognises
   its own earlier attempt.
 
-- **A.116 · Rollback leaves the directories `fs.write` created.** *(Lane A; not re-run here.)*
+- **A.116 · Rollback leaves the directories `fs.write` created.** *(Lane A; re-run: after the
+  fresh-workspace late veto in §A.99's repro, `approved/` remains, empty.)*
   `fs.write` creates missing parents (`mkdir -p`); `fs.restore` removes the file only. **Closes
   when** created directories are recorded and removed when empty, or the limit is stated in
   `fs.write`'s description and `examples/README.md`.
@@ -3167,8 +3174,8 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   bounded (entries dropped once no rollback can reach them) or the bound is argued.
 
 - **A.122 · An ABSENT `subgraph.inputs`/`outputs` on an unresolved child compiles silent and
-  crashes at run time.** *(Lane C, §A.98's residue; not re-run here.)* `Object.entries(undefined)` in
-  `Engine.#contextFor`. Pinned as residue in `test/graph/subgraph-parent-mapping.test.ts` ("ONLY THE
+  crashes at run time.** *(Lane C, §A.98's residue; not re-run here.)* `Object.entries(sub.inputs)`
+  on `undefined`, at `packages/core/src/run/engine.ts:9679` inside `Engine.#runSubgraph`. Pinned as residue in `test/graph/subgraph-parent-mapping.test.ts` ("ONLY THE
   NAMES MOVED"). **Closes when** the compiler refuses a `subgraph` node missing either block
   whatever the child resolves to, and that pin flips.
 
@@ -3179,10 +3186,20 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   decision. **Closes when** the maintainer decides whether a resumed run compiles under its RECORDED
   build's rules or the current one, and the answer is pinned.
 
-- **A.124 · `loom gates` says "Publish the graph this run used to see what is being approved" even
-  when the graph is present.** *(Lane D's review, pre-existing; re-run by reading.)*
-  `packages/core/src/cli.ts:6396`, unconditional — the sentence §A.91's fifth round removed from
-  every other door. **Closes when** it is printed only when the resolver found no graph.
+- ~~**A.124 · `loom gates` says "Publish the graph this run used to see what is being approved" even
+  when the graph is present.**~~ **WITHDRAWN 2026-09-24 — premise false**, found by the settlement's
+  own reviewer. The sentence at `packages/core/src/cli.ts:6396` sits inside
+  `if (graph === undefined)` (`:6378`), so it is printed only when the resolver found no graph.
+  Driven for this withdrawal on `packages/core/dist/bin.js` at `7f576a47`, a parked
+  `two-person-veto` run, counting the sentence on `loom gates`' stderr:
+  ```
+  graph present      exit=0  0
+  graph edited       exit=0  1
+  graph deleted      exit=0  1
+  ```
+  In both arms that print it, *publish the graph this run used* is the right advice, so no narrower
+  claim was kept. "Re-run by reading" read the line and not its guard. The id is kept, as every id
+  is. *(Filed from the orchestrator's fact sheet, which carried Lane D's reviewer's note.)*
 
 - **A.125 · `sanitizeDiagnosticMessage` misses bidi controls, and three vectors print raw control
   characters.** *(Lane D's final review, pre-existing vectors; re-run by reading.)*
@@ -4471,7 +4488,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | H.17 | `267b3601`, `830aa0f5`, `a332471d`, `c2df008a`, `d558513c` | `pack.mjs` packs `git archive HEAD` in a throwaway checkout, strips map pointers, refuses cleanly. Residue → §H.22, §H.23 |
 | H.18 | `cf7f964b`, `da966096`, `d8e116b9` | shipped `.d.ts` need no `@types/node`; two lib needs documented (Q2). Residue → §H.25 |
 | H.19 | `96c71bd6`, `d74b162c`, `5c2b5c50` | `--port 1`, `--version --tokne x` and (N7) `--help --tokne x` exit 1 naming the flag. Residue → §H.21, §H.26 |
-| A.91 | `96c71bd6` … `6b1a47eb` | one `resolveRecordedGraph` for every by-hash verb: silent sweep, one refusal naming what was searched, advice that guesses nothing. Residue → §A.124–§A.126 |
+| A.91 | `96c71bd6` … `6b1a47eb` | one `resolveRecordedGraph` for every by-hash verb: silent sweep, one refusal naming what was searched, advice that guesses nothing. Residue → §A.125, §A.126 |
 | G.5 | `4fe87a88`, `5c236f55` | `graph.mutated.resolutionManifest`; every gate door checks a successor against it — Sequence item 18. Residue → §A.102, §A.103 |
 | A.85 | `6152c2d8` | `#assertBound`'s fourth vocabulary check, over edges and router cases. Residue → §A.104 |
 | A.83 | `26a4f358`, `a2f5244a`, `6f5c1b8b` | the truncation marker out of `content` at three tools, `truncated`/`bytes` on the projection, `maxBytes` in bytes, an in-band note to agents. Residue → §A.105, §A.111 |
