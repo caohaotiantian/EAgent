@@ -18,8 +18,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { classifyShippedSource, namesASourceMap } from "../../../scripts/pack.mjs";
+import { archiveHeadInto, classifyShippedSource, namesASourceMap } from "../../../scripts/pack.mjs";
 
 test("classifyShippedSource: ok, orphan, untracked — the three answers TODO.md §H.17 and §A.91 M3 name", () => {
   assert.equal(classifyShippedSource(true, true), "ok", "a source that exists and is tracked ships clean");
@@ -46,4 +50,42 @@ test("namesASourceMap: a pointer at line start, never a bare substring — TODO.
     false,
     "a string literal holding the exact text is not a pointer either — it does not OPEN a line",
   );
+});
+
+/**
+ * `archiveHeadInto` IS THE WHOLE MECHANISM M3 RESTS ON, AND WAS UNPINNED — TODO.md §A.91, the
+ * reviewer's second fix round. Reverting `runPack` to compile the working tree directly (deleting
+ * the call to this function) kept every OTHER check in `pack.mjs` green, because none of them ask
+ * the one question this row is actually about: is a dirty working tree's change absent from what
+ * gets packed? This test asks it directly, offline and fast — a throwaway two-commit repo, no real
+ * `tsc`/`npm pack` anywhere near it.
+ */
+test("archiveHeadInto: a dirty working tree's change is ABSENT from the archived checkout", () => {
+  const repo = mkdtempSync(join(tmpdir(), "loom-archive-src-"));
+  const dest = mkdtempSync(join(tmpdir(), "loom-archive-dest-"));
+  try {
+    const git = (...args: string[]): string =>
+      execFileSync("git", args, {
+        cwd: repo,
+        encoding: "utf8",
+        // NO GLOBAL CONFIG ASSUMED: a CI checkout may have no user.name/email set at all, and
+        // this repo must commit regardless.
+        env: { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
+      });
+    git("init", "-q");
+    writeFileSync(join(repo, "a.txt"), "committed\n");
+    git("add", "a.txt");
+    git("commit", "-q", "-m", "init");
+    const headSha = git("rev-parse", "HEAD").trim();
+
+    // THE DIRTYING. Same file, uncommitted — the exact shape `runPack`'s own first round missed:
+    // packing the working tree instead of HEAD would carry this straight into the tarball.
+    writeFileSync(join(repo, "a.txt"), "DIRTY, UNCOMMITTED\n");
+
+    archiveHeadInto(repo, headSha, dest);
+    assert.equal(readFileSync(join(dest, "a.txt"), "utf8"), "committed\n", "the archive must reflect HEAD, not the dirtied working tree");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(dest, { recursive: true, force: true });
+  }
 });

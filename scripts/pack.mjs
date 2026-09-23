@@ -43,12 +43,26 @@
  *
  * OUTSIDE A GIT CHECKOUT, THIS REFUSES IN ITS OWN WORDS: `git archive` is the whole packing
  * mechanism now, not an optional check, so `fail()` names that rather than letting `git`'s own
- * stderr and a raw non-zero exit stand in for this script's diagnosis.
+ * stderr and a raw non-zero exit stand in for this script's diagnosis. `--out` ITSELF is not
+ * created until every check has passed — TODO.md §A.91, the reviewer's second fix round: creating
+ * it up front left an empty directory behind on any early failure, indistinguishable from "packed
+ * zero files" to a caller scripting around this. A COMMITTED COMPILE ERROR is caught the same
+ * round: `tsc -b --force`'s own diagnostics still print (`stdio: "inherit"`), but the exception
+ * `execFileSync` throws for the non-zero exit is caught and turned into a `pack FAILED:` line
+ * rather than an uncaught `Error: Command failed …` stack riding on top of them.
+ *
+ * WHAT WAS PACKED IS PRINTED WITH THE BRANCH ("detached" if none) beside the sha, and — NOT A
+ * REFUSAL — a working tree with uncommitted changes is counted and named: this row packs `HEAD`
+ * ON PURPOSE, so a dirty tree is a fact worth telling the operator, not an error.
  *
  * THE CLASSIFICATION IN STEP 2 IS `classifyShippedSource`, A PURE FUNCTION, exported for
  * `packages/core/test/scripts-pack.test.ts` to pin directly — deleting or loosening the check
  * turns that test red without needing a real compile, a real archive or a real `npm pack` in the
- * loop.
+ * loop. `archiveHeadInto` (step 0's mechanism) is exported and pinned there too, directly: reverting
+ * `runPack` to compile the working tree instead — deleting the one call to it — was UNPINNED after
+ * the first round, because nothing else in this file asks "is a dirty tree's change absent from
+ * what gets archived". The test asks that one question, offline, against a throwaway two-commit
+ * repo, with no real `tsc`/`npm pack` anywhere near it.
  *
  *     node scripts/pack.mjs --out DIR     → DIR/caohaotiantian-loom-<version>.tgz, path on stdout
  */
@@ -109,6 +123,28 @@ export function namesASourceMap(text) {
   return /^\/\/# sourceMappingURL=/m.test(text);
 }
 
+/**
+ * `git archive HEAD | tar -x`, ISOLATED — TODO.md §A.91, the reviewer's second fix round. The
+ * mechanism M3 rests on: materialises exactly the tree ONE commit named, into `destDir`, with no
+ * reference to whatever the working tree currently holds. Extracted on its own so
+ * `packages/core/test/scripts-pack.test.ts` can pin the ONE property that actually matters — a
+ * dirty working tree's changes are ABSENT from what lands in `destDir` — without paying for a real
+ * `tsc -b` or a real `npm pack` to prove it. That property was UNPINNED after the first round:
+ * reverting `runPack` to compile the working tree directly (deleting this whole function's call)
+ * kept every other check in this file green, because none of them asked this specific question.
+ *
+ * `git archive`, NOT `--output` to a file: piping keeps this one process tree and needs no
+ * intermediate file cleaned up on every exit path.
+ *
+ * @param {string} repoRoot - a directory `git` can resolve `headSha` from.
+ * @param {string} headSha - the commit to materialise.
+ * @param {string} destDir - an existing, empty directory to extract into.
+ */
+export function archiveHeadInto(repoRoot, headSha, destDir) {
+  const archive = execFileSync("git", ["archive", headSha], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 1024 });
+  execFileSync("tar", ["-x", "-C", destDir], { input: archive });
+}
+
 function runPack(argv) {
   const stray = argv.filter((a, i) => !(a === "--out" || a.startsWith("--out=") || argv[i - 1] === "--out"));
   if (stray.length > 0) {
@@ -123,15 +159,32 @@ function runPack(argv) {
     process.exit(2);
   }
   const OUT = resolve(outArg);
-  mkdirSync(OUT, { recursive: true });
+  // NOT CREATED YET — TODO.md §A.91, the reviewer's second fix round: outside a git checkout (or
+  // on any other early failure) this used to leave an empty `--out` directory behind, which looks
+  // exactly like "packed zero files" to a caller scripting around this. Created only once every
+  // check below has passed, right before `npm pack` needs it to exist.
 
   // ── 0. a clean HEAD, materialised — not the working tree ───────────────────────
   let headSha;
+  let branch;
+  let dirtyCount;
   try {
     // `stdio: ["ignore","pipe","pipe"]`, so a failure's stderr reaches THIS message once — the
     // default inherits stdio, which printed git's own "fatal: not a git repository" a second
     // time, ahead of and separate from this script's own diagnosis of the same fact.
-    headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const gitStdio = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
+    headSha = execFileSync("git", ["rev-parse", "HEAD"], gitStdio).trim();
+    // DETACHED READS "HEAD" FROM THIS COMMAND, so it is renamed for the operator: "HEAD" printed
+    // next to a sha that is ALSO what `rev-parse HEAD` names is confusing in a way "detached"
+    // is not.
+    const abbrev = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], gitStdio).trim();
+    branch = abbrev === "HEAD" ? "detached" : abbrev;
+    // NOT A REFUSAL — TODO.md §A.91 M3. Packing sources HEAD ON PURPOSE (that is the whole of
+    // this row); a dirty working tree is not an error, it is a fact the operator packing might
+    // not have meant to leave out, so it is counted and named rather than silently dropped.
+    dirtyCount = execFileSync("git", ["status", "--porcelain"], gitStdio)
+      .split("\n")
+      .filter((l) => l.length > 0).length;
   } catch (e) {
     fail(
       `this is not a git checkout (\`git rev-parse HEAD\` failed): ${(e.stderr ?? e.message).toString().trim()}\n` +
@@ -144,10 +197,7 @@ function runPack(argv) {
   try {
     const checkout = join(scratch, "checkout");
     mkdirSync(checkout, { recursive: true });
-    // `git archive HEAD | tar -x`, not `git archive --output`: piping keeps this one process tree
-    // and needs no intermediate file this script would then have to clean up on every exit path.
-    const archive = execFileSync("git", ["archive", headSha], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 1024 });
-    execFileSync("tar", ["-x", "-C", checkout], { input: archive });
+    archiveHeadInto(repoRoot, headSha, checkout);
     // BORROWED, NOT COPIED: `node_modules` holds no source `check-zero-dep.mjs` cares about, and
     // `git archive` never contains it (it is gitignored) — the checkout cannot compile without it.
     if (existsSync(join(repoRoot, "node_modules"))) {
@@ -157,10 +207,19 @@ function runPack(argv) {
     const DIST = join(CORE, "dist");
 
     // ── 1. compile, IN THE CHECKOUT — the maintainer's own dist/ is never opened ──
-    execFileSync(process.execPath, [join(checkout, "node_modules", "typescript", "bin", "tsc"), "-b", "--force"], {
-      cwd: checkout,
-      stdio: "inherit",
-    });
+    try {
+      execFileSync(process.execPath, [join(checkout, "node_modules", "typescript", "bin", "tsc"), "-b", "--force"], {
+        cwd: checkout,
+        stdio: "inherit",
+      });
+    } catch {
+      // `stdio: "inherit"` above already printed tsc's own diagnostics — this catches only the
+      // exception `execFileSync` throws for the non-zero exit, so a committed compile error
+      // reads as a clean refusal rather than an uncaught `Error: Command failed …` stack trace
+      // riding on top of the real diagnostics an operator already has.
+      fail(`the archived commit ${headSha} does not compile (tsc -b --force failed, see above) — a broken commit cannot be packed.`);
+      return;
+    }
 
     // ── 2. every shipped file has a TRACKED source ────────────────────────────────
     // `git ls-tree`, NOT `git ls-files` — `ls-files` reads the INDEX/working tree and the
@@ -225,6 +284,9 @@ function runPack(argv) {
     }
 
     // ── 3. pack ────────────────────────────────────────────────────────────────────
+    // CREATED HERE, not at the top: every check above has passed, so this is the first point at
+    // which there is anything to put in `--out` — see the note where `OUT` was resolved.
+    mkdirSync(OUT, { recursive: true });
     const raw = execFileSync("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", OUT], {
       cwd: CORE,
       encoding: "utf8",
@@ -280,10 +342,16 @@ function runPack(argv) {
     }
 
     console.error(
-      `packed ${report.name}@${report.version} from ${headSha.slice(0, 12)} — ${String(report.entryCount)} files, ` +
+      `packed ${report.name}@${report.version} from ${branch}@${headSha.slice(0, 12)} — ${String(report.entryCount)} files, ` +
         `${(report.size / 1024).toFixed(0)} KB (${(report.unpackedSize / 1024).toFixed(0)} KB unpacked), every one compiled ` +
         `from a clean archive of that commit (${String(stripped)} sourceMappingURL pointer(s) stripped, none remain in the tarball)`,
     );
+    // NOT A REFUSAL — see where `dirtyCount` was measured. A caller who forgot to commit before
+    // packing gets told what was left out, rather than a tarball that quietly does not match what
+    // `git status` shows on their screen.
+    if (dirtyCount > 0) {
+      console.error(`! the working tree has ${String(dirtyCount)} uncommitted change(s), left out of this pack (it sources ${branch}@${headSha.slice(0, 12)} only)`);
+    }
     console.log(tarball);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
