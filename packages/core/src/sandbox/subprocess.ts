@@ -89,7 +89,7 @@ import { CODES, err } from "../errors.ts";
  * value this process ever actually assigns to `.signal` is one of these names on every platform
  * this file runs on, so nothing here is a claim beyond what `NodeJS.Signals` already made.
  */
-export type ExitSignal =
+type ExitSignal =
   | "SIGABRT"
   | "SIGALRM"
   | "SIGBUS"
