@@ -57,20 +57,44 @@ test("namesASourceMap: a pointer at line start, never a bare substring — TODO.
  * reviewer's second fix round. Reverting `runPack` to compile the working tree directly (deleting
  * the call to this function) kept every OTHER check in `pack.mjs` green, because none of them ask
  * the one question this row is actually about: is a dirty working tree's change absent from what
- * gets packed? This test asks it directly, offline and fast — a throwaway two-commit repo, no real
+ * gets packed? This test asks it directly, offline and fast — a throwaway ONE-commit repo, no real
  * `tsc`/`npm pack` anywhere near it.
+ *
+ * WHAT THIS DOES NOT PIN — TODO.md §A.91, the reviewer's third fix round (N1), said rather than
+ * left implicit: this asserts `archiveHeadInto` itself is correct, never that `runPack` actually
+ * CALLS it on the path that matters. A mutant that swapped the call site back to compiling the
+ * working tree directly — an `rsync`-the-tree-instead-of-`git archive` regression — would leave
+ * this file, and every other check in it, green: none of them drive `runPack`'s own dirty-tree
+ * behavior end to end (that needs a real `tsc -b --force`, which this file's own docstring says it
+ * is deliberately not paying for). Closing that gap costs one of: exporting `runPack`'s pre-compile
+ * stage so a test can assert it called `archiveHeadInto` rather than a raw copy, or a `--dry-run`/
+ * staging flag that stops after the archive step and reports what it archived. Neither is done
+ * here; this is residue, not a fix, and `scripts/pack.mjs`'s own docstring is the place a reader
+ * would look for the call site this test does not reach.
  */
 test("archiveHeadInto: a dirty working tree's change is ABSENT from the archived checkout", () => {
   const repo = mkdtempSync(join(tmpdir(), "loom-archive-src-"));
   const dest = mkdtempSync(join(tmpdir(), "loom-archive-dest-"));
   try {
+    // AN INHERITED GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE MUST NOT REACH THIS REPO — TODO.md §A.91,
+    // the reviewer's third fix round (N2). `execFileSync`'s `env` otherwise inherits whatever this
+    // TEST RUNNER's own process carries, and a caller invoking this suite from inside a git hook
+    // (or any wrapper that sets one of those three to point at a DIFFERENT repository) makes every
+    // `git` call below operate on that repository instead of the throwaway one just initialised —
+    // `git init -q` in `repo` would silently no-op against an already-initialised GIT_DIR, and the
+    // "committed" vs "DIRTY, UNCOMMITTED" assertion would be reading and writing someone else's
+    // history. Stripped rather than left to chance.
+    const cleanEnv = { ...process.env };
+    delete cleanEnv["GIT_DIR"];
+    delete cleanEnv["GIT_WORK_TREE"];
+    delete cleanEnv["GIT_INDEX_FILE"];
     const git = (...args: string[]): string =>
       execFileSync("git", args, {
         cwd: repo,
         encoding: "utf8",
         // NO GLOBAL CONFIG ASSUMED: a CI checkout may have no user.name/email set at all, and
         // this repo must commit regardless.
-        env: { ...process.env, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
+        env: { ...cleanEnv, GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid", GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" },
       });
     git("init", "-q");
     writeFileSync(join(repo, "a.txt"), "committed\n");
