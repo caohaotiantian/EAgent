@@ -267,7 +267,19 @@ test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS REFUSED 
   assert.equal(cand.length, 30);
   assert.deepEqual(cand.filter((k) => k.pass !== true).map((k) => k.id), [], "check wrote verdict.pass === true on every replayed case");
   const base = await verifierVerdicts(c, join("graphs", "keep.json"));
-  assert.equal(base.filter((k) => k.pass === true).length, 10, "the baseline's own verifier passes it on the ten goldens only");
+  assert.equal(base.length, 30);
+  // Both halves stated POSITIVELY: `true` on the goldens and a real `false` elsewhere, so a missing
+  // or non-boolean verdict cannot pass as "not certified".
+  assert.deepEqual(
+    base.filter((k) => k.pass === true).map((k) => k.id).sort(),
+    golden.map((k) => k.id).sort(),
+    "the baseline's own verifier passes it on the ten goldens only",
+  );
+  assert.deepEqual(
+    base.filter((k) => !k.mustPass).map((k) => k.pass),
+    Array.from({ length: 20 }, () => false),
+    "…and FAILS it, verdict.pass === false, on the other twenty",
+  );
 
   // …AND THE ONLY THING THE CANDIDATE FAILED IS THE VERBATIM PIN.
   const failed = cand.filter((k) => k.caseReasons.length > 0);
@@ -297,7 +309,12 @@ test("§A.29 · A CANDIDATE ITS OWN VERIFIER CERTIFIES ON EVERY CASE IS REFUSED 
 test("CONTROL · a candidate that really drops items is refused on the same two checks, and its own verifier says so", async () => {
   const c = await corpus();
   const verdicts = await verifierVerdicts(c, "dropper.json");
-  assert.equal(verdicts.filter((k) => k.pass === true).length, 0, "check fails the dropper on every case");
+  assert.equal(verdicts.length, 30);
+  assert.deepEqual(
+    verdicts.map((k) => k.pass),
+    Array.from({ length: 30 }, () => false),
+    "check fails the dropper — verdict.pass === false — on every case",
+  );
 
   const r = await promote(c, "dropper.json");
   assert.equal(r.decision.promote, false);
