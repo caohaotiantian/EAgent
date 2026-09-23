@@ -143,6 +143,7 @@ const LEAVES_NOTHING: readonly {
   { what: "an unknown verb named on Object.prototype", argv: ["constructor"], code: 2 },
   { what: "an unknown verb named on Object.prototype, with a flag", argv: ["constructor", "--port", "1"], code: 2 },
   { what: "an unknown flag", argv: ["run", "--bogus", "x"], code: 1 },
+  { what: "an unknown flag with no verb", argv: ["--bogus"], code: 1, says: /unknown flag: --bogus/ },
   { what: "a known flag this verb does not read", argv: ["score", "--suite", "x"], code: 1 },
   { what: "a repeated --extension-module", argv: ["compile", "--extension-module", "a", "--extension-module", "b"], code: 1 },
   // §H.12 — a VERB flag with no value. The message is the reader's own, unchanged.
@@ -185,13 +186,15 @@ test("EVERY GLOBAL FLAG GIVEN NO VALUE REFUSES WITH NOTHING ON DISK — the list
   // EXACT, NOT A FLOOR. The number moves with `GLOBAL_FLAGS` and bumping it is the point: a floor
   // with two members of slack passes on exactly the scan this line exists to catch — a regex that
   // matched most of the list — and a new global arriving uncovered is the other thing it catches.
-  assert.equal(flags.length, 15, `the scan found ${String(flags.length)} global flags: ${flags.join(", ")}. Either the regex broke, or GLOBAL_FLAGS changed — check the new flag is covered below, then set this number to it`);
+  assert.equal(flags.length, 16, `the scan found ${String(flags.length)} global flags: ${flags.join(", ")}. Either the regex broke, or GLOBAL_FLAGS changed — check the new flag is covered below, then set this number to it`);
   for (const f of flags) {
     const { code, out, err, left } = await inAnEmptyDirectory(() => ["compile", `--${f}`]);
     assert.deepEqual(left, [], `\`loom compile --${f}\` (no value) created ${left.join(", ")} — stderr was:\n${err}`);
-    // `--help` is the one global that is not a value at all: it prints the usage and exits 0.
-    assert.equal(code, f === "help" ? 0 : 1, `\`loom compile --${f}\` (no value), stderr:\n${err}`);
+    // `--help` and `--version` are the two globals that are not values at all: each prints what
+    // it names and exits 0.
+    assert.equal(code, f === "help" || f === "version" ? 0 : 1, `\`loom compile --${f}\` (no value), stderr:\n${err}`);
     if (f === "help") assert.match(out, /loom — graph-native/);
+    else if (f === "version") assert.match(out, /^loom \d+\.\d+\.\d+\n$/);
     else assert.match(err, new RegExp(`--${f}`), `the refusal for --${f} does not name the flag: ${err}`);
   }
 });
@@ -248,7 +251,7 @@ const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly
 };
 
 /** `null` rows that are not in the set above, each because there is nothing to refuse. */
-const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject"];
+const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject", "version"];
 
 test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the table, not with this file", () => {
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");

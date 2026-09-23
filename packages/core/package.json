@@ -1,15 +1,34 @@
 {
-  "name": "@loom/core",
-  "version": "0.0.0",
+  "name": "@caohaotiantian/loom",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Loom engine: journal, graph compiler, executor, scheduler. Zero runtime dependencies. `private` until the maintainer decides to publish; `bin` and the `./cli` subpath make a `npm pack` tarball installable in the meantime, which is what `loom --help` in a fresh directory needs.",
+  "description": "Loom — a multi-agent runtime where every durable fact is an append-only journal entry: parallelism, human gates, replay and tracing as one mechanism. Zero runtime dependencies. `private` stays true until the maintainer publishes; `node scripts/pack.mjs --out DIR` packs an installable tarball meanwhile.",
+  "keywords": [
+    "agents",
+    "multi-agent",
+    "orchestration",
+    "workflow",
+    "journal",
+    "replay",
+    "human-in-the-loop"
+  ],
   "license": "MIT",
+  "author": "caohaotiantian",
+  "homepage": "https://github.com/caohaotiantian/EAgent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caohaotiantian/EAgent.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/caohaotiantian/EAgent/issues"
+  },
   "engines": {
     "node": ">=24.0.0"
   },
   "bin": {
-    "loom": "./dist/cli.js"
+    "loom": "./dist/bin.js"
   },
   "exports": {
     ".": {
@@ -23,8 +42,13 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist/**/*.js",
+    "dist/**/*.d.ts"
   ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "dependencies": {},
   "scripts": {
     "build": "tsc -b --force"

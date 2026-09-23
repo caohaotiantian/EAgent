@@ -340,11 +340,13 @@ test("A COMPILE DIAGNOSTIC NAMES ITS FILE — an unattributed ✗ above a succes
 
 // ── install it ───────────────────────────────────────────────────────────────
 
-test("THE CLI RUNS WHEN IT IS REACHED THROUGH A SYMLINK, which is what `package.json`'s `bin` produces", async () => {
-  // npm writes `node_modules/.bin/loom` as a SYMLINK to `dist/cli.js` on POSIX, so `argv[1]`'s
-  // basename is "loom" while the module's own URL ends in "cli". The entry-point test used to
-  // compare those two strings, so an installed `loom --help` printed NOTHING and exited 0 —
-  // "Install it", the goal's first two words, failing in silence.
+test("THE CLI RUNS WHEN IT IS REACHED THROUGH A SYMLINK", async () => {
+  // npm writes `node_modules/.bin/loom` as a SYMLINK on POSIX, so `argv[1]`'s basename is "loom"
+  // while the module's own URL ends in "cli". The entry-point test used to compare those two
+  // strings, so while `bin` pointed at `dist/cli.js` an installed `loom --help` printed NOTHING
+  // and exited 0 — "Install it", the goal's first two words, failing in silence. `bin` is
+  // `dist/bin.js` now and `node-floor.test.ts` drives THAT link; a link straight to `cli` is still
+  // a way to start it, and this keeps it one.
   //
   // The link is named `.ts` so Node type-strips it exactly as it does the real file; the
   // basename still differs, which is the whole condition under test.
