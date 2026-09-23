@@ -5097,6 +5097,10 @@ function rule010ConcurrentWriters(spec: GraphSpec, idx: GraphIndex, d: Diagnosti
         // is pushed into a per-arm channel per arm, which is worse modelling forced by
         // an over-approximation.
         if (routerExclusive(spec, idx, a, b)) continue;
+        // One node's SUCCESS arm and the same node's FAILURE arm cannot both run (§A.94): a Task
+        // commits one outcome, and a failed one routes by `#errorEdges` alone. See
+        // `outcomeExclusive` for the graph property this rests on and what it does not cover.
+        if (outcomeExclusive(idx, a, b)) continue;
         d.push({
           severity: "error",
           code: "GRAPH010_CONCURRENT_WRITE",
@@ -5492,6 +5496,79 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
   return !router.cases.some((c) => c.take.includes(armA.edge) && c.take.includes(armB.edge));
 }
 
+/**
+ * Are `a` and `b` on the success arm and the failure arm of ONE node — as a property of the graph?
+ *
+ * `grant-access.json`'s `prior` (behind `read-ledger`'s `seq` edge) and `first-grant` (behind its
+ * `error` edge) both write `history`, and GRAPH010 called them concurrent writers of a `replace`
+ * channel (§A.94). They are exclusive by construction: `#commit` routes a failed outcome by
+ * `#errorEdges` and a succeeded one by `#edgesToTake`, a `take` or a `steer` applies to a
+ * SUCCEEDED outcome only, and a Task commits exactly one outcome. The workaround that shipped —
+ * `merge_object` with `onConflict: "last_by_branch"` — bought a conflict arm that cannot fire.
+ *
+ * THE PROPERTY, over `flowEdges` from the entry nodes, for some node `X`:
+ *   - every path to `a` crosses a SUCCESS arm of `X` (`seq`, `conditional`, `fanout` — the kinds
+ *     `#edgesToTake` takes and `#errorEdges` never does), so deleting those edges leaves `a`
+ *     unreachable;
+ *   - every path to `b` crosses an `error` edge of `X`, so deleting those leaves `b` unreachable;
+ *   - `X` runs at most once per branch and is inside no fan-out (`multiRunNodes`, and an empty
+ *     fan-out stack) — so there is ONE outcome, not one per pass or per branch;
+ *   - and no `join` node lies between `X` and either of them: a barrier fires on TERMINATION,
+ *     failures included, so it can carry a path onward without `X`'s arm having been taken.
+ * `join` edges out of `X` are in neither arm for the same reason, and a `loop` edge out of `X`
+ * would put `X` on a cycle, which the third condition already refuses.
+ *
+ * NARROWER THAN `routerExclusive` ON PURPOSE: that one rests on a router taking one case, which an
+ * operator `steer` can overrule; this rests on success and failure, which nothing overrules.
+ */
+function outcomeExclusive(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  const multi = multiRunNodes(idx);
+  const reachableWithout = (cut: ReadonlySet<EdgeId>): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = [...idx.entryNodes];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation" && !cut.has(e.id)) stack.push(e.to);
+    }
+    return seen;
+  };
+  const noJoinBetween = (x: NodeId, target: NodeId): boolean => {
+    // The nodes on some path from `x` to `target` over `flowEdges` — `target` included, `x` not.
+    const after = new Set<NodeId>();
+    const fwd = (idx.outbound.get(x) ?? []).filter((e) => e.kind !== "compensation").map((e) => e.to);
+    while (fwd.length > 0) {
+      const id = fwd.pop()!;
+      if (after.has(id)) continue;
+      after.add(id);
+      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation") fwd.push(e.to);
+    }
+    const between = new Set<NodeId>();
+    const back = [target];
+    while (back.length > 0) {
+      const id = back.pop()!;
+      if (between.has(id) || !after.has(id)) continue;
+      between.add(id);
+      for (const e of idx.inbound.get(id) ?? []) if (e.kind !== "compensation") back.push(e.from);
+    }
+    return [...between].every((id) => idx.byId.get(id)?.type !== "join");
+  };
+  for (const [x, outs] of idx.outbound) {
+    const failure = outs.filter((e) => e.kind === "error");
+    if (failure.length === 0 || multi.has(x)) continue;
+    const stack = idx.fanoutEdgeStack.get(x);
+    if (stack === undefined || stack.length > 0) continue;
+    const success = outs.filter((e) => e.kind === "seq" || e.kind === "conditional" || e.kind === "fanout");
+    const withoutSuccess = reachableWithout(new Set(success.map((e) => e.id)));
+    const withoutFailure = reachableWithout(new Set(failure.map((e) => e.id)));
+    for (const [s, f] of [[a, b], [b, a]] as const) {
+      if (withoutSuccess.has(s) || withoutFailure.has(f)) continue;
+      if (noJoinBetween(x, s) && noJoinBetween(x, f)) return true;
+    }
+  }
+  return false;
+}
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────
 
