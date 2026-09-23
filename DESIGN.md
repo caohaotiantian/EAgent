@@ -250,7 +250,9 @@ prompt, an argument or an expression; widening is additive. (A `function` reader
 GATED does show the projection in its gate payload — `#gatePayload` builds the same view — bound by
 the view's hash like any read.) *Residue:* a source inside or downstream of a loop body, or inside a
 fan-out the reader is not in, is REFUSED rather than served (the reader's iteration is not threaded
-into `viewFor`); `E_CAP_DENIED` is also the code for a capability the policy did not grant, so "the
+into `viewFor`) — which OVER-refuses a node behind a loop's exit that runs once (`TODO.md` §A.95);
+a COMPENSATED task still projects `ok: true`, since rollback folds nothing onto the task (§A.96, no
+shipped path reaches it); `E_CAP_DENIED` is also the code for a capability the policy did not grant, so "the
 jail refused this path" is distinct from missing and unreadable but not from every other refusal;
 `fs.write`, `fs.edit` and `fs.glob` still THROW their jail refusals (and `net.fetch` its egress
 refusal), which `#invokeTool` flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a
