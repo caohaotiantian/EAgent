@@ -103,48 +103,6 @@ export interface TaskRecord {
    */
   readonly lease?: { readonly workerId: string; readonly at: number; readonly fencingToken: number };
   /**
-   * The seq of the latest `compensation.recorded` ROW naming this Task whose rollback was
-   * ATTEMPTED — outcome `compensated` or `failed` — folded WITHOUT suppression.
-   *
-   * It exists so the Task's error projection stops saying `ok: true` about an effect that no
-   * longer stands (`TODO.md` §A.96). Rollback folds nothing else onto the Task: its state stays
-   * `succeeded`, which is true of what the Task DID and false of what is left of it.
-   *
-   * ONE RULE FOR RETRY AND REWIND: the Task is undone when this row is LATER than the latest
-   * effect the Task actually PERFORMED (`performedAtSeq`) — not later than its lease, and not
-   * later than the call the row names. Both of those were tried and each failed a case, because
-   * what matters is whether the effect that STANDS behind this Task's success came after the undo:
-   *
-   *  - keyed on the undone call (`compensatesSeq`) vs the lease, a RETRY broke it: the retried
-   *    attempt is SERVED the first attempt's recorded call (`#servedToolEffect`), so the call sits
-   *    before the lease that finally succeeded — `{ok: true}` over a rolled-back file
-   *    (review probe `zz-review-a96-retry`);
-   *  - keyed on the row vs the lease, a REWIND broke it: a redo re-leased after the row but was
-   *    SERVED the recorded call too, so nothing was re-performed — `{ok: true, bytes: 1}` over a
-   *    file the run-failed rollback had removed (review probe `rewind-served`). Re-leased is not
-   *    re-executed.
-   *
-   * A served call writes nothing to the journal; a performed one writes `tool.called`, which is
-   * the rollback planner's own record that an action really happened (`run/compensation.ts`,
-   * WHAT IS A CANDIDATE). So "performed after the undo" is read from the same rows the undo was
-   * planned from, and a redo that re-performs its call is `ok: true` again while one that was
-   * served the undone call is not.
-   *
-   * UNSUPPRESSED, the rule `run/compensation.ts` states for its own read of these rows: a record
-   * of an undo is not a thing a rewind undoes. A run that FAILED, rolled back a Task committed
-   * before seq A, and was then rewound to A would otherwise fold that Task `succeeded` with its
-   * rollback hidden — its effect gone, its projection `ok: true`.
-   *
-   * `not_attempted` does not set it: that row says the effect STANDS.
-   */
-  readonly undoneAtSeq?: number;
-  /**
-   * The seq of the latest `tool.called` for one of this Task's OWN calls (`<taskId>:tool:<n>`) —
-   * an effect the Task really performed, never one it was served. Folded like any event, so a
-   * call a rewind hides is not counted. Read against `undoneAtSeq`; see there.
-   */
-  readonly performedAtSeq?: number;
-  /**
    * What each of this Task's tool calls said about the COMPLETENESS of what it returned — the
    * `truncated` and `bytes` its recorded `details` carried — keyed by effect key, folded from
    * `effect.completed` (`DESIGN.md` D8, `TODO.md` §A.83).
@@ -463,6 +421,53 @@ export interface RunProjection {
    * an input, and the fail-closed reading of a command nobody can parse is that it was not given.
    */
   readonly steers: Readonly<Record<NodeId, readonly EdgeId[]>>;
+  /**
+   * EVERY CALL A ROLLBACK UNDID, by its effect key, mapped to the seq of the latest
+   * `compensation.recorded` row that attempted it (`compensated` or `failed`; `not_attempted` says
+   * the effect STANDS and adds nothing). Folded WITHOUT suppression — the rule
+   * `run/compensation.ts` states for its own read of these rows: a record of an undo is not a
+   * thing a rewind undoes. Read with `performedCalls` by `errorProjectionOf` (`TODO.md` §A.96).
+   *
+   * PER CALL, NOT PER TASK, and three rounds of review are why. Each earlier key was a task-level
+   * SCALAR standing in for the one fact that matters — whether the SPECIFIC effect a rollback
+   * undid came back — and each moved the gap one edge over:
+   *
+   *  - the undone call's seq vs the task's lease: a RETRY is served the first attempt's call, so
+   *    the call sits before the lease that succeeded — `{ok: true}` over a removed file;
+   *  - the row's seq vs the lease: a redo after a REWIND re-leases and is SERVED the call, so it
+   *    re-performs nothing — `{ok: true, bytes: 1}` over a removed file. Re-leased is not
+   *    re-executed;
+   *  - the row's seq vs the task's latest PERFORMED call: a body with two calls, redone after a
+   *    rewind, is served the undone write and PERFORMS a later read — `{ok: true}` over a removed
+   *    file (review probe `two-calls`, mid).
+   *
+   * So the rule names the call: a task is undone iff SOME call of its own (`<taskId>:tool:<n>`)
+   * was undone at row seq R and no `tool.called` with THAT key sits at a seq later than R. A redo
+   * that re-performs every undone call is `ok: true` again; one that re-performs other calls, or
+   * none at all, is not — which is also right when the redo makes NO call: the effect it had is
+   * gone and nothing put it back, so "succeeded" no longer describes what stands.
+   *
+   * Absent on a projection built by hand; read as empty.
+   */
+  readonly undoneCalls?: Readonly<Record<string, number>>;
+  /**
+   * The seq of the latest `tool.called` per effect key — a call a body MADE. Folded like any
+   * event, so a call a rewind hides is not counted.
+   *
+   * WHAT "MADE" MEANS ON THE PATH THE FOLD SEES. A live call handed back from this run's own record
+   * (`#servedToolEffect`, a retry or a redo) appends no `tool.called`; a live call the body really
+   * dispatched appends one after it returns. That is the LIVE journal, and it is the one this
+   * rule is written for. UNDER REPLAY it is not so: `#servedEffect` is off in a replay, so every
+   * call a body makes — including one the live run was handed back — goes to the replay arm of
+   * `#invokeTool`, which serves it from the recording AND appends `tool.called`. A replayed journal
+   * can therefore hold MORE "made" rows than the live one, never fewer. For a run-failed rollback
+   * that changes nothing, because its rows are appended after every call the run made; measured,
+   * the replay of a rollback, and of a retry served the undone call and then rolled back, both
+   * match. It could matter only for a served call made AFTER a rollback row — a redo after a
+   * rewind — and replay does not re-drive a rewind at all: such a run replays `match: false`, and
+   * did before this fold (residue).
+   */
+  readonly performedCalls?: Readonly<Record<string, number>>;
 }
 
 interface MutableProjection {
@@ -489,6 +494,8 @@ interface MutableProjection {
   bindings: Record<string, Record<string, unknown>>;
   external: Record<string, PayloadRef>;
   tasks: Record<TaskId, TaskRecord>;
+  undoneCalls: Record<string, number>;
+  performedCalls: Record<string, number>;
   gates: Record<GateId, GateRecord>;
   usage: UsageRecord;
   /** Per Task, everything already added to `usage` on its behalf. `chargeUsage` reads it. */
@@ -648,6 +655,8 @@ function emptyProjection(e: JournalEvent): MutableProjection {
     bindings: {},
     external: {},
     tasks: {},
+    undoneCalls: {},
+    performedCalls: {},
     gates: {},
     usage: { ...ZERO_USAGE },
     usageSeen: {},
@@ -719,6 +728,8 @@ function freeze(p: MutableProjection): RunProjection {
     paused: p.paused,
     steers: { ...p.steers },
     fanouts: { ...p.fanouts },
+    undoneCalls: { ...p.undoneCalls },
+    performedCalls: { ...p.performedCalls },
     ...(p.submittedBy === undefined ? {} : { submittedBy: p.submittedBy }),
     ...(p.endedAt === undefined ? {} : { endedAt: p.endedAt }),
     ...(p.error === undefined ? {} : { error: p.error }),
@@ -920,21 +931,23 @@ const RUN_STATUS_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * A rollback, onto the Task whose call it undid — see `TaskRecord.undoneAtSeq`.
+ * A rollback, onto the CALL it undid — see `RunProjection.undoneCalls`.
  *
  * Reached from `apply` AND from both folds' suppressed paths, because a rewind's range hides the
- * rows a run-failed rollback wrote before it, and the undo they record still happened. It only
- * ever PATCHES a Task the fold already holds: a row naming no Task, or one this fold has not seen,
- * changes nothing, since a Task that appears later is one leased after the row and so outside it.
+ * rows a run-failed rollback wrote before it, and the undo they record still happened. Keyed by
+ * the row's `compensates` (the undone call's effect key), so it needs no Task in the fold: a
+ * rewind to before the Task was even readied still leaves the mark for its redo to be read
+ * against. A row whose `compensates` is not a string is attributed to an unknown call of its
+ * Task, which no later call can match — the fail-closed reading of a row the fold cannot place.
  */
 function foldRollback(p: MutableProjection, e: JournalEvent): void {
-  if (!isEvent(e, "compensation.recorded") || e.taskId === undefined) return;
-  const { outcome } = e.payload;
+  if (!isEvent(e, "compensation.recorded")) return;
+  const { outcome, compensates } = e.payload;
   if (outcome !== "compensated" && outcome !== "failed") return;
-  const t = p.tasks[e.taskId];
-  if (t === undefined) return;
+  const key = typeof compensates === "string" ? compensates : e.taskId === undefined ? undefined : `${e.taskId}:tool:?`;
+  if (key === undefined) return;
   p.snapshot = undefined;
-  p.tasks[e.taskId] = { ...t, undoneAtSeq: Math.max(t.undoneAtSeq ?? -1, e.seq) };
+  p.undoneCalls[key] = Math.max(p.undoneCalls[key] ?? -1, e.seq);
 }
 
 /**
@@ -1195,11 +1208,10 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     foldRollback(p, e);
     return;
   }
-  if (isEvent(e, "tool.called") && e.taskId !== undefined) {
-    // A PERFORMED call of the Task's own (not an undo, whose key is `:compensate:`) — see
-    // `TaskRecord.performedAtSeq`.
-    const t = p.tasks[e.taskId];
-    if (t !== undefined && e.payload.key.startsWith(`${e.taskId}:tool:`)) p.tasks[e.taskId] = { ...t, performedAtSeq: e.seq };
+  if (isEvent(e, "tool.called")) {
+    // A call a body MADE — see `RunProjection.performedCalls`. An undo's own call is keyed
+    // `:compensate:` and can never match an undone `:tool:` key, so it is not a redo.
+    if (typeof e.payload.key === "string") p.performedCalls[e.payload.key] = e.seq;
     return;
   }
   if (isEvent(e, "model.called")) {
@@ -1548,7 +1560,7 @@ export function viewFor(
  * Pending, leased, retrying, awaiting a gate, skipped, cancelled, or never scheduled: no value,
  * so a body asking `view.require` is refused and one asking `view.get` holds `undefined` — which
  * no reading can mistake for success. A `succeeded` Task whose call was since ROLLED BACK is no
- * value either (`TaskRecord.undoneAtSeq`, §A.96): what it did no longer stands.
+ * value either (`RunProjection.undoneCalls`, §A.96): what it did no longer stands.
  */
 /**
  * `truncated` and `bytes` for a SUCCEEDED Task, from its tool calls' recorded facts (§A.83).
@@ -1570,6 +1582,16 @@ function completeness(t: TaskRecord): { truncated?: boolean; bytes?: number } {
   };
 }
 
+/** Whether some call of `task`'s own was undone and not made again after its undo — see `RunProjection.undoneCalls`. */
+function undoneCallOf(p: RunProjection, task: TaskId): boolean {
+  const own = `${task}:tool:`;
+  const made = p.performedCalls ?? {};
+  for (const [key, at] of Object.entries(p.undoneCalls ?? {})) {
+    if (key.startsWith(own) && (made[key] ?? -1) < at) return true;
+  }
+  return false;
+}
+
 function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: NodeId): ErrorProjection | undefined {
   const chain = branchChain(branch);
   let best: TaskRecord | undefined;
@@ -1585,11 +1607,11 @@ function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: N
   }
   if (best === undefined) return undefined;
   // ROLLED BACK IS NOT SUCCEEDED (§A.96). The state stays `succeeded` — rollback folds nothing
-  // else onto the Task — so the mark is read here: a rollback row later than the latest effect
-  // this Task PERFORMED (any, when it performed none) means what it did may no longer stand, and
+  // onto the Task — so it is read here, per CALL: if any call of this Task's own was undone and
+  // not made again after its undo (`RunProjection.undoneCalls`), what it did no longer stands and
   // the honest answer is no projection, never `ok: true`. A FAILED Task's `ok: false` stays: an
   // undo does not make a failure less true.
-  const undone = best.undoneAtSeq !== undefined && best.undoneAtSeq > (best.performedAtSeq ?? -1);
+  const undone = undoneCallOf(p, best.taskId);
   if (best.state === "succeeded") return undone ? undefined : { ok: true, ...completeness(best) };
   if (best.state === "failed" && best.error !== undefined && typeof best.error.code === "string") {
     const { code, message } = best.error;
