@@ -3571,16 +3571,16 @@ function checkErrorProjectionRead(
   // "INSIDE" MEANS EVERY NODE THAT RUNS MORE THAN ONCE, not only the cycle's own members: a node
   // hanging off a loop body by a `seq` edge inherits the pass's iteration and runs once per pass
   // too (a reviewer drove one: a reader downstream of pass 0's FAILURE was served pass 2's
-  // `ok: true`). So the source is refused when it is on a cycle or reachable from one.
-  const onOrAfterLoop = idx.loopEdges.some((e) => {
-    const cycle = nodesInCycle(idx, e.from, e.to);
-    return cycle.has(source) || [...cycle].some((c) => canPrecede(idx, c, source));
-  });
-  if (onOrAfterLoop) {
+  // `ok: true`). KEYED ON MULTIPLICITY, NOT ON REACHABILITY FROM A CYCLE (§A.95) — the question
+  // is "can this node run at two iterations of one branch", and `multiRunNodes` answers it. It
+  // is the old set minus exactly the nodes reached from a loop body ONLY through a failure exit
+  // that ends the loop; its docstring says why that is the whole of what may be dropped, and why
+  // a `conditional` exit is NOT in it.
+  if (multiRunNodes(idx).has(source)) {
     d.push({
       severity: "error",
       code: "GRAPH005_ERROR_PROJECTION_IN_LOOP",
-      message: `node "${reader.id}" reads "${name}", but "${source}" is inside or downstream of a loop body and runs once per pass — this phase serves a projection only for a node that runs once per branch`,
+      message: `node "${reader.id}" reads "${name}", but "${source}" is inside or downstream of a loop body and can run on more than one pass — this phase serves a projection only for a node that runs once per branch`,
       at,
       fix: `branch on "${source}" with \`codes\` on its error edge, or read the projection of a node outside the loop`,
     });
@@ -3703,6 +3703,187 @@ function nodesInCycle(idx: GraphIndex, from: NodeId, to: NodeId): Set<NodeId> {
   for (const [id, anc] of idx.ancestors) {
     if (anc.has(to) && (idx.ancestors.get(from)?.has(id) ?? false)) out.add(id);
   }
+  return out;
+}
+
+const MULTI_RUN = new WeakMap<GraphIndex, ReadonlySet<NodeId>>();
+
+/**
+ * The nodes that can run at MORE THAN ONE ITERATION of one branch — a Task id is
+ * `node@branch#iteration`, and the iteration only moves on a `loop` edge, so this is the set of
+ * nodes one run may hold two Tasks of on the same branch. §A.95 asked for GRAPH005's loop
+ * refusal to be keyed on this rather than on "reachable from a cycle".
+ *
+ * THE ANSWER IS A CLASS PER NODE, propagated over the forward edges: `zero` (never downstream of
+ * a loop: iteration 0, once), `once:<loop>` (reached from a loop body only through an exit that
+ * fires in that loop's LAST pass: one iteration, once), or `top` (can run at two). Every cycle
+ * member (`nodesInCycle`) is `top`. A node's class is the join of what its inbound edges carry —
+ * two different classes join to `top`, because `#0` and `#k` are two Tasks — and an edge out of a
+ * cycle member carries `top` unless it is a ONCE-EXIT.
+ *
+ * A ONCE-EXIT IS AN `error` EDGE, AND ONLY THAT, because only a failure is an outcome the graph's
+ * own routing cannot overrule. The obvious candidate is a `conditional` exit whose `when` is the
+ * complement of the loop's continuation (`examples/graphs/harden-config.json`'s `done` beside
+ * `repair`) and it is NOT one: `#edgesToTake` honours a `take` WITHOUT evaluating `when`, and a
+ * `function` or `evaluator` body, a `human_gate` redirect and an operator `steer` all produce a
+ * `take`. Driven on that shape, `when: "settled"` against `when: "!settled"`, with the `audit`
+ * body returning `take: ["repair", "done"]` while unsettled: `collate#0`, `collate#1`, `collate#2`,
+ * three Tasks of the exit's target on one branch. A failed Task is different: it routes by
+ * `#errorEdges` alone (a `take` and a `steer` apply to a SUCCEEDED outcome only), so when it
+ * takes no edge back toward the loop's source, nothing from that pass can re-enter the loop.
+ *
+ * An `error` edge `X -> v` out of the cycle `C` of loop edge `L: S -> H` is a once-exit when:
+ *   - `C` is `L`'s alone (it shares no node with another loop's cycle) and `L` is a real
+ *     back-edge, so one counter drives it and the passes are strictly sequential;
+ *   - no member of `C` is a `join` node or has a `fanout` or `join` edge out, and every member
+ *     sits under the same fan-out stack — a join fires on TERMINATION, failures included, and a
+ *     fan-out makes `X` one Task per branch. CONSERVATIVE: driven, a static barrier after a
+ *     failing member fails the run rather than carrying the pass on, so this condition refuses
+ *     more than it has been shown to need (so is the back-edge half of the first condition: a
+ *     `loop` edge that is not a back-edge is simply not reasoned about, and its exits stay `top`). `test/graph/error-projection-multiplicity.test.ts` shows each of the
+ *     OTHER conditions necessary, and the `error`-only rule too;
+ *   - no `error` edge out of `X` reaches `S` — on failure `X` activates its `error` edges (and its
+ *     `join` edges, excluded above), nothing else;
+ *   - `X` is `S`, or every forward path to `S` from an entry node or from any loop target passes
+ *     through `X` — so pass `k` cannot reach `S` without `X#k`'s success;
+ *   - and `C` is entered at ONE iteration: the classes of its outside predecessors join to
+ *     something other than `top`, since a loop entered twice runs its last pass twice.
+ * Then `X#k` failing means no `S#k`, so no pass `k+1`: the exit fires only in the last pass, and
+ * every once-exit of `L` fires at that same `k`, which is why they share one class.
+ *
+ * ONLY EVER QUIETER THAN WHAT IT REPLACED. `top` starts at cycle members and moves only along
+ * forward edges, so every node in this set was already on a cycle or `canPrecede`-reachable from
+ * one — the old refusal's set. What leaves the set is exactly the nodes whose every inbound route
+ * from a loop body is a once-exit of one loop, entered once.
+ *
+ * FAILS CLOSED: an unmarked forward cycle (no topological order) answers "every node".
+ */
+function multiRunNodes(idx: GraphIndex): ReadonlySet<NodeId> {
+  const cached = MULTI_RUN.get(idx);
+  if (cached !== undefined) return cached;
+  const out = computeMultiRun(idx);
+  MULTI_RUN.set(idx, out);
+  return out;
+}
+
+function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
+  const all = [...idx.byId.keys()];
+  if (idx.loopEdges.length === 0) return new Set();
+  if (new Set(idx.topoOrder).size !== all.length) return new Set(all);
+  const entries = new Set(idx.entryNodes);
+
+  const cycles = idx.loopEdges.map((l) => ({ loop: l, members: nodesInCycle(idx, l.from, l.to) }));
+  const onCycle = new Set<NodeId>();
+  for (const c of cycles) for (const m of c.members) onCycle.add(m);
+  const loopTargets = idx.loopEdges.map((l) => l.to);
+
+  /** Forward reachability over `dagEdges`, optionally with one node deleted. */
+  const reach = (from: readonly NodeId[], without?: NodeId): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = from.filter((x) => x !== without);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.outbound.get(id) ?? []) {
+        if (e.kind === "loop" || e.kind === "compensation" || e.to === without) continue;
+        stack.push(e.to);
+      }
+    }
+    return seen;
+  };
+  /** Nodes that can reach `to` over `dagEdges` (itself included). */
+  const reaching = (to: NodeId): Set<NodeId> => {
+    const seen = new Set<NodeId>();
+    const stack = [to];
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (const e of idx.inbound.get(id) ?? []) if (e.kind !== "loop" && e.kind !== "compensation") stack.push(e.from);
+    }
+    return seen;
+  };
+
+  // Which loop, if any, an edge is a once-exit of — every condition but the entry class, which
+  // depends on the propagation below and is checked there.
+  const exitLoop = new Map<EdgeId, number>();
+  cycles.forEach(({ loop, members }, i) => {
+    const alone = cycles.every((o, j) => j === i || [...o.members].every((m) => !members.has(m)));
+    const backEdge = loop.from === loop.to || (idx.ancestors.get(loop.from)?.has(loop.to) ?? false);
+    if (!alone || !backEdge) return;
+    const stackKey = (id: NodeId): string | undefined => {
+      const s = idx.fanoutEdgeStack.get(id);
+      return s === undefined ? undefined : s.join("\u0000");
+    };
+    const first = stackKey(loop.to);
+    if (first === undefined) return;
+    for (const m of members) {
+      if (stackKey(m) !== first || idx.byId.get(m)?.type === "join") return;
+      if ((idx.outbound.get(m) ?? []).some((e) => e.kind === "fanout" || e.kind === "join")) return;
+    }
+    const source = loop.from;
+    const toSource = reaching(source);
+    const starts = [...idx.entryNodes, ...loopTargets];
+    for (const x of members) {
+      const errorOut = (idx.outbound.get(x) ?? []).filter((e) => e.kind === "error");
+      if (errorOut.length === 0) continue;
+      // On failure `x` activates its `error` edges (and a `join` edge by termination, which the
+      // loop above already excluded). None of them may lead back toward `S`.
+      if (errorOut.some((e) => toSource.has(e.to))) continue;
+      if (x !== source && reach(starts, x).has(source)) continue;
+      for (const e of errorOut) if (!members.has(e.to)) exitLoop.set(e.id, i);
+    }
+  });
+
+  // THE PROPAGATION. Classes only rise (unset < zero | once:i < top), so rounds converge; the
+  // cap is a backstop that fails closed rather than a bound anything relies on.
+  const cls = new Map<NodeId, string>();
+  for (const m of onCycle) cls.set(m, "top");
+  const join = (vals: readonly string[]): string | undefined => {
+    if (vals.length === 0) return undefined;
+    const first = vals[0]!;
+    return vals.every((v) => v === first) ? first : "top";
+  };
+  const entryClass = (i: number): string | undefined => {
+    const members = cycles[i]!.members;
+    const vals: string[] = [];
+    for (const m of members) {
+      if (entries.has(m)) vals.push("zero");
+      for (const e of idx.inbound.get(m) ?? []) {
+        if (e.kind === "loop" || e.kind === "compensation" || members.has(e.from)) continue;
+        const c = cls.get(e.from);
+        if (c !== undefined) vals.push(c);
+      }
+    }
+    return join(vals);
+  };
+  for (let round = 0; ; round++) {
+    if (round > all.length + 2) return new Set(all);
+    let changed = false;
+    for (const id of idx.topoOrder) {
+      if (onCycle.has(id)) continue;
+      const vals: string[] = entries.has(id) ? ["zero"] : [];
+      for (const e of idx.inbound.get(id) ?? []) {
+        if (e.kind === "loop" || e.kind === "compensation") continue;
+        if (onCycle.has(e.from)) {
+          const i = exitLoop.get(e.id);
+          vals.push(i !== undefined && entryClass(i) !== "top" ? `once:${String(i)}` : "top");
+          continue;
+        }
+        const c = cls.get(e.from);
+        if (c !== undefined) vals.push(c);
+      }
+      const next = join(vals);
+      if (next !== undefined && next !== cls.get(id)) {
+        cls.set(id, next);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const out = new Set<NodeId>();
+  for (const [id, c] of cls) if (c === "top") out.add(id);
   return out;
 }
 
@@ -5310,6 +5491,7 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
   // Two edges in the SAME case fire together; two edges in different cases never do.
   return !router.cases.some((c) => c.take.includes(armA.edge) && c.take.includes(armB.edge));
 }
+
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────
 
