@@ -1479,8 +1479,9 @@ export interface ErrorProjection {
    */
   readonly truncated?: boolean;
   /**
-   * On `ok: true` (§A.83): the size in BYTES of the whole source — present only when exactly one
-   * of the node's calls reported one (a `tool` node's single `fs.read` or `net.fetch`).
+   * On `ok: true` (§A.83): a size in BYTES that the node's one sizing call reported — the whole
+   * source for `fs.read` and `net.fetch` (whatever part of it arrived), the bytes written for
+   * `fs.write` and `fs.edit`. Present only when exactly one of the node's calls reported a size.
    */
   readonly bytes?: number;
   /** RESERVED, no producer yet (§A.82). Absent means `untrusted`. */

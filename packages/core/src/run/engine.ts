@@ -759,6 +759,32 @@ interface RollbackWalkStep {
  * `{}` exactly. What it cannot reconstruct is an absent key, a `null`, or a non-object, and
  * those three are the ones that now come back `undefined` for `#compensateOne` to refuse.
  */
+/**
+ * What the MODEL is told a tool returned — `content`, and the fact that it was cut short when it was.
+ *
+ * `TODO.md` §A.83 took the truncation marker OUT of `ToolResult.content` (`DESIGN.md` D8: a
+ * marker inside the string reached a channel and read as a corrupt file), and put the fact in
+ * `details.truncated`/`details.bytes`, where a later node reads it through the reserved
+ * projection. A model reads neither: this message was `result.content` and nothing else, so an
+ * agent that read an over-cap file was handed a prefix with no sign it was one — measured, the
+ * review's probe model saw `"AAAAAAAAAAAAAAAAAAAA"` where the base build had shown
+ * `…[truncated 48 chars]`. The note is added HERE, to the transcript only: the channel value and
+ * the journaled result stay marker-free.
+ *
+ * DERIVED, NOT RECORDED. It is a function of the recorded result (`details` is journaled inline
+ * with it), so a served or replayed turn rebuilds the identical message from the journal and
+ * `model.called.requestDigest` agrees with the live run's. Only a well-formed `truncated: true`
+ * adds it, and `bytes` is quoted only when it is a finite non-negative number.
+ */
+function modelToolContent(result: ToolResult): string {
+  const d = detailsOf(result);
+  if (d === undefined || d["truncated"] !== true) return result.content;
+  const shown = Buffer.byteLength(result.content, "utf8");
+  const total = d["bytes"];
+  const of = typeof total === "number" && Number.isFinite(total) && total >= 0 ? ` of ${String(total)}` : "";
+  return `${result.content}\n[truncated by the tool: ${String(shown)}${of} bytes shown; the rest was not returned]`;
+}
+
 function detailsOf(result: unknown): Record<string, unknown> | undefined {
   const details = (result as { readonly details?: unknown } | undefined)?.details;
   return details !== null && typeof details === "object" ? (details as Record<string, unknown>) : undefined;
@@ -9503,7 +9529,7 @@ export class Engine {
       // invariant 7's failure mode wearing a different hat.
       for (const [i, call] of calls.entries()) {
         const result = await this.#runAgentToolCall(ctx, p, w, call, allowed, nodeApproved, callsSoFar + i);
-        messages.push({ role: "tool", content: result.content, toolCallId: call.id });
+        messages.push({ role: "tool", content: modelToolContent(result), toolCallId: call.id });
       }
       callsSoFar += calls.length;
     }

@@ -545,19 +545,21 @@ function readFailure(rel: string, e: unknown): ToolResult {
  * `text.length` — UTF-16 units — so a file of multi-byte text read back `bytes` that were not its
  * size and a cap that was not the one asked for. The cut is moved back to a UTF-8 character
  * boundary, so the prefix never ends in half a character (it may be up to three bytes short of
- * `max`); `bytes` is the size of the WHOLE source.
+ * `max`); `bytes` is the size of the WHOLE source. The step back is at most three bytes — the
+ * most a UTF-8 character can put past its first byte — so input that is not UTF-8 (a run of
+ * continuation bytes) is cut at `max - 3` or later, never emptied.
  *
- * WHAT A MODEL LOSES: an agent is handed `content` and nothing else (`run/engine.ts`, the tool
- * message of an agent turn), so an agent reading an over-cap file is no longer told in-band that
- * it is short. That is the cost D8 accepted in writing "never again into `content`"; telling the
- * model belongs where the transcript is built, from `details`, and is not this file's.
+ * WHAT A MODEL IS TOLD: an agent's transcript is built from `content`, so the note that the text
+ * is short is added there and only there, from these `details` (`modelToolContent` in
+ * `run/engine.ts`) — never to `content`, which is what reaches a channel.
  */
 function capBytes(all: Buffer, max: number): { readonly text: string; readonly bytes: number; readonly truncated: boolean } {
   if (!(all.length > max)) return { text: all.toString("utf8"), bytes: all.length, truncated: false };
   let end = Math.max(0, Math.floor(max));
   // A continuation byte (10xxxxxx) at the cut means a character straddles it: step back to its
   // first byte and leave the whole character out.
-  while (end > 0 && (all[end]! & 0xc0) === 0x80) end -= 1;
+  const floor = Math.max(0, end - 3);
+  while (end > floor && (all[end]! & 0xc0) === 0x80) end -= 1;
   return { text: all.subarray(0, end).toString("utf8"), bytes: all.length, truncated: true };
 }
 
@@ -635,7 +637,12 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
         // write a different value on every branch of a fan-out. Where the bytes actually
         // landed is `at`, which is diagnostic and reported beside it rather than in place
         // of it — the same rule `net.fetch` follows for the host that answered.
-        details: { path: rel, bytes: String(args["body"]).length, ...undo, at: path },
+        // `details.bytes` COUNTS BYTES — what landed on disk — because `details` reach the reserved
+        // projection (§A.83), where `bytes` means bytes. It was the body's UTF-16 length. The
+        // CHANNEL receipt `writes.written.bytes` keeps the UTF-16 count it always had: it is a
+        // channel value shipped graphs already carry (`examples-triage.test.ts` pins it), and
+        // changing what a channel holds is not this fix.
+        details: { path: rel, bytes: Buffer.byteLength(String(args["body"]), "utf8"), ...undo, at: path },
         writes: { written: { path: rel, bytes: String(args["body"]).length } },
       };
     },
@@ -772,7 +779,7 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       const undo = writeWithUndo(path, updated);
       return {
         content: `edited ${rel} (${match.kind}${match.kind === "relaxed" ? `: ${match.strategy}` : ""}, ${String(occurrences)} occurrence${occurrences === 1 ? "" : "s"})`,
-        details: { path: rel, match: match.kind, occurrences, bytes: updated.length, ...undo, at: path },
+        details: { path: rel, match: match.kind, occurrences, bytes: Buffer.byteLength(updated, "utf8"), ...undo, at: path },
         writes: { written: { path: rel, bytes: updated.length } },
       };
     },
@@ -1364,9 +1371,13 @@ function netFetch(opts: BuiltinOptions): ToolDefinition {
         res = await doFetch(url, { signal: ctx.signal, redirect: "manual" });
       }
 
-      // Bytes, then decoded as UTF-8 — what `res.text()` did — so `maxBytes` and `bytes` count
-      // bytes, and the cut is `fs.read`'s (`capBytes`): no marker in `content`.
-      const cut = capBytes(Buffer.from(await res.arrayBuffer()), Number(args["maxBytes"] ?? 100_000));
+      // Bytes, then decoded as UTF-8 — what `res.text()` did, INCLUDING dropping a leading UTF-8
+      // byte-order mark, which `res.text()` strips and a `JSON.parse` downstream chokes on — so
+      // `maxBytes` and `bytes` count the body's bytes after the mark, and the cut is `fs.read`'s
+      // (`capBytes`): no marker in `content`.
+      let body = Buffer.from(await res.arrayBuffer());
+      if (body.length >= 3 && body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf) body = body.subarray(3);
+      const cut = capBytes(body, Number(args["maxBytes"] ?? 100_000));
       return {
         content: cut.text,
         // `url` is where the bytes CAME FROM, which after a redirect is not what was

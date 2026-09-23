@@ -1137,3 +1137,50 @@ test("§A.99 — fs.edit's FIRST write in a branch creates the branch copy, is r
     s.cleanup();
   }
 });
+
+// ── §A.83 review: `bytes` is bytes everywhere; the cut never empties; a BOM is still dropped ──
+
+test("§A.83 — fs.write and fs.edit report BYTES, not UTF-16 units (é😀 is 6 on disk, not 3)", async () => {
+  const s = sandbox();
+  try {
+    const tools = builtinTools({ root: s.root, deny: [] });
+    const w = await byName(tools, "fs.write").execute({ path: "u.txt", body: "é😀" }, ctx());
+    assert.equal(statSync(join(s.root, "u.txt")).size, 6);
+    assert.equal((w.details as { bytes: number }).bytes, 6);
+    // The channel receipt is unchanged — a UTF-16 count, which a shipped graph's channel carries.
+    assert.deepEqual(w.writes, { written: { path: "u.txt", bytes: 3 } });
+    const e = await byName(tools, "fs.edit").execute({ path: "u.txt", find: "é", replace: "€" }, ctx());
+    assert.equal(statSync(join(s.root, "u.txt")).size, 7);
+    assert.equal((e.details as { bytes: number }).bytes, 7);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — the cut steps back at most THREE bytes: input that is not UTF-8 is cut short, never emptied", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "bin"), Buffer.from([0x41, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]));
+    const r = await byName(builtinTools({ root: s.root, deny: [] }), "fs.read").execute({ path: "bin", maxBytes: 8 }, ctx());
+    assert.equal((r.details as { truncated: boolean }).truncated, true);
+    // Bytes 0..4 survive: `A` and four stray continuation bytes, decoded as replacement characters.
+    assert.equal(r.content, `A${"�".repeat(4)}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — net.fetch still drops a leading UTF-8 BOM, as res.text() did, so the body parses", async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"ok":true}')]);
+  const r = await byName(
+    builtinTools({
+      root: "/tmp",
+      deny: [],
+      egressAllowlist: ["example.com"],
+      fetch: (async () => new Response(bom, { status: 200 })) as unknown as typeof fetch,
+    }),
+    "net.fetch",
+  ).execute({ url: "https://example.com/x" }, ctx());
+  assert.deepEqual(JSON.parse(r.content), { ok: true });
+  assert.equal((r.details as { bytes: number }).bytes, 11);
+});

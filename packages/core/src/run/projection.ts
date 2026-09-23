@@ -132,12 +132,16 @@ export interface TaskRecord {
    * `truncated` and `bytes` its recorded `details` carried — keyed by effect key, folded from
    * `effect.completed` (`DESIGN.md` D8, `TODO.md` §A.83).
    *
-   * The producers are the tools that cap what they return (`fs.read`, `net.fetch`, `proc.exec`,
-   * and `fs.glob`/`fs.grep`'s capped listings), which used to write the fact into `content` as a
-   * marker. It is folded, not stored anywhere new: `effect.completed.result` is journaled inline
-   * with its `details` (only channel values are externalised), so a restart and a replay reach the
-   * same answer from the same rows. Keyed by effect key so a redo's completion REPLACES the call
-   * it redid rather than adding a second opinion about it.
+   * `truncated` comes from the tools that cap what they return (`fs.read`, `net.fetch`,
+   * `proc.exec`, and `fs.glob`/`fs.grep`'s capped listings), which used to write the fact into
+   * `content` as a marker; `bytes` from any tool call reporting a size, which every built-in does
+   * in bytes (the source for a read, what landed for `fs.write`/`fs.edit`). It is folded, not
+   * stored anywhere new: `effect.completed.result` is journaled inline with its `details` (only
+   * channel values are externalised), so a restart and a replay of a journal THIS BUILD wrote reach
+   * the same answer from the same rows. (A journal written before this fold replays with these
+   * fields present where its live run had none — `match: false`; recorded as residue.) Keyed by
+   * effect key so a redo's completion REPLACES the call it redid rather than adding a second
+   * opinion about it.
    */
   readonly readFacts?: Readonly<Record<string, { readonly truncated?: boolean; readonly bytes?: number }>>;
   /**
