@@ -25,7 +25,7 @@ import { undeclaredInputsMessage } from "./graph/declared-inputs.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpToolName, mcpTools } from "./mcp/tools.ts";
 import { observedChannels, type GraphSpec, type RunGraph } from "./graph/spec.ts";
-import type { ResourceResolver } from "./graph/validate.ts";
+import type { Diagnostic, ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import type { RunSummary, StateStore } from "./journal/store.ts";
@@ -5237,8 +5237,24 @@ function writeDiagnostic(line: string, indent: number): void {
  * failure, and `introducing` (always `false` on this path already) still governs hook/function
  * body enforcement. A caller compiling a file the operator DID name — `compile`, `run`, an
  * explicit `--graph`, `discoverGraphs`' boot catalogue — passes nothing and stays as loud as ever.
+ *
+ * `diagnosticsOut` — a second channel for the diagnostics `silent` swallows, so the CALLER can
+ * decide to say them later. TODO.md §A.91 M1: silence was too wide — a candidate that turns out
+ * to BE the run's graph must still show its own warnings, and `silent` alone has no way back to
+ * them once `writeDiagnostic` is skipped. When given, this compile's `result.diagnostics` are
+ * pushed onto it whether the compile succeeds or fails, independent of `silent`; `compiledFile`
+ * is the only caller that passes one, and only it decides whether anything is ever done with them
+ * (`GraphIndex.diagnostics`, read by `announceResolvedGraph` once a caller knows which hash it
+ * actually wanted).
  */
-function loadGraph(ws: Workspace, file: string, introducing = true, source?: string, silent = false): RunGraph {
+function loadGraph(
+  ws: Workspace,
+  file: string,
+  introducing = true,
+  source?: string,
+  silent = false,
+  diagnosticsOut?: Diagnostic[],
+): RunGraph {
   const spec = readSpec(file, source);
   const result = compile({
     spec,
@@ -5269,6 +5285,7 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
   // same token in all three.
   const where = basename(file);
   if (!result.ok) {
+    diagnosticsOut?.push(...result.diagnostics);
     if (!silent) {
       for (const d of result.diagnostics) {
         writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
@@ -5277,6 +5294,7 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
     }
     throw result.error;
   }
+  diagnosticsOut?.push(...result.diagnostics);
   if (!silent) for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
@@ -5886,14 +5904,114 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * `graphs/` IS SCANNED FIRST AND WINS A HASH COLLISION, which keeps `recordedGraph`'s message
  * naming the top-level file whenever one exists. Two files with one hash are the same bytes, so
  * the choice is only about which name an operator is shown.
+ *
+ * `loud` — TODO.md §A.91 M1. Every caller here resolves ONE operator-named run against this
+ * index, so the default (`false`, meaning silent) is right for all of them: a rejected candidate
+ * is not the operator's business, and `announceResolvedGraph` restores the ONE candidate's own
+ * warnings once a caller knows it matched. `runClockTick` and `armForeignGates` are not resolving
+ * one run — they build this index ONCE per tick to drive or arm EVERY due run in the workspace,
+ * which is the memo-driven, print-once-per-bytes-change behaviour `compiledFile`'s own docstring
+ * describes and `test/deployment/stranded-run-tick-cost.test.ts` measures directly off stderr.
+ * Silencing that sweep too made every compile in the workspace invisible from `loom serve`'s own
+ * console, not just the ones unrelated to a particular run — so those two callers pass `true`.
  */
-function graphsByHash(ws: Workspace): GraphIndex {
-  return indexGraphs(ws, ["graphs", ...subgraphDirs()], true);
+function graphsByHash(ws: Workspace, loud = false): GraphIndex {
+  return indexGraphs(ws, ["graphs", ...subgraphDirs()], !loud);
 }
 
 /** The workspace directories a SPEC resource is published from — `readResources`' own list. */
 function subgraphDirs(): readonly string[] {
   return SPEC_KINDS.map((k) => join("resources", k));
+}
+
+/**
+ * THE MATCHED CANDIDATE'S OWN DIAGNOSTICS, SURFACED — TODO.md §A.91 M1.
+ *
+ * `graphsByHash`'s silent sweep is silent about every candidate WHILE IT SEARCHES, because most
+ * of them are not the operator's business. But the one that turns out to BE the run's graph is,
+ * and its own warnings — a channel with a clock-dependent reducer, an irreversible tool with no
+ * gate, the same class of thing `discoverGraphs`' boot pass already narrates — are exactly what an
+ * approver or a tracer needs to see. `!` only, never `✗`: an ERROR would have failed this
+ * candidate's compile and kept its hash out of `index` (and therefore out of `diagnostics`, keyed
+ * by hash) in the first place — matching `loadGraph`'s own success-path loop.
+ *
+ * Called once a caller has confirmed `wanted` is a key of `index`; calling it for a hash the sweep
+ * never matched prints nothing, since `diagnostics` has no entry for it either. Takes `files` and
+ * `diagnostics` rather than a whole `GraphIndex`, because every call site already destructures
+ * `index` down to the one `Map` it reads by hash, and re-widening that back to the container type
+ * at each call site would be the second spelling `compiledFile`'s own docstring warns against.
+ */
+function announceResolvedGraph(files: ReadonlyMap<string, string>, diagnostics: ReadonlyMap<string, readonly Diagnostic[]>, wanted: string): void {
+  const where = basename(files.get(wanted) ?? "?");
+  for (const d of diagnostics.get(wanted) ?? []) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
+}
+
+/**
+ * THE FRAGMENT EVERY BY-HASH MISS OWES AN OPERATOR — TODO.md §A.91 M1.
+ *
+ * `graphsByHash`'s `failed` array already carries why each REJECTED candidate did not compile;
+ * before this helper, only `recordedGraph` (`trace`/`replay`) and `approve` read it, so `gates`,
+ * `steer`, `deescalate`, `exam attest` and others said "no graph has that hash" — or worse, fell
+ * through to a generic "not attached" — even when a candidate HOLDING that hash was sitting in
+ * `graphs/`, refusing to compile under this invocation's grants. A compile that fails never learns
+ * its own hash, so "no graph has that hash" was never a fact this process could establish; it
+ * could only fail to find one AMONG the candidates that compiled. This is the one place that
+ * sentence is worded, so every caller says the same true thing.
+ */
+/**
+ * BIND FIRST, THE WAY `steer` AND `deescalate` BOTH DO — TODO.md §A.91 M1's shared refusal.
+ *
+ * Both verbs tolerate a graph that is genuinely unpublished: the engine's own `#require` refusal,
+ * `E_RUN_NOT_FOUND: run … is not attached`, is the honest answer to that, and neither door adds
+ * anything ahead of it. What they did NOT distinguish is a candidate that IS in `graphs/`, holds
+ * the run's own recorded hash, and refuses to compile under THIS invocation's grants — before this
+ * helper, both verbs fell through to the SAME generic "not attached" message either way, naming a
+ * run that is missing when the truth is a graph that will not compile (reviewer's repro: `sole.json`
+ * run with `--allow-exec`, then `steer`/`deescalate` without it).
+ */
+function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string | undefined): void {
+  if (wanted === undefined) return;
+  const { index, failed, files, diagnostics } = graphsByHash(ws);
+  const found = index.get(wanted);
+  if (found !== undefined) {
+    ws.engine.attach(runId, found);
+    announceResolvedGraph(files, diagnostics, wanted);
+    return;
+  }
+  // GENUINELY UNPUBLISHED: nothing failed to compile, so the engine's own "not attached" is not
+  // hiding anything — falling through to it is the honest answer, not a caller's oversight.
+  if (failed.length === 0) return;
+  throw err.notFound(
+    CODES.E_RUN_NOT_FOUND,
+    `run ${runId} compiled graph ${wanted}, and no graph among the ones that compile in ${join(ws.root, "graphs")} has that ` +
+      `hash.${candidatesThatDidNotCompile(failed)} Publish the graph this run used, or pass the flags it needs to compile ` +
+      `here — a graph is compiled with THIS invocation's grants, so one declaring net:fetch needs the same --egress this ` +
+      `run had, and one declaring proc:exec the same --allow-exec.`,
+    { details: { runId, graphHash: wanted, failed } },
+  );
+}
+
+/**
+ * `promotedGraphHashes` IS READ, NOT DRIVEN, BY A CANDIDATE THAT FAILS TO COMPILE — TODO.md §A.91
+ * M1. `score`, `exam attest`, `suite freeze` and `promote --against-cohort` all build it as
+ * `new Set(index.keys())`, so a graph one human published but this invocation cannot compile
+ * silently reads as unpromoted to `isGolden`'s condition 5 and to every cohort fold — not a
+ * refusal (the set is still usable), but a fact worth one line on stderr rather than none.
+ */
+function warnPromotedSetShrunk(failed: readonly string[]): void {
+  if (failed.length === 0) return;
+  process.stderr.write(
+    `! ${String(failed.length)} candidate(s) in graphs/ do not compile under this invocation's grants and are excluded ` +
+      `from the promoted set this fold uses: ${failed.join("; ")}\n`,
+  );
+}
+
+function candidatesThatDidNotCompile(failed: readonly string[]): string {
+  if (failed.length === 0) return "";
+  return (
+    ` ${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} in graphs/ ${failed.length === 1 ? "does" : "do"} not compile under ` +
+    `this invocation's grants and may be this run's graph, unprovable either way until it compiles: ${failed.join("; ")}.`
+  );
 }
 
 /**
@@ -6101,8 +6219,17 @@ async function gatesWithReads(
   // failed — and the reason is carried into the notice so it is not swallowed.
   let graph: RunGraph | undefined;
   let why: string | undefined;
+  let failed: readonly string[] = [];
+  let files: ReadonlyMap<string, string> = new Map();
+  let diagnostics: ReadonlyMap<string, readonly Diagnostic[]> = new Map();
   try {
-    graph = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
+    if (wanted !== undefined) {
+      const gi = graphsByHash(ws);
+      graph = gi.index.get(wanted);
+      failed = gi.failed;
+      files = gi.files;
+      diagnostics = gi.diagnostics;
+    }
   } catch (e) {
     why = (e as Error).message;
   }
@@ -6116,6 +6243,11 @@ async function gatesWithReads(
     //
     // STDERR, so `loom gates | jq` is unaffected — the same split A.41 just made true of
     // `loom run`.
+    //
+    // "NO GRAPH … HAS THE HASH" IS ONLY TRUE WHEN NOTHING FAILED TO COMPILE — TODO.md §A.91 M1.
+    // A candidate that fails to compile never learns its own hash, so it could BE this run's
+    // graph and this search cannot rule that out; `candidatesThatDidNotCompile` says so instead
+    // of the flat claim this line used to make.
     process.stderr.write(
       `! CONTENT NOT SHOWN — ${String(gates.length)} open gate(s) below print no \`reads\`, because ` +
         (why !== undefined
@@ -6126,13 +6258,15 @@ async function gatesWithReads(
               // per spec resource kind, so naming `graphs/` alone would send an operator to look
               // in one of three places — a correction that replaces a false claim with a
               // differently-false one.
-              `no graph under ${["graphs", ...subgraphDirs()].map((d) => join(ws.root, d)).join(", ")} has the hash ` +
-              `this run compiled (${wanted}).\n`) +
+              `no graph among the ones that compile under ${["graphs", ...subgraphDirs()].map((d) => join(ws.root, d)).join(", ")} has the hash ` +
+              `this run compiled (${wanted}).${candidatesThatDidNotCompile(failed)}\n`) +
         `  A missing \`reads\` is not "this gate reads nothing". Publish the graph this run used to see what is\n` +
         `  being approved — \`loom approve\` needs that same graph anyway. \`contentDigest\` binds either way.\n`,
     );
     return gates;
   }
+  // THE RESOLVED GRAPH'S OWN WARNINGS — TODO.md §A.91 M1.
+  if (wanted !== undefined) announceResolvedGraph(files, diagnostics, wanted);
   // WHICH GATES THE GRAPH DID NOT EXPLAIN, for the reason above. This arm is the MUTATED run:
   // `compiledGraphHash` names the graph the run compiled and `graph.mutated` only ever appends,
   // so a gate on an appended node is in the journal and in no file.
@@ -6703,6 +6837,14 @@ interface GraphIndex {
   index: Map<string, RunGraph>;
   files: Map<string, string>;
   failed: readonly string[];
+  /**
+   * EVERY SUCCESSFUL CANDIDATE'S OWN WARNINGS, keyed by the hash it compiled to — TODO.md §A.91
+   * M1. Populated even under `silent`, which only stops them reaching stderr as the sweep runs;
+   * this is how a caller that later learns WHICH hash it wanted can still show that one
+   * candidate's own diagnostics (`announceResolvedGraph`) without having re-narrated every other
+   * candidate along the way.
+   */
+  diagnostics: Map<string, readonly Diagnostic[]>;
 }
 
 /**
@@ -6724,6 +6866,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
   const failed: string[] = [];
+  const diagnostics = new Map<string, readonly Diagnostic[]>();
   const memo = compileMemo(ws);
   const seen = new Set<string>();
   for (const rel of dirs) {
@@ -6738,6 +6881,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
         if (!index.has(graph.graphHash)) {
           index.set(graph.graphHash, graph);
           files.set(graph.graphHash, join(rel, file));
+          diagnostics.set(graph.graphHash, memo.get(path)?.diagnostics ?? []);
         }
       } catch (e) {
         failed.push(`${join(rel, file)}: ${(e as Error).message}`);
@@ -6753,7 +6897,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
   // narrower one would evict `graphs/` on every boot banner.
   const walked = new Set(dirs.map((rel) => join(ws.root, rel)));
   for (const path of memo.keys()) if (!seen.has(path) && walked.has(dirname(path))) memo.delete(path);
-  return { index, files, failed };
+  return { index, files, failed, diagnostics };
 }
 
 /**
@@ -6820,6 +6964,8 @@ interface CompiledFile {
   readonly digest: Digest;
   readonly graph?: RunGraph;
   readonly error?: unknown;
+  /** This compile's own warnings, captured even when `loadGraph` was told to stay `silent`. */
+  readonly diagnostics?: readonly Diagnostic[];
 }
 
 const compileMemos = new WeakMap<Workspace, { token: Digest; files: Map<string, CompiledFile> }>();
@@ -6905,12 +7051,13 @@ function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: stri
     if (hit.graph === undefined) throw hit.error;
     return hit.graph;
   }
+  const diagnostics: Diagnostic[] = [];
   try {
-    const graph = loadGraph(ws, path, false, text, silent);
-    memo.set(path, { digest: key, graph });
+    const graph = loadGraph(ws, path, false, text, silent, diagnostics);
+    memo.set(path, { digest: key, graph, diagnostics });
     return graph;
   } catch (e) {
-    memo.set(path, { digest: key, error: e });
+    memo.set(path, { digest: key, error: e, diagnostics });
     throw e;
   }
 }
@@ -6977,12 +7124,15 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       { details: { runId } },
     );
   }
-  const { index, files, failed } = graphsByHash(ws);
+  const { index, files, failed, diagnostics } = graphsByHash(ws);
   const found = index.get(wanted);
   if (found !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
     process.stderr.write(`${verb}: graph ${named(found)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
+    // AND ITS OWN WARNINGS — TODO.md §A.91 M1. Silence is for the candidates that are NOT this
+    // run's graph; this one is, and an operator deciding whether to trust it needs to see them.
+    announceResolvedGraph(files, diagnostics, wanted);
     return found;
   }
   // ABSENCE IS NOT ZERO. An empty `graphs/` and a `graphs/` full of other people's graphs are
@@ -7654,7 +7804,7 @@ export async function runClockTick(
       (t) => (t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now)) || t.state === "leased",
     );
     if (!due) continue;
-    index ??= graphsByHash(ws).index;
+    index ??= graphsByHash(ws, true).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
     const graph = wanted === undefined ? undefined : index.get(wanted);
     if (graph === undefined) continue;
@@ -8112,7 +8262,7 @@ export async function armForeignGates(ws: Workspace, armed: Map<RunId, Seq>): Pr
     armed.set(row.runId, row.headSeq);
     const p = await ws.engine.projection(row.runId);
     if (p === undefined || p.status !== "awaiting_gate") continue;
-    index ??= graphsByHash(ws).index;
+    index ??= graphsByHash(ws, true).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
     const graph = wanted === undefined ? undefined : index.get(wanted);
     if (graph === undefined) continue;
@@ -8921,10 +9071,13 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         } else {
           const wanted = await ws.engine.compiledGraphHash(runId);
           if (wanted !== undefined) {
-            const { index, failed } = graphsByHash(ws);
+            const { index, failed, files, diagnostics } = graphsByHash(ws);
             const found = index.get(wanted);
             if (found !== undefined) {
               ws.engine.attach(runId, found);
+              // AND ITS OWN WARNINGS — TODO.md §A.91 M1. The highest-consequence command in the
+              // product must not approve a graph whose own compile diagnostics it hid.
+              announceResolvedGraph(files, diagnostics, wanted);
               // AND RE-ARM ITS CLOCK. Attaching binds the graph; it does not restore the gate's
               // non-durable half, and without that a sweep in this process would expire gates
               // that should have escalated — with a journaled reason that is false.
@@ -9023,8 +9176,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
         // the honest answer only when the graph is genuinely absent, and here it is on disk.
         const wanted = await ws.engine.compiledGraphHash(runId);
-        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
-        if (found !== undefined) ws.engine.attach(runId, found);
+        bindRecordedGraphOrExplain(ws, runId, wanted);
         const p = await ws.engine.steer(runId, { nodeId: nodeId as NodeId, take: take as EdgeId[] }, reason, {
           kind: "human",
           subject: subjectFlag(args),
@@ -9061,8 +9213,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // installed on a run nobody folded. A workspace that has not published the graph
         // therefore refuses, which is the honest answer and not a silent success.
         const wanted = await ws.engine.compiledGraphHash(runId);
-        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
-        if (found !== undefined) ws.engine.attach(runId, found);
+        bindRecordedGraphOrExplain(ws, runId, wanted);
         const p = await ws.engine.deescalate(runId, scope, to, why, { kind: "human", id: subjectFlag(args) }, "cli");
         process.stdout.write(`${JSON.stringify({ runId, scope, ceiling: p.ceilings[scope], status: p.status }, null, 2)}\n`);
         return 0;
@@ -9373,7 +9524,8 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `<workspace>/graphs/` was put there by a person, and a successor graph reached through
         // `graph.mutated` at runtime was not. A graph run from a path outside `graphs/` is
         // therefore NOT promoted, which is the conservative reading and the correct one.
-        const { index, failed } = graphsByHash(ws);
+        const { index, failed, files, diagnostics } = graphsByHash(ws);
+        warnPromotedSetShrunk(failed);
         const promotedGraphHashes = new Set(index.keys());
         // The AUTHORED graph, for `promptRef` and node types only. A run that mutated its graph
         // folds its own successor hash from the journal; this lookup does not decide that.
@@ -9434,6 +9586,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           );
           return 1;
         }
+        // THE RESOLVED GRAPH'S OWN WARNINGS — TODO.md §A.91 M1, and only for the silent-sweep
+        // path: an explicit `--graph` already compiled loudly a few lines up.
+        if (namedGraph === undefined) announceResolvedGraph(files, diagnostics, ranHash);
         // ONE BUCKET RULE, USED BY BOTH FOLDS. A cohort key is only meaningful if every
         // member was bucketed by the same rule — folding this run under `--bucket` and its
         // peers under the default would produce a key nothing else in the workspace can
@@ -10620,7 +10775,8 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
     process.stderr.write(`no journal for run ${anchorId} in this workspace (${ws.root}), so it names no workflow\n`);
     return 1;
   }
-  const { index } = graphsByHash(ws);
+  const { index, failed, files, diagnostics } = graphsByHash(ws);
+  warnPromotedSetShrunk(failed);
   const promotedGraphHashes = new Set(index.keys());
   const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
   const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
@@ -10630,12 +10786,15 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
   if (baseline === undefined) {
     throw err.notFound(
       CODES.E_RUN_NOT_FOUND,
-      `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} has that ` +
-        `hash (${String(index.size)} searched). --cohort names a RECORDING — a run of a graph published in graphs/ — because ` +
-        `the exam's inputs are checked against that graph's declared inputs and outputs. A candidate run or an exam run is ` +
-        `not one; name a recording, or restore the graph's bytes to graphs/.`,
+      `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and no graph among the ones that compile in ` +
+        `${join(ws.root, "graphs")} has that hash (${String(index.size)} searched).${candidatesThatDidNotCompile(failed)} ` +
+        `--cohort names a RECORDING — a run of a graph published in graphs/ — because the exam's inputs are checked ` +
+        `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a recording, ` +
+        `or restore the graph's bytes to graphs/.`,
     );
   }
+  // THE BASELINE'S OWN WARNINGS — TODO.md §A.91 M1.
+  announceResolvedGraph(files, diagnostics, anchorT.cohort.graphHash);
   const problems = attestationProblems(exam.spec, baseline.spec);
   if (problems.length > 0) {
     throw err.validation(
@@ -11233,7 +11392,8 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
   }
 
   // THE SAME THREE INPUTS `loom score` FOLDS WITH — see `promoteAgainstCohort`, which says why.
-  const { index } = graphsByHash(ws);
+  const { index, failed } = graphsByHash(ws);
+  warnPromotedSetShrunk(failed);
   const promotedGraphHashes = new Set(index.keys());
   const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
   const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
@@ -11753,7 +11913,8 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
 
   // THE SAME THREE INPUTS `loom score` FOLDS WITH, and they have to be the same or the key this
   // command derives is one no other verb in the binary can reproduce.
-  const { index } = graphsByHash(ws);
+  const { index, failed } = graphsByHash(ws);
+  warnPromotedSetShrunk(failed);
   const promotedGraphHashes = new Set(index.keys());
   const bucketInput = bucketFlag(args);
   const anchorSubmitted = anchorEvents.find((e): e is Extract<JournalEvent, { type: "run.submitted" }> => isEvent(e, "run.submitted"));
