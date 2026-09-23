@@ -81,6 +81,53 @@ import { StringDecoder } from "node:string_decoder";
 
 import { CODES, err } from "../errors.ts";
 
+/**
+ * Node's own `NodeJS.Signals` union, restated — TODO.md §H.18 / DESIGN.md Q2. `SandboxResult` is
+ * exported, so `.signal`'s type is exactly what a shipped `.d.ts` carries, and `NodeJS.Signals`
+ * names an AMBIENT global `@types/node` declares — a consumer compiling with `"types": []` cannot
+ * resolve it. The list is copied from `node_modules/@types/node/process.d.ts`, not narrowed: a
+ * value this process ever actually assigns to `.signal` is one of these names on every platform
+ * this file runs on, so nothing here is a claim beyond what `NodeJS.Signals` already made.
+ */
+type ExitSignal =
+  | "SIGABRT"
+  | "SIGALRM"
+  | "SIGBUS"
+  | "SIGCHLD"
+  | "SIGCONT"
+  | "SIGFPE"
+  | "SIGHUP"
+  | "SIGILL"
+  | "SIGINT"
+  | "SIGIO"
+  | "SIGIOT"
+  | "SIGKILL"
+  | "SIGPIPE"
+  | "SIGPOLL"
+  | "SIGPROF"
+  | "SIGPWR"
+  | "SIGQUIT"
+  | "SIGSEGV"
+  | "SIGSTKFLT"
+  | "SIGSTOP"
+  | "SIGSYS"
+  | "SIGTERM"
+  | "SIGTRAP"
+  | "SIGTSTP"
+  | "SIGTTIN"
+  | "SIGTTOU"
+  | "SIGUNUSED"
+  | "SIGURG"
+  | "SIGUSR1"
+  | "SIGUSR2"
+  | "SIGVTALRM"
+  | "SIGWINCH"
+  | "SIGXCPU"
+  | "SIGXFSZ"
+  | "SIGBREAK"
+  | "SIGLOST"
+  | "SIGINFO";
+
 export interface SandboxOptions {
   /**
    * Executable path or name. Resolved by the OS; never interpreted by a shell.
@@ -153,7 +200,7 @@ export interface SandboxOptions {
 
 export interface SandboxResult {
   readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
+  readonly signal: ExitSignal | null;
   readonly stdout: string;
   readonly stderr: string;
   /**

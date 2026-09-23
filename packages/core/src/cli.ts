@@ -25,7 +25,7 @@ import { undeclaredInputsMessage } from "./graph/declared-inputs.ts";
 import { McpClient, type McpClientOptions } from "./mcp/client.ts";
 import { mcpToolName, mcpTools } from "./mcp/tools.ts";
 import { observedChannels, type GraphSpec, type RunGraph } from "./graph/spec.ts";
-import type { ResourceResolver } from "./graph/validate.ts";
+import type { Diagnostic, ResourceResolver } from "./graph/validate.ts";
 import { EXTERNALISE_ABOVE_BYTES, filePayloads, type PayloadStore } from "./journal/payloads.ts";
 import { SqliteStateStore } from "./journal/sqlite.ts";
 import type { RunSummary, StateStore } from "./journal/store.ts";
@@ -746,8 +746,14 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * `parseArgs` stores `--version 1` and `--version=yes` as strings, so a check for `=== true` alone
  * would skip them and let the verb run with the flag silently dropped — measured on the first
  * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
- * flag existed the same line was refused as unknown. (`--help` has that hole and is left as it
- * was; it is not this flag's to copy.)
+ * flag existed the same line was refused as unknown.
+ *
+ * `--help` HAS THE SAME HOLE, AND IT IS STILL OPEN. `main` checks `args.flags["help"] === true` and
+ * nothing else — there is no `helpFlag`-shaped reader that refuses a VALUE the way `versionFlag`
+ * does here — so `loom run g.json --input … --help 1` and `--help=yes` both still RUN THE VERB AND
+ * EXIT 0: `args.flags["help"]` is the string `"1"` or `"yes"`, `=== true` is false, and nothing
+ * downstream refuses a KNOWN flag holding a value nobody reads. `loom --version 1` refuses the same
+ * shape of value; `--help` does not. Residue, to be filed.
  */
 function versionFlag(args: Args): boolean {
   const v = args.flags["version"];
@@ -991,6 +997,57 @@ function dispatchesVerb(command: string): boolean {
 function refuseUnknownCommand(command: string): number {
   process.stderr.write(`unknown command "${command}"\n\n${USAGE}`);
   return 2;
+}
+
+/**
+ * Refuse a flag neither `--version` nor the default `help` answer reads — TODO.md §H.19.
+ *
+ * `refuseFlagsThisVerbDoesNotRead` covers every DISPATCHED verb, and returns unmolested for
+ * `"help"` (`dispatchesVerb`'s own docstring: "A COMMAND NOT LISTED HERE IS NOT CHECKED", because
+ * `"help"` has no `case` in `main`'s switch to recompute a row from). But `"help"` is also what
+ * `parseArgs` defaults an ABSENT verb to, and that default is reached by `main` before the door
+ * above ever runs — so `loom --port 1`, a KNOWN flag naming no verb at all, fell through to the
+ * usage text and exit 0: accepted and ignored, the twin of the unknown-flag hole §H.4 closed one
+ * door over. `loom --version --port 1` is the same hole one flag later — answering the version
+ * question does not read `--port` either.
+ *
+ * `GLOBAL_FLAGS` ARE EXEMPT TOO — a reviewer's fix, TODO.md §A.91 M2. `refuseFlagsThisVerbDoesNotRead`
+ * already exempts them (`.filter((f) => !GLOBAL_FLAGS.includes(f) && ...)`) because every DISPATCHED
+ * verb reads them; this door disagreed, and a plain `loom --workspace .` — no verb, nothing else —
+ * refused with "--workspace is read by no verb this binary dispatches", which is false for all
+ * fourteen of them. The wrapper shape it broke is ordinary: `loom() { command loom --workspace ~/ws
+ * "$@"; }` prepends a global ahead of whatever the caller typed, including `--version` or nothing at
+ * all, and both used to exit 0. `--help` and `--version` are themselves members of `GLOBAL_FLAGS`,
+ * so this filter alone now covers what the old `f !== "help" && f !== "version"` pair covered.
+ *
+ * `wantsVersion` IS A PARAMETER AND NOT A SECOND READ OF `args.flags["version"]`, on purpose: this
+ * function's signature is deliberately not `(args: Args)` alone, because `flag-door.test.ts`
+ * recomputes `FLAGS`' reader column from every top-level `(args: Args)` function whose body
+ * touches a given flag name, and `versionFlag` is already `--version`'s one true reader — this
+ * function only picks between two SENTENCES about a flag it did not decide.
+ */
+function refuseFlagsBeforeAVerb(args: Args, wantsVersion: boolean): void {
+  const offenders = Object.keys(args.flags)
+    .filter((f) => !GLOBAL_FLAGS.includes(f))
+    .sort();
+  if (offenders.length === 0) return;
+  const readers = (f: string): string => {
+    const verbs = Object.keys(VERB_FLAGS)
+      .filter((v) => VERB_FLAGS[v]!.includes(f))
+      .sort();
+    return verbs.length === 0 ? "read by no verb this binary dispatches" : `read by ${verbs.map((v) => `\`loom ${v}\``).join(", ")}`;
+  };
+  const named = wantsVersion ? "`loom --version`" : "`loom`, naming no verb,";
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    offenders
+      .map(
+        (f) =>
+          `--${f} is ${readers(f)}. ${named} reads neither it nor any verb's flags. ` +
+          (FLAG_CONSEQUENCE[f] ?? "It would have been accepted and done nothing, leaving an operator believing it was configured by it."),
+      )
+      .join(" "),
+  );
 }
 
 /**
@@ -5172,8 +5229,38 @@ function writeDiagnostic(line: string, indent: number): void {
  * hook is missing" — the graph silently drops out of the index and the approver is told the run
  * cannot be found. Letting a deleted extension file block human oversight of a live run is a
  * worse failure than the silence this check exists to end, so the check does not run there.
+ *
+ * `silent` — whether a diagnostic this compile produces is this operator's business at all.
+ * `graphsByHash` compiles EVERY file in `<workspace>/graphs/` to find the one hash a RUN
+ * recorded; that sweep is an internal question ("which of these files is this run's graph") and
+ * its answer is either a match (named through `files`/`recordedGraph`, already) or a rejection
+ * (named through `indexGraphs`' `failed` list, already) — never a raw diagnostic about a
+ * candidate the operator did not ask about. Before this parameter, `loom approve`, `replay` and
+ * `trace` printed every OTHER graph's `GRAPH0xx` line to stderr while resolving the one they were
+ * asked about (TODO.md §A.91) — the highest-consequence command in the product printing warnings
+ * about a file nobody named, above the answer to the question actually asked. `silent` suppresses
+ * the two `writeDiagnostic` loops only; the compile still runs, still throws `result.error` on
+ * failure, and `introducing` (always `false` on this path already) still governs hook/function
+ * body enforcement. A caller compiling a file the operator DID name — `compile`, `run`, an
+ * explicit `--graph`, `discoverGraphs`' boot catalogue — passes nothing and stays as loud as ever.
+ *
+ * `diagnosticsOut` — a second channel for the diagnostics `silent` swallows, so the CALLER can
+ * decide to say them later. TODO.md §A.91 M1: silence was too wide — a candidate that turns out
+ * to BE the run's graph must still show its own warnings, and `silent` alone has no way back to
+ * them once `writeDiagnostic` is skipped. When given, this compile's `result.diagnostics` are
+ * pushed onto it whether the compile succeeds or fails, independent of `silent`; `compiledFile`
+ * is the only caller that passes one, and only it decides whether anything is ever done with them
+ * (`GraphIndex.diagnostics`, read by `announceResolvedGraph` once a caller knows which hash it
+ * actually wanted).
  */
-function loadGraph(ws: Workspace, file: string, introducing = true, source?: string): RunGraph {
+function loadGraph(
+  ws: Workspace,
+  file: string,
+  introducing = true,
+  source?: string,
+  silent = false,
+  diagnosticsOut?: Diagnostic[],
+): RunGraph {
   const spec = readSpec(file, source);
   const result = compile({
     spec,
@@ -5196,19 +5283,25 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
   // graph. `recordedGraph`'s own docstring states the rule this broke — "SAY WHAT IT RESOLVED. A
   // verb that silently picks a file out of a directory is a verb whose output an operator cannot
   // check" — and the not-found path already did it right (`1 would not compile — slow.json: …`).
+  // `silent` (see the docstring above) now ends the OTHER half of that same complaint: the
+  // candidates that were NOT resolved stay off stderr entirely rather than printing ahead of it.
   //
   // `basename`, matching the two places that already attribute a graph failure: `graphsByHash`'s
   // `failed` entries and `discoverGraphs`' skip line. An operator reading three of these wants the
   // same token in all three.
   const where = basename(file);
   if (!result.ok) {
-    for (const d of result.diagnostics) {
-      writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
-      if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
+    diagnosticsOut?.push(...result.diagnostics);
+    if (!silent) {
+      for (const d of result.diagnostics) {
+        writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
+        if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
+      }
     }
     throw result.error;
   }
-  for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
+  diagnosticsOut?.push(...result.diagnostics);
+  if (!silent) for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
@@ -5817,14 +5910,259 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * `graphs/` IS SCANNED FIRST AND WINS A HASH COLLISION, which keeps `recordedGraph`'s message
  * naming the top-level file whenever one exists. Two files with one hash are the same bytes, so
  * the choice is only about which name an operator is shown.
+ *
+ * `loud` — TODO.md §A.91 M1. Every caller here resolves ONE operator-named run against this
+ * index, so the default (`false`, meaning silent) is right for all of them: a rejected candidate
+ * is not the operator's business, and `announceResolvedGraph` restores the ONE candidate's own
+ * warnings once a caller knows it matched. `runClockTick` and `armForeignGates` are not resolving
+ * one run — they build this index ONCE per tick to drive or arm EVERY due run in the workspace,
+ * which is the memo-driven, print-once-per-bytes-change behaviour `compiledFile`'s own docstring
+ * describes and `test/deployment/stranded-run-tick-cost.test.ts` measures directly off stderr.
+ * Silencing that sweep too made every compile in the workspace invisible from `loom serve`'s own
+ * console, not just the ones unrelated to a particular run — so those two callers pass `true`.
  */
-function graphsByHash(ws: Workspace): GraphIndex {
-  return indexGraphs(ws, ["graphs", ...subgraphDirs()]);
+function graphsByHash(ws: Workspace, loud = false): GraphIndex {
+  return indexGraphs(ws, ["graphs", ...subgraphDirs()], !loud);
 }
 
 /** The workspace directories a SPEC resource is published from — `readResources`' own list. */
 function subgraphDirs(): readonly string[] {
   return SPEC_KINDS.map((k) => join("resources", k));
+}
+
+/**
+ * THE MATCHED CANDIDATE'S OWN DIAGNOSTICS, SURFACED — TODO.md §A.91 M1.
+ *
+ * `graphsByHash`'s silent sweep is silent about every candidate WHILE IT SEARCHES, because most
+ * of them are not the operator's business. But the one that turns out to BE the run's graph is,
+ * and its own warnings — a channel with a clock-dependent reducer, an irreversible tool with no
+ * gate, the same class of thing `discoverGraphs`' boot pass already narrates — are exactly what an
+ * approver or a tracer needs to see. `!` only, never `✗`: an ERROR would have failed this
+ * candidate's compile and kept its hash out of `index` (and therefore out of `diagnostics`, keyed
+ * by hash) in the first place — matching `loadGraph`'s own success-path loop.
+ *
+ * Called once a caller has confirmed `wanted` is a key of `index`; calling it for a hash the sweep
+ * never matched prints nothing, since `diagnostics` has no entry for it either. Takes `files` and
+ * `diagnostics` rather than a whole `GraphIndex`, because every call site already destructures
+ * `index` down to the one `Map` it reads by hash, and re-widening that back to the container type
+ * at each call site would be the second spelling `compiledFile`'s own docstring warns against.
+ */
+function announceResolvedGraph(files: ReadonlyMap<string, string>, diagnostics: ReadonlyMap<string, readonly Diagnostic[]>, wanted: string): void {
+  const where = basename(files.get(wanted) ?? "?");
+  for (const d of diagnostics.get(wanted) ?? []) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
+}
+
+/**
+ * ONE RESOLVER, EVERY BY-HASH CALLER — TODO.md §A.91, the reviewer's second fix round on
+ * `d8e116b9`.
+ *
+ * The first round's answer to §A.91's silence was "the sweep stays silent, and each of ~11 call
+ * sites restores what it needs" — `announceResolvedGraph` here, `candidatesThatDidNotCompile`
+ * there, a hand-rolled not-found sentence at each of `recordedGraph`, `approve`, `score`,
+ * `bindRecordedGraphOrExplain`'s `steer`/`deescalate` and `attestExam`. Three properties this row
+ * wants therefore held site by site instead of always: `approve`'s own silence and its matched-
+ * graph announcement were pinned by NO test (only `trace`'s was); the "one shared sentence" was
+ * three different wordings (`recordedGraph`'s "no graph {root} publishes has that hash", `approve`/
+ * `score`'s "no graph in {root}/graphs has that hash (N searched; …)",
+ * `bindRecordedGraphOrExplain`/`attestExam`'s "no graph among the ones that compile in
+ * {root}/graphs"); and every one of those wordings HARDCODED `graphs/` regardless of which of the
+ * THREE searched directories a failing candidate actually lived in — a `resources/subgraph/`
+ * candidate was reported as if it sat in `graphs/`.
+ *
+ * So there is one function now, and every by-hash caller — `trace`, `replay` (`recordedGraph`),
+ * `approve`, `steer`, `deescalate`, `gates`, `score`, `exam attest`, `suite freeze` and `promote
+ * --against-cohort` — goes through it. It does the sweep SILENTLY (`graphsByHash(ws)`, `loud`
+ * defaulted false — nobody here is the clock or the gate-arming sweep), ANNOUNCES the matched
+ * candidate's own diagnostics when one is found (never skippable by a caller forgetting to call a
+ * second function), and builds the ONE refusal FRAGMENT when none is — naming the directories
+ * actually searched and quoting `failed`'s entries verbatim, which already carry each candidate's
+ * real relative path (`indexGraphs` builds them as `join(rel, file)` over every directory in the
+ * sweep, `resources/subgraph/` included).
+ *
+ * `promote --suite` IS NOT IN THAT LIST — TODO.md §A.91, the reviewer's third fix round (B2). Its
+ * baseline is named explicitly, `loadGraph(ws, promoteBaseline(args), false)` off `--baseline
+ * <file>`, the same door `--graph` is everywhere else — loud, and never a by-hash search at all.
+ * It still calls `graphsByHash(ws)` once, but only to build the `published` set `scanForExam`
+ * checks a workflow's attestation against for the "is this exam-backed at all" certificate on the
+ * printed report — a set-membership read, not a resolution, and nothing there is ever announced or
+ * refused. Naming it as a caller of this resolver was itself the false claim a fix round found; the
+ * earlier draft of this docstring is why the mistake carries its own remark rather than a silent
+ * edit.
+ *
+ * IT RETURNS RATHER THAN THROWS, deliberately: `gates` and `score` fold a miss into their own
+ * non-refusing output, `recordedGraph`/`approve`/`steer`/`deescalate`/`attestExam`/`freezeSuite`/
+ * `promoteAgainstCohort` wrap `.refusal` in their own `err.notFound` with their own verb-specific
+ * follow-up advice (a replay's advice about `--graph` is not a gate's advice about `loom cancel`)
+ * — the CORE claim about what was searched and what failed is shared; what a caller tells the
+ * operator to DO about it is not, and folding those together was never this row's ask.
+ *
+ * `index`/`files` come back too, because `score`, `attestExam`, `freezeSuite` and
+ * `promoteAgainstCohort` all build `promotedGraphHashes = new Set(index.keys())` from the SAME
+ * sweep this resolves against — a second `graphsByHash(ws)` call would cost nothing extra
+ * (`compileMemo` makes it a cache hit) but would be a second place "the three directories" is
+ * spelled, which is the exact drift this function exists to end.
+ */
+/**
+ * ONE FAILED CANDIDATE, STRUCTURED — TODO.md §A.91, the reviewer's fifth fix round. `failed` used
+ * to be `readonly string[]`, a pre-joined display line per candidate, and `capabilityIssue` read it
+ * back with `f.includes("GRAPH017")` — a substring match over a string that ALSO carries the
+ * diagnostic's own MESSAGE (TODO.md §A.91's fourth round appended it). That produced a false
+ * positive (a ref named `function/GRAPH017-fix@stable` makes ANY refusal about it "capability
+ * advice"-worthy) and a false negative in the other direction the SAME substring test cannot see:
+ * `GRAPH017_CAPABILITY_NOT_DECLARED` also contains "GRAPH017" and needs no grant at all — the
+ * capability is undeclared, not denied, and no flag on this command line writes a graph's own
+ * `policy.capabilities`. `codes` is every ERROR diagnostic's code for this candidate — the FULL
+ * array `compile()` attaches (`{ details: { diagnostics: errors } }`), not the first three the
+ * thrown message's own text joins for display — so a GRAPH017 fourth in line is not lost either.
+ */
+interface FailedCandidate {
+  readonly path: string;
+  /** The display line — unchanged in shape from the pre-structuring `failed[i]`. */
+  readonly text: string;
+  readonly codes: readonly string[];
+}
+
+interface RecordedGraphResolution {
+  readonly graph?: RunGraph;
+  /** The ONE fragment naming why no graph resolved — present iff `graph` is undefined. */
+  readonly refusal?: string;
+  readonly index: ReadonlyMap<string, RunGraph>;
+  readonly files: ReadonlyMap<string, string>;
+  readonly failed: readonly FailedCandidate[];
+  /**
+   * Whether ANY failed candidate carries `GRAPH017_CAPABILITY_NOT_GRANTED` — TODO.md §A.91, the
+   * reviewer's third fix round (N4), keyed structurally since the fifth (see `FailedCandidate`).
+   * No caller branches on this any more: the fourth fix round (X1) moved the grant advice it gated
+   * INTO `refusal` itself, so every by-hash caller gets it from the one string they already quote.
+   * Kept on the return value anyway — a structured fact a future caller may still act on.
+   */
+  readonly capabilityIssue: boolean;
+}
+
+function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResolution {
+  const { index, files, failed, diagnostics } = graphsByHash(ws);
+  const capabilityIssue = failed.some((f) => f.codes.includes("GRAPH017_CAPABILITY_NOT_GRANTED"));
+  const found = index.get(wanted);
+  if (found !== undefined) {
+    announceResolvedGraph(files, diagnostics, wanted);
+    return { graph: found, index, files, failed, capabilityIssue };
+  }
+  // ONLY THE DIRECTORIES THAT EXIST — TODO.md §A.91, the reviewer's third fix round (N3).
+  // `indexGraphs` already skips a directory that is not there (`existsSync` guards its walk);
+  // naming `resources/graph` as "searched" when this workspace never published one is the same
+  // false claim the row's own history keeps finding a new shape of.
+  const dirs = ["graphs", ...subgraphDirs()].filter((d) => existsSync(join(ws.root, d)));
+  const searched = dirs.length === 0 ? `${ws.root} (no graphs/ or resources/{subgraph,graph} directory exists)` : dirs.map((d) => join(ws.root, d)).join(", ");
+  const others = [...index.values()].map(
+    (g) => `${files.get(g.graphHash) ?? "?"} ${g.spec.metadata.name} v${String(g.spec.metadata.version)} (${g.graphHash})`,
+  );
+  // "SEARCHING X: ..." RATHER THAN "X ... IT ...", so the sentence needs no pronoun standing in
+  // for a comma-joined list of paths — TODO.md §A.91, the reviewer's third fix round (N3's other
+  // half): the antecedent-less "it publishes no graph…" this replaces read as though `searched`
+  // named one place, always false once a second or third directory is in the list.
+  //
+  // THE GRANT ADVICE LIVES HERE NOW, NOT PER CALLER — TODO.md §A.91, the reviewer's fourth fix
+  // round (X1, BLOCKING). N4 made the shared fragment neutral and added `capabilityIssue`, but
+  // only TWO of nine by-hash callers (`recordedGraph`, `bindRecordedGraphOrExplain`) were ever
+  // given their own conditional sentence for it — `approve`, `gates`, `score`, `exam attest`,
+  // `suite freeze` and `promote --against-cohort` interpolate `refusal` bare and so named neither
+  // the capability nor the fix. Reproduced: a `proc:exec` gated run recorded with `--allow-exec
+  // echo`, then `approve` without it — exit 1 naming only "GRAPH017_CAPABILITY_NOT_GRANTED.
+  // Publish the graph this run used, or pass --graph explicitly", both of which are wrong advice
+  // for a graph that IS published and needs no editing, only the grant the run had. Said ONCE,
+  // here, so every caller gets it from the one string they already quote — a caller may still add
+  // its own verb-specific action (`approve`'s cancel/reject line, `recordedGraph`'s --graph line)
+  // beside it, and `capabilityIssue` stays on the return value for exactly that purpose.
+  const refusal =
+    `searching ${searched}: no graph compiles to hash ${wanted}` +
+    (others.length === 0 ? " — nothing there compiles at all" : ` — ${String(others.length)} compile to a different hash: ${others.join("; ")}`) +
+    (failed.length === 0
+      ? ""
+      : // NEUTRAL — TODO.md §A.91, the reviewer's third fix round (N4). "does not compile under
+        // this invocation's grants" was said even for a GRAPH015 missing resource, which no grant
+        // this process could hold would have fixed; the capability advice below is separate and
+        // conditional on `capabilityIssue`, never folded into this clause.
+        ` (${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} do${failed.length === 1 ? "es" : ""} not compile here and may be ` +
+        `this run's graph, unprovable either way until it compiles: ${failed.map((f) => f.text).join("; ")})`) +
+    (capabilityIssue
+      ? // A FULL STOP BEFORE THIS SENTENCE, NOT JUST A SPACE — TODO.md §A.91, the reviewer's fifth
+        // fix round: the failed-candidates clause above closes on `)`, and " A candidate…" right
+        // after it read as "…does not hold) A candidate…", one sentence bleeding into the next
+        // with no punctuation between them. NO TRAILING PERIOD AT THE END, still: every caller
+        // interpolates this as `${refusal}. <next sentence>`, so a period there produced ".. " at
+        // the join (measured: `approve`'s own repro, TODO.md §A.91's fourth round).
+        `. A candidate refused for a capability this invocation was not granted may compile with the grants the ` +
+        `RUN had: a graph declaring net:fetch needs the same --egress, and one declaring proc:exec the same ` +
+        `--allow-exec`
+      : "");
+  return { refusal, index, files, failed, capabilityIssue };
+}
+
+/**
+ * THE HONEST NEXT STEP, WITH NO GUESS ABOUT WHICH CASE APPLIES — TODO.md §A.91, the reviewer's
+ * fifth fix round (B1, BLOCKING — a regression the fourth round introduced).
+ *
+ * `missingGraphAdvice`, which this replaces, picked its branch on `failed.length > 0`, reading a
+ * NONEMPTY `failed` as proof that the candidate AT THE RUN'S OWN PATH was found and is broken. That
+ * is not what `failed` says: it is every candidate anywhere in the sweep that did not compile, and
+ * `resolveRecordedGraph`'s own `refusal` already calls each one "unprovable either way" — the
+ * resolver cannot tell "this run's own graph, edited or broken" from "an unrelated candidate,
+ * broken, that this run never touched" apart from a hash match, which is exactly the thing that did
+ * NOT happen. Reproduced: record and score a run of `graphs/pick.json`, `rm graphs/pick.json`, then
+ * publish an UNRELATED broken candidate elsewhere (`resources/subgraph/unrelated.json`, GRAPH015,
+ * or `graphs/draft.json`, GRAPH017) — `suite freeze`, `promote --against-cohort` and `exam attest`
+ * all said "fix why it does not compile … the file is already there, and restoring it changes
+ * nothing", false on both counts: the run's own file was DELETED, not present-but-broken, and
+ * `e44c9b30` (before this branching existed) correctly said "restore those bytes to graphs/". The
+ * same false advice fires when the run's own file was EDITED rather than deleted, for the same
+ * reason: an edit changes the hash, so the edited file no longer resolves as "the run's graph" any
+ * more than a stranger's file would, and `failed` cannot distinguish the two.
+ *
+ * THE FIX IS TO STOP GUESSING: one sentence naming both cases, used with no branching everywhere a
+ * caller's refusal is followed by next-step advice — including `trace`, `replay`, `approve`,
+ * `steer`, `deescalate` and `score`, which said "Publish the graph this run used" / "publish those
+ * bytes" unconditionally (the SAME false claim in the OTHER direction: true when the file is gone,
+ * false when a candidate at that path is present and simply will not compile).
+ */
+function noGuessAdvice(): string {
+  return (
+    "If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate " +
+    "named above is that file, fix why it does not compile."
+  );
+}
+
+/**
+ * BIND FIRST, THE WAY `steer` AND `deescalate` BOTH DO — over `resolveRecordedGraph`.
+ *
+ * Both verbs tolerate a graph that is genuinely unpublished: the engine's own `#require` refusal,
+ * `E_RUN_NOT_FOUND: run … is not attached`, is the honest answer to that, and neither door adds
+ * anything ahead of it. What they must not do is fall through to that SAME generic message when
+ * the truth is a candidate that IS in `graphs/` (or `resources/subgraph/`, or `resources/graph/`),
+ * holds the run's own recorded hash, and refuses to compile under THIS invocation's grants —
+ * naming a run as missing when the graph is the problem (reviewer's repro: `sole.json` run with
+ * `--allow-exec`, then `steer`/`deescalate` without it).
+ */
+function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string | undefined): void {
+  if (wanted === undefined) return;
+  const { graph, refusal, failed } = resolveRecordedGraph(ws, wanted);
+  if (graph !== undefined) {
+    ws.engine.attach(runId, graph);
+    return;
+  }
+  // GENUINELY UNPUBLISHED: nothing failed to compile, so the engine's own "not attached" is not
+  // hiding anything — falling through to it is the honest answer, not a caller's oversight.
+  if (failed.length === 0) return;
+  // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
+  // fourth fix round (X1). `resolveRecordedGraph` itself now appends the --egress/--allow-exec
+  // sentence when a failed candidate's own diagnostic is GRAPH017, so this call site no longer
+  // repeats it (or omits it) on its own. The remaining action is `noGuessAdvice()` — TODO.md
+  // §A.91's fifth fix round (B1) — never "Publish the graph this run used" unconditionally, which
+  // was false whenever the candidate named in `refusal` was present and simply would not compile.
+  throw err.notFound(
+    CODES.E_RUN_NOT_FOUND,
+    `run ${runId} compiled graph ${wanted}, and ${refusal}. ${noGuessAdvice()}`,
+    { details: { runId, graphHash: wanted, failed: failed.map((f) => f.text) } },
+  );
 }
 
 /**
@@ -6032,8 +6370,9 @@ async function gatesWithReads(
   // failed — and the reason is carried into the notice so it is not swallowed.
   let graph: RunGraph | undefined;
   let why: string | undefined;
+  let refusal: string | undefined;
   try {
-    graph = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
+    if (wanted !== undefined) ({ graph, refusal } = resolveRecordedGraph(ws, wanted));
   } catch (e) {
     why = (e as Error).message;
   }
@@ -6053,12 +6392,7 @@ async function gatesWithReads(
           ? `the search could not be run: ${why}\n`
           : wanted === undefined
             ? `this journal records no compile for run ${p.runId}.\n`
-            : // EVERY DIRECTORY THE SEARCH ACTUALLY WALKED. `graphsByHash` is `graphs/` PLUS one
-              // per spec resource kind, so naming `graphs/` alone would send an operator to look
-              // in one of three places — a correction that replaces a false claim with a
-              // differently-false one.
-              `no graph under ${["graphs", ...subgraphDirs()].map((d) => join(ws.root, d)).join(", ")} has the hash ` +
-              `this run compiled (${wanted}).\n`) +
+            : `${refusal}.\n`) +
         `  A missing \`reads\` is not "this gate reads nothing". Publish the graph this run used to see what is\n` +
         `  being approved — \`loom approve\` needs that same graph anyway. \`contentDigest\` binds either way.\n`,
     );
@@ -6633,7 +6967,38 @@ function gateReadBound(args: Args): number {
 interface GraphIndex {
   index: Map<string, RunGraph>;
   files: Map<string, string>;
-  failed: readonly string[];
+  failed: readonly FailedCandidate[];
+  /**
+   * EVERY SUCCESSFUL CANDIDATE'S OWN WARNINGS, keyed by the hash it compiled to — TODO.md §A.91
+   * M1. Populated even under `silent`, which only stops them reaching stderr as the sweep runs;
+   * this is how a caller that later learns WHICH hash it wanted can still show that one
+   * candidate's own diagnostics (`announceResolvedGraph`) without having re-narrated every other
+   * candidate along the way.
+   */
+  diagnostics: Map<string, readonly Diagnostic[]>;
+}
+
+/** The longest a sanitized diagnostic message may run before `sanitizeDiagnosticMessage` truncates it. */
+const MAX_DIAGNOSTIC_MESSAGE_LEN = 200;
+
+/**
+ * STRIP CONTROL CHARACTERS AND CAP LENGTH before a diagnostic's own message rides into a refusal an
+ * operator reads on a terminal — TODO.md §A.91, the reviewer's fifth fix round.
+ *
+ * A `Diagnostic.message` can quote GRAPH-AUTHOR-CONTROLLED text verbatim: `rule015Resources`
+ * interpolates a `subgraph.ref`/resource ref straight into `resource "${ref}" does not resolve`,
+ * and node ids, channel names and edge ids reach other messages the same way. Untrusted content
+ * did not stop being untrusted because it is now inside an error string this binary prints — a ref
+ * holding a newline or an ANSI escape (`\x1B[...`) would ride unescaped into this process's own
+ * stderr, letting a graph file forge extra lines or terminal control sequences inside a message the
+ * binary appears to have written itself. C0 (`\x00`–`\x1F`, and DEL `\x7F`) and C1 (`\x80`–`\x9F`)
+ * are stripped outright — none of them have a legitimate use inside a one-line refusal — and the
+ * result is capped at `MAX_DIAGNOSTIC_MESSAGE_LEN` so one candidate's message cannot dominate a
+ * summary meant to name several.
+ */
+function sanitizeDiagnosticMessage(s: string): string {
+  const stripped = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  return stripped.length > MAX_DIAGNOSTIC_MESSAGE_LEN ? `${stripped.slice(0, MAX_DIAGNOSTIC_MESSAGE_LEN)}…` : stripped;
 }
 
 /**
@@ -6644,11 +7009,18 @@ interface GraphIndex {
  * would recompile `graphs/` a second time at `loom serve` boot, and `loadGraph` writes its
  * diagnostics to stderr — so every warning in that directory would be printed twice in the boot
  * banner, which is how an operator learns to stop reading it.
+ *
+ * `silent` — see `loadGraph`'s docstring. `graphsByHash` passes `true`: it compiles every
+ * candidate in `graphs/` to find the one hash a run recorded, which is an internal question, and
+ * a candidate the operator did not name has no business on stderr (TODO.md §A.91). The boot's own
+ * subgraph catalogue passes nothing and stays as loud as it always was — that walk IS the
+ * operator's own published set, at boot, once.
  */
-function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
+function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
-  const failed: string[] = [];
+  const failed: FailedCandidate[] = [];
+  const diagnostics = new Map<string, readonly Diagnostic[]>();
   const memo = compileMemo(ws);
   const seen = new Set<string>();
   for (const rel of dirs) {
@@ -6659,13 +7031,35 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
       const path = join(dir, file);
       seen.add(path);
       try {
-        const graph = compiledFile(ws, memo, path);
+        const graph = compiledFile(ws, memo, path, silent);
         if (!index.has(graph.graphHash)) {
           index.set(graph.graphHash, graph);
           files.set(graph.graphHash, join(rel, file));
+          diagnostics.set(graph.graphHash, memo.get(path)?.diagnostics ?? []);
         }
       } catch (e) {
-        failed.push(`${join(rel, file)}: ${(e as Error).message}`);
+        // THE FIRST DIAGNOSTIC'S OWN MESSAGE, NOT JUST THE SUMMARY CODE — TODO.md §A.91, the
+        // reviewer's fourth fix round (X1's "same mechanism" follow-up). `compile()`'s thrown
+        // `LoomError.message` is "graph has N error(s): CODE1, CODE2, …", which names WHAT went
+        // wrong but not WHICH resource, node or channel — base's loud sweep printed the
+        // diagnostic's own sentence (`resource "function/pre@stable" does not resolve …
+        // resources/function/pre.js`) and this resolver's refusal fragment quoted only the code,
+        // a real loss the reviewer measured against base. `details.diagnostics` is the same array
+        // `compile()` attaches for exactly this reason (`graph/compile.ts`'s own
+        // `{ details: { diagnostics: errors } }`) — the FULL array, unsliced, never the first three
+        // the thrown message's own text joins for display, so a capability error fourth in line is
+        // still counted below. `first.message` is sanitized before it rides into a refusal an
+        // operator reads on a terminal — TODO.md §A.91's fifth fix round, `sanitizeDiagnosticMessage`
+        // — because it can quote graph-author-controlled text verbatim (a resource ref, a node id).
+        const details = isLoomError(e) ? (e.details as { diagnostics?: readonly Diagnostic[] } | undefined) : undefined;
+        const allDiagnostics = details?.diagnostics ?? [];
+        const first = allDiagnostics[0];
+        // ALL CODES, NOT JUST THE FIRST — TODO.md §A.91's fifth fix round. The grant advice keys on
+        // WHETHER ANY of a candidate's error diagnostics is GRAPH017_CAPABILITY_NOT_GRANTED, and a
+        // candidate can carry several; keying on `codes[0]` alone would miss one listed second.
+        const codes = allDiagnostics.map((d) => d.code);
+        const text = `${join(rel, file)}: ${(e as Error).message}${first === undefined ? "" : ` — ${sanitizeDiagnosticMessage(first.message)}`}`;
+        failed.push({ path: join(rel, file), text, codes });
       }
     }
   }
@@ -6678,7 +7072,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
   // narrower one would evict `graphs/` on every boot banner.
   const walked = new Set(dirs.map((rel) => join(ws.root, rel)));
   for (const path of memo.keys()) if (!seen.has(path) && walked.has(dirname(path))) memo.delete(path);
-  return { index, files, failed };
+  return { index, files, failed, diagnostics };
 }
 
 /**
@@ -6745,6 +7139,8 @@ interface CompiledFile {
   readonly digest: Digest;
   readonly graph?: RunGraph;
   readonly error?: unknown;
+  /** This compile's own warnings, captured even when `loadGraph` was told to stay `silent`. */
+  readonly diagnostics?: readonly Diagnostic[];
 }
 
 const compileMemos = new WeakMap<Workspace, { token: Digest; files: Map<string, CompiledFile> }>();
@@ -6811,7 +7207,7 @@ function compileMemo(ws: Workspace): Map<string, CompiledFile> {
   return held.files;
 }
 
-function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string): RunGraph {
+function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string, silent = false): RunGraph {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -6822,7 +7218,7 @@ function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: stri
     memo.delete(path);
     // `false`: every caller of this function is re-attaching a graph to a run that already
     // exists — the run clock, and the door an approver answers a gate through.
-    return loadGraph(ws, path, false);
+    return loadGraph(ws, path, false, undefined, silent);
   }
   const key = digestOf(text);
   const hit = memo.get(path);
@@ -6830,12 +7226,13 @@ function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: stri
     if (hit.graph === undefined) throw hit.error;
     return hit.graph;
   }
+  const diagnostics: Diagnostic[] = [];
   try {
-    const graph = loadGraph(ws, path, false, text);
-    memo.set(path, { digest: key, graph });
+    const graph = loadGraph(ws, path, false, text, silent, diagnostics);
+    memo.set(path, { digest: key, graph, diagnostics });
     return graph;
   } catch (e) {
-    memo.set(path, { digest: key, error: e });
+    memo.set(path, { digest: key, error: e, diagnostics });
     throw e;
   }
 }
@@ -6902,41 +7299,26 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       { details: { runId } },
     );
   }
-  const { index, files, failed } = graphsByHash(ws);
-  const found = index.get(wanted);
-  if (found !== undefined) {
+  const { graph, refusal, files, failed } = resolveRecordedGraph(ws, wanted);
+  if (graph !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
-    process.stderr.write(`${verb}: graph ${named(found)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
-    return found;
+    process.stderr.write(`${verb}: graph ${named(graph)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
+    return graph;
   }
-  // ABSENCE IS NOT ZERO. An empty `graphs/` and a `graphs/` full of other people's graphs are
-  // different diagnoses with different fixes, so they get different sentences.
-  const others = [...index.values()].map((g) => `${files.get(g.graphHash) ?? "?"} ${named(g)}`);
+  // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
+  // fourth fix round (X1). It used to live only here (and in `bindRecordedGraphOrExplain`), so
+  // seven of the resolver's nine callers named neither the capability nor the fix; it is now said
+  // ONCE, inside `resolveRecordedGraph` itself, and every caller inherits it for free. The
+  // remaining action is `noGuessAdvice()` — TODO.md §A.91's fifth fix round (B1) — never "Publish
+  // the graph this run used" unconditionally, which was false whenever a candidate named in
+  // `refusal` was present and simply would not compile. `--graph` is still named separately: it is
+  // always a real option, never an inference about which case applies.
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
-    `run ${runId} compiled graph ${wanted}, and no graph ${ws.root} publishes has that hash — not in graphs/, ` +
-      `resources/subgraph/ or resources/graph/. ` +
-      (others.length === 0
-        ? `It publishes no graph this process can compile`
-        : `It publishes ${String(others.length)}, and none is this run's — ${others.join("; ")}`) +
-      `${failed.length === 0 ? "" : ` (${String(failed.length)} would not compile — ${failed.join("; ")})`}. ` +
-      `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
-      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.` +
-      // THE FIX LINE IS WRONG FOR THE COMMONEST INSTANCE OF THIS REFUSAL, and this is the sentence that
-      // says so. A graph is compiled HERE with THIS invocation's grants, so `graphs/slow.json` declaring
-      // `net:fetch` compiles under `loom run --egress 127.0.0.1` and not under a bare `loom trace` —
-      // which drops it out of the index and produces this message about a graph that is published, is
-      // unedited, and needs no `--graph`. Measured through the binary: `loom trace <that run>` exits 1
-      // with the parenthetical above naming GRAPH017, and the same command with `--egress 127.0.0.1`
-      // exits 0. Only said when something actually failed to compile, so the ordinary refusal is
-      // unchanged.
-      (failed.length === 0
-        ? ""
-        : ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
-          `flags on THIS command line, so a graph declaring net:fetch needs the same --egress, and one declaring ` +
-          `proc:exec the same --allow-exec.`),
-    { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
+    `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
+      `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without publishing it.`,
+    { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
   );
 }
 
@@ -7579,7 +7961,7 @@ export async function runClockTick(
       (t) => (t.state === "ready" && (t.retryAfter === undefined || t.retryAfter <= now)) || t.state === "leased",
     );
     if (!due) continue;
-    index ??= graphsByHash(ws).index;
+    index ??= graphsByHash(ws, true).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
     const graph = wanted === undefined ? undefined : index.get(wanted);
     if (graph === undefined) continue;
@@ -8037,7 +8419,7 @@ export async function armForeignGates(ws: Workspace, armed: Map<RunId, Seq>): Pr
     armed.set(row.runId, row.headSeq);
     const p = await ws.engine.projection(row.runId);
     if (p === undefined || p.status !== "awaiting_gate") continue;
-    index ??= graphsByHash(ws).index;
+    index ??= graphsByHash(ws, true).index;
     const wanted = await ws.engine.compiledGraphHash(row.runId);
     const graph = wanted === undefined ? undefined : index.get(wanted);
     if (graph === undefined) continue;
@@ -8519,6 +8901,16 @@ export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clo
  */
 export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fetch"]): Promise<number> {
   const args = parseArgs(argv);
+  // BEFORE `--help`, not after — TODO.md §H.19/§A.91, the reviewer's third fix round (N7). This
+  // used to answer `--help` first "so `loom --help --tokne x` still prints the list a reader needs
+  // to fix the typo", which was the exact hole `--version` had before it was closed one commit
+  // below: `loom --help --tokne x` exited 0 with the usage and `--tokne` — a misspelling of a real
+  // flag `assertKnownFlags` would have named — was silently accepted and read by nothing. The
+  // usage text lists every flag in the abstract; it is not "the list a reader needs to fix a typo"
+  // the way `assertKnownFlags`'s own "did you mean --token?" is, and an operator who typed
+  // `--tokne` believing it configured something learns nothing from either printout unless this
+  // one runs first.
+  assertKnownFlags(args);
   if (args.flags["help"] === true) {
     process.stdout.write(USAGE);
     return 0;
@@ -8526,15 +8918,26 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // `loom --version` USED TO PRINT THE WHOLE USAGE AND EXIT 0, because `parseArgs` defaults a
   // missing verb to `help` and the `help` arm answered before any flag was looked at — so every
   // "is it installed, and which one" probe passed against every build, and said nothing.
-  if (versionFlag(args)) {
+  //
+  // `assertKnownFlags` MOVED AHEAD OF THIS CHECK — TODO.md §H.19. `versionFlag`'s own docstring
+  // said the quiet part: "(`--help` has that hole and is left as it was; it is not this flag's to
+  // copy.)" — and then this ordering copied it anyway. `loom --version --tokne x` reached
+  // `versionFlag`, printed `loom 0.1.0`, and returned before `assertKnownFlags` ever ran, so the
+  // misspelt `--token` was accepted and ignored exactly like the `--help` hole this flag was built
+  // not to share.
+  const wantsVersion = versionFlag(args);
+  // NEITHER THIS NOR THE DEFAULT `help` BELOW READS A FLAG BEYOND `--help`/`--version` THEMSELVES
+  // — TODO.md §H.19's other half. `loom --port 1`, naming no verb at all, used to fall straight
+  // through to the usage text: `--port` is a KNOWN flag (so `assertKnownFlags` above says nothing)
+  // and `"help"` is not a row `refuseFlagsThisVerbDoesNotRead` checks (it dispatches no `case`),
+  // so nothing between here and the usage print ever looked at it. Checked before EITHER answer
+  // prints, so `loom --version --port 1` refuses `--port` rather than printing the version and
+  // discarding it too.
+  if (wantsVersion || args.command === "help") refuseFlagsBeforeAVerb(args, wantsVersion);
+  if (wantsVersion) {
     process.stdout.write(`loom ${VERSION}\n`);
     return 0;
   }
-  // AFTER `--help`, so `loom --help --tokne x` still prints the list a reader needs to fix the
-  // typo — and BEFORE the `help` VERB, which is also what a bare `loom` defaults to. With the
-  // verb answered first, `loom --bogus` printed the usage and exited 0: an unknown flag refused
-  // after every verb and accepted before none of them.
-  assertKnownFlags(args);
   if (args.command === "help") {
     process.stdout.write(USAGE);
     return 0;
@@ -8830,8 +9233,10 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         } else {
           const wanted = await ws.engine.compiledGraphHash(runId);
           if (wanted !== undefined) {
-            const { index, failed } = graphsByHash(ws);
-            const found = index.get(wanted);
+            // ONE RESOLVER — TODO.md §A.91's second fix round. `resolveRecordedGraph` does the
+            // silent sweep and announces this graph's own warnings when it matches; the highest-
+            // consequence command in the product must not approve one whose diagnostics it hid.
+            const { graph: found, refusal, failed } = resolveRecordedGraph(ws, wanted);
             if (found !== undefined) {
               ws.engine.attach(runId, found);
               // AND RE-ARM ITS CLOCK. Attaching binds the graph; it does not restore the gate's
@@ -8842,16 +9247,18 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
               // NAMING THE FIX, because "is not attached" named none. An operator who has just
               // been told to run this command needs to know that the graph is what is missing,
               // not the run.
+              // `noGuessAdvice()`, NOT "Publish the graph this run used" — TODO.md §A.91's fifth
+              // fix round (B1). Unconditional publish advice was false whenever a candidate named
+              // in `refusal` was present and simply would not compile (an edit since the run
+              // started, or a capability this invocation lacks) — the resolver cannot tell that
+              // apart from a genuinely deleted file, so this door may not guess either.
               throw err.notFound(
                 CODES.E_RUN_NOT_FOUND,
-                `run ${runId} compiled graph ${wanted}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
-                  `(${index.size} searched${failed.length === 0 ? "" : `; ${failed.length} would not compile — ${failed.join("; ")}`}). ` +
-                  `Publish the graph this run used, or pass --graph explicitly. ` +
-                  `A graph EDITED since the run started no longer matches, which is the point — the approver ` +
-                  `approved those bytes. Restore them to answer the gate, or \`loom cancel ${runId} --as ID\` ` +
-                  `to stop the run, which needs no graph. NOT --reject: a rejected gate runs the graph's ` +
-                  `error edges, so it binds like an approval does`,
-                { details: { runId, graphHash: wanted, searched: index.size, ...(failed.length === 0 ? {} : { failed }) } },
+                `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
+                  `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without ` +
+                  `publishing it, or \`loom cancel ${runId} --as ID\` to stop the run, which needs no graph. ` +
+                  `NOT --reject: a rejected gate runs the graph's error edges, so it binds like an approval does`,
+                { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
               );
             }
           }
@@ -8932,8 +9339,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // BIND FIRST, or every steer on a restarted workspace answers "not attached" — which is
         // the honest answer only when the graph is genuinely absent, and here it is on disk.
         const wanted = await ws.engine.compiledGraphHash(runId);
-        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
-        if (found !== undefined) ws.engine.attach(runId, found);
+        bindRecordedGraphOrExplain(ws, runId, wanted);
         const p = await ws.engine.steer(runId, { nodeId: nodeId as NodeId, take: take as EdgeId[] }, reason, {
           kind: "human",
           subject: subjectFlag(args),
@@ -8970,8 +9376,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // installed on a run nobody folded. A workspace that has not published the graph
         // therefore refuses, which is the honest answer and not a silent success.
         const wanted = await ws.engine.compiledGraphHash(runId);
-        const found = wanted === undefined ? undefined : graphsByHash(ws).index.get(wanted);
-        if (found !== undefined) ws.engine.attach(runId, found);
+        bindRecordedGraphOrExplain(ws, runId, wanted);
         const p = await ws.engine.deescalate(runId, scope, to, why, { kind: "human", id: subjectFlag(args) }, "cli");
         process.stdout.write(`${JSON.stringify({ runId, scope, ceiling: p.ceilings[scope], status: p.status }, null, 2)}\n`);
         return 0;
@@ -9282,7 +9687,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // `<workspace>/graphs/` was put there by a person, and a successor graph reached through
         // `graph.mutated` at runtime was not. A graph run from a path outside `graphs/` is
         // therefore NOT promoted, which is the conservative reading and the correct one.
-        const { index, failed } = graphsByHash(ws);
+        const { index } = graphsByHash(ws);
         const promotedGraphHashes = new Set(index.keys());
         // The AUTHORED graph, for `promptRef` and node types only. A run that mutated its graph
         // folds its own successor hash from the journal; this lookup does not decide that.
@@ -9318,7 +9723,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // silently ignored on the path where it happens to be redundant is a flag whose meaning
         // depends on the workspace's contents.
         const namedGraph = args.flags["graph"];
-        let graph = index.get(ranHash);
+        let graph: RunGraph | undefined;
         if (namedGraph !== undefined) {
           const g = loadGraph(ws, graphFlag(args)!, false);
           if (g.graphHash !== ranHash) {
@@ -9329,19 +9734,25 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             return 1;
           }
           graph = g;
-        }
-        if (graph === undefined) {
-          process.stderr.write(
-            `run ${runId} ran graph ${ranHash}, and no graph in ${join(ws.root, "graphs")} has that hash ` +
-              `(${String(index.size)} searched${failed.length === 0 ? "" : `; ${String(failed.length)} would not compile — ${failed.join("; ")}`}). ` +
-              `Without the spec this run's assertion, rubric and agent nodes cannot be identified, so every ` +
-              `signal would read as absent and the verdict would be outcome 0 — the same number a run that ` +
-              `failed every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. ` +
-              `fix: pass --graph <file> with the graph this run ran (a candidate lives in candidates/, and ` +
-              `--graph scores it without publishing it), or publish those bytes into ${join(ws.root, "graphs")}. ` +
-              `A graph EDITED since the run no longer matches, which is the point — this run executed the old bytes.\n`,
-          );
-          return 1;
+        } else {
+          // ONE RESOLVER — TODO.md §A.91's second fix round. Announces `ranHash`'s own warnings
+          // when it resolves; an explicit `--graph` above already compiled loudly on its own.
+          const resolved = resolveRecordedGraph(ws, ranHash);
+          graph = resolved.graph;
+          if (graph === undefined) {
+            // `noGuessAdvice()`, NOT "publish those bytes" unconditionally — TODO.md §A.91's fifth
+            // fix round (B1). That was false whenever a candidate at `ranHash`'s path was present
+            // and simply would not compile, which `refusal` (quoted above) already names.
+            process.stderr.write(
+              `run ${runId} ran graph ${ranHash}, and ${resolved.refusal}. ` +
+                `Without the spec this run's assertion, rubric and agent nodes cannot be identified, so every ` +
+                `signal would read as absent and the verdict would be outcome 0 — the same number a run that ` +
+                `failed every assertion earns. Refusing instead: nothing was measured, so nothing is journaled. ` +
+                `${noGuessAdvice()} fix: pass --graph <file> with the graph this run ran (a candidate lives in ` +
+                `candidates/, and --graph scores it without publishing it).\n`,
+            );
+            return 1;
+          }
         }
         // ONE BUCKET RULE, USED BY BOTH FOLDS. A cohort key is only meaningful if every
         // member was bucketed by the same rule — folding this run under `--bucket` and its
@@ -10535,14 +10946,17 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
   const anchorGraph = anchorSubmitted === undefined ? undefined : index.get(anchorSubmitted.payload.graphHash);
   const anchorT = foldTrajectory(anchorEvents, { promotedGraphHashes, ...(anchorGraph === undefined ? {} : { graph: anchorGraph }) });
   const workflow = anchorT.cohort.workflow;
-  const baseline = index.get(anchorT.cohort.graphHash);
+  // ONE RESOLVER — TODO.md §A.91's second fix round. Announces the baseline's own warnings when
+  // it resolves.
+  const resolved = resolveRecordedGraph(ws, anchorT.cohort.graphHash);
+  const baseline = resolved.graph;
   if (baseline === undefined) {
     throw err.notFound(
       CODES.E_RUN_NOT_FOUND,
-      `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} has that ` +
-        `hash (${String(index.size)} searched). --cohort names a RECORDING — a run of a graph published in graphs/ — because ` +
-        `the exam's inputs are checked against that graph's declared inputs and outputs. A candidate run or an exam run is ` +
-        `not one; name a recording, or restore the graph's bytes to graphs/.`,
+      `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and ${resolved.refusal}. ` +
+        `--cohort names a RECORDING — a run of a graph published in graphs/ — because the exam's inputs are checked ` +
+        `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a ` +
+        `recording. ${noGuessAdvice()}`,
     );
   }
   const problems = attestationProblems(exam.spec, baseline.spec);
@@ -11152,12 +11566,36 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     ...(bucketInput === undefined ? {} : { bucketInput }),
   });
   const key = cohortKeyOf(anchorT);
+  // RESOLVED BEFORE THE COHORT IS MEASURED, not after — TODO.md §A.91, the reviewer's third fix
+  // round (B1). This block used to sit below the `n < MIN_COHORT_SIZE` refusal, and
+  // `measureCohort` drops a member it could not measure — so an unpublished (or broken) cohort
+  // graph made every member specless and the FIRST thing an operator heard was "record more runs
+  // of this workflow", blaming their corpus for their `graphs/` directory. Driven on a 30-run
+  // corpus with the cohort's own resource deleted: the true reason (a GRAPH015 the resolver
+  // reports) never reached the operator at all. `promoteAgainstCohort` already gets this order
+  // right; this is the same fix, one verb over.
+  //
+  // THE COHORT'S OWN GRAPH HAS TO BE PUBLISHED — and not only for the reason
+  // `promoteAgainstCohort` needs it. The grader-channel exclusion below reads NODE TYPES, and
+  // without the spec every channel an `evaluator` wrote would be pinned as though it were the
+  // work. A suite that grades on the grader is the failure this whole verb is aimed at, so a
+  // missing spec is a refusal rather than a degraded freeze.
+  const resolvedBaseline = resolveRecordedGraph(ws, anchorT.cohort.graphHash);
+  const baseline = resolvedBaseline.graph;
+  if (baseline === undefined) {
+    throw err.notFound(
+      CODES.E_RUN_NOT_FOUND,
+      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The ` +
+        `expectations exclude every channel an evaluator node wrote, and node types live in the spec — without it ` +
+        `this would freeze an exam that grades the grader. ${noGuessAdvice()}`,
+    );
+  }
   // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
   // `golden` rests on this graph's own evaluator — which is what let a rigged grader write its
   // wrong outputs into the next exam as ground truth. The exam also FREEZES THE QUESTIONS:
   // recordings after `corpusThrough` are not cases until a human re-attests, and the corpus is
   // assembled from the attestation's own scan rather than from a listing window (`examCorpus`).
-  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], index.get(anchorT.cohort.graphHash)?.spec, { corpusOnly: true });
+  const exam = await examFor(ws, anchorT.cohort.workflow, promotedGraphHashes, [anchorT], baseline.spec, { corpusOnly: true });
   if (exam === undefined) throw noExamRefusal(anchorT.cohort.workflow, anchorId, "freeze a suite from");
   const inCorpus = await examCorpus(ws, exam, anchorT, key, promotedGraphHashes, index, bucketInput);
   const afterCorpus = exam.recordings.filter((r) => r.graphHash === anchorT.authoredGraphHash && r.runId > exam.attestation.corpusThrough).length;
@@ -11188,23 +11626,8 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
     );
   }
 
-  // THE COHORT'S OWN GRAPH, WHICH HAS TO BE PUBLISHED — and not for the reason
-  // `promoteAgainstCohort` needs it. The grader-channel exclusion below reads NODE TYPES, and
-  // without the spec every channel an `evaluator` wrote would be pinned as though it were the
-  // work. A suite that grades on the grader is the failure this whole verb is aimed at, so a
-  // missing spec is a refusal rather than a degraded freeze.
-  const graph = index.get(anchorT.cohort.graphHash);
-  if (graph === undefined) {
-    throw err.notFound(
-      CODES.E_RUN_NOT_FOUND,
-      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} ` +
-        `has that hash (${String(index.size)} searched). The expectations exclude every channel an evaluator node ` +
-        `wrote, and node types live in the spec — without it this would freeze an exam that grades the grader. ` +
-        `Restore those bytes to graphs/.`,
-    );
-  }
-  const evaluatorNodes = new Set(graph.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
-  const inputChannels = new Set<string>(graph.spec.inputs);
+  const evaluatorNodes = new Set(baseline.spec.nodes.filter((n) => n.type === "evaluator").map((n) => n.id));
+  const inputChannels = new Set<string>(baseline.spec.inputs);
 
   interface Selectable {
     readonly runId: RunId;
@@ -11691,14 +12114,15 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
   // measure, an unpublished baseline makes every member specless and the FIRST thing the
   // operator hears is "record more runs of this workflow" — blaming their corpus for their
   // graphs/ directory. The missing file is the earlier fact, so it is the earlier message.
-  const baseline = index.get(anchorT.cohort.graphHash);
+  // ONE RESOLVER — TODO.md §A.91's second fix round. Announces the baseline's own warnings when
+  // it resolves.
+  const resolvedBaseline = resolveRecordedGraph(ws, anchorT.cohort.graphHash);
+  const baseline = resolvedBaseline.graph;
   if (baseline === undefined) {
     throw err.notFound(
       CODES.E_RUN_NOT_FOUND,
-      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and no graph in ${join(ws.root, "graphs")} ` +
-        `has that hash (${String(index.size)} searched). The baseline is derived from the cohort rather than passed in, ` +
-        `so it has to be publishable: restore those bytes to graphs/. A graph EDITED since the cohort ran no longer ` +
-        `matches, which is the point — those runs were produced by the old bytes.`,
+      `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The baseline is ` +
+        `derived from the cohort rather than passed in, so it has to be publishable. ${noGuessAdvice()}`,
     );
   }
   // NO MEASUREMENT THE CANDIDATE CANNOT WRITE, NO LIVE PROMOTION. Both sides of every pair below

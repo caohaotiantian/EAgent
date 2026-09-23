@@ -198,6 +198,30 @@ test.after(async () => {
   if (shared !== undefined) (await shared).dispose();
 });
 
+/**
+ * Like `freeze`/`cli`, but folds a THROW into the same shape — TODO.md §A.91's B1 fixture needs
+ * this, because `resolveRecordedGraph`'s warning/refusal text is printed to stderr from INSIDE
+ * `freezeSuite`, before a later, unrelated refusal (no exam; cohort too small) throws and unwinds
+ * past `cli`'s own return — which would otherwise discard everything captured on the way there.
+ */
+async function freezeCapture(dir: string, anchor: string, out: string, extra: string[] = []): Promise<{ code: number; out: string; err: string }> {
+  const outArr: string[] = [];
+  const errArr: string[] = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((c: string) => (outArr.push(String(c)), true)) as typeof process.stdout.write;
+  process.stderr.write = ((c: string) => (errArr.push(String(c)), true)) as typeof process.stderr.write;
+  try {
+    const code = await main(["suite", "freeze", "--cohort", anchor, "--workspace", dir, "--out", out, ...extra]);
+    return { code, out: outArr.join(""), err: errArr.join("") };
+  } catch (e) {
+    return { code: 1, out: outArr.join(""), err: `${errArr.join("")}${(e as Error).message}\n` };
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+}
+
 async function freeze(dir: string, anchor: string, out: string, extra: string[] = []): Promise<{ code: number; out: string; err: string }> {
   return await cli(["suite", "freeze", "--cohort", anchor, "--workspace", dir, "--out", out, ...extra]);
 }
@@ -432,6 +456,192 @@ test("CONTROL · A COHORT NOBODY JUDGED IS REFUSED, and refused DIFFERENTLY from
     );
   } finally {
     small.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// B1 · TODO.md §A.91 — the cohort's own graph is resolved BEFORE it is measured
+// ---------------------------------------------------------------------------
+
+/**
+ * A single scored run of a graph whose one non-input channel uses `last_write_wins_by_ts` —
+ * GRAPH013_CLOCK_DEPENDENT, a WARNING rather than a refusal, so the graph still compiles and the
+ * run still succeeds. Cheap on purpose: `resolveRecordedGraph` now runs before `examFor` and the
+ * `MIN_COHORT_SIZE` floor, so pinning that it announces a warning needs neither an attested exam
+ * nor thirty runs — one is enough to reach the resolver, which is the only thing under test.
+ */
+async function warnCorpus(): Promise<Fixture> {
+  const dir = mkdtempSync(join(tmpdir(), "loom-freeze-warn-"));
+  mkdirSync(join(dir, "graphs"), { recursive: true });
+  mkdirSync(join(dir, "resources", "function"), { recursive: true });
+  writeFileSync(join(dir, "resources", "function", "pick.js"), `(view) => ({ writes: { picked: (view.get("items") ?? []).slice() } })`);
+  writeFileSync(
+    join(dir, "resources", "function", "check.js"),
+    `(view) => {
+      const items = view.get("items") ?? [];
+      const picked = view.get("picked") ?? [];
+      return { writes: { verdict: { pass: picked.length === items.length, confidence: 1, detail: picked.length + "/" + items.length } } };
+    }`,
+  );
+  writeFileSync(
+    join(dir, "graphs", "pick.json"),
+    JSON.stringify({
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "pick-bench-warn", project: "demo", version: 1 },
+      policy: { posture: "out", capabilities: [] },
+      channels: {
+        items: { type: "array", reduce: "replace" },
+        // THE WARNING: a clock-dependent reducer on an ordinary function-node output, nothing
+        // to do with gates or tools — GRAPH013 fires on the channel declaration alone.
+        picked: { type: "array", reduce: "last_write_wins_by_ts" },
+        verdict: { type: "object", reduce: "replace" },
+      },
+      inputs: ["items"],
+      outputs: ["picked", "verdict"],
+      nodes: [
+        { id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/pick@stable" } },
+        {
+          id: "check",
+          type: "evaluator",
+          reads: ["items", "picked"],
+          writes: ["verdict"],
+          evaluator: { kind: "assertion", ref: "function/check@stable", threshold: 0.5 },
+        },
+      ],
+      edges: [{ id: "e", from: "pick", to: "check", kind: "seq" }],
+    }),
+  );
+  const r = await cli(["run", join(dir, "graphs", "pick.json"), "--workspace", dir, "--input", JSON.stringify({ items: ["a", "b"] })]);
+  assert.equal(r.code, 0, r.err);
+  const p = JSON.parse(r.out) as { runId: string; status: string };
+  assert.equal(p.status, "succeeded", r.out);
+  const scored = await cli(["score", p.runId, "--workspace", dir]);
+  assert.equal(scored.code, 0, `${scored.out}${scored.err}`);
+  return { dir, ids: [p.runId], dispose: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("(a) A COHORT GRAPH THAT COMPILES WITH A WARNING IS ANNOUNCED, not silently frozen — TODO.md §A.91 B1", async () => {
+  const c = await warnCorpus();
+  try {
+    const out = join(c.dir, "warn-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    // The cohort is one run — no exam is attested and it is nowhere near MIN_COHORT_SIZE, so the
+    // command still fails downstream. What is pinned here is EARLIER: `resolveRecordedGraph`
+    // resolves the cohort's own graph before either of those refusals, and announces its warning
+    // when it does — the reviewer's case (a), reported gone in round 3.
+    assert.match(r.out + r.err, /GRAPH013_CLOCK_DEPENDENT/, `the resolved baseline's own warning must be announced:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+test("(b) A COHORT GRAPH THAT NO LONGER COMPILES IS DIAGNOSED HONESTLY, not blamed on the corpus — TODO.md §A.91 B1", async () => {
+  // ONE recorded, scored run — not thirty. `resolveRecordedGraph` now runs before `measureCohort`
+  // and the `MIN_COHORT_SIZE` floor, so a broken cohort graph is diagnosed as itself rather than
+  // as an empty population; a single run is enough to reach that diagnosis, which is the whole
+  // point of the fix (it used to require the reviewer's 30-run corpus to even notice the bug).
+  const c = await corpus(1, { score: true });
+  try {
+    // THE REVIEWER'S OWN REPRO: the cohort's own function resource, deleted out from under it.
+    rmSync(join(c.dir, "resources", "function", "pick.js"));
+    const out = join(c.dir, "broken-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND/, `the true reason must reach the operator:\n${r.out}${r.err}`);
+    assert.match(r.out + r.err, /graphs[\\/]pick\.json/, `it must name the broken file:\n${r.out}${r.err}`);
+    // THE FALSE DIAGNOSIS THIS FIX REMOVES: before B1, a broken cohort graph made `measureCohort`
+    // drop the (only) member as specless, and freeze reported "n = 0 ... Record more runs of this
+    // workflow first" — blaming the operator's corpus for the operator's graphs/ directory.
+    assert.doesNotMatch(r.out + r.err, /n = 0 comparable runs/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
+    assert.doesNotMatch(r.out + r.err, /Record more runs of this workflow first/, `must not fall back to the population refusal:\n${r.out}${r.err}`);
+    // THE HONEST SENTENCE, WITH NO GUESS — TODO.md §A.91, the reviewer's fifth fix round (B1). The
+    // graph FILE is present here (only its resource is gone), so "restore the bytes" alone would be
+    // wrong advice too — the sentence must name BOTH possibilities and assert neither.
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice:\n${r.out}${r.err}`,
+    );
+    // THE FALSE CLAIM THIS ROUND REMOVES: `missingGraphAdvice`'s branch for this exact case said
+    // "the file is already there, and restoring it changes nothing" — an assertion the resolver has
+    // no way to know is true, since it cannot tell this candidate apart from an edited or replaced
+    // one a `restore` WOULD fix.
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// B1 (fifth fix round) · the advice must not guess which candidate is the run's own graph
+// ---------------------------------------------------------------------------
+
+test("(B1-deleted+unrelated) THE RUN'S GRAPH WAS DELETED, AND AN UNRELATED BROKEN CANDIDATE MUST NOT CHANGE THE ADVICE", async () => {
+  // THE REVIEWER'S OWN REPRO: record and score a run, delete ITS graph file, and publish an
+  // UNRELATED broken candidate elsewhere. `missingGraphAdvice` read `failed.length > 0` — true here,
+  // because the UNRELATED candidate fails to compile — as proof the run's own path held a broken
+  // file, and said "fix why it does not compile ... restoring it changes nothing". Both halves are
+  // false: the run's own file was DELETED, not broken, and restoring it is exactly the fix.
+  const c = await corpus(1, { score: true });
+  try {
+    rmSync(join(c.dir, "graphs", "pick.json"));
+    // An unrelated candidate, broken for an unrelated reason (a missing resource of its own),
+    // published in `graphs/` where the sweep will find it but never resolve it as this cohort's
+    // graph — the reviewer's own repro names this file `graphs/draft.json`.
+    writeFileSync(
+      join(c.dir, "graphs", "draft.json"),
+      JSON.stringify({
+        apiVersion: "loom.dev/v1",
+        kind: "GraphSpec",
+        metadata: { name: "unrelated", project: "demo", version: 1 },
+        policy: { posture: "out", capabilities: [] },
+        channels: { items: { type: "array", reduce: "replace" }, picked: { type: "array", reduce: "replace" } },
+        inputs: ["items"],
+        outputs: ["picked"],
+        nodes: [{ id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: "function/does-not-exist@stable" } }],
+        edges: [],
+      }),
+    );
+
+    const out = join(c.dir, "deleted-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice even with an unrelated broken candidate present:\n${r.out}${r.err}`,
+    );
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing — the file was DELETED:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
+  }
+});
+
+test("(B1-edited) THE RUN'S GRAPH WAS EDITED INTO BROKENNESS, AND THE ADVICE STILL DOES NOT GUESS", async () => {
+  // Same path, new bytes: the file is not gone, but the edit itself is what broke it — "restoring"
+  // (reverting the edit) WOULD fix this, which is exactly what "restoring it changes nothing" denied.
+  const c = await corpus(1, { score: true });
+  try {
+    const edited = JSON.parse(readFileSync(join(c.dir, "graphs", "pick.json"), "utf8")) as {
+      nodes: { function?: { ref: string } }[];
+    };
+    edited.nodes[0]!.function = { ref: "function/does-not-exist-after-the-edit@stable" };
+    writeFileSync(join(c.dir, "graphs", "pick.json"), JSON.stringify(edited));
+
+    const out = join(c.dir, "edited-suite.json");
+    const r = await freezeCapture(c.dir, c.ids[0]!, out);
+    assert.match(r.out + r.err, /GRAPH015_RESOURCE_NOT_FOUND/, `the true reason must reach the operator:\n${r.out}${r.err}`);
+    assert.match(
+      r.out + r.err,
+      /If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate named above is that file, fix why it does not compile\./,
+      `must give the honest, no-guess advice for an edited-and-broken graph:\n${r.out}${r.err}`,
+    );
+    assert.doesNotMatch(r.out + r.err, /restoring it changes nothing/, `must not claim restoring would do nothing — reverting the edit fixes this:\n${r.out}${r.err}`);
+    assert.equal(existsSync(out), false);
+  } finally {
+    c.dispose();
   }
 });
 

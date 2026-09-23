@@ -331,7 +331,10 @@ test("DELETING A HOOK BODY UNDER A LIVE GATE NAMES THE FILE, not just the run", 
       () => cli(["approve", summary.runId, gateId, "--workspace", w.dir, "--as", "u:alice"]),
       (e: unknown) => {
         assert.ok(isLoomError(e), String(e));
-        assert.match(e.message, /would not compile/, "the index must say what it could not build");
+        // NEUTRAL WORDING — TODO.md §A.91, the reviewer's third fix round (N4): this is a GRAPH015
+        // missing resource, not a capability the grants on this invocation could have supplied, so
+        // the message no longer claims "under this invocation's grants" for it.
+        assert.match(e.message, /does not compile here/, "the index must say what it could not build");
         assert.match(e.message, /gated\.json/, "and name the graph file");
         assert.deepEqual((e.details as { failed?: readonly string[] }).failed?.length, 1);
         return true;

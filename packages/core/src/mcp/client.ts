@@ -69,16 +69,38 @@ export interface McpClientOptions {
  * (and die of memory) or to drop it. Dropping is right, and it must drop *through* the next
  * newline so the following message starts clean rather than being parsed as the tail of the
  * garbage. That is the whole reason this is not a two-line `split("\n")`.
+ *
+ * `push` TAKES `Uint8Array`, NOT `Buffer` — TODO.md §H.18 / DESIGN.md Q2. This function is
+ * exported, so its declared shape is exactly what a shipped `.d.ts` carries, and `Buffer` is an
+ * AMBIENT global `@types/node` declares — a consumer compiling with `"types": []` cannot resolve
+ * it. `Buffer` is a `Uint8Array` (Node's own extension of it), so every real caller — `child.stdout`
+ * always emits actual `Buffer`s — satisfies this signature unchanged; only the DECLARED type moved
+ * to the one both runtimes and this package's zero-dependency rule already agree on.
+ *
+ * `push` ALWAYS COPIES `chunk` — TODO.md §A.91 M4, a reviewer's fix on the first draft of the
+ * `Uint8Array` change above. That draft wrapped `chunk` as a VIEW (`Buffer.from(buffer, offset,
+ * length)`, no copy) on the reasoning that every real caller's `Buffer` is safe to alias — true
+ * WITHIN one call, false across two. A no-newline chunk is retained in `residual` past this
+ * function's return, and `push` is now PUBLIC API: a caller that reuses one buffer across reads
+ * (an ordinary way to avoid allocating one per chunk) overwrites what `residual` was still
+ * aliasing before the next `push` ever runs — reproduced with two pushes of a REUSED
+ * `Buffer.from("A")`/`.set()`-overwritten-to-"Z" pair with no newline in either: the line, once a
+ * newline finally arrives, reads the SECOND chunk's bytes twice rather than the first chunk's
+ * bytes followed by the second's. `Buffer.from(chunk)` (a `Uint8Array` argument, not the tuple
+ * form) always copies; this is a bounded, per-chunk allocation the aliasing was buying against
+ * a correctness bug in retained state, and MCP frames are not the gigabyte case this reader's
+ * OWN cap exists for.
  */
 export function createBoundedLineReader(
   cap: number,
   onLine: (line: string) => void,
-): { push(chunk: Buffer): void; buffered(): number; discarding(): boolean } {
+): { push(chunk: Uint8Array): void; buffered(): number; discarding(): boolean } {
   let residual: Buffer = Buffer.alloc(0);
   let discarding = false;
   return {
-    push(chunk: Buffer): void {
-      residual = residual.length === 0 ? chunk : Buffer.concat([residual, chunk]);
+    push(chunk: Uint8Array): void {
+      const bytes = Buffer.from(chunk);
+      residual = residual.length === 0 ? bytes : Buffer.concat([residual, bytes]);
       for (;;) {
         const nl = residual.indexOf(0x0a);
         if (discarding) {
@@ -121,7 +143,11 @@ export class McpClient {
   readonly name: string;
   #child: ChildProcessWithoutNullStreams | undefined;
   #nextId = 1;
-  readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  // `ReturnType<typeof setTimeout>` rather than `NodeJS.Timeout` — TODO.md §H.18 / DESIGN.md Q2,
+  // for consistency with `createBoundedLineReader` above. This field is private (`#`-prefixed) and
+  // never reaches a shipped `.d.ts` either way; changed anyway so the file names no ambient
+  // `@types/node` global at all.
+  readonly #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   readonly #opts: McpClientOptions;
   #tools: readonly McpToolSpec[] = [];
   #rejectedTools: readonly { readonly name: string; readonly reason: string }[] = [];

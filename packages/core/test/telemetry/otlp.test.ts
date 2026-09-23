@@ -62,6 +62,11 @@ test("the payload is OTLP/JSON: hex ids, nanosecond STRINGS, integer enums, KeyV
 
   assert.equal(wire.length, spans.length, "every folded span reached the wire");
 
+  // TODO.md §H.16 / DESIGN.md Q1: the scope names the PUBLISHED package, not the
+  // workspace-internal `@loom/core` this monorepo never shipped to a registry.
+  const scopeName = (payload.resourceSpans[0] as { scopeSpans: readonly { scope: { name: string } }[] }).scopeSpans[0]!.scope.name;
+  assert.equal(scopeName, "@caohaotiantian/loom/telemetry");
+
   // Rule 2 — the one that produces a 200 and no data when it is wrong. Hex, not base64:
   // base64 of 16 bytes is 24 chars ending in `=`, so the length test alone separates them.
   for (const s of wire) {

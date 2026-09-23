@@ -1002,7 +1002,7 @@ test("A DRIFTED GRAPH STRANDS NOTHING — cancel is the exit and it needs no gra
       refused = (e as Error).message;
     }
     assert.ok(refused !== undefined, "approve must refuse a drifted graph — it did not");
-    assert.match(refused, /no graph in .* has that hash|E_GRAPH_MISMATCH/, refused);
+    assert.match(refused, /no graph compiles to hash|E_GRAPH_MISMATCH/, refused);
 
     const cancelled = await run(["cancel", m[1]!, "--workspace", d.dir, "--as", "u:alice", "--reason", "drifted"]);
     assert.equal(cancelled.code, 0, `cancel must work with no graph: ${cancelled.err}`);

@@ -110,8 +110,15 @@ export interface OtlpTracePayload {
   readonly resourceSpans: readonly OtlpJson[];
 }
 
-/** The instrumentation scope every span in this payload is attributed to. */
-const SCOPE_NAME = "@loom/core/telemetry";
+/**
+ * The instrumentation scope every span in this payload is attributed to.
+ *
+ * TODO.md §H.16 / DESIGN.md Q1: named after the SCOPED PACKAGE this ships as
+ * (`packages/core/package.json`'s own `name`), not the workspace-internal `@loom/core` this
+ * monorepo never published — a collector operator reading `@loom/core/telemetry` off the wire
+ * had no package on npm to look it up against.
+ */
+const SCOPE_NAME = "@caohaotiantian/loom/telemetry";
 
 /**
  * OTLP's own enum, and the reason the mapping is only three arms wide.
