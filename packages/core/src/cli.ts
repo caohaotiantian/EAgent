@@ -746,8 +746,9 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * `parseArgs` stores `--version 1` and `--version=yes` as strings, so a check for `=== true` alone
  * would skip them and let the verb run with the flag silently dropped — measured on the first
  * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
- * flag existed the same line was refused as unknown. (`--help` has that hole and is left as it
- * was; it is not this flag's to copy.)
+ * flag existed the same line was refused as unknown. (`--help` had the SAME hole — TODO.md §H.19's
+ * N7 — and it is closed the same way `main` closes this one: `assertKnownFlags` now runs before
+ * either flag is answered, not after.)
  */
 function versionFlag(args: Args): boolean {
   const v = args.flags["version"];
@@ -8780,15 +8781,20 @@ export async function serveUntilInterrupt(plane: { close(): Promise<void> }, clo
  */
 export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fetch"]): Promise<number> {
   const args = parseArgs(argv);
+  // BEFORE `--help`, not after — TODO.md §H.19/§A.91, the reviewer's third fix round (N7). This
+  // used to answer `--help` first "so `loom --help --tokne x` still prints the list a reader needs
+  // to fix the typo", which was the exact hole `--version` had before it was closed one commit
+  // below: `loom --help --tokne x` exited 0 with the usage and `--tokne` — a misspelling of a real
+  // flag `assertKnownFlags` would have named — was silently accepted and read by nothing. The
+  // usage text lists every flag in the abstract; it is not "the list a reader needs to fix a typo"
+  // the way `assertKnownFlags`'s own "did you mean --token?" is, and an operator who typed
+  // `--tokne` believing it configured something learns nothing from either printout unless this
+  // one runs first.
+  assertKnownFlags(args);
   if (args.flags["help"] === true) {
     process.stdout.write(USAGE);
     return 0;
   }
-  // AFTER `--help`, so `loom --help --tokne x` still prints the list a reader needs to fix the
-  // typo — and BEFORE `--version` and the `help` VERB, which is also what a bare `loom` defaults
-  // to. With the verb answered first, `loom --bogus` printed the usage and exited 0: an unknown
-  // flag refused after every verb and accepted before none of them.
-  assertKnownFlags(args);
   // `loom --version` USED TO PRINT THE WHOLE USAGE AND EXIT 0, because `parseArgs` defaults a
   // missing verb to `help` and the `help` arm answered before any flag was looked at — so every
   // "is it installed, and which one" probe passed against every build, and said nothing.

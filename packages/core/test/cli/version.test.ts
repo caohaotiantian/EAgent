@@ -122,8 +122,18 @@ test("AN UNKNOWN FLAG WITH NO VERB IS REFUSED — it used to print the usage and
   }
 });
 
+test("`--help` READS NO FLAG BESIDE ITSELF EITHER — TODO.md §A.91 N7, the hole --version had", async () => {
+  // `loom --help --tokne x` used to answer `--help` before `assertKnownFlags` ever ran, the exact
+  // shape `--version` was fixed for in §H.19 above — an unknown flag riding beside it was silently
+  // accepted and read by nothing.
+  await assert.rejects(
+    () => cli(["--help", "--tokne", "x"]),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag: --tokne/.test(e.message),
+  );
+});
+
 test("...while the ways to ASK for the usage still get it", async () => {
-  for (const argv of [[], ["help"], ["--help"], ["--help", "--tokne", "x"]]) {
+  for (const argv of [[], ["help"], ["--help"]]) {
     const r = await cli(argv);
     assert.equal(r.code, 0, argv.join(" "));
     assert.match(r.out, /^loom — graph-native multi-agent orchestration/, argv.join(" "));

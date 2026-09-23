@@ -222,14 +222,20 @@ test("THE SECURITY CASE: a typo'd --token no longer opens the plane", async () =
 });
 
 test("`loom help` still works, and every real flag is accepted", async () => {
-  // The refusal runs AFTER `help`, so a reader who typo'd can still get the list. And a
-  // false positive here would be worse than the bug: every advertised flag must pass.
+  // A false positive here would be worse than the bug: every advertised flag must pass.
   assert.equal(await cli(["help"]), 0);
   assert.equal(await cli(["--help"]), 0);
-  // AND `--help` WORKS ALONGSIDE THE TYPO, which is the point of ordering the refusal after it:
-  // the reader who misspelled a flag is exactly the one who needs the list. Ordering this the
-  // other way is a mutation the sweep reported as undistinguished until this line existed.
-  assert.equal(await cli(["--help", "--tokne", "x"]), 0, "a typo must not cost a reader the usage text");
+  // `--help` BESIDE A TYPO NOW REFUSES — TODO.md §A.91, the reviewer's third fix round (N7). The
+  // refusal used to run AFTER `--help` on the theory that "a reader who typo'd can still get the
+  // list", but the usage text is not the list a misspelling needs — `assertKnownFlags`'s own "did
+  // you mean --token?" is — and ordering it after `--help` meant `loom --help --tokne x` exited 0
+  // with `--tokne` silently accepted and read by nothing, the same hole `--version` was fixed for
+  // in §H.19. `assertKnownFlags` now runs before `--help` is answered, mirroring `--version`.
+  await assert.rejects(
+    () => cli(["--help", "--tokne", "x"]),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag: --tokne/.test(e.message),
+    "a typo beside --help must be refused, not silently accepted",
+  );
 
   const w = workspace();
   try {
