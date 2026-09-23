@@ -1005,6 +1005,52 @@ function refuseUnknownCommand(command: string): number {
  * given them nothing. `--suite` on `loom score` becomes "read by `loom promote`", which is the
  * command they were reaching for.
  */
+/**
+ * Refuse a flag neither `--version` nor the default `help` answer reads — TODO.md §H.19.
+ *
+ * `refuseFlagsThisVerbDoesNotRead` covers every DISPATCHED verb, and returns unmolested for
+ * `"help"` (`dispatchesVerb`'s own docstring: "A COMMAND NOT LISTED HERE IS NOT CHECKED", because
+ * `"help"` has no `case` in `main`'s switch to recompute a row from). But `"help"` is also what
+ * `parseArgs` defaults an ABSENT verb to, and that default is reached by `main` before the door
+ * above ever runs — so `loom --port 1`, a KNOWN flag naming no verb at all, fell through to the
+ * usage text and exit 0: accepted and ignored, the twin of the unknown-flag hole §H.4 closed one
+ * door over. `loom --version --port 1` is the same hole one flag later — answering the version
+ * question does not read `--port` either.
+ *
+ * Only the two flags THIS path itself reads are exempt: `--help` never reaches here (it answers
+ * and returns above), and `--version` is what may have brought us here at all — it names itself,
+ * not a flag it failed to read.
+ *
+ * `wantsVersion` IS A PARAMETER AND NOT A SECOND READ OF `args.flags["version"]`, on purpose: this
+ * function's signature is deliberately not `(args: Args)` alone, because `flag-door.test.ts`
+ * recomputes `FLAGS`' reader column from every top-level `(args: Args)` function whose body
+ * touches a given flag name, and `versionFlag` is already `--version`'s one true reader — this
+ * function only picks between two SENTENCES about a flag it did not decide.
+ */
+function refuseFlagsBeforeAVerb(args: Args, wantsVersion: boolean): void {
+  const offenders = Object.keys(args.flags)
+    .filter((f) => f !== "help" && f !== "version")
+    .sort();
+  if (offenders.length === 0) return;
+  const readers = (f: string): string => {
+    const verbs = Object.keys(VERB_FLAGS)
+      .filter((v) => VERB_FLAGS[v]!.includes(f))
+      .sort();
+    return verbs.length === 0 ? "read by no verb this binary dispatches" : `read by ${verbs.map((v) => `\`loom ${v}\``).join(", ")}`;
+  };
+  const named = wantsVersion ? "`loom --version`" : "`loom`, naming no verb,";
+  throw err.validation(
+    CODES.E_CONFIG_INVALID,
+    offenders
+      .map(
+        (f) =>
+          `--${f} is ${readers(f)}. ${named} reads neither it nor any verb's flags. ` +
+          (FLAG_CONSEQUENCE[f] ?? "It would have been accepted and done nothing, leaving an operator believing it was configured by it."),
+      )
+      .join(" "),
+  );
+}
+
 function refuseFlagsThisVerbDoesNotRead(args: Args): void {
   if (!dispatchesVerb(args.command)) return;
   const applies = VERB_FLAGS[args.command]!;
@@ -5172,8 +5218,22 @@ function writeDiagnostic(line: string, indent: number): void {
  * hook is missing" — the graph silently drops out of the index and the approver is told the run
  * cannot be found. Letting a deleted extension file block human oversight of a live run is a
  * worse failure than the silence this check exists to end, so the check does not run there.
+ *
+ * `silent` — whether a diagnostic this compile produces is this operator's business at all.
+ * `graphsByHash` compiles EVERY file in `<workspace>/graphs/` to find the one hash a RUN
+ * recorded; that sweep is an internal question ("which of these files is this run's graph") and
+ * its answer is either a match (named through `files`/`recordedGraph`, already) or a rejection
+ * (named through `indexGraphs`' `failed` list, already) — never a raw diagnostic about a
+ * candidate the operator did not ask about. Before this parameter, `loom approve`, `replay` and
+ * `trace` printed every OTHER graph's `GRAPH0xx` line to stderr while resolving the one they were
+ * asked about (TODO.md §A.91) — the highest-consequence command in the product printing warnings
+ * about a file nobody named, above the answer to the question actually asked. `silent` suppresses
+ * the two `writeDiagnostic` loops only; the compile still runs, still throws `result.error` on
+ * failure, and `introducing` (always `false` on this path already) still governs hook/function
+ * body enforcement. A caller compiling a file the operator DID name — `compile`, `run`, an
+ * explicit `--graph`, `discoverGraphs`' boot catalogue — passes nothing and stays as loud as ever.
  */
-function loadGraph(ws: Workspace, file: string, introducing = true, source?: string): RunGraph {
+function loadGraph(ws: Workspace, file: string, introducing = true, source?: string, silent = false): RunGraph {
   const spec = readSpec(file, source);
   const result = compile({
     spec,
@@ -5196,19 +5256,23 @@ function loadGraph(ws: Workspace, file: string, introducing = true, source?: str
   // graph. `recordedGraph`'s own docstring states the rule this broke — "SAY WHAT IT RESOLVED. A
   // verb that silently picks a file out of a directory is a verb whose output an operator cannot
   // check" — and the not-found path already did it right (`1 would not compile — slow.json: …`).
+  // `silent` (see the docstring above) now ends the OTHER half of that same complaint: the
+  // candidates that were NOT resolved stay off stderr entirely rather than printing ahead of it.
   //
   // `basename`, matching the two places that already attribute a graph failure: `graphsByHash`'s
   // `failed` entries and `discoverGraphs`' skip line. An operator reading three of these wants the
   // same token in all three.
   const where = basename(file);
   if (!result.ok) {
-    for (const d of result.diagnostics) {
-      writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
-      if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
+    if (!silent) {
+      for (const d of result.diagnostics) {
+        writeDiagnostic(`${d.severity === "error" ? "✗" : "!"} ${where}: ${d.code}: ${d.message}`, 2);
+        if (d.fix !== undefined) writeDiagnostic(`   fix: ${d.fix}`, 8);
+      }
     }
     throw result.error;
   }
-  for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
+  if (!silent) for (const d of result.diagnostics) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
   if (introducing) {
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
@@ -5819,7 +5883,7 @@ function warnAboutModels(models: ModelConfig | undefined, command: string): void
  * the choice is only about which name an operator is shown.
  */
 function graphsByHash(ws: Workspace): GraphIndex {
-  return indexGraphs(ws, ["graphs", ...subgraphDirs()]);
+  return indexGraphs(ws, ["graphs", ...subgraphDirs()], true);
 }
 
 /** The workspace directories a SPEC resource is published from — `readResources`' own list. */
@@ -6644,8 +6708,14 @@ interface GraphIndex {
  * would recompile `graphs/` a second time at `loom serve` boot, and `loadGraph` writes its
  * diagnostics to stderr — so every warning in that directory would be printed twice in the boot
  * banner, which is how an operator learns to stop reading it.
+ *
+ * `silent` — see `loadGraph`'s docstring. `graphsByHash` passes `true`: it compiles every
+ * candidate in `graphs/` to find the one hash a run recorded, which is an internal question, and
+ * a candidate the operator did not name has no business on stderr (TODO.md §A.91). The boot's own
+ * subgraph catalogue passes nothing and stays as loud as it always was — that walk IS the
+ * operator's own published set, at boot, once.
  */
-function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
+function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): GraphIndex {
   const index = new Map<string, RunGraph>();
   const files = new Map<string, string>();
   const failed: string[] = [];
@@ -6659,7 +6729,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[]): GraphIndex {
       const path = join(dir, file);
       seen.add(path);
       try {
-        const graph = compiledFile(ws, memo, path);
+        const graph = compiledFile(ws, memo, path, silent);
         if (!index.has(graph.graphHash)) {
           index.set(graph.graphHash, graph);
           files.set(graph.graphHash, join(rel, file));
@@ -6811,7 +6881,7 @@ function compileMemo(ws: Workspace): Map<string, CompiledFile> {
   return held.files;
 }
 
-function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string): RunGraph {
+function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: string, silent = false): RunGraph {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -6822,7 +6892,7 @@ function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: stri
     memo.delete(path);
     // `false`: every caller of this function is re-attaching a graph to a run that already
     // exists — the run clock, and the door an approver answers a gate through.
-    return loadGraph(ws, path, false);
+    return loadGraph(ws, path, false, undefined, silent);
   }
   const key = digestOf(text);
   const hit = memo.get(path);
@@ -6831,7 +6901,7 @@ function compiledFile(ws: Workspace, memo: Map<string, CompiledFile>, path: stri
     return hit.graph;
   }
   try {
-    const graph = loadGraph(ws, path, false, text);
+    const graph = loadGraph(ws, path, false, text, silent);
     memo.set(path, { digest: key, graph });
     return graph;
   } catch (e) {
@@ -8523,18 +8593,34 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
     process.stdout.write(USAGE);
     return 0;
   }
+  // AFTER `--help`, so `loom --help --tokne x` still prints the list a reader needs to fix the
+  // typo — and BEFORE `--version` and the `help` VERB, which is also what a bare `loom` defaults
+  // to. With the verb answered first, `loom --bogus` printed the usage and exited 0: an unknown
+  // flag refused after every verb and accepted before none of them.
+  assertKnownFlags(args);
   // `loom --version` USED TO PRINT THE WHOLE USAGE AND EXIT 0, because `parseArgs` defaults a
   // missing verb to `help` and the `help` arm answered before any flag was looked at — so every
   // "is it installed, and which one" probe passed against every build, and said nothing.
-  if (versionFlag(args)) {
+  //
+  // `assertKnownFlags` MOVED AHEAD OF THIS CHECK — TODO.md §H.19. `versionFlag`'s own docstring
+  // said the quiet part: "(`--help` has that hole and is left as it was; it is not this flag's to
+  // copy.)" — and then this ordering copied it anyway. `loom --version --tokne x` reached
+  // `versionFlag`, printed `loom 0.1.0`, and returned before `assertKnownFlags` ever ran, so the
+  // misspelt `--token` was accepted and ignored exactly like the `--help` hole this flag was built
+  // not to share.
+  const wantsVersion = versionFlag(args);
+  // NEITHER THIS NOR THE DEFAULT `help` BELOW READS A FLAG BEYOND `--help`/`--version` THEMSELVES
+  // — TODO.md §H.19's other half. `loom --port 1`, naming no verb at all, used to fall straight
+  // through to the usage text: `--port` is a KNOWN flag (so `assertKnownFlags` above says nothing)
+  // and `"help"` is not a row `refuseFlagsThisVerbDoesNotRead` checks (it dispatches no `case`),
+  // so nothing between here and the usage print ever looked at it. Checked before EITHER answer
+  // prints, so `loom --version --port 1` refuses `--port` rather than printing the version and
+  // discarding it too.
+  if (wantsVersion || args.command === "help") refuseFlagsBeforeAVerb(args, wantsVersion);
+  if (wantsVersion) {
     process.stdout.write(`loom ${VERSION}\n`);
     return 0;
   }
-  // AFTER `--help`, so `loom --help --tokne x` still prints the list a reader needs to fix the
-  // typo — and BEFORE the `help` VERB, which is also what a bare `loom` defaults to. With the
-  // verb answered first, `loom --bogus` printed the usage and exited 0: an unknown flag refused
-  // after every verb and accepted before none of them.
-  assertKnownFlags(args);
   if (args.command === "help") {
     process.stdout.write(USAGE);
     return 0;

@@ -5,6 +5,12 @@
  * looked at a single flag — so `loom --version` and `loom --bogus` both printed the usage and
  * exited 0. The first made "which build is installed" unanswerable; the second is the silence
  * `assertKnownFlags` exists to refuse, reachable only by leaving the verb off.
+ *
+ * TODO.md §H.19, the residue `assertKnownFlags` alone did not close: `loom --port 1` (a KNOWN
+ * flag, naming no verb) and `loom --version --tokne x` (an unknown one riding beside `--version`,
+ * which used to answer and return before `assertKnownFlags` ever ran) both exited 0. The fix moved
+ * `assertKnownFlags` ahead of `versionFlag` and added `refuseFlagsBeforeAVerb` for the flags that
+ * ARE known but unread by both `--version` and the default `help` answer.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -33,11 +39,37 @@ test("VERSION IS THE PACKAGE'S VERSION — the constant exists because the binar
 });
 
 test("`loom --version` prints `loom <version>` and nothing else, with or without a verb", async () => {
-  for (const argv of [["--version"], ["run", "g.json", "--version"], ["--version", "--tokne", "x"]]) {
+  for (const argv of [["--version"], ["run", "g.json", "--version"]]) {
     const r = await cli(argv);
     assert.equal(r.code, 0, argv.join(" "));
     assert.equal(r.out, `loom ${PKG.version}\n`, argv.join(" "));
   }
+});
+
+test("`loom --version` READS NO FLAG BESIDE ITSELF — TODO.md §H.19, both exit non-zero naming the flag", async () => {
+  // UNKNOWN, riding beside --version: before the fix `versionFlag` answered and returned before
+  // `assertKnownFlags` ever ran, so a misspelt --token was accepted and ignored.
+  await assert.rejects(
+    () => cli(["--version", "--tokne", "x"]),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /unknown flag: --tokne/.test(e.message),
+  );
+  // KNOWN, but unread by --version or by any verb this invocation names: `assertKnownFlags` alone
+  // cannot catch this one, because --port IS a flag the binary understands — just not this one's.
+  await assert.rejects(
+    () => cli(["--version", "--port", "1"]),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--port is read by `loom serve`/.test(e.message),
+  );
+});
+
+test("`loom` NAMING NO VERB READS NO FLAG EITHER — TODO.md §H.19's other half", async () => {
+  // Before the fix this printed the whole usage and exited 0: --port is a KNOWN flag, so
+  // `assertKnownFlags` said nothing, and "help" (never a `case` in the switch) is not a row
+  // `refuseFlagsThisVerbDoesNotRead` checks — so nothing between the parse and the usage print
+  // ever looked at it.
+  await assert.rejects(
+    () => cli(["--port", "1"]),
+    (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--port is read by `loom serve`/.test(e.message),
+  );
 });
 
 test("`--version` GIVEN A VALUE IS REFUSED, not dropped while the verb runs", async () => {
