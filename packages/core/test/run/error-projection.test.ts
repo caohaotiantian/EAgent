@@ -862,30 +862,72 @@ test("§A.96 — a REWIND that hides the rollback row does not hide the rollback
   }
 });
 
-test("§A.96 — the rule is PER CALL: undone iff some call of the task's was undone and not MADE again after its undo", () => {
+test("§A.96 — the rule is PER CALL — position + tool + argsDigest: undone iff some undone call of the task's was not MADE again after its undo", () => {
   const task = { taskId: "src@root#0" as TaskId, nodeId: "src" as NodeId };
   const K0 = "src@root#0:tool:0";
   const K1 = "src@root#0:tool:1";
-  const withCalls = (rec: Partial<TaskRecord>, undone: Record<string, number>, made: Record<string, number>): RunProjection =>
-    ({ ...projectionWith([rec]), undoneCalls: undone, performedCalls: made }) as RunProjection;
+  type Mark = { seq: number; name?: string; argsDigest?: string };
+  const withCalls = (rec: Partial<TaskRecord>, undone: Record<string, Mark>, made: Record<string, Mark>): RunProjection =>
+    ({ ...projectionWith([rec]), undoneCalls: undone, performedCalls: made }) as unknown as RunProjection;
+  const W = { name: "fs.write", argsDigest: "sha256:w" };
+  const R = { name: "fs.read", argsDigest: "sha256:r" };
   const ok = { ...task, state: "succeeded" as const };
   // No undo at all: ok. `not_attempted` adds no entry, so it is this case (g).
-  assert.deepEqual(at(withCalls(ok, {}, { [K0]: 3 })), { ok: true });
+  assert.deepEqual(at(withCalls(ok, {}, { [K0]: { seq: 3, ...W } })), { ok: true });
   // K0 undone at 5, made at 3 and never again: undone.
-  assert.equal(at(withCalls(ok, { [K0]: 5 }, { [K0]: 3 })), undefined);
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, { [K0]: { seq: 3, ...W } })), undefined);
   // K0 undone, and ANOTHER call made later (the two-calls mid shape): still undone.
-  assert.equal(at(withCalls(ok, { [K0]: 5 }, { [K0]: 3, [K1]: 9 })), undefined);
-  // K0 undone and made again after its undo (f): ok.
-  assert.deepEqual(at(withCalls(ok, { [K0]: 5 }, { [K0]: 9, [K1]: 2 })), { ok: true });
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, { [K0]: { seq: 3, ...W }, [K1]: { seq: 9, ...R } })), undefined);
+  // K0 undone and the SAME call made again after its undo (f): ok.
+  assert.deepEqual(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, { [K0]: { seq: 9, ...W }, [K1]: { seq: 2, ...R } })), { ok: true });
+  // A DIFFERENT tool at the same position after the undo (shift): undone.
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, { [K0]: { seq: 9, ...R } })), undefined);
+  // The same tool with DIFFERENT arguments at the same position: undone.
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, { [K0]: { seq: 9, name: "fs.write", argsDigest: "sha256:other" } })), undefined);
+  // An undone call the fold could not identify: nothing clears it.
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5 } }, { [K0]: { seq: 9, ...W } })), undefined);
   // No call made at all after an undo (e): undone — the effect is gone and nothing put it back.
-  assert.equal(at(withCalls(ok, { [K0]: 5 }, {})), undefined);
+  assert.equal(at(withCalls(ok, { [K0]: { seq: 5, ...W } }, {})), undefined);
   // Another task's undone call is not this task's.
-  assert.deepEqual(at(withCalls(ok, { "other@root#0:tool:0": 5, "src@root#01:tool:0": 5 }, {})), { ok: true });
+  assert.deepEqual(at(withCalls(ok, { "other@root#0:tool:0": { seq: 5, ...W }, "src@root#01:tool:0": { seq: 5, ...W } }, {})), { ok: true });
   // A FAILED task keeps its ok:false.
   assert.deepEqual(
-    at(withCalls({ ...task, state: "failed", error: { class: "unavailable", code: "E_X", message: "m", retryable: true } }, { [K0]: 5 }, {})),
+    at(withCalls({ ...task, state: "failed", error: { class: "unavailable", code: "E_X", message: "m", retryable: true } }, { [K0]: { seq: 5, ...W } }, {})),
     { ok: false, code: "E_X", message: "m" },
   );
+});
+
+test("§A.96 — a rollback row the fold cannot place FAILS CLOSED: a `compensates` that is not a string, or not the row's own task's call", async () => {
+  const ws = workspace();
+  try {
+    const { events } = await rolledBack(ws.root);
+    const row = events.find((e) => e.type === "compensation.recorded")!;
+    const call = events.find((e) => e.type === "tool.called" && (e.payload as { key: string }).key === "save@root#0:tool:0")!;
+    const last = events[events.length - 1]!;
+    // The run re-makes the SAME call after the row — so the only thing left to refuse is the row itself.
+    const remade = { ...call, seq: (last.seq + 1) as Seq } as JournalEvent;
+    const forge = (compensates: unknown): JournalEvent[] => [
+      ...events.map((e) => (e.seq === row.seq ? ({ ...e, payload: { ...(e.payload as object), compensates } } as JournalEvent) : e)),
+      remade,
+    ];
+    // The control: the genuine row, then the same call made again — ok:true.
+    assert.equal((saveAt(foldRun(forge("save@root#0:tool:0"))) as ErrorProjection | undefined)?.ok, true);
+    for (const compensates of [7, null, "garbage", "other@root#0:tool:0", "save@root#01:tool:0"]) {
+      const { full, incremental } = folded(forge(compensates));
+      assert.equal(saveAt(full), undefined, `compensates=${JSON.stringify(compensates)}`);
+      assert.equal(saveAt(incremental), undefined, `compensates=${JSON.stringify(compensates)}`);
+    }
+    // A row whose `compensatesSeq` names a call at ANOTHER key: its identity is not the undone
+    // call's, so a later call carrying that identity at the undone key must not clear the mark.
+    const undo = events.find((e) => e.type === "tool.called" && (e.payload as { key: string }).key.startsWith("save@root#0:compensate:"))!;
+    const misplaced = [
+      ...events.map((e) => (e.seq === row.seq ? ({ ...e, payload: { ...(e.payload as object), compensatesSeq: undo.seq } } as JournalEvent) : e)),
+      { ...undo, seq: (last.seq + 1) as Seq, payload: { ...(undo.payload as object), key: "save@root#0:tool:0" } } as JournalEvent,
+    ];
+    assert.equal(saveAt(folded(misplaced).full), undefined, "compensatesSeq naming another key's call");
+  } finally {
+    ws.dispose();
+  }
 });
 
 // ── §A.83: the truncation producer — `truncated`/`bytes` on `ok: true` ────────
@@ -1141,7 +1183,10 @@ test("§A.96 — a REWIND whose redo is SERVED the rolled-back call: the reader 
  * `nocall` rewinds to before the task and the redo makes no call at all. Review probes
  * `a4p/two-calls.ts` and `a4p/nocall.ts`, rebuilt here.
  */
-async function twoCalls(mode: "mid" | "before" | "nocall"): Promise<{
+/** How the redo behaves. `mid*` rewinds to the write's completion; everything else to before the task. */
+type Redo = "mid" | "before" | "nocall" | "read-only-before" | "read-only-mid" | "read-then-write-before";
+
+async function twoCalls(mode: Redo): Promise<{
   p: RunProjection;
   events: JournalEvent[];
   fileExists: boolean;
@@ -1162,6 +1207,13 @@ async function twoCalls(mode: "mid" | "before" | "nocall"): Promise<{
     functions.register("function/save@stable", (async (_v: unknown, ctx: { effects: Effects }) => {
       saves += 1;
       if (saves > 1 && mode === "nocall") return { writes: { doc: "redo, nothing written" } };
+      if (saves > 1 && mode.startsWith("read-")) {
+        // The redo puts a READ at ordinal 0, where the undone write was — and, in
+        // `read-then-write-before`, writes the same path again at ordinal 1.
+        const r = await ctx.effects["fs.read"]!({ path: "other.txt" });
+        if (mode === "read-then-write-before") await ctx.effects["fs.write"]!({ path: "out/saved.txt", body: "x" });
+        return { writes: { doc: `r=${r.content}` } };
+      }
       const w = await ctx.effects["fs.write"]!({ path: "out/saved.txt", body: "x" });
       const r = await ctx.effects["fs.read"]!({ path: "other.txt" });
       return { writes: { doc: `w=${w.content} r=${r.content}` } };
@@ -1204,7 +1256,7 @@ async function twoCalls(mode: "mid" | "before" | "nocall"): Promise<{
     const first = await read();
     const write = first.find((e) => e.type === "effect.completed" && (e.payload as { key: string }).key === "save@root#0:tool:0")!;
     const lease = first.find((e) => e.type === "task.leased" && e.taskId === ("save@root#0" as TaskId))!;
-    const atSeq = mode === "mid" ? write.seq : ((lease.seq - 1) as Seq);
+    const atSeq = mode.endsWith("mid") ? write.seq : ((lease.seq - 1) as Seq);
     const op = { kind: "human", subject: "u:op", via: "api" } as const;
     const plan = await engine.planRewind(runId, atSeq, op);
     p = await engine.rewind(runId, atSeq, "test", op, { planHash: plan.planHash });
@@ -1260,4 +1312,111 @@ test("§A.96 — the replay of a REWOUND run is match:false, and was before §A.
   // so that a replay that DOES learn rewinds turns this red and the claim gets re-read.
   const r = await twoCalls("mid");
   assert.equal(r.replayMatch, false);
+});
+
+test("§A.96 — a redo that puts a DIFFERENT call at the undone write's position does not clear the mark (position + tool + argsDigest)", async () => {
+  // Review round 4, probe `shapes`: the effect key is POSITIONAL, and a redo whose ordinal 0 is an
+  // `fs.read` where the undone `fs.write` had been cleared a position-only mark — `{ok: true,
+  // bytes: 1}` with the file gone. `read-only-mid` is not served the write because the call at
+  // that position changed (fs.write is idempotent, so `#servedToolEffect` declines, not throws).
+  for (const mode of ["read-only-before", "read-only-mid"] as const) {
+    const r = await twoCalls(mode);
+    assert.equal(r.fileExists, false, mode);
+    assert.ok(r.made.some((m) => m.endsWith(":tool:0")) && r.made.length >= 2, `${mode}: ${r.made.join(", ")}`);
+    assert.equal(saveAt(r.p), undefined, mode);
+    const { full, incremental } = folded(r.events);
+    assert.equal(saveAt(full), undefined, mode);
+    assert.equal(saveAt(incremental), undefined, mode);
+  }
+});
+
+test("§A.96 — the write re-made at ANOTHER position stays undone while the file stands: fail closed (residue N1)", async () => {
+  const r = await twoCalls("read-then-write-before");
+  assert.equal(r.fileExists, true, "the redo wrote the file again, at ordinal 1");
+  assert.equal(saveAt(r.p), undefined, "and the mark on ordinal 0 is not cleared by a call at ordinal 1");
+});
+
+test("§A.96 — an AGENT whose redo makes only a READ at the undone write's position: undone, like making no call", async () => {
+  // Review probe `shapes` agent-read-before vs agent-nocall-before: same file state, and they used
+  // to answer opposite ways.
+  for (const readOnRedo of [true, false]) {
+    const ws = workspace();
+    try {
+      writeFileSync(join(ws.root, "other.txt"), "o");
+      const store = new MemoryStateStore({ now: () => NOW });
+      const tools = new ToolRegistry();
+      for (const t of builtinTools({ root: ws.root, deny: [] })) if (t.name === "fs.write" || t.name === "fs.read") tools.register(t);
+      tools.register(fsRestore({ root: ws.root, deny: [] }));
+      const functions = new FunctionRegistry();
+      let booms = 0;
+      functions.register("function/boom@stable", (() => (booms++ === 0 ? { refuse: { reason: "no" } } : { writes: { out: { done: true } } })) as never);
+      let calls = 0;
+      const models = new ModelRegistry();
+      models.register(
+        new MockModelAdapter({
+          pricePerMTok: 1,
+          script: (_req, turn) => {
+            calls += 1;
+            if (calls > 2) {
+              if (readOnRedo && turn === 0) return { toolCalls: [{ id: "r", name: "fs.read", arguments: { path: "other.txt" } }], finishReason: "tool_use" };
+              return { text: "nothing to write", finishReason: "stop" };
+            }
+            return turn === 0
+              ? { toolCalls: [{ id: "w", name: "fs.write", arguments: { path: "out/saved.txt", body: "x" } }], finishReason: "tool_use" }
+              : { text: "done", finishReason: "stop" };
+          },
+        }),
+        true,
+      );
+      const engine = new Engine({
+        store,
+        bus: new InProcessEventBus({ store }),
+        tools,
+        functions,
+        models,
+        now: () => NOW,
+        sleep: async () => {},
+        resolver: resolver(),
+        policy: { granted: ["fs:write", "fs:read"], systemFloor: "out", budget: { runUsd: 5 } },
+      });
+      const base = spec(
+        [
+          { id: "a", type: "agent", writes: ["doc"], agent: { profile: "agent_profile/a@stable", prompt: "prompt/p@v1", maxTurns: 4, tools: ["fs.write", "fs.read"] } },
+          { id: "boom", type: "function", reads: ["doc"], writes: ["out"], function: { ref: "function/boom@stable" } },
+        ],
+        [{ id: "e1", from: "a", to: "boom", kind: "seq" }],
+      );
+      const s2 = { ...base, inputs: [], policy: { ...base.policy, capabilities: ["fs:write", "fs:read"], budget: { costUsd: 5 } } } as GraphSpec;
+      const graph = compileOrThrow({ spec: s2, resolver: resolver(), tools: Object.fromEntries(tools.list().map((t) => [t.name, t])), tenantCapabilities: ["fs:write", "fs:read"] });
+      const runId = await engine.submit({ graph, inputs: {} });
+      let p = await engine.advance(runId);
+      for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+      assert.equal(p.status, "failed");
+      const read = async (): Promise<JournalEvent[]> => {
+        const out: JournalEvent[] = [];
+        for await (const e of store.read(runId, 1 as Seq)) out.push(e);
+        return out;
+      };
+      const lease = (await read()).find((e) => e.type === "task.leased" && e.taskId === ("a@root#0" as TaskId))!;
+      const op = { kind: "human", subject: "u:op", via: "api" } as const;
+      const plan = await engine.planRewind(runId, (lease.seq - 1) as Seq, op);
+      p = await engine.rewind(runId, (lease.seq - 1) as Seq, "test", op, { planHash: plan.planHash });
+      for (let i = 0; i < 8 && p.status !== "succeeded" && p.status !== "failed"; i++) p = await engine.advance(runId);
+      const events = await read();
+      const aAt = (q: RunProjection | undefined): unknown => viewFor(q!, {}, { segments: [] }, ["a:error"]).get("a:error");
+      const what = readOnRedo ? "read on redo" : "no call on redo";
+      assert.equal(existsSync(join(ws.root, "out", "saved.txt")), false, what);
+      assert.equal(
+        events.filter((e) => e.type === "tool.called" && (e.payload as { key: string }).key === "a@root#0:tool:0").length,
+        readOnRedo ? 2 : 1,
+        what,
+      );
+      assert.equal(aAt(p), undefined, what);
+      const { full, incremental } = folded(events);
+      assert.equal(aAt(full), undefined, what);
+      assert.equal(aAt(incremental), undefined, what);
+    } finally {
+      ws.dispose();
+    }
+  }
 });
