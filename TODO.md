@@ -103,7 +103,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 21 | 14 | 7 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs |
+| §H | 21 | 15 | 6 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs. **§H.20 CLOSED 2026-09-23 at `39c5e0b5`** — each leaking suite now removes its roots in a module-level `after` |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -3821,18 +3821,35 @@ Each traces to a decision in `DESIGN.md`.
   exits **0**, the misspelt `--token` never reaching a refusal. **Closes when** both exit non-zero
   naming the flag, pinned beside `test/cli/version.test.ts` and `test/cli/flag-door.test.ts`.
 
-- **H.20 · `npm test` leaves 22 `loom-*` directories in `$TMPDIR` on every run.** *(Opened
-  2026-09-23 by the settlement. The item-29 lane reported the `loom-dist-*` quarter of it; the
-  settlement's reviewer found the rest.)* Measured on this settlement's HEAD by running `npm test`
-  with `TMPDIR` pointed at an empty directory. Afterwards the directory holds, by prefix:
+- ~~**H.20 · `npm test` leaves 22 `loom-*` directories in `$TMPDIR` on every run.**~~ **CLOSED
+  2026-09-23 at `39c5e0b5`.** *(Opened 2026-09-23 by the settlement. The item-29 lane reported the
+  `loom-dist-*` quarter of it; the settlement's reviewer found the rest.)* Measured on this
+  settlement's HEAD by running `npm test` with `TMPDIR` pointed at an empty directory. Afterwards
+  the directory held, by prefix:
   - `readme-gaps.test.ts`: 4 `loom-dist-*`, from its four `distIsBehindSources` tests, pre-existing
     since `81b42586` (2026-08-28); 11 `loom-freshness-*` and 1 `loom-freshness-moved-*`.
   - `binary-freshness-absent-or-unreadable.test.ts`: 5 `loom-fresh-edge-*`.
   - `cli/promote-live-gates.test.ts`: 1 `loom-gated-template-*`.
 
-  Each is a `mkdtempSync(join(tmpdir(), …))` with no removal. The machine that settled this wave had
-  **388** `loom-dist-*` alone. **Closes when** the same measurement leaves no `loom-*` entry (a
-  `t.after` `rmSync` per root). Counting one prefix is not enough.
+  Each was a `mkdtempSync(join(tmpdir(), …))` with no removal; the last was a corpus TEMPLATE built
+  once and copied per test, whose per-test copy WAS disposed but whose own root never was. The
+  machine that settled this wave had **388** `loom-dist-*` alone.
+  ```
+  $ T=$(mktemp -d) && TMPDIR=$T npm test; ls $T | sed -E 's/-[^-]*$//' | sort | uniq -c    # before
+     4 loom-dist
+     5 loom-fresh-edge
+    11 loom-freshness
+     1 loom-freshness-moved
+     1 loom-gated-template
+     1 node-compile-cache                                    # Node's own, not this row's
+  $ T=$(mktemp -d) && TMPDIR=$T npm test; ls $T | sed -E 's/-[^-]*$//' | sort | uniq -c    # after
+     1 node-compile-cache                                    # zero loom-* entries
+  ```
+  Each of the three files now tracks the roots it mints and removes them all in a module-level
+  `after`, so a directory a test never got to inspect is still gone at suite end — including on a
+  failing run, which the `after` does not condition on. Closed at the array, not at each call site:
+  a shared `tempRoots`/`after` pair per file, following the try/finally-per-`mkdtempSync` idiom
+  already used elsewhere in `test/journal/store.test.ts`, rather than one `t.after` per test.
 
 ---
 
