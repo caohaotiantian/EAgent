@@ -39,8 +39,9 @@ function fail(message) {
 
 const argv = process.argv.slice(2);
 const at = argv.indexOf("--out");
-const outArg = at === -1 ? undefined : argv[at + 1];
-if (outArg === undefined || outArg.startsWith("--")) {
+const eq = argv.find((a) => a.startsWith("--out="));
+const outArg = eq !== undefined ? eq.slice("--out=".length) : at === -1 ? undefined : argv[at + 1];
+if (outArg === undefined || outArg === "" || outArg.startsWith("--")) {
   console.error("usage: node scripts/pack.mjs --out DIR");
   process.exit(2);
 }
