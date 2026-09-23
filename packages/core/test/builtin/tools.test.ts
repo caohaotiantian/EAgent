@@ -9,9 +9,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -695,6 +697,671 @@ test("END TO END: a fan-out of three branches writing one declared path leaves t
       "each branch's body survived its siblings",
     );
     for (const f of files) assert.equal(f.endsWith("report.md"), true, `every file is still the path the graph named: ${f}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.97: a path that is not a regular file is refused before it can block ────────────────
+
+/**
+ * `fs.read` of `pipe` in `root`, IN A CHILD PROCESS under a wall-clock bound.
+ *
+ * A child, because the defect is a SYNCHRONOUS block: a blocking `open` of a FIFO with no writer
+ * parks the event loop, so an in-process test of the broken code would hang the runner itself
+ * rather than fail. `spawnSync`'s `timeout` kills the child, and the parent reads that as the
+ * failure it is. The bound is 10 s against a call that returns in well under one.
+ */
+function readInChild(root: string, path: string): { status: number | null; signal: string | null; out: string; err: string } {
+  const tools = new URL("../../src/builtin/tools.ts", import.meta.url).href;
+  const script =
+    `const { builtinTools } = await import(${JSON.stringify(tools)});` +
+    `const read = builtinTools({ root: ${JSON.stringify(root)}, deny: [] }).find((t) => t.name === "fs.read");` +
+    `const r = await read.execute({ path: ${JSON.stringify(path)} }, { taskId: "t@root#0", signal: new AbortController().signal, progress() {} });` +
+    `process.stdout.write(JSON.stringify({ isError: r.isError === true, code: r.error?.code, cls: r.error?.class, content: r.content, details: r.error?.details ?? r.details }));`;
+  const c = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 10_000 });
+  return { status: c.status, signal: c.signal, out: c.stdout, err: c.stderr };
+}
+
+test("§A.97 — a FIFO at an fs.read path is refused E_FS_UNREADABLE at once, and never blocks", { skip: process.platform === "win32" }, () => {
+  const s = sandbox();
+  try {
+    // No writer ever opens it. A blocking read-open waits for one forever.
+    execFileSync("mkfifo", [join(s.root, "pipe")]);
+    const c = readInChild(s.root, "pipe");
+    assert.equal(c.signal, null, `the read BLOCKED and the child was killed by the 10 s bound (${String(c.signal)})`);
+    assert.equal(c.status, 0, c.err);
+    const r = JSON.parse(c.out) as { isError: boolean; code?: string; cls?: string; content: string; details: { errno: string } };
+    assert.equal(r.isError, true);
+    // UNREADABLE, never NOT_FOUND: something IS at the path, and an `error` arm that reads
+    // `E_FS_NOT_FOUND` as "nothing here" must not be told otherwise.
+    assert.equal(r.code, "E_FS_UNREADABLE", c.out);
+    assert.equal(r.cls, "policy");
+    assert.equal(r.details.errno, "ENOTREG");
+    assert.match(r.content, /a FIFO, not a regular file/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.97 — a DIRECTORY at an fs.read path keeps its errno, and a regular file still reads", () => {
+  // The ordinary half: the non-blocking open must change nothing about a file that IS regular.
+  const s = sandbox();
+  try {
+    mkdirSync(join(s.root, "dir"));
+    writeFileSync(join(s.root, "plain.txt"), "plain bytes");
+    const read = readInChild(s.root, "dir");
+    const r = JSON.parse(read.out) as { code?: string; details: { errno: string } };
+    assert.equal(r.code, "E_FS_UNREADABLE", read.out);
+    assert.equal(r.details.errno, "EISDIR");
+    const ok = JSON.parse(readInChild(s.root, "plain.txt").out) as { isError: boolean; content: string };
+    assert.equal(ok.isError, false);
+    assert.equal(ok.content, "plain bytes");
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.99: fs.restore undoes a CREATE, from what fs.write recorded ────────────────────────
+
+test("§A.99 — fs.write RECORDS a create (`created`, a digest of its bytes) and an overwrite (`previous`)", async () => {
+  const s = sandbox();
+  try {
+    const write = byName(builtinTools({ root: s.root, deny: [] }), "fs.write");
+    const created = (await write.execute({ path: "new.txt", body: "fresh" }, ctx())).details as Record<string, unknown>;
+    assert.equal(created["created"], true);
+    assert.match(String(created["wrote"]), /^sha256:[0-9a-f]{64}$/);
+    assert.equal("previous" in created, false, "a create has nothing to put back");
+    const over = (await write.execute({ path: "new.txt", body: "second" }, ctx())).details as Record<string, unknown>;
+    assert.equal(over["created"], false);
+    assert.equal(over["previous"], "fresh");
+    assert.equal("wrote" in over, false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.restore REMOVES a file the write created, from the record alone (a fresh tool instance)", async () => {
+  const s = sandbox();
+  try {
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "d/new.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    // A NEW instance, as after a restart: nothing but the recorded details reaches it.
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(join(s.root, "d", "new.txt")), false);
+    // Already gone is the state the undo wants — it says so rather than failing.
+    const again = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(again.isError, undefined, again.content);
+    assert.match(again.content, /already absent/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.restore REFUSES to remove a created file whose bytes changed, and leaves it untouched", async () => {
+  const s = sandbox();
+  try {
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "new.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    writeFileSync(join(s.root, "new.txt"), "somebody else's bytes");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, true);
+    assert.match(r.content, /bytes changed since the write created it/);
+    assert.equal(readFileSync(join(s.root, "new.txt"), "utf8"), "somebody else's bytes");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a MISSING or AMBIGUOUS create record fails CLOSED: nothing is removed", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "keep.txt"), "fresh");
+    const good = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "probe.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    const restore = fsRestore({ root: s.root, deny: [] });
+    for (const [what, args] of [
+      ["no record at all (an old journal)", { path: "keep.txt" }],
+      ["created without a digest", { path: "keep.txt", created: true }],
+      ["created as a STRING", { path: "keep.txt", created: "true", wrote: good["wrote"] }],
+      ["created: false with no previous", { path: "keep.txt", created: false, wrote: good["wrote"] }],
+      ["a digest that is not a string", { path: "keep.txt", created: true, wrote: 7 }],
+    ] as const) {
+      const r = await restore.execute(args as Record<string, unknown>, ctx());
+      assert.equal(r.isError, true, `${what}: ${r.content}`);
+      assert.equal(readFileSync(join(s.root, "keep.txt"), "utf8"), "fresh", `${what}: the file must be untouched`);
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a path that already existed is NEVER recorded as a create, even when it cannot be read", async () => {
+  // `created: true` only on ENOENT. A file this run cannot read is something it did not make, and
+  // its undo must refuse rather than delete it.
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "locked.txt"), "someone's");
+    chmodSync(join(s.root, "locked.txt"), 0o222);
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "locked.txt", body: "mine" }, ctx()))
+      .details as Record<string, unknown>;
+    chmodSync(join(s.root, "locked.txt"), 0o644);
+    assert.equal(details["created"], false);
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(existsSync(join(s.root, "locked.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.83: a short read is a FACT in `details`, never a marker in `content` ────────────────
+
+test("§A.83 — fs.read past maxBytes returns a bare PREFIX, and says so in details: truncated, and the WHOLE size in bytes", async () => {
+  const s = sandbox();
+  try {
+    const doc = `${JSON.stringify({ a: 1 })}${" ".repeat(50)}`;
+    writeFileSync(join(s.root, "doc.json"), doc);
+    const read = byName(builtinTools({ root: s.root, deny: [] }), "fs.read");
+    const cut = await read.execute({ path: "doc.json", maxBytes: 20 }, ctx());
+    assert.equal(cut.content, doc.slice(0, 20), "the prefix and nothing else");
+    assert.doesNotMatch(cut.content, /truncated/);
+    assert.deepEqual(JSON.parse(cut.content), { a: 1 }, "a prefix that still parses — which is why the fact must be elsewhere");
+    assert.deepEqual(cut.details, { path: "doc.json", bytes: doc.length, truncated: true });
+    const whole = await read.execute({ path: "doc.json" }, ctx());
+    assert.equal(whole.content, doc);
+    assert.deepEqual(whole.details, { path: "doc.json", bytes: doc.length, truncated: false });
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — maxBytes counts BYTES, and the cut never splits a UTF-8 character", async () => {
+  // It compared `text.length` — UTF-16 units — so `bytes` was not the file's size and the cap was
+  // not the one asked for. `é` is two bytes, `€` three.
+  const s = sandbox();
+  try {
+    const text = "éé€x";
+    writeFileSync(join(s.root, "u.txt"), text);
+    const read = byName(builtinTools({ root: s.root, deny: [] }), "fs.read");
+    const all = await read.execute({ path: "u.txt" }, ctx());
+    assert.deepEqual(all.details, { path: "u.txt", bytes: Buffer.byteLength(text), truncated: false });
+    assert.equal(Buffer.byteLength(text), 8);
+    // 6 bytes lands inside `€` (bytes 4..6): the character is left out whole.
+    const cut = await read.execute({ path: "u.txt", maxBytes: 6 }, ctx());
+    assert.equal(cut.content, "éé");
+    assert.equal((cut.details as { truncated: boolean }).truncated, true);
+    assert.equal((await read.execute({ path: "u.txt", maxBytes: 7 }, ctx())).content, "éé€");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — net.fetch past maxBytes: a bare prefix, with truncated and the body's size in bytes", async () => {
+  const body = `{"ok":true}${" ".repeat(40)}`;
+  const fetchTool = byName(
+    builtinTools({
+      root: "/tmp",
+      deny: [],
+      egressAllowlist: ["example.com"],
+      fetch: (async () => new Response(body, { status: 200 })) as unknown as typeof fetch,
+    }),
+    "net.fetch",
+  );
+  const r = await fetchTool.execute({ url: "https://example.com/x", maxBytes: 11 }, ctx());
+  assert.equal(r.content, '{"ok":true}');
+  assert.doesNotMatch(r.content, /truncated/);
+  const d = r.details as { bytes: number; truncated: boolean };
+  assert.equal(d.bytes, body.length);
+  assert.equal(d.truncated, true);
+  const whole = await fetchTool.execute({ url: "https://example.com/x" }, ctx());
+  assert.equal(whole.content, body);
+  assert.equal((whole.details as { truncated: boolean }).truncated, false);
+});
+
+test("§A.83 — proc.exec past its output cap: no marker appended, and details.truncated says so", async () => {
+  const s = sandbox();
+  try {
+    const exec = byName(builtinTools({ root: s.root, deny: [], execAllowlist: [process.execPath] }), "proc.exec");
+    // Past the sandbox's 1 MiB default capture.
+    const r = await exec.execute({ command: process.execPath, args: ["-e", "process.stdout.write('y'.repeat(1_200_000))"] }, ctx());
+    assert.equal((r.details as { truncated: boolean }).truncated, true);
+    assert.doesNotMatch(r.content, /truncated/, "the output ends in the program's bytes, not in a marker");
+    assert.match(r.content, /^exit=0\ny+$/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.99 review: the undo removes THE FILE the write made, identified, never a name ─────────
+
+/** One create through the real `fs.write`, and its recorded details — the undo's only input. */
+async function created(root: string, path = "a.txt", body = "B"): Promise<Record<string, unknown>> {
+  return (await byName(builtinTools({ root, deny: [] }), "fs.write").execute({ path, body }, ctx())).details as Record<string, unknown>;
+}
+
+test("§A.99 — a SYMLINK planted at the created path is refused, and its target survives (in the jail or out)", async () => {
+  const s = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "loom-tools-out-"));
+  try {
+    for (const target of [join(s.root, "victim.txt"), join(outside, "victim.txt")]) {
+      const d = await created(s.root);
+      writeFileSync(target, "B");
+      rmSync(join(s.root, "a.txt"));
+      symlinkSync(target, join(s.root, "a.txt"));
+      const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+      assert.equal(r.isError, true, r.content);
+      assert.equal(readFileSync(target, "utf8"), "B", `the link's target must survive: ${target}`);
+      assert.equal(lstatSync(join(s.root, "a.txt")).isSymbolicLink(), true, "and the link is left as it is");
+      rmSync(join(s.root, "a.txt"));
+    }
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a PARENT DIRECTORY swapped for a symlink is refused, and the file it now reaches survives", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root, "d/x.txt");
+    mkdirSync(join(s.root, "e"));
+    writeFileSync(join(s.root, "e", "x.txt"), "B");
+    renameSync(join(s.root, "d"), join(s.root, "d-moved"));
+    symlinkSync(join(s.root, "e"), join(s.root, "d"));
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /no longer a real directory/);
+    assert.equal(readFileSync(join(s.root, "e", "x.txt"), "utf8"), "B");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — CREATE then OVERWRITE in one run: the reverse rollback restores, then REMOVES — both undone", async () => {
+  // The run's own rollback runs in reverse: the overwrite's undo puts the create's bytes back, and
+  // then the create's undo must still recognise its file. A change time in the identity refused
+  // exactly this (review round 2): the restore moved it, so a file the run created stayed standing.
+  const s = sandbox();
+  try {
+    const first = await created(s.root, "f.txt", "first x");
+    const second = await created(s.root, "f.txt", "second x");
+    assert.equal(second["created"], false);
+    const restore = fsRestore({ root: s.root, deny: [] });
+    const r2 = await restore.execute(second, ctx());
+    assert.equal(r2.isError, undefined, r2.content);
+    assert.equal(readFileSync(join(s.root, "f.txt"), "utf8"), "first x");
+    const r1 = await restore.execute(first, ctx());
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.equal(existsSync(join(s.root, "f.txt")), false, "the file the run created is gone");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — CREATE then OVERWRITE through the ENGINE: a failed run's rollback leaves no file and records two `compensated`", async () => {
+  const s = sandbox();
+  try {
+    const store = new MemoryStateStore({ now: () => 1 });
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: s.root, deny: [] })) if (t.name === "fs.write") tools.register(t);
+    tools.register(fsRestore({ root: s.root, deny: [] }));
+    const functions = new FunctionRegistry();
+    functions.register("function/boom@stable", (() => ({ refuse: { reason: "no" } })) as never);
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models: new ModelRegistry(),
+      now: () => 1,
+      sleep: async () => {},
+      policy: { granted: ["fs:write"], systemFloor: "out" },
+    });
+    const write = (id: string, body: string) => ({
+      id,
+      type: "tool",
+      writes: [id],
+      tool: { name: "fs.write", version: "1.0", args: { path: "out/f.txt", body } },
+    });
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "create-overwrite", project: "t", version: 1 },
+      policy: { posture: "out", capabilities: ["fs:write"] },
+      channels: {
+        save1: { type: "object", reduce: "replace" },
+        save2: { type: "object", reduce: "replace" },
+        out: { type: "object", reduce: "replace" },
+      },
+      inputs: [],
+      outputs: ["out"],
+      nodes: [write("save1", "first x"), write("save2", "second x"), { id: "boom", type: "function", reads: ["save2"], writes: ["out"], function: { ref: "function/boom@stable" } }],
+      edges: [
+        { id: "a", from: "save1", to: "save2", kind: "seq" },
+        { id: "b", from: "save2", to: "boom", kind: "seq" },
+      ],
+    } as unknown as GraphSpec;
+    const graph = compileOrThrow({ spec, resolver: resolver(), tools: Object.fromEntries(tools.list().map((t) => [t.name, t])), tenantCapabilities: ["fs:write"] });
+    const runId = await engine.submit({ graph, inputs: {} });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+    assert.equal(p.status, "failed");
+    const outcomes: string[] = [];
+    for await (const e of store.read(runId, 1 as never)) if (e.type === "compensation.recorded") outcomes.push((e.payload as { outcome: string }).outcome);
+    assert.deepEqual(outcomes, ["compensated", "compensated"]);
+    assert.equal(existsSync(join(s.root, "out", "f.txt")), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — TWO fs.edits in one branch: undoing both in reverse removes the branch copy the first created", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "shared.txt"), "hello world");
+    const edit = byName(builtinTools({ root: s.root, deny: [] }), "fs.edit");
+    const branch = ctxOf("e@root/fo[0]#0");
+    const d1 = (await edit.execute({ path: "shared.txt", find: "world", replace: "one" }, branch)).details as Record<string, unknown>;
+    const d2 = (await edit.execute({ path: "shared.txt", find: "one", replace: "two" }, branch)).details as Record<string, unknown>;
+    assert.equal(d1["created"], true);
+    assert.equal(d2["created"], false);
+    const restore = fsRestore({ root: s.root, deny: [] });
+    assert.equal((await restore.execute(d2, branch)).isError, undefined);
+    const r1 = await restore.execute(d1, branch);
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.equal(existsSync(String(d1["at"])), false);
+    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "hello world");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a HARD LINK to the created file (a second name) makes the undo refuse", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root);
+    linkSync(join(s.root, "a.txt"), join(s.root, "hl.txt"));
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(existsSync(join(s.root, "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — the digest is checked too: the true identity with other bytes' digest refuses", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root);
+    const r = await fsRestore({ root: s.root, deny: [] }).execute({ ...d, wrote: `sha256:${"0".repeat(64)}` }, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /bytes changed/);
+    assert.equal(existsSync(join(s.root, "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a FORGED record naming any file by path and digest deletes nothing, and says no creation", async () => {
+  // A graph `tool` node may call `fs.restore` directly; the identity is what refuses it.
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "precious.txt"), "operator data");
+    const digest = `sha256:${createHash("sha256").update("operator data").digest("hex")}`;
+    for (const args of [
+      { path: "precious.txt", created: true, wrote: digest },
+      { path: "precious.txt", created: true, wrote: digest, at: join(realpathSync(s.root), "precious.txt") },
+      { path: "precious.txt", created: true, wrote: digest, at: join(realpathSync(s.root), "precious.txt"), identity: { dev: "1", ino: "2", ctimeNs: "3" } },
+    ]) {
+      const r = await fsRestore({ root: s.root, deny: [] }).execute(args, ctx());
+      assert.equal(r.isError, true, r.content);
+      assert.doesNotMatch(r.content, /removed/);
+      assert.equal(readFileSync(join(s.root, "precious.txt"), "utf8"), "operator data");
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a record from ANOTHER workspace root is refused — never read as 'already absent'", async () => {
+  const s = sandbox();
+  const other = mkdtempSync(join(tmpdir(), "loom-tools-other-"));
+  try {
+    const d = await created(s.root);
+    const r = await fsRestore({ root: other, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /not under this workspace's root/);
+    assert.equal(existsSync(join(s.root, "a.txt")), true, "the created file still stands, and nothing claimed otherwise");
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — 'already absent' ONLY for a plain absence of the recorded path; an unreadable parent refuses", { skip: process.getuid?.() === 0 }, async () => {
+  const s = sandbox();
+  try {
+    // The leaf gone, and a directory above it gone: both are the state the undo wants.
+    const leaf = await created(s.root, "d1/a.txt");
+    rmSync(join(s.root, "d1", "a.txt"));
+    const r1 = await fsRestore({ root: s.root, deny: [] }).execute(leaf, ctx());
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.match(r1.content, /already absent/);
+    const dir = await created(s.root, "d2/a.txt");
+    rmSync(join(s.root, "d2"), { recursive: true });
+    assert.match((await fsRestore({ root: s.root, deny: [] }).execute(dir, ctx())).content, /already absent/);
+    // An absence the undo cannot SEE is not one: a parent it may not search is a refusal.
+    const hidden = await created(s.root, "d3/a.txt");
+    chmodSync(join(s.root, "d3"), 0o000);
+    let r3;
+    try {
+      r3 = await fsRestore({ root: s.root, deny: [] }).execute(hidden, ctx());
+    } finally {
+      chmodSync(join(s.root, "d3"), 0o755);
+    }
+    assert.equal(r3.isError, true, r3.content);
+    assert.doesNotMatch(r3.content, /already absent/);
+    assert.equal(existsSync(join(s.root, "d3", "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a created file inside a subtree THIS jail denies is refused, even with its true record", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root, "later-denied/a.txt");
+    const r = await fsRestore({ root: s.root, deny: ["later-denied"] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /denied subtree/);
+    assert.equal(existsSync(join(s.root, "later-denied", "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a record claiming BOTH a create and a previous content is refused, and nothing is written", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "p.txt"), "cur");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute({ path: "p.txt", previous: "X", created: true }, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(readFileSync(join(s.root, "p.txt"), "utf8"), "cur");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.edit's FIRST write in a branch creates the branch copy, is recorded as a create, and its undo removes only that copy", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "shared.txt"), "hello world");
+    const edit = byName(builtinTools({ root: s.root, deny: [] }), "fs.edit");
+    const branch = ctxOf("e@root/fo[0]#0");
+    const d = (await edit.execute({ path: "shared.txt", find: "world", replace: "branch" }, branch)).details as Record<string, unknown>;
+    assert.equal(d["created"], true, JSON.stringify(d));
+    assert.equal("previous" in d, false);
+    const copy = String(d["at"]);
+    assert.equal(readFileSync(copy, "utf8"), "hello branch");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, branch);
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(copy), false, "the branch copy is gone");
+    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "hello world", "the shared file is untouched");
+    // And a SECOND edit in a branch that already has its copy is an overwrite, not a create.
+    await edit.execute({ path: "shared.txt", find: "world", replace: "one" }, branch);
+    const again = (await edit.execute({ path: "shared.txt", find: "one", replace: "two" }, branch)).details as Record<string, unknown>;
+    assert.equal(again["created"], false);
+    assert.equal(again["previous"], "hello one");
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.83 review: `bytes` is bytes everywhere; the cut never empties; a BOM is still dropped ──
+
+test("§A.83 — fs.write and fs.edit report BYTES, not UTF-16 units (é😀 is 6 on disk, not 3)", async () => {
+  const s = sandbox();
+  try {
+    const tools = builtinTools({ root: s.root, deny: [] });
+    const w = await byName(tools, "fs.write").execute({ path: "u.txt", body: "é😀" }, ctx());
+    assert.equal(statSync(join(s.root, "u.txt")).size, 6);
+    assert.equal((w.details as { bytes: number }).bytes, 6);
+    // The channel receipt is unchanged — a UTF-16 count, which a shipped graph's channel carries.
+    assert.deepEqual(w.writes, { written: { path: "u.txt", bytes: 3 } });
+    const e = await byName(tools, "fs.edit").execute({ path: "u.txt", find: "é", replace: "€" }, ctx());
+    assert.equal(statSync(join(s.root, "u.txt")).size, 7);
+    assert.equal((e.details as { bytes: number }).bytes, 7);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — the cut steps back at most THREE bytes: input that is not UTF-8 is cut short, never emptied", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "bin"), Buffer.from([0x41, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80]));
+    const r = await byName(builtinTools({ root: s.root, deny: [] }), "fs.read").execute({ path: "bin", maxBytes: 8 }, ctx());
+    assert.equal((r.details as { truncated: boolean }).truncated, true);
+    // Bytes 0..4 survive: `A` and four stray continuation bytes, decoded as replacement characters.
+    assert.equal(r.content, `A${"�".repeat(4)}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.83 — net.fetch still drops a leading UTF-8 BOM, as res.text() did, so the body parses", async () => {
+  const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('{"ok":true}')]);
+  const r = await byName(
+    builtinTools({
+      root: "/tmp",
+      deny: [],
+      egressAllowlist: ["example.com"],
+      fetch: (async () => new Response(bom, { status: 200 })) as unknown as typeof fetch,
+    }),
+    "net.fetch",
+  ).execute({ url: "https://example.com/x" }, ctx());
+  assert.deepEqual(JSON.parse(r.content), { ok: true });
+  assert.equal((r.details as { bytes: number }).bytes, 11);
+});
+
+test("§A.97 — a UNIX SOCKET and a TERMINAL DEVICE are refused E_FS_UNREADABLE by KIND when their OPEN fails", { skip: process.platform === "win32" }, async (t) => {
+  // Their OPEN fails before the descriptor can be checked — macOS: a socket with errno 102, which
+  // libuv does not name, and /dev/tty with ENXIO — and both used to come back UNTYPED, i.e. the
+  // retryable E_TOOL_SOURCE_UNAVAILABLE. An `lstat` after the failed open classifies them.
+  const dir = mkdtempSync(join(tmpdir(), "sk-"));
+  const server = createNetServer();
+  await new Promise<void>((ok) => server.listen(join(dir, "sock"), ok));
+  t.after(() => {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const socket = await byName(builtinTools({ root: dir, deny: [] }), "fs.read").execute({ path: "sock" }, ctx());
+  assert.equal(socket.error?.code, "E_FS_UNREADABLE", socket.content);
+  assert.match(socket.content, /ENOTREG: a socket, not a regular file/);
+  for (const dev of ["tty", "null"]) {
+    const r = await byName(builtinTools({ root: "/dev", deny: [] }), "fs.read").execute({ path: dev }, ctx());
+    assert.equal(r.error?.code, "E_FS_UNREADABLE", `${dev}: ${r.content}`);
+    assert.match(r.content, /ENOTREG: a character device, not a regular file/, dev);
+  }
+});
+
+// ── §A.99 review round 2: the removal's path is checked as the filesystem resolves it ──────
+
+/** A forged record with a TRUE identity and digest for `target`, spelled as `at`. */
+function trueRecord(target: string, at: string): Record<string, unknown> {
+  const st = lstatSync(target, { bigint: true });
+  return {
+    path: "x",
+    created: true,
+    at,
+    identity: { dev: String(st.dev), ino: String(st.ino) },
+    wrote: `sha256:${createHash("sha256").update(readFileSync(target)).digest("hex")}`,
+  };
+}
+
+test("§A.99 — a NON-NORMALISED `at` is refused: `..` cannot carry the removal out of the jail, nor fake an absence", async () => {
+  const s = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "loom-tools-out-"));
+  try {
+    const root = realpathSync(s.root);
+    // Through an in-jail symlink: `root/link/../victim.txt` is lexically inside and physically out.
+    mkdirSync(join(outside, "deep"));
+    writeFileSync(join(outside, "victim.txt"), "V");
+    symlinkSync(join(realpathSync(outside), "deep"), join(root, "link"));
+    const r1 = await fsRestore({ root: s.root, deny: [] }).execute(trueRecord(join(outside, "victim.txt"), `${root}/link/../victim.txt`), ctx());
+    assert.equal(r1.isError, true, r1.content);
+    assert.equal(readFileSync(join(outside, "victim.txt"), "utf8"), "V", "the file outside the jail survives");
+    // And `root/x/../a.txt` must not answer "already absent" about a file that stands.
+    const d = await created(s.root, "a.txt");
+    const r2 = await fsRestore({ root: s.root, deny: [] }).execute({ ...d, at: `${root}/x/../a.txt` }, ctx());
+    assert.equal(r2.isError, true, r2.content);
+    assert.doesNotMatch(r2.content, /already absent/);
+    assert.equal(existsSync(join(root, "a.txt")), true);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a CASE ALIAS of a denied subtree is still denied (case-insensitive volumes)", async (t) => {
+  const s = sandbox();
+  try {
+    const root = realpathSync(s.root);
+    mkdirSync(join(root, ".loom"));
+    writeFileSync(join(root, ".loom", "secret.db"), "S");
+    if (!existsSync(join(root, ".LOOM", "secret.db"))) {
+      t.skip("this volume is case-sensitive: `.LOOM` names nothing");
+      return;
+    }
+    const r = await fsRestore({ root: s.root, deny: [".loom"] }).execute(trueRecord(join(root, ".loom", "secret.db"), `${root}/.LOOM/secret.db`), ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /denied subtree/);
+    assert.equal(readFileSync(join(root, ".loom", "secret.db"), "utf8"), "S");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a workspace ROOT reached by a CASE ALIAS still undoes its own create (case-insensitive volumes)", async (t) => {
+  // `fs.write` records `at` in the filesystem's own spelling; the undo compares it with the root.
+  // Resolved with `realpath` (not `.native`) a case-aliased root keeps the alias's spelling, the
+  // recorded path is not "under" it, and the run's own create is refused — review round 3's N3.
+  const s = sandbox();
+  try {
+    const real = realpathSync(s.root);
+    const base = real.split("/").pop()!;
+    const alias = join(dirname(real), base.toUpperCase());
+    if (alias === real || !existsSync(alias)) {
+      t.skip("this volume is case-sensitive: the alias names nothing");
+      return;
+    }
+    const jail = { root: alias, deny: [".loom"] };
+    const w = await byName(builtinTools(jail), "fs.write").execute({ path: "f.txt", body: "B" }, ctx());
+    const r = await fsRestore(jail).execute(w.details as Record<string, unknown>, ctx());
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(join(real, "f.txt")), false, "the created file is removed");
   } finally {
     s.cleanup();
   }

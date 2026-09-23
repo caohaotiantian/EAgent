@@ -26,8 +26,9 @@
  * on the same file. See `branchRoot`.
  */
 
-import { closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Script, createContext } from "node:vm";
 
 import { CODES, err, isLoomError } from "../errors.ts";
@@ -195,6 +196,175 @@ function openLeaf(path: string, flags: number): number {
   return openSync(path, flags | NOFOLLOW, 0o666);
 }
 
+/** Absent on platforms without the flag (Windows), which have no FIFO to block on either. */
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+
+/**
+ * Not a platform errno: this file's own name for "something is at this path and it is not a
+ * regular file". `UNREADABLE_ERRNO` lists it, so `fs.read` answers `E_FS_UNREADABLE` for it.
+ */
+const NOT_REGULAR = "ENOTREG";
+
+/**
+ * READ A REGULAR FILE, AND REFUSE ANYTHING ELSE BEFORE IT CAN BLOCK (`TODO.md` §A.97).
+ *
+ * A blocking `open(O_RDONLY)` of a FIFO waits for a writer that may never come, and the task
+ * has no bound below the node's `timeoutMs` — measured on the shipped `grant-access` with
+ * `mkfifo out/access-ledger.json`: the run hung until a 10 s alarm killed it. The same wait
+ * sits behind a character device (`/dev/zero` never ends) and a socket. So the open is
+ * NON-BLOCKING, which returns at once for a FIFO with no writer, and the descriptor is
+ * `fstat`ed before a byte is read: what is not a regular file is refused.
+ *
+ * AND WHEN THE OPEN ITSELF FAILS, the name is `lstat`ed to say why, because some kinds never
+ * reach the `fstat`: the open fails with an errno that says nothing about what is there — measured
+ * on macOS, a unix socket answers errno 102 (`"Unknown system error -102"`) and `/dev/tty`
+ * `ENXIO`, so both became the retryable `E_TOOL_SOURCE_UNAVAILABLE` (review of §A.97). Something
+ * at the path that is not a regular file is refused by KIND; an absent name keeps `ENOENT`, and a
+ * symlink the `O_NOFOLLOW` open refused keeps `ELOOP`. (The `lstat` looks after the open, so a
+ * name swapped in between is classified as it now is — the refusal is right either way, since
+ * the open did not produce a regular file.)
+ *
+ * `O_NONBLOCK` changes nothing about a regular file: its reads never block to begin with.
+ *
+ * A directory is refused with the errno it always had (`EISDIR`); every other kind carries
+ * `NOT_REGULAR`. Both read as UNREADABLE — never as NOT FOUND, because something is there. A
+ * symlink at the leaf is left to the open, whose `O_NOFOLLOW` refuses it (`ELOOP`, unreadable).
+ */
+function readRegularLeaf(path: string): string {
+  return readRegularBytes(path).toString("utf8");
+}
+
+/** `readRegularLeaf`'s bytes, undecoded — what `fs.restore` digests before it removes a file. */
+function readRegularBytes(path: string): Buffer {
+  let fd: number;
+  try {
+    fd = openLeaf(path, constants.O_RDONLY | NONBLOCK);
+  } catch (e) {
+    // The open failed: say what is there when it is not a regular file, rather than pass on an
+    // errno that names nothing (see above). Absent, or a symlink the open refused, keeps its own.
+    const seen = lstatSync(path, { throwIfNoEntry: false });
+    if (seen !== undefined && !seen.isFile() && !seen.isSymbolicLink()) throw notRegular(seen);
+    throw e;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw notRegular(st);
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The refusal for something at the path that is not a regular file, naming what it is. */
+function notRegular(st: { isDirectory(): boolean; isFIFO(): boolean; isSocket(): boolean; isCharacterDevice(): boolean; isBlockDevice(): boolean }): Error {
+  const directory = st.isDirectory();
+  const kind = directory
+    ? "a directory"
+    : st.isFIFO()
+      ? "a FIFO"
+      : st.isSocket()
+        ? "a socket"
+        : st.isCharacterDevice()
+          ? "a character device"
+          : st.isBlockDevice()
+            ? "a block device"
+            : "not a regular file";
+  const code = directory ? "EISDIR" : NOT_REGULAR;
+  return Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to read it`), { code });
+}
+
+/** The digest `fs.write` records for a file it CREATED, and `fs.restore` checks before removing it. */
+function bytesDigest(bytes: Buffer): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+/**
+ * WHO THE CREATED FILE IS — recorded at write time, checked before `fs.restore` removes anything.
+ *
+ * A relative path re-resolved at restore time plus a digest of the bytes did NOT identify the file
+ * (review of §A.99): a symlink planted at the path, or a parent directory swapped for one, made
+ * the undo delete whatever the link pointed at if its bytes matched; a second run writing the same
+ * bytes over the first run's file made the first run's rollback delete the second's; and a caller
+ * passing `{created: true, wrote: <digest of any file>}` deleted any file in the jail.
+ *
+ * So the write records the file ITSELF: the device and inode the create produced. Strings,
+ * because a journal holds JSON and these are 64-bit.
+ *
+ * NOT ITS CHANGE TIME, and that is the maintainer's rule rather than an omission (Q3: "delete,
+ * refusing if the bytes differ"). A change time moves on every later write, so it refused the
+ * run's OWN rollback: create then overwrite one path in one run, and the reverse rollback first
+ * puts the create's bytes back — which moves the change time — and then the create's undo
+ * refused a file whose bytes were exactly what it wrote, leaving it standing.
+ *
+ * THE SET THIS REMOVES, named rather than exemplified (recorded, not guarded — residue): ANY file
+ * at the recorded path with the same device and inode, exactly one link, and bytes digesting to
+ * what this write wrote. That includes a file whose mode was changed after the create, one
+ * renamed away and back, one that was hard-linked and had the extra name unlinked again, and one
+ * that another writer — a later node, a person, a second run — rewrote with the SAME bytes. Each
+ * is this write's inode holding exactly this write's bytes, which is the maintainer's rule.
+ */
+interface FileIdentity {
+  readonly dev: string;
+  readonly ino: string;
+}
+
+function identityOf(st: { readonly dev: bigint; readonly ino: bigint }): FileIdentity {
+  return { dev: String(st.dev), ino: String(st.ino) };
+}
+
+function isIdentity(v: unknown): v is FileIdentity {
+  if (v === null || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return ["dev", "ino"].every((k) => typeof o[k] === "string" && /^\d{1,40}$/.test(o[k] as string));
+}
+
+/** What an existing path held before an overwrite — `previous` only when it was a readable regular file. */
+function priorAt(path: string): { readonly previous?: string; readonly created: false } {
+  try {
+    return { previous: readRegularLeaf(path), created: false };
+  } catch {
+    return { created: false };
+  }
+}
+
+/**
+ * Write the body, and hand back the `details` fields that let `fs.restore` undo it.
+ *
+ * `fs.restore` builds its arguments from the write's recorded `details` (`detailsOf` in
+ * `run/engine.ts`), so whatever it will need is decided and journaled HERE, at write time — a
+ * look at the disk at restore time would answer a different question after a restart, and on
+ * replay would answer nothing.
+ *
+ * THE CREATE IS THE OPEN, NOT A LOOK BEFORE IT. The first open is `O_CREAT | O_EXCL`: if it
+ * succeeds this call made the file, and the record says `created: true` with the file's identity
+ * and a digest of the bytes; if it fails `EEXIST`, something was already there and this is an
+ * overwrite — `previous` is what it held when it was a readable regular file, and nothing at all
+ * otherwise, so its undo refuses. No window lies between deciding "created" and creating.
+ */
+function writeWithUndo(
+  path: string,
+  body: string,
+): { readonly previous?: string; readonly created: boolean; readonly wrote?: string; readonly identity?: FileIdentity } {
+  const bytes = Buffer.from(body, "utf8");
+  let fd: number;
+  try {
+    fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw e;
+    const prior = priorAt(path);
+    writeLeaf(path, body);
+    return prior;
+  }
+  let identity: FileIdentity;
+  try {
+    writeFileSync(fd, bytes);
+    identity = identityOf(fstatSync(fd, { bigint: true }));
+  } finally {
+    closeSync(fd);
+  }
+  return { created: true, wrote: bytesDigest(bytes), identity };
+}
+
 /** Create-or-truncate and write, through a descriptor the OS opened without following. */
 function writeLeaf(path: string, body: string): void {
   const fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC);
@@ -301,8 +471,11 @@ function procExec(opts: BuiltinOptions): ToolDefinition {
       // `irreversible` class already means `CLASS_AUTO_RETRYABLE` will not act on it.
       const head = `exit=${String(result.code ?? "null")}${result.signal === null ? "" : ` signal=${result.signal}`}`;
       const body = [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n");
+      // A capped output is `details.truncated`, never a marker appended to `content` (§A.83,
+      // `capBytes`). `bytes` is not reported: the sandbox discards what it does not keep, so the
+      // size of the whole output is not known here.
       return {
-        content: `${head}\n${body}${result.truncated ? "\n…[output truncated]" : ""}`,
+        content: `${head}\n${body}`,
         details: {
           command,
           code: result.code,
@@ -358,7 +531,7 @@ function writePath(opts: BuiltinOptions, ctx: ToolContext, rel: string): string 
  * Either way it is not `E_FS_NOT_FOUND`, and that is the only code an `error` arm may read as
  * "there is nothing here".
  */
-const UNREADABLE_ERRNO: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP"]);
+const UNREADABLE_ERRNO: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP", NOT_REGULAR]);
 
 /**
  * THREE OUTCOMES THAT WERE ONE (`DESIGN.md` D8, `TODO.md` §A.90).
@@ -382,6 +555,41 @@ function readFailure(rel: string, e: unknown): ToolResult {
     return { content, isError: true, error: err.policy(CODES.E_FS_UNREADABLE, content, { details }) };
   }
   return { content, isError: true };
+}
+
+/**
+ * A SHORT READ IS A FACT BESIDE THE CONTENT, NEVER A MARKER INSIDE IT (`DESIGN.md` D8, `TODO.md`
+ * §A.83).
+ *
+ * `fs.read`, `net.fetch` and `proc.exec` each appended their marker to `content` —
+ * `…[truncated N chars]`, `…[truncated]`, `…[output truncated]` — and a `tool` node writes
+ * `content` to its channel. So a capped JSON document reached the next body as a syntax error in
+ * the FILE, and a format whose prefix still parses reached it as a whole document with part of it
+ * missing, which is worse: a search for absences reads the missing part as compliance. The text is
+ * now the prefix and nothing else; `truncated` and `bytes` go into `details`, which the journal
+ * keeps and the fold turns into the node's reserved projection (`"<id>:error"` → `{ok: true,
+ * truncated, bytes}`), where a body can read them without parsing anything.
+ *
+ * `max` COUNTS BYTES, as `maxBytes` always said and `bytes` always claimed. It compared
+ * `text.length` — UTF-16 units — so a file of multi-byte text read back `bytes` that were not its
+ * size and a cap that was not the one asked for. The cut is moved back to a UTF-8 character
+ * boundary, so the prefix never ends in half a character (it may be up to three bytes short of
+ * `max`); `bytes` is the size of the WHOLE source. The step back is at most three bytes — the
+ * most a UTF-8 character can put past its first byte — so input that is not UTF-8 (a run of
+ * continuation bytes) is cut at `max - 3` or later, never emptied.
+ *
+ * WHAT A MODEL IS TOLD: an agent's transcript is built from `content`, so the note that the text
+ * is short is added there and only there, from these `details` (`modelToolContent` in
+ * `run/engine.ts`) — never to `content`, which is what reaches a channel.
+ */
+function capBytes(all: Buffer, max: number): { readonly text: string; readonly bytes: number; readonly truncated: boolean } {
+  if (!(all.length > max)) return { text: all.toString("utf8"), bytes: all.length, truncated: false };
+  let end = Math.max(0, Math.floor(max));
+  // A continuation byte (10xxxxxx) at the cut means a character straddles it: step back to its
+  // first byte and leave the whole character out.
+  const floor = Math.max(0, end - 3);
+  while (end > floor && (all[end]! & 0xc0) === 0x80) end -= 1;
+  return { text: all.subarray(0, end).toString("utf8"), bytes: all.length, truncated: true };
 }
 
 function fsRead(opts: BuiltinOptions): ToolDefinition {
@@ -414,24 +622,14 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
         if (isLoomError(e) && e.code === CODES.E_CAP_DENIED) return { content: e.message, isError: true, error: e };
         throw e;
       }
-      const max = Number(args["maxBytes"] ?? 200_000);
-      let text: string;
-      let fd: number | undefined;
+      let bytes: Buffer;
       try {
-        fd = openLeaf(path, constants.O_RDONLY);
-        text = readFileSync(fd, "utf8");
+        bytes = readRegularBytes(path);
       } catch (e) {
         return readFailure(String(args["path"]), e);
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
-      // Truncation is FLAGGED in the content, so a model reasoning over the result
-      // is told it is not seeing everything.
-      const truncated = text.length > max;
-      return {
-        content: truncated ? `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` : text,
-        details: { path: String(args["path"]), bytes: text.length, truncated },
-      };
+      const cut = capBytes(bytes, Number(args["maxBytes"] ?? 200_000));
+      return { content: cut.text, details: { path: String(args["path"]), bytes: cut.bytes, truncated: cut.truncated } };
     },
   };
 }
@@ -456,19 +654,10 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
       const rel = String(args["path"]);
       const path = writePath(opts, ctx, rel);
       mkdirSync(dirname(path), { recursive: true });
-      // Capture the prior content so `fs.restore` has something to restore to. A
-      // declared compensation that cannot actually compensate is worse than none.
-      let previous: string | undefined;
-      let readFd: number | undefined;
-      try {
-        readFd = openLeaf(path, constants.O_RDONLY);
-        previous = readFileSync(readFd, "utf8");
-      } catch {
-        previous = undefined;
-      } finally {
-        if (readFd !== undefined) closeSync(readFd);
-      }
-      writeLeaf(path, String(args["body"]));
+      // Capture what stood at the path so `fs.restore` can put it back — or, when nothing did,
+      // record the CREATE so it can remove the file (§A.99). A declared compensation that
+      // cannot actually compensate is worse than none.
+      const undo = writeWithUndo(path, String(args["body"]));
       return {
         content: `wrote ${rel}`,
         // `path` stays the RELATIVE path the graph asked for, in both `details` and
@@ -477,7 +666,12 @@ function fsWrite(opts: BuiltinOptions): ToolDefinition {
         // write a different value on every branch of a fan-out. Where the bytes actually
         // landed is `at`, which is diagnostic and reported beside it rather than in place
         // of it — the same rule `net.fetch` follows for the host that answered.
-        details: { path: rel, bytes: String(args["body"]).length, previous, at: path },
+        // `details.bytes` COUNTS BYTES — what landed on disk — because `details` reach the reserved
+        // projection (§A.83), where `bytes` means bytes. It was the body's UTF-16 length. The
+        // CHANNEL receipt `writes.written.bytes` keeps the UTF-16 count it always had: it is a
+        // channel value shipped graphs already carry (`examples-triage.test.ts` pins it), and
+        // changing what a channel holds is not this fix.
+        details: { path: rel, bytes: Buffer.byteLength(String(args["body"]), "utf8"), ...undo, at: path },
         writes: { written: { path: rel, bytes: String(args["body"]).length } },
       };
     },
@@ -548,14 +742,11 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       const path = writePath(opts, ctx, rel);
 
       let current: string;
-      let fd: number | undefined;
       try {
-        fd = openLeaf(readFrom, constants.O_RDONLY);
-        current = readFileSync(fd, "utf8");
+        // Through `readRegularLeaf` for `fs.read`'s reason (§A.97): a FIFO here blocked too.
+        current = readRegularLeaf(readFrom);
       } catch (e) {
         return { content: `cannot read ${rel}: ${(e as Error).message}`, isError: true };
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
 
       const match = locateEdit(current, find, replaceAll);
@@ -612,22 +803,12 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       mkdirSync(dirname(path), { recursive: true });
       // Captured from the WRITE path, not from `current`: on the first edit in a branch
       // `current` came from the shared workspace file, and restoring that content to the
-      // branch path would fabricate a file that never existed there.
-      let previous: string | undefined;
-      let prevFd: number | undefined;
-      try {
-        prevFd = openLeaf(path, constants.O_RDONLY);
-        previous = readFileSync(prevFd, "utf8");
-      } catch {
-        previous = undefined;
-      } finally {
-        if (prevFd !== undefined) closeSync(prevFd);
-      }
-
-      writeLeaf(path, updated);
+      // branch path would fabricate a file that never existed there. That first edit therefore
+      // CREATES the branch copy, and is recorded as a create (§A.99): its undo removes the copy.
+      const undo = writeWithUndo(path, updated);
       return {
         content: `edited ${rel} (${match.kind}${match.kind === "relaxed" ? `: ${match.strategy}` : ""}, ${String(occurrences)} occurrence${occurrences === 1 ? "" : "s"})`,
-        details: { path: rel, match: match.kind, occurrences, bytes: updated.length, previous, at: path },
+        details: { path: rel, match: match.kind, occurrences, bytes: Buffer.byteLength(updated, "utf8"), ...undo, at: path },
         writes: { written: { path: rel, bytes: updated.length } },
       };
     },
@@ -1036,12 +1217,9 @@ function fsGrep(opts: BuiltinOptions): ToolDefinition {
         try {
           // Bounded before it is scanned: a multi-gigabyte file in the workspace must
           // narrow the results, not exhaust the process.
-          const fd = openLeaf(abs, constants.O_RDONLY);
-          try {
-            text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
-          } finally {
-            closeSync(fd);
-          }
+          // `walk` yields regular files only, by DIRENT type; the name can be swapped for a FIFO
+          // between that listing and this open, which `readRegularLeaf` refuses without blocking.
+          text = readRegularLeaf(abs).slice(0, GREP_FILE_CAP);
         } catch {
           return;
         }
@@ -1222,13 +1400,18 @@ function netFetch(opts: BuiltinOptions): ToolDefinition {
         res = await doFetch(url, { signal: ctx.signal, redirect: "manual" });
       }
 
-      const text = await res.text();
-      const max = Number(args["maxBytes"] ?? 100_000);
+      // Bytes, then decoded as UTF-8 — what `res.text()` did, INCLUDING dropping a leading UTF-8
+      // byte-order mark, which `res.text()` strips and a `JSON.parse` downstream chokes on — so
+      // `maxBytes` and `bytes` count the body's bytes after the mark, and the cut is `fs.read`'s
+      // (`capBytes`): no marker in `content`.
+      let body = Buffer.from(await res.arrayBuffer());
+      if (body.length >= 3 && body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf) body = body.subarray(3);
+      const cut = capBytes(body, Number(args["maxBytes"] ?? 100_000));
       return {
-        content: text.length > max ? `${text.slice(0, max)}\n…[truncated]` : text,
+        content: cut.text,
         // `url` is where the bytes CAME FROM, which after a redirect is not what was
         // asked for. The journal records the host that answered, not the one that was named.
-        details: { status: res.status, bytes: text.length, url: url.href, hops },
+        details: { status: res.status, bytes: cut.bytes, truncated: cut.truncated, url: url.href, hops },
         isError: !res.ok,
       };
     },
@@ -1247,23 +1430,155 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
   return {
     name: "fs.restore",
     version: "1.0",
-    description: "Restore a file to its previous content (the compensation for fs.write).",
+    description: "Restore a file to its previous content, or remove a file the write created (the compensation for fs.write).",
     capabilities: ["fs:write"],
     irreversibility: "reversible_write",
     idempotent: true,
     parameters: {
       type: "object",
-      properties: { path: { type: "string" }, previous: { type: "string" } },
+      properties: {
+        path: { type: "string" },
+        previous: { type: "string" },
+        created: { type: "boolean" },
+        wrote: { type: "string" },
+        at: { type: "string" },
+        identity: { type: "object" },
+      },
       required: ["path"],
     },
     execute: (args, ctx) => {
-      const path = writePath(opts, ctx, String(args["path"]));
+      const rel = String(args["path"]);
       const previous = args["previous"];
-      if (typeof previous !== "string") {
-        return { content: `no previous content recorded for ${String(args["path"])}`, isError: true };
+      // BOTH IS NEITHER. `fs.write` records one or the other; a record claiming a create AND a
+      // prior content cannot be told apart from a forged one, so it is not acted on.
+      if (typeof previous === "string" && args["created"] === true) {
+        return { content: `refusing to restore ${rel}: the record says both that the write created it and what it held before`, isError: true };
       }
-      writeLeaf(path, previous);
-      return { content: `restored ${String(args["path"])}` };
+      if (typeof previous === "string") {
+        writeLeaf(writePath(opts, ctx, rel), previous);
+        return { content: `restored ${rel}` };
+      }
+      if (args["created"] === true) return removeCreated(opts, args, rel);
+      return { content: `no previous content recorded for ${rel}`, isError: true };
     },
   };
+}
+
+/**
+ * UNDO A CREATE BY REMOVING THE FILE — and only the file the recorded write made (`TODO.md` §A.99).
+ *
+ * Before this, `fs.restore` could not undo a create at all: a late veto on
+ * `two-person-veto.json` in a fresh workspace failed the run, left the approved file standing, and
+ * journaled `compensation.recorded{outcome: "failed"}` — "no previous content recorded".
+ *
+ * EVERY ARGUMENT COMES FROM THE JOURNAL: `at` (the absolute path the write landed on), `identity`
+ * (device and inode — `FileIdentity`) and `wrote` (a digest of the bytes), all recorded by
+ * `writeWithUndo`. Nothing is re-resolved from the relative `path`. The removal happens only when
+ * ALL of these hold, and every other outcome REFUSES and leaves the disk as it is:
+ *
+ *  - `at` is a normalised absolute path under THIS jail's root, and the file's own spelling of it
+ *    (`realpath.native`) is under that root and outside every denied subtree, so neither `..` nor
+ *    a case alias reaches past either. A record from another workspace is not this one's to
+ *    judge — and must not be read as "already absent";
+ *  - every directory between the root and the leaf is a real directory, not a symlink, checked
+ *    with `lstat`, so a parent swapped for a link cannot redirect the removal;
+ *  - the leaf, read with `lstat` (never followed), has the recorded device and inode — which a
+ *    symlink, FIFO or directory put there cannot have — exactly ONE link (a hard link made to it
+ *    is another name the removal would not account for), and bytes that digest to `wrote`;
+ *  - and the removal is by that same name, as the filesystem spells it.
+ *
+ * "ALREADY ABSENT" is the state the undo wants, and it is answered `compensated` ONLY when the
+ * recorded path itself is missing under this same root (the leaf, or a directory above it). Any
+ * error that is not a plain absence is a refusal.
+ *
+ * A CALLER WHO FORGES A RECORD must name a real file's device and inode as well as its digest;
+ * without all three this refuses. That is what stands between a graph `tool`
+ * node calling `fs.restore` directly and an arbitrary delete — the registry has no way to mark a
+ * tool compensation-only. Residue: the checks and the removal are separate system calls, so a
+ * swap landing between them is not detected; and a caller that can already `stat` the workspace can
+ * supply a true identity (it holds `fs:write`, which could empty the same file anyway).
+ */
+function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel: string): ToolResult {
+  const refuse = (why: string): ToolResult => ({ content: `refusing to remove ${rel}: ${why}`, isError: true });
+  const at = args["at"];
+  const identity = args["identity"];
+  const wrote = args["wrote"];
+  if (typeof at !== "string" || !isAbsolute(at) || !isIdentity(identity) || typeof wrote !== "string") {
+    return refuse("the record does not say which file the write created (absolute path, device, inode and digest are all required)");
+  }
+  // NORMALISED, OR NOT AT ALL. `relative()` collapses `..` lexically while `lstat` and `rm` walk
+  // the raw string through the filesystem, so `root/link/../victim` passed a lexical containment
+  // check and then reached through `link` to a file OUTSIDE the jail (review round 2). `fs.write`
+  // records `at` normalised (it came out of `assertWithin`), so anything else is not its record.
+  if (at !== resolve(at)) return refuse(`${at} is not a normalised absolute path`);
+  let root: string;
+  try {
+    root = realpathSync.native(opts.root);
+  } catch (e) {
+    return refuse(`the workspace root cannot be resolved (${(e as Error).message})`);
+  }
+  const inside = relative(root, at);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    return refuse(`it was written at ${at}, which is not under this workspace's root ${root}`);
+  }
+  const absent: ToolResult = { content: `${rel} is already absent; the file the write created no longer stands` };
+  let dir = root;
+  for (const part of inside.split(sep).slice(0, -1)) {
+    dir = join(dir, part);
+    let st;
+    try {
+      st = lstatSync(dir, { throwIfNoEntry: false });
+    } catch (e) {
+      return refuse(`cannot inspect ${dir} (${(e as Error).message})`);
+    }
+    if (st === undefined) return absent;
+    if (st.isSymbolicLink() || !st.isDirectory()) return refuse(`${dir} is no longer a real directory`);
+  }
+  let leaf;
+  try {
+    leaf = lstatSync(at, { bigint: true, throwIfNoEntry: false });
+  } catch (e) {
+    return refuse(`cannot inspect it (${(e as Error).message})`);
+  }
+  if (leaf === undefined) return absent;
+  // A symlink, a directory or a special file at the path has its own inode, so the identity check
+  // below is also the "is it still a regular file" check — `lstat` never follows the leaf.
+  const now = identityOf(leaf);
+  if (now.dev !== identity.dev || now.ino !== identity.ino) {
+    return refuse("it is not the file the write created (another device or inode is at the path)");
+  }
+  if (leaf.nlink !== 1n) return refuse(`it has ${String(leaf.nlink)} links, and removing one name would leave the others holding its bytes`);
+  // CONTAINMENT AND THE DENY-LIST ON THE FILESYSTEM'S OWN SPELLING. `realpath.native` returns the
+  // name as the filesystem stores it, so on a case-insensitive volume `.LOOM/secret.db` comes back
+  // as `.loom/secret.db` and meets the deny entry it was spelled to slip past (review round 2).
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(at);
+  } catch (e) {
+    return refuse(`cannot resolve it (${(e as Error).message})`);
+  }
+  // (Its CONTAINMENT needs no second check here: `at` is normalised and under the root, every
+  // directory on the way is a real one, and the leaf is not a link — so its own spelling cannot
+  // leave the root. Only the deny-list, which compares names, can be dodged by spelling.)
+  for (const d of resolvedDeny(opts)) {
+    let denied = d;
+    try {
+      denied = realpathSync.native(d);
+    } catch {
+      // A denied subtree that does not exist is compared by its lexical name.
+    }
+    const under = relative(denied, canonical);
+    if (under === "" || (!under.startsWith("..") && !isAbsolute(under))) return refuse(`${canonical} is inside the denied subtree ${denied}`);
+  }
+  let current: Buffer;
+  try {
+    current = readRegularBytes(at);
+  } catch (e) {
+    return refuse(`cannot read it to check its bytes (${(e as Error).message})`);
+  }
+  if (bytesDigest(current) !== wrote) {
+    return refuse("its bytes changed since the write created it, and removing it would delete content the write did not produce");
+  }
+  rmSync(canonical);
+  return { content: `removed ${rel}: the file the recorded write created (same device, inode and bytes)` };
 }

@@ -1452,26 +1452,37 @@ export function carriesOversight(node: NodeSpec | undefined): boolean {
  *
  * IT IS NOT JOURNALED ON ITS OWN, and that is what makes it safe to read. It is a pure function
  * of the fold (`run/projection.ts`, `viewFor`): `ok: true` exactly when that node's task is
- * `succeeded`, `ok: false` with the `code` and `message` its `task.failed` record journaled
- * exactly when it is `failed`, and NO VALUE in every other state. So a restart that folds the
- * journal, and a replay that folds its own, hand the reader the same fact the live run did — and
- * "no projection" is never "success", because nothing produces `ok: true` from an absence.
+ * `succeeded` and no rollback has since undone one of its calls (§A.96), `ok: false` with the
+ * `code` and `message` its `task.failed` record journaled exactly when it is `failed`, and NO
+ * VALUE in every other state. So a restart that folds the journal, and a replay that folds its
+ * own, hand the reader the same fact the live run did — and "no projection" is never "success",
+ * because nothing produces `ok: true` from an absence.
  *
- * ALL SIX FIELDS ARE DECLARED NOW AND THREE HAVE NO PRODUCER, deliberately. D8's own risk is that
- * once this shape is written it is frozen, so a truncated read (`truncated`, `bytes` — §A.83) and
- * a per-key classification (`classification` — §A.82) are slots of THIS envelope rather than a
- * second kind of channel metadata invented later. Until their producers land they are always
- * absent. An absent `classification` means `untrusted` (D4: unlabelled means untrusted), which is
- * also how the engine treats every read of this projection on the integrity axis.
+ * ALL SIX FIELDS WERE DECLARED AT ONCE, deliberately. D8's own risk is that once this shape is
+ * written it is frozen, so a truncated read (`truncated`, `bytes` — §A.83) and a per-key
+ * classification (`classification` — §A.82) are slots of THIS envelope rather than a second kind
+ * of channel metadata invented later. `truncated` and `bytes` now have their producer: the tools
+ * that cap what they return record the fact in `details` instead of a marker in `content`, and the
+ * fold carries it here on `ok: true` (`completeness` in `run/projection.ts`). `classification`
+ * still has none and is always absent; absent means `untrusted` (D4: unlabelled means untrusted),
+ * which is also how the engine treats every read of this projection on the integrity axis.
  */
 export interface ErrorProjection {
   readonly ok: boolean;
   /** Present when `ok` is false: the failure's normalized code, as `task.failed` recorded it. */
   readonly code?: string;
   readonly message?: string;
-  /** RESERVED, no producer yet (§A.83): the read this node made was cut short. */
+  /**
+   * On `ok: true` (§A.83): present when one of the node's tool calls reported whether what it
+   * returned was complete, and `true` when any of them was cut short (`fs.read`/`net.fetch` past
+   * `maxBytes`, `proc.exec` past its output cap, a capped `fs.glob`/`fs.grep` listing).
+   */
   readonly truncated?: boolean;
-  /** RESERVED, no producer yet (§A.83): the size of what was actually there. */
+  /**
+   * On `ok: true` (§A.83): a size in BYTES that the node's one sizing call reported — the whole
+   * source for `fs.read` and `net.fetch` (whatever part of it arrived), the bytes written for
+   * `fs.write` and `fs.edit`. Present only when exactly one of the node's calls reported a size.
+   */
   readonly bytes?: number;
   /** RESERVED, no producer yet (§A.82). Absent means `untrusted`. */
   readonly classification?: "untrusted" | "secret" | "plain";

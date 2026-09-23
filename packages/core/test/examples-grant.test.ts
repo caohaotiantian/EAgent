@@ -1169,3 +1169,131 @@ test("every hostile request fails CLOSED — nothing reaches `record`, nothing r
     ws.dispose();
   }
 });
+
+// ── §A.83: a TRUNCATED read is refused on the FACT, never parsed out of the content ───────────
+
+/**
+ * Past the shipped 200,000-byte `maxBytes`, with the padding AFTER the JSON — so the prefix
+ * `fs.read` hands back still PARSES. That is the case §A.83 calls dangerous: nothing in the
+ * content says anything is missing, and only the reading node's projection (`truncated: true`)
+ * does. A body that stopped reading it would proceed.
+ */
+const pad = (json: string): string => `${json}${" ".repeat(250_000)}`;
+
+test("§A.83 — a LEDGER read back truncated is refused at `prior`, and the ledger's bytes are untouched", async () => {
+  const ws = workspace();
+  try {
+    const first = await run(ws.dir, "docs-site-read.json");
+    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
+    const padded = pad(readFileSync(join(ws.dir, LEDGER), "utf8"));
+    writeFileSync(join(ws.dir, LEDGER), padded);
+    const second = await run(ws.dir, "docs-site-read-ravi.json");
+    assert.equal(second.r.code, 1, `${second.r.out}${second.r.err}`);
+    const e = errorOf(second.s);
+    assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+    assert.match(String(e.message), /on node "prior" refused/, String(e.message));
+    assert.match(String(e.message), /the access ledger was read back TRUNCATED \(200000 chars of \d+ bytes\)/, String(e.message));
+    assert.equal(readFileSync(join(ws.dir, LEDGER), "utf8"), padded, "nothing rewrote the ledger");
+    const counts = await taskCounts(ws.dir, String(second.s["runId"]));
+    assert.equal(counts["weigh"], undefined, JSON.stringify(counts));
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.83 — a REQUEST or a POLICY read back truncated is refused at `weigh`, before the router", async () => {
+  const ws = workspace();
+  try {
+    const request = join(ws.dir, "access", "requests", "docs-site-read.json");
+    const policy = join(ws.dir, "access", "policy.json");
+    for (const [file, what] of [
+      [request, /the request was read back TRUNCATED/],
+      [policy, /access\/policy\.json was read back TRUNCATED/],
+    ] as const) {
+      const original = readFileSync(file, "utf8");
+      writeFileSync(file, pad(original));
+      let got: { r: Result; s: Record<string, unknown> };
+      try {
+        got = await run(ws.dir, "docs-site-read.json");
+      } finally {
+        writeFileSync(file, original);
+      }
+      assert.equal(got.r.code, 1, `${file}: ${got.r.out}${got.r.err}`);
+      const e = errorOf(got.s);
+      assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+      assert.match(String(e.message), /on node "weigh" refused/, String(e.message));
+      assert.match(String(e.message), what, String(e.message));
+      const counts = await taskCounts(ws.dir, String(got.s["runId"]));
+      assert.equal(counts["route"], undefined, `${file}: ${JSON.stringify(counts)}`);
+      assert.equal(existsSync(join(ws.dir, GRANT)), false, `${file}: no grant was written`);
+    }
+    // And the control: the same files, unpadded, are granted — the refusal is the truncation's.
+    const ok = await run(ws.dir, "docs-site-read.json");
+    assert.equal(ok.s["status"], "succeeded", `${ok.r.out}${ok.r.err}`);
+  } finally {
+    ws.dispose();
+  }
+});
+
+// ── §A.83 review M-d: the completeness guards refuse what the engine never hands them ─────────
+
+/**
+ * The projections a body must REFUSE on — every one short of `{ok: true, truncated: false}`.
+ * The engine hands a successful `fs.read`'s reader exactly `{ok: true, truncated, bytes}`, so a
+ * graph run cannot pin these; a guard that refused only on `truncated === true`, or that ignored
+ * `ok`, would pass every run-level test in this file. So the bodies are called directly.
+ */
+const NOT_COMPLETE: readonly (readonly [string, unknown])[] = [
+  ["no projection", undefined],
+  ["null", null],
+  ["ok: true with no `truncated`", { ok: true, bytes: 10 }],
+  ["a non-boolean `truncated`", { ok: true, truncated: "false", bytes: 10 }],
+  ["ok: false that says not truncated", { ok: false, truncated: false, code: "E_X" }],
+  ["a non-boolean `ok`", { ok: "true", truncated: false }],
+];
+const COMPLETE = { ok: true, truncated: false, bytes: 10 };
+
+type Body = (view: { get: (c: string) => unknown; require: (c: string) => unknown }, ctx: { now: () => number }) => {
+  writes?: unknown;
+  refuse?: { reason: string };
+};
+const bodyOf = (name: string): Body => runInNewContext(`(${readFileSync(join(EXAMPLES, "resources", "function", name), "utf8")})`) as Body;
+const viewOf = (values: Record<string, unknown>) => ({
+  get: (c: string) => values[c],
+  require: (c: string) => {
+    if (!(c in values)) throw new Error(`no ${c}`);
+    return values[c];
+  },
+});
+const CTX = { now: () => Date.UTC(2026, 8, 23) };
+
+test("§A.83 — `prior` refuses every ledger projection short of {ok: true, truncated: false}", () => {
+  const prior = bodyOf("grant-prior.js");
+  const ledgerDoc = JSON.stringify({ grants: [] });
+  const request = readFileSync(join(EXAMPLES, "access", "requests", "docs-site-read.json"), "utf8");
+  for (const [what, fact] of NOT_COMPLETE) {
+    const out = prior(viewOf({ ledgerDoc, request, "read-ledger:error": fact }), CTX);
+    assert.equal(out.writes, undefined, `${what}: must not produce a history`);
+    assert.match(String(out.refuse?.reason), /read in full|TRUNCATED/, what);
+  }
+  assert.notEqual(prior(viewOf({ ledgerDoc, request, "read-ledger:error": COMPLETE }), CTX).writes, undefined, "the control: a complete read proceeds");
+});
+
+test("§A.83 — `weigh` refuses every request or policy projection short of {ok: true, truncated: false}", () => {
+  const weigh = bodyOf("grant-weigh.js");
+  const base = {
+    request: readFileSync(join(EXAMPLES, "access", "requests", "docs-site-read.json"), "utf8"),
+    policyDoc: readFileSync(join(EXAMPLES, "access", "policy.json"), "utf8"),
+    history: { source: "none", grants: [], ledger: [] },
+    "read-request:error": COMPLETE,
+    "read-policy:error": COMPLETE,
+  };
+  assert.notEqual(weigh(viewOf(base), CTX).writes, undefined, "the control: both reads complete, a decision is written");
+  for (const source of ["read-request:error", "read-policy:error"]) {
+    for (const [what, fact] of NOT_COMPLETE) {
+      const out = weigh(viewOf({ ...base, [source]: fact }), CTX);
+      assert.equal(out.writes, undefined, `${source} ${what}: must not decide`);
+      assert.match(String(out.refuse?.reason), /read in full|TRUNCATED/, `${source} ${what}`);
+    }
+  }
+});

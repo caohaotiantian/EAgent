@@ -45,7 +45,7 @@
     {
       "id": "parse",
       "type": "function",
-      "reads": ["source", "manifestPath"],
+      "reads": ["source", "manifestPath", "load:error"],
       "writes": ["seed"],
       "function": { "ref": "function/harden-parse@stable" }
     },

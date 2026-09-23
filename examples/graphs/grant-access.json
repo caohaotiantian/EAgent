@@ -58,7 +58,7 @@
     {
       "id": "prior",
       "type": "function",
-      "reads": ["ledgerDoc", "request"],
+      "reads": ["ledgerDoc", "request", "read-ledger:error"],
       "writes": ["history"],
       "function": { "ref": "function/grant-prior@stable" }
     },
@@ -72,7 +72,7 @@
     {
       "id": "weigh",
       "type": "function",
-      "reads": ["request", "policyDoc", "history"],
+      "reads": ["request", "policyDoc", "history", "read-request:error", "read-policy:error"],
       "writes": ["decision"],
       "function": { "ref": "function/grant-weigh@stable" }
     },

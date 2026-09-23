@@ -20,15 +20,18 @@
  *
  *     votes                          two-person-approval (skip)            two-person-veto (fail)
  *     alice ✓  bob ✓                 awaiting_gate  written                awaiting_gate  written
- *     alice ✓  bob ✓  carol ✗        succeeded      written                failed E_HUMAN_APPROVAL_REQUIRED  WRITTEN
+ *     alice ✓  bob ✓  carol ✗        succeeded      written                failed E_HUMAN_APPROVAL_REQUIRED  written, ROLLED BACK
  *     alice ✗  bob ✓  carol ✓        succeeded      written                failed E_HUMAN_APPROVAL_REQUIRED  nothing
  *     alice ✓  bob ✗  carol ✗        failed E_QUORUM_UNREACHABLE  nothing  failed E_HUMAN_APPROVAL_REQUIRED  nothing
  *     alice ✗                        awaiting_gate  nothing                awaiting_gate  nothing
  *
- * The fourth VETO cell is the one a copier is likeliest to get wrong, and it is a PRODUCT LIMIT,
- * not a defect this file waits on: the barrier short-circuits on two approvals, `save` runs, and
- * the gate the short-circuit left open is still answerable — so a late reject marks the run
- * failed while the effect stays. Under quorum the same three votes succeed.
+ * The second VETO cell is the one a copier is likeliest to get wrong: the barrier short-circuits
+ * on two approvals, `save` runs, and the gate the short-circuit left open is still answerable — so
+ * a late reject fails a run whose write already LANDED, and the run-failed rollback then undoes it
+ * through `fs.write`'s declared `fs.restore` (old bytes back, or a file the run created removed;
+ * refused if the file changed since — `TODO.md` §A.99). The table's harness uses a fake `fs.write`
+ * with no compensation, so its cell reads "written"; the rollback is pinned with the real tools.
+ * Under quorum the same three votes succeed.
  *
  * THE RESIDUE IS REAL AND IS PINNED HERE. A short-circuiting quorum join leaves the unneeded
  * branch OPEN — `JoinNode`'s own documented `drain` gap — so the run is still `awaiting_gate`
@@ -46,15 +49,18 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { builtinTools, fsRestore } from "../../src/builtin/tools.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { CODES } from "../../src/errors.ts";
 import { compile } from "../../src/graph/compile.ts";
 import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver, ToolManifestLite } from "../../src/graph/validate.ts";
-import type { GateId, NodeId, RunId } from "../../src/ids.ts";
+import type { GateId, NodeId, RunId, Seq } from "../../src/ids.ts";
 import type { HumanActor } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
@@ -360,25 +366,143 @@ test("VETO · THE FIRST REJECT DECIDES — any rejection before the second appro
   assert.deepEqual(await drive(VETO, [["alice", "reject"]]), { status: "awaiting_gate", wrote: [], error: undefined });
 });
 
-test("VETO · PRODUCT LIMIT — a late reject, after the short-circuited write, fails the run and the write STAYS", async () => {
-  // Measured through the binary (`TODO.md` §A.68): alice approve, bob approve, carol reject.
-  // The barrier short-circuits on two approvals, `save` runs, and the gate the short-circuit left
-  // open is still answerable — so the third vote fails a run whose effect already happened. Two
-  // approvals are the point of no return. This is what the file SAYS, not a defect it waits on;
-  // whether an effect may short-circuit is a separate question D9 did not decide. Every ordering
-  // in which the dissenter votes last.
-  for (const order of ORDERS) {
-    const late = order[2]!;
-    const votes = order.map((who): Vote => [who, who === late ? "reject" : "approve"]);
-    const r = await drive(VETO, votes);
+// ── the late reject, through the REAL `fs.write` and its declared undo ─────────────────────
+
+/**
+ * Drive the shipped veto file through a real `Engine` whose `fs.write` is the built-in one, in a
+ * throwaway workspace, with `fs.restore` registered beside it exactly as `cli.ts` does. The fake
+ * `fs.write` above declares no compensation, so it can only ever show "the write stays"; what a
+ * copier of this file actually gets is this.
+ *
+ * `betweenWriteAndReject` runs after the second approval — when `save` has landed — and before
+ * the late reject, which is the only window in which somebody else can touch the file.
+ */
+async function driveReal(
+  root: string,
+  decisions: readonly Vote[],
+  betweenWriteAndReject: () => void = () => {},
+  /** A NEW `Engine` and a new tool set over the same journal before the reject — a restart. */
+  restartBeforeReject = false,
+): Promise<{ status: string; error: string | undefined; compensations: { outcome: string; reason?: string }[] }> {
+  const now = (): number => 1_700_000_000_000;
+  const store = new MemoryStateStore({ now });
+  const jail = { root, deny: [] };
+  const boot = (): { engine: Engine; tools: ToolRegistry } => {
+    const tools = new ToolRegistry();
+    for (const t of builtinTools(jail)) tools.register(t);
+    tools.register(fsRestore(jail));
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions: new FunctionRegistry(),
+      models: new ModelRegistry(),
+      now,
+      sleep: async () => {},
+      policy: { granted: ["fs:write"], systemFloor: "out" },
+    });
+    return { engine, tools };
+  };
+  let { engine, tools } = boot();
+  const r = compile({
+    spec: VETO,
+    resolver: RESOLVER,
+    tools: Object.fromEntries(tools.list().map((t) => [t.name, t])),
+    tenantCapabilities: ["fs:write"],
+  });
+  assert.equal(r.ok, true, r.diagnostics.map((d) => `${d.severity}:${d.code} ${d.message}`).join(" | "));
+  const runId: RunId = await engine.submit({ graph: r.graph, inputs: { request: "ship it" } });
+  let p = await engine.advance(runId);
+  let i = 0;
+  for (const [who, how] of decisions) {
+    const g = openGates(p).find((x) => x.nodeId === (who as NodeId));
+    if (g === undefined) break;
+    if (how === "reject") {
+      betweenWriteAndReject();
+      if (restartBeforeReject) {
+        ({ engine, tools } = boot());
+        engine.attach(runId, r.graph);
+      }
+    }
+    p = await engine.resolveGate(runId, {
+      gateId: g.gateId,
+      decision: how === "approve" ? { kind: "approve" } : { kind: "reject", reason: "no" },
+      actor: human(`u:${who}`),
+      idempotencyKey: `k${i++}`,
+    });
+  }
+  const compensations: { outcome: string; reason?: string }[] = [];
+  for await (const e of store.read(runId, 1 as Seq)) {
+    if (e.type === "compensation.recorded") compensations.push(e.payload as { outcome: string; reason?: string });
+  }
+  return { status: p.status, error: (p as { error?: { code: string } }).error?.code, compensations };
+}
+
+function workspace(): { root: string; file: string; dispose: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "loom-veto-"));
+  return { root, file: join(root, "approved", "request.txt"), dispose: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+/** Every ordering with the dissenter LAST — the late reject, after the short-circuited write. */
+const LATE: readonly (readonly Vote[])[] = ORDERS.map((order) => order.map((who): Vote => [who, who === order[2] ? "reject" : "approve"]));
+
+test("VETO · A LATE REJECT ROLLS THE WRITE BACK — a file the run CREATED is removed (`TODO.md` §A.99)", async (t) => {
+  // Measured on the packed binary at `48de87f6`, fresh workspace: `status: failed`, the file
+  // STILL WRITTEN, and `compensation.recorded{outcome: "failed", reason: "… no previous content
+  // recorded for approved/request.txt"}` — `fs.restore` could not undo a create. The maintainer
+  // decided (Q3 = a) that it does: `fs.write` records the create in the journal, and the undo
+  // removes the file. Every ordering in which the dissenter votes last.
+  for (const votes of LATE) {
+    const ws = workspace();
+    t.after(ws.dispose);
     const where = votes.map(([w, h]) => `${w}:${h}`).join(" ");
-    assert.equal(r.status, "failed", `${where}: the run is marked failed`);
+    const r = await driveReal(ws.root, votes, () => assert.equal(readFileSync(ws.file, "utf8"), "ship it", `${where}: the write landed first`));
+    assert.equal(r.status, "failed", where);
     assert.equal(r.error, CODES.E_HUMAN_APPROVAL_REQUIRED, where);
-    assert.deepEqual(r.wrote, ["ship it"], `${where}: and the write has ALREADY LANDED — the veto arrived after the effect`);
+    assert.deepEqual(r.compensations.map((c) => c.outcome), ["compensated"], `${where}: ${JSON.stringify(r.compensations)}`);
+    assert.equal(existsSync(ws.file), false, `${where}: the file this run created is gone`);
   }
 });
 
-test("VETO · THE FILE SAYS SO IN ITS OWN WORDS — the first reject decides, and a late reject cannot recover the effect", () => {
+test("VETO · A LATE REJECT over a file that was ALREADY THERE puts its old bytes back", async (t) => {
+  // The case that already worked, and must keep working: nothing is deleted that the run did not
+  // create.
+  const ws = workspace();
+  t.after(ws.dispose);
+  mkdirSync(dirname(ws.file), { recursive: true });
+  writeFileSync(ws.file, "the previous release");
+  const r = await driveReal(ws.root, LATE[0]!, () => assert.equal(readFileSync(ws.file, "utf8"), "ship it"));
+  assert.equal(r.status, "failed");
+  assert.deepEqual(r.compensations.map((c) => c.outcome), ["compensated"], JSON.stringify(r.compensations));
+  assert.equal(readFileSync(ws.file, "utf8"), "the previous release");
+});
+
+test("VETO · the CREATE is read from the JOURNAL — a restart between the write and the late reject still removes it", async (t) => {
+  // The decision to remove is made from what `fs.write` RECORDED (`created`, and a digest of the
+  // bytes it wrote), never from memory or from a look at the disk: a fresh engine and a fresh
+  // `fs.restore` over the same journal reach the same undo.
+  const ws = workspace();
+  t.after(ws.dispose);
+  const r = await driveReal(ws.root, LATE[0]!, () => assert.equal(readFileSync(ws.file, "utf8"), "ship it"), true);
+  assert.equal(r.status, "failed");
+  assert.deepEqual(r.compensations.map((c) => c.outcome), ["compensated"], JSON.stringify(r.compensations));
+  assert.equal(existsSync(ws.file), false);
+});
+
+test("VETO · a created file CHANGED before the late reject is NOT removed — the undo refuses, and says so", async (t) => {
+  // Somebody wrote the path after `save` did. Removing it would delete bytes this run did not
+  // produce, so the undo refuses, the file is left exactly as it is, and the journal records a
+  // FAILED compensation naming why — not a clean rollback it did not achieve.
+  const ws = workspace();
+  t.after(ws.dispose);
+  const r = await driveReal(ws.root, LATE[0]!, () => writeFileSync(ws.file, "a person's edit"));
+  assert.equal(r.status, "failed");
+  assert.deepEqual(r.compensations.map((c) => c.outcome), ["failed"], JSON.stringify(r.compensations));
+  assert.match(String(r.compensations[0]!.reason), /bytes changed since the write created it/);
+  assert.equal(readFileSync(ws.file, "utf8"), "a person's edit", "the file is untouched");
+});
+
+test("VETO · THE FILE SAYS SO IN ITS OWN WORDS — the first reject decides, and a late reject is rolled back", () => {
   const d = describe(VETO);
   // The defect D9 closed was a description and a behaviour disagreeing, so the description is
   // what is asserted — not a comment in this file, which a reader copying the example never sees.
@@ -390,8 +514,12 @@ test("VETO · THE FILE SAYS SO IN ITS OWN WORDS — the first reject decides, an
   // D9's second required half, in the DESCRIPTION and not in a residue label: the late reject.
   assert.match(d, /late reject/i, d);
   assert.match(d, /already landed/i, `a late reject fails a run whose write has already happened: ${d}`);
-  assert.match(d, /effect stays/i, `the effect is not recovered: ${d}`);
-  assert.match(d, /only marked failed/i, `the run is only marked failed: ${d}`);
+  // §A.99: the rollback, in both of its cases, and the refusal — each pinned by a real-tool test above.
+  assert.match(d, /rolls the write back/i, `the runtime undoes it: ${d}`);
+  assert.match(d, /puts back the bytes/i, `over an existing file: ${d}`);
+  assert.match(d, /removes the file if this run created it/i, `over a file the run created: ${d}`);
+  assert.match(d, /refuses[\s\S]*changed after the write/i, `and what it will not delete: ${d}`);
+  assert.doesNotMatch(d, /effect stays|nothing in this graph undoes|only marked failed/i, `the pre-§A.99 sentence is false now: ${d}`);
   assert.match(d, /before the second approval/i, `and the boundary a vetoing person must beat: ${d}`);
   assert.match(d, /two-person-approval\.json/, `and where a copier who wants quorum should go instead: ${d}`);
   assert.doesNotMatch(d, /onBranchError: \\?"skip\\?"/, `this file must not declare quorum's value as its own: ${d}`);
