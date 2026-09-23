@@ -30,35 +30,35 @@ Decisions section, and `TODO.md` §D.8 / §D.9 are different rows one dot away. 
 the projection and `grant-access`'s `error` arm branching by code, deleting `look` and the
 `KNOWN HAZARD` test → then §A.68's word and the example split → then items 29, 18/24, 31. **The
 first two steps have landed** (D8 phase one at `83f86bec`, D9 on 2026-09-23 — §A.90 and §A.68's
-addendum); items 29, 18/24 and 31 are next.
+addendum), and item 29 is built short of its publish (`48de87f6`, §H.15) — so what is next is the
+maintainer's publish, then 18/24, then 31 (`docs/handoff-2026-09-23.md` §6).
 
 ---
 
-## State — one command each, re-run 2026-09-22b on the settlement HEAD
+## State — one command each, re-run 2026-09-23 on `48de87f6`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **4,117 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,043 → 4,117) | `npm test` |
-| pinned exports | 542, **unmoved** — the 2026-09-22b wave added no exported name either, and this is the wave where the guard was SEEN working: the validate lane's first cut exported `BlockFieldType` and `check-surface.mjs` refused it (`added: BlockFieldType`), so the union is module-private now, derived inside `validate.ts` by an indexed-access type. `blockFieldTypes`, `readableLoopBound`, `computeDominators`, `flowAncestors` and `DomTree` are all module-private too. **LEDGER WATCH, and it is the same blind spot one table over**: `POLICY_FIELDS` and `NESTED_FIELDS` went from ARRAYS to RECORDS and kept their names, exactly as `EDGE_FIELDS` did last wave — and the break is worse in one direction, because an out-of-tree `.includes`/spread reader THROWS while a `.length` or indexed-loop reader fails SILENTLY, validating nothing | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, 16 declared seams — unmoved; the 2026-09-22b wave's only kernel edits are `graph/spec.ts` (`d1b452fe`, `83aa54bf`, `79cab047`) and `run/engine.ts` (`648cc9c6`, `78e64ce3`, `297d12e0`), all under `fix:` and owing no trailer. `graph/validate.ts`, where §A.79, §A.80, §A.84 and §A.81(a) landed, is on `kernel.json`'s `notKernel` list BY NAME, with a written reason. **LEDGER WATCH, carried forward and now true of a SECOND table: `graph/spec.ts` gained enforcement vocabulary under `fix:` again** — `POLICY_FIELDS`/`NESTED_FIELDS` now carry a type the compiler acts on, as `EDGE_FIELDS` did last wave — and neither guard can see that | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, 67 files, unmoved — the 2026-09-22b wave added no `src/` file either; of its 27 new files, SIX are test suites, one is a doc, and the other twenty are a graph, a policy, thirteen request fixtures and five `function` bodies, all under `examples/` | `node scripts/check-zero-dep.mjs` |
-| NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved — re-run because `docs/workflow-port-2026-09-22b.md` QUOTES control characters too, and it wrote none. The denominator is deliberately not a cell (rule 3: it moves with every add or delete, this file's own included) | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types, unmoved | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | 60 codes, unmoved — the 2026-09-22b wave added no code either: §A.78 reuses `GRAPH004_EXPR` (and `E_EXPR_INVALID` at run time), §A.79 `GRAPH003_MALFORMED`, §A.80 `GRAPH003_UNKNOWN_EDGE_KIND`, §A.81(b) `E_GRAPH_INVALID`, §A.84 the four rule codes it made correct, and the port added none because it changed no source | `Object.keys(CODES).length` |
+| tests on `loom` | **4,162 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,117 → 4,162) | `npm test` |
+| pinned exports | **544** (542 → 544): `ErrorProjection` and `errorProjectionSource`, D8's envelope and its `"<nodeId>:error"` parser, added to `scripts/surface.json` by the D8 lane — the guard's list moved with the name set, which is what it is for. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, **17 declared seams** (16 → 17): `6a03694d`, the D8 `feat:`, touched `graph/spec.ts`, `run/projection.ts` and `run/engine.ts` and carries a `Kernel-seam:` trailer — *"there is none for a fact about a node's outcome that a later node may read"*. The wave's other kernel edits: `c153566e` (`run/engine.ts`, `fix:`) and `2f1c19ff` (`graph/spec.ts`, `run/gates.ts`, `docs:` — the package rename in prose), owing none | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, **69 files** (67 → 69): `src/bin.ts` (the Node-floor entry with no static imports) and `src/version.ts`. Of the wave's ten new files, three are test suites, one a graph (`two-person-veto.json`), two scripts (`pack.mjs`, `smoke-install.mjs`), and `packages/core`'s README and LICENSE | `node scripts/check-zero-dep.mjs` |
+| NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved. The denominator is deliberately not a cell (rule 3) | read every `git ls-files` path; see CLAUDE.md |
+| journal vocabulary | 51 event types, unmoved — D8 folds its projection out of `task.failed` and added no event | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| error vocabulary | **62 codes** (60 → 62): `E_FS_NOT_FOUND` and `E_FS_UNREADABLE`; `fs.read`'s third code, `E_CAP_DENIED`, already existed. The `GRAPH005_ERROR_PROJECTION_*` refusals and `GRAPH003_STALE_FS_READ_CODE` are compile diagnostics, not `CODES` members | `Object.keys(CODES).length` |
 | README's extensibility ledger | **18** and **3**, both unmoved | the two `sed … \| /usr/bin/grep -a -c` commands in `CLAUDE.md` §2 |
-| README's test floor | **3,500+**, unchanged; the probe counts **3,855** `test(` declarations across **363** files (3,781 / 357 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
+| README's test floor | **3,500+**, unchanged; the probe counts **3,899** `test(` declarations across **366** files (3,855 / 363 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
 
-The kernel guard also prints a commits-judged count (879 at the merge of the three lanes; 853 one
-wave ago). It is deliberately not a cell above: it moves with every commit, this file's own
-included — rule 3.
+The kernel guard also prints a commits-judged count (904 at `48de87f6`; 879 one wave ago). It is
+deliberately not a cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
-per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-22b lanes are
-`0431ddcb` (validate-a84), `297d12e0` (bounds-a78-a81) and `9ee826a5` (port-3), merged `--no-ff` in
-that order (`452b7c9c`, `5af927ee`, `86a35a0a`) with zero conflicts — the EIGHTH wave running.
-`docs/handoff-2026-09-22b.md` is the current handoff; `docs/handoff-2026-09-22.md` is the one before
-it.
+per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-23 lanes are
+`9288e678` (d8-error-projection), `d04d1bcb` (d9-quorum-veto) and `4ec84c11` (item-29-install),
+merged `--no-ff` in that order (`83f86bec`, `e9f7fae4`, `48de87f6`) with zero conflicts — the NINTH
+wave running. `docs/handoff-2026-09-23.md` is the current handoff; `docs/handoff-2026-09-22b.md` is
+the one before it.
 
 ## Row census — three commands, run on this file
 
@@ -71,7 +71,8 @@ it.
 **Do not carry those three numbers here** — they are counts of THIS file and move with every edit
 to it, this sentence's own included (rule 3). Run the commands. What IS fixed enough to write down
 is the settlement-to-settlement series, because each term is pinned to a commit: **46 → 51 → 56**
-at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above. The 2026-09-22b
+at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — and **62** at
+`48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §H.17–§H.20. The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -102,7 +103,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
 | §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 17 | 14 | 3 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows |
+| §H | 21 | 14 | 7 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -1625,7 +1626,10 @@ rather than taken from a lane report.
   discarded. The refusal is `members.length > 0 && no WORK member succeeded && every WORK member
   terminal`, falling back to §D.9's rule verbatim when there are no work members at all, which is
   what leaves the shipped `examples/graphs/two-person-approval.json` byte-identical through the
-  CLI — the only committed spec with gates in a barrier, five nodes with `save` behind it. A new
+  CLI — the only committed spec with gates in a barrier, five nodes with `save` behind it (*2026-09-23:
+  there are TWO now — D9 split it into `two-person-approval.json`, `"skip"`, and
+  `two-person-veto.json`, `"fail"`, five nodes each; the byte-identical run was measured on the
+  `"fail"` file, which is the veto one today*). A new
   field would have been a second spelling of a fact `NodeSpec.type` already states totally, new
   replay vocabulary in the one artifact `graphHash` is taken over, and its default would have had
   to be the node-type rule anyway.
@@ -3760,6 +3764,47 @@ Each traces to a decision in `DESIGN.md`.
   `@caohaotiantian/loom/telemetry` (most naturally at the first publish, before anyone outside has
   a dashboard on it) or stays as an opaque name. The `Symbol.for("@loom/core:…")` keys are NOT this
   row: they never leave the process and must only agree with each other.
+
+- **H.17 · The tarball carries what `pack.mjs` says it does not: map pointers with no maps, and
+  sources git does not track.** *(Opened 2026-09-23 by the settlement, from the item-29 lane's open
+  list.)* `scripts/pack.mjs`'s header says the tarball is *"a function of `src`"* and that no source
+  map ships because maps *"point at a `src/` the tarball does not carry"* — true of the `.map`
+  FILES, not of the pointers. Measured on `48de87f6`, `node scripts/pack.mjs --out <dir>` then
+  `tar -xzf` and a walk of `package/`: **141 files, 0 `.map`, 138 still ending in
+  `//# sourceMappingURL=…`**, so a stranger's `node --enable-source-maps` or bundler looks for maps
+  that are not there. And "a function of `src`" means the DIRECTORY, not the tree:
+  `echo 'export const untrackedProbe = 1;' > packages/core/src/zz-untracked-probe.ts`, pack, and
+  `tar -tzf` lists `package/dist/zz-untracked-probe.js` and `.d.ts` — an untracked file in the
+  maintainer's checkout rides into the publish. **Closes when** the packed `.js`/`.d.ts` carry no
+  `sourceMappingURL` (or the maps and sources ship), and `pack.mjs` refuses a `dist` file whose
+  source `git ls-files` does not list — both asserted against the tarball, the way step 4 already
+  checks `files`.
+
+- **H.18 · The shipped `.d.ts` need `@types/node`, and nothing says so.** *(Opened 2026-09-23 by the
+  settlement, from the item-29 lane's open list.)* A TypeScript consumer of the packed tarball with
+  `"types": []` and `skipLibCheck` off gets **2** errors, both in shipped declarations:
+  `dist/mcp/client.d.ts` `TS2591: Cannot find name 'Buffer'` and `dist/sandbox/subprocess.d.ts`
+  `TS2503: Cannot find namespace 'NodeJS'` (measured on `48de87f6`: the tarball copied into a scratch
+  project's `node_modules/@caohaotiantian/loom`, `import * as loom from "@caohaotiantian/loom"`,
+  this repo's `tsc -p .` under `module: nodenext`). The package has no dependencies by rule, so the
+  answer is not a `dependency` on `@types/node`. **Closes when** either the two declarations stop
+  naming Node's ambient types, or `packages/core/README.md` states the requirement — a decision
+  about which, and neither is behaviour.
+
+- **H.19 · Two CLI doors answer 0 to a flag they never read.** *(Opened 2026-09-23 by the
+  settlement, from the item-29 lane's open list — the class §H.4 closed for three verbs.)* On the
+  packed `dist/bin.js` at `48de87f6`: `loom --port 1` (a flag, no verb) prints the usage and exits
+  **0**, where `loom --bogus` exits 1 — the item-29 lane refused an UNKNOWN flag with no verb and
+  left a KNOWN one accepted and ignored; and `loom --version --tokne x` prints `loom 0.1.0` and
+  exits **0**, the misspelt `--token` never reaching a refusal. **Closes when** both exit non-zero
+  naming the flag, pinned beside `test/cli/version.test.ts` and `test/cli/flag-door.test.ts`.
+
+- **H.20 · `readme-gaps.test.ts` leaves four `loom-dist-*` directories in `$TMPDIR` on every run.**
+  *(Opened 2026-09-23 by the settlement; pre-existing since `81b42586`, 2026-08-28.)* Its four
+  `distIsBehindSources` tests each `mkdtempSync(join(tmpdir(), "loom-dist-"))` and never remove it.
+  `node -e 'const fs=require("fs"),os=require("os");console.log(fs.readdirSync(os.tmpdir()).filter(n=>n.startsWith("loom-dist-")).length)'`
+  → **388** on the machine that settled this wave. **Closes when** each test removes its root (a
+  `t.after` `rmSync`), and a second `npm test` leaves the count where the first left it.
 
 ---
 
