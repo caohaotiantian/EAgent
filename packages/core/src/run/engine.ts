@@ -6111,31 +6111,29 @@ export class Engine {
   /**
    * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
    *
-   * §A.63. `#assertBound`'s THREE VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
-   * `maxWidth` outside `readableFanoutWidth`, and a loop `maxIterations` outside
-   * `readableLoopBound` (§A.81) — all `throw` before anything is appended. The caller got
-   * `E_GRAPH_INVALID` and the journal, which is the only authoritative state, held
-   * `run.submitted, run.compiled, run.started, task.ready` and not one word about the width; a
-   * second process attaching later saw a `running` run with no reason and no terminal row. A
-   * decision was taken and the fold could not reconstruct it.
+   * §A.63. `#assertBound`'s FOUR VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
+   * `maxWidth` outside `readableFanoutWidth`, a loop `maxIterations` outside `readableLoopBound`
+   * (§A.81), and an expression `#expr` cannot parse on an edge's `when`/`until` or a router case's
+   * `when` (§A.85) — all `throw` before anything is appended. The caller got `E_GRAPH_INVALID` and
+   * the journal, which is the only authoritative state, held `run.submitted, run.compiled,
+   * run.started, task.ready` and not one word about the width; a second process attaching later
+   * saw a `running` run with no reason and no terminal row. A decision was taken and the fold
+   * could not reconstruct it.
    *
    * EVERY CHECK BY CONSTRUCTION, and that is why this keys on the CODE rather than on any arm.
    * `0dd0a524` closed a three-lines-apart asymmetry between the first two; answering some of them
-   * here and not the others would put it straight back. **A fourth check added to `#assertBound`
+   * here and not the others would put it straight back. **A fifth check added to `#assertBound`
    * under `E_GRAPH_INVALID` joins this automatically and must also join `FAULTS` in
    * `test/run/advance-refusal-is-journaled.test.ts`**, which is the census that makes the claim
-   * checkable rather than asserted — §A.81's own check was added to it for exactly that reason.
+   * checkable rather than asserted — §A.81's and §A.85's checks were added to it for exactly that
+   * reason, the second as three rows, one per reader of `#expr`.
    *
-   * THE FOURTH ONE THAT IS OWED, NAMED SO THE NEXT READER DOES NOT HAVE TO FIND IT. `when` and
-   * `until` are not checked here for string-ness, so a bent `RunGraph` reaches `#expr` →
-   * `parseExpr` at RUN TIME, mid-commit: measured on this build, `when: [null]` / `{}` / `42` each
-   * throw `E_EXPR_INVALID` out of the first `advance`, leave the run `running` with no terminal
-   * row, and answer a second `advance` with `running`. **Such a check must cover EDGES AND ROUTER
-   * CASES** — `#expr` has three call sites, `e.when` and `e.until` on edges and
-   * `router.cases[].when` on a NODE (`#runRouter`) — which is the same three `graph/validate.ts`
-   * already walks through `checkExpr`. Scoping it to `ctx.graph.spec.edges`, as the three checks
-   * above are, would close two sites of three and leave the asymmetry this paragraph exists to
-   * prevent one node type over.
+   * THE FOURTH IS THE ONE WHOSE ABSENCE LANDED MID-COMMIT. Without it a bent
+   * `when`/`until` reached `#expr` → `parseExpr` at RUN TIME, inside `#commit`, after the node's
+   * work: measured at `2af9716a`, `when: [null]` threw `E_EXPR_INVALID` out of the first `advance`
+   * with `effect.completed` as the last row, and a second `advance` answered `running`. It covers
+   * EDGES AND ROUTER CASES because `#expr` has three call sites and one of them is on a NODE; the
+   * reader-by-reader scoping is argued where the check is written.
    *
    * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
    * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
@@ -6414,6 +6412,50 @@ export class Engine {
           details: {
             runId: ctx.runId,
             edges: unreadableIterations.map((edge) => ({ id: edge.id, maxIterations: describeWidth(edge.maxIterations) })),
+          },
+        },
+      );
+    }
+    // AND AN EXPRESSION THIS EXECUTOR CANNOT PARSE REFUSES THE RUN — §A.85, the fourth vocabulary
+    // check, and the one whose absence cost the most. `#expr` is reached from `#runRouter` and
+    // `#edgesToTake`, both INSIDE `#commit`, after the node's work is done: measured on `2af9716a`
+    // with a compiled loop graph and one field bent on the `RunGraph`, `when: [null]` on the
+    // `conditional` exit and `until: [null]` on the loop each THREW `E_EXPR_INVALID` out of the
+    // first `advance` with `effect.completed` as the last row, and the second `advance` answered
+    // `status=running` — a run an operator cannot tell from a live one, and no terminal row.
+    //
+    // EDGES AND ROUTER CASES, because `#expr` has exactly THREE call sites and an edge-only check
+    // would close two of them and leave the asymmetry `0dd0a524` closed one node type over — the
+    // reason the bounds lane declined to write one. They are the three `graph/validate.ts` walks
+    // through `checkExpr`, and each is scoped to its READER, as the loop bound is:
+    //   - `until` on a `loop` edge — `#loopMayContinue`, reached for `loop` alone;
+    //   - `when` on a `conditional` edge whose source is not a router — `#edgesToTake` skips it
+    //     for a router, whose `take` already chose, and no other kind reads a `when`;
+    //   - `when` on every case of a `router` node — `#runRouter`, and the `cases` array itself,
+    //     since `for…of` over a non-array throws in the same place.
+    // ABSENT is readable on the two edge fields, because both readers test `!== undefined` on
+    // purpose; a router case has no such test, so an absent case `when` is refused.
+    //
+    // PARSED, NOT JUST TYPE-TESTED. A string `parseExpr` rejects throws from the same line as a
+    // non-string, so testing the type alone would be the half-check the row warns about. It
+    // refuses nothing the compiler accepted — `checkExpr` parses with the same `parseExpr`, and
+    // GRAPH004_EXPR refuses whatever fails — and the parse lands in `ctx.exprCache`, so the
+    // readers are served the same tree and a later `advance` pays a map lookup.
+    const unreadableExprs = this.#unreadableExpressions(ctx);
+    if (unreadableExprs.length > 0) {
+      const edges = unreadableExprs.filter((x) => x.edge !== undefined);
+      const nodes = unreadableExprs.filter((x) => x.node !== undefined);
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `the graph supplied for ${why} has ${unreadableExprs.length === 1 ? "an expression" : "expressions"} this build cannot read: ` +
+          `${unreadableExprs.map((x) => `${x.edge === undefined ? `node "${x.node}"` : `edge "${x.edge}"`} ${x.field} (${x.value}: ${x.reason})`).join(", ")} — ` +
+          `an expression is parsed when its edge or case is evaluated, after the node's work is committed, ` +
+          `and an unreadable one throws there and leaves the run running with no terminal row`,
+        {
+          details: {
+            runId: ctx.runId,
+            edges: edges.map((x) => ({ id: x.edge, field: x.field, value: x.value })),
+            nodes: nodes.map((x) => ({ id: x.node, field: x.field, value: x.value })),
           },
         },
       );
@@ -12794,6 +12836,55 @@ export class Engine {
       ctx.exprCache.set(src, e);
     }
     return e;
+  }
+
+  /**
+   * Every expression in the graph in hand that one of `#expr`'s three readers would reach and
+   * could not parse — `#assertBound`'s fourth vocabulary check (§A.85), which says why these three
+   * and why each is scoped as it is. Asked through `#expr` itself, so "readable" means exactly what
+   * the reader will find, and a readable one is cached for it.
+   */
+  #unreadableExpressions(
+    ctx: RunContext,
+  ): readonly { readonly edge?: string; readonly node?: string; readonly field: string; readonly value: string; readonly reason: string }[] {
+    const out: { edge?: string; node?: string; field: string; value: string; reason: string }[] = [];
+    const unreadable = (v: unknown): string | undefined => {
+      try {
+        this.#expr(ctx, v as string);
+        return undefined;
+      } catch (thrown) {
+        return thrown instanceof Error ? thrown.message : String(thrown);
+      }
+    };
+    const shown = (v: unknown): string => {
+      const s = describeWidth(v);
+      return s.length > 120 ? `${s.slice(0, 117)}...` : s;
+    };
+    for (const edge of ctx.graph.spec.edges) {
+      if (edge.kind === "loop" && edge.until !== undefined) {
+        const reason = unreadable(edge.until);
+        if (reason !== undefined) out.push({ edge: edge.id, field: "until", value: shown(edge.until), reason });
+      }
+      if (edge.kind === "conditional" && edge.when !== undefined && ctx.index.byId.get(edge.from)?.type !== "router") {
+        const reason = unreadable(edge.when);
+        if (reason !== undefined) out.push({ edge: edge.id, field: "when", value: shown(edge.when), reason });
+      }
+    }
+    for (const node of ctx.graph.spec.nodes) {
+      if (node.type !== "router") continue;
+      const cases: unknown = (node.router as { cases?: unknown } | undefined)?.cases;
+      if (!Array.isArray(cases)) {
+        out.push({ node: node.id, field: "router.cases", value: shown(cases), reason: "a router's cases must be an array" });
+        continue;
+      }
+      cases.forEach((c: unknown, i) => {
+        const isCase = typeof c === "object" && c !== null;
+        const when = isCase ? (c as { when?: unknown }).when : undefined;
+        const reason = isCase ? unreadable(when) : "a router case must be an object";
+        if (reason !== undefined) out.push({ node: node.id, field: `router.cases[${i}].when`, value: shown(isCase ? when : c), reason });
+      });
+    }
+    return out;
   }
 
   /**
