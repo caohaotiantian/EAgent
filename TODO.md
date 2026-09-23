@@ -81,8 +81,8 @@ is the settlement-to-settlement series, because each term is pinned to a commit:
 at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — and **62** at
 `48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §A.99 and §H.17–§H.20; **67** at
 `7f576a47` (170 rows, 103 struck), the 2026-09-24 wave's merge, whose lanes closed seventeen rows
-but struck none — every strike is the settlement's — and **82** after that settlement
-(202 rows, 120 struck: seventeen struck, thirty-two opened). The 2026-09-22b
+but struck none — every strike is the settlement's — and **83** after that settlement
+(203 rows, 120 struck: seventeen struck, thirty-three opened). The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -106,7 +106,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 125 | 74 | 51 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SIX (§A.101–§A.126), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** §A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 126 | 74 | 52 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself), so open went 37 → 52 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** §A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
@@ -3000,7 +3000,7 @@ the four still open; of §A.95–§A.100, filed below by the 2026-09-23 settleme
 ### Opened by the 2026-09-24 settlement
 
 The residue of the five `wave-0923-*` lanes (`docs/handoff-2026-09-24.md` §3), filed from the
-orchestrator's record of the lanes' reports and reviews. **Rows marked *re-run* were reproduced on
+orchestrator's record of the lanes' reports and reviews, plus one the settlement found (§A.127). **Rows marked *re-run* were reproduced on
 `7f576a47` for this settlement; the others carry the lane's or its reviewer's measurement, named as
 such, and their first task is the re-run.** §A.101 is the one to read first: a KERNEL defect,
 reproduced on the pre-wave base `2af9716a` by two agents independently, and again here.
@@ -3197,6 +3197,16 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   and the refusal's structured `details` no longer carry `searched`, the directories the message
   names. **Closes when** both verbs resolve first (as `suite freeze` now does) and `details.searched`
   is restored, pinned in `resolve-recorded-graph.test.ts`.
+
+- **A.127 · `grant-access.json` still ships §A.94's workaround, and its label still describes a
+  refusal that no longer happens.** *(Found by this settlement; re-run.)* File:
+  `examples/graphs/grant-access.json` — `history` is `merge_object` with `onConflict:
+  "last_by_branch"`, and `labels.residue-error-arm` says *"The compiler cannot see that:
+  `GRAPH010_CONCURRENT_WRITE` … refuses `replace`"*. On `packages/core/dist/bin.js` at `7f576a47`, the
+  same graph with `"history": {"type": "object", "reduce": "replace"}` → `loom compile` exit 0,
+  `ok`. The compiler lane did not own the example. `examples/README.md` §10 now says so. **Closes
+  when** the shipped graph uses `replace`, the label is deleted, and `test/examples-grant.test.ts`
+  still passes over every ending.
 
 
 ---

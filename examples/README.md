@@ -626,11 +626,12 @@ nothing today and is left alone.
 
 **Two things this graph measured that are worth knowing before you build one like it.**
 
-- **`GRAPH010_CONCURRENT_WRITE` refuses the obvious error-handling shape.** `prior` and
-  `first-grant` are the `seq` and `error` targets of one node and no run can take both — but the
-  concurrency analysis does not know that an `error` edge and a `seq` edge out of the same node are
-  exclusive, so `history` may not be `replace`. It is `merge_object` here, and that is a workaround
-  rather than a design. F1 of `docs/workflow-port-2026-09-22b.md`.
+- **`GRAPH010_CONCURRENT_WRITE` USED TO refuse the obvious error-handling shape.** `prior` and
+  `first-grant` are the `seq` and `error` targets of one node and no run can take both, and since
+  `TODO.md` §A.94 the compiler knows it: with `history: replace` the graph compiles clean. The
+  shipped file still says `merge_object`, the workaround from before, and its `residue-error-arm`
+  label still describes the refusal — both now out of date (§A.127). F1 of
+  `docs/workflow-port-2026-09-22b.md`.
 - **A failed run's already-landed `fs.write` is rolled back automatically, with no `compensation`
   edge anywhere in the graph.** `fs.write` declares `compensation: {tool: "fs.restore"}`, so when
   `write-ledger` fails after `write-grant` succeeded the engine undoes the grant write and
