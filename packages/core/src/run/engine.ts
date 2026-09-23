@@ -8234,7 +8234,9 @@ export class Engine {
     // shipped composition `ApprovalSpec` was stripped of `mode`/`k` in favour of. Nothing there
     // was ever going to be produced, so "did any work succeed" has no numerator and the fallback is
     // §D.9's rule verbatim — one approval folds, every member rejected refuses. It is measured
-    // unchanged, in all four of that graph's driven decision sets.
+    // unchanged, in all four of that graph's driven decision sets. (Measured when that file said
+    // `onBranchError: "fail"`. Since `DESIGN.md` D9, 2026-09-23, it says `"skip"` and the `"fail"`
+    // graph is `examples/graphs/two-person-veto.json`; both are evidence-only barriers.)
     //
     // AND `terminalWork === workMembers` IS NOT BELT-AND-BRACES — IT IS WHAT MAKES THIS AN
     // ANSWERABLE QUESTION, and the first cut of §A.67 shipped without it and broke working runs.
@@ -8358,7 +8360,9 @@ export class Engine {
     // `onBranchError: "fail"` any loss failed the run before the count mattered, which masked it
     // in every shipped graph, and under `"skip"` nothing did: measured on
     // `examples/graphs/two-person-approval.json` with that one word changed, ONE approval of
-    // three met `k: 2`, in all three orderings. k-of-n was any-of-n.
+    // three met `k: 2`, in all three orderings. k-of-n was any-of-n. (Since `DESIGN.md` D9,
+    // 2026-09-23, the shipped file itself says `"skip"`, with this arm in place; the `"fail"`
+    // variant is `examples/graphs/two-person-veto.json`.)
     //
     // `k` IS A FLOOR AND NOT MERELY A SHORT-CIRCUIT THRESHOLD, which is the judgement this arm
     // takes: `k` is the whole of what a quorum join declares, and a graph that writes it is

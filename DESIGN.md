@@ -302,6 +302,23 @@ before the second approval is `E_HUMAN_APPROVAL_REQUIRED` with nothing written, 
 `failed` with the write already landed. Short-circuit, straggler cancellation, §A.77 and `TODO.md`
 §D.8 are untouched, as above. **Decided by the maintainer 2026-09-22**; the record is `TODO.md`
 §A.68's addendum.
+*Flagged for the maintainer, 2026-09-23 (settlement): two phrases above that the build measured
+otherwise. The recorded decision text is left as it stands. The WHEN framing predates his answer;
+it first appears in `TODO.md` §A.68's 2026-09-22 addendum.*
+(1) **"they differ only in WHEN"**: driven on both shipped files, each marks a run failed only once
+every gate is answered. A lone reject parks `awaiting_gate` on both (§A.68's BUILT note). So they
+differ in WHICH runs they refuse: `skip` refuses only a run below `k`; `fail` refuses any run
+holding a rejection, including two approvals over one dissenter. `README.md`'s "Approval modes"
+row already says so.
+(2) **"cannot recover the effect"**, after an **"irreversible write"**: `save` is `fs.write`, which
+is declared `reversible_write`, and a FAILED run compensates from the journal, with no edge needed
+(`#failRun` → `#compensate(…, "run_failed")`). A late veto therefore does run `fs.restore`. On the
+shipped path, a file that did not exist before, the restore fails with *"no previous content
+recorded"* (`compensation.recorded outcome: "failed"`), and the write stays. Over a file that
+already existed, the restore puts the old bytes back (`outcome: "compensated"`). The veto file's
+"nothing in this graph undoes it" holds only for the first case (`TODO.md` §A.99). Which he wants
+is his call: undo a create (delete what was made), or keep "irreversible" and let the description
+name both cases.
 
 ---
 
@@ -438,8 +455,8 @@ union was made module-private. The open-row count ROSE across three settlements 
 counted with `TODO.md`'s own census command at `bde693e2`, `0a9483c0` and `279b5c73` — because
 strangers drove the binary, not because anything decayed. **What is not started is the product.**
 These three items are what a maintainer does next. **Item 31 waits on the owed-decision list after
-item 31; item 30 no longer does — it was DECIDED on 2026-09-22 as D8 above and now waits on its
-BUILD — and item 29 no longer does either: DECIDED 2026-09-23 and built short of the publish, it
+item 31; item 30 no longer does — it was DECIDED on 2026-09-22 as D8 above and its phase one was
+BUILT at `83f86bec` on 2026-09-23 — and item 29 no longer does either: DECIDED 2026-09-23 and built short of the publish, it
 waits on the maintainer's publish alone.** Items 18 and 24 wait on none of it; each closes on the terms written in its own row and
 cell.
 
@@ -634,6 +651,10 @@ would have to use. Then 31. A FOURTH workflow port is worth
 as much as the first three — that claim is unchanged — and comes after 29 and 30, because a port's
 value is the friction it logs, and friction met by a stranger who could not install this is
 friction nobody logs.
+*Where that order stands, 2026-09-23:* item 30's phase one landed at `83f86bec`, D9 at `e9f7fae4`,
+and item 29 was built short of the publish at `48de87f6` — so what is next is the maintainer's
+publish (29's closing receipt), then 24 and 18, then 31. Of the fourth port's two conditions, 30 is
+met; 29 waits on that same publish, and so does the stranger whose friction the port exists to log.
 
 **The ORDER inside item 30, decided with D8 on 2026-09-22** — the two decisions above are the first
 two units of work, in this sequence and not in parallel:
@@ -648,7 +669,8 @@ two units of work, in this sequence and not in parallel:
 3. **Change §A.68's one word and split the examples** — the canonical file to `skip`, veto into its
    own graph — and update `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING
    assertions rather than re-testing the engine. **Landed 2026-09-23** — D9's *Enforced* line.
-4. **Only then** items 29, 18/24, and 31.
+4. **Only then** items 29, 18/24, and 31. *(2026-09-23: 29 is built short of its publish; 18/24
+   and 31 are untouched.)*
 
 **And the do-not-do-in-parallel list, which is part of the decision rather than advice:** do not
 split D.10 back into three rows fixed a little each; do not add only a per-run ledger for §A.90 and
