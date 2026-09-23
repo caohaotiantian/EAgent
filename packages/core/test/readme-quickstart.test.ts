@@ -61,7 +61,8 @@ test("THE README DOES NOT TELL A READER TO RUN A COMMAND THAT IS ON NO PATH", ()
   // for a reader: either the packed tarball's `npm install -g` or the binary's `export PATH=`
   // does, and the README has to show one of them before it uses the bare name.
   const ways = [README.indexOf("npm install -g out/"), README.indexOf("export PATH=")].filter((i) => i !== -1);
-  const firstBareLoom = README.search(/^(?:cd \S+ && )?loom /m);
+  // `cd "$(mktemp -d)" && loom --version` counts as a bare use — the quoted argument has a space.
+  const firstBareLoom = README.search(/^(?:cd .* && )?loom /m);
   assert.ok(ways.length > 0, "the quickstart must show how `loom` gets onto PATH");
   assert.ok(Math.min(...ways) < firstBareLoom, "it must do so BEFORE the first bare `loom` invocation");
 });

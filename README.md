@@ -65,9 +65,11 @@ On a Node below 24 the installed `loom` says so in one sentence and exits 2, ins
 trace. `pack.mjs` compiles first and refuses to pack a `dist/` file that has no source, and
 `node scripts/smoke-install.mjs <tgz>` installs it into a temp directory and runs the two examples
 under "Try it" below through it — which is what CI's `install` job does on Linux and macOS.
-**`packages/core` stays `private: true` until the maintainer publishes it**, and `npm publish` on a
-private package does not REFUSE — it exits 0 and quietly does nothing, which a CI step checking only
-the exit code would report as a successful release.
+**`packages/core` stays `private: true` until the maintainer publishes it**, and `npm publish` run
+in `packages/core` does not REFUSE — as a workspace member it exits 0 with one warning line and
+publishes nothing, which a CI step checking only the exit code would report as a successful
+release. (A standalone private package is refused, `EPRIVATE`; it is the workspace that makes it a
+skip.)
 
 ## Or run it as a service
 

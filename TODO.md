@@ -76,7 +76,8 @@ assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK*
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
 row, by §A.62's own closing clause and by §State's two LEDGER WATCH cells; and **§H.15** names an
-absence `README.md`:55 and :69–72 already document.
+absence `README.md`:55 and :69–72 already documented at `369eb4f6` (that text is now README's
+"Install it").
 
 **And the open count moves for reasons that are not work, in BOTH directions — which is why the
 series above is pinned to commits and not carried.** Two instances, one each way: the three rows the
@@ -3746,7 +3747,8 @@ Each traces to a decision in `DESIGN.md`.
   ```
   docker run --rm node:24-slim sh -c 'npm i -g @caohaotiantian/loom@0.1.0 && loom --version'
   ```
-  printing `loom 0.1.0`.
+  printing `loom 0.1.0`. Publish the packed TARBALL, never the directory — the procedure, and what
+  `npm publish` in `packages/core` does instead, is in `DESIGN.md` item 29.
 
 - **H.16 · The OTLP instrumentation scope still says `@loom/core/telemetry`.** *(Opened 2026-09-23
   by the item-29 lane, which renamed the package everywhere prose names it and deliberately left
