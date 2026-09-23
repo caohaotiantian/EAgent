@@ -635,7 +635,8 @@ nothing today and is left alone.
   `loom trace` prints `loom.tool (compensate) [ok]` under it. Measured: `out/grant.json` came back
   byte-identical to before the failed run — a file that EXISTED before it. A write that created its
   file is not undone: `fs.restore` has no previous content to put back, and the compensation is
-  journaled `failed` (`TODO.md` §A.99). A `compensation` edge is a DECLARATION the compiler
+  journaled `failed` (`TODO.md` §A.99) while `loom trace` still prints `(compensate) [ok]` — read
+  the journal's `compensation.recorded` outcome, not the trace line. A `compensation` edge is a DECLARATION the compiler
   proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
 
 **The error arm branches on WHY the read failed, not on the fact that it did** (`DESIGN.md` D8,

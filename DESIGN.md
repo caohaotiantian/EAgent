@@ -511,7 +511,7 @@ STAYS, because removing it IS the publish act and that act is the maintainer's. 
 - **The package**: name, version, `repository`/`homepage`/`bugs`, `publishConfig` for the public
   registry, a README and LICENSE in `packages/core`, and `files` shipping `dist/**/*.js` and
   `*.d.ts` only — no source maps pointing at a `src/` the tarball does not carry, no `.tsbuildinfo`
-  (the `.js` files still END in a `sourceMappingURL` pointer to a map that is not there: `TODO.md`
+  (the `.js` and `.d.ts` files still END in a `sourceMappingURL` pointer to a map that is not there: `TODO.md`
   §H.17).
   Examples stay in the repository.
 - **`loom --version`** prints `loom 0.1.0` (it used to print the usage, exit 0, on every build —

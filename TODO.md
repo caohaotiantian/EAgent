@@ -2463,7 +2463,7 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   so that somebody decides rather than discovers.
 
 - **A.87 · `GraphMetadata.version` is declared `number` and an IN-TREE fixture writes `"1.0.0"` and
-  runs.** File: `packages/core/src/graph/spec.ts:633` (the type) against `:1148` (the tag), and
+  runs.** File: `packages/core/src/graph/spec.ts:633` (the type) against `:1157` (the tag), and
   `packages/core/test/cli/guards-lane-extension-engine-seams.test.ts:90` (the fixture). §A.81(a)
   tagged the field `unknown` rather than `number`, and said why in place: tagging it `number`
   refuses a graph that compiles and RUNS today, and *"a guard that cries wolf on correct code is
