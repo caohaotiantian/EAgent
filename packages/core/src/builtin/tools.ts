@@ -1472,14 +1472,16 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
  * `writeWithUndo`. Nothing is re-resolved from the relative `path`. The removal happens only when
  * ALL of these hold, and every other outcome REFUSES and leaves the disk as it is:
  *
- *  - `at` lies under THIS jail's root, outside every denied subtree. A record from another
- *    workspace is not this one's to judge — and must not be read as "already absent";
+ *  - `at` is a normalised absolute path under THIS jail's root, and the file's own spelling of it
+ *    (`realpath.native`) is under that root and outside every denied subtree, so neither `..` nor
+ *    a case alias reaches past either. A record from another workspace is not this one's to
+ *    judge — and must not be read as "already absent";
  *  - every directory between the root and the leaf is a real directory, not a symlink, checked
  *    with `lstat`, so a parent swapped for a link cannot redirect the removal;
  *  - the leaf, read with `lstat` (never followed), has the recorded device and inode — which a
  *    symlink, FIFO or directory put there cannot have — exactly ONE link (a hard link made to it
  *    is another name the removal would not account for), and bytes that digest to `wrote`;
- *  - and the removal is by that same absolute name.
+ *  - and the removal is by that same name, as the filesystem spells it.
  *
  * "ALREADY ABSENT" is the state the undo wants, and it is answered `compensated` ONLY when the
  * recorded path itself is missing under this same root (the leaf, or a directory above it). Any
@@ -1500,25 +1502,20 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
   if (typeof at !== "string" || !isAbsolute(at) || !isIdentity(identity) || typeof wrote !== "string") {
     return refuse("the record does not say which file the write created (absolute path, device, inode and digest are all required)");
   }
+  // NORMALISED, OR NOT AT ALL. `relative()` collapses `..` lexically while `lstat` and `rm` walk
+  // the raw string through the filesystem, so `root/link/../victim` passed a lexical containment
+  // check and then reached through `link` to a file OUTSIDE the jail (review round 2). `fs.write`
+  // records `at` normalised (it came out of `assertWithin`), so anything else is not its record.
+  if (at !== resolve(at)) return refuse(`${at} is not a normalised absolute path`);
   let root: string;
   try {
-    root = realpathSync(opts.root);
+    root = realpathSync.native(opts.root);
   } catch (e) {
     return refuse(`the workspace root cannot be resolved (${(e as Error).message})`);
   }
   const inside = relative(root, at);
   if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
     return refuse(`it was written at ${at}, which is not under this workspace's root ${root}`);
-  }
-  for (const d of resolvedDeny(opts)) {
-    let denied = d;
-    try {
-      denied = realpathSync(d);
-    } catch {
-      // A denied subtree that does not exist is compared by its lexical name.
-    }
-    const under = relative(denied, at);
-    if (under === "" || (!under.startsWith("..") && !isAbsolute(under))) return refuse(`${at} is inside the denied subtree ${denied}`);
   }
   const absent: ToolResult = { content: `${rel} is already absent; the file the write created no longer stands` };
   let dir = root;
@@ -1547,6 +1544,28 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
     return refuse("it is not the file the write created (another device or inode is at the path)");
   }
   if (leaf.nlink !== 1n) return refuse(`it has ${String(leaf.nlink)} links, and removing one name would leave the others holding its bytes`);
+  // CONTAINMENT AND THE DENY-LIST ON THE FILESYSTEM'S OWN SPELLING. `realpath.native` returns the
+  // name as the filesystem stores it, so on a case-insensitive volume `.LOOM/secret.db` comes back
+  // as `.loom/secret.db` and meets the deny entry it was spelled to slip past (review round 2).
+  let canonical: string;
+  try {
+    canonical = realpathSync.native(at);
+  } catch (e) {
+    return refuse(`cannot resolve it (${(e as Error).message})`);
+  }
+  // (Its CONTAINMENT needs no second check here: `at` is normalised and under the root, every
+  // directory on the way is a real one, and the leaf is not a link — so its own spelling cannot
+  // leave the root. Only the deny-list, which compares names, can be dodged by spelling.)
+  for (const d of resolvedDeny(opts)) {
+    let denied = d;
+    try {
+      denied = realpathSync.native(d);
+    } catch {
+      // A denied subtree that does not exist is compared by its lexical name.
+    }
+    const under = relative(denied, canonical);
+    if (under === "" || (!under.startsWith("..") && !isAbsolute(under))) return refuse(`${canonical} is inside the denied subtree ${denied}`);
+  }
   let current: Buffer;
   try {
     current = readRegularBytes(at);
@@ -1556,6 +1575,6 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
   if (bytesDigest(current) !== wrote) {
     return refuse("its bytes changed since the write created it, and removing it would delete content the write did not produce");
   }
-  rmSync(at);
+  rmSync(canonical);
   return { content: `removed ${rel}: the file the recorded write created (same device, inode and bytes)` };
 }

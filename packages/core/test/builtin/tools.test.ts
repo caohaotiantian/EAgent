@@ -1286,3 +1286,60 @@ test("§A.97 — a UNIX SOCKET and a TERMINAL DEVICE are refused E_FS_UNREADABLE
     assert.match(r.content, /ENOTREG: a character device, not a regular file/, dev);
   }
 });
+
+// ── §A.99 review round 2: the removal's path is checked as the filesystem resolves it ──────
+
+/** A forged record with a TRUE identity and digest for `target`, spelled as `at`. */
+function trueRecord(target: string, at: string): Record<string, unknown> {
+  const st = lstatSync(target, { bigint: true });
+  return {
+    path: "x",
+    created: true,
+    at,
+    identity: { dev: String(st.dev), ino: String(st.ino) },
+    wrote: `sha256:${createHash("sha256").update(readFileSync(target)).digest("hex")}`,
+  };
+}
+
+test("§A.99 — a NON-NORMALISED `at` is refused: `..` cannot carry the removal out of the jail, nor fake an absence", async () => {
+  const s = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "loom-tools-out-"));
+  try {
+    const root = realpathSync(s.root);
+    // Through an in-jail symlink: `root/link/../victim.txt` is lexically inside and physically out.
+    mkdirSync(join(outside, "deep"));
+    writeFileSync(join(outside, "victim.txt"), "V");
+    symlinkSync(join(realpathSync(outside), "deep"), join(root, "link"));
+    const r1 = await fsRestore({ root: s.root, deny: [] }).execute(trueRecord(join(outside, "victim.txt"), `${root}/link/../victim.txt`), ctx());
+    assert.equal(r1.isError, true, r1.content);
+    assert.equal(readFileSync(join(outside, "victim.txt"), "utf8"), "V", "the file outside the jail survives");
+    // And `root/x/../a.txt` must not answer "already absent" about a file that stands.
+    const d = await created(s.root, "a.txt");
+    const r2 = await fsRestore({ root: s.root, deny: [] }).execute({ ...d, at: `${root}/x/../a.txt` }, ctx());
+    assert.equal(r2.isError, true, r2.content);
+    assert.doesNotMatch(r2.content, /already absent/);
+    assert.equal(existsSync(join(root, "a.txt")), true);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a CASE ALIAS of a denied subtree is still denied (case-insensitive volumes)", async (t) => {
+  const s = sandbox();
+  try {
+    const root = realpathSync(s.root);
+    mkdirSync(join(root, ".loom"));
+    writeFileSync(join(root, ".loom", "secret.db"), "S");
+    if (!existsSync(join(root, ".LOOM", "secret.db"))) {
+      t.skip("this volume is case-sensitive: `.LOOM` names nothing");
+      return;
+    }
+    const r = await fsRestore({ root: s.root, deny: [".loom"] }).execute(trueRecord(join(root, ".loom", "secret.db"), `${root}/.LOOM/secret.db`), ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /denied subtree/);
+    assert.equal(readFileSync(join(root, ".loom", "secret.db"), "utf8"), "S");
+  } finally {
+    s.cleanup();
+  }
+});
