@@ -2,7 +2,8 @@
  * A REFUSAL AT THE ADVANCE DOOR LEAVES A ROW THE FOLD CAN SERVE. (§A.63.)
  *
  * `#assertBound`'s VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a `maxWidth` outside
- * `readableFanoutWidth`, and (§A.81) a loop `maxIterations` outside `readableLoopBound` — all
+ * `readableFanoutWidth`, (§A.81) a loop `maxIterations` outside `readableLoopBound`, and (§A.85)
+ * an expression `#expr` cannot parse on an edge's `when`/`until` or a router case's `when` — all
  * `throw` before anything is appended. The caller got `E_GRAPH_INVALID`; the journal, which is the
  * only authoritative state, held `run.submitted, run.compiled, run.started, task.ready` and
  * nothing about why. A second process attaching later saw a `running` run with no reason and no
@@ -30,6 +31,13 @@
  *
  *     pass 1  fail 5      (guard disabled)
  *     pass 6  fail 0      (guard present)
+ *
+ * §A.85's expression check is the FOURTH member, and it is THREE rows because the row that owed it
+ * said an edge-only check "would be partial": `#expr` is reached from an edge's `when`
+ * (`#edgesToTake`), an edge's `until` (`#loopMayContinue`) and a router case's `when`
+ * (`#runRouter`), and a census holding one of them passes with the other two unguarded. The router
+ * row names a NODE, so a row carries `offender` and `details` are read as `edges` + `nodes`.
+ * Measured the same way, the fourth check disabled in `#assertBound`: the same five tests RED.
  *
  * THE ORDINARY HALF IS THE LAST TEST, and it is the reason the engine does not simply fail the
  * run on every refusal at this door. `advance` refuses the graph IN HAND, and the vocabulary
@@ -234,7 +242,14 @@ function chargeThenGateSpec(): GraphSpec {
 interface Fault {
   readonly what: string;
   readonly mangle: (g: RunGraph) => RunGraph;
-  readonly edge: string;
+  /** The edge id — or, for §A.85's router row, the NODE id — the refusal's `details` must name. */
+  readonly offender: string;
+}
+
+/** The ids a refusal's `details` name: `edges` for the first three checks, `edges` + `nodes` for §A.85's. */
+function offendersOf(details: unknown): string[] {
+  const d = (details ?? {}) as { edges?: { id: string }[]; nodes?: { id: string }[] };
+  return [...(d.edges ?? []).map((x) => x.id), ...(d.nodes ?? []).map((x) => x.id)];
 }
 const FAULTS: readonly Fault[] = [
   {
@@ -244,7 +259,7 @@ const FAULTS: readonly Fault[] = [
         ...g,
         spec: { ...g.spec, edges: g.spec.edges.map((x) => (x.kind === "fanout" ? { ...x, maxWidth: "24" } : x)) },
       }) as RunGraph,
-    edge: "fo",
+    offender: "fo",
   },
   {
     what: "an edge kind this build cannot read (the check three lines above it)",
@@ -253,7 +268,7 @@ const FAULTS: readonly Fault[] = [
         ...g,
         spec: { ...g.spec, edges: g.spec.edges.map((x) => (x.kind === "join" ? { ...x, kind: "conditionl" } : x)) },
       }) as RunGraph,
-    edge: "jn0",
+    offender: "jn0",
   },
   {
     // §A.81. `#assertBound` grew a THIRD vocabulary check and this census is what stops the
@@ -275,7 +290,53 @@ const FAULTS: readonly Fault[] = [
           ],
         },
       }) as unknown as RunGraph,
-    edge: "lp",
+    offender: "lp",
+  },
+  // §A.85 — the FOURTH check, one row per reader of `#expr`. Each ADDS the edge (and, for the
+  // router, the node) carrying the bent expression, for the reason the loop row gives: `fanSpec`
+  // has none of the three, and the point is the value. `[null]` is the value the row measured; the
+  // `until` is a STRING `parseExpr` rejects, so "readable" is pinned as PARSES and not as "is a
+  // string"; the router's is `{}`.
+  {
+    what: "a conditional edge's when this build cannot parse (the check §A.85 added)",
+    mangle: (g) =>
+      ({
+        ...g,
+        spec: { ...g.spec, edges: [...g.spec.edges, { id: e("cw"), from: n("b0"), to: n("J"), kind: "conditional", when: [null] }] },
+      }) as unknown as RunGraph,
+    offender: "cw",
+  },
+  {
+    what: "a loop edge's until this build cannot parse (the check §A.85 added)",
+    mangle: (g) =>
+      ({
+        ...g,
+        spec: {
+          ...g.spec,
+          edges: [...g.spec.edges, { id: e("lu"), from: n("b0"), to: n("b0"), kind: "loop", until: "len(seen) >=", maxIterations: 2 }],
+        },
+      }) as unknown as RunGraph,
+    offender: "lu",
+  },
+  {
+    what: "a router case's when this build cannot parse (the check §A.85 added)",
+    mangle: (g) =>
+      ({
+        ...g,
+        spec: {
+          ...g.spec,
+          nodes: [
+            ...g.spec.nodes,
+            { id: n("R"), type: "router", reads: ["items"], router: { cases: [{ when: {}, take: [e("rt")] }], fallbackEdge: e("rt") } },
+          ],
+          edges: [
+            ...g.spec.edges,
+            { id: e("sr"), from: n("start"), to: n("R"), kind: "seq" },
+            { id: e("rt"), from: n("R"), to: n("J"), kind: "conditional" },
+          ],
+        },
+      }) as unknown as RunGraph,
+    offender: "R",
   },
 ];
 
@@ -288,7 +349,7 @@ async function typesOf(store: SqliteStateStore, runId: RunId): Promise<JournalEv
 test("A RUN WHOSE OWN GRAPH THE EXECUTOR CANNOT READ IS FAILED, with the code on the row", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-a63-"));
   try {
-    for (const { what, mangle, edge } of FAULTS) {
+    for (const { what, mangle, offender } of FAULTS) {
       const path = join(dir, `${what.slice(0, 12).replace(/\W+/g, "-")}.db`);
       // `submit` records the hash of the graph it is handed, so this run really is bound to a
       // graph nothing can read — the §A.63 shape, not a caller bringing a foreign one.
@@ -320,11 +381,7 @@ test("A RUN WHOSE OWN GRAPH THE EXECUTOR CANNOT READ IS FAILED, with the code on
         assert.equal(err.code, "E_GRAPH_INVALID", `${what}: carrying the code`);
         assert.equal(err.class, "validation", `${what}: and the class`);
         // `errorRecord` and not a hand-built literal, so the row names the edge that stopped it.
-        assert.deepEqual(
-          (err.details as { edges?: { id: string }[] } | undefined)?.edges?.map((x) => x.id),
-          [edge],
-          `${what}: and the details name the offending edge`,
-        );
+        assert.deepEqual(offendersOf(err.details), [offender], `${what}: and the details name the offending edge or node`);
 
         // FAILING CLOSED ON A REPEAT, and appending nothing the second time. It is
         // `#failUnreadableGraph`'s OWN `isTerminal` return that suppresses the second row, not
@@ -748,7 +805,7 @@ test("A FOLD THAT FORGETS IS NOT A RUN THAT NEVER RAN — the retry window and t
 test("A PAUSED RUN IS STILL FAILED IF ITS OWN GRAPH IS UNREADABLE, AND STILL SPARED IF IT RAN", async () => {
   const dir = mkdtempSync(join(tmpdir(), "loom-a66-pause-"));
   try {
-    for (const { what, mangle, edge } of FAULTS) {
+    for (const { what, mangle, offender } of FAULTS) {
       // ── (1) the three §A.63 shapes: nothing has ever executed, so all three FAIL ──────────
       for (const how of ["control", "paused", "paused-and-resumed"] as const) {
         const path = join(dir, `${how}-${what.slice(0, 10).replace(/\W+/g, "-")}.db`);
@@ -777,11 +834,7 @@ test("A PAUSED RUN IS STILL FAILED IF ITS OWN GRAPH IS UNREADABLE, AND STILL SPA
           assert.equal(failures.length, 1, `${what}/${how}: and a run that can never progress is FAILED, pause or no pause`);
           const err = (failures[0] as { payload: { error: { code: string; details?: unknown } } }).payload.error;
           assert.equal(err.code, "E_GRAPH_INVALID", `${what}/${how}: carrying the code`);
-          assert.deepEqual(
-            (err.details as { edges?: { id: string }[] } | undefined)?.edges?.map((x) => x.id),
-            [edge],
-            `${what}/${how}: and the edge that stopped it`,
-          );
+          assert.deepEqual(offendersOf(err.details), [offender], `${what}/${how}: and the edge or node that stopped it`);
         } finally {
           store.close();
         }

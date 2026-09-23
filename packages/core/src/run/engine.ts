@@ -1071,6 +1071,20 @@ interface RecordedIdentity {
 }
 
 /**
+ * WHICH of the two identity facts moved, and the pair that actually differs — see
+ * `#graphIdentityMismatch`. `expected` is `undefined` only with `unrecorded`: a successor whose
+ * `graph.mutated` row predates `resolutionManifest`, refused because there is nothing to compare.
+ */
+interface IdentityMismatch {
+  readonly differs: "spec" | "resources";
+  readonly expected: string | undefined;
+  readonly actual: string;
+  readonly unrecorded?: true;
+  /** Found on the SUCCESSOR arm: `expected` was recorded when a mutation was ADOPTED, not compiled. */
+  readonly successor?: true;
+}
+
+/**
  * What a gate is allowed to do, carried by the outcome that raises it.
  *
  * It exists as a REQUIRED field rather than something `#commit` derives, because
@@ -4070,6 +4084,8 @@ export class Engine {
     // The higher-consequence sibling of `resolveGate`: it closes N gates at once and then
     // advances. Guarding one and not the other is the shape invariant 6 exists to prevent.
     await this.#assertBound(ctx, `deciding gate batch "${input.batchId}"`);
+    // AND THE SUCCESSOR REBUILT BEFORE THE DECISION LANDS — see `#resolveGateAsSystem`.
+    await this.#rehydrateGraph(ctx);
     await this.#gates.resolveBatch(ctx.log, input);
     return this.advance(runId);
   }
@@ -4110,6 +4126,13 @@ export class Engine {
     // The operator's exit is `cancel`, which genuinely runs no graph code and genuinely does not
     // bind. The reject exemption bought nothing `cancel` did not already provide.
     await this.#assertBound(ctx, `deciding gate "${input.gateId}"`);
+    // AND THE SUCCESSOR REBUILT BEFORE THE DECISION LANDS (§G.5). A fresh process attaches the
+    // AUTHORED graph, which `#assertBound` checks against `run.compiled`; the refs a mutation
+    // ADDED are only resolved when `#rehydrateGraph` replays it, and that checks each against the
+    // manifest its `graph.mutated` row recorded. Left to `advance`, the check ran AFTER
+    // `gate.decided` was appended — a human's approval on the log for bytes nobody had verified.
+    // Idempotent: it returns at once when the graph in hand is already the journal's successor.
+    await this.#rehydrateGraph(ctx);
     await this.#gates.resolve(ctx.log, input);
     return this.advance(runId);
   }
@@ -6033,49 +6056,91 @@ export class Engine {
    * identity the journal does not publish — and that is not what this closes. §A.66 stays open,
    * re-scoped to it.
    */
-  #graphIdentityMismatch(
+  async #graphIdentityMismatch(
     ctx: RunContext,
     recorded: RecordedIdentity,
     current: string | undefined,
-  ): "spec" | "resources" | undefined {
+  ): Promise<IdentityMismatch | undefined> {
     const isCompiled = recorded.graphHash === ctx.graph.graphHash;
     const isCurrent = current !== undefined && current === ctx.graph.graphHash;
-    if (!isCompiled && !isCurrent) return "spec";
-    // The manifest is journaled on `run.compiled` alone, so it can only be checked against the
-    // compiled graph. A successor carries no recorded manifest to compare — an honest gap,
-    // narrowed by mutation being unreachable from the shipped binary today.
-    if (isCompiled && recorded.manifest !== manifestKey(ctx.graph.resolutionManifest)) return "resources";
-    return undefined;
+    const actual = manifestKey(ctx.graph.resolutionManifest);
+    if (!isCompiled && !isCurrent) return { differs: "spec", expected: recorded.graphHash, actual: ctx.graph.graphHash };
+    if (isCompiled) {
+      return recorded.manifest !== manifestKey(ctx.graph.resolutionManifest) ? { differs: "resources", expected: recorded.manifest, actual } : undefined;
+    }
+    // THE SUCCESSOR ARM, WHICH HAD NO RESOURCE CHECK AT ALL (§G.5). The graph in hand is the one a
+    // `graph.mutated` adopted, and that row now carries the successor's manifest — the same fact
+    // `run.compiled` carries for the graph the run started on. Compared exactly as that one is.
+    //
+    // ONLY ON THIS ARM IS THE EXTRA READ PAID. An unmutated run answers above on `isCompiled`, and
+    // so does a mutated run a fresh process has attached by its AUTHORED graph, which is what the
+    // CLI does — `#rehydrateGraph` checks the successor it rebuilds from there against the same
+    // rows. What reaches here is a successor already held: after `#applyMutation` or
+    // `#rehydrateGraph` in this process, or one a caller attached directly.
+    //
+    // NO STRONGER THAN THE COMPILED ARM, and the docstring's §A.66 paragraph applies verbatim: the
+    // row is as readable as `run.compiled`, so a caller with journal read access can copy this
+    // manifest onto any graph too. It refuses the WRONG graph brought by accident — an edited file,
+    // a moved `@stable` — which is the whole of what §G.5 asked of it.
+    const successor = await this.#successorManifest(ctx.runId, ctx.graph.graphHash);
+    // A ROW WITH NO MANIFEST IS REFUSED, not waved through. It is a journal from a build that
+    // predates the field, and "there is nothing to compare against" is the undecidable case a
+    // guard must not answer with the passing value. `cancel` binds no graph and is the exit.
+    if (successor === undefined) return { differs: "resources", expected: undefined, actual, unrecorded: true };
+    return successor === actual ? undefined : { differs: "resources", expected: successor, actual, successor: true };
+  }
+
+  /**
+   * The recorded manifest key of the graph `hash` names, from the LAST `graph.mutated` that adopted
+   * it — or `undefined` when no row adopted it or the row predates the field.
+   *
+   * THE LAST ROW IS DEFENSIVE, AND NO PATH TODAY TELLS IT FROM THE FIRST. Mutation is additive, so
+   * a later mutation adopts a new spec and a new hash; two rows can name one hash only if a rewind
+   * suppressed the first and the run re-mutated to the same spec — and that path is wedged before
+   * it gets here: `#rehydrateGraph` replays every raw row, suppressed or not, and a rewind past a
+   * `graph.mutated` was measured refusing at `2af9716a` and at this fix alike (same process:
+   * `E_GRAPH_MISMATCH` on the spec; fresh process: `E_EXPANSION_EXHAUSTED` at base,
+   * `E_GRAPH_MISMATCH` on resources here). A mutant reading the FIRST row survives the suite for
+   * that reason. The last row is kept because, if rewinding past a mutation is ever made to work,
+   * the latest adoption is the one the fold's `graphHash` points at — and whoever makes it work
+   * owes the test that tells the two apart.
+   */
+  async #successorManifest(runId: RunId, hash: string): Promise<string | undefined> {
+    let found: string | undefined;
+    for await (const ev of this.#store.read(runId, 1)) {
+      if (!isEvent(ev, "graph.mutated") || ev.payload.newHash !== hash) continue;
+      const m = ev.payload.resolutionManifest;
+      found = m === undefined ? undefined : manifestKey(m);
+    }
+    return found;
   }
 
   /**
    * A RUN WHOSE OWN GRAPH THIS BUILD CANNOT READ IS FAILED, not left `running` in silence.
    *
-   * §A.63. `#assertBound`'s THREE VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
-   * `maxWidth` outside `readableFanoutWidth`, and a loop `maxIterations` outside
-   * `readableLoopBound` (§A.81) — all `throw` before anything is appended. The caller got
-   * `E_GRAPH_INVALID` and the journal, which is the only authoritative state, held
-   * `run.submitted, run.compiled, run.started, task.ready` and not one word about the width; a
-   * second process attaching later saw a `running` run with no reason and no terminal row. A
-   * decision was taken and the fold could not reconstruct it.
+   * §A.63. `#assertBound`'s FOUR VOCABULARY checks — an edge `kind` outside `EDGE_KINDS`, a
+   * `maxWidth` outside `readableFanoutWidth`, a loop `maxIterations` outside `readableLoopBound`
+   * (§A.81), and an expression `#expr` cannot parse on an edge's `when`/`until` or a router case's
+   * `when` (§A.85) — all `throw` before anything is appended. The caller got `E_GRAPH_INVALID` and
+   * the journal, which is the only authoritative state, held `run.submitted, run.compiled,
+   * run.started, task.ready` and not one word about the width; a second process attaching later
+   * saw a `running` run with no reason and no terminal row. A decision was taken and the fold
+   * could not reconstruct it.
    *
    * EVERY CHECK BY CONSTRUCTION, and that is why this keys on the CODE rather than on any arm.
    * `0dd0a524` closed a three-lines-apart asymmetry between the first two; answering some of them
-   * here and not the others would put it straight back. **A fourth check added to `#assertBound`
+   * here and not the others would put it straight back. **A fifth check added to `#assertBound`
    * under `E_GRAPH_INVALID` joins this automatically and must also join `FAULTS` in
    * `test/run/advance-refusal-is-journaled.test.ts`**, which is the census that makes the claim
-   * checkable rather than asserted — §A.81's own check was added to it for exactly that reason.
+   * checkable rather than asserted — §A.81's and §A.85's checks were added to it for exactly that
+   * reason, the second as three rows, one per reader of `#expr`.
    *
-   * THE FOURTH ONE THAT IS OWED, NAMED SO THE NEXT READER DOES NOT HAVE TO FIND IT. `when` and
-   * `until` are not checked here for string-ness, so a bent `RunGraph` reaches `#expr` →
-   * `parseExpr` at RUN TIME, mid-commit: measured on this build, `when: [null]` / `{}` / `42` each
-   * throw `E_EXPR_INVALID` out of the first `advance`, leave the run `running` with no terminal
-   * row, and answer a second `advance` with `running`. **Such a check must cover EDGES AND ROUTER
-   * CASES** — `#expr` has three call sites, `e.when` and `e.until` on edges and
-   * `router.cases[].when` on a NODE (`#runRouter`) — which is the same three `graph/validate.ts`
-   * already walks through `checkExpr`. Scoping it to `ctx.graph.spec.edges`, as the three checks
-   * above are, would close two sites of three and leave the asymmetry this paragraph exists to
-   * prevent one node type over.
+   * THE FOURTH IS THE ONE WHOSE ABSENCE LANDED MID-COMMIT. Without it a bent
+   * `when`/`until` reached `#expr` → `parseExpr` at RUN TIME, inside `#commit`, after the node's
+   * work: measured at `2af9716a`, `when: [null]` threw `E_EXPR_INVALID` out of the first `advance`
+   * with `effect.completed` as the last row, and a second `advance` answered `running`. It covers
+   * EDGES AND ROUTER CASES because `#expr` has three call sites and one of them is on a NODE; the
+   * reader-by-reader scoping is argued where the check is written.
    *
    * ONLY WHEN THE GRAPH IS THIS RUN'S OWN, which is the whole of the judgement and the reason
    * this is not three lines at the call site. `advance` refuses the graph IN HAND, and the
@@ -6117,7 +6182,7 @@ export class Engine {
     const p = await this.#project(ctx);
     if (p === undefined || isTerminal(p.status)) return;
     if (recorded === undefined) return;
-    if (this.#graphIdentityMismatch(ctx, recorded, p.graphHash) !== undefined) return;
+    if ((await this.#graphIdentityMismatch(ctx, recorded, p.graphHash)) !== undefined) return;
     // AND THE RUN HAS NEVER EXECUTED, WHICH IS THE OTHER HALF OF "THIS RUN'S OWN" (§A.66).
     //
     // IDENTITY ALONE CANNOT CARRY THIS, and the reason is written at `#graphIdentityMismatch`:
@@ -6358,6 +6423,50 @@ export class Engine {
         },
       );
     }
+    // AND AN EXPRESSION THIS EXECUTOR CANNOT PARSE REFUSES THE RUN — §A.85, the fourth vocabulary
+    // check, and the one whose absence cost the most. `#expr` is reached from `#runRouter` and
+    // `#edgesToTake`, both INSIDE `#commit`, after the node's work is done: measured on `2af9716a`
+    // with a compiled loop graph and one field bent on the `RunGraph`, `when: [null]` on the
+    // `conditional` exit and `until: [null]` on the loop each THREW `E_EXPR_INVALID` out of the
+    // first `advance` with `effect.completed` as the last row, and the second `advance` answered
+    // `status=running` — a run an operator cannot tell from a live one, and no terminal row.
+    //
+    // EDGES AND ROUTER CASES, because `#expr` has exactly THREE call sites and an edge-only check
+    // would close two of them and leave the asymmetry `0dd0a524` closed one node type over — the
+    // reason the bounds lane declined to write one. They are the three `graph/validate.ts` walks
+    // through `checkExpr`, and each is scoped to its READER, as the loop bound is:
+    //   - `until` on a `loop` edge — `#loopMayContinue`, reached for `loop` alone;
+    //   - `when` on a `conditional` edge whose source is not a router — `#edgesToTake` skips it
+    //     for a router, whose `take` already chose, and no other kind reads a `when`;
+    //   - `when` on every case of a `router` node — `#runRouter`, and the `cases` array itself,
+    //     since `for…of` over a non-array throws in the same place.
+    // ABSENT is readable on the two edge fields, because both readers test `!== undefined` on
+    // purpose; a router case has no such test, so an absent case `when` is refused.
+    //
+    // PARSED, NOT JUST TYPE-TESTED. A string `parseExpr` rejects throws from the same line as a
+    // non-string, so testing the type alone would be the half-check the row warns about. It
+    // refuses nothing the compiler accepted — `checkExpr` parses with the same `parseExpr`, and
+    // GRAPH004_EXPR refuses whatever fails — and the parse lands in `ctx.exprCache`, so the
+    // readers are served the same tree and a later `advance` pays a map lookup.
+    const unreadableExprs = this.#unreadableExpressions(ctx);
+    if (unreadableExprs.length > 0) {
+      const edges = unreadableExprs.filter((x) => x.edge !== undefined);
+      const nodes = unreadableExprs.filter((x) => x.node !== undefined);
+      throw err.validation(
+        CODES.E_GRAPH_INVALID,
+        `the graph supplied for ${why} has ${unreadableExprs.length === 1 ? "an expression" : "expressions"} this build cannot read: ` +
+          `${unreadableExprs.map((x) => `${x.edge === undefined ? `node "${x.node}"` : `edge "${x.edge}"`} ${x.field} (${x.value}: ${x.reason})`).join(", ")} — ` +
+          `an expression is parsed when its edge or case is evaluated, after the node's work is committed, ` +
+          `and an unreadable one throws there and leaves the run running with no terminal row`,
+        {
+          details: {
+            runId: ctx.runId,
+            edges: edges.map((x) => ({ id: x.edge, field: x.field, value: x.value })),
+            nodes: nodes.map((x) => ({ id: x.node, field: x.field, value: x.value })),
+          },
+        },
+      );
+    }
     const recorded = await this.#compiledIdentity(ctx.runId);
     // A run with no `run.compiled` cannot be checked, and what to do about that DIFFERS BY DOOR.
     //
@@ -6389,26 +6498,32 @@ export class Engine {
     // `graph.mutated`: a caller cannot forge a successor into the journal. So "the graph the run
     // is currently on" is as recorded a fact as "the graph the run compiled".
     const current = (await this.#project(ctx))?.graphHash;
-    const mismatch = this.#graphIdentityMismatch(ctx, recorded, current);
+    const mismatch = await this.#graphIdentityMismatch(ctx, recorded, current);
     if (mismatch !== undefined) {
       throw err.conflict(
         CODES.E_GRAPH_MISMATCH,
-        mismatch === "spec"
+        mismatch.differs === "spec"
           ? `the graph supplied for ${why} is not the graph run ${ctx.runId} compiled`
-          : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
+          : mismatch.unrecorded === true
+            ? `the graph supplied for ${why} is the successor run ${ctx.runId} mutated to, and its journal recorded no manifest for it — ` +
+              `the row predates \`graph.mutated.resolutionManifest\`, so the resources behind its refs cannot be checked; cancel is the exit`
+            : mismatch.successor === true
+              ? `the graph supplied for ${why} is the successor run ${ctx.runId} mutated to, but the resources behind its refs have changed since that mutation was adopted`
+              : `the graph supplied for ${why} matches run ${ctx.runId}'s spec, but the resources behind its refs have changed since it was compiled`,
         {
-          // REPORT THE PAIR THAT ACTUALLY DIFFERS. On the `resources` branch `isCompiled` is
-          // true by construction, so printing the two SPEC hashes printed the same string twice
-          // under a message saying they had changed — a diagnostic that reads as a broken check
-          // and sends the operator to look at the graph file, which is the one thing that did
-          // not change. Found by deleting a published hook body from a workspace with a live
-          // gate: "the resources behind its refs have changed", expected == actual.
+          // REPORT THE PAIR THAT ACTUALLY DIFFERS. On the `resources` branch the spec hashes are
+          // equal by construction, so printing them printed the same string twice under a message
+          // saying they had changed — a diagnostic that reads as a broken check and sends the
+          // operator to look at the graph file, which is the one thing that did not change. Found
+          // by deleting a published hook body from a workspace with a live gate: "the resources
+          // behind its refs have changed", expected == actual. `#graphIdentityMismatch` returns
+          // the pair, so the successor arm reports the SUCCESSOR's recorded manifest.
           details: {
             runId: ctx.runId,
-            differs: mismatch,
-            ...(mismatch === "resources"
-              ? { expected: recorded.manifest, actual: manifestKey(ctx.graph.resolutionManifest) }
-              : { expected: recorded.graphHash, actual: ctx.graph.graphHash }),
+            differs: mismatch.differs,
+            expected: mismatch.expected ?? null,
+            actual: mismatch.actual,
+            ...(mismatch.unrecorded === true ? { unrecorded: true } : {}),
           },
         },
       );
@@ -6612,6 +6727,38 @@ export class Engine {
             .map((d) => `${d.code}: ${d.message}`)
             .join("; ")}`,
           { details: { diagnostics: result.diagnostics.filter((d) => d.severity === "error") } },
+        );
+      }
+      // AND THE REBUILT SUCCESSOR RESOLVES TO WHAT THE ROW RECORDED, or the attach is refused
+      // (§G.5). `graphHash` is `digest(spec)`, so the hash check below cannot see this: a ref the
+      // mutation INTRODUCED is not in the authored graph `frozenFirst` freezes, so it resolves LIVE
+      // here — and if its file was edited since, the run would go on under bytes nobody decided
+      // on, behind a gate a human approved against the old ones. The authored graph's own refs
+      // were checked by `#assertBound` against `run.compiled` before this ran; this is the same
+      // check for the refs each mutation added, against the manifest each row recorded.
+      //
+      // A ROW WITH NO MANIFEST REFUSES TOO — a journal from a build that predates the field has
+      // nothing to compare against, and refusing is always allowed. After the oversight refusal
+      // above, so a row this binary refuses on its SHAPE still says so first.
+      const recordedManifest = m.resolutionManifest === undefined ? undefined : manifestKey(m.resolutionManifest);
+      const rebuiltManifest = manifestKey(result.graph.resolutionManifest);
+      if (recordedManifest !== rebuiltManifest) {
+        throw err.conflict(
+          CODES.E_GRAPH_MISMATCH,
+          recordedManifest === undefined
+            ? `run ${ctx.runId} recorded a mutation to ${m.newHash} with no manifest — the row predates ` +
+                `\`graph.mutated.resolutionManifest\`, so the resources behind the successor's refs cannot be checked; cancel is the exit`
+            : `run ${ctx.runId} recorded a mutation to ${m.newHash} whose resources have changed since it was adopted`,
+          {
+            details: {
+              runId: ctx.runId,
+              differs: "resources",
+              successor: m.newHash,
+              expected: recordedManifest ?? null,
+              actual: rebuiltManifest,
+              ...(recordedManifest === undefined ? { unrecorded: true } : {}),
+            },
+          },
         );
       }
       graph = result.graph;
@@ -11406,6 +11553,11 @@ export class Engine {
             proposedBy: w.task.taskId,
             proposedByNode: w.node.id,
             budgetConsumed: ctx.addedNodes,
+            // THE SUCCESSOR'S MANIFEST, so the resource half of the binding reaches it (§G.5).
+            // `newHash` covers the spec's pointers only, and a ref this mutation introduced was
+            // resolved LIVE just now by `frozenFirst` — this row is the only place its digest
+            // will ever be written down. `#graphIdentityMismatch` and `#rehydrateGraph` read it.
+            resolutionManifest: result.graph.resolutionManifest.map((r) => ({ ref: r.ref, digest: r.digest })),
           },
           actor: SYSTEM_ACTOR("executor"),
           taskId: w.task.taskId,
@@ -12693,6 +12845,55 @@ export class Engine {
       ctx.exprCache.set(src, e);
     }
     return e;
+  }
+
+  /**
+   * Every expression in the graph in hand that one of `#expr`'s three readers would reach and
+   * could not parse — `#assertBound`'s fourth vocabulary check (§A.85), which says why these three
+   * and why each is scoped as it is. Asked through `#expr` itself, so "readable" means exactly what
+   * the reader will find, and a readable one is cached for it.
+   */
+  #unreadableExpressions(
+    ctx: RunContext,
+  ): readonly { readonly edge?: string; readonly node?: string; readonly field: string; readonly value: string; readonly reason: string }[] {
+    const out: { edge?: string; node?: string; field: string; value: string; reason: string }[] = [];
+    const unreadable = (v: unknown): string | undefined => {
+      try {
+        this.#expr(ctx, v as string);
+        return undefined;
+      } catch (thrown) {
+        return thrown instanceof Error ? thrown.message : String(thrown);
+      }
+    };
+    const shown = (v: unknown): string => {
+      const s = describeWidth(v);
+      return s.length > 120 ? `${s.slice(0, 117)}...` : s;
+    };
+    for (const edge of ctx.graph.spec.edges) {
+      if (edge.kind === "loop" && edge.until !== undefined) {
+        const reason = unreadable(edge.until);
+        if (reason !== undefined) out.push({ edge: edge.id, field: "until", value: shown(edge.until), reason });
+      }
+      if (edge.kind === "conditional" && edge.when !== undefined && ctx.index.byId.get(edge.from)?.type !== "router") {
+        const reason = unreadable(edge.when);
+        if (reason !== undefined) out.push({ edge: edge.id, field: "when", value: shown(edge.when), reason });
+      }
+    }
+    for (const node of ctx.graph.spec.nodes) {
+      if (node.type !== "router") continue;
+      const cases: unknown = (node.router as { cases?: unknown } | undefined)?.cases;
+      if (!Array.isArray(cases)) {
+        out.push({ node: node.id, field: "router.cases", value: shown(cases), reason: "a router's cases must be an array" });
+        continue;
+      }
+      cases.forEach((c: unknown, i) => {
+        const isCase = typeof c === "object" && c !== null;
+        const when = isCase ? (c as { when?: unknown }).when : undefined;
+        const reason = isCase ? unreadable(when) : "a router case must be an object";
+        if (reason !== undefined) out.push({ node: node.id, field: `router.cases[${i}].when`, value: shown(isCase ? when : c), reason });
+      });
+    }
+    return out;
   }
 
   /**
