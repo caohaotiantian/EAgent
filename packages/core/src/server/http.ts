@@ -1,7 +1,7 @@
 /**
  * The control plane: the only externally reachable surface.
  *
- * `node:http` only — no framework — so `@loom/core` stays zero-dependency and the
+ * `node:http` only — no framework — so `@caohaotiantian/loom` stays zero-dependency and the
  * single binary keeps working.
  *
  * Two contracts matter more than the routes:
@@ -343,7 +343,7 @@ export interface AuthContext {
 /**
  * The seam a deployment plugs OIDC, mTLS or an internal SSO into.
  *
- * Injected for the same reason `DeliveryChannel` is: `@loom/core` must not learn any
+ * Injected for the same reason `DeliveryChannel` is: `@caohaotiantian/loom` must not learn any
  * vendor's API to stay zero-dependency, and identity is the most vendor-shaped thing in
  * a deployment. Everything the core needs is a subject and whether it belongs to a
  * person.

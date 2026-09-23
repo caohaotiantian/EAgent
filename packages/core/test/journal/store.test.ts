@@ -494,7 +494,7 @@ test("EVENT_TYPES matches the EventPayloads key set", () => {
  * The limit `canonicalize` enforces, mirrored here as a literal.
  *
  * It is deliberately NOT imported: `scripts/check-surface.mjs` pins the exported NAME
- * SET of `@loom/core`, `index.ts` re-exports all of `canonical.ts`, and adding a public
+ * SET of `@caohaotiantian/loom`, `index.ts` re-exports all of `canonical.ts`, and adding a public
  * export is a reviewed act that re-pins `surface.json`. So the constant stays private and
  * this literal is the coupling. If it ever disagrees with `canonical.ts`, these tests fail
  * — which is the intent.

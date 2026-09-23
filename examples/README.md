@@ -257,7 +257,7 @@ token; at 4,096 it never reached content and every review came back empty (`TODO
 ## 7 · An extension module — a wire the binary does not speak
 
 `extensions/bedrock-converse.mjs` answers "my provider is not on the OpenAI wire". It imports
-nothing from `@loom/core`: `loom` hands its default export a registrar —
+nothing from `@caohaotiantian/loom`: `loom` hands its default export a registrar —
 `{models, tools, channels, identity, functions, hooks, resolver, store, payloads, jail}` — before
 any configuration is read. `packages/core/test/cli/extension-module.test.ts` drives it.
 

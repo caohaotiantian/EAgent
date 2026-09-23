@@ -785,7 +785,7 @@ test("parseArgs understands `--name=value`, because not understanding it opened 
 // `bin/loom` used to construct a `ControlPlane` with no dispatcher, so neither the inbound
 // callback route nor its bearer carve-out existed in the binary, and nothing in the CLI
 // built a channel or held a signing secret. The feature was reachable by embedding
-// `@loom/core` and not by running the thing we ship — which is the shape of defect a test
+// `@caohaotiantian/loom` and not by running the thing we ship — which is the shape of defect a test
 // per hop cannot see, because every hop had one and the joins had none.
 
 const CHANNEL_SECRET = "shhh-approvals-service";

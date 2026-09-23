@@ -3,13 +3,13 @@
  * Build `bin/loom` — one file, no Node installation required to run it.
  *
  * This is what turns "zero runtime dependencies" from a discipline into a deliverable.
- * The bundle is `dist/cli.js` plus nothing: because `@loom/core` imports only
+ * The bundle is `dist/cli.js` plus nothing: because `@caohaotiantian/loom` imports only
  * `node:` builtins, esbuild has no third-party code to pull in, and the SEA blob is
  * the application and the runtime and nothing else.
  *
  * esbuild and postject are BUILD-only dependencies. They never appear in
  * `packages/core/package.json`, which is what `check-zero-dep.mjs` enforces — so a
- * library consumer of `@loom/core` downloads neither.
+ * library consumer of `@caohaotiantian/loom` downloads neither.
  *
  * The build also stamps the binary with a digest of the sources it compiled, so the
  * thing it produces knows when it has gone stale — see `binary-freshness.cjs` for why

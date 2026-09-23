@@ -22,7 +22,7 @@
  * was deleted from this tree on 2026-08-25, so the path resolves only at the tag) — the bounded line
  * reader below is its design, unchanged, because it gets the one property that matters right.
  *
- * A FORK RATHER THAN AN IMPORT, and it stays one. `@loom/core` has zero runtime dependencies
+ * A FORK RATHER THAN AN IMPORT, and it stays one. `@caohaotiantian/loom` has zero runtime dependencies
  * and may not import a sibling package (invariant 1), and `build:binary` bundles core's entry
  * alone — so an import here would put the capability outside the single binary that IS the
  * deployment. The original is now in this repo, so the two can be diffed rather than trusted.

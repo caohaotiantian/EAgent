@@ -1,7 +1,7 @@
 /**
  * The durable StateStore, on Node's built-in SQLite.
  *
- * `node:sqlite` is a builtin, which is the whole reason `@loom/core` can have a real
+ * `node:sqlite` is a builtin, which is the whole reason `@caohaotiantian/loom` can have a real
  * SQL durable store and still declare zero runtime dependencies — and therefore why
  * the single-binary deployment is possible at all (D12.1).
  *

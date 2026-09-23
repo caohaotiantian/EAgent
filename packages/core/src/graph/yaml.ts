@@ -9,7 +9,7 @@
  * ## Why a subset, and why write one at all
  *
  * The design's open thread T1 asked: take a YAML dependency, or write a subset parser?
- * `@loom/core` has zero runtime dependencies, which is checked in CI and demonstrated by
+ * `@caohaotiantian/loom` has zero runtime dependencies, which is checked in CI and demonstrated by
  * a single binary that boots from an empty directory. Spending that on authoring sugar
  * would be a poor trade.
  *

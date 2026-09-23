@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Guard: the public surface of @loom/core is pinned.
+ * Guard: the public surface of @caohaotiantian/loom is pinned.
  *
  * EAgent pinned a kernel LINE COUNT, which taxed correct primitives as much as
  * incidental ones — the ceiling had to be raised four times. Loom pins the exported
@@ -83,7 +83,7 @@ if (added.length === 0 && removed.length === 0) {
   process.exit(0);
 }
 
-console.error("surface guard FAILED — the public contract of @loom/core changed.");
+console.error("surface guard FAILED — the public contract of @caohaotiantian/loom changed.");
 if (added.length) console.error("  added:   " + added.join(", "));
 if (removed.length) console.error("  removed: " + removed.join(", ") + "  (REMOVAL IS BREAKING)");
 console.error(`\nIf intentional: node scripts/check-surface.mjs --write, and commit ${PIN}.`);

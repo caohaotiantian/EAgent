@@ -2,7 +2,7 @@
  * Shared HTTP + SSE plumbing for model adapters.
  *
  * No SDK. Providers talk to their APIs with the global `fetch` and a hand-rolled SSE
- * reader, which is what keeps `@loom/core` at zero runtime dependencies — and
+ * reader, which is what keeps `@caohaotiantian/loom` at zero runtime dependencies — and
  * therefore what keeps the single-binary deployment possible.
  *
  * The valuable part is not the transport; it is `normalizeError`. Every adapter maps
@@ -70,7 +70,7 @@ export interface HttpOptions {
    * Bounded retries for transient failures BEFORE the first byte. **Default 1 — no retry.**
    *
    * IT IS THE CALLER WHO SHOULD OWN THE CURVE, because the caller is the only party that can
-   * make its retries visible. Under `@loom/core`'s engine every provider-calling node already
+   * make its retries visible. Under `@caohaotiantian/loom`'s engine every provider-calling node already
    * carries `DEFAULT_PROVIDER_RETRY`, and a second curve here does not add resilience — it
    * MULTIPLIES, 3 x 3 requests per model turn, with two thirds of them appearing in no journal.
    * See this file's header for the measurement.
@@ -422,7 +422,7 @@ function redactForeign(text: string, limit: number): string {
  *
  * WHAT IS NOT BOUNDED HERE: `details`. `redact` walks it with its own depth and cycle limits
  * but sweeps each string leaf whole, so the `MAX_SWEEP` argument does not reach them. Inside
- * `@loom/core` every `details` on this path is built from an already-bounded `detail` or from
+ * `@caohaotiantian/loom` every `details` on this path is built from an already-bounded `detail` or from
  * counters; an INJECTED adapter can hand over an arbitrary one, and that is an embedder
  * spending its own process on its own value. `message` — the field a provider actually writes
  * through `anthropic.ts`'s error frame — is bounded.
@@ -597,7 +597,7 @@ async function hold(ms: number, signal: AbortSignal, sleep: (ms: number) => Prom
  * and `retryAfterMs` is the PROVIDER'S (clamped per attempt — see `retryDelay`).
  *
  * **A RATE LIMIT IS THE ONE FAILURE THIS LOOP DOES NOT WAIT OUT.** Everything here is paid
- * inside the CALLER'S unit of concurrency — for `@loom/core` that is an engine worker slot —
+ * inside the CALLER'S unit of concurrency — for `@caohaotiantian/loom` that is an engine worker slot —
  * and the caller is the only layer that knows the slot exists. Measured before the change,
  * one leased Task against a provider answering `429, Retry-After: 30`:
  *
