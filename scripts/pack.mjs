@@ -75,6 +75,24 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/**
+ * `process.env`, WITH `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` REMOVED — TODO.md §A.91, the
+ * reviewer's third fix round (N2). Every `git` call below names its repository by `cwd`
+ * (`repoRoot`, or a caller's own directory), and any of these three variables in the calling
+ * process's environment overrides that: `git` prefers them over `cwd`, so a wrapper that sets one
+ * — a hook, a nested checkout, another tool's `git -C` shim — silently redirects every git call in
+ * this script (and `archiveHeadInto`, which a test also calls directly against a throwaway repo)
+ * to a DIFFERENT repository than the one `cwd` names. `{ ...process.env }` inherited them by
+ * default; this is what every `execFileSync("git", ...)` call passes instead.
+ */
+function gitEnv() {
+  const env = { ...process.env };
+  delete env["GIT_DIR"];
+  delete env["GIT_WORK_TREE"];
+  delete env["GIT_INDEX_FILE"];
+  return env;
+}
+
 function fail(message) {
   console.error(`pack FAILED: ${message}`);
   process.exitCode = 1;
@@ -141,7 +159,7 @@ export function namesASourceMap(text) {
  * @param {string} destDir - an existing, empty directory to extract into.
  */
 export function archiveHeadInto(repoRoot, headSha, destDir) {
-  const archive = execFileSync("git", ["archive", headSha], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 1024 });
+  const archive = execFileSync("git", ["archive", headSha], { cwd: repoRoot, maxBuffer: 1024 * 1024 * 1024, env: gitEnv() });
   execFileSync("tar", ["-x", "-C", destDir], { input: archive });
 }
 
@@ -172,7 +190,7 @@ function runPack(argv) {
     // `stdio: ["ignore","pipe","pipe"]`, so a failure's stderr reaches THIS message once — the
     // default inherits stdio, which printed git's own "fatal: not a git repository" a second
     // time, ahead of and separate from this script's own diagnosis of the same fact.
-    const gitStdio = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] };
+    const gitStdio = { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: gitEnv() };
     headSha = execFileSync("git", ["rev-parse", "HEAD"], gitStdio).trim();
     // DETACHED READS "HEAD" FROM THIS COMMAND, so it is renamed for the operator: "HEAD" printed
     // next to a sha that is ALSO what `rev-parse HEAD` names is confusing in a way "detached"
@@ -237,7 +255,7 @@ function runPack(argv) {
     // `repoRoot` where `.git` actually lives, is the one query that names what was tracked AT
     // THAT COMMIT regardless of what the working tree looks like right now.
     const tracked = new Set(
-      execFileSync("git", ["ls-tree", "-r", "--name-only", headSha, "--", "packages/core/src"], { cwd: repoRoot, encoding: "utf8" })
+      execFileSync("git", ["ls-tree", "-r", "--name-only", headSha, "--", "packages/core/src"], { cwd: repoRoot, encoding: "utf8", env: gitEnv() })
         .split("\n")
         .filter((l) => l.length > 0),
     );
