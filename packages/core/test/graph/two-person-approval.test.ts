@@ -498,7 +498,7 @@ test("VETO · a created file CHANGED before the late reject is NOT removed — t
   const r = await driveReal(ws.root, LATE[0]!, () => writeFileSync(ws.file, "a person's edit"));
   assert.equal(r.status, "failed");
   assert.deepEqual(r.compensations.map((c) => c.outcome), ["failed"], JSON.stringify(r.compensations));
-  assert.match(String(r.compensations[0]!.reason), /bytes changed since this run created it/);
+  assert.match(String(r.compensations[0]!.reason), /not the file the write created, or it has been written/);
   assert.equal(readFileSync(ws.file, "utf8"), "a person's edit", "the file is untouched");
 });
 

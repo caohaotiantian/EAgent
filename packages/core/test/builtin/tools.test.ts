@@ -9,7 +9,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -806,7 +807,7 @@ test("§A.99 — fs.restore REFUSES to remove a created file whose bytes changed
     writeFileSync(join(s.root, "new.txt"), "somebody else's bytes");
     const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
     assert.equal(r.isError, true);
-    assert.match(r.content, /bytes changed since this run created it/);
+    assert.match(r.content, /written, renamed, linked or re-permissioned since/);
     assert.equal(readFileSync(join(s.root, "new.txt"), "utf8"), "somebody else's bytes");
   } finally {
     s.cleanup();
@@ -928,6 +929,210 @@ test("§A.83 — proc.exec past its output cap: no marker appended, and details.
     assert.equal((r.details as { truncated: boolean }).truncated, true);
     assert.doesNotMatch(r.content, /truncated/, "the output ends in the program's bytes, not in a marker");
     assert.match(r.content, /^exit=0\ny+$/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.99 review: the undo removes THE FILE the write made, identified, never a name ─────────
+
+/** One create through the real `fs.write`, and its recorded details — the undo's only input. */
+async function created(root: string, path = "a.txt", body = "B"): Promise<Record<string, unknown>> {
+  return (await byName(builtinTools({ root, deny: [] }), "fs.write").execute({ path, body }, ctx())).details as Record<string, unknown>;
+}
+
+test("§A.99 — a SYMLINK planted at the created path is refused, and its target survives (in the jail or out)", async () => {
+  const s = sandbox();
+  const outside = mkdtempSync(join(tmpdir(), "loom-tools-out-"));
+  try {
+    for (const target of [join(s.root, "victim.txt"), join(outside, "victim.txt")]) {
+      const d = await created(s.root);
+      writeFileSync(target, "B");
+      rmSync(join(s.root, "a.txt"));
+      symlinkSync(target, join(s.root, "a.txt"));
+      const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+      assert.equal(r.isError, true, r.content);
+      assert.equal(readFileSync(target, "utf8"), "B", `the link's target must survive: ${target}`);
+      assert.equal(lstatSync(join(s.root, "a.txt")).isSymbolicLink(), true, "and the link is left as it is");
+      rmSync(join(s.root, "a.txt"));
+    }
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a PARENT DIRECTORY swapped for a symlink is refused, and the file it now reaches survives", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root, "d/x.txt");
+    mkdirSync(join(s.root, "e"));
+    writeFileSync(join(s.root, "e", "x.txt"), "B");
+    renameSync(join(s.root, "d"), join(s.root, "d-moved"));
+    symlinkSync(join(s.root, "e"), join(s.root, "d"));
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /no longer a real directory/);
+    assert.equal(readFileSync(join(s.root, "e", "x.txt"), "utf8"), "B");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a SECOND write of the same bytes over the created file is not the created file: its undo refuses", async () => {
+  // Run 2 overwrites run 1's file with identical bytes: same inode, same digest. Only the change
+  // time tells them apart, so the overwrite waits 20 ms first — past the timestamp granularity of
+  // any filesystem this runs on (Linux stamps inodes from a coarse clock, a few ms). No ratio.
+  const s = sandbox();
+  try {
+    const run1 = await created(s.root, "shared.txt", "v1");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    const run2 = await created(s.root, "shared.txt", "v1");
+    assert.equal(run2["created"], false, "run 2 found the file and did not create it");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(run1, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "v1", "run 2's file stands");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a HARD LINK to the created file changes its identity, and the undo refuses", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root);
+    linkSync(join(s.root, "a.txt"), join(s.root, "hl.txt"));
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(existsSync(join(s.root, "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — the digest is checked too: the true identity with other bytes' digest refuses", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root);
+    const r = await fsRestore({ root: s.root, deny: [] }).execute({ ...d, wrote: `sha256:${"0".repeat(64)}` }, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /bytes changed/);
+    assert.equal(existsSync(join(s.root, "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a FORGED record naming any file by path and digest deletes nothing, and says no creation", async () => {
+  // A graph `tool` node may call `fs.restore` directly; the identity is what refuses it.
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "precious.txt"), "operator data");
+    const digest = `sha256:${createHash("sha256").update("operator data").digest("hex")}`;
+    for (const args of [
+      { path: "precious.txt", created: true, wrote: digest },
+      { path: "precious.txt", created: true, wrote: digest, at: join(realpathSync(s.root), "precious.txt") },
+      { path: "precious.txt", created: true, wrote: digest, at: join(realpathSync(s.root), "precious.txt"), identity: { dev: "1", ino: "2", ctimeNs: "3" } },
+    ]) {
+      const r = await fsRestore({ root: s.root, deny: [] }).execute(args, ctx());
+      assert.equal(r.isError, true, r.content);
+      assert.doesNotMatch(r.content, /removed/);
+      assert.equal(readFileSync(join(s.root, "precious.txt"), "utf8"), "operator data");
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a record from ANOTHER workspace root is refused — never read as 'already absent'", async () => {
+  const s = sandbox();
+  const other = mkdtempSync(join(tmpdir(), "loom-tools-other-"));
+  try {
+    const d = await created(s.root);
+    const r = await fsRestore({ root: other, deny: [] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /not under this workspace's root/);
+    assert.equal(existsSync(join(s.root, "a.txt")), true, "the created file still stands, and nothing claimed otherwise");
+  } finally {
+    rmSync(other, { recursive: true, force: true });
+    s.cleanup();
+  }
+});
+
+test("§A.99 — 'already absent' ONLY for a plain absence of the recorded path; an unreadable parent refuses", { skip: process.getuid?.() === 0 }, async () => {
+  const s = sandbox();
+  try {
+    // The leaf gone, and a directory above it gone: both are the state the undo wants.
+    const leaf = await created(s.root, "d1/a.txt");
+    rmSync(join(s.root, "d1", "a.txt"));
+    const r1 = await fsRestore({ root: s.root, deny: [] }).execute(leaf, ctx());
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.match(r1.content, /already absent/);
+    const dir = await created(s.root, "d2/a.txt");
+    rmSync(join(s.root, "d2"), { recursive: true });
+    assert.match((await fsRestore({ root: s.root, deny: [] }).execute(dir, ctx())).content, /already absent/);
+    // An absence the undo cannot SEE is not one: a parent it may not search is a refusal.
+    const hidden = await created(s.root, "d3/a.txt");
+    chmodSync(join(s.root, "d3"), 0o000);
+    let r3;
+    try {
+      r3 = await fsRestore({ root: s.root, deny: [] }).execute(hidden, ctx());
+    } finally {
+      chmodSync(join(s.root, "d3"), 0o755);
+    }
+    assert.equal(r3.isError, true, r3.content);
+    assert.doesNotMatch(r3.content, /already absent/);
+    assert.equal(existsSync(join(s.root, "d3", "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a created file inside a subtree THIS jail denies is refused, even with its true record", async () => {
+  const s = sandbox();
+  try {
+    const d = await created(s.root, "later-denied/a.txt");
+    const r = await fsRestore({ root: s.root, deny: ["later-denied"] }).execute(d, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.match(r.content, /denied subtree/);
+    assert.equal(existsSync(join(s.root, "later-denied", "a.txt")), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a record claiming BOTH a create and a previous content is refused, and nothing is written", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "p.txt"), "cur");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute({ path: "p.txt", previous: "X", created: true }, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(readFileSync(join(s.root, "p.txt"), "utf8"), "cur");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.edit's FIRST write in a branch creates the branch copy, is recorded as a create, and its undo removes only that copy", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "shared.txt"), "hello world");
+    const edit = byName(builtinTools({ root: s.root, deny: [] }), "fs.edit");
+    const branch = ctxOf("e@root/fo[0]#0");
+    const d = (await edit.execute({ path: "shared.txt", find: "world", replace: "branch" }, branch)).details as Record<string, unknown>;
+    assert.equal(d["created"], true, JSON.stringify(d));
+    assert.equal("previous" in d, false);
+    const copy = String(d["at"]);
+    assert.equal(readFileSync(copy, "utf8"), "hello branch");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(d, branch);
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(copy), false, "the branch copy is gone");
+    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "hello world", "the shared file is untouched");
+    // And a SECOND edit in a branch that already has its copy is an overwrite, not a create.
+    await edit.execute({ path: "shared.txt", find: "world", replace: "one" }, branch);
+    const again = (await edit.execute({ path: "shared.txt", find: "one", replace: "two" }, branch)).details as Record<string, unknown>;
+    assert.equal(again["created"], false);
+    assert.equal(again["previous"], "hello one");
   } finally {
     s.cleanup();
   }

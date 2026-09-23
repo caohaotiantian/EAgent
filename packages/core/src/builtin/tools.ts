@@ -26,9 +26,9 @@
  * on the same file. See `branchRoot`.
  */
 
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { Script, createContext } from "node:vm";
 
 import { CODES, err, isLoomError } from "../errors.ts";
@@ -260,49 +260,80 @@ function bytesDigest(bytes: Buffer): string {
 }
 
 /**
- * WHAT STOOD AT A WRITE'S PATH BEFORE THE WRITE — the undo record, and now for a CREATE as well.
+ * WHO THE CREATED FILE IS — recorded at write time, checked before `fs.restore` removes anything.
  *
- * `fs.restore` builds its arguments from the write's recorded `details` (`detailsOf` in
- * `run/engine.ts`), so whatever it will need has to be decided and journaled HERE, at write time.
- * A check at restore time — "is the file there now?" — would answer a different question after a
- * restart, and on replay would answer nothing. Three outcomes, each recorded:
+ * A relative path re-resolved at restore time plus a digest of the bytes did NOT identify the file
+ * (review of §A.99): a symlink planted at the path, or a parent directory swapped for one, made
+ * the undo delete whatever the link pointed at if its bytes matched; a second run writing the same
+ * bytes over the first run's file made the first run's rollback delete the second's; and a caller
+ * passing `{created: true, wrote: <digest of any file>}` deleted any file in the jail.
  *
- *  - the path held a regular file: `previous` is its content, and the undo rewrites it;
- *  - nothing was there (`ENOENT`, and ONLY that): `created: true`, and the undo removes the file
- *    — see `fs.restore` for the refusal that keeps it from removing bytes the run did not write;
- *  - anything else (unreadable, a FIFO, a directory): neither, and the undo refuses, as it always
- *    did. Something is at the path and this run cannot say what, so nothing may be deleted.
+ * So the write records the file ITSELF: the device and inode the create produced, and its change
+ * time after the bytes landed (`ctimeNs` moves on every later write, `chmod`, rename and link to
+ * it, which is what makes the second run's same-bytes overwrite visible — the inode alone does not
+ * change on a truncating write). Strings, because a journal holds JSON and these are 64-bit.
  */
-function priorAt(path: string): { readonly previous?: string; readonly created: boolean } {
+interface FileIdentity {
+  readonly dev: string;
+  readonly ino: string;
+  readonly ctimeNs: string;
+}
+
+function identityOf(st: { readonly dev: bigint; readonly ino: bigint; readonly ctimeNs: bigint }): FileIdentity {
+  return { dev: String(st.dev), ino: String(st.ino), ctimeNs: String(st.ctimeNs) };
+}
+
+function isIdentity(v: unknown): v is FileIdentity {
+  if (v === null || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return ["dev", "ino", "ctimeNs"].every((k) => typeof o[k] === "string" && /^\d{1,40}$/.test(o[k] as string));
+}
+
+/** What an existing path held before an overwrite — `previous` only when it was a readable regular file. */
+function priorAt(path: string): { readonly previous?: string; readonly created: false } {
   try {
     return { previous: readRegularLeaf(path), created: false };
-  } catch (e) {
-    return { created: (e as NodeJS.ErrnoException | undefined)?.code === "ENOENT" };
+  } catch {
+    return { created: false };
   }
 }
 
 /**
  * Write the body, and hand back the `details` fields that let `fs.restore` undo it.
  *
- * A CREATE IS WRITTEN WITH `O_EXCL`, so `created: true` is a fact about the write and not about a
- * look taken a moment before it: if something appeared at the path in between, the open fails
- * with `EEXIST` and the tool throws — nothing was written, so there is nothing to undo, and the
- * record never claims a create that overwrote somebody's file.
+ * `fs.restore` builds its arguments from the write's recorded `details` (`detailsOf` in
+ * `run/engine.ts`), so whatever it will need is decided and journaled HERE, at write time — a
+ * look at the disk at restore time would answer a different question after a restart, and on
+ * replay would answer nothing.
+ *
+ * THE CREATE IS THE OPEN, NOT A LOOK BEFORE IT. The first open is `O_CREAT | O_EXCL`: if it
+ * succeeds this call made the file, and the record says `created: true` with the file's identity
+ * and a digest of the bytes; if it fails `EEXIST`, something was already there and this is an
+ * overwrite — `previous` is what it held when it was a readable regular file, and nothing at all
+ * otherwise, so its undo refuses. No window lies between deciding "created" and creating.
  */
-function writeWithUndo(path: string, body: string): { readonly previous?: string; readonly created: boolean; readonly wrote?: string } {
-  const prior = priorAt(path);
-  if (!prior.created) {
+function writeWithUndo(
+  path: string,
+  body: string,
+): { readonly previous?: string; readonly created: boolean; readonly wrote?: string; readonly identity?: FileIdentity } {
+  const bytes = Buffer.from(body, "utf8");
+  let fd: number;
+  try {
+    fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") throw e;
+    const prior = priorAt(path);
     writeLeaf(path, body);
     return prior;
   }
-  const bytes = Buffer.from(body, "utf8");
-  const fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL);
+  let identity: FileIdentity;
   try {
     writeFileSync(fd, bytes);
+    identity = identityOf(fstatSync(fd, { bigint: true }));
   } finally {
     closeSync(fd);
   }
-  return { created: true, wrote: bytesDigest(bytes) };
+  return { created: true, wrote: bytesDigest(bytes), identity };
 }
 
 /** Create-or-truncate and write, through a descriptor the OS opened without following. */
@@ -1370,62 +1401,123 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
         previous: { type: "string" },
         created: { type: "boolean" },
         wrote: { type: "string" },
+        at: { type: "string" },
+        identity: { type: "object" },
       },
       required: ["path"],
     },
     execute: (args, ctx) => {
       const rel = String(args["path"]);
-      const path = writePath(opts, ctx, rel);
       const previous = args["previous"];
+      // BOTH IS NEITHER. `fs.write` records one or the other; a record claiming a create AND a
+      // prior content cannot be told apart from a forged one, so it is not acted on.
+      if (typeof previous === "string" && args["created"] === true) {
+        return { content: `refusing to restore ${rel}: the record says both that the write created it and what it held before`, isError: true };
+      }
       if (typeof previous === "string") {
-        writeLeaf(path, previous);
+        writeLeaf(writePath(opts, ctx, rel), previous);
         return { content: `restored ${rel}` };
       }
-      if (args["created"] === true && typeof args["wrote"] === "string") return removeCreated(path, rel, args["wrote"]);
+      if (args["created"] === true) return removeCreated(opts, args, rel);
       return { content: `no previous content recorded for ${rel}`, isError: true };
     },
   };
 }
 
 /**
- * UNDO A CREATE BY REMOVING THE FILE — and only the file this run wrote (`TODO.md` §A.99).
+ * UNDO A CREATE BY REMOVING THE FILE — and only the file the recorded write made (`TODO.md` §A.99).
  *
  * Before this, `fs.restore` could not undo a create at all: a late veto on
  * `two-person-veto.json` in a fresh workspace failed the run, left the approved file standing, and
  * journaled `compensation.recorded{outcome: "failed"}` — "no previous content recorded".
  *
- * EVERY ARGUMENT COMES FROM THE JOURNAL. `created` and `wrote` are what `fs.write` recorded at
- * write time (`writeWithUndo`), so the decision holds across a restart and a replay serves it
- * from the record. Neither is inferred here: a record without `created: true` and a digest is
- * refused above, the fail-closed reading of an old journal or an ambiguous one.
+ * EVERY ARGUMENT COMES FROM THE JOURNAL: `at` (the absolute path the write landed on), `identity`
+ * (device, inode, change time — `FileIdentity`) and `wrote` (a digest of the bytes), all recorded by
+ * `writeWithUndo`. Nothing is re-resolved from the relative `path`. The removal happens only when
+ * ALL of these hold, and every other outcome REFUSES and leaves the disk as it is:
  *
- * REFUSED WHEN THE BYTES DIFFER. Something may have written the path since — a later node, a
- * person, another run sharing the workspace — and removing it would delete bytes this run did not
- * produce. So the file's CURRENT bytes are digested and must equal what the write recorded;
- * otherwise the undo fails, the file is left exactly as it is, and the compensation row says why.
- * A file that is already gone is the state the undo wants, and says so. (The digest check and the
- * removal are two operations; a write landing between them is not detected, which is the same
- * window `fs.write`'s own capture has.)
+ *  - `at` lies under THIS jail's root, outside every denied subtree. A record from another
+ *    workspace is not this one's to judge — and must not be read as "already absent";
+ *  - every directory between the root and the leaf is a real directory, not a symlink, checked
+ *    with `lstat`, so a parent swapped for a link cannot redirect the removal;
+ *  - the leaf, read with `lstat` (never followed), has the recorded device, inode AND change time
+ *    — which a symlink, FIFO or directory put there cannot have — and its bytes digest to `wrote`;
+ *  - and the removal is by that same absolute name.
  *
- * WHAT THIS REMOVES IS INSIDE THE JAIL, never the journal: `path` came through `writePath`, so it
- * passed `assertWithin` against the deny-list that holds the data directory.
+ * "ALREADY ABSENT" is the state the undo wants, and it is answered `compensated` ONLY when the
+ * recorded path itself is missing under this same root (the leaf, or a directory above it). Any
+ * error that is not a plain absence is a refusal.
+ *
+ * A CALLER WHO FORGES A RECORD must name a real file's device, inode and nanosecond change time as
+ * well as its digest; without all four this refuses. That is what stands between a graph `tool`
+ * node calling `fs.restore` directly and an arbitrary delete — the registry has no way to mark a
+ * tool compensation-only. Residue: the checks and the removal are separate system calls, so a
+ * swap landing between them is not detected; and a caller that can already `stat` the workspace can
+ * supply a true identity (it holds `fs:write`, which could empty the same file anyway).
  */
-function removeCreated(path: string, rel: string, wrote: string): ToolResult {
+function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel: string): ToolResult {
+  const refuse = (why: string): ToolResult => ({ content: `refusing to remove ${rel}: ${why}`, isError: true });
+  const at = args["at"];
+  const identity = args["identity"];
+  const wrote = args["wrote"];
+  if (typeof at !== "string" || !isAbsolute(at) || !isIdentity(identity) || typeof wrote !== "string") {
+    return refuse("the record does not say which file the write created (absolute path, device, inode, change time and digest are all required)");
+  }
+  let root: string;
+  try {
+    root = realpathSync(opts.root);
+  } catch (e) {
+    return refuse(`the workspace root cannot be resolved (${(e as Error).message})`);
+  }
+  const inside = relative(root, at);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    return refuse(`it was written at ${at}, which is not under this workspace's root ${root}`);
+  }
+  for (const d of resolvedDeny(opts)) {
+    let denied = d;
+    try {
+      denied = realpathSync(d);
+    } catch {
+      // A denied subtree that does not exist is compared by its lexical name.
+    }
+    const under = relative(denied, at);
+    if (under === "" || (!under.startsWith("..") && !isAbsolute(under))) return refuse(`${at} is inside the denied subtree ${denied}`);
+  }
+  const absent: ToolResult = { content: `${rel} is already absent; the file the write created no longer stands` };
+  let dir = root;
+  for (const part of inside.split(sep).slice(0, -1)) {
+    dir = join(dir, part);
+    let st;
+    try {
+      st = lstatSync(dir, { throwIfNoEntry: false });
+    } catch (e) {
+      return refuse(`cannot inspect ${dir} (${(e as Error).message})`);
+    }
+    if (st === undefined) return absent;
+    if (st.isSymbolicLink() || !st.isDirectory()) return refuse(`${dir} is no longer a real directory`);
+  }
+  let leaf;
+  try {
+    leaf = lstatSync(at, { bigint: true, throwIfNoEntry: false });
+  } catch (e) {
+    return refuse(`cannot inspect it (${(e as Error).message})`);
+  }
+  if (leaf === undefined) return absent;
+  // A symlink, a directory or a special file at the path has its own inode, so the identity check
+  // below is also the "is it still a regular file" check — `lstat` never follows the leaf.
+  const now = identityOf(leaf);
+  if (now.dev !== identity.dev || now.ino !== identity.ino || now.ctimeNs !== identity.ctimeNs) {
+    return refuse("it is not the file the write created, or it has been written, renamed, linked or re-permissioned since");
+  }
   let current: Buffer;
   try {
-    current = readRegularBytes(path);
+    current = readRegularBytes(at);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-      return { content: `${rel} is already absent; the file this run created no longer stands` };
-    }
-    return { content: `refusing to remove ${rel}: cannot read it to check it is the file this run created (${(e as Error).message})`, isError: true };
+    return refuse(`cannot read it to check its bytes (${(e as Error).message})`);
   }
   if (bytesDigest(current) !== wrote) {
-    return {
-      content: `refusing to remove ${rel}: its bytes changed since this run created it, and removing it would delete content this run did not write`,
-      isError: true,
-    };
+    return refuse("its bytes changed since the write created it, and removing it would delete content the write did not produce");
   }
-  rmSync(path);
-  return { content: `removed ${rel}, which this run created` };
+  rmSync(at);
+  return { content: `removed ${rel}: the file the recorded write created (same device, inode, change time and bytes)` };
 }
