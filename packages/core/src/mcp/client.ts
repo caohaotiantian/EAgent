@@ -76,6 +76,20 @@ export interface McpClientOptions {
  * it. `Buffer` is a `Uint8Array` (Node's own extension of it), so every real caller — `child.stdout`
  * always emits actual `Buffer`s — satisfies this signature unchanged; only the DECLARED type moved
  * to the one both runtimes and this package's zero-dependency rule already agree on.
+ *
+ * `push` ALWAYS COPIES `chunk` — TODO.md §A.91 M4, a reviewer's fix on the first draft of the
+ * `Uint8Array` change above. That draft wrapped `chunk` as a VIEW (`Buffer.from(buffer, offset,
+ * length)`, no copy) on the reasoning that every real caller's `Buffer` is safe to alias — true
+ * WITHIN one call, false across two. A no-newline chunk is retained in `residual` past this
+ * function's return, and `push` is now PUBLIC API: a caller that reuses one buffer across reads
+ * (an ordinary way to avoid allocating one per chunk) overwrites what `residual` was still
+ * aliasing before the next `push` ever runs — reproduced with two pushes of a REUSED
+ * `Buffer.from("A")`/`.set()`-overwritten-to-"Z" pair with no newline in either: the line, once a
+ * newline finally arrives, reads the SECOND chunk's bytes twice rather than the first chunk's
+ * bytes followed by the second's. `Buffer.from(chunk)` (a `Uint8Array` argument, not the tuple
+ * form) always copies; this is a bounded, per-chunk allocation the aliasing was buying against
+ * a correctness bug in retained state, and MCP frames are not the gigabyte case this reader's
+ * OWN cap exists for.
  */
 export function createBoundedLineReader(
   cap: number,
@@ -85,9 +99,7 @@ export function createBoundedLineReader(
   let discarding = false;
   return {
     push(chunk: Uint8Array): void {
-      // A view, not a copy, when `chunk` is already the `Buffer` every real caller passes —
-      // `Buffer.from(buffer, offset, length)` wraps the same bytes rather than cloning them.
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      const bytes = Buffer.from(chunk);
       residual = residual.length === 0 ? bytes : Buffer.concat([residual, bytes]);
       for (;;) {
         const nl = residual.indexOf(0x0a);

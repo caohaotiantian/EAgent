@@ -45,13 +45,25 @@ import { agent } from "@caohaotiantian/loom";
 ```
 
 The shipped `.d.ts` needs no `@types/node` — `Buffer`/`NodeJS.*` in a public signature would have
-forced every consumer to install it, so none remain. One TypeScript LIBRARY requirement does
-remain, and only surfaces if your own `tsconfig.json` sets an explicit `"target"`/`"lib"` older
-than the default `nodenext` infers (`esnext`): `bus.ts`'s `Subscription` uses `Disposable` (the
-TC39 explicit-resource-management interface, `using`/`Symbol.dispose`), which needs the
-`ESNext.Disposable` lib. `moduleResolution: "nodenext"` with no `"target"` set already gets it for
-free; a project pinning `"target": "es2022"` (or older) needs it added explicitly, alongside
-whatever else the target implies — it is additive, not a replacement for `"lib"`:
+forced every consumer to install it, so none remain. TWO TypeScript LIBRARY requirements remain,
+and both surface only if your own `tsconfig.json` sets an explicit `"target"`/`"lib"` older than —
+or an explicit `"lib"` array narrower than — what the default `nodenext` infers (`esnext`):
+
+- **`DOM`**, for `AbortSignal`/`RequestInit`/`Response`/`Headers` — used in public signatures
+  across `telemetry/otlp.ts`, `mcp/client.ts` and the provider adapters, wherever this package
+  hands you a `fetch`-shaped call. TypeScript includes `DOM` in the AUTOMATIC per-target default
+  (`"target": "es2022"` alone already has it, no `"lib"` needed) — it is lost only if your project
+  sets `"lib"` EXPLICITLY, since that replaces the default rather than adding to it.
+- **`ESNext.Disposable`**, for `bus.ts`'s `Subscription` (the TC39 explicit-resource-management
+  interface, `using`/`Symbol.dispose`). Unlike `DOM`, no shipped target's automatic default
+  includes this one (measured through `"target": "es2022"` with no `"lib"` override — the ONLY
+  error was `Disposable`), so it needs adding explicitly regardless of whether you set `"lib"` at
+  all.
+
+`moduleResolution: "nodenext"` with no `"target"` set infers `"target": "esnext"`, whose default
+already covers both. A project pinning `"target": "es2022"` (or older) needs only
+`ESNext.Disposable` added; a project that ALSO sets `"lib"` explicitly must list `DOM` again too —
+it is additive, not a replacement for the target's own list:
 
 ```json
 { "compilerOptions": { "target": "es2022", "lib": ["ES2022", "DOM", "DOM.Iterable", "ESNext.Disposable"] } }

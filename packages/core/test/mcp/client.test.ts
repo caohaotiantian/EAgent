@@ -100,6 +100,27 @@ test("the line reader splits ordinary traffic exactly", () => {
   assert.deepEqual(seen, ["a", "bc", "d"]);
 });
 
+/**
+ * `push` MUST COPY A RETAINED, NO-NEWLINE CHUNK — TODO.md §A.91 M4, a reviewer's fix on the first
+ * draft of `push`'s `Uint8Array` signature. That draft aliased `chunk` as a zero-copy VIEW rather
+ * than copying it, reasoning that it is safe because every real caller's `Buffer` is immutable
+ * for the DURATION of one call — true, and irrelevant: a chunk with no newline is retained in
+ * `residual` PAST that call's return, and `push` is public API, so a caller reading into one
+ * reusable buffer across chunks (an ordinary way to avoid allocating a `Buffer` per read) can
+ * overwrite what `residual` is still aliasing before the next `push` ever runs.
+ */
+test("push COPIES a retained no-newline chunk — a caller reusing its buffer must not corrupt it", () => {
+  const seen: string[] = [];
+  const r = createBoundedLineReader(1024, (l) => seen.push(l));
+  const reusable = Buffer.alloc(4);
+  reusable.write("AAAA", "utf8");
+  r.push(reusable); // no newline in it — retained as `residual`, aliased if `push` does not copy
+  // THE REUSE: the exact same backing memory, overwritten before the completing newline arrives.
+  reusable.write("ZZZZ", "utf8");
+  r.push(Buffer.from("\n"));
+  assert.deepEqual(seen, ["AAAA"], "the retained tail must be the bytes AT PUSH TIME — a buggy alias reads back \"ZZZZ\" instead");
+});
+
 // ── the protocol, end to end ─────────────────────────────────────────────────
 
 test("A REAL HANDSHAKE ENUMERATES TOOLS, and drops the entries that are not tools", async () => {
