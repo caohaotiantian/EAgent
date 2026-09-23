@@ -4319,6 +4319,42 @@ function rule008Joins(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): void {
           message: `join "${n.id}" quorum k=${join.k} must be a fraction ≤ 1 or a whole count`,
           at: { nodeId: n.id },
         });
+      } else if (join.k > 1) {
+        // A WHOLE COUNT ABOVE WHAT THE BARRIER CAN EVER HOLD (§A.77, decided Q11: refuse). The
+        // barrier's width is `#joinArrivals`' `expected`: the fan-out PLAN when a member was
+        // fanned out, and otherwise the member Tasks at or under the join's coordinate. When
+        // every member sits at the join's own fan-out stack (none fanned out beneath it) and runs
+        // at most once per branch (`multiRunNodes`), that count is at most the number of distinct
+        // members — so `k` above it can be met by NO input, and the run finds out only at the
+        // barrier, after every arm has run and applied its writes.
+        //
+        // THE UNDECIDABLE SHAPES ARE LEFT ALONE, named: a FANNED member (its width is data, the
+        // plan), a member that can run on more than one pass (each pass is another Task the count
+        // includes), a member whose stack is ambiguous, and an unknown member (refused on its own
+        // above). A member behind a `conditional` edge is NOT one of them: narrowing only makes
+        // the width smaller, so a `k` above the whole list is unmeetable either way, while `k` at
+        // or below it stays the runtime's question (`join-quorum-k-is-a-floor.test.ts`).
+        const joinStack = idx.fanoutEdgeStack.get(n.id);
+        const members = [...new Set(join.branches)];
+        const multi = multiRunNodes(idx);
+        const decidable =
+          joinStack !== undefined &&
+          members.every((m) => {
+            if (!idx.byId.has(m) || multi.has(m)) return false;
+            const s = idx.fanoutEdgeStack.get(m);
+            return s !== undefined && s.length === joinStack.length && s.every((e, i) => joinStack[i] === e);
+          });
+        if (decidable && join.k > members.length) {
+          d.push({
+            severity: "error",
+            code: "GRAPH008_QUORUM_K",
+            message:
+              `join "${n.id}" quorum k=${join.k} exceeds its ${members.length} branch(es), and every one is static and unfanned — ` +
+              `no run can materialise more, so every run would reach this barrier, run all ${members.length}, and be refused there`,
+            at: { nodeId: n.id },
+            fix: `lower k to at most ${members.length} (or use a fraction ≤ 1), or add the missing branches`,
+          });
+        }
       }
     }
 

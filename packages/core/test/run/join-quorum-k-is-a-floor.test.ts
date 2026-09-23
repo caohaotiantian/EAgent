@@ -849,41 +849,24 @@ function staticArmsSpec(k: number): GraphSpec {
   } as unknown as GraphSpec;
 }
 
-test("§A.75 — RESIDUE: a whole-count `k` ABOVE a static branch list compiles CLEAN and is refused only here", async () => {
-  // THE ONE HALF OF THE COMPILE-TIME QUESTION THAT *IS* DECIDABLE, and is not decided. Every member
-  // of this barrier is static, none is behind a `conditional` edge and none is fanned out, so
-  // `branches.length` is the width before anything runs — and `k: 4` over three of them can be met by
-  // NO input. `GRAPH008_QUORUM_K` checks that `k` is positive and that a `k > 1` is a whole number,
-  // and never that it is `<= branches.length`, so the graph compiles with ZERO diagnostics and the
-  // run gets all the way to the barrier before anything objects.
+test("§A.77 — CLOSED: a whole-count `k` ABOVE a static branch list is refused at COMPILE, before any arm runs", async () => {
+  // THIS WAS THE RESIDUE PIN, and it went red when `graph/validate.ts` learned the rule — which is
+  // what it was written to do. Every member of this barrier is static, none is fanned out, so the
+  // width is at most `branches.length` before anything runs and `k: 4` over three can be met by NO
+  // input. It compiled with ZERO diagnostics and the run spent all three arms, writes applied,
+  // before the barrier refused. `GRAPH008_QUORUM_K` now refuses it; the shapes it cannot decide (a
+  // fanned member, a member on a loop) are pinned in `test/graph/quorum-k-above-static-branches.test.ts`.
   //
-  // THIS TEST PINS THE RESIDUE RATHER THAN CLAIMING IT IS FINE. The right refusal is in
-  // `graph/validate.ts` — a fold cannot refuse a graph — and `TODO.md` carries the line. What is
-  // asserted here is (1) that the compiler really does pass it, so the residue cannot quietly stop
-  // existing without this going red, and (2) that the runtime arm catches it, so nothing folds a
-  // quorum that was unreachable from the start.
-  const clean = compile({ spec: staticArmsSpec(4), resolver, tools: {}, tenantCapabilities: [] });
+  // The barrier arm itself is unchanged and still driven — by the `conditional`-narrowed row above,
+  // which is the one shape of this message a compiler cannot see coming.
+  const refused = compile({ spec: staticArmsSpec(4), resolver, tools: {}, tenantCapabilities: [] });
+  assert.equal(refused.ok, false);
   assert.deepEqual(
-    (clean.diagnostics ?? []).map((d) => d.code),
-    [],
-    `RESIDUE: the compiler passes a k no run can meet — if this is now non-empty, graph/validate.ts learned the rule and this test is what says so`,
+    refused.diagnostics.filter((d) => d.severity === "error").map((d) => d.code),
+    ["GRAPH008_QUORUM_K"],
   );
 
-  const four = await runFunctions(staticArmsSpec(4), { items: [{ id: "i" }] }, "J");
-  assert.equal(four.status, "failed", `k: 4 over three static arms — ${JSON.stringify(four)}`);
-  assert.equal(four.joinError, CODES.E_QUORUM_UNREACHABLE);
-  assert.equal(
-    four.joinMessage,
-    'join "J": mode "quorum" declares k 4, which exceeds the 3 branch(es) this barrier materialised — ' +
-      "no outcome can meet it, and 3 of them produced something. Lower `k` or widen the branch set",
-    `named as a width and not as a loss: ${String(four.joinMessage)}`,
-  );
-  // THE COST OF CATCHING IT THIS LATE, asserted: every arm ran, succeeded, and applied its write at
-  // the root coordinate, so a graph that could never have worked spent the whole run first.
-  assert.deepEqual(four.seen, ["a", "b", "c"], `all three arms ran and wrote: ${JSON.stringify(four.seen)}`);
-  assert.equal(four.note, undefined, "and only the node behind the barrier was spared");
-
-  // The control at the width the list actually has: folds.
+  // The control at the width the list actually has: compiles, and folds.
   const three = await runFunctions(staticArmsSpec(3), { items: [{ id: "i" }] }, "J");
   assert.equal(three.status, "succeeded", `k: 3 of three is met — ${JSON.stringify(three)}`);
   assert.deepEqual(three.note, ["done-ran"]);
