@@ -287,25 +287,31 @@ function bytesDigest(bytes: Buffer): string {
  * bytes over the first run's file made the first run's rollback delete the second's; and a caller
  * passing `{created: true, wrote: <digest of any file>}` deleted any file in the jail.
  *
- * So the write records the file ITSELF: the device and inode the create produced, and its change
- * time after the bytes landed (`ctimeNs` moves on every later write, `chmod`, rename and link to
- * it, which is what makes the second run's same-bytes overwrite visible — the inode alone does not
- * change on a truncating write). Strings, because a journal holds JSON and these are 64-bit.
+ * So the write records the file ITSELF: the device and inode the create produced. Strings,
+ * because a journal holds JSON and these are 64-bit.
+ *
+ * NOT ITS CHANGE TIME, and that is the maintainer's rule rather than an omission (Q3: "delete,
+ * refusing if the bytes differ"). A change time moves on every later write, so it refused the
+ * run's OWN rollback: create then overwrite one path in one run, and the reverse rollback first
+ * puts the create's bytes back — which moves the change time — and then the create's undo
+ * refused a file whose bytes were exactly what it wrote, leaving it standing. The consequence of
+ * dropping it is recorded, not guarded: a second run that overwrote this run's file with the SAME
+ * bytes is removed by this run's rollback, since the file is then the inode this run created
+ * holding exactly the bytes this run wrote (residue).
  */
 interface FileIdentity {
   readonly dev: string;
   readonly ino: string;
-  readonly ctimeNs: string;
 }
 
-function identityOf(st: { readonly dev: bigint; readonly ino: bigint; readonly ctimeNs: bigint }): FileIdentity {
-  return { dev: String(st.dev), ino: String(st.ino), ctimeNs: String(st.ctimeNs) };
+function identityOf(st: { readonly dev: bigint; readonly ino: bigint }): FileIdentity {
+  return { dev: String(st.dev), ino: String(st.ino) };
 }
 
 function isIdentity(v: unknown): v is FileIdentity {
   if (v === null || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
-  return ["dev", "ino", "ctimeNs"].every((k) => typeof o[k] === "string" && /^\d{1,40}$/.test(o[k] as string));
+  return ["dev", "ino"].every((k) => typeof o[k] === "string" && /^\d{1,40}$/.test(o[k] as string));
 }
 
 /** What an existing path held before an overwrite — `previous` only when it was a readable regular file. */
@@ -1462,7 +1468,7 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
  * journaled `compensation.recorded{outcome: "failed"}` — "no previous content recorded".
  *
  * EVERY ARGUMENT COMES FROM THE JOURNAL: `at` (the absolute path the write landed on), `identity`
- * (device, inode, change time — `FileIdentity`) and `wrote` (a digest of the bytes), all recorded by
+ * (device and inode — `FileIdentity`) and `wrote` (a digest of the bytes), all recorded by
  * `writeWithUndo`. Nothing is re-resolved from the relative `path`. The removal happens only when
  * ALL of these hold, and every other outcome REFUSES and leaves the disk as it is:
  *
@@ -1470,16 +1476,17 @@ export function fsRestore(opts: BuiltinOptions): ToolDefinition {
  *    workspace is not this one's to judge — and must not be read as "already absent";
  *  - every directory between the root and the leaf is a real directory, not a symlink, checked
  *    with `lstat`, so a parent swapped for a link cannot redirect the removal;
- *  - the leaf, read with `lstat` (never followed), has the recorded device, inode AND change time
- *    — which a symlink, FIFO or directory put there cannot have — and its bytes digest to `wrote`;
+ *  - the leaf, read with `lstat` (never followed), has the recorded device and inode — which a
+ *    symlink, FIFO or directory put there cannot have — exactly ONE link (a hard link made to it
+ *    is another name the removal would not account for), and bytes that digest to `wrote`;
  *  - and the removal is by that same absolute name.
  *
  * "ALREADY ABSENT" is the state the undo wants, and it is answered `compensated` ONLY when the
  * recorded path itself is missing under this same root (the leaf, or a directory above it). Any
  * error that is not a plain absence is a refusal.
  *
- * A CALLER WHO FORGES A RECORD must name a real file's device, inode and nanosecond change time as
- * well as its digest; without all four this refuses. That is what stands between a graph `tool`
+ * A CALLER WHO FORGES A RECORD must name a real file's device and inode as well as its digest;
+ * without all three this refuses. That is what stands between a graph `tool`
  * node calling `fs.restore` directly and an arbitrary delete — the registry has no way to mark a
  * tool compensation-only. Residue: the checks and the removal are separate system calls, so a
  * swap landing between them is not detected; and a caller that can already `stat` the workspace can
@@ -1491,7 +1498,7 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
   const identity = args["identity"];
   const wrote = args["wrote"];
   if (typeof at !== "string" || !isAbsolute(at) || !isIdentity(identity) || typeof wrote !== "string") {
-    return refuse("the record does not say which file the write created (absolute path, device, inode, change time and digest are all required)");
+    return refuse("the record does not say which file the write created (absolute path, device, inode and digest are all required)");
   }
   let root: string;
   try {
@@ -1536,9 +1543,10 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
   // A symlink, a directory or a special file at the path has its own inode, so the identity check
   // below is also the "is it still a regular file" check — `lstat` never follows the leaf.
   const now = identityOf(leaf);
-  if (now.dev !== identity.dev || now.ino !== identity.ino || now.ctimeNs !== identity.ctimeNs) {
-    return refuse("it is not the file the write created, or it has been written, renamed, linked or re-permissioned since");
+  if (now.dev !== identity.dev || now.ino !== identity.ino) {
+    return refuse("it is not the file the write created (another device or inode is at the path)");
   }
+  if (leaf.nlink !== 1n) return refuse(`it has ${String(leaf.nlink)} links, and removing one name would leave the others holding its bytes`);
   let current: Buffer;
   try {
     current = readRegularBytes(at);
@@ -1549,5 +1557,5 @@ function removeCreated(opts: BuiltinOptions, args: Record<string, unknown>, rel:
     return refuse("its bytes changed since the write created it, and removing it would delete content the write did not produce");
   }
   rmSync(at);
-  return { content: `removed ${rel}: the file the recorded write created (same device, inode, change time and bytes)` };
+  return { content: `removed ${rel}: the file the recorded write created (same device, inode and bytes)` };
 }

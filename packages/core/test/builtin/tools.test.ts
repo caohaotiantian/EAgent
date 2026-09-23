@@ -807,7 +807,7 @@ test("§A.99 — fs.restore REFUSES to remove a created file whose bytes changed
     writeFileSync(join(s.root, "new.txt"), "somebody else's bytes");
     const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
     assert.equal(r.isError, true);
-    assert.match(r.content, /written, renamed, linked or re-permissioned since/);
+    assert.match(r.content, /bytes changed since the write created it/);
     assert.equal(readFileSync(join(s.root, "new.txt"), "utf8"), "somebody else's bytes");
   } finally {
     s.cleanup();
@@ -979,25 +979,106 @@ test("§A.99 — a PARENT DIRECTORY swapped for a symlink is refused, and the fi
   }
 });
 
-test("§A.99 — a SECOND write of the same bytes over the created file is not the created file: its undo refuses", async () => {
-  // Run 2 overwrites run 1's file with identical bytes: same inode, same digest. Only the change
-  // time tells them apart, so the overwrite waits 20 ms first — past the timestamp granularity of
-  // any filesystem this runs on (Linux stamps inodes from a coarse clock, a few ms). No ratio.
+test("§A.99 — CREATE then OVERWRITE in one run: the reverse rollback restores, then REMOVES — both undone", async () => {
+  // The run's own rollback runs in reverse: the overwrite's undo puts the create's bytes back, and
+  // then the create's undo must still recognise its file. A change time in the identity refused
+  // exactly this (review round 2): the restore moved it, so a file the run created stayed standing.
   const s = sandbox();
   try {
-    const run1 = await created(s.root, "shared.txt", "v1");
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-    const run2 = await created(s.root, "shared.txt", "v1");
-    assert.equal(run2["created"], false, "run 2 found the file and did not create it");
-    const r = await fsRestore({ root: s.root, deny: [] }).execute(run1, ctx());
-    assert.equal(r.isError, true, r.content);
-    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "v1", "run 2's file stands");
+    const first = await created(s.root, "f.txt", "first x");
+    const second = await created(s.root, "f.txt", "second x");
+    assert.equal(second["created"], false);
+    const restore = fsRestore({ root: s.root, deny: [] });
+    const r2 = await restore.execute(second, ctx());
+    assert.equal(r2.isError, undefined, r2.content);
+    assert.equal(readFileSync(join(s.root, "f.txt"), "utf8"), "first x");
+    const r1 = await restore.execute(first, ctx());
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.equal(existsSync(join(s.root, "f.txt")), false, "the file the run created is gone");
   } finally {
     s.cleanup();
   }
 });
 
-test("§A.99 — a HARD LINK to the created file changes its identity, and the undo refuses", async () => {
+test("§A.99 — CREATE then OVERWRITE through the ENGINE: a failed run's rollback leaves no file and records two `compensated`", async () => {
+  const s = sandbox();
+  try {
+    const store = new MemoryStateStore({ now: () => 1 });
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: s.root, deny: [] })) if (t.name === "fs.write") tools.register(t);
+    tools.register(fsRestore({ root: s.root, deny: [] }));
+    const functions = new FunctionRegistry();
+    functions.register("function/boom@stable", (() => ({ refuse: { reason: "no" } })) as never);
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models: new ModelRegistry(),
+      now: () => 1,
+      sleep: async () => {},
+      policy: { granted: ["fs:write"], systemFloor: "out" },
+    });
+    const write = (id: string, body: string) => ({
+      id,
+      type: "tool",
+      writes: [id],
+      tool: { name: "fs.write", version: "1.0", args: { path: "out/f.txt", body } },
+    });
+    const spec = {
+      apiVersion: "loom.dev/v1",
+      kind: "GraphSpec",
+      metadata: { name: "create-overwrite", project: "t", version: 1 },
+      policy: { posture: "out", capabilities: ["fs:write"] },
+      channels: {
+        save1: { type: "object", reduce: "replace" },
+        save2: { type: "object", reduce: "replace" },
+        out: { type: "object", reduce: "replace" },
+      },
+      inputs: [],
+      outputs: ["out"],
+      nodes: [write("save1", "first x"), write("save2", "second x"), { id: "boom", type: "function", reads: ["save2"], writes: ["out"], function: { ref: "function/boom@stable" } }],
+      edges: [
+        { id: "a", from: "save1", to: "save2", kind: "seq" },
+        { id: "b", from: "save2", to: "boom", kind: "seq" },
+      ],
+    } as unknown as GraphSpec;
+    const graph = compileOrThrow({ spec, resolver: resolver(), tools: Object.fromEntries(tools.list().map((t) => [t.name, t])), tenantCapabilities: ["fs:write"] });
+    const runId = await engine.submit({ graph, inputs: {} });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+    assert.equal(p.status, "failed");
+    const outcomes: string[] = [];
+    for await (const e of store.read(runId, 1 as never)) if (e.type === "compensation.recorded") outcomes.push((e.payload as { outcome: string }).outcome);
+    assert.deepEqual(outcomes, ["compensated", "compensated"]);
+    assert.equal(existsSync(join(s.root, "out", "f.txt")), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — TWO fs.edits in one branch: undoing both in reverse removes the branch copy the first created", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "shared.txt"), "hello world");
+    const edit = byName(builtinTools({ root: s.root, deny: [] }), "fs.edit");
+    const branch = ctxOf("e@root/fo[0]#0");
+    const d1 = (await edit.execute({ path: "shared.txt", find: "world", replace: "one" }, branch)).details as Record<string, unknown>;
+    const d2 = (await edit.execute({ path: "shared.txt", find: "one", replace: "two" }, branch)).details as Record<string, unknown>;
+    assert.equal(d1["created"], true);
+    assert.equal(d2["created"], false);
+    const restore = fsRestore({ root: s.root, deny: [] });
+    assert.equal((await restore.execute(d2, branch)).isError, undefined);
+    const r1 = await restore.execute(d1, branch);
+    assert.equal(r1.isError, undefined, r1.content);
+    assert.equal(existsSync(String(d1["at"])), false);
+    assert.equal(readFileSync(join(s.root, "shared.txt"), "utf8"), "hello world");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a HARD LINK to the created file (a second name) makes the undo refuse", async () => {
   const s = sandbox();
   try {
     const d = await created(s.root);
