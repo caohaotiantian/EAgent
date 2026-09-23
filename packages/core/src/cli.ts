@@ -746,9 +746,20 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * `parseArgs` stores `--version 1` and `--version=yes` as strings, so a check for `=== true` alone
  * would skip them and let the verb run with the flag silently dropped — measured on the first
  * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
- * flag existed the same line was refused as unknown. (`--help` had the SAME hole — TODO.md §H.19's
- * N7 — and it is closed the same way `main` closes this one: `assertKnownFlags` now runs before
- * either flag is answered, not after.)
+ * flag existed the same line was refused as unknown.
+ *
+ * `--help` HAS THE SAME HOLE, AND IT IS STILL OPEN — TODO.md §A.91, the reviewer's fourth fix
+ * round (X2, correcting a false claim this docstring made after N7). N7 (TODO.md §H.19) closed a
+ * DIFFERENT hole: an UNKNOWN flag riding beside `--help` (`loom --help --tokne x`) now refuses,
+ * because `assertKnownFlags` runs before `--help` is answered. That is not this hole. `main` checks
+ * `args.flags["help"] === true` and nothing else — there is no `helpFlag`-shaped reader that refuses
+ * a VALUE the way `versionFlag` does here — so `loom run g.json --input … --help 1` and `--help=yes`
+ * both still RUN THE GRAPH AND EXIT 0: `args.flags["help"]` is the string `"1"` or `"yes"`, `=== true`
+ * is false, the early return is skipped, and nothing downstream refuses a KNOWN flag holding a value
+ * nobody reads. Measured directly, this round: both exit 0 and print the run's JSON, where
+ * `loom --version 1` refuses. Not closed here — residue, TODO.md §A.91 — because doing it needs the
+ * same `helpFlag` shape this function already is, which is a real (if small) code change and the
+ * round's scope was the two BLOCKING items plus this docstring.
  */
 function versionFlag(args: Args): boolean {
   const v = args.flags["version"];
