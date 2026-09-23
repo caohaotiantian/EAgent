@@ -208,15 +208,24 @@ function runPack(argv) {
 
     // ── 1. compile, IN THE CHECKOUT — the maintainer's own dist/ is never opened ──
     try {
+      // `stdio: ["ignore", "pipe", "pipe"]`, NOT `"inherit"` — TODO.md §H.17/§A.91, the reviewer's
+      // third fix round (N5). `tsc` writes its own diagnostics to STDOUT, and this process's
+      // stdout is reserved for the tarball path on success (`console.log(tarball)` below): a
+      // committed compile error used to leave tsc's diagnostics sitting on THIS process's stdout
+      // even though the failure itself is correctly reported on stderr (`fail` below), so a caller
+      // reading stdout for "the path, or nothing" got compiler noise instead. Piped here and
+      // re-emitted on OUR stderr in the catch below, so a clean run's stdout carries only the
+      // tarball path either way.
       execFileSync(process.execPath, [join(checkout, "node_modules", "typescript", "bin", "tsc"), "-b", "--force"], {
         cwd: checkout,
-        stdio: "inherit",
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
       });
-    } catch {
-      // `stdio: "inherit"` above already printed tsc's own diagnostics — this catches only the
-      // exception `execFileSync` throws for the non-zero exit, so a committed compile error
-      // reads as a clean refusal rather than an uncaught `Error: Command failed …` stack trace
-      // riding on top of the real diagnostics an operator already has.
+    } catch (e) {
+      // tsc's own diagnostics, on OUR stderr — never our stdout. `e.stdout`/`e.stderr` are what
+      // `execFileSync` attaches to the thrown error when stdio is piped rather than inherited.
+      if (e.stdout) process.stderr.write(e.stdout);
+      if (e.stderr) process.stderr.write(e.stderr);
       fail(`the archived commit ${headSha} does not compile (tsc -b --force failed, see above) — a broken commit cannot be packed.`);
       return;
     }
