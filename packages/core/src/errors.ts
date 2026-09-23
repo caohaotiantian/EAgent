@@ -347,8 +347,26 @@ export const CODES = {
   E_EVAL_REGRESSION: "E_EVAL_REGRESSION",
   /** A channel did not accept a gate. NEVER an approval — see run/delivery.ts. */
   E_GATE_DELIVERY_FAILED: "E_GATE_DELIVERY_FAILED",
+  /**
+   * The file is THERE and `fs.read` could not read it: permission denied, a directory or a link
+   * where a file was named, a path component that is not a directory.
+   *
+   * ONE OF THREE CODES THAT USED TO BE ONE (`DESIGN.md` D8, `TODO.md` §A.90). A missing file is
+   * `E_FS_NOT_FOUND`, a path the jail refuses is `E_CAP_DENIED`, and this is the third. They were
+   * all `E_TOOL_SOURCE_UNAVAILABLE`, so an `error` arm written for "there is nothing here yet"
+   * could not tell that apart from "something is here and I could not see it" — and the shipped
+   * `grant-access` rebuilt its ledger from nothing and destroyed a prior grant, exit 0.
+   * `policy`: nothing about it changes on a retry; a person has to change a permission.
+   */
+  E_FS_UNREADABLE: "E_FS_UNREADABLE",
 
   // not_found
+  /**
+   * `fs.read` was told the file does not exist (ENOENT) — the file, or a directory on its path.
+   * The ONLY one of the three `fs.read` failure codes that means "there is nothing here"; see
+   * `E_FS_UNREADABLE`. `not_found`, so it is never retried.
+   */
+  E_FS_NOT_FOUND: "E_FS_NOT_FOUND",
   E_RESOURCE_NOT_FOUND: "E_RESOURCE_NOT_FOUND",
   E_RESOURCE_YANKED: "E_RESOURCE_YANKED",
   E_TOOL_NOT_FOUND: "E_TOOL_NOT_FOUND",

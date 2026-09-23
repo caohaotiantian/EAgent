@@ -63,53 +63,6 @@
   const rank = pol.levels.indexOf(req.level);
   const cap = Object.hasOwn(pol.maxHours, req.level) ? pol.maxHours[req.level] : undefined;
 
-  // A LEDGER THAT EXISTS AND WAS NOT READ IS A REFUSAL, AND THIS IS THE ONLY PLACE THAT CAN SEE IT.
-  //
-  // The `error` arm on `read-ledger` is handed no reason (F5), so `first-grant` reports "there is
-  // no ledger yet" for a read that failed for ANY reason — including a ledger that is present and
-  // unreadable, which `grant-record.js` would then REPLACE with a document built from nothing.
-  // `look` runs `fs.glob` over the same path and its listing is the second opinion: glob lists a
-  // file `fs.read` cannot open (measured at `chmod 222`), so **listing non-empty AND history from
-  // the error arm** is exactly the case the arm cannot distinguish and this can.
-  //
-  // THIS DEFENCE COVERS EXACTLY ONE CASE AND FAILS OPEN ON THE REST, which is the same shape as
-  // the hole it is standing in for, and saying so is the point of the comment.
-  //
-  //   COVERED: a regular file that is LISTABLE but not readable (`chmod 222` on the ledger).
-  //   UNCOVERED BY THIS DEFENCE, each measured — and they DO NOT END ALIKE, which is the part
-  //   worth reading:
-  //     · an unlistable PARENT directory — `chmod 333 out`. fs.glob skips it, and the run
-  //       SUCCEEDS and REWRITES the ledger. This is the silent data loss, and the only one.
-  //       Pinned as a KNOWN HAZARD test so it cannot stop existing quietly.
-  //     · an escaping SYMLINK at the path — fs.glob skips it. The run fails CLOSED, ledger
-  //       intact, for a reason this defence had nothing to do with: `write-ledger` meets the
-  //       same obstruction `read-ledger` did (`write-grant` lands first and is compensated).
-  //     · a DIRECTORY at the path — fs.glob lists files. Same ending as the symlink.
-  //
-  // All three make fs.glob answer `(no matches)`, which is byte-identical to its answer for "there
-  // is nothing here" — so `ledgerOnDisk` is false and the run proceeds. Four patterns were tried
-  // (`out/access-ledger.json`, `out/*`, `out/**`, `out`) and none distinguishes "empty" from
-  // "cannot enumerate". **A guard that fails open is being guarded by a guard that fails open**;
-  // only a failure projection from the runtime closes it, which is why F5 stays a PRODUCT row.
-  //
-  // It also has a TOCTOU window: the file can appear or vanish between `look` and `read-ledger`.
-  // That race loses in the failing-CLOSED direction — a spurious refusal, never a spurious grant —
-  // which is the one part of this shape that is safe by construction.
-  const listing = String(view.require("listing")).trim();
-  const ledgerOnDisk = listing !== "" && listing !== "(no matches)";
-  if (ledgerOnDisk && history.source === "none") {
-    return {
-      refuse: {
-        reason:
-          `"out/access-ledger.json" IS on disk — fs.glob lists it as "${listing}" — but the run reached ` +
-          `here on the error arm, which means fs.read could not open it and this graph was told only ` +
-          `that it failed. Granting now would publish a ledger rebuilt from an empty history and ` +
-          `destroy every grant the file already holds. Fix the file's permissions, or move it aside ` +
-          `deliberately if you mean to start a new ledger.`,
-      },
-    };
-  }
-
   // DENIALS BEFORE RENEWALS, and the reason is the cap and ONLY the cap: `firstDenial` refuses
   // anything over `maxHours`, so no renewal can be reached by a request that exceeds it. It does
   // NOT stop a renewal from widening what was already approved — that is `findRenewal`'s own job,
@@ -154,9 +107,13 @@
         cap: cap === undefined ? null : cap,
         ceremony,
         why,
-        // WHERE THE HISTORY CAME FROM, carried all the way to the gate. "No prior grants" and "we
-        // never found the ledger" are different facts and a person deciding must be able to tell
-        // them apart — `source: "none"` is the first run of this command, and nothing else.
+        // WHERE THE HISTORY CAME FROM, carried all the way to the gate, so a person can see
+        // whether "no prior grants" means "this requester has none in the ledger" (`ledger`) or
+        // "there is no ledger at all" (`none`). A DISPLAY, and no longer a guard: `none` can
+        // only be reached through `first-grant`, which returns it for `E_FS_NOT_FOUND` alone and
+        // refuses every other failure of the read (DESIGN.md D8) — so this body no longer
+        // second-guesses it. It used to, with an `fs.glob` listing from a `look` node, and that
+        // defence failed open on exactly the case it existed for (TODO.md §A.90).
         historySource: history.source,
         renewalOf: renewal === null ? null : { at: renewal.grantedAt, level: renewal.level, by: renewal.decidedBy },
         priorGrants: history.grants.map((g) => ({ at: g.grantedAt, level: g.level, hours: g.hours, by: g.decidedBy })),

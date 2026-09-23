@@ -531,10 +531,22 @@ export function makeStateView(
   specs: Readonly<Record<string, ChannelSpec>>,
   state: ChannelState,
   reads: readonly string[],
+  /**
+   * Values the RUNTIME supplies under reserved names that are not channels — today only a node's
+   * error projection (`graph/spec.ts`, `ErrorProjection`), computed from the fold by `viewFor`.
+   * Admitted under exactly the same allow-list as a channel: a name the node did not declare in
+   * `reads` is not in the slice, and does not enter the hash.
+   */
+  reserved: Readonly<Record<string, unknown>> = {},
 ): StateView {
   const allowed = new Set(reads);
   const slice: Record<string, unknown> = {};
   for (const name of [...allowed].sort()) {
+    if (Object.hasOwn(reserved, name)) {
+      const v = reserved[name];
+      if (v !== undefined) slice[name] = v;
+      continue;
+    }
     const spec = declared(specs, name);
     if (spec === undefined) continue;
     const v = channelValue(spec, own(state, name));

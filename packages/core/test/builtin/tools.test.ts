@@ -22,7 +22,7 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { NodeId } from "../../src/ids.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
+import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition, type ToolResult } from "../../src/run/registry.ts";
 import { resolver } from "../run/skeleton.ts";
 
 const ctx = () => ({ taskId: "t@root#0" as never, signal: new AbortController().signal, progress: () => {} });
@@ -45,15 +45,24 @@ function filesUnder(dir: string): string[] {
 const byName = (tools: readonly ToolDefinition[], name: string): ToolDefinition =>
   tools.find((t) => t.name === name)!;
 
+/** An `fs.read` the jail refused: an error RESULT carrying `E_CAP_DENIED`, never a throw (D8). */
+function refused(r: ToolResult, why: RegExp): void {
+  assert.equal(r.isError, true, r.content);
+  assert.equal(r.error?.code, "E_CAP_DENIED", r.content);
+  assert.match(r.content, why);
+}
+
 // ── confinement ──────────────────────────────────────────────────────────────
 
 test("fs.read CANNOT ESCAPE THE ROOT", async () => {
   const s = sandbox();
   const tools = builtinTools({ root: s.root, deny: [] });
-  await assert.rejects(
-    async () => byName(tools, "fs.read").execute({ path: "../../etc/passwd" }, ctx()),
-    (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED",
-  );
+  // RETURNED, not thrown, since D8: a refusal `fs.read` throws becomes `effect.failed`, loses its
+  // code at the dispatcher and cannot be replayed. The containment claim is unchanged — it is
+  // refused, with the jail's code, and nothing of the target is in the answer.
+  const r = await byName(tools, "fs.read").execute({ path: "../../etc/passwd" }, ctx());
+  refused(r, /escapes the sandbox root/);
+  assert.doesNotMatch(r.content, /root:/);
   s.cleanup();
 });
 
@@ -72,10 +81,7 @@ test("a path that merely SHARES A PREFIX with the root is still outside it", asy
   // is a path-relation question, not a string-prefix one.
   const s = sandbox();
   const tools = builtinTools({ root: s.root, deny: [] });
-  await assert.rejects(
-    async () => byName(tools, "fs.read").execute({ path: "../../evil" }, ctx()),
-    (e: unknown) => /escapes the sandbox root/.test((e as Error).message),
-  );
+  refused(await byName(tools, "fs.read").execute({ path: "../../evil" }, ctx()), /escapes the sandbox root/);
   s.cleanup();
 });
 
@@ -135,10 +141,9 @@ test("the deny-list covers READING too — the journal is where the redaction by
   writeFileSync(join(data, "journal.db"), "canary-from-a-run-input");
   const tools = builtinTools({ root: s.root, deny: [data] });
 
-  await assert.rejects(
-    async () => byName(tools, "fs.read").execute({ path: ".loom/journal.db" }, ctx()),
-    (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED",
-  );
+  const r = await byName(tools, "fs.read").execute({ path: ".loom/journal.db" }, ctx());
+  refused(r, /which this sandbox denies/);
+  assert.doesNotMatch(r.content, /canary-from-a-run-input/);
   s.cleanup();
 });
 
@@ -183,11 +188,9 @@ test("fs.read CANNOT EXFILTRATE THROUGH A SYMLINK OUT OF THE JAIL", async () => 
   symlinkSync(outside, join(s.root, "vendor"));
   const tools = builtinTools({ root: s.root, deny: [] });
 
-  await assert.rejects(
-    async () => byName(tools, "fs.read").execute({ path: "vendor/secret.txt" }, ctx()),
-    (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED" && !/not yours/.test((e as Error).message),
-    "a read through a symlink must not resolve to a file outside the root",
-  );
+  const r = await byName(tools, "fs.read").execute({ path: "vendor/secret.txt" }, ctx());
+  refused(r, /escapes the sandbox root/);
+  assert.doesNotMatch(r.content, /sk-not-a-real-key/, "a read through a symlink must not resolve to a file outside the root");
   rmSync(outside, { recursive: true, force: true });
   s.cleanup();
 });

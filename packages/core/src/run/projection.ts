@@ -44,7 +44,7 @@ import {
   type StateView,
 } from "../state/channels.ts";
 import { ZERO_USAGE, addUsage, maxPosture, type Posture, type UsageRecord } from "../vocab.ts";
-import type { GraphSpec } from "../graph/spec.ts";
+import { errorProjectionSource, type ErrorProjection, type GraphSpec } from "../graph/spec.ts";
 
 export type RunStatus =
   | "queued"
@@ -1403,7 +1403,52 @@ export function viewFor(
   branch: BranchCoordinate,
   reads: readonly string[],
 ): StateView {
-  return makeStateView(specs, stateAtBranch(p, branch), reads);
+  const reserved: Record<string, unknown> = {};
+  for (const name of reads) {
+    const source = errorProjectionSource(name);
+    if (source !== undefined) reserved[name] = errorProjectionOf(p, branch, source);
+  }
+  return makeStateView(specs, stateAtBranch(p, branch), reads, reserved);
+}
+
+/**
+ * A node's reserved error projection, as a Task at `branch` sees it — `DESIGN.md` D8.
+ *
+ * FOLDED, NEVER STORED. The fact is already durable: `task.failed` journals the code and the
+ * message and the task's final state is in `p.tasks`, so the projection is a function of the
+ * fold like every other value a node reads. Nothing new is written, so there is no new crash
+ * window and no restart that hands anything back empty — the lens `CLAUDE.md` names for this
+ * file's neighbours has nothing to find here, by construction.
+ *
+ * WHICH TASK: the source node's, on this branch or an ancestor of it — the same visibility a
+ * channel binding has (`stateAtBranch`) — the DEEPEST such branch, then the highest iteration.
+ *
+ * THE ANSWER IS `undefined` UNLESS IT IS KNOWN, and that is the rule `ok: true` hangs on. Only
+ * `succeeded` yields `{ok: true}`; only `failed` with a recorded error yields `{ok: false, …}`.
+ * Pending, leased, retrying, awaiting a gate, skipped, cancelled, or never scheduled: no value,
+ * so a body asking `view.require` is refused and one asking `view.get` holds `undefined` — which
+ * no reading can mistake for success.
+ */
+function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: NodeId): ErrorProjection | undefined {
+  const chain = branchChain(branch);
+  let best: TaskRecord | undefined;
+  let bestDepth = -1;
+  for (const t of Object.values(p.tasks)) {
+    if (t.nodeId !== source) continue;
+    const depth = chain.indexOf(encodeBranch(t.branch));
+    if (depth < 0) continue;
+    if (depth > bestDepth || (depth === bestDepth && best !== undefined && t.iteration > best.iteration)) {
+      best = t;
+      bestDepth = depth;
+    }
+  }
+  if (best === undefined) return undefined;
+  if (best.state === "succeeded") return { ok: true };
+  if (best.state === "failed" && best.error !== undefined && typeof best.error.code === "string") {
+    const { code, message } = best.error;
+    return typeof message === "string" ? { ok: false, code, message } : { ok: false, code };
+  }
+  return undefined;
 }
 
 /**
