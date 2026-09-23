@@ -24,8 +24,8 @@ convergence loop: `loop` + `until` + `maxIterations`, a complementary `condition
 stop rule, 8 nodes, 4 `function` bodies, 11 manifest fixtures (`f43d5a0f`), whose port is
 `docs/workflow-port-2026-09-22.md` — **it overlaps the first in `seq` alone**, which is why the
 second was worth as much as the first; and `examples/graphs/grant-access.json`, temporary access to
-a production resource ROUTED BY CEREMONY: 13 nodes over four node types, 14 edges over three kinds,
-5 `function` bodies, 13 request fixtures (`9ee826a5`), whose port is
+a production resource ROUTED BY CEREMONY: 12 nodes over four node types, 13 edges over three kinds,
+5 `function` bodies, 13 request fixtures (`9ee826a5`; D8 deleted a node and an edge), whose port is
 `docs/workflow-port-2026-09-22b.md`. **The third holds four mechanisms neither other one does** — a
 `router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, a reducer that is neither
 `replace` nor `append_ordered`, and a node reached by two mutually exclusive paths that runs exactly
@@ -33,15 +33,11 @@ once — which is the whole reason it was worth doing: it overlaps port 1 in `hu
 `tool`, `fs.*`, `seq` and `replace`, and port 2 in `conditional` besides, and nowhere else.
 
 **Running the FIRST needed no source change; making it NATURAL needed eight, and THAT is the number
-worth carrying.** The port logged eight friction entries and **all eight are now closed** — F6 in
-the port lane itself, F2, F3, F4, F5, F7 and F8 in the 2026-09-10 wave, and F1 last, at `51f4a5f`,
-where GRAPH021 learned to state the whole fan-out branch rule in one diagnostic instead of two. More
-than the count: the workflow now CONSUMES what those closures built rather than merely no longer
-suffering it — `triage-classify.js` reads `raw` as a plain `replace` string (F2, `77c245a`),
-`triage-plan.js` reads its fan-out width off `ctx.node` and refuses on purpose through `{refuse}`
-(`c2360be`, `f7f74d5`, `b181b55`), and its suite parses the whole of stdout and reads the approver's
-report out of `loom gates` (F4, F3). **The port is what pulled on them**, which is the argument for
-porting one at all: an invariant nobody exercises names no seam.
+worth carrying.** All eight friction entries are closed (F1 last, at `51f4a5f`), and the workflow
+now CONSUMES what they built rather than merely no longer suffering it — `triage-plan.js` reads its
+fan-out width off `ctx.node` and refuses on purpose through `{refuse}` (`c2360be`, `f7f74d5`), and
+its suite reads the approver's report out of `loom gates`. **The port is what pulled on them**,
+which is the argument for porting one at all: an invariant nobody exercises names no seam.
 
 **The second port cost THIRTEEN, and needed no source change either — and the useful number is that
 THREE of the thirteen were ONE mechanism**: `graph/validate.ts` dropped `loop` AND `compensation`
@@ -57,26 +53,28 @@ workflow, over four reviews, none found by its author, every one of them *the re
 something the run had not established* — the exact defect class that workflow exists to prevent, and
 the receipt for *a builder's own green suite is not evidence*.
 
-**The third port cost SEVEN, none of them closed yet, and its lesson is a different one: a
-workaround for a fail-open guard is a guard, and nobody audited it as one.** F5 is the row to read —
-`§A.90`, the only row in `TODO.md` that ends in destroyed data with exit code 0. An `error` arm is
-handed no reason, so *there is no ledger* and *I could not read the ledger* are the same event; the
-port built a defence out of a second read-only tool, and `fs.glob` answers `(no matches)` for
-*nothing here* AND for *cannot enumerate*, so the defence has the identical shape to the gap it
-stands in for. The other six are §A.91–§A.94, one docs gap that `examples/README.md` §10 now fills,
-and one canonical-form manifestation recorded in the log. **§4 of that log is NINE defects in the
-port's own workflow, six of them blocking, and five are one class** — *a guard nothing
-distinguishes*: two renewal guards could be DELETED with the suite green, and MUTATION found them
-where reading had not. **A FOURTH port is worth as much again**, and nothing
-has replaced these three.
+**The third port cost SEVEN, and ONE is closed — the one that ended in destroyed data with exit
+code 0.** Its lesson: *a workaround for a fail-open guard is a guard, and nobody audited it as one.*
+F5 (§A.90): an `error` arm was handed no reason, so *there is no ledger* and *I could not read the
+ledger* were one event, and the port's defence — `fs.glob`, which answers `(no matches)` for
+*nothing here* AND *cannot enumerate* — had the gap's own shape. **D8 closed it at `83f86bec` by
+handing the arm the reason**: `first-grant` reads `"read-ledger:error"` and proceeds on
+`E_FS_NOT_FOUND` alone, the defence is deleted, and the row's `chmod 333` repro went from exit 0
+with a grant destroyed to exit 1 with the ledger's bytes unchanged. The other six are §A.91–§A.94,
+still open, one docs gap `examples/README.md` §10 fills, and one canonical-form manifestation in the
+log. **§4 of that log is NINE defects in the port's own workflow, six of them blocking, and five are
+one class** — *a guard nothing distinguishes*: two renewal guards could be DELETED with the suite
+green, and MUTATION found them where reading had not. **A FOURTH port is worth as much again.**
 
-**The 2026-09-22b settlement's assessment qualifies the ranking above** — *a port beats an
-invariant* — **and does not overturn it: between those two it still holds, but a maintainer's
-DECISION and an INSTALL PATH now outrank both.** Same argument as the port's: a runtime nobody can
-install has no strangers to exercise it, and the goal's first verb is *install it*. **TWO are now
-DECIDED (2026-09-22) and are BUILDS: `DESIGN.md` D8** — a channel carries a FACT on one reserved
-error projection — **and D9** — the example teaches QUORUM, veto is a second file. The rest stay
-owed (list after Sequence item 31); items 29–31, 18, 24 and the handoff §6 say what comes next.
+**A maintainer's DECISION and an INSTALL PATH outrank both a port and an invariant** (the 2026-09-22b
+assessment; between those two the ranking above holds) — a runtime nobody can install has no
+strangers to exercise it, and the goal's first verb is *install it*. **Both decisions it wanted are
+BUILT:** `DESIGN.md` D8, a node's reserved `"<id>:error"` projection (`83f86bec`), and D9, the
+approval example teaches QUORUM and veto is `two-person-veto.json` (`e9f7fae4`). **The install is
+built short of the publish** (`48de87f6`): `@caohaotiantian/loom` 0.1.0 packs, installs and runs
+outside the repo, stays `private: true`, and item 29 closes only on the maintainer's publish from a
+machine with no clone. The other owed decisions are listed after Sequence item 31;
+`docs/handoff-2026-09-23.md` says what comes next.
 
 ## The three properties, in priority order — where a change trades one away, it is wrong
 
@@ -97,7 +95,7 @@ hatch and also the ledger; **read the ledger from `node scripts/check-kernel.mjs
 `feat:`-only; the census counts every subject, merges included. They share ONE definition of a
 trailer — `seamTrailer()`: a `Kernel-seam:` line in the message's own FINAL PARAGRAPH, with
 flush-left continuation lines allowed, which git's `interpret-trailers --parse` rejects and which
-five of the sixteen declared seams are written as. Where they still differ is what "touched the
+five of the seventeen declared seams are written as. Where they still differ is what "touched the
 kernel" means for a MERGE: the requirement reads the commit's own diff (`git show --name-only` —
 empty for a clean merge, the resolution's own changes for an evil one), the census reads its
 effective diff (`-m`, one per parent). So a clean merge cannot violate, its branch having been read
@@ -240,11 +238,11 @@ scripts/           build, and the three guards: zero-dep, surface (the exported 
                    kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
-docs/              dated records w/ repros. START: handoff-2026-09-22b.md, audit-2026-09-02.md
+docs/              dated records w/ repros. START: handoff-2026-09-23.md, audit-2026-09-02.md
 .agent/<task>/     per-task working state (gitignored)
 ```
 
-Every branch through the 2026-09-22b wave is merged into `loom`; the handoff says what each lane
+Every branch through the 2026-09-23 wave is merged into `loom`; the handoff says what each lane
 did and left open, and which of its lanes' claims did not survive being re-run.
 
 ## Commands
@@ -255,6 +253,7 @@ npm test            # tests only
 npm run build:binary                            # a single-file binary
 npx tsc -p packages/core/tsconfig.test.json     # read-only typecheck, safe under concurrency
 node --test packages/core/test/<file>           # one suite
+node scripts/pack.mjs --out out && node scripts/smoke-install.mjs out/*.tgz  # install it, outside the repo
 ```
 
 With several agents or shells at once, do not run `npm run check` or a bare `tsc -b`: concurrent
