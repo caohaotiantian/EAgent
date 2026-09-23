@@ -164,7 +164,10 @@ text in it would make every prompt edit its own cohort of one, and comparing two
 prompt edit is exactly the candidate kind D6 defines self-improvement as producing.
 *Enforced:* `RunGraph.resolutionManifest` in `graph/compile.ts`; `test/run/graph-binding.test.ts`'s "THE SAME SPEC WITH
 DIFFERENT RESOURCES IS REFUSED" (5/5). *Residue:* a MUTATED run's successor carries no recorded
-manifest — `TODO.md` §G.5(a).
+manifest — `TODO.md` §G.5(a). *(2026-09-24: CLOSED at `4fe87a88` — `graph.mutated` records the
+successor's `resolutionManifest` and every gate door checks it, Sequence item 18;
+`test/run/graph-binding.test.ts` → 11 pass. What is left: `replay` does not check it (§A.102), and an
+old journal's refusal is not journaled (§A.103).)*
 
 ### D8 · A channel carries a FACT about its value, on one reserved projection
 
@@ -249,17 +252,30 @@ bytes). *Narrower than this section's words, deliberately:* the READERS are a `f
 refused at compile, because this phase has not decided how an untrusted fact should be put into a
 prompt, an argument or an expression; widening is additive. (A `function` reader that is itself
 GATED does show the projection in its gate payload — `#gatePayload` builds the same view — bound by
-the view's hash like any read.) *Residue:* a source inside or downstream of a loop body, or inside a
-fan-out the reader is not in, is REFUSED rather than served (the reader's iteration is not threaded
-into `viewFor`) — which OVER-refuses a node behind a loop's exit that runs once (`TODO.md` §A.95);
-a COMPENSATED task still projects `ok: true`, since rollback folds nothing onto the task (§A.96, no
-shipped path reaches it); `E_CAP_DENIED` is also the code for a capability the policy did not grant, so "the
+the view's hash like any read.)
+*Enforced (the truncation producer and the rollback, 2026-09-23):* `fs.read`, `proc.exec` and
+`net.fetch` no longer write a marker into `content` — the constraint above now holds at all three —
+and put `truncated` (all three) and `bytes` (`fs.read`, `net.fetch`) in `details`, which the fold
+serves as `{ok: true, truncated, bytes}`; `maxBytes` counts BYTES; an agent is told in-band by
+`modelToolContent` in `run/engine.ts`, derived from the recorded `details` so a replay rebuilds it
+(`26a4f358`, the `feat:` extending this section's seam — `TODO.md` §A.83). And a task whose own call
+was undone by a rollback in its run's journal, and not made again with the same tool name and
+`argsDigest`, projects NO value (`249c9536` … `e2e783ca`, §A.96). `classification` still has no
+producer (§A.82, the maintainer's Q8). Tests: `test/builtin/tools.test.ts`,
+`test/run/agent-tool-truncation.test.ts`, `test/run/error-projection.test.ts`.
+*Residue:* a source that can run more than once per branch — inside a loop body, behind a loop's
+`conditional` exit (a `take` bypasses `when`), or inside a fan-out the reader is not in — is REFUSED
+rather than served, since the reader's iteration is not threaded into `viewFor` (§A.95 lifted the
+rest by keying the refusal on MULTIPLICITY); a subgraph child's rollback does not reach the parent's
+projection (§A.110); a Task re-run by a late arrival can be read `ok: true` behind its own `error`
+edge (§A.101, a kernel defect); `E_CAP_DENIED` is also the code for a capability the policy did not grant, so "the
 jail refused this path" is distinct from missing and unreadable but not from every other refusal;
 `fs.write`, `fs.edit` and `fs.glob` still THROW their jail refusals (and `net.fetch` its egress
 refusal), which `#invokeTool` flattens to `E_TOOL_SOURCE_UNAVAILABLE` and replay refuses as a
 divergence, and `proc.exec` returns its allow-list refusal untyped; a `postTool` hook that rewrites a
 failed result's `content` rewrites its typed error's `message` with it, but not its `details`; `fs.glob`/`fs.grep` still answer `(no matches)` for a directory they could not
-enumerate — an INCOMPLETE listing, which is the `truncated` producer's (§A.83's) kind of fact.
+enumerate — an INCOMPLETE listing, which is the `truncated` producer's (§A.83's) kind of fact — and
+still write their own cap marker into `content` (§A.105).
 **Decided by the maintainer 2026-09-22**; `TODO.md` §D.10 (not to be read as `TODO.md` §D.8, a different row one dot away) is
 struck with this answer and carries the options it was chosen from.
 
@@ -294,13 +310,16 @@ D8 one dot away): those are compile tightenings, not the product word.
 *Enforced (2026-09-23):* `examples/graphs/two-person-approval.json` declares `"skip"` and its
 description teaches quorum; `examples/graphs/two-person-veto.json` declares `"fail"` and its
 description states both halves — the first reject decides, and a late reject after the
-short-circuited write leaves the effect standing and only marks the run failed. The two files differ
+short-circuited write leaves the effect standing and only marks the run failed *(2026-09-24: no
+longer — the run's rollback now undoes the write, see flag (2) below)*. The two files differ
 in `onBranchError` and `metadata` alone. `packages/core/test/graph/two-person-approval.test.ts`
 asserts each file's value, each description's required sentences, that equality, and the vote
 outcomes each teaches over every ordering — quorum: one dissenter succeeds (the late reject
 included), one approval of three is `E_QUORUM_UNREACHABLE` with nothing written; veto: a reject
 before the second approval is `E_HUMAN_APPROVAL_REQUIRED` with nothing written, a late reject is
-`failed` with the write already landed. Short-circuit, straggler cancellation, §A.77 and `TODO.md`
+`failed` with the write already landed *(2026-09-24: and now ROLLED BACK — the suite's four late-veto
+tests assert a created file removed, an existing file's old bytes back, the create read from the
+journal across a restart, and a changed file refused; 13 pass)*. Short-circuit, straggler cancellation, §A.77 and `TODO.md`
 §D.8 are untouched, as above. **Decided by the maintainer 2026-09-22**; the record is `TODO.md`
 §A.68's addendum.
 *Flagged for the maintainer, 2026-09-23 (settlement): two phrases above that the build measured
@@ -320,6 +339,15 @@ already existed, the restore puts the old bytes back (`outcome: "compensated"`).
 "nothing in this graph undoes it" holds only for the first case (`TODO.md` §A.99). Which he wants
 is his call: undo a create (delete what was made), or keep "irreversible" and let the description
 name both cases.
+*Flag (2) DECIDED by the maintainer, 2026-09-23 — Q3 = (a), undo a create — and BUILT at
+`b7c1ccc6` (`TODO.md` §A.99, struck).* `fs.restore` removes a file the run created, identified by
+the `dev`, `ino`, normalised path and digest `fs.write` recorded, with `nlink` 1, and REFUSES — a
+`failed` compensation — if the bytes changed. So a late veto now leaves no created file, and an
+existing file gets its old bytes; `two-person-veto.json`'s description says so, and the
+recorded decision text above keeps its words. Re-run on `dist/bin.js` at `7f576a47`: alice and bob
+approve, carol rejects → exit 1, `approved/request.txt` ABSENT, `compensation.recorded
+{"outcome":"compensated"}`. `loom trace` still draws a FAILED undo `[ok]` (§A.100). **Flag (1) was
+not put to him this wave** — Q4 in `docs/handoff-2026-09-23.md` §7, still owed.
 
 ---
 
@@ -408,13 +436,13 @@ admitting it turns the rule into a counterexample generator.
 | 15 | A.18 | **done `b2f4002`+** — control-flow taint. It shipped keyed on `node.type === "router"` when a router is not the only way this engine chooses a branch; a reviewer drove the identical attack with the router deleted, three ways. Now keyed on the CHOICE, naming its covered set |
 | 16 | A.30 | **done `e639d2b`** — an `effect.completed` with no `details` dispatched its undo with `args = {}` and journaled `compensated` while the effect stood |
 | 17 | A.2 | **done `34a7f14`** — `compare()` graded `status` alone, so a refusal whose error RECORD varied by path scored `match: true` |
-| 18 | G.5(a) | **open** — after a MUTATION the successor carries no recorded manifest, so a gate decision on it never checks the resources behind its refs. `TODO.md` §G.5 residue (a) |
+| 18 | G.5(a) | **done `4fe87a88`** (merged `c36bbae7`, 2026-09-23) — `graph.mutated` records the successor's `resolutionManifest`, and every gate door checks a held successor against it; an old journal fails closed. "Mutation is unreachable from the binary" was FALSE: `--grant graph:mutate` plus an adapter reached it, and an edited mutation-added function ran on `loom approve` (exit 0) where it is now exit 1, `E_GRAPH_MISMATCH`. `test/run/graph-binding.test.ts` → 11 pass. Residue `TODO.md` §A.102, §A.103 |
 | 19 | A.23 | **done `276e05c`** — a ceiling lowered 15× replayed clean with zero reasons |
 | 20 | B.2 | **done** — every declared event type now has an appender, asserted as a rule over the EMPTY SET (`registries.test.ts`), so a new unappended member fails with nowhere to be excused. `budget.reserved`/`budget.settled` and `task.skipped` were wired (the last at `Engine.#skippedByJoin`, from both of `#commit`'s terminal-failure exits); `channel.written` and `task.started` were deleted from the vocabulary, 53 → 51 |
 | 21 | A.36 | **done `d9a8173`** — a child run was LISTED by `GET /runs` and 404'd on every by-id route; a child id always contains a `#` |
 | 22 | B.1 | **reclassified, not work** — `TODO.md` §B.1: `LeasedScheduler` is a pinned public type a library embedder already reaches, so "wire it or delete it" is a false dichotomy |
 | 23 | A.13 | **done `96a03bf`** — `loom run` counted its own laps instead of the run's progress |
-| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29. **RE-SEQUENCED 2026-09-22b, keeping its number rather than being reopened as a new item.** The FACT that moved: "a second input shape for the self-improvement corpus" was deferred below on the cost of a second port, and ports 2 and 3 have since happened, so the shapes exist and what is left is live spend against them. The 2026-09-22b assessment's judgement — not a measurement — is that this makes the money decision smaller. **What closes it is the behaviour §A.29's title names** — a candidate the graph's OWN verifier certifies, refused by `1-must-pass` and reported as a 33.3pp regression, must stop being refused. **That behaviour is NOT currently reproduced by a command:** §A.29 carries only a grep the row itself disowns (it counts prose about a deletion), so producing a repro for the refusal is the item's own first task. Closing it needs a fold that can answer *"what did channel C hold when task T read it"*, a per-task ordering `RunProjection` does not carry — **or** property 3's claim re-scoped to what the exam actually establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. This item and item 18 are the only OPEN items in 1–28; 8 and 13 are HALF, and their remainders are real — D5's version pin, and `TODO.md` §E.2's coordinator |
+| 24 | A.29 | **open, and three mechanisms have been REFUSED** — a frozen golden case pins the whole work channel verbatim. Each refusal is the same shape: the candidate owns both sides of any channel its graph produces. `TODO.md` §A.29. **RE-SEQUENCED 2026-09-22b, keeping its number rather than being reopened as a new item.** The FACT that moved: "a second input shape for the self-improvement corpus" was deferred below on the cost of a second port, and ports 2 and 3 have since happened, so the shapes exist and what is left is live spend against them. The 2026-09-22b assessment's judgement — not a measurement — is that this makes the money decision smaller. **What closes it is the behaviour §A.29's title names** — a candidate the graph's OWN verifier certifies, refused by `1-must-pass` and reported as a 33.3pp regression, must stop being refused. **That behaviour is NOT currently reproduced by a command:** §A.29 carries only a grep the row itself disowns (it counts prose about a deletion), so producing a repro for the refusal is the item's own first task. Closing it needs a fold that can answer *"what did channel C hold when task T read it"*, a per-task ordering `RunProjection` does not carry — **or** property 3's claim re-scoped to what the exam actually establishes, with `CLAUDE.md` §3's five assumptions rewritten to match. This item and item 18 are the only OPEN items in 1–28; 8 and 13 are HALF, and their remainders are real — D5's version pin, and `TODO.md` §E.2's coordinator. **2026-09-24: the first task is DONE — the refusal is REPRODUCED** at `0558c2a5` (merged `7f576a47`): `node --test packages/core/test/evolution/a29-verifier-certified-refused.test.ts` → 2 pass, a green-is-wrong pin in which a candidate its own verifier certifies 30/30 (baseline 10/30) is refused `1-must-pass` + `2-non-inferior` at *"66.7% vs baseline 100.0% (Δ -33.3pp)"*, every failure `channel "picked" differs` on the ten goldens, and a control that genuinely drops items (verifier 0/30) gets the identical verdict. **Still OPEN, and now the only open item in 1–28** (item 18 closed): which closure — the fold or the re-scope — is the maintainer's Q6 |
 | 25 | D.1 | **done** — `readMcpServers` silently dropped every key it did not know, so a per-server `irreversibility` vanished. `TODO.md` §D.1 |
 | 26 | H.4 | **done `96a03bf`** — three flags accepted and ignored on a verb reading none of them |
 | 27 | H.3 | **done `e8c2fb5`** |
@@ -446,7 +474,8 @@ items at all, and the list of them after item 31 says so in its own heading.
 so a gate decision on it never checks the resources behind its refs) **and 24** (A.29) — **two are
 half**, 8's version pin and 13's second half, **22 was reclassified**, and the other **twenty-three
 are done**. Re-derive it from the three tables above, never from this sentence. No item had been
-opened since 2026-09-02, when items 15–28 were.
+opened since 2026-09-02, when items 15–28 were. *(2026-09-24: 18 is done at `4fe87a88`, so ONE is
+open — 24 — two half, one reclassified, twenty-four done.)*
 
 **What that leaves is not code.** Three workflows are ported with zero changes under
 `packages/core/src`; `npm run check` is green (the handoff's §1 carries the wave's counts, which
@@ -512,7 +541,7 @@ STAYS, because removing it IS the publish act and that act is the maintainer's. 
   registry, a README and LICENSE in `packages/core`, and `files` shipping `dist/**/*.js` and
   `*.d.ts` only — no source maps pointing at a `src/` the tarball does not carry, no `.tsbuildinfo`
   (the `.js` and `.d.ts` files still END in a `sourceMappingURL` pointer to a map that is not there: `TODO.md`
-  §H.17).
+  §H.17 — *2026-09-24: no longer; `pack.mjs` strips them, 138 stripped and 0 remain*).
   Examples stay in the repository.
 - **`loom --version`** prints `loom 0.1.0` (it used to print the usage, exit 0, on every build —
   which also made the first repro above pass against ANY build once the name resolved), and an
@@ -544,6 +573,14 @@ reviewer with `--dry-run`: exit 0, `total files: 3`). **After that, and not befo
 did not build: a release workflow (tarball to npm, SEA binaries to a GitHub release — the `binary`
 job builds one per commit and uploads nothing), and `TODO.md` §H.1's reopening, which the publish
 triggers. `TODO.md` §H.15 carries the same closing condition.
+
+**2026-09-24 — the publish is UNBLOCKED.** The pre-publish hygiene the 2026-09-23 handoff asked to
+land first merged at `9b8377e9`: `pack.mjs` now packs `git archive HEAD` extracted into a throwaway
+checkout, so dirty, staged or untracked state cannot ship, and it prints the `branch@sha` it packed
+(§H.17); the OTLP scope is `@caohaotiantian/loom/telemetry` (§H.16, the maintainer's Q1); the
+shipped `.d.ts` need no `@types/node` (§H.18, Q2); and `loom --port 1`, `loom --version --tokne x`
+and `loom --help --tokne x` exit 1 (§H.19, N7). `private: true` still stands; the three commands
+above are unchanged, and the receipt is still the only thing that closes this item.
 
 **30 · The channel-shape decision: what a channel carries when a tool fails, truncates, or holds a
 secret — DECIDED 2026-09-22 as D8, and the item is now its IMPLEMENTATION.** §A.82, §A.83 and §A.90
@@ -584,12 +621,16 @@ neither does a per-run ledger alone (D8's option (d)), a wider regex (§A.82's o
 with `grant-access`'s arm branching on the code, `look` deleted and the `KNOWN HAZARD` test deleted
 after it went RED; D8's *Enforced* line names the sites and the tests, and `TODO.md` §A.90 is struck
 with the repro on the shipped binary. §A.83 and §A.82 remain open, as this item says they should.
+**STATUS 2026-09-24: §A.83 is CLOSED** at `26a4f358` — the marker is out of `content` at all three
+sites and `truncated`/`bytes` are served on the projection (D8's second *Enforced* line); **§A.82 is
+the one still open**, on the maintainer's Q8 (where a per-key classification is declared).
 
 *That phasing — **the envelope plus the failure producer closes the ITEM**, with §A.83 and §A.82
 closing later on their own rows — **is the orchestrator's READING of the maintainer's four-step
 order, not his words.** His sentence is: "phase one lands only the failure projection, which is
 enough to close §A.90." **Flagged for the maintainer to confirm**, because it decides whether item
-30 closes once or three times.*
+30 closes once or three times.* *(2026-09-24: not yet put to him — Q5 in
+`docs/handoff-2026-09-23.md` §7, still owed.)*
 
 **31 · The journal vocabulary §C is blocked on.** §C gates the UI direction, and it is blocked on
 facts the journal has no words for, not on a view. Eight of eleven documented span attributes are
@@ -609,14 +650,24 @@ above. **Closes name by name, two or three events at a time** — every one is a
 `journal/events.ts` change and therefore a `Kernel-seam:` trailer, which is exactly what the kernel gate exists to make visible. **It does not close by
 emitting them**: §C.2's own text says so. Do not start the UI ahead of it — a richer operator
 surface over a plane that is not emitting is a better view of nothing.
+*(2026-09-24: untouched, and next after §A.101. Its first slice as planned — `durationMs` on
+`run.compiled` and the node type on `task.leased` — rests on Q7, "the order only, not the whole
+owed list", which was recommended and has not been put to the maintainer.)*
 
 **The owed decisions are NOT an item, and that is the rule working rather than an omission.** A
 decision cannot name a command that fails, so it gets cut rather than reworded — but the SITTING is
 the highest-value unit of work in this project right now, and the list is here so it is not carried
 in a chat. Four of these are owed for the FIFTH wave running. Enumerated:
 
-- **§A.77** — whether `validate.ts` should refuse `k > branches.length` for a barrier whose every
-  member is static and unfanned. No lane has taken it.
+**2026-09-24 — this list and the table in `docs/handoff-2026-09-23.md` §7 (Q1–Q20) are the same
+questions; the table is the one to answer from.** Decided by the maintainer this wave, and BUILT:
+**Q1** (§H.16, rename the OTLP scope), **Q2** (§H.18, change the types and document the libs),
+**Q3 = (a)** (D9's flag 2 / §A.99, `fs.restore` undoes a create), **Q11** (§A.77, refuse), **Q12**
+(§A.86, a written argument) and **N7** (`loom --help --tokne x` refuses, reversing `ad83204d`).
+**Still owed, and not put to him this wave: Q4–Q10 and Q13–Q20.** Struck below where answered.
+
+- ~~**§A.77** — whether `validate.ts` should refuse `k > branches.length` for a barrier whose every
+  member is static and unfanned. No lane has taken it.~~ Q11: refuse — `1e37ca87`.
 - **The exported-constant shape-break policy** — `EDGE_FIELDS`, and now `POLICY_FIELDS` and
   `NESTED_FIELDS`, changed from ARRAYS to RECORDS and kept their names, so `check-surface.mjs` reads
   "unchanged". Whether that guard should pin SHAPE, and whether such a change may land under `fix:`.
@@ -628,8 +679,9 @@ in a chat. Four of these are owed for the FIFTH wave running. Enumerated:
   join's inbound edge be `kind: "join"` — a TODO row, one dot away from this file's D8), **§A.70**
   and **§A.72** — four owed into a fifth wave.
 - **§A.87** — `metadata.version`: a number or a semver STRING.
-- **§A.86** — whether `GRAPH002`'s reachability should be *realisable* rather than *reachable*, or
-  whether a warning may over-approximate and say so at the rule.
+- ~~**§A.86** — whether `GRAPH002`'s reachability should be *realisable* rather than *reachable*, or
+  whether a warning may over-approximate and say so at the rule.~~ Q12: the argument, written at
+  `rule002Terminals` — `51dd4548`.
 - **The per-run-ledger alternative to port 3's F5** — a per-run ledger file cannot lose an entry to
   a failed read, and converts a silent loss into a spurious gate, which is the direction a guard is
   allowed to fail in. **It is NOT a closure of D.10 and the maintainer said so in deciding it**: it
@@ -659,6 +711,14 @@ friction nobody logs.
 and item 29 was built short of the publish at `48de87f6` — so what is next is the maintainer's
 publish (29's closing receipt), then 24 and 18, then 31. Of the fourth port's two conditions, 30 is
 met; 29 waits on that same publish, and so does the stranger whose friction the port exists to log.
+*Where it stands, 2026-09-24:* the five `wave-0923-*` lanes merged (`9b8377e9` … `7f576a47`). 18 is
+DONE; 24's repro landed and its closure waits on Q6; 30's §A.83 closed, leaving §A.82 on Q8; and
+29's pre-publish hygiene merged, so **the publish is unblocked and is the maintainer's act alone**.
+The next wave's order: **(1) `TODO.md` §A.101** — a KERNEL defect, a committed Task re-run by a late
+second arrival, which the compiler assumes cannot happen outside §A.94's and §A.95's rules; a defect in the runtime's
+own contract outranks new vocabulary. **(2) Item 31's first slice**, on Q7. **(3) Item 24's fold**,
+once Q6 is answered — or the re-scope instead. **(4) The fourth port**, after the publish. The four
+owed into a fifth wave (§A.71, `TODO.md` §D.8, §A.70, §A.72) are now owed into a SIXTH.
 
 **The ORDER inside item 30, decided with D8 on 2026-09-22** — the two decisions above are the first
 two units of work, in this sequence and not in parallel:
@@ -675,7 +735,8 @@ two units of work, in this sequence and not in parallel:
    own graph — and update `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING
    assertions rather than re-testing the engine. **Landed 2026-09-23** — D9's *Enforced* line.
 4. **Only then** items 29, 18/24, and 31. *(2026-09-23: 29 is built short of its publish; 18/24
-   and 31 are untouched.)*
+   and 31 are untouched.)* *(2026-09-24: 18 done, 24 reproduced, 29 unblocked for the publish, 31
+   untouched.)*
 
 **And the do-not-do-in-parallel list, which is part of the decision rather than advice:** do not
 split D.10 back into three rows fixed a little each; do not add only a per-run ledger for §A.90 and

@@ -3023,8 +3023,8 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   ```
   The lane measured two more shapes: `s→X` beside `s→m→m1→m3→X` with `X` failing then succeeding
   ran BOTH of X's arms, and a reader two or more hops behind X's `error` edge read `X:error` as
-  `{ok: true}`. **Every compile rule but two assumes one run per Task**; `graph/validate.ts`'s
-  single-arrival and tree conditions are what keep §A.94 and §A.95 sound under it. No shipped
+  `{ok: true}`. **The compiler assumes one run per Task** everywhere except §A.94's and §A.95's
+  rules, whose single-arrival and tree conditions in `graph/validate.ts` keep them sound under it. No shipped
   example reaches it — only `grant-access`'s `weigh` and `record` fan in, on exclusive paths.
   **Closes when** a TERMINAL Task is never re-readied (or a re-arrival is refused, or journaled as a
   distinct fact), with all three shapes pinned — the duplicated write, both arms, the stale
