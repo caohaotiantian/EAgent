@@ -6017,9 +6017,13 @@ interface RecordedGraphResolution {
   readonly failed: readonly string[];
   /**
    * Whether ANY failed candidate's own diagnostic is a capability refusal (`GRAPH017`) — TODO.md
-   * §A.91, the reviewer's third fix round (N4). A caller's own "--allow-exec/--egress might fix
-   * this" advice is true for a capability the compiler here was not granted; it is not true for a
-   * `GRAPH015` missing resource, and saying it anyway was measured on exactly that diagnostic.
+   * §A.91, the reviewer's third fix round (N4). No caller branches on this any more: the fourth
+   * fix round (X1) moved the grant advice it gated INTO `refusal` itself, so every by-hash caller
+   * gets it from the one string they already quote rather than from a caller-specific conditional
+   * two of nine remembered to write. Kept on the return value anyway — it is a fact about WHY the
+   * resolution failed that a future caller may want to act on differently than prose in `refusal`
+   * allows (a structured field, not a string to parse), and it costs nothing `failed` was not
+   * already computing.
    */
   readonly capabilityIssue: boolean;
 }
@@ -6045,6 +6049,19 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
   // for a comma-joined list of paths — TODO.md §A.91, the reviewer's third fix round (N3's other
   // half): the antecedent-less "it publishes no graph…" this replaces read as though `searched`
   // named one place, always false once a second or third directory is in the list.
+  //
+  // THE GRANT ADVICE LIVES HERE NOW, NOT PER CALLER — TODO.md §A.91, the reviewer's fourth fix
+  // round (X1, BLOCKING). N4 made the shared fragment neutral and added `capabilityIssue`, but
+  // only TWO of nine by-hash callers (`recordedGraph`, `bindRecordedGraphOrExplain`) were ever
+  // given their own conditional sentence for it — `approve`, `gates`, `score`, `exam attest`,
+  // `suite freeze` and `promote --against-cohort` interpolate `refusal` bare and so named neither
+  // the capability nor the fix. Reproduced: a `proc:exec` gated run recorded with `--allow-exec
+  // echo`, then `approve` without it — exit 1 naming only "GRAPH017_CAPABILITY_NOT_GRANTED.
+  // Publish the graph this run used, or pass --graph explicitly", both of which are wrong advice
+  // for a graph that IS published and needs no editing, only the grant the run had. Said ONCE,
+  // here, so every caller gets it from the one string they already quote — a caller may still add
+  // its own verb-specific action (`approve`'s cancel/reject line, `recordedGraph`'s --graph line)
+  // beside it, and `capabilityIssue` stays on the return value for exactly that purpose.
   const refusal =
     `searching ${searched}: no graph compiles to hash ${wanted}` +
     (others.length === 0 ? " — nothing there compiles at all" : ` — ${String(others.length)} compile to a different hash: ${others.join("; ")}`) +
@@ -6052,11 +6069,41 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
       ? ""
       : // NEUTRAL — TODO.md §A.91, the reviewer's third fix round (N4). "does not compile under
         // this invocation's grants" was said even for a GRAPH015 missing resource, which no grant
-        // this process could hold would have fixed; a caller mentions --allow-exec/--egress itself,
-        // and only when `capabilityIssue` says the diagnostic was actually a capability refusal.
+        // this process could hold would have fixed; the capability advice below is separate and
+        // conditional on `capabilityIssue`, never folded into this clause.
         ` (${String(failed.length)} candidate${failed.length === 1 ? "" : "s"} do${failed.length === 1 ? "es" : ""} not compile here and may be ` +
-        `this run's graph, unprovable either way until it compiles: ${failed.join("; ")})`);
+        `this run's graph, unprovable either way until it compiles: ${failed.join("; ")})`) +
+    (capabilityIssue
+      ? // NO TRAILING PERIOD — every caller interpolates this as `${refusal}. <next sentence>`,
+        // so a period here produced ".. " at the join (measured: `approve`'s own repro). `refusal`
+        // ends mid-sentence throughout; the caller's own period closes it.
+        ` A candidate refused for a capability this invocation was not granted may compile with the grants the ` +
+        `RUN had: a graph declaring net:fetch needs the same --egress, and one declaring proc:exec the same ` +
+        `--allow-exec`
+      : "");
   return { refusal, index, files, failed, capabilityIssue };
+}
+
+/**
+ * ADVICE FOR A COHORT/BASELINE GRAPH THAT DID NOT RESOLVE — TODO.md §A.91, the reviewer's fourth
+ * fix round (X1's GRAPH015 follow-up). `attestExam`, `freezeSuite` and `promoteAgainstCohort` all
+ * derive their graph from a run's journaled hash rather than take one on the command line, and all
+ * three ended their refusal with "restore those bytes to graphs/" UNCONDITIONALLY. That is right
+ * when nothing there compiles to the wanted hash at all — the file is genuinely gone or was never
+ * published — and WRONG when a candidate at that path WAS found and failed to compile (a missing
+ * resource under `resources/`, a capability this invocation lacks): the graph's own bytes are
+ * right there, and "restore" tells an operator to do something that changes nothing. Reproduced:
+ * `graphs/x.json` present, `resources/function/pre.js` deleted — before, `suite freeze` and `exam
+ * attest` both ended "Restore those bytes to graphs/"; the bytes were never the problem.
+ *
+ * `failed.length > 0` is exactly the second case (`resolveRecordedGraph`'s own `refusal`, quoted
+ * ahead of this in every caller, already names WHICH candidate and WHY) — this only says what to
+ * DO about it, not what went wrong.
+ */
+function missingGraphAdvice(failed: readonly string[]): string {
+  return failed.length === 0
+    ? "restore those bytes to graphs/"
+    : "fix why it does not compile (named above) — the file is already there, and restoring it changes nothing";
 }
 
 /**
@@ -6072,7 +6119,7 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
  */
 function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string | undefined): void {
   if (wanted === undefined) return;
-  const { graph, refusal, failed, capabilityIssue } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, failed } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     ws.engine.attach(runId, graph);
     return;
@@ -6080,15 +6127,14 @@ function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string 
   // GENUINELY UNPUBLISHED: nothing failed to compile, so the engine's own "not attached" is not
   // hiding anything — falling through to it is the honest answer, not a caller's oversight.
   if (failed.length === 0) return;
+  // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
+  // fourth fix round (X1). `resolveRecordedGraph` itself now appends the --egress/--allow-exec
+  // sentence when a failed candidate's own diagnostic is GRAPH017, so this call site no longer
+  // repeats it (or omits it) on its own; "Publish the graph this run used" is this verb's own
+  // action regardless of why the candidate failed.
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
-    `run ${runId} compiled graph ${wanted}, and ${refusal}. Publish the graph this run used` +
-      // --allow-exec/--egress ONLY WHEN THE DIAGNOSTIC IS ACTUALLY A CAPABILITY REFUSAL — TODO.md
-      // §A.91, the reviewer's third fix round (N4). A GRAPH015 missing resource needs neither.
-      (capabilityIssue
-        ? `, or pass the flags it needs to compile here — a graph is compiled with THIS invocation's grants, so one ` +
-          `declaring net:fetch needs the same --egress this run had, and one declaring proc:exec the same --allow-exec.`
-        : "."),
+    `run ${runId} compiled graph ${wanted}, and ${refusal}. Publish the graph this run used.`,
     { details: { runId, graphHash: wanted, failed } },
   );
 }
@@ -6943,7 +6989,20 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
           diagnostics.set(graph.graphHash, memo.get(path)?.diagnostics ?? []);
         }
       } catch (e) {
-        failed.push(`${join(rel, file)}: ${(e as Error).message}`);
+        // THE FIRST DIAGNOSTIC'S OWN MESSAGE, NOT JUST THE SUMMARY CODE — TODO.md §A.91, the
+        // reviewer's fourth fix round (X1's "same mechanism" follow-up). `compile()`'s thrown
+        // `LoomError.message` is "graph has N error(s): CODE1, CODE2, …", which names WHAT went
+        // wrong but not WHICH resource, node or channel — base's loud sweep printed the
+        // diagnostic's own sentence (`resource "function/pre@stable" does not resolve …
+        // resources/function/pre.js`) and this resolver's refusal fragment quoted only the code,
+        // a real loss the reviewer measured against base. `details.diagnostics[0]` is the same
+        // array `compile()` attaches for exactly this reason (`graph/compile.ts`'s own
+        // `{ details: { diagnostics: errors } }`); appended when present, and the bare message
+        // stands alone for a throw this shape does not cover (an unreadable file, a YAML parse
+        // error).
+        const details = isLoomError(e) ? (e.details as { diagnostics?: readonly Diagnostic[] } | undefined) : undefined;
+        const first = details?.diagnostics?.[0];
+        failed.push(`${join(rel, file)}: ${(e as Error).message}${first === undefined ? "" : ` — ${first.message}`}`);
       }
     }
   }
@@ -7183,32 +7242,23 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       { details: { runId } },
     );
   }
-  const { graph, refusal, files, failed, capabilityIssue } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, files, failed } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
     process.stderr.write(`${verb}: graph ${named(graph)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
     return graph;
   }
+  // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
+  // fourth fix round (X1). It used to live only here (and in `bindRecordedGraphOrExplain`), so
+  // seven of the resolver's nine callers named neither the capability nor the fix; it is now said
+  // ONCE, inside `resolveRecordedGraph` itself, and every caller inherits it for free. This verb's
+  // own remaining action — publish, or name the file with --graph — is unconditional.
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
     `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
       `Publish the graph this run used, or pass --graph explicitly — a candidate outside graphs/ is named that ` +
-      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.` +
-      // THE FIX LINE IS WRONG FOR THE COMMONEST INSTANCE OF THIS REFUSAL, and this is the sentence that
-      // says so. A graph is compiled HERE with THIS invocation's grants, so `graphs/slow.json` declaring
-      // `net:fetch` compiles under `loom run --egress 127.0.0.1` and not under a bare `loom trace` —
-      // which drops it out of the index and produces this message about a graph that is published, is
-      // unedited, and needs no `--graph`. Measured through the binary: `loom trace <that run>` exits 1
-      // with the parenthetical above naming GRAPH017, and the same command with `--egress 127.0.0.1`
-      // exits 0. Only said when something FAILED TO COMPILE FOR A CAPABILITY REASON — TODO.md §A.91,
-      // the reviewer's third fix round (N4): a GRAPH015 missing-resource failure is not fixed by
-      // --egress or --allow-exec, and saying so anyway was measured on exactly that diagnostic.
-      (capabilityIssue
-        ? ` A graph that will not compile HERE may compile with the grants the RUN had: this verb applies the ` +
-          `flags on THIS command line, so a graph declaring net:fetch needs the same --egress, and one declaring ` +
-          `proc:exec the same --allow-exec.`
-        : ""),
+      `way. A graph EDITED since the run no longer matches, which is the point: this run executed the old bytes.`,
     { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed }) } },
   );
 }
@@ -10842,7 +10892,7 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
       `run ${anchorId} was produced by graph ${anchorT.cohort.graphHash}, and ${resolved.refusal}. ` +
         `--cohort names a RECORDING — a run of a graph published in graphs/ — because the exam's inputs are checked ` +
         `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a recording, ` +
-        `or restore the graph's bytes to graphs/.`,
+        `or ${missingGraphAdvice(resolved.failed)}.`,
     );
   }
   const problems = attestationProblems(exam.spec, baseline.spec);
@@ -11473,7 +11523,7 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       CODES.E_RUN_NOT_FOUND,
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The ` +
         `expectations exclude every channel an evaluator node wrote, and node types live in the spec — without it ` +
-        `this would freeze an exam that grades the grader. Restore those bytes to graphs/.`,
+        `this would freeze an exam that grades the grader — ${missingGraphAdvice(resolvedBaseline.failed)}.`,
     );
   }
   // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
@@ -12008,7 +12058,7 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
     throw err.notFound(
       CODES.E_RUN_NOT_FOUND,
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The baseline is ` +
-        `derived from the cohort rather than passed in, so it has to be publishable: restore those bytes to graphs/. A ` +
+        `derived from the cohort rather than passed in, so it has to be publishable: ${missingGraphAdvice(resolvedBaseline.failed)}. A ` +
         `graph EDITED since the cohort ran no longer matches, which is the point — those runs were produced by the old bytes.`,
     );
   }

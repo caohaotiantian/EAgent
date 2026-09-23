@@ -12,9 +12,21 @@
  *
  *   (a) THE RUN'S OWN GRAPH COMPILES WITH A WARNING — `announceResolvedGraph` must print it.
  *   (b) THE RUN'S OWN GRAPH IS THE SOLE CANDIDATE AND FAILS TO COMPILE HERE — the refusal must
- *       name its real path and explain why (GRAPH017), never "not found" or "not attached" alone.
+ *       name its real path and explain why (GRAPH017), never "not found" or "not attached" alone —
+ *       AND, since the fourth fix round (X1), the --allow-exec/--egress advice, from every verb.
  *   (c) AN UNRELATED CANDIDATE, published under `resources/subgraph/`, FAILS TO COMPILE — it must
  *       never be named anywhere in the output; the run's own graph still resolves cleanly.
+ *   (d) THE RUN'S OWN GRAPH FAILS TO COMPILE FOR A MISSING RESOURCE (GRAPH015), NOT A CAPABILITY —
+ *       the refusal must name WHICH resource (not only the summary code), and must NEVER offer the
+ *       --allow-exec/--egress advice, which fixes nothing here. TODO.md §A.91, the reviewer's
+ *       fourth fix round (X1, BLOCKING): N4 made the shared fragment neutral about GRAPH015 but the
+ *       grant advice it added back for GRAPH017 was written into only TWO of the resolver's nine
+ *       by-hash callers (`recordedGraph`, `bindRecordedGraphOrExplain`) — `approve`, `gates`,
+ *       `score`, `exam attest`, `suite freeze` and `promote --against-cohort` named neither the
+ *       capability nor the fix. Closed by moving the advice INTO `resolveRecordedGraph`'s own
+ *       `refusal`, so every caller inherits it from the one string they already quote; (b) and (d)
+ *       are the untested direction the reviewer named — `capabilityIssue → true` always, or
+ *       `→ false` always, now turns one of them red without touching the other.
  *
  * `promote --suite` is NOT in this table, and not because of `MIN_COHORT_SIZE`: it never calls
  * `resolveRecordedGraph` at all. `--baseline <file>` is loaded loudly with `loadGraph`, like
@@ -123,6 +135,42 @@ const UNRELATED_BROKEN_GRAPH = {
   edges: [],
 };
 
+/**
+ * A `function` node reading a resource that can be deleted AFTER the run records it — GRAPH015,
+ * scenario (d). Gates so the same `gatedRun` helper works; the resource must exist for `loom run`
+ * to compile it once, and is removed before the verb under test resolves it a second time.
+ */
+const FN_GATED_GRAPH = {
+  apiVersion: "loom.dev/v1",
+  kind: "GraphSpec",
+  metadata: { name: "fn-gated", project: "lane-d", version: 1 },
+  policy: { posture: "out", capabilities: ["fs:write"] },
+  channels: {
+    source: { type: "string", reduce: "replace" },
+    body: { type: "string", reduce: "replace" },
+    written: { type: "object", reduce: "replace" },
+  },
+  inputs: ["source"],
+  outputs: ["written"],
+  nodes: [
+    { id: "prep", type: "function", reads: ["source"], writes: ["body"], function: { ref: "function/prep@stable" } },
+    { id: "gate", type: "human_gate", reads: ["body"], writes: ["body"], humanGate: { ref: "oversight/publish@stable" } },
+    {
+      id: "write",
+      type: "tool",
+      reads: ["body"],
+      writes: ["written"],
+      unhandled: true,
+      tool: { name: "fs.write", version: "1.0", args: { path: "out/copy.txt", body: "${body}" } },
+    },
+  ],
+  edges: [
+    { id: "e1", from: "prep", to: "gate", kind: "seq" },
+    { id: "e2", from: "gate", to: "write", kind: "seq" },
+  ],
+};
+const PREP_FN = `(view) => ({ writes: { body: String(view.get("source") ?? "") } })`;
+
 const EXAM = {
   apiVersion: "loom.dev/v1",
   kind: "GraphSpec",
@@ -184,6 +232,18 @@ async function gatedRun(dir: string, graphFile: string, extraArgs: string[] = []
   const gateMatch = /gate (gate_\S+) on node/.exec(started.err);
   assert.ok(gateMatch !== null, `expected a gate id on stderr: ${started.err}`);
   return { runId, gateId: gateMatch![1]! };
+}
+
+/**
+ * One recorded, gated run of `FN_GATED_GRAPH` — publishes its resource, records the run, then
+ * deletes the resource before returning, so a verb resolving this run's graph a second time finds
+ * it published but broken (GRAPH015), never gone.
+ */
+async function fnGatedRun(dir: string): Promise<{ runId: string; gateId: string }> {
+  writeFileSync(join(dir, "resources", "function", "prep.js"), PREP_FN);
+  const f = await gatedRun(dir, join(dir, "graphs", "fn-gated.json"));
+  rmSync(join(dir, "resources", "function", "prep.js"));
+  return f;
 }
 
 /** One recorded, gated run of SOLE_GRAPH, --allow-exec granted so it compiles once to record. */
@@ -264,6 +324,13 @@ test("(b) EVERY VERB NAMES THE SOLE CANDIDATE'S REAL PATH AND WHY, NEVER \"NOT F
       const text = r.out + r.err;
       assert.match(text, /GRAPH017_CAPABILITY_NOT_GRANTED/, `${v.name} must explain WHY, not just that nothing resolved:\n${text}`);
       assert.match(text, /graphs\/sole\.json/, `${v.name} must name the candidate's real path:\n${text}`);
+      // THE GRANT ADVICE — TODO.md §A.91, the reviewer's fourth fix round (X1). It used to be
+      // written per caller, and only two of nine remembered to; it now lives in
+      // `resolveRecordedGraph`'s own `refusal`, so every verb in this loop gets it for free.
+      // Killed by `capabilityIssue → false` (the sentence would vanish here too) and by deleting
+      // the resolver's own clause (every verb in this loop goes red at once, not just two).
+      assert.match(text, /--allow-exec/, `${v.name} must say the flag that would fix a GRAPH017:\n${text}`);
+      assert.match(text, /grants the RUN had/, `${v.name} must explain WHY the flag would fix it:\n${text}`);
     }
 
     writeFileSync(join(w.dir, "resources", "exam.json"), JSON.stringify(EXAM));
@@ -271,6 +338,43 @@ test("(b) EVERY VERB NAMES THE SOLE CANDIDATE'S REAL PATH AND WHY, NEVER \"NOT F
     const text = attested.out + attested.err;
     assert.match(text, /GRAPH017_CAPABILITY_NOT_GRANTED/, `exam attest must explain WHY:\n${text}`);
     assert.match(text, /graphs\/sole\.json/, `exam attest must name the candidate's real path:\n${text}`);
+    assert.match(text, /--allow-exec/, `exam attest must say the flag that would fix a GRAPH017:\n${text}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── (d) GRAPH015 → the grant advice must be ABSENT, and the missing resource named ──
+
+test("(d) A GRAPH015 (MISSING RESOURCE) NAMES THE RESOURCE, AND NEVER OFFERS THE GRANT ADVICE", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "graphs", "fn-gated.json"), JSON.stringify(FN_GATED_GRAPH));
+
+    // A FRESH RUN PER VERB — the resource is republished and re-deleted each time (see (a)'s own
+    // note on why a shared run would not do, which applies here too: `approve` resolves the gate).
+    for (const v of VERBS) {
+      const f = await fnGatedRun(w.dir);
+      const r = await run(withWorkspace(w.dir, v.argv(f)));
+      const text = r.out + r.err;
+      assert.match(text, /GRAPH015_RESOURCE_NOT_FOUND/, `${v.name} must explain WHY, not just that nothing resolved:\n${text}`);
+      // THE MISSING RESOURCE ITSELF, NOT ONLY THE CODE — TODO.md §A.91, the reviewer's fourth fix
+      // round (X1's "same mechanism" follow-up): `indexGraphs` used to quote only the summary
+      // code ("graph has 1 error(s): GRAPH015_RESOURCE_NOT_FOUND"), never which resource — base's
+      // loud sweep named the ref and the file.
+      assert.match(text, /function\/prep@stable/, `${v.name} must name WHICH resource is missing:\n${text}`);
+      // NEVER THE GRANT ADVICE — a GRAPH015 is not a capability this invocation could hold or
+      // withhold, and offering --allow-exec/--egress for it is the false advice this round fixes.
+      assert.doesNotMatch(text, /--allow-exec|--egress|grants the RUN had/, `${v.name} must not offer a flag that fixes nothing:\n${text}`);
+    }
+
+    const examF = await fnGatedRun(w.dir);
+    writeFileSync(join(w.dir, "resources", "exam.json"), JSON.stringify(EXAM));
+    const attested = await run(["exam", "attest", join(w.dir, "resources", "exam.json"), "--cohort", examF.runId, "--as", "u:alice", "--workspace", w.dir]);
+    const text = attested.out + attested.err;
+    assert.match(text, /GRAPH015_RESOURCE_NOT_FOUND/, `exam attest must explain WHY:\n${text}`);
+    assert.match(text, /function\/prep@stable/, `exam attest must name WHICH resource is missing:\n${text}`);
+    assert.doesNotMatch(text, /--allow-exec|--egress|grants the RUN had/, `exam attest must not offer a flag that fixes nothing:\n${text}`);
   } finally {
     w.dispose();
   }
