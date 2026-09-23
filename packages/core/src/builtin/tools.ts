@@ -26,7 +26,7 @@
  * on the same file. See `branchRoot`.
  */
 
-import { closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { Script, createContext } from "node:vm";
 
@@ -195,6 +195,59 @@ function openLeaf(path: string, flags: number): number {
   return openSync(path, flags | NOFOLLOW, 0o666);
 }
 
+/** Absent on platforms without the flag (Windows), which have no FIFO to block on either. */
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+
+/**
+ * Not a platform errno: this file's own name for "something is at this path and it is not a
+ * regular file". `UNREADABLE_ERRNO` lists it, so `fs.read` answers `E_FS_UNREADABLE` for it.
+ */
+const NOT_REGULAR = "ENOTREG";
+
+/**
+ * READ A REGULAR FILE, AND REFUSE ANYTHING ELSE BEFORE IT CAN BLOCK (`TODO.md` §A.97).
+ *
+ * A blocking `open(O_RDONLY)` of a FIFO waits for a writer that may never come, and the task
+ * has no bound below the node's `timeoutMs` — measured on the shipped `grant-access` with
+ * `mkfifo out/access-ledger.json`: the run hung until a 10 s alarm killed it. The same wait
+ * sits behind a character device (`/dev/zero` never ends) and a socket. So the open is
+ * NON-BLOCKING, which returns at once for a FIFO with no writer, and the descriptor is
+ * `fstat`ed before a byte is read: what is not a regular file is refused. Checking the
+ * descriptor, not the name, is what keeps it one decision — a `stat` of the path first would be
+ * a second look at a name that can be swapped between the two.
+ *
+ * `O_NONBLOCK` changes nothing about a regular file: its reads never block to begin with.
+ *
+ * A directory is refused here too, with the errno it always had (`EISDIR`); every other kind
+ * carries `NOT_REGULAR`. Both read as UNREADABLE — never as NOT FOUND, because something is
+ * there.
+ */
+function readRegularLeaf(path: string): string {
+  const fd = openLeaf(path, constants.O_RDONLY | NONBLOCK);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      const directory = st.isDirectory();
+      const kind = directory
+        ? "a directory"
+        : st.isFIFO()
+          ? "a FIFO"
+          : st.isSocket()
+            ? "a socket"
+            : st.isCharacterDevice()
+              ? "a character device"
+              : st.isBlockDevice()
+                ? "a block device"
+                : "not a regular file";
+      const code = directory ? "EISDIR" : NOT_REGULAR;
+      throw Object.assign(new Error(`${code}: ${kind}, not a regular file; refusing to read it`), { code });
+    }
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Create-or-truncate and write, through a descriptor the OS opened without following. */
 function writeLeaf(path: string, body: string): void {
   const fd = openLeaf(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC);
@@ -358,7 +411,7 @@ function writePath(opts: BuiltinOptions, ctx: ToolContext, rel: string): string 
  * Either way it is not `E_FS_NOT_FOUND`, and that is the only code an `error` arm may read as
  * "there is nothing here".
  */
-const UNREADABLE_ERRNO: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP"]);
+const UNREADABLE_ERRNO: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP", NOT_REGULAR]);
 
 /**
  * THREE OUTCOMES THAT WERE ONE (`DESIGN.md` D8, `TODO.md` §A.90).
@@ -416,14 +469,10 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
       }
       const max = Number(args["maxBytes"] ?? 200_000);
       let text: string;
-      let fd: number | undefined;
       try {
-        fd = openLeaf(path, constants.O_RDONLY);
-        text = readFileSync(fd, "utf8");
+        text = readRegularLeaf(path);
       } catch (e) {
         return readFailure(String(args["path"]), e);
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
       // Truncation is FLAGGED in the content, so a model reasoning over the result
       // is told it is not seeing everything.
@@ -548,14 +597,11 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       const path = writePath(opts, ctx, rel);
 
       let current: string;
-      let fd: number | undefined;
       try {
-        fd = openLeaf(readFrom, constants.O_RDONLY);
-        current = readFileSync(fd, "utf8");
+        // Through `readRegularLeaf` for `fs.read`'s reason (§A.97): a FIFO here blocked too.
+        current = readRegularLeaf(readFrom);
       } catch (e) {
         return { content: `cannot read ${rel}: ${(e as Error).message}`, isError: true };
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
 
       const match = locateEdit(current, find, replaceAll);
@@ -1036,12 +1082,9 @@ function fsGrep(opts: BuiltinOptions): ToolDefinition {
         try {
           // Bounded before it is scanned: a multi-gigabyte file in the workspace must
           // narrow the results, not exhaust the process.
-          const fd = openLeaf(abs, constants.O_RDONLY);
-          try {
-            text = readFileSync(fd, "utf8").slice(0, GREP_FILE_CAP);
-          } finally {
-            closeSync(fd);
-          }
+          // `walk` yields regular files only, by DIRENT type; the name can be swapped for a FIFO
+          // between that listing and this open, which `readRegularLeaf` refuses without blocking.
+          text = readRegularLeaf(abs).slice(0, GREP_FILE_CAP);
         } catch {
           return;
         }

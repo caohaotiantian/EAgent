@@ -10,6 +10,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -695,6 +696,66 @@ test("END TO END: a fan-out of three branches writing one declared path leaves t
       "each branch's body survived its siblings",
     );
     for (const f of files) assert.equal(f.endsWith("report.md"), true, `every file is still the path the graph named: ${f}`);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.97: a path that is not a regular file is refused before it can block ────────────────
+
+/**
+ * `fs.read` of `pipe` in `root`, IN A CHILD PROCESS under a wall-clock bound.
+ *
+ * A child, because the defect is a SYNCHRONOUS block: a blocking `open` of a FIFO with no writer
+ * parks the event loop, so an in-process test of the broken code would hang the runner itself
+ * rather than fail. `spawnSync`'s `timeout` kills the child, and the parent reads that as the
+ * failure it is. The bound is 10 s against a call that returns in well under one.
+ */
+function readInChild(root: string, path: string): { status: number | null; signal: string | null; out: string; err: string } {
+  const tools = new URL("../../src/builtin/tools.ts", import.meta.url).href;
+  const script =
+    `const { builtinTools } = await import(${JSON.stringify(tools)});` +
+    `const read = builtinTools({ root: ${JSON.stringify(root)}, deny: [] }).find((t) => t.name === "fs.read");` +
+    `const r = await read.execute({ path: ${JSON.stringify(path)} }, { taskId: "t@root#0", signal: new AbortController().signal, progress() {} });` +
+    `process.stdout.write(JSON.stringify({ isError: r.isError === true, code: r.error?.code, cls: r.error?.class, content: r.content, details: r.error?.details ?? r.details }));`;
+  const c = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 10_000 });
+  return { status: c.status, signal: c.signal, out: c.stdout, err: c.stderr };
+}
+
+test("§A.97 — a FIFO at an fs.read path is refused E_FS_UNREADABLE at once, and never blocks", { skip: process.platform === "win32" }, () => {
+  const s = sandbox();
+  try {
+    // No writer ever opens it. A blocking read-open waits for one forever.
+    execFileSync("mkfifo", [join(s.root, "pipe")]);
+    const c = readInChild(s.root, "pipe");
+    assert.equal(c.signal, null, `the read BLOCKED and the child was killed by the 10 s bound (${String(c.signal)})`);
+    assert.equal(c.status, 0, c.err);
+    const r = JSON.parse(c.out) as { isError: boolean; code?: string; cls?: string; content: string; details: { errno: string } };
+    assert.equal(r.isError, true);
+    // UNREADABLE, never NOT_FOUND: something IS at the path, and an `error` arm that reads
+    // `E_FS_NOT_FOUND` as "nothing here" must not be told otherwise.
+    assert.equal(r.code, "E_FS_UNREADABLE", c.out);
+    assert.equal(r.cls, "policy");
+    assert.equal(r.details.errno, "ENOTREG");
+    assert.match(r.content, /a FIFO, not a regular file/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.97 — a DIRECTORY at an fs.read path keeps its errno, and a regular file still reads", () => {
+  // The ordinary half: the non-blocking open must change nothing about a file that IS regular.
+  const s = sandbox();
+  try {
+    mkdirSync(join(s.root, "dir"));
+    writeFileSync(join(s.root, "plain.txt"), "plain bytes");
+    const read = readInChild(s.root, "dir");
+    const r = JSON.parse(read.out) as { code?: string; details: { errno: string } };
+    assert.equal(r.code, "E_FS_UNREADABLE", read.out);
+    assert.equal(r.details.errno, "EISDIR");
+    const ok = JSON.parse(readInChild(s.root, "plain.txt").out) as { isError: boolean; content: string };
+    assert.equal(ok.isError, false);
+    assert.equal(ok.content, "plain bytes");
   } finally {
     s.cleanup();
   }
