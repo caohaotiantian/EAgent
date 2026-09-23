@@ -1316,8 +1316,15 @@ function checkProjectionValues(channel: string, projection: Record<string, unkno
   // `project()` reads a `take` that is neither `undefined` nor `null`, and refuses whatever it
   // cannot read — including `""`, `false` and `[]`, which `Number()` would have coerced to a
   // bound of zero. A NEGATIVE take is legal and means "the last N".
+  //
+  // AN EXPLICIT `null` IS REFUSED HERE TOO, although `project()` reads it as absent (§A.88). This
+  // rule refused `"banana"`, `["x"]`, `{a:1}` and `true` and dropped `null` silently, and `take`
+  // is on `CHECKED_BY_A_RULE`, so the typed-field pass deferred to this rule and nothing refused
+  // it. Absent is spelled by leaving the key out; a `null` is a value somebody wrote, and a
+  // compiler stricter than the runtime is the allowed direction. The runtime stays as it is, so
+  // a graph compiled by an older build still runs.
   const take = projection["take"];
-  if (take !== undefined && take !== null && readProjectionBound(take) === undefined) {
+  if (take !== undefined && (take === null || readProjectionBound(take) === undefined)) {
     bad(
       `channel "${channel}"'s \`contextProjection.take\` is not an item count: ${describeProjectionValue(take)}`,
       "use a number, or a quoted number like `take: \"3\"`; remove it to show the whole value",
