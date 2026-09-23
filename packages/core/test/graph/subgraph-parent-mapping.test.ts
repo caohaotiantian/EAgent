@@ -90,6 +90,16 @@ test("THE ORDINARY HALF: declared parent channels compile clean, resolved child 
   assert.equal(r.ok, true, JSON.stringify(r.diagnostics));
 });
 
+test("ONLY THE NAMES MOVED: an ABSENT mapping on an unresolved child is still silent (RESIDUE, pinned)", () => {
+  // `requiredMapping`'s shape refusal was NOT hoisted: doing so turned three graphs in
+  // `test/run/retry-default-policy.test.ts` (`subgraph: {ref}` alone, no `subgraph` hook) from ok
+  // into GRAPH003_MALFORMED, which is a different change from §A.98's. Such a node still crashes at
+  // run time on `Object.entries(sub.inputs)`; if a later change refuses it here, this goes red and
+  // is the signal to delete it with its TODO row.
+  const r = compile({ spec: parent({ inputs: undefined, outputs: undefined }), resolver: bare(), tools: {}, tenantCapabilities: ["*"] });
+  assert.deepEqual(r.diagnostics.filter((x) => x.severity === "error").map((x) => x.code), []);
+});
+
 test("A RESOLVED child still gets BOTH halves, each ONCE — the hoist did not duplicate the parent's", () => {
   const msgs = mapping(parent({ inputs: { nope: "gone" }, outputs: { gone: "nope" } }), stubResolver({ subgraphs: { "graph/child@stable": CHILD } }));
   assert.equal(msgs.length, 4, msgs.join("\n"));

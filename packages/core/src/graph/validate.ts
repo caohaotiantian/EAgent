@@ -6627,22 +6627,27 @@ function rule016Subgraphs(
     const sub = n.subgraph;
     if (sub === undefined) continue;
 
-    // THE PARENT'S HALF FIRST, BEFORE ANY `continue` BELOW (§A.98). `sub.inputs` and
-    // `sub.outputs` are the PARENT's declaration and name the PARENT's channels, so whether they
-    // are well-formed and whether each parent-side name is declared is decidable from this spec
-    // alone. This half used to sit after `if (child === undefined) continue;`, so a ref the
-    // resolver could not expand — a resolver with no `subgraph` hook at all, which is what the
-    // test skeleton and a bare `ResourceResolver` are — skipped it: `inputs: {k: "nope"}` with no
-    // channel `nope` compiled `ok`, and the child was handed `undefined` at run time. The same
-    // was true behind a subgraph CYCLE and past the depth budget. None of those three conditions
-    // is about the parent's own mapping, so none of them may silence it.
+    // THE PARENT-CHANNEL HALF FIRST, BEFORE ANY `continue` BELOW (§A.98). The VALUES of
+    // `sub.inputs` and the KEYS of `sub.outputs` name the PARENT's channels, so whether each is
+    // declared is decidable from this spec alone. This half used to sit after
+    // `if (child === undefined) continue;`, so a ref the resolver could not expand — a resolver
+    // with no `subgraph` hook at all, which is what the test skeleton and a bare
+    // `ResourceResolver` are — skipped it: `inputs: {k: "nope"}` with no channel `nope` compiled
+    // `ok`, and the child was handed `undefined` at run time. The same was true behind a subgraph
+    // CYCLE and past the depth budget. None of those is about the parent's own channel names.
+    //
+    // ONLY THE NAMES MOVE, NOT `requiredMapping`'s SHAPE REFUSAL. A mapping that is absent or not
+    // an object is read here as "maps nothing" and left to `requiredMapping` below, which still
+    // runs only for a resolved child — so hoisting this adds no GRAPH003 to a graph that compiled
+    // before. (An ABSENT mapping on an unresolved child is therefore still silent, and still a
+    // crash at run time — `TODO.md` residue, not this row's closing condition.)
     //
     // WHY `continue` STILL SKIPS THE CHILD HALF: "which channels does the child declare" needs the
     // child, and an unresolved child is GRAPH015's to report (or, with no `subgraph` hook, nobody
     // can answer it here). The child half stays below the resolution, unchanged.
-    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
-    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
-    for (const [childCh, parentCh] of Object.entries(inputs ?? {})) {
+    const asMapping = (v: unknown): Readonly<Record<string, unknown>> =>
+      typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Readonly<Record<string, unknown>>) : {};
+    for (const [childCh, parentCh] of Object.entries(asMapping(sub.inputs))) {
       if (!Object.hasOwn(spec.channels, parentCh as string)) {
         d.push({
           severity: "error",
@@ -6652,7 +6657,7 @@ function rule016Subgraphs(
         });
       }
     }
-    for (const parentCh of Object.keys(outputs ?? {})) {
+    for (const parentCh of Object.keys(asMapping(sub.outputs))) {
       if (!Object.hasOwn(spec.channels, parentCh)) {
         d.push({
           severity: "error",
@@ -6712,7 +6717,10 @@ function rule016Subgraphs(
     // `SubgraphNode.inputs` and `.outputs` are NOT optional in the type and the executor agrees:
     // `run/engine.ts` does `Object.entries(sub.inputs)` at `#contextFor` too, so an absent one is
     // a crash at run time and not a subgraph that maps nothing. Absent is a fault, and it says so.
-    // (`inputs`/`outputs` are read at the top of this loop, above every `continue` — §A.98.)
+    // (Their PARENT-channel names are checked at the top of this loop, above every `continue` —
+    // §A.98; this is the shape refusal and the child half.)
+    const inputs = requiredMapping(sub.inputs, n.id, "inputs", "child channel", "parent channel", d);
+    const outputs = requiredMapping(sub.outputs, n.id, "outputs", "parent channel", "child channel", d);
     //
     // NOT A PLAIN OBJECT IS REFUSE, NEVER SKIP, and that distinction was a defect. This used to
     // hand back `undefined` for a child whose `channels` was not a plain object and the mapping
