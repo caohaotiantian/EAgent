@@ -30,7 +30,7 @@ import { closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, wr
 import { dirname, join, resolve } from "node:path";
 import { Script, createContext } from "node:vm";
 
-import { CODES, err } from "../errors.ts";
+import { CODES, err, isLoomError } from "../errors.ts";
 import { encodeBranch, parseTaskId } from "../ids.ts";
 import { assertWithin, runSandboxed } from "../sandbox/subprocess.ts";
 import { locateEdit } from "./edit-match.ts";
@@ -349,6 +349,41 @@ function writePath(opts: BuiltinOptions, ctx: ToolContext, rel: string): string 
   return assertWithin(branchRoot(opts.root, deny, ctx) ?? opts.root, rel, deny);
 }
 
+/**
+ * The errno values that mean "something IS at this path and it cannot be read as a file".
+ *
+ * NAMED, and deliberately not "everything that is not ENOENT". What is left out — `EIO`,
+ * `EMFILE`, `ENFILE`, `EAGAIN`, `ENAMETOOLONG`, anything a platform adds — stays UNTYPED, which
+ * `#runToolNode` turns into `E_TOOL_SOURCE_UNAVAILABLE`: retryable, and still not "absent".
+ * Either way it is not `E_FS_NOT_FOUND`, and that is the only code an `error` arm may read as
+ * "there is nothing here".
+ */
+const UNREADABLE_ERRNO: ReadonlySet<string> = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP"]);
+
+/**
+ * THREE OUTCOMES THAT WERE ONE (`DESIGN.md` D8, `TODO.md` §A.90).
+ *
+ * This returned `{content: "cannot read …", isError: true}` for every failure, and
+ * `#runToolNode` turned an untyped `isError` into `E_TOOL_SOURCE_UNAVAILABLE` — so a file that
+ * does not exist, a file that exists and may not be read, and (one function up) a path the jail
+ * refuses were ONE code, and an `error` arm written for the first silently handled the other
+ * two. `examples/graphs/grant-access.json` rebuilt its access ledger from nothing on exactly
+ * that, exit 0. The code now says which, and it reaches the arm through the node's reserved
+ * error projection (`graph/spec.ts`, `ErrorProjection`).
+ *
+ * The message is unchanged, so a model reading `content` is told the same thing it always was.
+ */
+function readFailure(rel: string, e: unknown): ToolResult {
+  const errno = (e as NodeJS.ErrnoException | undefined)?.code;
+  const content = `cannot read ${rel}: ${(e as Error).message}`;
+  const details = { path: rel, errno: String(errno) };
+  if (errno === "ENOENT") return { content, isError: true, error: err.notFound(CODES.E_FS_NOT_FOUND, content, { details }) };
+  if (errno !== undefined && UNREADABLE_ERRNO.has(errno)) {
+    return { content, isError: true, error: err.policy(CODES.E_FS_UNREADABLE, content, { details }) };
+  }
+  return { content, isError: true };
+}
+
 function fsRead(opts: BuiltinOptions): ToolDefinition {
   return {
     name: "fs.read",
@@ -366,7 +401,19 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
       required: ["path"],
     },
     execute: (args, ctx) => {
-      const path = readPath(opts, ctx, String(args["path"]));
+      let path: string;
+      try {
+        path = readPath(opts, ctx, String(args["path"]));
+      } catch (e) {
+        // THE JAIL'S REFUSAL IS RETURNED, NOT THROWN, and that is what makes it a fact. A throw
+        // out of `execute` becomes `effect.failed`, loses its code at `#invokeTool`'s catch
+        // (`E_TOOL_SOURCE_UNAVAILABLE`, the collapse §A.90 is about), and is refused by replay
+        // as a divergence. Returned, it is `effect.completed` with its code on it: replayable,
+        // and an `error` arm can tell "refused" from "absent". Only the jail's own code is
+        // caught — anything else is a bug above this file and keeps failing loudly.
+        if (isLoomError(e) && e.code === CODES.E_CAP_DENIED) return { content: e.message, isError: true, error: e };
+        throw e;
+      }
       const max = Number(args["maxBytes"] ?? 200_000);
       let text: string;
       let fd: number | undefined;
@@ -374,7 +421,7 @@ function fsRead(opts: BuiltinOptions): ToolDefinition {
         fd = openLeaf(path, constants.O_RDONLY);
         text = readFileSync(fd, "utf8");
       } catch (e) {
-        return { content: `cannot read ${String(args["path"])}: ${(e as Error).message}`, isError: true };
+        return readFailure(String(args["path"]), e);
       } finally {
         if (fd !== undefined) closeSync(fd);
       }
@@ -491,7 +538,9 @@ function fsEdit(opts: BuiltinOptions): ToolDefinition {
       const replace = String(args["replace"]);
       const replaceAll = args["replaceAll"] === true;
 
-      // OUTSIDE the try, exactly as `fs.read` does it. `assertWithin` throws
+      // OUTSIDE the try. (`fs.read` now RETURNS the same refusal with `E_CAP_DENIED` on it rather
+      // than throwing — `DESIGN.md` D8 — which keeps it a refusal by its CODE; this tool still
+      // throws, so here it still ends as `effect.failed`.) `assertWithin` throws
       // `E_CAP_DENIED`, and that is a containment refusal, not a failed read: catching it
       // here would hand the model an ordinary tool error it is free to retry with a
       // different spelling, and would report a jail escape as a missing file.

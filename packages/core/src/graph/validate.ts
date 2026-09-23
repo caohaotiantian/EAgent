@@ -41,6 +41,7 @@ import {
   EDGE_FIELDS,
   NESTED_FIELDS,
   dataFloorOf,
+  errorProjectionSource,
   launderedChannels,
   observedChannels,
   REQUIRED_BLOCK,
@@ -2267,7 +2268,9 @@ const RAISED_CLASS: Record<Code, readonly ErrorClass[]> = {
   E_HUMAN_APPROVAL_REQUIRED: ["policy", "validation"],   // two classes, neither retryable
   E_EVAL_REGRESSION: ["policy"],
   E_GATE_DELIVERY_FAILED: ["not_found", "unavailable"],   // two classes, one retryable -> CAN fire
+  E_FS_UNREADABLE: ["policy"],
   // not_found
+  E_FS_NOT_FOUND: ["not_found"],
   E_RESOURCE_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
   E_RESOURCE_YANKED: ["policy"],   // raised policy, not the not_found its heading claims
   E_TOOL_NOT_FOUND: ["not_found", "validation"],   // two classes, neither retryable
@@ -3268,6 +3271,19 @@ function rule004Expressions(
     if (n.tool?.args === undefined) continue;
     const declared = new Set([...(n.reads ?? []), ...(n.writes ?? [])]);
     for (const ref of observedChannels(n)) {
+      // A NODE'S ERROR PROJECTION IS NOT A TEMPLATE VALUE, and naming one here is refused rather
+      // than warned about: `resolveArgs` resolves against channels only, so `${x:error}` would
+      // silently become nothing, and a tool node is outside the set that may read it at all.
+      if (errorProjectionSource(ref) !== undefined) {
+        d.push({
+          severity: "error",
+          code: "GRAPH005_ERROR_PROJECTION_READER",
+          message: `node "${n.id}"'s tool arguments name "${ref}", a node's error projection; it is served to a \`function\` body or an \`evaluator{kind: "assertion"}\` body only, never to a tool argument`,
+          at: { nodeId: n.id, channel: ref },
+          fix: `read "${ref}" in a function node and write what the tool needs to a declared channel`,
+        });
+        continue;
+      }
       if (declared.has(ref)) continue;
       d.push({
         severity: "warning",
@@ -3347,6 +3363,16 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
 
   for (const n of spec.nodes) {
     for (const w of n.writes ?? []) {
+      if (errorProjectionSource(w) !== undefined) {
+        d.push({
+          severity: "error",
+          code: "GRAPH005_ERROR_PROJECTION_WRITE",
+          message: `node "${n.id}" writes "${w}", which is a node's reserved error projection — the runtime derives it from that node's outcome and no node may write it`,
+          at: { nodeId: n.id, channel: w },
+          fix: `remove "${w}" from node "${n.id}".writes; to carry a fact forward, write it to a declared channel`,
+        });
+        continue;
+      }
       if (!Object.hasOwn(spec.channels, w)) {
         d.push({
           severity: "error",
@@ -3395,6 +3421,11 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
     const items = fanoutItems.get(n.id) ?? new Set<string>();
     for (const r of n.reads ?? []) {
       if (items.has(r)) continue;
+      const source = errorProjectionSource(r);
+      if (source !== undefined) {
+        checkErrorProjectionRead(spec, idx, n, r, source, d);
+        continue;
+      }
       if (!Object.hasOwn(spec.channels, r)) {
         d.push({
           severity: "error",
@@ -3428,6 +3459,142 @@ function rule005Dataflow(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): voi
       }
     }
   }
+}
+
+/**
+ * A `reads` entry naming another node's reserved error projection (`"<nodeId>:error"`,
+ * `DESIGN.md` D8) — every way it can be wrong, refused, because each is a read that could only
+ * ever be empty or could carry what the graph did not mean it to.
+ *
+ * WHO MAY READ IT is a NAMED SET: a `function` body and an `evaluator{kind: "assertion"}` body,
+ * the two executors that hand code a `StateView` and nothing else. An `agent` would put the
+ * failure message into a prompt, a `human_gate` into a payload, a `tool` into an argument
+ * template, a `router` into an expression — each a place this phase has not decided how an
+ * untrusted fact should appear, so each is refused rather than served. Widening the set later is
+ * additive; narrowing it after graphs depend on it would not be.
+ *
+ * WHOSE projection: any node of this graph but the reader, and only one that can run BEFORE the
+ * reader on some path the executor takes (`canPrecede`, over `flowEdges`, which keeps `error`
+ * edges). A projection of a node that can never have finished when the reader runs is always
+ * absent — `ok` would never be readable at all, which is a graph bug, not a runtime condition.
+ * Nor a node inside a loop body (it has one outcome per pass, and the runtime would not know
+ * which pass the reader means), nor one inside a fan-out the reader is not inside (its outcomes
+ * live on branches the reader never sees).
+ *
+ * AND NOT a node that observes a `pii` or `secret_ref` channel, directly or through a projection
+ * it reads in turn. A failure message can quote the
+ * failing node's input, and the classification field that would carry that fact across is
+ * RESERVED with no producer yet (§A.82) — so the only honest answer this phase has is to refuse
+ * the hop the compiler can see. The laundered case, which only a run can see, is covered by the
+ * engine treating every projection read as TAINTED (`taintedOn`), which earns the same floor.
+ */
+function checkErrorProjectionRead(
+  spec: GraphSpec,
+  idx: GraphIndex,
+  reader: NodeSpec,
+  name: string,
+  source: NodeId,
+  d: Diagnostic[],
+): void {
+  const at = { nodeId: reader.id, channel: name };
+  const readerOk = reader.type === "function" || (reader.type === "evaluator" && reader.evaluator?.kind === "assertion");
+  if (!readerOk) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_READER",
+      message: `node "${reader.id}" is a ${reader.type === "evaluator" ? `${String(reader.evaluator?.kind)} evaluator` : String(reader.type)} and reads "${name}"; a node's error projection is served to a \`function\` body or an \`evaluator{kind: "assertion"}\` body only`,
+      at,
+      fix: `read "${name}" in a function node on the error path, and have it write what the next node needs to a declared channel`,
+    });
+    return;
+  }
+  const from = idx.byId.get(source);
+  if (from === undefined) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_UNKNOWN_NODE",
+      message: `node "${reader.id}" reads "${name}", but this graph has no node "${source}"`,
+      at,
+      fix: `name an existing node: ${spec.nodes.map((x) => `"${x.id}:error"`).slice(0, 5).join(", ")}`,
+    });
+    return;
+  }
+  if (source === reader.id || !canPrecede(idx, source, reader.id)) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_UNORDERED",
+      message:
+        source === reader.id
+          ? `node "${reader.id}" reads its own error projection "${name}", which cannot exist while it runs`
+          : `node "${reader.id}" reads "${name}", but "${source}" cannot run before "${reader.id}" on any path — the projection would always be absent`,
+      at,
+      fix: `read it from a node downstream of "${source}" — typically the target of "${source}"'s \`error\` edge`,
+    });
+    return;
+  }
+  // ONE TASK PER BRANCH, OR REFUSED. The runtime serves the source's task on the reader's branch
+  // (or an ancestor of it), deepest branch first, then highest iteration — and "highest
+  // iteration" is only the RIGHT one when there is exactly one. A source inside a loop body
+  // runs once per pass, so a reader in pass k+1 whose path skipped the source would be handed
+  // pass k's outcome as if it were current. Serving the reader's own iteration is the fix that
+  // would lift this, and it needs the iteration threaded into `viewFor`; until then, refused.
+  if (idx.loopEdges.some((e) => nodesInCycle(idx, e.from, e.to).has(source))) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_IN_LOOP",
+      message: `node "${reader.id}" reads "${name}", but "${source}" is inside a loop body and runs once per pass — this phase serves a projection only for a node that runs once per branch`,
+      at,
+      fix: `branch on "${source}" with \`codes\` on its error edge, or read the projection of a node outside the loop`,
+    });
+    return;
+  }
+  // AND ON THE READER'S BRANCH. A source inside a fan-out that the reader is not inside — the
+  // reader sits after the join — has its tasks on child branches the reader's branch chain never
+  // contains, so the projection would be absent on every run: a port nothing can exercise.
+  // An ambiguous stack (two paths disagree about the enclosing fan-outs) is refused too.
+  const sourceStack = idx.fanoutEdgeStack.get(source);
+  const readerStack = idx.fanoutEdgeStack.get(reader.id);
+  if (
+    sourceStack === undefined ||
+    readerStack === undefined ||
+    sourceStack.length > readerStack.length ||
+    sourceStack.some((edge, i) => readerStack[i] !== edge)
+  ) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_BRANCH",
+      message: `node "${reader.id}" reads "${name}", but "${source}" is not on "${reader.id}"'s branch — it runs inside a fan-out "${reader.id}" is not inside (or the enclosing fan-outs are ambiguous), so the projection would never be there`,
+      at,
+      fix: `read "${name}" from a node inside the same fan-out branch as "${source}", and carry what it needs past the join in a declared channel`,
+    });
+    return;
+  }
+  // TRANSITIVELY: a source that itself reads another node's projection passes on whatever that
+  // node could have seen, because a failure message can quote a failure message.
+  const classified = classifiedVia(spec, idx, source, new Set<NodeId>());
+  if (classified.length > 0) {
+    d.push({
+      severity: "error",
+      code: "GRAPH005_ERROR_PROJECTION_CLASSIFIED",
+      message: `node "${reader.id}" reads "${name}", but "${source}" observes ${classified.map((c) => `"${c}"`).join(", ")}, classified above \`out\`; its failure message could carry that value, and nothing would carry the classification with it`,
+      at,
+      fix: `branch on "${source}" with \`codes\` on its error edge instead of reading the projection, or move the classified read off "${source}"`,
+    });
+  }
+}
+
+/** The channels above `out` that `id` observes — through any error projection it reads, too. */
+function classifiedVia(spec: GraphSpec, idx: GraphIndex, id: NodeId, seen: Set<NodeId>): string[] {
+  if (seen.has(id)) return [];
+  seen.add(id);
+  const node = idx.byId.get(id);
+  if (node === undefined) return [];
+  return observedChannels(node).flatMap((c) => {
+    const via = errorProjectionSource(c);
+    if (via !== undefined) return classifiedVia(spec, idx, via, seen);
+    const cls = spec.channels[c]?.classification;
+    return cls !== undefined && CLASSIFICATION_POSTURE_FLOOR[cls] !== "out" ? [c] : [];
+  });
 }
 
 // ── GRAPH006 ─────────────────────────────────────────────────────────────────

@@ -323,14 +323,14 @@ test("the journal cannot be READ back out through the tools either", async () =>
     const ws = openWorkspace(parseArgs(["gates", "--workspace", d.dir]));
     try {
       const read = ws.engine.tools.list().find((t) => t.name === "fs.read")!;
-      await assert.rejects(
-        async () =>
-          read.execute(
-            { path: ".loom/journal.db", maxBytes: 100_000_000 },
-            { taskId: "t@root#0" as never, signal: new AbortController().signal, progress: () => {} },
-          ),
-        (e: unknown) => (e as { code: string }).code === "E_CAP_DENIED",
+      // A REFUSAL RETURNED, not thrown, since D8 — with the jail's code, and none of the bytes.
+      const r = await read.execute(
+        { path: ".loom/journal.db", maxBytes: 100_000_000 },
+        { taskId: "t@root#0" as never, signal: new AbortController().signal, progress: () => {} },
       );
+      assert.equal(r.isError, true, r.content);
+      assert.equal(r.error?.code, "E_CAP_DENIED", r.content);
+      assert.doesNotMatch(r.content, /SQLite format 3/);
     } finally {
       ws.close();
     }
@@ -361,7 +361,11 @@ test("a symlink planted in the workspace does not reopen either hole", async () 
         }) as Promise<unknown>;
 
       await assert.rejects(async () => call("fs.write", { path: "link/journal.db", body: "x" }), /which this sandbox denies/);
-      await assert.rejects(async () => call("fs.read", { path: "out/secret.txt" }), /escapes the sandbox root/);
+      const read = (await call("fs.read", { path: "out/secret.txt" })) as { isError?: boolean; content: string; error?: { code: string } };
+      assert.equal(read.isError, true, read.content);
+      assert.equal(read.error?.code, "E_CAP_DENIED", read.content);
+      assert.match(read.content, /escapes the sandbox root/);
+      assert.doesNotMatch(read.content, /not yours/);
       await assert.rejects(async () => call("fs.write", { path: "out/planted.txt", body: "x" }), /escapes the sandbox root/);
       assert.equal(existsSync(join(outside, "planted.txt")), false);
     } finally {

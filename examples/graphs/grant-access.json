@@ -11,7 +11,7 @@
       "residue-error-arm": "`prior` and `first-grant` are mutually exclusive BY CONSTRUCTION — one is the `seq` target of `read-ledger` and the other its `error` target, and no run can take both. The compiler cannot see that: `GRAPH010_CONCURRENT_WRITE` calls them concurrent writers of `history` and refuses `replace`. `merge_object` is the workaround, and it is a workaround — the channel holds one contribution on every run that has ever been measured. See F1 of docs/workflow-port-2026-09-22b.md.",
       "residue-static-approvers": "`sign` names `u:you` because `approval.approvers` is a STATIC list in the graph, while the people who may actually sign are `decision.owners` — read out of access/policy.json at run time. The gate therefore shows the right owners and accepts the wrong signature. See F3.",
       "compiles-silent": "This graph prints NO diagnostic at all — measured, not assumed. `deny` is terminal and writes no declared output, but GRAPH002_DEAD_END does not fire on it: `decision` is a declared output and `weigh` writes it on the same path. An earlier draft of these labels claimed the warning, which was a label asserting something no run had established.",
-      "residue-blind-error-arm": "THE PRODUCT GAP, AND A DEFENCE THAT COVERS ONE CASE OF IT. An error arm is handed no reason: the failed node writes nothing and no channel carries the code or the message, so `first-grant` cannot tell \"there is no ledger yet\" from \"the ledger is there and I could not read it\". `codes` does not separate them either — a missing file, an unreadable file AND a path the sandbox refuses are all E_TOOL_SOURCE_UNAVAILABLE (measured; see F5). Undefended, `chmod 222 out/access-ledger.json` made the run report `succeeded` and REPLACED the ledger, destroying a prior grant. THE `look` NODE COVERS EXACTLY THAT ONE CASE: a regular file that is LISTABLE but not readable. THREE CASES ARE UNCOVERED BY IT, each measured — an unlistable parent directory (`chmod 333 out`), an escaping symlink at the path, and a directory at the path. All three make fs.glob answer `(no matches)`, which is the same answer as \"there is nothing here\", so the defence answers ITS undecidable case with the passing value exactly as the arm does. THEY DO NOT END ALIKE: only the unlistable parent destroys the ledger, and only it is silent (the run succeeds, exit 0). The other two fail the run CLOSED for an unrelated reason — the write meets the same obstruction the read did — ending unavailable/E_TOOL_SOURCE_UNAVAILABLE with the ledger intact. It is a guard that fails open standing in for a guard that fails open; only the product row closes this. See F5 of docs/workflow-port-2026-09-22b.md for the four-pattern measurement, and the KNOWN HAZARD test that pins the chmod-333 hole so it cannot stop existing in silence.",
+      "error-arm-reads-the-code": "THE ERROR ARM BRANCHES ON WHY, not on the fact that the read failed (DESIGN.md D8; TODO.md §A.90). `no-ledger` is a catch-all `error` edge, and `first-grant` declares `read-ledger:error` in `reads` — `read-ledger`'s reserved error projection, `{ok, code, message}`, which the runtime folds out of the journal. Only `E_FS_NOT_FOUND` — the file is not there — becomes an empty history. `E_FS_UNREADABLE` (the ledger is there and cannot be read: `chmod 000`, `chmod 222`, a directory at the path) and `E_CAP_DENIED` (the jail will not resolve the path: an unsearchable `out/`, an escaping symlink) are REFUSALS, as is any other code and a projection that is absent: the run fails and no ledger is written. Before D8 all of these were one code, `E_TOOL_SOURCE_UNAVAILABLE`, the arm was handed no reason, and `chmod 333 out` with an unreadable ledger made the run SUCCEED and replace the ledger, destroying a prior grant. The `look` node (an `fs.glob` second opinion) that stood in for this is deleted: `fs.glob` answers `(no matches)` for both \"nothing here\" and \"cannot enumerate\", so it was a guard failing open standing in for a guard failing open.",
       "compensation-fires-without-an-edge": "MEASURED, and worth knowing before you add a `compensation` edge you do not need: when `write-ledger` fails after `write-grant` succeeded, the engine rolls the grant write back on its own — `fs.write` declares `compensation: {tool: \"fs.restore\"}`, and `loom trace` shows `loom.tool (compensate) [ok]` under `write-grant`. out/grant.json still held the PREVIOUS run's grant afterwards. No compensation edge is declared in this graph and none is needed for that."
     }
   },
@@ -25,7 +25,6 @@
     "request": { "type": "string", "reduce": "replace" },
     "policyDoc": { "type": "string", "reduce": "replace" },
     "ledgerDoc": { "type": "string", "reduce": "replace" },
-    "listing": { "type": "string", "reduce": "replace" },
     "history": { "type": "object", "reduce": "merge_object", "onConflict": "last_by_branch" },
     "decision": { "type": "object", "reduce": "replace" },
     "grant": { "type": "object", "reduce": "replace" },
@@ -51,12 +50,6 @@
       "tool": { "name": "fs.read", "version": "1.0", "args": { "path": "access/policy.json", "maxBytes": 200000 } }
     },
     {
-      "id": "look",
-      "type": "tool",
-      "writes": ["listing"],
-      "tool": { "name": "fs.glob", "version": "1.0", "args": { "pattern": "out/access-ledger.json" } }
-    },
-    {
       "id": "read-ledger",
       "type": "tool",
       "writes": ["ledgerDoc"],
@@ -72,13 +65,14 @@
     {
       "id": "first-grant",
       "type": "function",
+      "reads": ["read-ledger:error"],
       "writes": ["history"],
       "function": { "ref": "function/grant-none@stable" }
     },
     {
       "id": "weigh",
       "type": "function",
-      "reads": ["request", "policyDoc", "history", "listing"],
+      "reads": ["request", "policyDoc", "history"],
       "writes": ["decision"],
       "function": { "ref": "function/grant-weigh@stable" }
     },
@@ -133,10 +127,9 @@
   ],
   "edges": [
     { "id": "then-policy", "from": "read-request", "to": "read-policy", "kind": "seq" },
-    { "id": "then-look", "from": "read-policy", "to": "look", "kind": "seq" },
-    { "id": "then-ledger", "from": "look", "to": "read-ledger", "kind": "seq" },
+    { "id": "then-ledger", "from": "read-policy", "to": "read-ledger", "kind": "seq" },
     { "id": "ledger-read", "from": "read-ledger", "to": "prior", "kind": "seq" },
-    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error", "codes": ["E_TOOL_SOURCE_UNAVAILABLE"] },
+    { "id": "no-ledger", "from": "read-ledger", "to": "first-grant", "kind": "error" },
     { "id": "weigh-it", "from": "prior", "to": "weigh", "kind": "seq" },
     { "id": "weigh-it-fresh", "from": "first-grant", "to": "weigh", "kind": "seq" },
     { "id": "decide", "from": "weigh", "to": "route", "kind": "seq" },

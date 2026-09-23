@@ -26,7 +26,7 @@
 import { randomInt } from "node:crypto";
 
 import { canonicalize, digest, shapeOf } from "../canonical.ts";
-import { CODES, err, isLoomError, toLoomError, type LoomError } from "../errors.ts";
+import { CODES, LoomError, err, isLoomError, toLoomError, type ErrorClass } from "../errors.ts";
 import {
   ROOT_BRANCH,
   childBranch,
@@ -60,7 +60,7 @@ import { EXTERNALISE_ABOVE_BYTES, payloadHandle, refFor, type PayloadRef, type P
 import type { StateStore } from "../journal/store.ts";
 import type { EventBus } from "../bus.ts";
 import { evaluate, parseExpr, referencedChannels, type Expr } from "../graph/expr.ts";
-import { carriesOversight, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
+import { carriesOversight, errorProjectionSource, observedChannels, parseTemplateExpr, reachableToolNames } from "../graph/spec.ts";
 import type { BatchingSpec, DedupeSpec, EdgeKind, EdgeSpec, GraphSpec, JoinNode, NodeSpec, RunGraph } from "../graph/spec.ts";
 import { indexGraph, type GraphIndex, type ResourceResolver } from "../graph/validate.ts";
 import { compileMutation, type GraphMutation } from "../graph/mutate.ts";
@@ -10418,7 +10418,7 @@ export class Engine {
       const calls = ctx.toolCalls.get(task.taskId) ?? [];
       calls.push(tool.name);
       ctx.toolCalls.set(task.taskId, calls);
-      return served.result as ToolResult;
+      return servedToolResult(served.result);
     }
 
     // 1 — validate
@@ -10598,7 +10598,7 @@ export class Engine {
       if (this.#replay !== undefined) {
         // A tool body is NEVER reached on replay — that is what makes replaying a
         // run with an irreversible action safe.
-        result = this.#replay.require(key).result as ToolResult;
+        result = servedToolResult(this.#replay.require(key).result);
       } else {
       result = await tool.execute(final.value as Record<string, unknown>, {
         taskId: task.taskId,
@@ -10630,6 +10630,7 @@ export class Engine {
     // also where an output-size projection would live, since the journal keeps the whole thing
     // and only the transcript needs bounding.
     result = await this.#filterHook(ctx, task, "postTool", result);
+    const recorded = recordedToolResult(result);
 
     await this.#serialize(ctx.runId, () =>
       ctx.log.append(
@@ -10652,7 +10653,7 @@ export class Engine {
           },
           {
             type: "effect.completed",
-            payload: { key, result, resultDigest: digest(result) },
+            payload: { key, result: recorded, resultDigest: digest(recorded) },
             actor: SYSTEM_ACTOR("tool-executor"),
             taskId: task.taskId,
           },
@@ -10661,7 +10662,9 @@ export class Engine {
       ),
     );
 
-    return result;
+    // THE LIVE RUN IS HANDED WHAT THE JOURNAL HOLDS, not the object the tool built — so a replay,
+    // which can only ever serve the record, rebuilds the same failure the live run acted on.
+    return servedToolResult(recorded);
   }
 
   // ── commit + edge activation ──────────────────────────────────────────────
@@ -13133,6 +13136,23 @@ function taintedFor(ctx: RunContext, taskId: TaskId, channel: string): boolean {
  * one reader that is deciding a task rather than folding one.
  */
 function taintedOn(ctx: RunContext, branch: BranchCoordinate, channel: string): boolean {
+  // A NODE'S ERROR PROJECTION IS ALWAYS UNTRUSTED (`DESIGN.md` D8: unannotated defaults to
+  // `untrusted`, D4's axis). Its `message` is whatever the failing node's tool, body or provider
+  // said — a path the request named, a remote server's refusal — and nothing labels it, so the
+  // failing-closed reading is the only one available. Constant rather than folded: the answer
+  // does not depend on the run, so there is nothing for a restart to hand back empty.
+  //
+  // IT ALSO COVERS THE CONFIDENTIALITY HOP, and that is why `applySecretFlow` has no projection
+  // arm. A failure message can quote what its source read, secrets included; but the ONLY reader
+  // of `carriesSecret` is the policy request, where it and `tainted` are the same term (`unseen`
+  // in `PolicyEngine.effectivePosture`), and taint propagates through every writer that
+  // `carriesSecret` would (`carriesTaint` is a superset of `applySecretFlow`'s test). A
+  // projection read is tainted unconditionally, so a laundered secret crossing one already earns
+  // the floor a `carriesSecret` mark would, and a second arm there could change no decision the
+  // policy makes — which is also why no test could tell it apart. The DECLARED case is the compiler's:
+  // `GRAPH005_ERROR_PROJECTION_CLASSIFIED`. If the `classification` field ever gets a producer
+  // that can say `plain`, this constant stops being enough and the arm is owed.
+  if (errorProjectionSource(channel) !== undefined) return true;
   if (ctx.tainted.has(channel)) return true;
   for (const seg of branch.segments) {
     if (!ctx.taintedFans.has(seg.edgeId as EdgeId)) continue;
@@ -15011,6 +15031,50 @@ function estimateTurnTokens(req: ModelRequest, ceiling: number): number {
  */
 function isServedToolResult(result: unknown): boolean {
   return typeof result === "object" && result !== null && (result as { isError?: unknown }).isError !== true;
+}
+
+/**
+ * A tool result as the JOURNAL holds it: its typed `error`, if any, as an `ErrorRecord`.
+ *
+ * A `LoomError` is a class instance, and `canonicalize` keeps its enumerable fields only — the
+ * `message` is not one, so a result carrying `error` was journaled as `{class, code, name,
+ * retryable}` and a replay rebuilt a failure with no message. That did not matter while no
+ * tool returned a typed error through here. `fs.read` now does (`DESIGN.md` D8), and its message
+ * reaches a later node through the error projection, so a replay serving a message-less record
+ * would hand that node a different fact than the live run did — a divergence in exactly the
+ * value D8 exists to make readable. Recorded as the error's own `toJSON()` — `task.failed`'s
+ * `ErrorRecord` fields plus `retryAfterMs` — and the live run is handed the rebuilt record too.
+ */
+function recordedToolResult(result: ToolResult): unknown {
+  if (result.error === undefined) return result;
+  // `toJSON`, not `errorRecord`: the retry loop reads `retryAfterMs` off a failure, and a record
+  // without it would make a replay back off on the default curve where the live run honoured
+  // the tool's own delay.
+  return { ...result, error: toLoomError(result.error).toJSON() };
+}
+
+/**
+ * The inverse of `recordedToolResult`, for a result SERVED out of the journal — a replay, or a
+ * re-execution handed back a call that already happened.
+ *
+ * A record journaled before `recordedToolResult` existed has no `message` of its own; the tool's
+ * `content`, which is what the live run's failure said, stands in rather than an empty string.
+ */
+function servedToolResult(recorded: unknown): ToolResult {
+  const r = recorded as ToolResult & { error?: unknown };
+  const e = r?.error as Partial<ErrorRecord> | undefined;
+  if (e === undefined || e === null || typeof e !== "object" || isLoomError(e)) return r;
+  // `toLoomError` over the rebuilt value is the class check: a class in no vocabulary is
+  // re-read as `internal`, the fail-closed reading, exactly as it is for a live error.
+  const cls = (typeof e.class === "string" ? e.class : "internal") as ErrorClass;
+  const code = typeof e.code === "string" ? e.code : CODES.E_INTERNAL;
+  const message = typeof e.message === "string" ? e.message : String(r.content);
+  const after = (e as { retryAfterMs?: unknown }).retryAfterMs;
+  const rebuilt = new LoomError(cls, code, message, {
+    ...(e.details === undefined ? {} : { details: e.details }),
+    ...(typeof after === "number" && Number.isFinite(after) ? { retryAfterMs: after } : {}),
+  });
+  return { ...r, error: toLoomError(rebuilt) };
 }
 
 function turnRefusal(

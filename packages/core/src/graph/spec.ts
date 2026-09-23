@@ -572,6 +572,10 @@ export interface SubgraphNode {
 export interface NodeSpec {
   readonly id: NodeId;
   readonly type: NodeType;
+  /**
+   * Channel names — and, on a `function` or an `evaluator{kind: "assertion"}`, a node's reserved
+   * error projection spelled `"<nodeId>:error"`. See `ErrorProjection`.
+   */
   readonly reads?: readonly string[];
   readonly writes?: readonly string[];
   readonly policy?: NodePolicy;
@@ -1435,6 +1439,61 @@ const TEMPLATE_JSON = /\s*\|\s*json$/;
 export function carriesOversight(node: NodeSpec | undefined): boolean {
   return node !== undefined && (node.type === "human_gate" || node.type === "subgraph");
 }
+
+/**
+ * WHAT A NODE'S RUN WAS, as a fact a later node may read — `DESIGN.md` D8.
+ *
+ * A channel carries a VALUE and nothing about it, so an `error` arm used to be handed no reason
+ * at all: a failed node writes nothing, and the one string that said why never reached a
+ * channel. `examples/graphs/grant-access.json` could not tell "there is no ledger yet" from "the
+ * ledger is there and could not be read", took the first reading for both, and replaced a real
+ * ledger with one built from nothing — exit 0 (`TODO.md` §A.90). This is the ONE reserved
+ * projection per node that answers it, and a node names it in `reads` as `"<nodeId>:error"`.
+ *
+ * IT IS NOT JOURNALED ON ITS OWN, and that is what makes it safe to read. It is a pure function
+ * of the fold (`run/projection.ts`, `viewFor`): `ok: true` exactly when that node's task is
+ * `succeeded`, `ok: false` with the `code` and `message` its `task.failed` record journaled
+ * exactly when it is `failed`, and NO VALUE in every other state. So a restart that folds the
+ * journal, and a replay that folds its own, hand the reader the same fact the live run did — and
+ * "no projection" is never "success", because nothing produces `ok: true` from an absence.
+ *
+ * ALL SIX FIELDS ARE DECLARED NOW AND THREE HAVE NO PRODUCER, deliberately. D8's own risk is that
+ * once this shape is written it is frozen, so a truncated read (`truncated`, `bytes` — §A.83) and
+ * a per-key classification (`classification` — §A.82) are slots of THIS envelope rather than a
+ * second kind of channel metadata invented later. Until their producers land they are always
+ * absent. An absent `classification` means `untrusted` (D4: unlabelled means untrusted), which is
+ * also how the engine treats every read of this projection on the integrity axis.
+ */
+export interface ErrorProjection {
+  readonly ok: boolean;
+  /** Present when `ok` is false: the failure's normalized code, as `task.failed` recorded it. */
+  readonly code?: string;
+  readonly message?: string;
+  /** RESERVED, no producer yet (§A.83): the read this node made was cut short. */
+  readonly truncated?: boolean;
+  /** RESERVED, no producer yet (§A.83): the size of what was actually there. */
+  readonly bytes?: number;
+  /** RESERVED, no producer yet (§A.82). Absent means `untrusted`. */
+  readonly classification?: "untrusted" | "secret" | "plain";
+}
+
+/**
+ * The node whose error projection this `reads` entry names, or `undefined` if it names none.
+ *
+ * `"<nodeId>:error"`, and the `:` is the whole argument for the spelling: `SAFE_ID` admits
+ * `[A-Za-z0-9._-]` and nothing else in a channel name or a node id, so no declared channel can
+ * ever be spelled like this and no existing graph changes meaning. `"read-ledger.error"` would
+ * have been a legal CHANNEL name, which is exactly the collision a reserved name must not have.
+ * The prefix is checked against the same alphabet here, so `":error"` or `"a b:error"` name no
+ * node and fall through to the ordinary undeclared-read refusal.
+ */
+export function errorProjectionSource(name: string): NodeId | undefined {
+  if (typeof name !== "string" || !name.endsWith(ERROR_SUFFIX)) return undefined;
+  const id = name.slice(0, -ERROR_SUFFIX.length);
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) ? (id as NodeId) : undefined;
+}
+
+const ERROR_SUFFIX = ":error";
 
 /**
  * Every channel this node can OBSERVE — not the ones it declares in `reads`.

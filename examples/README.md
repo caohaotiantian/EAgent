@@ -558,9 +558,11 @@ granted automatically, signed by a person first, or denied with the policy rule 
 appends what it did to an access ledger.
 
 ```
-  read-request ─seq─▶ read-policy ─seq─▶ look ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
-                                                          │                             ├─▶ weigh ─seq─▶ route
-                                                          └─error(E_TOOL_SOURCE_UNAVAILABLE)─▶ first-grant ─┘
+  read-request ─seq─▶ read-policy ─seq─▶ read-ledger ─seq──────▶ prior ─────┐
+                                               │                             ├─▶ weigh ─seq─▶ route
+                                               └─error─▶ first-grant ────────┘
+                                                         reads read-ledger:error — proceeds on
+                                                         E_FS_NOT_FOUND only, refuses the rest
                                                                                                 │
   route ─conditional(ceremony == "auto")───────────────────────────▶ record ─┬─seq─▶ write-grant
   route ─conditional(ceremony == "review")─▶ sign (human gate) ─seq─▶ ───────┘   └─seq─▶ write-ledger
@@ -605,6 +607,8 @@ every router tree needs.
 
 **An `error` edge is selected by a FAILURE, not by a choice.** It cannot appear in a `take` — a
 router naming one is `E_ROUTE_INVALID` — and `codes` narrows it to named normalized error codes.
+**The arm can also READ why**: `first-grant` declares `"read-ledger:error"` in `reads`, which is
+`read-ledger`'s reserved error projection (`DESIGN.md` D8) — see below.
 Here `read-ledger` reads a file that need not exist: the ledger is read at the start of the run and
 written at the end, so the two arms are the FIRST run of this command and every later one, and you
 flip between them by running it twice. **`loom trace` shows `read-ledger [error]` inside a run whose
@@ -631,32 +635,48 @@ alone.
   byte-identical to before the failed run. A `compensation` edge is a DECLARATION the compiler
   proves (`GRAPH012`) and never a route — it is not what makes rollback happen.
 
-**An error arm is handed NO REASON, and `look` is what this example pays to survive it.** The failed
-node writes nothing, no channel carries the code or the message, and `codes` narrows by class where
-a missing file, an unreadable file AND a path the sandbox refuses are all
-`E_TOOL_SOURCE_UNAVAILABLE`. So `first-grant` cannot tell "there is no ledger yet" from "the ledger
-is there and I could not read it" — and undefended, `chmod 222 out/access-ledger.json` made the run
-report `succeeded` and REPLACE the ledger, destroying a prior grant.
+**The error arm branches on WHY the read failed, not on the fact that it did** (`DESIGN.md` D8,
+`TODO.md` §A.90). Every node has ONE reserved error projection, which a `function` body (or an
+`evaluator{kind: "assertion"}` body) names in `reads` as `"<nodeId>:error"`:
 
-**The defence is a second tool asking the same question, and it covers ONE of the four ways this
-read can fail.** `fs.glob` lists a file `fs.read` cannot open, so the `look` node runs it over the
-ledger's path and `weigh` refuses when the listing is non-empty and the history came from the error
-arm. **Covered: a regular file that is listable but not readable.** Three cases are UNCOVERED BY THE
-DEFENCE, each measured — an unlistable parent directory (`chmod 333 out`), an escaping symlink at
-the path, and a directory at the path. All three make `fs.glob` answer `(no matches)`, which is its
-answer for "there is nothing here" as well, so **the defence answers its own undecidable case with
-the passing value exactly as the arm does**: a guard that fails open standing in for a guard that
-fails open. **They do not end alike, and that distinction is the dangerous part: only the unlistable
-parent destroys the ledger, and only it is silent** (the run succeeds, exit 0). The other two fail
-the run CLOSED for an unrelated reason — the write meets the same obstruction the read did, so they
-end `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE` with the ledger intact. Four glob patterns were measured and none distinguishes
-"empty" from "cannot enumerate", so no arrangement of read-only tools closes this — only the product
-gap does. **It answers "does the file exist", not "why did the read fail".** Its one safe-by-
-construction property is that its TOCTOU window loses in the failing-CLOSED direction.
-F5 of `docs/workflow-port-2026-09-22b.md` has the four-pattern table;
-`packages/core/test/examples-grant.test.ts` pins the defence in both directions — a defence that
-also fired on the ordinary first run would make the command's first use impossible — **and pins the
-`chmod 333` hole NEGATIVELY, as a test asserting today's loss, so it cannot stop existing quietly.**
+```
+{ ok: boolean, code?: string, message?: string,
+  truncated?: boolean, bytes?: number, classification?: "untrusted" | "secret" | "plain" }
+```
+
+`ok: true` when that node succeeded, `ok: false` with the `code` and `message` its failure journaled
+when it failed, and **no value at all** in every other state — so "no projection" can never be read
+as success. It is folded out of the journal, not stored beside it, so a restart and `loom replay`
+hand the arm the same fact the live run did. The last three fields are reserved and always absent
+today (§A.83's truncation and §A.82's classification land in them later); an absent
+`classification` means `untrusted`, and every read of a projection taints what the reader writes.
+
+`fs.read` now reports three different failures under three different codes, and `first-grant`
+proceeds on exactly one of them:
+
+| the ledger read failed because… | code | what `first-grant` does |
+|---|---|---|
+| there is no file (or no `out/`) | `E_FS_NOT_FOUND` | empty history — the first run |
+| the file is there and cannot be read: `chmod 000`, `chmod 222`, a directory at the path | `E_FS_UNREADABLE` | **refuses** — the run fails, no ledger is written |
+| the jail will not resolve the path: an unsearchable `out/` (`chmod 000`), an escaping symlink | `E_CAP_DENIED` | **refuses** |
+| anything else, or no projection at all | — | **refuses** |
+
+`no-ledger` is a catch-all `error` edge on purpose: the arm's body is where the decision lives, and a
+`codes` filter in front of it would make its refusals unreachable. The price is that a wrapping
+script sees `validation`/`E_FUNCTION_REFUSED` on node `first-grant` for all the refusals, with the
+underlying code named in the message.
+
+**What this replaced, and why it had to go.** Before D8 all of those failures were ONE code,
+`E_TOOL_SOURCE_UNAVAILABLE`, and the arm was handed no reason, so undefended `chmod 222
+out/access-ledger.json` made the run report `succeeded` and REPLACE the ledger. The port defended
+itself with a `look` node — an `fs.glob` over the ledger's path, and a check in `weigh` refusing
+when the glob listed a file the arm said was absent. That covered one case and failed OPEN on the
+rest: `fs.glob` answers `(no matches)` for "nothing here" AND for "cannot enumerate", so `chmod 333
+out` over an unreadable ledger still succeeded, exit 0, and destroyed a prior grant. **A defence
+built from a second read-only tool has the same shape as the gap it stands in for**, and every graph
+that copied it would have copied the hole; `look` is deleted, and the test that pinned the hole is
+replaced by one test per ending, each asserting the ledger's bytes. `chmod 333 out` over a READABLE
+ledger is not a failure at all — the read works, and u:ravi is appended beside u:sam.
 
 **A renewal skips the person, so it is bounded three ways**, all in `grant-weigh.js`'s
 `findRenewal`, and each has its own test with a control: only a `decidedByKind: "human"` grant
@@ -683,6 +703,7 @@ at all. **Three of the thirteen the graph REFUSES rather than denies**, because 
 answer is no" and "we could not decide" are different sentences to a requester — and they are
 different CLASSES too, which a script wrapping this needs: a denial and a refusal are both
 `validation`/`E_FUNCTION_REFUSED` and differ only by the node named in the message (F7), while a
-request file that is not there is `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE` at the tool, because
-only `read-ledger` has an error arm.
+request file that is not there is `not_found`/`E_FS_NOT_FOUND` at the tool (it was
+`unavailable`/`E_TOOL_SOURCE_UNAVAILABLE` before `DESIGN.md` D8), because only `read-ledger` has an
+error arm.
 `packages/core/test/examples-grant.test.ts` drives all of them.

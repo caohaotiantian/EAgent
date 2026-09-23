@@ -34,9 +34,12 @@
  *    grew: the first version of this suite was 16/16 GREEN with either of the two bounds that
  *    existed then DELETED, because the only renewal it exercised was a minutes-old, same-level,
  *    same-hours repeat — a fixture that satisfies every guard at once and distinguishes none.
- *  - **F5's DEFENCE, in both directions.** A ledger that cannot be READ but can be WRITTEN must be
- *    REFUSED (it used to be silently replaced), and the ordinary first run — where there really is
- *    no ledger — must still proceed. A defence that fired on the second would be worse than none.
+ *  - **The error arm branches on the CODE (`DESIGN.md` D8, `TODO.md` §A.90).** `first-grant` reads
+ *    `read-ledger:error` and only `E_FS_NOT_FOUND` becomes an empty history. Every other way the
+ *    read can fail — a ledger that is there and unreadable, a parent the jail cannot resolve, a
+ *    directory or an escaping link at the path — must FAIL the run and leave the ledger's bytes
+ *    exactly as they were; and the ordinary first run, where there really is no ledger, must still
+ *    proceed. One test per ending, each asserting the bytes on disk, not only the status.
  *
  * Offline by construction: no `agent` node, so no adapter is registered, no key is read, and no
  * network call is possible. Nothing here asserts on a duration or on a ratio of two; the tests
@@ -45,10 +48,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 import { main } from "../src/cli.ts";
 import { isLoomError, toLoomError } from "../src/errors.ts";
@@ -619,68 +623,241 @@ test("the compiler prints NOTHING on this graph — no error, no warning", async
     assert.deepEqual(diagnostics, [], `expected no diagnostic:\n${c.err}`);
 
     // `ok`, then one deadline line per node that can time out. `router` and `human_gate` run no
-    // body that could, so the eleven are the thirteen nodes minus `route` and `sign`.
+    // body that could, so the ten are the twelve nodes minus `route` and `sign`. (Thirteen and
+    // eleven until D8 deleted the `look` node.)
     assert.match(c.out, /^ok$/m, c.out);
     const deadlines = c.out.split("\n").filter((l) => /^\s+deadline /.test(l));
-    assert.equal(deadlines.length, 11, c.out);
+    assert.equal(deadlines.length, 10, c.out);
     assert.equal(deadlines.filter((l) => / route | sign /.test(l)).length, 0, c.out);
   } finally {
     ws.dispose();
   }
 });
 
-// ── the defence F5 cost, and the product behaviour behind it ──────────────────
+// ── the error arm reads WHY the ledger read failed (DESIGN.md D8, TODO.md §A.90) ──
 
-test("F5's DEFENCE — a ledger that cannot be READ but CAN be written is REFUSED, not replaced", async () => {
+/** The ledger's grantees, read as the test process — which is why every chmod is undone first. */
+function grantees(dir: string): string[] {
+  return (JSON.parse(readFileSync(join(dir, LEDGER), "utf8")) as { grants: Grant[] }).grants.map((g) => g.who);
+}
+
+/**
+ * Establish u:sam's grant, break the ledger's read in one way, run u:ravi's request, undo the
+ * breakage, and hand back the second run with the ledger's bytes before and after.
+ */
+async function secondRunWith(
+  dir: string,
+  breakIt: () => void,
+  undo: () => void,
+): Promise<{ second: { r: Result; s: Record<string, unknown> }; before: string; after: string }> {
+  const first = await run(dir, "docs-site-read.json");
+  assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
+  assert.deepEqual(grantees(dir), ["u:sam"]);
+  const before = readFileSync(join(dir, LEDGER), "utf8");
+  breakIt();
+  let second: { r: Result; s: Record<string, unknown> };
+  try {
+    second = await run(dir, "docs-site-read-ravi.json");
+  } finally {
+    undo();
+  }
+  return { second, before, after: readFileSync(join(dir, LEDGER), "utf8") };
+}
+
+/** A run the error arm REFUSED because of `code`: exit 1, nothing recorded, ledger bytes intact. */
+async function assertRefusedWithLedgerIntact(
+  dir: string,
+  got: { second: { r: Result; s: Record<string, unknown> }; before: string; after: string },
+  code: string,
+): Promise<void> {
+  const { second, before, after } = got;
+  assert.equal(second.r.code, 1, `${second.r.out}${second.r.err}`);
+  assert.equal(second.s["status"], "failed");
+  const e = errorOf(second.s);
+  assert.equal(e.class, "validation", JSON.stringify(e));
+  assert.equal(e.code, "E_FUNCTION_REFUSED", JSON.stringify(e));
+  assert.match(String(e.message), /on node "first-grant" refused/);
+  // THE CODE IS NAMED — the arm branched on it, and says which one it saw.
+  assert.match(String(e.message), new RegExp(`it failed ${code}: `), String(e.message));
+  // THE BYTES, which is what a person has: the prior grant survives, byte for byte.
+  assert.equal(after, before, "the ledger must be byte-identical to before the refused run");
+  assert.deepEqual(grantees(dir), ["u:sam"], "u:sam's grant must survive");
+  const counts = await taskCounts(dir, String(second.s["runId"]));
+  assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
+  assert.equal(counts["prior"], undefined, JSON.stringify(counts));
+  assert.equal(counts["weigh"], undefined, `nothing past the arm runs: ${JSON.stringify(counts)}`);
+  assert.equal(counts["write-ledger"], undefined, `nothing writes the ledger: ${JSON.stringify(counts)}`);
+}
+
+test("NO LEDGER — `E_FS_NOT_FOUND` is the first run, and the arm proceeds with an empty history", async () => {
   const ws = workspace();
   try {
-    // Establish a ledger holding somebody's grant.
-    const first = await run(ws.dir, "docs-site-read.json");
-    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
-    const before = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
-    assert.deepEqual(before.grants.map((g) => g.who), ["u:sam"]);
-
-    // Write-only. `read-ledger` fails and the error arm CANNOT SEE WHY, so `first-grant` still
-    // reports "there is no ledger yet" — which is false. The DEFENCE is `look`: `fs.glob` lists a
-    // file `fs.read` cannot open, so `weigh` has a second opinion the arm does not.
-    chmodSync(join(ws.dir, LEDGER), 0o222);
-    let second: { r: Result; s: Record<string, unknown> };
-    try {
-      second = await run(ws.dir, "docs-site-read-ravi.json");
-    } finally {
-      chmodSync(join(ws.dir, LEDGER), 0o644);
-    }
-
-    // BEFORE THE DEFENCE THIS RUN SUCCEEDED AND THE LEDGER WAS REPLACED. Both halves are asserted:
-    // the refusal, and — the one that actually matters — that the bytes on disk did not move.
-    assert.equal(second.r.code, 1, `${second.r.out}${second.r.err}`);
-    assert.equal(second.s["status"], "failed");
-    const e = errorOf(second.s);
-    assert.equal(e.class, "validation");
-    assert.equal(e.code, "E_FUNCTION_REFUSED");
-    assert.match(String(e.message), /on node "weigh" refused/);
-    assert.match(String(e.message), /IS on disk — fs.glob lists it/);
-    assert.match(String(e.message), /destroy every grant the file already holds/);
-
-    const after = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
-    assert.deepEqual(after.grants.map((g) => g.who), ["u:sam"], "u:sam's grant must survive");
+    // The ordinary half, and the one a guard like this gets wrong by refusing too much: a first
+    // run that failed here would make the command unusable.
+    const r = await run(ws.dir, "docs-site-read.json");
+    assert.equal(r.s["status"], "succeeded", `${r.r.out}${r.r.err}`);
+    assert.equal((outputs(r.s)["decision"] as Decision).historySource, "none");
+    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
+    assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
+    assert.equal(counts["look"], undefined, `the fs.glob defence is gone: ${JSON.stringify(counts)}`);
+    assert.deepEqual(grantees(ws.dir), ["u:sam"]);
   } finally {
     ws.dispose();
   }
 });
 
-test("F5's defence does NOT fire on the ordinary first run, where there really is no ledger", async () => {
+test("AN UNREADABLE LEDGER — chmod 000 and chmod 222 — fails `E_FS_UNREADABLE` and writes nothing", async () => {
+  for (const mode of [0o000, 0o222]) {
+    const ws = workspace();
+    try {
+      const ledger = join(ws.dir, LEDGER);
+      const got = await secondRunWith(ws.dir, () => chmodSync(ledger, mode), () => chmodSync(ledger, 0o644));
+      await assertRefusedWithLedgerIntact(ws.dir, got, "E_FS_UNREADABLE");
+    } finally {
+      ws.dispose();
+    }
+  }
+});
+
+test("THE §A.90 REPRO — `chmod 333 out` over a `chmod 222` ledger — now fails, and u:sam keeps his grant", async () => {
   const ws = workspace();
   try {
-    // THE OTHER HALF, and the one a defence like this gets wrong. `look` finds nothing, the error
-    // arm fires for the RIGHT reason, and the run must proceed. A defence that refused here would
-    // make the first run of the command impossible.
-    const r = await run(ws.dir, "docs-site-read.json");
-    assert.equal(r.s["status"], "succeeded", `${r.r.out}${r.r.err}`);
-    assert.equal((outputs(r.s)["decision"] as Decision).historySource, "none");
-    const counts = await taskCounts(ws.dir, String(r.s["runId"]));
-    assert.equal(counts["look"], 1, JSON.stringify(counts));
-    assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
+    // EXACTLY the measurement that closed nothing before D8: an unlistable parent and an
+    // unreadable ledger, both still WRITABLE. It used to exit 0 with `historySource: "none"` and
+    // a ledger holding only u:ravi. The `look` node's `fs.glob` saw `(no matches)` and agreed.
+    const ledger = join(ws.dir, LEDGER);
+    const out = join(ws.dir, "out");
+    const got = await secondRunWith(
+      ws.dir,
+      () => {
+        chmodSync(ledger, 0o222);
+        chmodSync(out, 0o333);
+      },
+      () => {
+        chmodSync(out, 0o755);
+        chmodSync(ledger, 0o644);
+      },
+    );
+    await assertRefusedWithLedgerIntact(ws.dir, got, "E_FS_UNREADABLE");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("A PARENT THE JAIL CANNOT RESOLVE — `chmod 000 out` — fails `E_CAP_DENIED` and writes nothing", async () => {
+  const ws = workspace();
+  try {
+    // Unsearchable, so `realpath` answers EACCES and `assertWithin` cannot show the path is inside
+    // the jail: a PATH REFUSAL, the third code, and not "there is nothing here".
+    const out = join(ws.dir, "out");
+    const got = await secondRunWith(ws.dir, () => chmodSync(out, 0o000), () => chmodSync(out, 0o755));
+    await assertRefusedWithLedgerIntact(ws.dir, got, "E_CAP_DENIED");
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("A DIRECTORY, or a link OUT of the jail, at the ledger's path is refused by CODE, not by the write", async () => {
+  // These two used to fail closed only because `write-ledger` met the same obstruction — after
+  // `write-grant` had landed and been compensated. Now the arm refuses them before `weigh`.
+  const ws = workspace();
+  const outside = mkdtempSync(join(tmpdir(), "loom-grant-outside-"));
+  try {
+    const ledger = join(ws.dir, LEDGER);
+    const aside = join(ws.dir, "ledger-aside.json");
+    const first = await run(ws.dir, "docs-site-read.json");
+    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
+    const bytes = readFileSync(ledger, "utf8");
+
+    for (const [shape, code, plant] of [
+      ["a directory", "E_FS_UNREADABLE", () => mkdirSync(ledger)],
+      ["an escaping symlink", "E_CAP_DENIED", () => symlinkSync(join(outside, "ledger.json"), ledger)],
+    ] as const) {
+      renameSync(ledger, aside);
+      writeFileSync(join(outside, "ledger.json"), bytes);
+      plant();
+      let second: { r: Result; s: Record<string, unknown> };
+      try {
+        second = await run(ws.dir, "docs-site-read-ravi.json");
+      } finally {
+        rmSync(ledger, { recursive: true, force: true });
+        renameSync(aside, ledger);
+      }
+      assert.equal(second.s["status"], "failed", `${shape}: ${second.r.out}${second.r.err}`);
+      const e = errorOf(second.s);
+      assert.equal(e.code, "E_FUNCTION_REFUSED", `${shape}: ${JSON.stringify(e)}`);
+      assert.match(String(e.message), new RegExp(`it failed ${code}: `), `${shape}: ${String(e.message)}`);
+      const counts = await taskCounts(ws.dir, String(second.s["runId"]));
+      assert.equal(counts["write-grant"], undefined, `${shape} must not reach a write: ${JSON.stringify(counts)}`);
+      assert.equal(readFileSync(join(outside, "ledger.json"), "utf8"), bytes, `${shape}: the outside file is untouched`);
+    }
+    assert.deepEqual(grantees(ws.dir), ["u:sam"]);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+    ws.dispose();
+  }
+});
+
+test("`chmod 333 out` over a READABLE ledger is not a failure — the read works, and nothing is lost", async () => {
+  // The control for the refusals above: an unlistable but SEARCHABLE parent does not stop a read
+  // of a file whose name is known, so this is the seq arm and u:ravi is APPENDED. A guard that
+  // refused this would be refusing on the directory's mode rather than on what the read said.
+  const ws = workspace();
+  try {
+    const out = join(ws.dir, "out");
+    const { second } = await secondRunWith(ws.dir, () => chmodSync(out, 0o333), () => chmodSync(out, 0o755));
+    assert.equal(second.s["status"], "succeeded", `${second.r.out}${second.r.err}`);
+    assert.equal((outputs(second.s)["decision"] as Decision).historySource, "ledger");
+    assert.deepEqual(grantees(ws.dir), ["u:sam", "u:ravi"]);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("the arm's body refuses what the engine never hands it — NO projection, and an `ok: true` one", () => {
+  // Neither can reach `first-grant` through the shipped graph — it is the target of an `error`
+  // edge, and the engine folds a projection for every failed task — so the graph cannot pin them.
+  // The body is called directly instead, because "no projection" read as "no ledger" is the exact
+  // shape of the hole this row closed, and a body that proceeded on it would pass every other
+  // test here.
+  const body = runInNewContext(readFileSync(join(EXAMPLES, "resources", "function", "grant-none.js"), "utf8")) as (
+    view: { get: (c: string) => unknown },
+    ctx: unknown,
+  ) => { writes?: unknown; refuse?: { reason: string } };
+  const call = (fact: unknown): { writes?: unknown; refuse?: { reason: string } } =>
+    body({ get: (c: string) => (c === "read-ledger:error" ? fact : undefined) }, {});
+
+  for (const [what, fact] of [
+    ["no projection", undefined],
+    ["null", null],
+    ["ok: true", { ok: true }],
+    ["ok: false with no code", { ok: false }],
+    ["E_FS_UNREADABLE", { ok: false, code: "E_FS_UNREADABLE", message: "EACCES" }],
+    ["E_CAP_DENIED", { ok: false, code: "E_CAP_DENIED", message: "escapes" }],
+    ["E_TOOL_SOURCE_UNAVAILABLE", { ok: false, code: "E_TOOL_SOURCE_UNAVAILABLE", message: "EIO" }],
+    ["a truthy non-boolean ok", { ok: "false", code: "E_FS_NOT_FOUND" }],
+  ] as const) {
+    const out = call(fact);
+    assert.equal(out.writes, undefined, `${what}: must not produce a history`);
+    assert.match(String(out.refuse?.reason), /destroy every grant the file holds/, what);
+  }
+  // Through JSON: the body runs in another realm, so its objects have another `Object.prototype`.
+  assert.deepEqual(JSON.parse(JSON.stringify(call({ ok: false, code: "E_FS_NOT_FOUND", message: "ENOENT" }))), {
+    writes: { history: { source: "none", absent: "E_FS_NOT_FOUND", grants: [], ledger: [] } },
+  });
+});
+
+test("a REFUSED run replays hermetically — the projection the arm read is served from the journal", async () => {
+  const ws = workspace();
+  try {
+    const ledger = join(ws.dir, LEDGER);
+    const { second } = await secondRunWith(ws.dir, () => chmodSync(ledger, 0o000), () => chmodSync(ledger, 0o644));
+    assert.equal(second.s["status"], "failed");
+    // The ledger is READABLE now. A replay that re-ran the read, or rebuilt the arm's view from
+    // anything but the journal, would take the other arm and diverge.
+    const replayed = await loom(ws.dir, ["replay", String(second.s["runId"])]);
+    assert.equal(replayed.code, 0, `${replayed.out}${replayed.err}`);
+    assert.deepEqual(JSON.parse(replayed.out), { match: true, hermetic: true });
   } finally {
     ws.dispose();
   }
@@ -694,10 +871,9 @@ test("a failed run's already-landed fs.write is COMPENSATED, with no compensatio
     const before = readFileSync(join(ws.dir, GRANT), "utf8");
     assert.match(before, /REQ-1042/);
 
-    // READ-ONLY, not unreadable — and the distinction is what F5's defence changed. `read-ledger`
-    // now SUCCEEDS (so `prior` runs and `weigh` does not refuse), `write-grant` succeeds, and
-    // `write-ledger` is the node that fails. An earlier version of this test used `chmod 000`,
-    // which since the `look` node refuses at `weigh` and never reaches a write at all.
+    // READ-ONLY, not unreadable. `read-ledger` SUCCEEDS (so `prior` runs), `write-grant`
+    // succeeds, and `write-ledger` is the node that fails. `chmod 000` would not reach a write at
+    // all: `first-grant` refuses `E_FS_UNREADABLE` before `weigh`.
     chmodSync(join(ws.dir, LEDGER), 0o444);
     let second: { r: Result; s: Record<string, unknown> };
     try {
@@ -922,13 +1098,15 @@ test("a missing REQUEST file fails at the TOOL, because read-request has no erro
   try {
     // ONLY `read-ledger` has an error arm, and deliberately: a ledger may legitimately not exist,
     // while a request the caller named and did not provide is the caller's bug. This is the
-    // `unavailable` class — the workflow never ran, as against declining to grant.
+    // `not_found` class — the workflow never ran, as against declining to grant. It was
+    // `unavailable`/`E_TOOL_SOURCE_UNAVAILABLE`, the one code every `fs.read` failure shared until
+    // `DESIGN.md` D8 split it three ways.
     const r = await run(ws.dir, "no-such-request.json");
     assert.equal(r.r.code, 1, `${r.r.out}${r.r.err}`);
     assert.equal(r.s["status"], "failed");
     const e = errorOf(r.s);
-    assert.equal(e.class, "unavailable", JSON.stringify(e));
-    assert.equal(e.code, "E_TOOL_SOURCE_UNAVAILABLE", JSON.stringify(e));
+    assert.equal(e.class, "not_found", JSON.stringify(e));
+    assert.equal(e.code, "E_FS_NOT_FOUND", JSON.stringify(e));
 
     const counts = await taskCounts(ws.dir, String(r.s["runId"]));
     assert.equal(counts["weigh"], undefined, `nothing downstream runs: ${JSON.stringify(counts)}`);
@@ -987,60 +1165,6 @@ test("every hostile request fails CLOSED — nothing reaches `record`, nothing r
       assert.equal(existsSync(join(ws.dir, GRANT)), false, `${request} left a grant on disk`);
       assert.equal(existsSync(join(ws.dir, LEDGER)), false, `${request} touched the ledger`);
     }
-  } finally {
-    ws.dispose();
-  }
-});
-
-test("KNOWN HAZARD (F5) — an UNLISTABLE parent directory defeats the `look` defence entirely", async () => {
-  const ws = workspace();
-  try {
-    // THIS TEST ASSERTS A LOSS, DELIBERATELY, so that the hole cannot stop existing in silence.
-    //
-    // `look` decides "is there a ledger" from `fs.glob`, and `fs.glob` answers `(no matches)` for
-    // BOTH "there is nothing here" and "I cannot see what is here". So the defence answers its own
-    // undecidable case with the passing value — the very shape of the F5 product gap it stands in
-    // for. A guard that fails open, guarding a guard that fails open.
-    //
-    // Four patterns were measured against a `chmod 333` directory and none distinguishes the two:
-    //   out/access-ledger.json → "(no matches)"      out/**  → "(no matches)"
-    //   out/*                  → "(no matches)"      out     → "(no matches)"
-    // The same `(no matches)` also hides an escaping symlink at the path and a directory at the
-    // path. The defence covers exactly ONE case: a regular file that is listable but unreadable.
-    //
-    // WHEN F5 IS CLOSED — an error arm handed its failure's code and message — this test should
-    // FAIL, and the right change is to delete it along with the `look` node, not to loosen it.
-    const first = await run(ws.dir, "docs-site-read.json");
-    assert.equal(first.s["status"], "succeeded", `${first.r.out}${first.r.err}`);
-    const before = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
-    assert.deepEqual(before.grants.map((g) => g.who), ["u:sam"]);
-
-    // The ledger is unreadable AND its directory cannot be enumerated — but both are still
-    // WRITABLE, which is what makes this destructive rather than merely a failed run.
-    chmodSync(join(ws.dir, LEDGER), 0o222);
-    chmodSync(join(ws.dir, "out"), 0o333);
-    let second: { r: Result; s: Record<string, unknown> };
-    try {
-      second = await run(ws.dir, "docs-site-read-ravi.json");
-    } finally {
-      chmodSync(join(ws.dir, "out"), 0o755);
-      chmodSync(join(ws.dir, LEDGER), 0o644);
-    }
-
-    // THE LOSS, ASSERTED. Identical to the pre-defence F5 measurement: exit 0, the error arm's
-    // history reported as "none", and a prior grant destroyed.
-    assert.equal(second.r.code, 0, `${second.r.out}${second.r.err}`);
-    assert.equal(second.s["status"], "succeeded", "today it succeeds, and that is the finding");
-    assert.equal((outputs(second.s)["decision"] as Decision).historySource, "none");
-
-    // `look` RAN AND SUCCEEDED — it is not that the defence errored, it is that it was satisfied.
-    const counts = await taskCounts(ws.dir, String(second.s["runId"]));
-    assert.equal(counts["look"], 1, JSON.stringify(counts));
-    assert.equal(counts["first-grant"], 1, JSON.stringify(counts));
-    assert.equal(counts["prior"], undefined, JSON.stringify(counts));
-
-    const after = JSON.parse(readFileSync(join(ws.dir, LEDGER), "utf8")) as { grants: Grant[] };
-    assert.deepEqual(after.grants.map((g) => g.who), ["u:ravi"], "u:sam's grant is GONE — the hazard");
   } finally {
     ws.dispose();
   }
