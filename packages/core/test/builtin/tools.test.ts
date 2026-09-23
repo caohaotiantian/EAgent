@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -756,6 +756,100 @@ test("§A.97 — a DIRECTORY at an fs.read path keeps its errno, and a regular f
     const ok = JSON.parse(readInChild(s.root, "plain.txt").out) as { isError: boolean; content: string };
     assert.equal(ok.isError, false);
     assert.equal(ok.content, "plain bytes");
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ── §A.99: fs.restore undoes a CREATE, from what fs.write recorded ────────────────────────
+
+test("§A.99 — fs.write RECORDS a create (`created`, a digest of its bytes) and an overwrite (`previous`)", async () => {
+  const s = sandbox();
+  try {
+    const write = byName(builtinTools({ root: s.root, deny: [] }), "fs.write");
+    const created = (await write.execute({ path: "new.txt", body: "fresh" }, ctx())).details as Record<string, unknown>;
+    assert.equal(created["created"], true);
+    assert.match(String(created["wrote"]), /^sha256:[0-9a-f]{64}$/);
+    assert.equal("previous" in created, false, "a create has nothing to put back");
+    const over = (await write.execute({ path: "new.txt", body: "second" }, ctx())).details as Record<string, unknown>;
+    assert.equal(over["created"], false);
+    assert.equal(over["previous"], "fresh");
+    assert.equal("wrote" in over, false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.restore REMOVES a file the write created, from the record alone (a fresh tool instance)", async () => {
+  const s = sandbox();
+  try {
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "d/new.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    // A NEW instance, as after a restart: nothing but the recorded details reaches it.
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, undefined, r.content);
+    assert.equal(existsSync(join(s.root, "d", "new.txt")), false);
+    // Already gone is the state the undo wants — it says so rather than failing.
+    const again = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(again.isError, undefined, again.content);
+    assert.match(again.content, /already absent/);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — fs.restore REFUSES to remove a created file whose bytes changed, and leaves it untouched", async () => {
+  const s = sandbox();
+  try {
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "new.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    writeFileSync(join(s.root, "new.txt"), "somebody else's bytes");
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, true);
+    assert.match(r.content, /bytes changed since this run created it/);
+    assert.equal(readFileSync(join(s.root, "new.txt"), "utf8"), "somebody else's bytes");
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a MISSING or AMBIGUOUS create record fails CLOSED: nothing is removed", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "keep.txt"), "fresh");
+    const good = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "probe.txt", body: "fresh" }, ctx()))
+      .details as Record<string, unknown>;
+    const restore = fsRestore({ root: s.root, deny: [] });
+    for (const [what, args] of [
+      ["no record at all (an old journal)", { path: "keep.txt" }],
+      ["created without a digest", { path: "keep.txt", created: true }],
+      ["created as a STRING", { path: "keep.txt", created: "true", wrote: good["wrote"] }],
+      ["created: false with no previous", { path: "keep.txt", created: false, wrote: good["wrote"] }],
+      ["a digest that is not a string", { path: "keep.txt", created: true, wrote: 7 }],
+    ] as const) {
+      const r = await restore.execute(args as Record<string, unknown>, ctx());
+      assert.equal(r.isError, true, `${what}: ${r.content}`);
+      assert.equal(readFileSync(join(s.root, "keep.txt"), "utf8"), "fresh", `${what}: the file must be untouched`);
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("§A.99 — a path that already existed is NEVER recorded as a create, even when it cannot be read", async () => {
+  // `created: true` only on ENOENT. A file this run cannot read is something it did not make, and
+  // its undo must refuse rather than delete it.
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "locked.txt"), "someone's");
+    chmodSync(join(s.root, "locked.txt"), 0o222);
+    const details = (await byName(builtinTools({ root: s.root, deny: [] }), "fs.write").execute({ path: "locked.txt", body: "mine" }, ctx()))
+      .details as Record<string, unknown>;
+    chmodSync(join(s.root, "locked.txt"), 0o644);
+    assert.equal(details["created"], false);
+    const r = await fsRestore({ root: s.root, deny: [] }).execute(details, ctx());
+    assert.equal(r.isError, true, r.content);
+    assert.equal(existsSync(join(s.root, "locked.txt")), true);
   } finally {
     s.cleanup();
   }
