@@ -11,7 +11,7 @@
  * before the count matters), which is why no shipped graph ever showed it. Under `"skip"` nothing
  * did.
  *
- * THE MATRIX IS THE TEST, and it is the row's own. Measured on the shipped
+ * THE MATRIX IS THE TEST, and it is the row's own. Measured on the then-shipped (`"fail"`)
  * `examples/graphs/two-person-approval.json` — three `human_gate` nodes under one
  * `quorum k: 2` join — with `onBranchError` changed from `"fail"` to `"skip"` and nothing else
  * (`.agent/engine-a75-a76/a68-skip.mjs`, on `6fb2e618`):
@@ -26,10 +26,13 @@
  * NOT-wanted lines now refuse and the two wanted lines are unchanged, which is the whole of the
  * row's closing condition.
  *
- * THE GRAPH IS THIS FILE'S OWN COPY of that shape, deliberately. The shipped example stays
- * `onBranchError: "fail"` — §A.68 refused to switch it, because under `skip` two rejections plus
- * one approval used to LAND the write, and that is the fail-OPEN direction. This file is where the
- * `skip` variant is allowed to exist.
+ * THE GRAPH IS THIS FILE'S OWN COPY of that shape, deliberately. When it was written the shipped
+ * example stayed `onBranchError: "fail"` — §A.68 refused to switch it, because under `skip` two
+ * rejections plus one approval used to LAND the write, and that is the fail-OPEN direction.
+ * (2026-09-23, `DESIGN.md` D9: with this floor in place the shipped
+ * `examples/graphs/two-person-approval.json` now IS the `skip` variant, and the `fail` one is
+ * `examples/graphs/two-person-veto.json`. This copy stays so the matrix does not move with an
+ * example's wording.)
  *
  * AND THE OTHER THREE MODES ARE CONTROLS, on the same release path, because "independent of
  * `onBranchError`" is only half the claim — the other half is that this arm touches no mode that
