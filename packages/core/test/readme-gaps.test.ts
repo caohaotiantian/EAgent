@@ -19,7 +19,7 @@
  * updated the row. The probes are deliberately cheap — the expensive end-to-end evidence lives
  * in the suites named beside each one.
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
@@ -592,9 +592,22 @@ const freshness = require_(fileURLToPath(new URL("../../../scripts/binary-freshn
   banner: (stamp: unknown) => string;
 };
 
+/**
+ * Every `mkdtempSync` root this file creates (`fakeRepo`, the moved-repo case, and the
+ * dist-freshness cases below), removed once the whole suite is done rather than per test — see
+ * the `after` beside this array. `force: true` covers a root a test already removed itself (the
+ * "moved repo" case relocates its own root mid-test).
+ */
+const tempRoots: string[] = [];
+
+after(() => {
+  for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
+});
+
 /** A throwaway repo: `<root>/packages/core/src/*.ts` plus `<root>/bin/loom.cjs`, the fake binary. */
 function fakeRepo(files: Readonly<Record<string, string>>): string {
   const root = mkdtempSync(join(tmpdir(), "loom-freshness-"));
+  tempRoots.push(root);
   const src = join(root, freshness.SOURCE_DIR);
   for (const [rel, body] of Object.entries(files)) {
     mkdirSync(dirname(join(src, rel)), { recursive: true });
@@ -712,6 +725,7 @@ test("the binary is located by ITSELF, not by the path it was built at — a mov
   const root = fakeRepo(ONE_FILE);
   buildFake(root);
   const moved = mkdtempSync(join(tmpdir(), "loom-freshness-moved-"));
+  tempRoots.push(moved);
   cpSync(root, moved, { recursive: true });
   rmSync(root, { recursive: true });
   writeFileSync(join(moved, freshness.SOURCE_DIR, "a.ts"), "export const a = 99;\n");
@@ -784,18 +798,21 @@ function distTree(root: string, srcMtime: number, distMtime: number | null): voi
 
 test("the build refuses to stamp when dist is older than src — the stamp would be a lie", () => {
   const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  tempRoots.push(root);
   distTree(root, 2_000_000, 1_000_000);
   assert.match(String(freshness.distIsBehindSources(root)), /a\.ts is newer than the compiled dist/);
 });
 
 test("the build refuses when there is no dist at all", () => {
   const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  tempRoots.push(root);
   distTree(root, 2_000_000, null);
   assert.match(String(freshness.distIsBehindSources(root)), /nothing has been built/);
 });
 
 test("the build refuses when dist exists but holds no compiled .js", () => {
   const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  tempRoots.push(root);
   distTree(root, 2_000_000, null);
   mkdirSync(join(root, "packages", "core", "dist"), { recursive: true });
   writeFileSync(join(root, "packages", "core", "dist", "README"), "");
@@ -804,6 +821,7 @@ test("the build refuses when dist exists but holds no compiled .js", () => {
 
 test("…and stamps when dist is newer than src, which is what `npm run build:binary` guarantees", () => {
   const root = mkdtempSync(join(tmpdir(), "loom-dist-"));
+  tempRoots.push(root);
   distTree(root, 1_000_000, 2_000_000);
   assert.equal(freshness.distIsBehindSources(root), null);
 });

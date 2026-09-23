@@ -43,7 +43,7 @@
  * through `openWorkspace`'s `fetchImpl`, so the models file is real, the adapter is real, the
  * `baseUrl` is never dialled and no socket is opened. Nothing here reads a clock.
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -271,6 +271,12 @@ function seed(dir: string): void {
  * `decidedNodes` empty and the comparison would have nothing to notice.
  */
 let TEMPLATE: { dir: string; runIds: RunId[] } | undefined;
+
+// The template is built once and reused by every test's `workspace()` copy; nothing else in this
+// file ever removes it. Clean it up when the whole suite is done, not per-test.
+after(() => {
+  if (TEMPLATE !== undefined) rmSync(TEMPLATE.dir, { recursive: true, force: true });
+});
 
 async function corpus(): Promise<{ dir: string; runIds: RunId[] }> {
   if (TEMPLATE !== undefined) return TEMPLATE;

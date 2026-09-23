@@ -25,7 +25,7 @@
  * `ENOTDIR` and `EACCES` are the same branch (`err.code !== "ENOENT"`), and `ENOTDIR` is the one
  * that can be produced without privilege, so it is what stands in for the pair.
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -43,12 +43,20 @@ const freshness = require_(fileURLToPath(new URL("../../../scripts/binary-freshn
   sourceDirState: (dir: string) => { present: boolean; why: string | null };
 };
 
+/** Every `fakeRepo()` root, removed once the whole suite is done — see the `after` below. */
+const tempRoots: string[] = [];
+
+after(() => {
+  for (const root of tempRoots) rmSync(root, { recursive: true, force: true });
+});
+
 /**
  * A throwaway repo plus the fake binary, stamped against the sources as they are RIGHT NOW.
  * The "application" is one `console.log`, so `APP RAN` on stdout means the guard let it through.
  */
 function fakeRepo(): { root: string; bin: string; src: string } {
   const root = mkdtempSync(join(tmpdir(), "loom-fresh-edge-"));
+  tempRoots.push(root);
   const src = join(root, freshness.SOURCE_DIR);
   mkdirSync(join(src, "run"), { recursive: true });
   writeFileSync(join(src, "a.ts"), "export const a = 1;\n");
