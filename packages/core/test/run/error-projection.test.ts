@@ -23,17 +23,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { builtinTools } from "../../src/builtin/tools.ts";
+import { builtinTools, fsRestore } from "../../src/builtin/tools.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
 import { CODES, err } from "../../src/errors.ts";
 import { compile, compileOrThrow } from "../../src/graph/compile.ts";
 import { errorProjectionSource, type ErrorProjection, type GraphSpec, type RunGraph } from "../../src/graph/spec.ts";
-import type { NodeId, RunId, TaskId } from "../../src/ids.ts";
+import type { NodeId, RunId, Seq, TaskId } from "../../src/ids.ts";
+import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
 import { SqliteStateStore } from "../../src/journal/sqlite.ts";
 import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
-import { viewFor, type RunProjection, type TaskRecord } from "../../src/run/projection.ts";
+import { RunFolder, foldRun, viewFor, type RunProjection, type TaskRecord } from "../../src/run/projection.ts";
 import { HookRegistry } from "../../src/run/hooks.ts";
 import { FunctionRegistry, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 import { replayRun } from "../../src/run/replay.ts";
@@ -703,4 +704,140 @@ test("reading a projection TAINTS what the reader writes, even from a body decla
   const E8 = /tainted input feeding an irreversible action \(E8\)/;
   assert.ok((await reasonsFor(["r:error"])).some((r) => E8.test(r)), "reading the projection taints the arm's write");
   assert.ok(!(await reasonsFor([])).some((r) => E8.test(r)), "the control: the same arm reading nothing does not");
+});
+
+// ── §A.96: a ROLLED-BACK task is not a success ──────────────────────────────
+
+/**
+ * `save` writes a file through the real `fs.write`, `boom` refuses, the run fails, and the
+ * run-failed rollback undoes `save` through `fs.restore` — no compensation edge, the path every
+ * failed run with a landed `fs.write` takes. The journal is handed back for the fold tests below.
+ */
+async function rolledBack(root: string): Promise<{ events: JournalEvent[]; p: RunProjection }> {
+  const store = new MemoryStateStore({ now: () => NOW });
+  const tools = new ToolRegistry();
+  for (const t of builtinTools({ root, deny: [] })) if (t.name === "fs.write") tools.register(t);
+  tools.register(fsRestore({ root, deny: [] }));
+  const functions = new FunctionRegistry();
+  functions.register("function/boom@stable", (() => ({ refuse: { reason: "no" } })) as never);
+  const engine = new Engine({
+    store,
+    bus: new InProcessEventBus({ store }),
+    tools,
+    functions,
+    models: new ModelRegistry(),
+    now: () => NOW,
+    sleep: async () => {},
+    policy: { granted: ["fs:write"], systemFloor: "out" },
+  });
+  const base = spec(
+    [
+      { id: "save", type: "tool", reads: ["path"], writes: ["doc"], tool: { name: "fs.write", version: "1.0", args: { path: "${path}", body: "x" } } },
+      { id: "boom", type: "function", reads: ["doc"], writes: ["out"], function: { ref: "function/boom@stable" } },
+    ],
+    [{ id: "then", from: "save", to: "boom", kind: "seq" }],
+  );
+  const s = { ...base, policy: { ...base.policy, capabilities: ["fs:write"] } } as GraphSpec;
+  const graph = compileOrThrow({
+    spec: s,
+    resolver: resolver(),
+    tools: Object.fromEntries(tools.list().map((t) => [t.name, t])),
+    tenantCapabilities: ["fs:write"],
+  });
+  const runId = await engine.submit({ graph, inputs: { path: "out/saved.txt" } });
+  let p = await engine.advance(runId);
+  for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+  const events: JournalEvent[] = [];
+  for await (const e of store.read(runId, 1 as Seq)) events.push(e);
+  return { events, p };
+}
+
+const SAVE = ["save:error"];
+const saveAt = (p: RunProjection | undefined): unknown => viewFor(p!, {}, { segments: [] }, SAVE).get("save:error");
+
+function folded(events: readonly JournalEvent[]): { full: RunProjection | undefined; incremental: RunProjection | undefined } {
+  const f = new RunFolder();
+  f.push(events);
+  while (f.stale) {
+    f.restart();
+    f.push(events);
+  }
+  return { full: foldRun(events), incremental: f.projection() };
+}
+
+test("§A.96 — a task whose effect the run-failed rollback UNDID projects NO value, not ok:true", async () => {
+  const ws = workspace();
+  try {
+    const { events, p } = await rolledBack(ws.root);
+    assert.equal(p.status, "failed", JSON.stringify(p.error ?? {}));
+    const rows = events.filter((e) => e.type === "compensation.recorded");
+    assert.deepEqual(rows.map((e) => (e.payload as { outcome: string }).outcome), ["compensated"]);
+    assert.equal(p.tasks["save@root#0" as TaskId]?.state, "succeeded", "the STATE still says succeeded — which is why the mark exists");
+
+    // Before the rollback row, the same journal says ok:true: the control.
+    const before = events.filter((e) => e.seq < rows[0]!.seq);
+    assert.equal((saveAt(foldRun(before)) as ErrorProjection | undefined)?.ok, true);
+    // `not_attempted` says the effect STANDS, and `failed` that the undo ran and may have acted:
+    // the first keeps ok:true, the second does not.
+    const as = (outcome: string): JournalEvent[] =>
+      events.map((e) => (e.seq === rows[0]!.seq ? ({ ...e, payload: { ...(e.payload as object), outcome } } as JournalEvent) : e));
+    assert.equal((saveAt(foldRun(as("not_attempted"))) as ErrorProjection | undefined)?.ok, true);
+    assert.equal(saveAt(foldRun(as("failed"))), undefined);
+    // After it, no projection — in the engine's own projection and in both folds.
+    assert.equal(saveAt(p), undefined);
+    const { full, incremental } = folded(events);
+    assert.equal(saveAt(full), undefined);
+    assert.equal(saveAt(incremental), undefined);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.96 — a REWIND that hides the rollback row does not hide the rollback; a REDO after it is ok:true again", async () => {
+  // A run that failed and rolled `save` back, then rewound to a seq AFTER `save` committed: the
+  // marker suppresses the rollback's own row — and `save`'s file is still gone. Folding the row
+  // unsuppressed, as `run/compensation.ts` reads it, is what keeps `ok: true` from coming back.
+  const ws = workspace();
+  try {
+    const { events } = await rolledBack(ws.root);
+    const committed = events.find((e) => e.type === "task.committed" && e.taskId === ("save@root#0" as TaskId))!;
+    const leased = events.find((e) => e.type === "task.leased" && e.taskId === ("save@root#0" as TaskId))!;
+    const last = events[events.length - 1]!;
+    const marker = {
+      ...last,
+      seq: (last.seq + 1) as Seq,
+      type: "checkpoint.restored",
+      payload: { checkpointId: "ck", mode: "rewind", atSeq: committed.seq, reason: "test" },
+      taskId: undefined,
+    } as unknown as JournalEvent;
+    const rewound = [...events, marker];
+    const { full, incremental } = folded(rewound);
+    assert.equal(full?.tasks["save@root#0" as TaskId]?.state, "succeeded", "the rewind restored save's commit");
+    assert.equal(saveAt(full), undefined, "and its rollback still stands");
+    assert.equal(saveAt(incremental), undefined, "in the incremental fold too");
+
+    // A REDO: save leased and committed again after the marker. Its lease is newer than every
+    // call the rollback undid, so the mark no longer covers it.
+    const redo = [
+      { ...leased, seq: (marker.seq + 1) as Seq },
+      { ...committed, seq: (marker.seq + 2) as Seq },
+    ] as JournalEvent[];
+    const again = folded([...rewound, ...redo]);
+    assert.equal((saveAt(again.full) as ErrorProjection | undefined)?.ok, true);
+    assert.equal((saveAt(again.incremental) as ErrorProjection | undefined)?.ok, true);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.96 — `not_attempted` leaves ok:true (the effect STANDS), and a FAILED task keeps its ok:false", () => {
+  const task = { taskId: "src@root#0" as TaskId, nodeId: "src" as NodeId };
+  // `undoneAtSeq` is only ever set by `compensated` or `failed`; a lease newer than it is a redo.
+  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5 }])), undefined, "no lease: any undo covers it");
+  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, lease: { workerId: "w", at: 1, fencingToken: 4 } }])), undefined);
+  assert.deepEqual(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, lease: { workerId: "w", at: 1, fencingToken: 9 } }])), { ok: true });
+  assert.deepEqual(
+    at(projectionWith([{ ...task, state: "failed", undoneAtSeq: 5, error: { class: "unavailable", code: "E_X", message: "m", retryable: true } }])),
+    { ok: false, code: "E_X", message: "m" },
+  );
 });

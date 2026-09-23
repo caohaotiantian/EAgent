@@ -103,6 +103,26 @@ export interface TaskRecord {
    */
   readonly lease?: { readonly workerId: string; readonly at: number; readonly fencingToken: number };
   /**
+   * The highest `compensatesSeq` among this Task's calls whose rollback was ATTEMPTED — a
+   * `compensation.recorded` with outcome `compensated` or `failed` — folded WITHOUT suppression.
+   *
+   * It exists so the Task's error projection stops saying `ok: true` about an effect that no
+   * longer stands (`TODO.md` §A.96). Rollback folds nothing else onto the Task: its state stays
+   * `succeeded`, which is true of what the Task DID and false of what is left of it.
+   *
+   * A SEQ AND NOT A FLAG, so a redo is not marked by the rollback of the run it replaced: the
+   * mark counts only when it is at or after the Task's current lease (`errorProjectionOf`), and a
+   * Task re-leased after a rewind holds a lease newer than every call the rewind undid.
+   *
+   * UNSUPPRESSED, the rule `run/compensation.ts` states for its own read of these rows: a record
+   * of an undo is not a thing a rewind undoes. A run that FAILED, rolled back a Task committed
+   * before seq A, and was then rewound to A would otherwise fold that Task `succeeded` with its
+   * rollback hidden — its effect gone, its projection `ok: true`.
+   *
+   * `not_attempted` does not set it: that row says the effect STANDS.
+   */
+  readonly undoneAtSeq?: number;
+  /**
    * WHAT THIS TASK HAS SPENT ACROSS ALL ITS ATTEMPTS, not what its last commit said.
    *
    * It used to be `task.committed.usage` assigned verbatim, which is a per-ATTEMPT summary
@@ -538,8 +558,12 @@ export class RunFolder {
       }
       this.#lastSeq = e.seq;
       // A suppressed event still advances `lastSeq` — it has been read and must not be read
-      // again — but it must not advance `seq` or reach `apply`, exactly as in `foldRun`.
-      if (this.#suppressed.some(([from, to]) => e.seq > from && e.seq < to)) continue;
+      // again — but it must not advance `seq` or reach `apply`, exactly as in `foldRun`. A
+      // rollback row is the one exception, in both folds: see `foldRollback`.
+      if (this.#suppressed.some(([from, to]) => e.seq > from && e.seq < to)) {
+        if (this.#p !== undefined) foldRollback(this.#p, e);
+        continue;
+      }
       this.#p ??= emptyProjection(e);
       this.#p.seq = e.seq;
       apply(this.#p, e);
@@ -675,7 +699,11 @@ export function foldRun(events: Iterable<JournalEvent>): RunProjection | undefin
   const suppressed = suppressedRanges(all);
 
   for (const e of all) {
-    if (suppressed.some(([from, to]) => e.seq > from && e.seq < to)) continue;
+    if (suppressed.some(([from, to]) => e.seq > from && e.seq < to)) {
+      // The one event a rewind does not hide — see `foldRollback`.
+      if (p !== undefined) foldRollback(p, e);
+      continue;
+    }
     p ??= emptyProjection(e);
     p.seq = e.seq;
     apply(p, e);
@@ -851,6 +879,27 @@ const RUN_STATUS_EVENTS: ReadonlySet<string> = new Set([
   "run.failed",
   "run.cancelled",
 ]);
+
+/**
+ * A rollback, onto the Task whose call it undid — see `TaskRecord.undoneAtSeq`.
+ *
+ * Reached from `apply` AND from both folds' suppressed paths, because a rewind's range hides the
+ * rows a run-failed rollback wrote before it, and the undo they record still happened. It only
+ * ever PATCHES a Task the fold already holds: a row naming no Task, or one this fold has not seen,
+ * changes nothing, since a Task that appears later is one leased after the row and so outside it.
+ */
+function foldRollback(p: MutableProjection, e: JournalEvent): void {
+  if (!isEvent(e, "compensation.recorded") || e.taskId === undefined) return;
+  const { outcome, compensatesSeq } = e.payload;
+  if (outcome !== "compensated" && outcome !== "failed") return;
+  const t = p.tasks[e.taskId];
+  if (t === undefined) return;
+  // A seq the payload does not carry as a number still marks the Task, at the highest seq there
+  // is: an undo the fold cannot place is read as covering the current execution, never as absent.
+  const at = typeof compensatesSeq === "number" && Number.isFinite(compensatesSeq) ? compensatesSeq : Number.MAX_SAFE_INTEGER;
+  p.snapshot = undefined;
+  p.tasks[e.taskId] = { ...t, undoneAtSeq: Math.max(t.undoneAtSeq ?? -1, at) };
+}
 
 function apply(p: MutableProjection, e: JournalEvent): void {
   // The one place a fold can change, so the one place the snapshot cache is dropped. Before the
@@ -1080,6 +1129,10 @@ function apply(p: MutableProjection, e: JournalEvent): void {
   if (isEvent(e, "effect.completed") || isEvent(e, "effect.failed")) {
     p.openEffects.delete(e.payload.key);
     p.sortedOpenEffects = undefined;
+    return;
+  }
+  if (isEvent(e, "compensation.recorded")) {
+    foldRollback(p, e);
     return;
   }
   if (isEvent(e, "model.called")) {
@@ -1427,7 +1480,8 @@ export function viewFor(
  * `succeeded` yields `{ok: true}`; only `failed` with a recorded error yields `{ok: false, …}`.
  * Pending, leased, retrying, awaiting a gate, skipped, cancelled, or never scheduled: no value,
  * so a body asking `view.require` is refused and one asking `view.get` holds `undefined` — which
- * no reading can mistake for success.
+ * no reading can mistake for success. A `succeeded` Task whose call was since ROLLED BACK is no
+ * value either (`TaskRecord.undoneAtSeq`, §A.96): what it did no longer stands.
  */
 function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: NodeId): ErrorProjection | undefined {
   const chain = branchChain(branch);
@@ -1443,7 +1497,13 @@ function errorProjectionOf(p: RunProjection, branch: BranchCoordinate, source: N
     }
   }
   if (best === undefined) return undefined;
-  if (best.state === "succeeded") return { ok: true };
+  // ROLLED BACK IS NOT SUCCEEDED (§A.96). The state stays `succeeded` — rollback folds nothing
+  // else onto the Task — so the mark is read here: an undo attempted on a call this execution made
+  // (at or after its lease; any, when it holds none) means the effect may no longer stand, and
+  // the honest answer is no projection, never `ok: true`. A FAILED Task's `ok: false` stays: an
+  // undo does not make a failure less true.
+  const undone = best.undoneAtSeq !== undefined && best.undoneAtSeq >= (best.lease?.fencingToken ?? -1);
+  if (best.state === "succeeded") return undone ? undefined : { ok: true };
   if (best.state === "failed" && best.error !== undefined && typeof best.error.code === "string") {
     const { code, message } = best.error;
     return typeof message === "string" ? { ok: false, code, message } : { ok: false, code };
