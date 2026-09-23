@@ -234,8 +234,8 @@ forced on the design, and the residue it left, are dated at that doc's top.
 
 ```
 packages/core/     the runtime. Zero runtime dependencies. src/ + test/. Ten files are the kernel.
-scripts/           build, and the three guards: zero-dep, surface (the exported name set),
-                   kernel (the pinned file list, scripts/kernel.json)
+scripts/           build, pack + install smoke, and the three guards: zero-dep, surface (the
+                   exported name set), kernel (the pinned file list, scripts/kernel.json)
 DESIGN.md          the decisions, and the Sequence they imply — the roadmap
 TODO.md            everything unfinished, self-contained
 docs/              dated records w/ repros. START: handoff-2026-09-23.md, audit-2026-09-02.md

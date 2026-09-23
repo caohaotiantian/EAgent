@@ -91,7 +91,7 @@ provably-exclusive router arms.
 
 **THE TRIGGER ABOVE HAS ALREADY FIRED, and nobody acted on it — say that rather than leave a
 reader looking for it.** *"Relaxing `GRAPH010` for provably-exclusive router arms"* is
-`routerExclusive` (`graph/validate.ts:2774`, live inside `rule010ConcurrentWriters` at `:2389`),
+`routerExclusive` (`graph/validate.ts`, live inside `rule010ConcurrentWriters`),
 which landed at `ce025c1` on 2026-08-05, three weeks BEFORE this note was written at `f74d863`. So
 the condition was true the day it was set. It was not acted on, and the reason is worth stating:
 `routerExclusive` proves exclusivity for a NAMED PAIR of writers on one channel; it does not give
@@ -100,7 +100,7 @@ not a trigger.** Whoever next owns this note should either restate it as a condi
 happened, or delete it and record that the reopening was declined on the evidence.
 
 **And `GRAPH010` now has a SECOND relaxation, which does not bear on this at all.**
-`branchLocalChannel` (`graph/validate.ts:2484`, `77c245a`, §A.40) exempts a channel every reader of
+`branchLocalChannel` (`graph/validate.ts`, `77c245a`, §A.40) exempts a channel every reader of
 which is inside the same fan-out branch as its writer, because there is one writer per branch and no
 fold across them. It is the OPPOSITE argument to the router one: `routerExclusive` says two DIFFERENT
 nodes never both run, which is the shape where siblings could diverge; `branchLocalChannel` says ONE
@@ -221,12 +221,13 @@ because there is already a slot for it.
 **Closes when** a tool failure is a fact an `error` arm declares in `reads` and `grant-access`'s arm
 branches on the CODE — no file → `first-grant`; unreadable, or a parent the sandbox will not list →
 fail and write no ledger — at which point the `KNOWN HAZARD` test
-(`packages/core/test/examples-grant.test.ts`:995), which asserts today's loss, goes **RED and is
-DELETED together with the `look` node** rather than loosened. **`look` is a node in a SHIPPED GRAPH,
-not a test fixture** — `examples/graphs/grant-access.json`:54, wired by the edges `then-look` and
-`then-ledger` at :136–137 — so deleting it edits that graph and re-points one edge, and the test
-deletion is the second half of the same change. **Why deletion and not loosening — the maintainer's
-inversion, which is the argument for the whole decision:** if workflows keep defending themselves
+(`packages/core/test/examples-grant.test.ts`:995 at `ab1654f7`), which asserted the loss, goes
+**RED and is DELETED together with the `look` node** rather than loosened — both done at
+`83f86bec`. **`look` was a node in a SHIPPED GRAPH, not a test fixture** —
+`examples/graphs/grant-access.json`:54, wired by the edges `then-look` and `then-ledger` at
+:136–137 — so deleting it edited that graph and re-pointed one edge, and the test deletion was the
+second half of the same change. **Why deletion and not loosening — the maintainer's inversion,
+which is the argument for the whole decision:** if workflows keep defending themselves
 (`look`, plus `historySource: "none"`), every new graph copies the hole and its tests PIN the hole,
 and that teaches the wrong shape. Sequence item 30 is the roadmap entry, and its closing condition
 is the envelope plus this failure producer; `TODO.md` §A.90, §A.83 and §A.82 each keep their own
@@ -475,8 +476,8 @@ against a live GLM-5.2, STOPPED at the gate, and TRUSTED by a replay with no key
 (`match: true, hermetic: true`, the side effect not repeated). **WATCH has the weakest** — the
 console and `GET /runs` exist, and `TODO.md` §C's header says *"a richer operator surface over a
 plane that is not emitting is a better view of nothing"*, which item 31 below is about. **INSTALL has none at all**, and it is the only one of the
-six no item has ever been written for. Two commands fail today, the second more quietly than the
-first:
+six no item has ever been written for. Two commands failed on `29c8b9ec`, the second more quietly
+than the first:
 
 ```
 $ cd "$(mktemp -d)" && npx --yes @loom/core --version
@@ -489,11 +490,12 @@ exit=0
 npm warn publish Skipping workspace @loom/core, marked as private
 ```
 
-`README.md`:69–72 already states the second in full — *"`@loom/core` is `private: true`, and
+`README.md`:69–72 stated the second in full at `29c8b9ec` — *"`@loom/core` is `private: true`, and
 `npm publish` does not REFUSE — it exits 0 and quietly does nothing, which a CI step checking only
-the exit code would report as a successful release."* **Closes when** somebody who has not cloned
-this repository can install and run `loom`. **Making `npm publish` refuse is NOT part of that** —
-it is a guard over a silence that stops mattering the moment the package is publishable, and
+the exit code would report as a successful release."* (that text is now README's "Install it").
+**Closes when** somebody who has not cloned this repository can install and run `loom`. **Making
+`npm publish` refuse is NOT part of that** — it is a guard over a silence that stops mattering the
+moment the package is publishable, and
 `TODO.md` §H.15 says so on its own row. **What this reopens by its own text**, named here so it is
 not discovered later: `TODO.md` §H.1 says verbatim *"Reopens on more than one operator, or a
 published binary"*. §D's single-operator framing is not disturbed by publishing as such — of the
@@ -508,7 +510,9 @@ STAYS, because removing it IS the publish act and that act is the maintainer's. 
 
 - **The package**: name, version, `repository`/`homepage`/`bugs`, `publishConfig` for the public
   registry, a README and LICENSE in `packages/core`, and `files` shipping `dist/**/*.js` and
-  `*.d.ts` only — no source maps pointing at a `src/` the tarball does not carry, no `.tsbuildinfo`.
+  `*.d.ts` only — no source maps pointing at a `src/` the tarball does not carry, no `.tsbuildinfo`
+  (the `.js` files still END in a `sourceMappingURL` pointer to a map that is not there: `TODO.md`
+  §H.17).
   Examples stay in the repository.
 - **`loom --version`** prints `loom 0.1.0` (it used to print the usage, exit 0, on every build —
   which also made the first repro above pass against ANY build once the name resolved), and an
@@ -545,8 +549,8 @@ triggers. `TODO.md` §H.15 carries the same closing condition.
 secret — DECIDED 2026-09-22 as D8, and the item is now its IMPLEMENTATION.** §A.82, §A.83 and §A.90
 WERE **one unanswered question**, which is the whole reason this is an item rather than three, and
 one answer settled all three of them. **§A.90 was the one to answer first, on this project's own
-priority rule — *silent-and-wrong outranks loud-and-missing*:** it is the only row in `TODO.md` that
-ends in destroyed data with exit code 0, and the command that shows it is **pasted once, on §A.90's
+priority rule — *silent-and-wrong outranks loud-and-missing*:** it was the only row in `TODO.md` that
+ended in destroyed data with exit code 0, and the command that shows it is **pasted once, on §A.90's
 own row**, re-run for this settlement on `29c8b9ec` against the shipped `grant-access.json` with
 its defence in place: `chmod 333` the output directory and the run exits **0**, reports
 `succeeded`, rebuilds its ledger from `historySource: "none"`, and `u:sam`'s grant is gone. Read it
@@ -565,7 +569,7 @@ are in D8; `TODO.md` §D.10 is struck with the answer and carries them at length
 unreadable and sandbox-refused wearing **distinct** codes — a projection that still says only
 `E_TOOL_SOURCE_UNAVAILABLE` closes nothing — and `grant-access`'s `error` arm branching on them (no
 file → `first-grant`; unreadable, or a parent the sandbox will not list → fail and write no ledger),
-at which point the `KNOWN HAZARD` test, which asserts today's LOSS, goes RED and is deleted with the
+at which point the `KNOWN HAZARD` test, which asserted the LOSS, goes RED and is deleted with the
 `look` node rather than loosened.
 
 **§A.83 and §A.82 stay OPEN rows after this item closes**, and that is deliberate: their producers
@@ -662,10 +666,11 @@ two units of work, in this sequence and not in parallel:
 1. **Record D.10 in `DESIGN.md`** — done here, as D8.
 2. **Implement the projection**, and make `grant-access`'s `error` arm branch by CODE (no file →
    `first-grant`; unreadable or an unlistable parent → fail, no ledger write). **Delete the `look`
-   NODE and the `KNOWN HAZARD` TEST together** — they are in two different files: `look` is a node
-   in the shipped `examples/graphs/grant-access.json`:54, reached by the edges `then-look` and
-   `then-ledger` at :136–137 (so removing it edits a shipped graph and its two edges), and the test
-   is `packages/core/test/examples-grant.test.ts`:995.
+   NODE and the `KNOWN HAZARD` TEST together** — they were in two different files: `look` was a
+   node in the shipped `examples/graphs/grant-access.json`:54, reached by the edges `then-look` and
+   `then-ledger` at :136–137 (so removing it edited a shipped graph and its two edges), and the test
+   was `packages/core/test/examples-grant.test.ts`:995, both at `ab1654f7`. **Landed at
+   `83f86bec`** — D8's *Enforced* line.
 3. **Change §A.68's one word and split the examples** — the canonical file to `skip`, veto into its
    own graph — and update `packages/core/test/graph/two-person-approval.test.ts`'s TEACHING
    assertions rather than re-testing the engine. **Landed 2026-09-23** — D9's *Enforced* line.
