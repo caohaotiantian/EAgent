@@ -3199,6 +3199,32 @@ function rule002Terminals(spec: GraphSpec, idx: GraphIndex, d: Diagnostic[]): vo
   // OVER `writers`, NOT OVER EVERY NODE: the set is already built two lines up, and scanning
   // `idx.byId` to filter it back down is the same avoidable O(nodes) per terminal that
   // `rule005Dataflow` paid for per read.
+  //
+  // WHAT THIS REACHABILITY IS, AND WHY A WARNING MAY STOP AT IT (§A.86, decided: an argument, not
+  // a new check). `canPrecede` is the full closure over `flowEdges` — every edge kind but
+  // `compensation`, which nothing traverses. It is STRUCTURAL reachability, and it differs from
+  // what a run can REALISE in exactly these ways, each of which only ever makes it LARGER:
+  //   - a `conditional` edge's `when`, a router's cases and a body's or operator's `take` are not
+  //     read, so an edge no input can select still connects;
+  //   - a `loop` edge's `until` and `maxIterations` are not read, so a writer reachable only on a
+  //     pass the bound forbids (the row's `maxIterations: 1` probe) still counts;
+  //   - an `error` edge's `codes` are not read, and neither is whether the node can fail at all;
+  //   - a `fanout` over an empty list and a `join` whose barrier cannot be met still connect.
+  // And one more that is not about realisability at all: the question is EXISTENTIAL. A terminal
+  // is silent when SOME writer is connected to it, so `s -> w -> t` beside `s -> x -> t`, with `w`
+  // the only writer, is silent although the run that takes `x` ends at `t` with no output. That is
+  // not new: the pre-§A.84 rule asked `ancestors(t) ∩ writers` and was existential too.
+  //
+  // So the rule is SOUND FOR WHAT IT SAYS and incomplete for what it does not: every
+  // `GRAPH002_DEAD_END` it prints is true of every run (no writer is connected at all, so none
+  // can have run before `t` or after it through a back-edge), and a dead end it misses is one of
+  // the shapes above. Missing one is the QUIET direction, which a warning may take and an error
+  // may not: this is `severity: "warning"`, it gates nothing (no reader of `GRAPH002_DEAD_END`
+  // exists outside this rule), and the runtime refuses the real fault itself — a run that ends
+  // without a declared output fails `E_OUTPUT_MISSING`. Computing realisable reachability instead
+  // would need the edge conditions and loop bounds evaluated, which is the runtime's job and not a
+  // static analysis's; closing the existential half would warn on every graph with a conditional
+  // output arm, which is the cry-wolf direction.
   const reachesAWriter = (t: NodeId): boolean =>
     [...writers].some((w) => canPrecede(idx, w, t) || canPrecede(idx, t, w));
   for (const t of idx.terminalNodes) {
