@@ -785,6 +785,11 @@ test("§A.96 — a task whose effect the run-failed rollback UNDID projects NO v
       events.map((e) => (e.seq === rows[0]!.seq ? ({ ...e, payload: { ...(e.payload as object), outcome } } as JournalEvent) : e));
     assert.equal((saveAt(foldRun(as("not_attempted"))) as ErrorProjection | undefined)?.ok, true);
     assert.equal(saveAt(foldRun(as("failed"))), undefined);
+    // An UNDO's own call is not something the task performed: a `:compensate:` `tool.called` with
+    // no row after it yet (a crash between the undo and its record) must not read as a redo.
+    const undo = events.find((e) => e.type === "tool.called" && (e.payload as { key: string }).key.startsWith("save@root#0:compensate:"))!;
+    const last = events[events.length - 1]!;
+    assert.equal(saveAt(foldRun([...events, { ...undo, seq: (last.seq + 1) as Seq } as JournalEvent])), undefined);
     // After it, no projection — in the engine's own projection and in both folds.
     assert.equal(saveAt(p), undefined);
     const { full, incremental } = folded(events);
@@ -795,7 +800,7 @@ test("§A.96 — a task whose effect the run-failed rollback UNDID projects NO v
   }
 });
 
-test("§A.96 — a REWIND that hides the rollback row does not hide the rollback; a REDO after it is ok:true again", async () => {
+test("§A.96 — a REWIND that hides the rollback row does not hide the rollback; only a redo that RE-PERFORMS is ok:true again", async () => {
   // A run that failed and rolled `save` back, then rewound to a seq AFTER `save` committed: the
   // marker suppresses the rollback's own row — and `save`'s file is still gone. Folding the row
   // unsuppressed, as `run/compensation.ts` reads it, is what keeps `ok: true` from coming back.
@@ -818,13 +823,25 @@ test("§A.96 — a REWIND that hides the rollback row does not hide the rollback
     assert.equal(saveAt(full), undefined, "and its rollback still stands");
     assert.equal(saveAt(incremental), undefined, "in the incremental fold too");
 
-    // A REDO: save leased and committed again after the marker. Its lease is newer than every
-    // call the rollback undid, so the mark no longer covers it.
-    const redo = [
+    // A REDO THAT IS SERVED: save leased and committed again after the marker, with no new
+    // `tool.called` — the recorded call handed back, nothing re-performed. Re-leased is not
+    // re-executed, so the rollback still covers it.
+    const served = [
       { ...leased, seq: (marker.seq + 1) as Seq },
       { ...committed, seq: (marker.seq + 2) as Seq },
     ] as JournalEvent[];
-    const again = folded([...rewound, ...redo]);
+    const stillUndone = folded([...rewound, ...served]);
+    assert.equal(saveAt(stillUndone.full), undefined, "a served redo re-performed nothing");
+    assert.equal(saveAt(stillUndone.incremental), undefined);
+
+    // A REDO THAT RE-PERFORMS: the same, with the call really made again after the rollback.
+    const call = events.find((e) => e.type === "tool.called" && (e.payload as { key: string }).key === "save@root#0:tool:0")!;
+    const redone = [
+      { ...leased, seq: (marker.seq + 1) as Seq },
+      { ...call, seq: (marker.seq + 2) as Seq },
+      { ...committed, seq: (marker.seq + 3) as Seq },
+    ] as JournalEvent[];
+    const again = folded([...rewound, ...redone]);
     assert.equal((saveAt(again.full) as ErrorProjection | undefined)?.ok, true);
     assert.equal((saveAt(again.incremental) as ErrorProjection | undefined)?.ok, true);
   } finally {
@@ -834,10 +851,13 @@ test("§A.96 — a REWIND that hides the rollback row does not hide the rollback
 
 test("§A.96 — `not_attempted` leaves ok:true (the effect STANDS), and a FAILED task keeps its ok:false", () => {
   const task = { taskId: "src@root#0" as TaskId, nodeId: "src" as NodeId };
-  // `undoneAtSeq` is only ever set by `compensated` or `failed`; a lease newer than it is a redo.
-  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5 }])), undefined, "no lease: any undo covers it");
-  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, lease: { workerId: "w", at: 1, fencingToken: 4 } }])), undefined);
-  assert.deepEqual(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, lease: { workerId: "w", at: 1, fencingToken: 9 } }])), { ok: true });
+  // `undoneAtSeq` is only ever set by `compensated` or `failed`; a PERFORMED call newer than it is
+  // a redo. A newer LEASE is not: a re-leased task may have been served the undone call.
+  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5 }])), undefined, "performed nothing: any undo covers it");
+  assert.equal(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, performedAtSeq: 4 }])), undefined);
+  assert.deepEqual(at(projectionWith([{ ...task, state: "succeeded", undoneAtSeq: 5, performedAtSeq: 9 }])), { ok: true });
+  const releasedOnly = { ...task, state: "succeeded" as const, undoneAtSeq: 5, performedAtSeq: 4, lease: { workerId: "w", at: 1, fencingToken: 9 } };
+  assert.equal(at(projectionWith([releasedOnly])), undefined, "re-leased after the undo, performed before it: still undone");
   assert.deepEqual(
     at(projectionWith([{ ...task, state: "failed", undoneAtSeq: 5, error: { class: "unavailable", code: "E_X", message: "m", retryable: true } }])),
     { ok: false, code: "E_X", message: "m" },
@@ -992,6 +1012,95 @@ test("§A.96 — a RETRIED task whose served call is rolled back projects NO val
     const { full, incremental } = folded(events);
     assert.equal(at(full), undefined);
     assert.equal(at(incremental), undefined);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("§A.96 — a REWIND whose redo is SERVED the rolled-back call: the reader is told nothing, in the engine and both folds", async () => {
+  // Review probe `rewind-served`: save -> check (reads save:error) -> boom (refuses once). The run
+  // fails and its rollback removes save's file; the operator rewinds to save's `effect.completed`;
+  // the redo re-leases save and is SERVED its recorded call, so nothing is written again. Keyed on
+  // the lease, check was handed `{ok: true, bytes: 1}` about a file that is not there. The engine
+  // serving a compensated call on redo is its own residue; the projection must not vouch for it.
+  const ws = workspace();
+  try {
+    const store = new MemoryStateStore({ now: () => NOW });
+    const tools = new ToolRegistry();
+    for (const t of builtinTools({ root: ws.root, deny: [] })) if (t.name === "fs.write") tools.register(t);
+    tools.register(fsRestore({ root: ws.root, deny: [] }));
+    const functions = new FunctionRegistry();
+    let booms = 0;
+    functions.register("function/boom@stable", (() => (booms++ === 0 ? { refuse: { reason: "no" } } : { writes: { out: { done: true } } })) as never);
+    functions.register("function/check@stable", ((v: { get: (c: string) => unknown }) => ({ writes: { chk: { saw: v.get("save:error") ?? null } } })) as never);
+    const engine = new Engine({
+      store,
+      bus: new InProcessEventBus({ store }),
+      tools,
+      functions,
+      models: new ModelRegistry(),
+      now: () => NOW,
+      sleep: async () => {},
+      policy: { granted: ["fs:write"], systemFloor: "out" },
+    });
+    const base = spec(
+      [
+        { id: "save", type: "tool", reads: ["path"], writes: ["doc"], tool: { name: "fs.write", version: "1.0", args: { path: "${path}", body: "x" } } },
+        { id: "check", type: "function", reads: ["doc", "save:error"], writes: ["chk"], function: { ref: "function/check@stable" } },
+        { id: "boom", type: "function", reads: ["chk"], writes: ["out"], function: { ref: "function/boom@stable" } },
+      ],
+      [
+        { id: "e1", from: "save", to: "check", kind: "seq" },
+        { id: "e2", from: "check", to: "boom", kind: "seq" },
+      ],
+      { chk: { type: "object", reduce: "replace" } },
+    );
+    const s = { ...base, policy: { ...base.policy, capabilities: ["fs:write"] } } as GraphSpec;
+    const graph = compileOrThrow({ spec: s, resolver: resolver(), tools: Object.fromEntries(tools.list().map((t) => [t.name, t])), tenantCapabilities: ["fs:write"] });
+    const runId = await engine.submit({ graph, inputs: { path: "out/saved.txt" } });
+    let p = await engine.advance(runId);
+    for (let i = 0; i < 8 && p.status === "running"; i++) p = await engine.advance(runId);
+    assert.equal(p.status, "failed");
+    assert.equal(existsSync(join(ws.root, "out", "saved.txt")), false, "the rollback removed save's file");
+    const read = async (): Promise<JournalEvent[]> => {
+      const out: JournalEvent[] = [];
+      for await (const e of store.read(runId, 1 as Seq)) out.push(e);
+      return out;
+    };
+    const first = await read();
+    const completed = first.find((e) => e.type === "effect.completed" && (e.payload as { key: string }).key === "save@root#0:tool:0")!;
+    const op = { kind: "human", subject: "u:op", via: "api" } as const;
+    const plan = await engine.planRewind(runId, completed.seq, op);
+    p = await engine.rewind(runId, completed.seq, "test", op, { planHash: plan.planHash });
+    for (let i = 0; i < 8 && p.status !== "succeeded" && p.status !== "failed"; i++) p = await engine.advance(runId);
+    const events = await read();
+    const performed = events.filter((e) => e.type === "tool.called" && (e.payload as { key: string }).key.startsWith("save@root#0:tool:"));
+    assert.equal(performed.length, 1, "the redo was SERVED — save's call was performed once, in the first pass");
+    assert.ok(events.filter((e) => e.type === "task.leased" && e.taskId === ("save@root#0" as TaskId)).length >= 2, "and save WAS re-leased");
+    assert.equal(existsSync(join(ws.root, "out", "saved.txt")), false, "so the file is still absent");
+    assert.deepEqual(p.channels["chk"], { saw: null }, "check was handed no projection, not ok:true");
+    assert.equal(saveAt(p), undefined);
+    const { full, incremental } = folded(events);
+    assert.equal(saveAt(full), undefined);
+    assert.equal(saveAt(incremental), undefined);
+
+    // THE GENUINE REDO: rewind to BEFORE save's call, so its recorded completion is hidden and the
+    // redo must perform the write again. That is an effect after the undo: ok:true, file present.
+    const lease = first.find((e) => e.type === "task.leased" && e.taskId === ("save@root#0" as TaskId))!;
+    const plan2 = await engine.planRewind(runId, lease.seq, op);
+    p = await engine.rewind(runId, lease.seq, "test", op, { planHash: plan2.planHash });
+    for (let i = 0; i < 8 && p.status !== "succeeded" && p.status !== "failed"; i++) p = await engine.advance(runId);
+    const after = await read();
+    assert.equal(
+      after.filter((e) => e.type === "tool.called" && (e.payload as { key: string }).key.startsWith("save@root#0:tool:")).length,
+      2,
+      "the second redo re-performed the write",
+    );
+    assert.equal(existsSync(join(ws.root, "out", "saved.txt")), true);
+    assert.equal((saveAt(p) as ErrorProjection | undefined)?.ok, true);
+    const again = folded(after);
+    assert.equal((saveAt(again.full) as ErrorProjection | undefined)?.ok, true);
+    assert.equal((saveAt(again.incremental) as ErrorProjection | undefined)?.ok, true);
   } finally {
     ws.dispose();
   }
