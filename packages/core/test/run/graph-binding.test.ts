@@ -16,6 +16,9 @@
  * The third part is the compiled oversight FLOOR, which the hash also excludes.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { CODES, isLoomError } from "../../src/errors.ts";
@@ -24,15 +27,22 @@ import type { GraphSpec } from "../../src/graph/spec.ts";
 import type { ResourceResolver } from "../../src/graph/validate.ts";
 import type { RunId } from "../../src/ids.ts";
 import { InProcessEventBus } from "../../src/bus.ts";
+import type { JournalEvent } from "../../src/journal/events.ts";
 import { MemoryStateStore } from "../../src/journal/memory.ts";
+import { SqliteStateStore } from "../../src/journal/sqlite.ts";
+import type { StateStore } from "../../src/journal/store.ts";
 import { Engine } from "../../src/run/engine.ts";
 import { FunctionRegistry, MockModelAdapter, ModelRegistry, ToolRegistry, type ToolDefinition } from "../../src/run/registry.ts";
 
 const NOW = 1_700_000_000_000;
 const alice = { kind: "human", subject: "u:alice", via: "console" } as const;
 
-/** A resolver whose answer for one ref can MOVE, the way a store's does when a file is edited. */
-function shifting(): { resolver: ResourceResolver; bump: () => void } {
+/**
+ * A resolver whose answer for a ref can MOVE, the way a store's does when a file is edited.
+ * `moves` picks WHICH refs a `bump` moves — every one by default, one file's worth when a test
+ * needs the edit to land on a ref only a mutation introduced.
+ */
+function shifting(moves: (ref: string) => boolean = () => true): { resolver: ResourceResolver; bump: () => void } {
   let n = 0;
   return {
     bump: () => {
@@ -41,7 +51,7 @@ function shifting(): { resolver: ResourceResolver; bump: () => void } {
     resolver: {
       resolve: (ref) =>
         /^[a-z_]+\/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$/.test(ref)
-          ? { ref, digest: `sha256:${String(n).repeat(64).slice(0, 64)}`, channel: "stable" }
+          ? { ref, digest: `sha256:${String(moves(ref) ? n : 0).repeat(64).slice(0, 64)}`, channel: "stable" }
           : undefined,
       document: () => "Instructions.",
     },
@@ -225,8 +235,10 @@ test("A MUTATED RUN IS STILL APPROVABLE — the successor is a recorded fact too
   const { runId, gateId, graph } = await park(r);
 
   // Stand in for a mutation by binding the run to a graph whose hash the JOURNAL has adopted.
-  // Rather than driving `canMutate` (unreachable from the binary), assert the property directly:
-  // a graph matching the current folded hash is accepted, one matching neither is not.
+  // Rather than driving `canMutate`, assert the property directly: a graph matching the current
+  // folded hash is accepted, one matching neither is not. (`canMutate` IS reachable from the
+  // shipped binary — `--grant graph:mutate` plus an `--extension-module` adapter — and the tests
+  // below drive a real mutation; this one is kept as the unmutated control.)
   const p = await r.engine.projection(runId);
   assert.equal(p?.graphHash, graph.graphHash, "an unmutated run's folded hash IS its compile hash");
 
@@ -290,24 +302,28 @@ function successorSpec(): GraphSpec {
   return { ...s, nodes: [...s.nodes, ...ADDED_GATE.addNodes], edges: [...ADDED_GATE.addEdges] } as unknown as GraphSpec;
 }
 
+
+type Res = { resolver: ResourceResolver; bump: () => void };
+/** What the mock model proposes: `ADDED_GATE` unless a test needs a different shape of it. */
+type Mutation = { readonly addNodes: readonly object[]; readonly addEdges: readonly object[] };
+
 interface MutRig {
   readonly engine: Engine;
-  readonly store: MemoryStateStore;
-  readonly res: { resolver: ResourceResolver; bump: () => void };
+  readonly store: StateStore;
+  readonly res: Res;
   fresh(): MutRig;
 }
 
-function mutRig(shared?: { store: MemoryStateStore; res: { resolver: ResourceResolver; bump: () => void } }): MutRig {
-  const res = shared?.res ?? shifting();
-  const store = shared?.store ?? new MemoryStateStore({ now: () => NOW });
+/** An Engine that proposes `ADDED_GATE` from its one agent node, over whatever store it is handed. */
+function mutEngine(store: StateStore, res: Res, mutation: Mutation = ADDED_GATE): Engine {
   const models = new ModelRegistry();
   models.register(
     new MockModelAdapter({
-      script: () => ({ text: JSON.stringify({ ok: true, mutation: { reason: "gate it", ...ADDED_GATE } }), finishReason: "stop" }),
+      script: () => ({ text: JSON.stringify({ ok: true, mutation: { reason: "gate it", ...mutation } }), finishReason: "stop" }),
     }),
     true,
   );
-  const engine = new Engine({
+  return new Engine({
     store,
     bus: new InProcessEventBus({ store }),
     tools: new ToolRegistry(),
@@ -317,99 +333,293 @@ function mutRig(shared?: { store: MemoryStateStore; res: { resolver: ResourceRes
     resolver: res.resolver,
     policy: { granted: ["graph:mutate"], systemFloor: "out", budget: { runUsd: 10 } },
   });
-  return { engine, store, res, fresh: () => mutRig({ store, res }) };
 }
 
-const mutCompile = (r: MutRig, s: GraphSpec) =>
-  compileOrThrow({ spec: s, resolver: r.res.resolver, tools: r.engine.tools.manifests(), tenantCapabilities: ["graph:mutate"] });
+function mutRig(shared?: { store: StateStore; res: Res; mutation?: Mutation }): MutRig {
+  const res = shared?.res ?? shifting();
+  const store = shared?.store ?? new MemoryStateStore({ now: () => NOW });
+  const mutation = shared?.mutation ?? ADDED_GATE;
+  return { engine: mutEngine(store, res, mutation), store, res, fresh: () => mutRig({ store, res, mutation }) };
+}
 
-/**
- * G.5 RESIDUE (a), RECORDED AS IT STANDS: the resource half of this binding does not reach a
- * MUTATED run's successor. Driven through the engine, not described.
- *
- * THIS TEST IS GREEN AND THE BEHAVIOUR IT PINS IS WRONG, which is deliberate and is the only
- * honest shape available here, because the fix is not in reach of this file's subject.
- * `#assertBound` compares `run.compiled.resolutionManifest` against `ctx.graph.resolutionManifest`
- * on the `isCompiled` arm alone, and states the gap where it lives: "the manifest is journaled on
- * `run.compiled` alone, so it can only be checked against the compiled graph". After a mutation
- * `ctx.graph` IS the successor — authorized, correctly, by the folded `graph.mutated.newHash` —
- * and that event carries no manifest. So the successor's manifest is not a recorded fact at all,
- * and no graph the compiler can produce changes which arm the engine takes.
- *
- * CLOSING IT NEEDS `graph.mutated` TO CARRY THE SUCCESSOR'S MANIFEST (`journal/events.ts`) AND
- * `#compiledIdentity`/`#assertBound` TO READ IT (`run/engine.ts`). Recomputing it instead of
- * recording it does not work: a mutation may name a ref nothing has seen, `frozenFirst` resolves
- * that one LIVE at the compile that introduces it, and its digest is written down nowhere — so a
- * fold cannot reconstruct the successor's manifest from `run.compiled` plus the added nodes.
- * Both files are kernel and both changes are a `fix`, which needs no seam.
- *
- * WHEN THAT LANDS THIS TEST GOES RED. That is the point of writing it here rather than in a
- * backlog row: the failure arrives in the file that documents the binding contract, beside the
- * control below. Swap the two expectations then and delete these paragraphs.
- *
- * WHAT IS AND IS NOT EXPOSED. `graph:mutate` is reachable from a library embedder and not from
- * the shipped binary, and a mutated successor still binds on its SPEC — a substituted graph is
- * refused exactly as the first test in this file shows. What goes unchecked is an edit to the
- * bytes behind a ref the run already resolved, on a run that mutated, decided by a process that
- * attached the successor.
- */
-test("A MUTATED RUN'S SUCCESSOR IS DECIDED WITHOUT CHECKING THE RESOURCES BEHIND ITS REFS", async () => {
-  const r = mutRig();
+const mutCompile = (r: { res: Res }, s: GraphSpec) =>
+  compileOrThrow({ spec: s, resolver: r.res.resolver, tools: {}, tenantCapabilities: ["graph:mutate"] });
+
+/** Submit the mutable graph and advance it until the agent's proposal has parked it on the ADDED gate. */
+async function parkMutated(r: MutRig): Promise<{ runId: RunId; gateId: string; compiled: ReturnType<typeof mutCompile> }> {
   const compiled = mutCompile(r, mutableSpec());
   const runId = await r.engine.submit({ graph: compiled, inputs: { note: "n" } });
   await r.engine.advance(runId);
-
   const open = await r.engine.openGates(runId);
   assert.equal(open.length, 1, "the agent's proposal must have added exactly one gate");
-  const gateId = open[0]!.gateId;
-
-  // The successor is the journal's own fact: only the ENGINE writes `graph.mutated`.
   const folded = (await r.engine.projection(runId))?.graphHash;
-  assert.notEqual(folded, compiled.graphHash, "a mutated run's folded hash leaves its compile hash");
+  assert.notEqual(folded, compiled.graphHash, "precondition: a mutated run's folded hash leaves its compile hash");
+  return { runId, gateId: open[0]!.gateId, compiled };
+}
+
+async function journal(store: StateStore, runId: RunId): Promise<JournalEvent[]> {
+  const out: JournalEvent[] = [];
+  for await (const ev of store.read(runId, 1 as never)) out.push(ev);
+  return out;
+}
+
+const approveAs = (r: { engine: Engine }, runId: RunId, gateId: string, key: string) =>
+  r.engine.resolveGate(runId, { gateId: gateId as never, decision: { kind: "approve" }, actor: alice, idempotencyKey: key });
+
+/** `E_GRAPH_MISMATCH` on the RESOURCE axis — the code alone cannot tell it from a spec refusal. */
+const onResources = (e: unknown): boolean =>
+  isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH && (e.details as { differs?: string }).differs === "resources";
+
+/**
+ * §G.5 — THE RESOURCE HALF OF THE BINDING REACHES A MUTATED RUN'S SUCCESSOR. Driven, not described.
+ *
+ * THIS TEST WAS GREEN WITH THE OPPOSITE ASSERTION, AND SAID SO: through `2af9716a` it pinned
+ * `out.status === "succeeded"` under the header "THIS TEST IS GREEN AND THE BEHAVIOUR IT PINS IS
+ * WRONG". `#assertBound` compared `run.compiled.resolutionManifest` against the graph in hand on the
+ * `isCompiled` arm alone; after a mutation `ctx.graph` IS the successor — authorized, correctly, by
+ * the folded `graph.mutated.newHash` — and that row carried no manifest, so an edit to the bytes
+ * behind a ref the run had resolved was decided on as if nothing had moved.
+ *
+ * `graph.mutated` now carries the successor's `resolutionManifest`, recorded at adoption because it
+ * cannot be recomputed (a ref a mutation introduces is resolved LIVE by `frozenFirst`, and its
+ * digest is written down nowhere else), and `#graphIdentityMismatch` checks the successor against it
+ * exactly as it checks the compiled graph against `run.compiled`.
+ *
+ * AND IT IS REACHABLE FROM THE SHIPPED BINARY, which this file used to deny: `--grant graph:mutate`
+ * (since `66a0c60a`) plus an `--extension-module` model adapter proposing a mutation parks a run on
+ * a mutation-ADDED gate through `loom run`; editing the added function's file and running `loom
+ * approve --graph <authored>` exited 0 at `2af9716a` with the EDITED bytes on the journal, and exits
+ * 1 `E_GRAPH_MISMATCH` now. The test after the control below is that exact shape on the engine.
+ */
+test("A MUTATED RUN'S SUCCESSOR IS REFUSED WHEN THE RESOURCES BEHIND ITS REFS HAVE MOVED", async () => {
+  const r = mutRig();
+  const { runId, gateId, compiled } = await parkMutated(r);
+  const folded = (await r.engine.projection(runId))?.graphHash;
 
   // THE RESOURCES MOVE, exactly as editing a published prompt file moves them.
   r.res.bump();
 
-  // A fresh process attaching the successor — `loom approve` after a restart is this shape.
+  // A fresh process attaching the successor — nothing survives but the journal.
   const second = r.fresh();
   const successor = mutCompile(second, successorSpec());
   assert.equal(successor.graphHash, folded, "the merged spec really is the graph the run folded to");
   assert.notDeepEqual(
     successor.resolutionManifest.map((p) => p.digest),
     compiled.resolutionManifest.map((p) => p.digest),
-    "and it was compiled against the MOVED resources, so a manifest check would have something to find",
+    "and it was compiled against the MOVED resources, so the check has something to find",
   );
   second.engine.attach(runId, successor);
   await second.engine.rehydrateGates(runId);
 
-  const out = await second.engine.resolveGate(runId, {
-    gateId: gateId as never,
-    decision: { kind: "approve" },
-    actor: alice,
-    idempotencyKey: "mut-approve",
-  });
-  assert.equal(out.status, "succeeded", JSON.stringify(out.error ?? {}));
+  const before = (await journal(r.store, runId)).length;
+  await assert.rejects(
+    () => approveAs(second, runId, gateId, "mut-approve"),
+    (e: unknown) => {
+      assert.ok(onResources(e), `refused on the RESOURCE axis: ${String((e as Error).message)}`);
+      // THE SUCCESSOR'S manifest was recorded when the mutation was ADOPTED, not at compile, and
+      // the message says which, so an operator is not sent to look at the compile.
+      assert.match((e as Error).message, /since that mutation was adopted/, "the message names the adoption");
+      // THE PAIR IS THE SUCCESSOR'S: `expected` is the manifest the `graph.mutated` row recorded,
+      // which names the ADDED gate's ref — `run.compiled`'s manifest could not.
+      const d = (e as { details: { expected: string; actual: string } }).details;
+      assert.match(d.expected, /^oversight\/added@stable=sha256:0{64}$/m, "expected is the successor's recorded manifest");
+      assert.match(d.actual, /^oversight\/added@stable=sha256:1{64}$/m, "actual is the moved one");
+      return true;
+    },
+  );
+  assert.equal((await journal(r.store, runId)).length, before, "and the refusal wrote nothing — no decision, no execution");
 
-  // THE CONTROL, and it is what bounds the claim: the IDENTICAL edit, decided against the
-  // COMPILED graph, is refused on the resource axis. The check works — it is the successor it
-  // cannot reach, so this is one arm missing rather than a check that does nothing.
+  // THE CONTROL, unchanged from when this test pinned the gap: the IDENTICAL edit, decided against
+  // the COMPILED graph, is refused on the resource axis by `run.compiled`'s own manifest.
   const third = r.fresh();
   third.engine.attach(runId, mutCompile(third, mutableSpec()));
   await third.engine.rehydrateGates(runId);
+  await assert.rejects(() => approveAs(third, runId, gateId, "ctl-approve"), onResources, "the compiled arm still refuses too");
+});
+
+test("A MUTATED RUN'S SUCCESSOR STILL APPROVES WHEN NOTHING MOVED — the ordinary half, both attach shapes", async () => {
+  // Without this the test above would be measuring "a successor is never approvable".
+  for (const shape of ["the successor", "the AUTHORED graph (what `loom approve --graph` attaches)"] as const) {
+    const r = mutRig();
+    const { runId, gateId } = await parkMutated(r);
+    const second = r.fresh();
+    second.engine.attach(runId, mutCompile(second, shape === "the successor" ? successorSpec() : mutableSpec()));
+    await second.engine.rehydrateGates(runId);
+    const out = await approveAs(second, runId, gateId, "ok-approve");
+    assert.equal(out.status, "succeeded", `${shape}: ${JSON.stringify(out.error ?? {})}`);
+  }
+});
+
+test("A REF ONLY THE MUTATION ADDED, EDITED, IS REFUSED BEFORE THE DECISION LANDS — the authored-graph door", async () => {
+  // The CLI shape: a fresh process attaches the AUTHORED graph, whose refs are unmoved, so
+  // `#assertBound`'s compiled arm passes. The ref that moved is one only the MUTATION named, so it
+  // is not in `run.compiled`'s manifest at all — it is resolved LIVE when `#rehydrateGraph` replays
+  // the mutation, and checked there against the `graph.mutated` row. At `2af9716a` this approved
+  // and ran; left to `advance`, the check would run after `gate.decided` was already appended.
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting((ref) => ref.startsWith("oversight/added@")) });
+  const { runId, gateId, compiled } = await parkMutated(r);
+  r.res.bump();
+  assert.deepEqual(
+    mutCompile(r, mutableSpec()).resolutionManifest,
+    compiled.resolutionManifest,
+    "precondition: the AUTHORED graph's own refs did not move — only the added one did",
+  );
+
+  const second = r.fresh();
+  second.engine.attach(runId, mutCompile(second, mutableSpec()));
+  await second.engine.rehydrateGates(runId);
+  await assert.rejects(
+    () => approveAs(second, runId, gateId, "added-approve"),
+    (e: unknown) => onResources(e) && /oversight\/added@stable/.test(String((e as { details: { actual: string } }).details.actual)),
+    "the edit to the mutation's own ref is refused",
+  );
+  const log = await journal(r.store, runId);
+  assert.equal(log.filter((ev) => ev.type === "gate.decided").length, 0, "and the refusal came BEFORE the decision was recorded");
+  assert.equal((await second.engine.projection(runId))?.status, "awaiting_gate", "the run is exactly where it was");
+});
+
+test("THE BATCH DOOR REBUILDS AND CHECKS THE SUCCESSOR BEFORE IT DECIDES, TOO", async () => {
+  // `resolveGateBatch` is the higher-consequence sibling of `resolveGate` — one call closes N
+  // gates — so it takes the same order: bind, rebuild the successor, and only then decide.
+  const BATCHED: Mutation = {
+    addNodes: [
+      {
+        ...ADDED_GATE.addNodes[0]!,
+        humanGate: { ...ADDED_GATE.addNodes[0]!.humanGate, batching: { enabled: true, key: "added", windowMs: 60_000, maxBatch: 20 } },
+      },
+    ],
+    addEdges: ADDED_GATE.addEdges,
+  };
+  const r = mutRig({ store: new MemoryStateStore({ now: () => NOW }), res: shifting((ref) => ref.startsWith("oversight/added@")), mutation: BATCHED });
+  const { runId } = await parkMutated(r);
+  const batch = (await r.engine.openGateBatches(runId))[0];
+  assert.ok(batch !== undefined, "precondition: the added gate is in a batch the batch door can decide");
+  r.res.bump();
+
+  const second = r.fresh();
+  second.engine.attach(runId, mutCompile(second, mutableSpec()));
+  await second.engine.rehydrateGates(runId);
   await assert.rejects(
     () =>
-      third.engine.resolveGate(runId, {
-        gateId: gateId as never,
+      second.engine.resolveGateBatch(runId, {
+        batchId: batch.batchId,
         decision: { kind: "approve" },
         actor: alice,
-        idempotencyKey: "ctl-approve",
+        idempotencyKey: "batch-approve",
+        expectManifest: batch.manifestDigest,
       }),
-    // THE AXIS, NOT JUST THE CODE. `#assertBound` raises `E_GRAPH_MISMATCH` for `differs: "spec"`
-    // AND for `differs: "resources"`, and this control attaches a graph whose folded hash is the
-    // successor's — so a spec-axis refusal is a live alternative explanation for a green
-    // assertion here, and the whole weight of the recorded finding rests on this control proving
-    // the RESOURCE check runs. Asserting the code alone could not tell the two apart.
-    (e: unknown) => isLoomError(e) && e.code === CODES.E_GRAPH_MISMATCH && (e.details as { differs?: string }).differs === "resources",
-    "the same moved resources ARE refused when the attached graph is the compiled one",
+    onResources,
+    "the batch door refuses the moved ref the mutation added",
   );
+  assert.equal((await journal(r.store, runId)).filter((ev) => ev.type === "gate.decided").length, 0, "before any member was decided");
+});
+
+test("THE SUCCESSOR'S MANIFEST SURVIVES A RESTART — a SQLite file closed and reopened is all the next process has", async (t) => {
+  // The journal is the only authoritative state: the manifest `#assertBound` and `#rehydrateGraph`
+  // compare against has to come back from the FILE, not from anything the parking process held.
+  // Two runs park in one process; the file is closed; each later process opens it cold.
+  const dir = mkdtempSync(join(tmpdir(), "loom-g5-restart-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "journal.db");
+  const res = shifting((ref) => ref.startsWith("oversight/added@"));
+
+  const parked: { runId: RunId; gateId: string }[] = [];
+  const first = new SqliteStateStore({ path, now: () => NOW });
+  try {
+    const r = mutRig({ store: first, res });
+    for (let i = 0; i < 2; i++) parked.push(await parkMutated(r));
+    const row = (await journal(first, parked[0]!.runId)).find((ev) => ev.type === "graph.mutated") as JournalEvent<"graph.mutated"> | undefined;
+    assert.deepEqual(
+      row?.payload.resolutionManifest?.map((m) => m.ref).sort(),
+      ["agent_profile/p@stable", "oversight/added@stable", "prompt/p@stable"],
+      "the row records the successor's WHOLE manifest, the ref the mutation added included",
+    );
+  } finally {
+    first.close();
+  }
+  const [okRun, movedRun] = parked as [{ runId: RunId; gateId: string }, { runId: RunId; gateId: string }];
+
+  // UNMOVED: a cold process attaching the authored graph approves the first run.
+  const okStore = new SqliteStateStore({ path, now: () => NOW });
+  try {
+    const engine = mutEngine(okStore, res);
+    engine.attach(okRun.runId, mutCompile({ res }, mutableSpec()));
+    await engine.rehydrateGates(okRun.runId);
+    const out = await approveAs({ engine }, okRun.runId, okRun.gateId, "restart-ok");
+    assert.equal(out.status, "succeeded", JSON.stringify(out.error ?? {}));
+  } finally {
+    okStore.close();
+  }
+
+  // MOVED: the added ref's bytes change, and a cold process is refused on the second run — by BOTH
+  // attach shapes, each in its own process, with nothing decided.
+  res.bump();
+  for (const shape of ["authored", "successor"] as const) {
+    const store = new SqliteStateStore({ path, now: () => NOW });
+    try {
+      const engine = mutEngine(store, res);
+      engine.attach(movedRun.runId, mutCompile({ res }, shape === "authored" ? mutableSpec() : successorSpec()));
+      await engine.rehydrateGates(movedRun.runId);
+      await assert.rejects(() => approveAs({ engine }, movedRun.runId, movedRun.gateId, `restart-${shape}`), onResources, `${shape}: refused after a restart`);
+      assert.equal(
+        (await journal(store, movedRun.runId)).filter((ev) => ev.type === "gate.decided").length,
+        0,
+        `${shape}: with nothing decided`,
+      );
+    } finally {
+      store.close();
+    }
+  }
+});
+
+test("A graph.mutated ROW WITH NO MANIFEST — a journal older than the field — FAILS CLOSED, and cancel is the exit", async () => {
+  // Nothing to compare the successor against is the undecidable case, and answering it with the
+  // passing value is the defect this row existed for. The journal is aged the way
+  // `mutation-dominator.test.ts` ages one: the run is submitted and a `graph.mutated` holding a
+  // legitimate mutation is appended straight into the log, without the field.
+  const r = mutRig();
+  const compiled = mutCompile(r, mutableSpec());
+  const runId = await r.engine.submit({ graph: compiled, inputs: { note: "n" } });
+  const successor = mutCompile(r, successorSpec());
+  let headSeq = 0;
+  for (const ev of await journal(r.store, runId)) headSeq = ev.seq;
+  await r.store.append({
+    runId,
+    expectedSeq: headSeq as never,
+    events: [
+      {
+        type: "graph.mutated",
+        payload: {
+          parentHash: compiled.graphHash,
+          newHash: successor.graphHash,
+          addedNodes: ADDED_GATE.addNodes.map((x) => x.id),
+          addedEdges: ADDED_GATE.addEdges.map((x) => x.id),
+          nodes: [...ADDED_GATE.addNodes],
+          edges: [...ADDED_GATE.addEdges],
+          proposedBy: "t-old",
+          proposedByNode: "propose",
+          budgetConsumed: 1,
+        },
+        actor: { kind: "system", id: "executor" },
+      } as never,
+    ],
+  });
+  assert.equal((await r.engine.projection(runId))?.graphHash, successor.graphHash, "precondition: the run folds to the successor");
+
+  // BOTH DOORS: the successor attached directly (`#assertBound`'s successor arm) and the authored
+  // graph (`#rehydrateGraph`, which replays the row). Neither may run anything.
+  for (const shape of ["successor", "authored"] as const) {
+    const second = r.fresh();
+    second.engine.attach(runId, shape === "successor" ? successor : mutCompile(second, mutableSpec()));
+    await assert.rejects(
+      () => second.engine.advance(runId),
+      (e: unknown) => onResources(e) && (e as { details: { unrecorded?: boolean } }).details.unrecorded === true,
+      `${shape}: refused as UNRECORDED, not waved through`,
+    );
+    const log = await journal(r.store, runId);
+    assert.equal(log.some((ev) => ev.type === "task.leased"), false, `${shape}: nothing executed`);
+    assert.equal(log.some((ev) => ev.type === "run.failed"), false, `${shape}: and the run was not failed — a refusal, not a verdict`);
+  }
+  const out = await r.fresh().engine.cancel(runId, "journal predates the manifest", alice);
+  assert.equal(out.status, "cancelled", "cancel binds no graph, so it is still the way out");
 });

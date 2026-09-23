@@ -1053,6 +1053,24 @@ export interface EventPayloads {
     readonly proposedBy: TaskId;
     readonly proposedByNode: NodeId;
     readonly budgetConsumed: number;
+    /**
+     * THE SUCCESSOR'S RESOLUTION MANIFEST — `RunGraph.resolutionManifest` of the graph `newHash`
+     * names, as the compile that adopted it pinned it. `run.compiled.resolutionManifest` is the
+     * same fact for the graph a run STARTED on, and this is it for every graph the run moved to.
+     *
+     * RECORDED, BECAUSE IT CANNOT BE RECOMPUTED. `newHash` is `digest(spec)` and covers pointers
+     * only, so without this a run that mutated was bound on its SPEC and never on the bytes behind
+     * its refs (`TODO.md` §G.5): the manifest check `#assertBound` runs against `run.compiled` had
+     * nothing to compare a successor against. And a fold cannot rebuild it from `run.compiled` plus
+     * `nodes`: a mutation may name a ref nothing had seen, which `frozenFirst` resolves LIVE at the
+     * compile that introduces it, so its digest exists nowhere else.
+     *
+     * ABSENT means a row from a build that predates the field. `#assertBound` and
+     * `#rehydrateGraph` REFUSE a successor whose row carries none — there is nothing to check its
+     * resources against, and "unverifiable, so allow" is the default a gate must not inherit.
+     * `cancel` binds no graph and stays the exit for such a run.
+     */
+    readonly resolutionManifest?: readonly { ref: string; digest: string }[];
   };
   /**
    * A `subgraph` node started a CHILD RUN.
