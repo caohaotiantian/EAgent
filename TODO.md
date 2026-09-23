@@ -32,34 +32,40 @@ the projection and `grant-access`'s `error` arm branching by code, deleting `loo
 first two steps have landed** (D8 phase one at `83f86bec`, D9 on 2026-09-23 — §A.90 and §A.68's
 addendum), and item 29 is built short of its publish (`48de87f6`, §H.15) — so what is next is the
 maintainer's publish, then 18/24, then 31 (`docs/handoff-2026-09-23.md` §6; §7 is the accepted
-lane plan and the owed-decision table).
+lane plan and the owed-decision table). **Amended 2026-09-24:** that plan's five lanes are merged
+(`9b8377e9` … `7f576a47`) — item 18 CLOSED, item 24's repro landed, §A.83 closed, the pre-publish
+hygiene (§H.16–§H.19) closed, so **the publish is unblocked**. Next, in order: **§A.101**, a
+KERNEL defect (a committed Task re-runs on a late arrival) — then item 31's first slice, item 24's
+fold once Q6 is answered, and the fourth port after the publish (`docs/handoff-2026-09-24.md` §6–§7).
 
 ---
 
-## State — one command each, re-run 2026-09-23 on `48de87f6`
+## State — one command each, re-run 2026-09-24 on `7f576a47`
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** | `npm run check` |
-| tests on `loom` | **4,162 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,117 → 4,162) | `npm test` |
-| pinned exports | **544** (542 → 544): `ErrorProjection` and `errorProjectionSource`, D8's envelope and its `"<nodeId>:error"` parser, added to `scripts/surface.json` by the D8 lane — the guard's list moved with the name set, which is what it is for. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, **17 declared seams** (16 → 17): `6a03694d`, the D8 `feat:`, touched `graph/spec.ts`, `run/projection.ts` and `run/engine.ts` and carries a `Kernel-seam:` trailer — `there is none for "a fact about a node's outcome that a later node may read"`. The wave's other kernel edits: `c153566e` (`run/engine.ts`, `fix:`) and `2f1c19ff` (`graph/spec.ts`, `run/gates.ts`, `docs:` — the package rename in prose), owing none | `node scripts/check-kernel.mjs` |
-| zero runtime deps | ok, **69 files** (67 → 69): `src/bin.ts` (the Node-floor entry with no static imports) and `src/version.ts`. Of the wave's ten new files, three are test suites, one a graph (`two-person-veto.json`), two scripts (`pack.mjs`, `smoke-install.mjs`), and `packages/core`'s README and LICENSE | `node scripts/check-zero-dep.mjs` |
+| tests on `loom` | **4,293 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,162 → 4,293) | `npm test` |
+| pinned exports | **544**, unchanged — the wave added no export. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
+| kernel | 10 files pinned, **19 declared seams** (17 → 19): `26a4f358` (`feat:`, §A.83's truncation producer, extending D8's seam `6a03694d`) and `4fe87a88` (`fix:` carrying a VOLUNTARY trailer, because `graph.mutated.resolutionManifest` is new journal vocabulary — §G.5). Six of the nineteen are written with flush-left continuation lines that `git interpret-trailers --parse` rejects (`4fe87a88` is the sixth) | `node scripts/check-kernel.mjs` |
+| zero runtime deps | ok, **69 files**, unchanged | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved. The denominator is deliberately not a cell (rule 3) | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types, unmoved — D8 folds its projection out of `task.failed` and added no event | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
-| error vocabulary | **62 codes** (60 → 62): `E_FS_NOT_FOUND` and `E_FS_UNREADABLE`; `fs.read`'s third code, `E_CAP_DENIED`, already existed. The `GRAPH005_ERROR_PROJECTION_*` refusals and `GRAPH003_STALE_FS_READ_CODE` are compile diagnostics, not `CODES` members | `Object.keys(CODES).length` |
+| journal vocabulary | 51 event types, unmoved — `graph.mutated` gained a FIELD (`resolutionManifest`), not a type; §A.83 and §A.96 fold existing rows | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| error vocabulary | **62 codes**, unmoved. §A.97 answers with the existing `E_FS_UNREADABLE`; the new refusals of the compiler lane (`GRAPH008_QUORUM_K`'s static arm, `GRAPH003_MALFORMED` for `take: null`, `GRAPH016_BAD_MAPPING` hoisted) are compile diagnostics, not `CODES` members | `Object.keys(CODES).length` |
 | README's extensibility ledger | **18** and **3**, both unmoved | the two `sed … \| /usr/bin/grep -a -c` commands in `CLAUDE.md` §2 |
-| README's test floor | **3,500+**, unchanged; the probe counts **3,899** `test(` declarations across **366** files (3,855 / 363 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
+| README's test floor | **3,500+**, unchanged; the probe counts **4,030** `test(` declarations across **378** files (3,899 / 366 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
 
-The kernel guard also prints a commits-judged count (904 at `48de87f6`; 879 one wave ago). It is
+The kernel guard also prints a commits-judged count (981 at `7f576a47`; 904 one wave ago). It is
 deliberately not a cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
-per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-23 lanes are
-`9288e678` (d8-error-projection), `d04d1bcb` (d9-quorum-veto) and `4ec84c11` (item-29-install),
-merged `--no-ff` in that order (`83f86bec`, `e9f7fae4`, `48de87f6`) with zero conflicts — the NINTH
-wave running. `docs/handoff-2026-09-23.md` is the current handoff; `docs/handoff-2026-09-22b.md` is
-the one before it.
+per lane — a merge that REPORTS merged is not evidence the work arrived. The 2026-09-24 wave's lanes
+are `6b1a47eb` (wave-0923-D, install surface), `5c236f55` (wave-0923-B, successor binding),
+`e2e783ca` (wave-0923-A, projection producers), `3731883a` (wave-0923-C-pins, compiler) and
+`0558c2a5` (wave-0923-E, item 24's repro), merged `--no-ff` in that order (`9b8377e9`, `c36bbae7`,
+`0420f95b`, `013e7d5e`, `7f576a47`) with zero conflicts — the TENTH wave running.
+`docs/handoff-2026-09-24.md` is the current handoff; `docs/handoff-2026-09-23.md` is the one before
+it.
 
 ## Row census — three commands, run on this file
 
@@ -73,7 +79,10 @@ the one before it.
 to it, this sentence's own included (rule 3). Run the commands. What IS fixed enough to write down
 is the settlement-to-settlement series, because each term is pinned to a commit: **46 → 51 → 56**
 at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — and **62** at
-`48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §A.99 and §H.17–§H.20. The 2026-09-22b
+`48de87f6` (164 rows, 102 struck), the 2026-09-23 wave's merge, before its settlement opened §A.99 and §H.17–§H.20; **67** at
+`7f576a47` (170 rows, 103 struck), the 2026-09-24 wave's merge, whose lanes closed seventeen rows
+but struck none — every strike is the settlement's — and **82** after that settlement
+(202 rows, 120 struck: seventeen struck, thirty-two opened). The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -97,14 +106,14 @@ be wrong without being falsifiable, which is why there are three columns.
 | section | rows | struck | still open | the shape of it |
 |---|---|---|---|---|
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
-| §A | 99 | 62 | 37 | **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
+| §A | 125 | 74 | 51 | **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SIX (§A.101–§A.126), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** §A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
 | §C | 5 | 2 | 3 | unbuilt observability |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
-| §G | 7 | 1 | 6 | field-survey work the redesign creates |
-| §H | 21 | 15 | 6 | housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs. **§H.20 CLOSED 2026-09-23 at `39c5e0b5`** — each leaking suite now removes its roots in a module-level `after` |
+| §G | 7 | 2 | 5 | field-survey work the redesign creates; **§G.5 CLOSED WHOLE 2026-09-23 at `4fe87a88`** (Sequence item 18) |
+| §H | 27 | 19 | 8 | **2026-09-24: §H.16–§H.19 CLOSED at the install-surface lane's merge (`9b8377e9`), which unblocks the publish; §H.21–§H.26 OPENED as its residue — in the settlement's reading, none a reason to hold the publish.** housekeeping; §H.0 is a decision the maintainer already made rather than work outstanding, and **§H.15 — no stranger-facing install, `npm publish` exiting 0 doing nothing — is the second, opened 2026-09-22b and closing with `DESIGN.md` item 29: everything but the publish landed 2026-09-23, and it closes on the publish receipt**. §H.16 (the OTLP scope name still `@loom/core/telemetry`) is the third, opened by that lane. §H.14 closed on 2026-09-19 by wrapping for a terminal and never for a pipe, which left §H's last readability row closed and opened nothing here — its two residues (`2>&1 \| less`, and control-character stripping on the TTY path only) are recorded IN the row rather than carried as rows. **§H.17–§H.20 were opened by the 2026-09-23 settlement** out of the item-29 lane's open list — the tarball's contents, `@types/node`, two CLI doors answering 0, and a test's leaked temp dirs. **§H.20 CLOSED 2026-09-23 at `39c5e0b5`** — each leaking suite now removes its roots in a module-level `after` |
 
 The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the record is
 `docs/audit-2026-09-02.md`.
@@ -347,6 +356,16 @@ The 2026-09-02 audit's 207 findings are NOT copied into the rows below; the reco
   **Re-checked on `26985b2` and unmoved**: `git diff 2309d3a..26985b2 -- packages/core/src/journal/events.ts
   packages/core/src/run/projection.ts` is EMPTY, so the 2026-09-10 wave touched neither the
   vocabulary nor the fold, and the repro still reads 3 prose hits.
+  **2026-09-24: THE REFUSAL IS REPRODUCED, and the row stays OPEN** — `DESIGN.md` item 24's first
+  task, at `0558c2a5`. The repro is now a command, and the grep above is superseded by it:
+  `node --test packages/core/test/evolution/a29-verifier-certified-refused.test.ts` → **2 pass**, a
+  GREEN-IS-WRONG pin: a candidate whose own `check` verifier passes 30/30 replayed cases (baseline
+  10/30) is refused `1-must-pass` + `2-non-inferior`, *"pass rate 66.7% vs baseline 100.0% (Δ
+  -33.3pp)"*, every failure `channel "picked" differs` on the ten goldens — `freezeSuite` pins the
+  whole work channel by `sameContent`. Its control, a candidate that genuinely drops items (verifier
+  0/30), gets the IDENTICAL verdict, which is the defect: the gate cannot tell them apart. The
+  closing condition above is unchanged, and which route closes it — the fold, or re-scoping
+  property 3 — is the maintainer's Q6 (`docs/handoff-2026-09-23.md` §7).
 
 ### Compensation — what runs, and the gaps that do not
 
@@ -2104,10 +2123,18 @@ rather than a reviewer.
 below with their shas — which is the strongest argument this file has for writing a row with a
 repro in it: the rows a lane could pick up and close were the ones a stranger could run. The three
 still open are the two that need a DECISION about a channel's shape (§A.82, §A.83) and the one
-nobody took (§A.77).
+nobody took (§A.77). **2026-09-24: §A.77 and §A.83 closed in the wave after that; §A.82 is the one
+still open**, waiting on where a per-KEY classification is declared (Q8).
 
-- **A.77 · A whole-count `k` above a STATIC, non-fan `branches` list compiles CLEAN and is refused
-  only at the barrier, with every arm's writes already applied.** File:
+- ~~**A.77 · A whole-count `k` above a STATIC, non-fan `branches` list compiles CLEAN and is refused
+  only at the barrier, with every arm's writes already applied.**~~ **CLOSED 2026-09-23 at
+  `1e37ca87` — the maintainer's Q11: refuse.** `GRAPH008_QUORUM_K` refuses a whole-count `k` above
+  the number of DISTINCT members when every member is static, unfanned and runs at most once per
+  branch (`multiRunNodes`); a fanned or looped member is left alone, which is the closing condition's
+  "two undecidable shapes named at the site". The negative pin in
+  `join-quorum-k-is-a-floor.test.ts` was changed with it, and
+  `node --test packages/core/test/graph/quorum-k-above-static-branches.test.ts` → 5 pass. Not §A.68.
+  The row as it stood follows. File:
   `packages/core/src/graph/validate.ts`, the `join.mode === "quorum"` block (`GRAPH008_QUORUM_K`).
   That block checks two things and no third: that `k` is positive, and that a `k > 1` is a whole
   number. It never checks `k <= branches.length`. When every member of the barrier is static — none
@@ -2305,9 +2332,26 @@ nobody took (§A.77).
   regex is still not the closure in either arm.
   **2026-09-23: the reserved field EXISTS** — `ErrorProjection.classification` in `graph/spec.ts`
   (D8 phase one, which closed §A.90) — with no producer; this row stays OPEN.
+  **2026-09-24: the LAST of the three still open** — §A.83's producer landed beside it at
+  `26a4f358`. Blocked on the maintainer's Q8, *where a per-KEY classification is declared*
+  (`docs/handoff-2026-09-23.md` §7).
 
-- **A.83 · `fs.read` appends its truncation marker INTO the returned content, so a big document
-  reads back as a syntax error in the FILE.** *(From the second port's F12.)* File:
+- ~~**A.83 · `fs.read` appends its truncation marker INTO the returned content, so a big document
+  reads back as a syntax error in the FILE.**~~ **CLOSED 2026-09-23 at `26a4f358` (`feat:` +
+  `Kernel-seam:`, extending D8's seam `6a03694d`); review fixes `a2f5244a`, `6f5c1b8b`.** The
+  marker is OUT of `content` at all three sites — `fs.read`, `proc.exec`, `net.fetch` — and the fact
+  is in `details`: `truncated` at all three, `bytes` at `fs.read` and `net.fetch`, folded onto the
+  node's `"<id>:error"` projection as `{ok: true, truncated, bytes}`. `maxBytes` now counts BYTES
+  (the cut steps back at most three bytes to a UTF-8 boundary), and `net.fetch` strips a leading
+  BOM. An agent is told IN-BAND: `engine.ts`'s `modelToolContent` appends *"[truncated by the tool:
+  N of M bytes shown; the rest was not returned]"* to the transcript only, derived from the recorded
+  `details`, so a replay rebuilds it. The three example parsers that read the marker out of the
+  content — `harden-parse.js`, `grant-prior.js`, and `grant-weigh.js`, a third found in-lane — read
+  the projection instead and refuse anything but `{ok: true, truncated: false}`. Restart and replay
+  agree for journals this build wrote; an older journal does not (§A.111). Repro:
+  `node --test packages/core/test/builtin/tools.test.ts packages/core/test/run/agent-tool-truncation.test.ts`
+  → 63 pass. Residue: `fs.glob`/`fs.grep` still write their cap marker into `content` (§A.105). The
+  row as it stood follows. *(From the second port's F12.)* File:
   `packages/core/src/builtin/tools.ts:417` and `:432`. `maxBytes` defaults to `200_000` — and is
   compared against `text.length`, so it bounds CHARACTERS and not bytes — and the return is
   `` `${text.slice(0, max)}\n…[truncated ${text.length - max} chars]` ``. `details` beside it does
@@ -2404,10 +2448,20 @@ ancestor. The probes are in `.agent/wave-2026-09-22b/probes/` (gitignored), copi
 worktrees and the reviewers' extracts and re-pointed at this checkout.
 
 **§A.90 is the one to read first.** It was the only row in this file that ended in destroyed data
-with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
+with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8). **2026-09-24:** of the ten,
+§A.85, §A.86, §A.88, §A.91 and §A.94 closed in the next wave, so §A.87, §A.89, §A.92 and §A.93 are
+the four still open; of §A.95–§A.100, filed below by the 2026-09-23 settlement, only §A.100 is.
 
-- **A.85 · A `RunGraph` whose `when`, `until` or router-case `when` is not a string is refused at
-  RUN time, mid-`#commit`, and the run is left `running` with NO terminal row.** *(§A.78's residue —
+- ~~**A.85 · A `RunGraph` whose `when`, `until` or router-case `when` is not a string is refused at
+  RUN time, mid-`#commit`, and the run is left `running` with NO terminal row.**~~ **CLOSED
+  2026-09-23 at `6152c2d8`.** `#assertBound` has its FOURTH vocabulary check, over edges AND router
+  cases: `until` on a `loop` edge, `when` on a `conditional` edge not leaving a router, and each
+  router case's `when` (with the `cases` array's own shape), where "readable" means *parses through
+  `#expr`*. Three `FAULTS` census rows joined `advance-refusal-is-journaled.test.ts`. The row's probe
+  `a85-expr-runtime.mjs`: the first AND second advance now THROW `E_GRAPH_INVALID`, `run.failed=1`.
+  Repro: `node --test packages/core/test/run/advance-refusal-is-journaled.test.ts packages/core/test/run/expression-vocabulary.test.ts`
+  → 10 pass. Residue: a router's `fallbackEdge` and a case's `take` are not checked at this door
+  (§A.104). The row as it stood follows. *(§A.78's residue —
   the refusal it created is correct and arrives in the wrong place.)* Files:
   `packages/core/src/graph/expr.ts` (`lex`, the new type test) and
   `packages/core/src/run/engine.ts` (`#assertBound`, which does not ask this question). `#expr` has
@@ -2434,8 +2488,15 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   edge-only check would be partial, which is why the bounds lane declined to write one — and it
   joins the `FAULTS` census in `advance-refusal-is-journaled.test.ts` with the other three.
 
-- **A.86 · `rule002`'s `reach(t)` half is reachability the run may never REALISE, so `GRAPH002` went
-  silent on a graph the base warned about.** *(§A.84's residue, at WARNING level.)* File:
+- ~~**A.86 · `rule002`'s `reach(t)` half is reachability the run may never REALISE, so `GRAPH002` went
+  silent on a graph the base warned about.**~~ **CLOSED 2026-09-23 at `51dd4548`, by the written
+  ARGUMENT this row preferred — the maintainer's Q12.** It sits at `rule002Terminals` (this row said
+  `rule002DeadEnds`, which is not the function's name): the rule is structural and existential, SOUND
+  for every `DEAD_END` it prints, and its misses err quiet and are backed at run time by
+  `E_OUTPUT_MISSING`. The counter-shape is written there too — `s -cond-> w -> t` beside
+  `s -> x -> t` compiles clean, and the `go=false` run fails `E_OUTPUT_MISSING`. Repro:
+  `/usr/bin/grep -an 'rule002Terminals' packages/core/src/graph/validate.ts`. The row as it stood
+  follows. *(§A.84's residue, at WARNING level.)* File:
   `packages/core/src/graph/validate.ts`, `rule002DeadEnds` — dead iff no output writer in
   `flowAncestors(t) ∪ reach(t)`. `reach(t)` walks `flowEdges` and reads neither a loop's
   `maxIterations` nor a `conditional`'s `when`, so a writer behind a never-true condition after a
@@ -2479,8 +2540,12 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   changes. It is one edit to `GraphMetadata`, one to that fixture, and one tag; it is on the owed
   list because the decision is a product decision and not a typing one.
 
-- **A.88 · `contextProjection.take: null` compiles clean, because the rule that owns the field reads
-  `null` as ABSENT.** File: `packages/core/src/graph/validate.ts`, `checkProjectionValues` —
+- ~~**A.88 · `contextProjection.take: null` compiles clean, because the rule that owns the field reads
+  `null` as ABSENT.**~~ **CLOSED 2026-09-23 at `7222b9ea`.** `checkProjectionValues` refuses an
+  explicit `null` with `GRAPH003_MALFORMED`, as it refuses the other four, and the `STILL_ACCEPTED`
+  pin went red and was deleted with the set member — the row's own signal. `project()` still reads a
+  `null` as absent at run time, pinned as a DELIBERATE disagreement. Repro: `node --test packages/core/test/graph/block-field-types.test.ts` → 7
+  pass. The row as it stood follows. File: `packages/core/src/graph/validate.ts`, `checkProjectionValues` —
   `take !== undefined && take !== null && …`. `take` is on `CHECKED_BY_A_RULE`, so §A.81(a)'s pass
   defers to that rule, and the rule drops `null` silently where it refuses `"banana"`, `["x"]`,
   `{a:1}` and `true` with `GRAPH003_MALFORMED`. **Pinned POSITIVELY as `STILL_ACCEPTED`** in
@@ -2635,8 +2700,23 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   "phase one lands only the failure projection, which is enough to close §A.90" — and it is flagged
   for him to confirm.*
 
-- **A.91 · A by-hash graph lookup COMPILES every graph in `graphs/` and prints the others'
-  diagnostics on stderr.** *(From the third port's F2.)* Files: the graph-by-hash resolution behind
+- ~~**A.91 · A by-hash graph lookup COMPILES every graph in `graphs/` and prints the others'
+  diagnostics on stderr.**~~ **CLOSED 2026-09-23 at `96c71bd6` … `6b1a47eb` (five review rounds,
+  the fourth and fifth authorised by the maintainer).** ONE resolver, `resolveRecordedGraph`, for
+  every by-hash verb — `trace`, `replay`, `approve` (with `--reject`), `steer`, `deescalate`,
+  `gates`, `score`, `exam attest`, `suite freeze`, `promote --against-cohort`. It sweeps silently,
+  announces the MATCHED graph's own diagnostics, and refuses in one message naming the directories
+  actually searched and each failing candidate's real path and first diagnostic (sanitised: C0/C1
+  stripped, capped). Grant advice appears iff a failing candidate carries the structured code
+  `GRAPH017_CAPABILITY_NOT_GRANTED`; the next-step advice is one sentence that guesses nothing:
+  *"If this run's graph file was removed or edited, restore the bytes it ran with; if a candidate
+  named above is that file, fix why it does not compile."* `suite freeze` now resolves BEFORE its
+  cohort-size check; `loom serve`'s clock and `armForeignGates` stay loud once per bytes change;
+  `warnPromotedSetShrunk` is removed. Repro:
+  `node --test packages/core/test/cli/resolve-recorded-graph.test.ts` → 6 pass (with
+  `capability-advice-keying`, `suite-freeze`, `graph-lookup-*` and `product-lane-doors` beside it).
+  Residue: §A.124–§A.126. The row as it stood follows. *(From the third port's F2.)* Files: the
+  graph-by-hash resolution behind
   `loom replay`, `loom trace` and `loom approve`. These verbs find the graph by the hash the journal
   recorded and compile the candidates in `graphs/` to compare hashes; every candidate's diagnostics
   go to stderr on the way past. Repro on the merged HEAD, with a noisy graph the operator did not
@@ -2708,8 +2788,18 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   `EdgeSpec.codes` and `retry.onlyIf` against a CLOSED `CODES`, so a *graph-declared* code is the
   narrower thing to design here.
 
-- **A.94 · `GRAPH010_CONCURRENT_WRITE` calls the `seq` target and the `error` target of ONE node
-  concurrent writers, and they are exclusive by construction.** *(From the third port's F1.)* File:
+- ~~**A.94 · `GRAPH010_CONCURRENT_WRITE` calls the `seq` target and the `error` target of ONE node
+  concurrent writers, and they are exclusive by construction.**~~ **CLOSED 2026-09-23 at
+  `b7b44eda`, `5db93cf6`, `3731883a`.** `outcomeExclusive`, a property of the GRAPH: two writers
+  are non-concurrent when X is reached by exactly one arrival, unfanned, with no join between, and
+  one sits behind X's success arm and the other behind its failure arm. `grant-access` with
+  `history: replace` now compiles clean. A guard made QUIETER, so the dropped refusals were
+  enumerated: an oracle against the base dropped 1,606 `GRAPH010`s with 0 violations; per-X arm sets
+  are cached (80 of 80 graphs, 5.8 s → 43 ms). Repro:
+  `node --test packages/core/test/graph/outcome-exclusive-writers.test.ts` → 8 pass. The
+  exactly-one-arrival condition is what keeps it sound under §A.101, where a node reached twice at
+  different times runs twice. The row as it stood follows. *(From the third port's
+  F1.)* File:
   `packages/core/src/graph/validate.ts`, `rule010ConcurrentWriters`. **This is NOT §A.84** — that
   was `loop` and `compensation` being DROPPED from the forward DAG; `error` is not on that exclusion
   list, so the edge IS visible and its EXCLUSIVITY is not. `#errorEdges` is reached only from
@@ -2738,8 +2828,16 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   stated as a property of the GRAPH, which is what `ac693d0` re-keyed §A.40's W6 on when enumerating
   engine methods failed.
 
-- **A.95 · `GRAPH005_ERROR_PROJECTION_IN_LOOP` refuses a node AFTER a loop's exit, which runs once.**
-  *(D8 phase one review, F3; residue of Sequence item 30.)* File: `graph/validate.ts`,
+- ~~**A.95 · `GRAPH005_ERROR_PROJECTION_IN_LOOP` refuses a node AFTER a loop's exit, which runs once.**~~
+  **CLOSED 2026-09-23 at `b9d75cdb`, `5db93cf6`, `3731883a` — the compile arm, keyed on
+  MULTIPLICITY** (`multiRunNodes`: can this node run at two iterations of one branch), and an
+  `error` exit that ends the loop is lifted. **The row's premise is FALSE for a `conditional` exit**:
+  a `function`/`evaluator` `take` bypasses `when` (driven: `collate` ran ×3), so a node behind one
+  can run more than once and stays refused — only the runtime alternative, `viewFor` handed the
+  reader's iteration, would lift it. `c153566e`'s hole stays closed. A guard made QUIETER: over 3,000
+  seeded graphs × 12 runs, 187 `IN_LOOP` drops and 0 violations (the reviewer's own ~7,000, 0).
+  Repro: `node --test packages/core/test/graph/error-projection-multiplicity.test.ts` → 16 pass. The
+  row as it stood follows. *(D8 phase one review, F3; residue of Sequence item 30.)* File: `graph/validate.ts`,
   `checkErrorProjectionRead`. The refusal covers every node reachable from a cycle (`c153566e`, which
   closed the reverse hole — a node hanging off a loop body read pass 2's `ok: true`). A node behind
   a `conditional` loop EXIT runs once, yet is refused, so no post-loop node of a
@@ -2753,7 +2851,18 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   branch) rather than on reachability from a cycle — or when `viewFor` is handed the reader's
   iteration and serves that pass's task, which lifts the refusal for both shapes.
 
-- **A.96 · A COMPENSATED task's error projection still says `ok: true`.** *(D8 phase one review,
+- ~~**A.96 · A COMPENSATED task's error projection still says `ok: true`.**~~ **CLOSED 2026-09-23 at
+  `249c9536`; review fixes `f8465b31`, `54116305`, `d28cbb23`, `e2e783ca` (four review rounds, the
+  fourth authorised by the maintainer) — for a task whose effects are compensated in its OWN run's
+  journal.** The rule: a task is UNDONE iff some call of its own (`<taskId>:tool:<n>`) was undone
+  by a `compensated` or `failed` rollback row, and no later PERFORMED `tool.called` at that position
+  has the same tool name AND `argsDigest`. Rows and call identities are folded even inside a
+  rewind's hidden range, and `RunFolder` one row at a time equals `foldRun`. Undone → NO value;
+  `not_attempted` keeps `ok: true`; a failed task keeps `ok: false`. **Four keys were tried and each
+  broke** — `compensatesSeq` against the lease, the lease, any performed call, the position alone —
+  and the docstring records why; the lesson is in `docs/handoff-2026-09-24.md` §4. Repro:
+  `node --test packages/core/test/run/error-projection.test.ts` → 34 pass. Residue: §A.108–§A.113.
+  The row as it stood follows. *(D8 phase one review,
   F4c; against item 30's own line, "no projection is never read as success".)* File:
   `run/projection.ts`, `errorProjectionOf`. Rollback is journal-driven and folds nothing onto the
   task — `/usr/bin/grep -an compensat packages/core/src/run/projection.ts` answers nothing — so a
@@ -2763,7 +2872,14 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   `examples/`. **Closes when** a compensated task projects as not-ok (or as no projection), or when a
   reader can be shown unable to run after its source's rollback.
 
-- **A.97 · A FIFO at an `fs.read` path hangs the run indefinitely.** *(D8 phase one review, F4a;
+- ~~**A.97 · A FIFO at an `fs.read` path hangs the run indefinitely.**~~ **CLOSED 2026-09-23 at
+  `b2bcc9ab`; review fix `e6ee1709`.** A non-blocking open, then `fstat`: a FIFO or a device answers
+  `E_FS_UNREADABLE` (`ENOTREG`), a directory `EISDIR`/`E_FS_UNREADABLE`; a failed open is classified
+  by `lstat`, so a socket (macOS errno 102) or a tty (`ENXIO`) is `E_FS_UNREADABLE` too — never
+  `E_FS_NOT_FOUND`. `grant-access` with a FIFO ledger: exit 142 (the alarm) → **exit 1 in ~40 ms**.
+  Repro: `node --test packages/core/test/builtin/tools.test.ts`. Residue: `fs.write` to a FIFO still
+  hangs (§A.114), and a socket/tty swapped between the failed open and the `lstat` (§A.120). The
+  row as it stood follows. *(D8 phase one review, F4a;
   pre-existing, same on the `ab1654f7` binary.)* File: `builtin/tools.ts`, `openLeaf` — the open has
   no `O_NONBLOCK`, and the task has no bound below the node's `timeoutMs` (600000 by default).
   Repro, the shipped `grant-access` with `mkfifo out/access-ledger.json`, bounded by a 10s alarm:
@@ -2773,8 +2889,15 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   **Closes when** `fs.read` refuses a non-regular file before it blocks (an `fstat` after a
   non-blocking open) — and it should answer `E_FS_UNREADABLE`, never `E_FS_NOT_FOUND`.
 
-- **A.98 · `subgraph.inputs` naming an undeclared parent channel compiles with no diagnostic about
-  it.** *(D8 phase one review, F4b; pre-existing, same on the `ab1654f7` binary.)* File:
+- ~~**A.98 · `subgraph.inputs` naming an undeclared parent channel compiles with no diagnostic about
+  it.**~~ **CLOSED 2026-09-23 at `044a7821`, `27b07e7f` — and the row below was WRONG about its
+  cause.** `GRAPH016_BAD_MAPPING` has checked parent channel NAMES since `51ce64f1`, but below
+  `if (child === undefined) continue;`, so an unresolved ref, a cycle or the depth limit skipped it.
+  The parent-name half now runs above every `continue`. Only the names were hoisted: hoisting
+  `requiredMapping` too broke three fixtures in `retry-default-policy.test.ts` that declare no
+  mapping. Repro: `node --test packages/core/test/graph/subgraph-parent-mapping.test.ts` → 5 pass.
+  Residue: §A.122. The row as it stood follows. *(D8 phase one review, F4b; pre-existing, same on
+  the `ab1654f7` binary.)* File:
   `graph/validate.ts` — nothing checks the VALUES of `subgraph.inputs` against `spec.channels`, and
   the child is handed `undefined`. Repro, a probe compiling a `subgraph` node with
   `inputs: {k: "nope"}` and no channel `nope`:
@@ -2785,9 +2908,29 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   declared parent channel is refused, as `GRAPH005_UNDECLARED_READ` refuses the same mistake in
   `reads`.
 
-- **A.99 · The veto example says a late reject's write stays and nothing undoes it. The runtime
-  tries, and over an existing file it succeeds.** *(Opened 2026-09-23 by the settlement's
-  reviewer.)* `examples/graphs/two-person-veto.json`'s description says *"the effect stays … nothing
+- ~~**A.99 · The veto example says a late reject's write stays and nothing undoes it. The runtime
+  tries, and over an existing file it succeeds.**~~ **CLOSED 2026-09-23 at `b7c1ccc6` — the
+  maintainer's Q3 = (a), `fs.restore` undoes a create; review fixes `46f0d3ba`, `3e18c383`,
+  `1dc57ef5`, `21aca685`.** `fs.write` decides "created" by `O_CREAT|O_EXCL` and records `dev`,
+  `ino`, the normalised absolute path and the digest. `fs.restore` REMOVES only when `at` is
+  normalised and under the jail root (`realpath.native`), every ancestor is a real directory, the
+  leaf has the same `dev`+`ino` with `nlink` 1, the digest matches, and the canonical path is
+  outside every denied subtree — and removes by that name. A symlink or parent swap, a hard link, a
+  forged record, a foreign root, `..` and a case-alias of a denied subtree are all refused. A
+  `ctime` term added in review round 1 was DROPPED in round 2 as stricter than Q3 (it blocked a
+  run's own create → overwrite rollback). So the late veto now leaves no created file, create →
+  overwrite → reject rolls back fully, and an existing file gets its old bytes. Re-run for this
+  settlement on `packages/core/dist/bin.js` at `7f576a47`, a fresh copy of `examples/`, each verb its
+  own process:
+  ```
+  $ loom run graphs/two-person-veto.json --input '{"request":"NEW"}'   → exit=0 awaiting_gate
+  $ loom approve … --as u:alice; loom approve … --as u:bob          → exit=0 awaiting_gate
+  $ loom approve … --as u:carol --reject                            → exit=1 failed
+  approved/request.txt after: ABSENT          compensation.recorded {"outcome":"compensated",…}
+  ```
+  `two-person-veto.json`'s description says so; `node --test packages/core/test/graph/two-person-approval.test.ts`
+  → 13 pass. Residue: §A.106, §A.107, §A.115, §A.116, §A.118. The row as it stood follows.
+  *(Opened 2026-09-23 by the settlement's reviewer.)* `examples/graphs/two-person-veto.json`'s description says *"the effect stays … nothing
   in this graph undoes it"*. `README.md`'s "Approval modes" row, `examples/README.md`'s veto row and
   D9's *Enforced* line all said the effect stays (the two READMEs now name both cases, pointing
   here; the description, which the test below asserts, and D9's line wait on the answer). In fact a failed run compensates from the journal,
@@ -2838,6 +2981,222 @@ with exit code 0, and it is CLOSED (2026-09-23, `DESIGN.md` D8).
   **Closes when** the trace shows the compensation's real outcome: a compensation span whose
   `compensation.recorded` says `failed` (or whose `tool.called.ok` is `false`) closes `error`,
   carries the outcome as an attribute, and a test drives the created-file late veto and asserts it.
+  **2026-09-24: STILL OPEN, and the repro above no longer produces a failed compensation** — §A.99
+  closed, so the created-file late veto now REMOVES the file and journals `compensated`, and its
+  `[ok]` is true. The same trace line over a failed undo is reached by changing the created file's
+  bytes before the late reject, which Q3's rule refuses. Re-run for this settlement on
+  `packages/core/dist/bin.js` at `7f576a47`, a fresh copy of `examples/`, each verb its own process:
+  ```
+  $ loom run graphs/two-person-veto.json --input '{"request":"NEW"}'; alice, bob approve
+  $ printf EDITED > approved/request.txt; loom approve … --as u:carol --reject   → exit=1 failed
+  approved/request.txt after: "EDITED"
+  $ loom trace <runId> | /usr/bin/grep -a -E 'compensate|save'
+    loom.task save root [ok] 2ms
+      loom.tool (compensate) [ok] 1ms
+  journal: compensation.recorded {"outcome":"failed","reason":"\"fs.restore\" did not undo \"fs.write\": refusing to remove approved/request.txt: its bytes changed since the write created it, …"}
+  ```
+  The closing condition stands; its test should drive THIS shape.
+
+### Opened by the 2026-09-24 settlement
+
+The residue of the five `wave-0923-*` lanes (`docs/handoff-2026-09-24.md` §3), filed from the
+orchestrator's record of the lanes' reports and reviews. **Rows marked *re-run* were reproduced on
+`7f576a47` for this settlement; the others carry the lane's or its reviewer's measurement, named as
+such, and their first task is the re-run.** §A.101 is the one to read first: a KERNEL defect,
+reproduced on the pre-wave base `2af9716a` by two agents independently, and again here.
+
+- **A.101 · A committed Task RE-RUNS when a second arrival reaches it late — same Task id, both
+  writes applied.** *(HIGH, kernel. Found by the compiler lane while building §A.94/§A.95; re-run.)*
+  Files: `packages/core/src/run/projection.ts`, the `task.ready` arm, which upserts state `"ready"`
+  UNCONDITIONALLY, and `packages/core/src/run/engine.ts`, `#activate`, which emits one `task.ready`
+  per inbound edge. When a node's two arrivals do not coincide — the second path at least two hops
+  longer — the second `task.ready` lands after the Task committed and re-readies it, and the Task
+  runs again. Re-run for this settlement on `packages/core/dist/bin.js` at `7f576a47`: five
+  `function` nodes, each appending its own name to one `append_ordered` channel, edges `a→b` beside
+  `a→c→c2→c3→b`:
+  ```
+  $ loom compile graphs/rearrival.json      → ok (five default-deadline notes, no diagnostic)
+  $ loom run graphs/rearrival.json --input '{"seed":"x"}'
+  "status": "succeeded",  "log": ["a", "c", "b", "c2", "c3", "b"]      ← b ran TWICE
+  $ loom trace <runId> | /usr/bin/grep -a 'task b '
+    loom.task b root [ok] 3ms                                          ← ONE span: the same Task id
+  ```
+  The lane measured two more shapes: `s→X` beside `s→m→m1→m3→X` with `X` failing then succeeding
+  ran BOTH of X's arms, and a reader two or more hops behind X's `error` edge read `X:error` as
+  `{ok: true}`. **Every compile rule but two assumes one run per Task**; `graph/validate.ts`'s
+  single-arrival and tree conditions are what keep §A.94 and §A.95 sound under it. No shipped
+  example reaches it — only `grant-access`'s `weigh` and `record` fan in, on exclusive paths.
+  **Closes when** a TERMINAL Task is never re-readied (or a re-arrival is refused, or journaled as a
+  distinct fact), with all three shapes pinned — the duplicated write, both arms, the stale
+  projection. A `fix:` to kernel files; the first lane of the next wave.
+
+- **A.102 · `replay` does not check the successor's manifest, so a mutated run whose added ref
+  MOVED replays `match: true`.** *(Lane B, successor binding, §G.5's closure; not re-run here.)*
+  File: `packages/core/src/run/replay.ts`. §G.5 made `graph.mutated` carry `resolutionManifest` and
+  every GATE door check it; `replayRun`'s `refsBound` still reads only `run.compiled`'s. Lane B's
+  measurement: a journal written by this build, a mutation-added ref's resource edited, `loom replay`
+  → `match: true`. **Closes when** replay refuses (or reports unbound) a successor whose recorded
+  manifest the resolver no longer reproduces, pinned beside `test/run/graph-binding.test.ts`.
+
+- **A.103 · A mutated run from an OLD journal is refused on every `advance` and gate with no
+  journaled reason — only `cancel` exits.** *(Lane B; not re-run here.)* File:
+  `packages/core/src/run/engine.ts`, `#rehydrateGraph`/`#graphIdentityMismatch`. A `graph.mutated`
+  written before `4fe87a88` has no `resolutionManifest`, so §G.5 fails it CLOSED — correctly — but
+  `E_GRAPH_MISMATCH` is thrown and never journaled, so the run's own record says nothing about why
+  it cannot move. **Closes when** the refusal is journaled once (as `#assertBound`'s refusals are,
+  `advance-refusal-is-journaled.test.ts`), or an argument that a pre-publish journal needs no reason
+  is written at the site.
+
+- **A.104 · A router's `fallbackEdge` and a case's `take` are not vocabulary-checked at the
+  `#assertBound` door.** *(Lane B, §A.85's scope note; not re-run here.)* File:
+  `packages/core/src/run/engine.ts`. §A.85's fourth check covers `until`, `when` and router-case
+  `when`; an unreadable `fallbackEdge` or `take` in an attached `RunGraph` is caught later by
+  `#strayRoute`, which fails it as a TASK — a terminal row exists, so this is not §A.85's defect,
+  only its boundary. **Closes when** both are checked at the door, or the boundary is argued at
+  `#assertBound`'s docstring.
+
+- **A.105 · `fs.glob` and `fs.grep` still write their cap marker INTO the content.** *(Lane A, §A.83's
+  residue; re-run.)* File: `packages/core/src/builtin/tools.ts`.
+  ```
+  $ /usr/bin/grep -an 'truncated at' packages/core/src/builtin/tools.ts
+  1128:  … `${matches.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} files; narrow the pattern to see more)`
+  1282:  … `${hits.join("\n")}\n… (truncated at ${String(SEARCH_RESULT_CAP)} matches; narrow the search to see more)`
+  ```
+  An agent reading one gets the marker AND `modelToolContent`'s note. `triage-plan.js:53` parses the
+  marker (pinned at `examples-triage.test.ts:548–577` and `fs-search.test.ts:212`), which is why it
+  was left: removing it without migrating that body deletes a guard silently — the §A.83 lesson.
+  **Closes when** both tools put `truncated` in `details`, as §A.83's three do, and `triage-plan.js`
+  reads the glob node's `"<id>:error"` projection instead of the line.
+
+- **A.106 · `fs.restore`'s create-undo removes ANY file at the recorded path with the same inode, one
+  link and the same bytes.** *(Lane A, §A.99's residue; not re-run here.)* File:
+  `packages/core/src/builtin/tools.ts`, `fs.restore`. Within Q3's rule — *refuse if the bytes
+  differ* — and so by decision, but the set is wider than "the file this run created": a file
+  `chmod`ed after the create, renamed away and back, hard-linked and the extra name unlinked, or
+  rewritten with the SAME bytes by another writer or run, is removed. **Closes when** the maintainer
+  accepts that set as Q3's (the row is then struck as a non-defect) or names a tighter identity that
+  still lets a run's own create → overwrite roll back — the reason `ctime` was dropped.
+
+- **A.107 · A created file RENAMED AWAY reads "already absent", so its undo journals `compensated`
+  while the bytes stand elsewhere.** *(Lane A; not re-run here.)* File: `fs.restore`. **Closes
+  when** an absent path after a recorded create is not reported as a successful undo, or the
+  journal distinguishes "removed" from "was already gone".
+
+- **A.108 · A redo after a rewind is SERVED a call the rollback undid, and the run ends
+  `succeeded` with the effect absent.** *(Lane A, §A.96's review; engine rewind semantics.)* File:
+  `packages/core/src/run/engine.ts`, the served-effect path after a rewind. §A.96's projection now
+  says undone (no value), so no reader is told `ok: true` — but the RUN reports success with the
+  write gone. **Closes when** a rewind past a compensated effect re-performs it or refuses, pinned
+  by a test that asserts the file.
+
+- **A.109 · A rewound run replays `match: false`.** *(Lane A; confirmed at base by its final
+  reviewer; not re-run here.)* File: `packages/core/src/run/replay.ts`. Pre-existing; §A.96 adds one
+  channel frame to the difference. **Closes when** a rewound run replays `match: true`, pinned.
+
+- **A.110 · A SUBGRAPH child's rollback does not reach the parent's projection.** *(Lane A, §A.96's
+  review; not re-run here.)* A child's compensation rows land in the CHILD journal, so the parent's
+  `subgraph` task still projects `ok: true` after its child's effect was undone. §A.96 is closed for
+  a task compensated in its own run's journal only, and says so. **Closes when** the parent fold
+  learns the child's rollback (engine + journal vocabulary — a seam), or a reader is shown unable to
+  run after it.
+
+- **A.111 · Journals written before `26a4f358` replay `match: false`.** *(Lane A; not re-run here.)*
+  The fold now adds `truncated`/`bytes` to the projection, so an older journal's replay differs; and
+  an AGENT journal before `a2f5244a` with a truncated tool result differs because the model request
+  now carries the in-band note. No journal outside this repository exists (item 29 is unpublished).
+  **Closes when** replay names the build boundary as the cause instead of a divergence, or an
+  argument that pre-publish journals need no compatibility is written where replay compares.
+
+- **A.112 · A same-args `tool.called` returning `ok: false` clears §A.96's mark, and the fold's call
+  identity omits the tool VERSION.** *(Lane A's final review; not re-run here.)* File:
+  `packages/core/src/run/projection.ts`. A later performed call at the same position with the same
+  name and `argsDigest` counts as re-making the effect even when it FAILED (the same as base); and
+  the docstring says the identity is `#servedToolEffect`'s, which also checks `version`, while the
+  fold does not. **Closes when** re-making requires `ok === true` and the identity includes the
+  version — or the docstring states the difference.
+
+- **A.113 · A redo that re-writes the path at a DIFFERENT position, or with different arguments,
+  leaves the task UNDONE while the file stands.** *(Lane A's final review, "N1"; not re-run here.)*
+  File: `run/projection.ts`. The shapes the reviewer named `shift-before`, `shift-mid` and
+  `twice-rows`, plus a failed undo, which stays undone until the call is made again. **Fail-closed**
+  — no value, never `ok: true` — so this is over-refusal, allowed; it is a row because a reader of
+  such a task cannot run. **Closes when** the identity is not positional, or the over-refusal is
+  argued at the rule.
+
+- **A.114 · `fs.write` to a FIFO still hangs the run.** *(Lane A; §A.97's other half; re-run by
+  reading.)* File: `packages/core/src/builtin/tools.ts` — `openLeaf(path, O_WRONLY | O_CREAT | …)`
+  at `:351` and `:370`, no `O_NONBLOCK`. **Closes when** `fs.write` refuses a non-regular leaf before
+  it blocks, as `fs.read` does since `b2bcc9ab`.
+
+- **A.115 · A retried `fs.write` whose first attempt LANDED but never reached `effect.completed`
+  loses its create.** *(Lane A, pre-existing; not re-run here.)* The retry finds the file present, so
+  `O_CREAT|O_EXCL` says "not created", and a rollback does not remove it.
+  **Closes when** the create is recorded before the attempt can be retried, or the retry recognises
+  its own earlier attempt.
+
+- **A.116 · Rollback leaves the directories `fs.write` created.** *(Lane A; not re-run here.)*
+  `fs.write` creates missing parents (`mkdir -p`); `fs.restore` removes the file only. **Closes
+  when** created directories are recorded and removed when empty, or the limit is stated in
+  `fs.write`'s description and `examples/README.md`.
+
+- **A.117 · `readme-gaps`' "nothing deletes" probe misses `rmSync`/`unlinkSync`.** *(Lane A's
+  review; re-run.)* File: `packages/core/test/readme-gaps.test.ts:275`, the pattern
+  `/DELETE\s+FROM|\bVACUUM\b|\bunlink\b/i`. `builtin/tools.ts:1582` is `rmSync(canonical)` —
+  `fs.restore`'s new removal — and the probe stays green. Its README row is about the JOURNAL, so
+  the removal is not a violation, but the probe cannot tell. **Closes when** the pattern covers
+  `rmSync`/`unlinkSync`/`rm(` with `fs.restore` excused by name.
+
+- **A.118 · `fs.restore`'s checks and its removal are separate syscalls.** *(Lane A's review; not
+  re-run here.)* A time-of-check/time-of-use window between the identity checks and `rmSync`.
+  **Closes when** the removal is bound to the checked inode, or an argument that the jail's
+  single-operator threat model makes the window acceptable is written at the site.
+
+- **A.119 · A channel receipt's `writes.written.bytes` counts UTF-16 units; `details.bytes` counts
+  bytes.** *(Lane A's review; not re-run here.)* One word, two units, since §A.83 made `details.bytes`
+  bytes; `examples-triage.test.ts` pins the receipt's value. **Closes when** both count bytes, the pin
+  moved with it.
+
+- **A.120 · A socket or tty swapped in between `fs.read`'s failed open and its `lstat` can come back
+  UNTYPED.** *(Lane A's review; not re-run here.)* It answers a retryable failure, never
+  `E_FS_NOT_FOUND`, so it fails in the allowed direction. **Closes when** the classification reads
+  the error of the open itself, or the race is argued at the site.
+
+- **A.121 · `callsBySeq` in the fold grows linearly with a run's tool calls.** *(Lane A's final
+  review — a note; re-run by reading.)* `packages/core/src/run/projection.ts:524`, one entry per
+  `tool.called` (`:969`), never pruned. **Closes when** it is
+  bounded (entries dropped once no rollback can reach them) or the bound is argued.
+
+- **A.122 · An ABSENT `subgraph.inputs`/`outputs` on an unresolved child compiles silent and
+  crashes at run time.** *(Lane C, §A.98's residue; not re-run here.)* `Object.entries(undefined)` in
+  `Engine.#contextFor`. Pinned as residue in `test/graph/subgraph-parent-mapping.test.ts` ("ONLY THE
+  NAMES MOVED"). **Closes when** the compiler refuses a `subgraph` node missing either block
+  whatever the child resolves to, and that pin flips.
+
+- **A.123 · A compile TIGHTENING can stop a run an older build started.** *(Lane C; not re-run
+  here.)* `packages/core/src/graph/mutate.ts:381–391` recompiles the merged spec, and a child
+  subgraph compiles at run time — so a run begun before §A.77, §A.88 or §A.98 landed can be refused
+  mid-flight by the build that resumes it. Refusing is allowed; stopping a live run is a product
+  decision. **Closes when** the maintainer decides whether a resumed run compiles under its RECORDED
+  build's rules or the current one, and the answer is pinned.
+
+- **A.124 · `loom gates` says "Publish the graph this run used to see what is being approved" even
+  when the graph is present.** *(Lane D's review, pre-existing; re-run by reading.)*
+  `packages/core/src/cli.ts:6396`, unconditional — the sentence §A.91's fifth round removed from
+  every other door. **Closes when** it is printed only when the resolver found no graph.
+
+- **A.125 · `sanitizeDiagnosticMessage` misses bidi controls, and three vectors print raw control
+  characters.** *(Lane D's final review, pre-existing vectors; re-run by reading.)*
+  `packages/core/src/cli.ts:6999–7001` strips `[\u0000-\u001f\u007f-\u009f]` only, so U+202E and
+  U+2066–U+2069 pass; a candidate's PATH, a graph NAME in the different-hash list and an invalid-JSON
+  parser message quoting file bytes are printed unsanitised; the cap slices UTF-16 and can split a
+  surrogate pair, and is unpinned; `noGuessAdvice` is pinned at `suite freeze` only. **Closes when**
+  every string the resolver prints from a file goes through one sanitiser covering those, pinned.
+
+- **A.126 · Two losses in the by-hash refusal.** *(Lane D's final review, "N8"; not re-run here.)*
+  In `loom score` and `loom exam attest` an earlier check's ORDER can mask the resolver's refusal;
+  and the refusal's structured `details` no longer carry `searched`, the directories the message
+  names. **Closes when** both verbs resolve first (as `suite freeze` now does) and `details.searched`
+  is restored, pinned in `resolve-recorded-graph.test.ts`.
 
 
 ---
@@ -3370,8 +3729,18 @@ Each traces to a decision in `DESIGN.md`.
   secret is trusted by default — and the fix is not symmetric, because there is no `effects: []`
   equivalent and marking every unclassified channel sensitive is the constant-gate failure that arm's
   docstring already refuses. **Closes when** that asymmetry has an answer.
-- **G.5 · Prompt text is bound by the MANIFEST, not by the hash (D7). Closed 2026-09-01 except one
-  residue.** Repro: `node --test packages/core/test/run/graph-binding.test.ts` → 6 pass / 0 fail;
+- ~~**G.5 · Prompt text is bound by the MANIFEST, not by the hash (D7). Closed 2026-09-01 except one
+  residue.**~~ **CLOSED WHOLE 2026-09-23 at `4fe87a88` (+ `5c236f55`, wording) — `DESIGN.md`
+  Sequence item 18.** `graph.mutated` records the successor's `resolutionManifest` (new journal
+  vocabulary, so a `fix:` carrying a voluntary `Kernel-seam:` trailer); `#graphIdentityMismatch`
+  compares a held successor against it (`#successorManifest`); `#rehydrateGraph` checks every
+  replayed successor; both gate doors rehydrate before `gate.decided`. **The residue's own
+  sentence below was FALSE**: `loom run --grant graph:mutate --extension-module <an adapter proposing
+  a mutation>` reaches mutation from the binary, and at `2af9716a` an edited mutation-added
+  `function` ran on `loom approve` (exit 0); it is now exit 1, `E_GRAPH_MISMATCH`. An old journal
+  (no manifest) fails CLOSED and `cancel` is the exit. Repro:
+  `node --test packages/core/test/run/graph-binding.test.ts` → 11 pass. Residue: §A.102 (replay),
+  §A.103 (the old-journal refusal is not journaled). The row as it stood follows. Repro: `node --test packages/core/test/run/graph-binding.test.ts` → 6 pass / 0 fail;
   "THE SAME SPEC WITH DIFFERENT RESOURCES IS REFUSED" asserts the graphHash is IDENTICAL while
   `resolutionManifest` moves and `resolveGate` throws. A subgraph's own
   refs were the half that was real and are now walked into the manifest (`graph/compile.ts`;
@@ -3809,8 +4178,19 @@ Each traces to a decision in `DESIGN.md`.
   ```
   printing `loom 0.1.0`. Publish the packed TARBALL, never the directory — the procedure, and what
   `npm publish` in `packages/core` does instead, is in `DESIGN.md` item 29.
+  **2026-09-24 — still OPEN, and now UNBLOCKED.** The pre-publish hygiene the 2026-09-23 handoff
+  asked to land first merged at `9b8377e9`: §H.16 (the scope name), §H.17 (what the tarball
+  carries), §H.18 (the declarations) and §H.19 (two flag doors) are struck below. What is left is
+  the maintainer's act alone. §H.21–§H.26 are residue; in this settlement's reading none is a reason
+  to hold the publish, and §H.24 is the only one touching a wire value — answerable without changing
+  it.
 
-- **H.16 · The OTLP instrumentation scope still says `@loom/core/telemetry`.** *(Opened 2026-09-23
+- ~~**H.16 · The OTLP instrumentation scope still says `@loom/core/telemetry`.**~~ **CLOSED
+  2026-09-23 at `95c5e8cf` — the maintainer's Q1: rename, pre-publish.** `SCOPE_NAME` is
+  `@caohaotiantian/loom/telemetry`, pinned on the wire in `test/telemetry/otlp.test.ts` (17 pass).
+  Re-run: `/usr/bin/grep -an 'SCOPE_NAME = ' packages/core/src/telemetry/otlp.ts` →
+  `121:const SCOPE_NAME = "@caohaotiantian/loom/telemetry";`. Residue: the name is a subpath the
+  package does not export (§H.24). The row as it stood follows. *(Opened 2026-09-23
   by the item-29 lane, which renamed the package everywhere prose names it and deliberately left
   this.)* `telemetry/otlp.ts`'s `SCOPE_NAME` is written into every `ExportTraceServiceRequest` as
   `scopeSpans[].scope.name`, which is what a collector groups spans by — so renaming it is a WIRE
@@ -3821,9 +4201,17 @@ Each traces to a decision in `DESIGN.md`.
   a dashboard on it) or stays as an opaque name. The `Symbol.for("@loom/core:…")` keys are NOT this
   row: they never leave the process and must only agree with each other.
 
-- **H.17 · The tarball carries what `pack.mjs` says it does not: map pointers with no maps, and
-  sources git does not track.** *(Opened 2026-09-23 by the settlement, from the item-29 lane's open
-  list.)* `scripts/pack.mjs`'s header says the tarball is *"a function of `src`"* and that no source
+- ~~**H.17 · The tarball carries what `pack.mjs` says it does not: map pointers with no maps, and
+  sources git does not track.**~~ **CLOSED 2026-09-23 at `267b3601`, `830aa0f5`, `a332471d`,
+  `c2df008a`, `d558513c`.** `pack.mjs` packs from `git archive HEAD` extracted into a throwaway
+  checkout, so dirty, staged or untracked state cannot ship (it prints `branch@sha` and counts the
+  changes it left out); strips `//# sourceMappingURL=` line-anchored (138 stripped, 0 remain);
+  refuses cleanly — `pack FAILED:` — outside git or on a committed compile error, diagnostics on
+  stderr; creates `--out` only after its checks; and strips `GIT_DIR`, `GIT_WORK_TREE` and
+  `GIT_INDEX_FILE` from the environment. Its pure functions are unit-tested:
+  `node --test packages/core/test/scripts-pack.test.ts` → 3 pass (+ `scripts/pack.d.mts`). Residue:
+  §H.22, §H.23. The row as it stood follows. *(Opened 2026-09-23 by the settlement, from the
+  item-29 lane's open list.)* `scripts/pack.mjs`'s header says the tarball is *"a function of `src`"* and that no source
   map ships because maps *"point at a `src/` the tarball does not carry"* — true of the `.map`
   FILES, not of the pointers. Measured on `48de87f6`, `node scripts/pack.mjs --out <dir>` then
   `tar -xzf` and a walk of `package/`: **141 files, 0 `.map`, 138 still ending in
@@ -3836,7 +4224,13 @@ Each traces to a decision in `DESIGN.md`.
   source `git ls-files` does not list — both asserted against the tarball, the way step 4 already
   checks `files`.
 
-- **H.18 · The shipped `.d.ts` need `@types/node`, and nothing says so.** *(Opened 2026-09-23 by the
+- ~~**H.18 · The shipped `.d.ts` need `@types/node`, and nothing says so.**~~ **CLOSED 2026-09-23 at
+  `cf7f964b`, `da966096`, `d8e116b9` — the maintainer's Q2: change the types, document the libs.**
+  A consumer with `module: nodenext`, `strict`, `noEmit` and `"types": []` typechecks the tarball
+  with 0 errors. `createBoundedLineReader.push` takes a `Uint8Array` (and copies retained chunks);
+  `SandboxResult.signal` uses a non-exported `ExitSignal`. `packages/core/README.md` documents the
+  two lib needs: `DOM` (in the default unless `lib` is overridden) and `ESNext.Disposable` (needed
+  with an explicit older target). Residue: §H.25. The row as it stood follows. *(Opened 2026-09-23 by the
   settlement, from the item-29 lane's open list.)* A TypeScript consumer of the packed tarball with
   `"types": []` and `skipLibCheck` off gets **2** errors, both in shipped declarations:
   `dist/mcp/client.d.ts` `TS2591: Cannot find name 'Buffer'` and `dist/sandbox/subprocess.d.ts`
@@ -3848,7 +4242,19 @@ Each traces to a decision in `DESIGN.md`.
   naming Node's ambient types, or `packages/core/README.md` states the requirement — a decision
   about which, and neither is behaviour.
 
-- **H.19 · Two CLI doors answer 0 to a flag they never read.** *(Opened 2026-09-23 by the
+- ~~**H.19 · Two CLI doors answer 0 to a flag they never read.**~~ **CLOSED 2026-09-23 at
+  `96c71bd6`, `d74b162c`, `5c2b5c50`.** Both exit 1 naming the flag, and so — the maintainer's N7,
+  2026-09-24, deliberately reversing `ad83204d`'s *"after help, so a typo still gets the list"* —
+  does `loom --help --tokne x`. A global flag before a verb, or alone, behaves as before. Re-run on
+  `packages/core/dist/bin.js` at `7f576a47`:
+  ```
+  loom --port 1                exit=1  E_CONFIG_INVALID: --port is read by `loom serve`. `loom`, naming no verb, reads neither it nor …
+  loom --version --tokne x     exit=1  E_CONFIG_INVALID: unknown flag: --tokne (did you mean --to or --token?) …
+  loom --help --tokne x        exit=1  E_CONFIG_INVALID: unknown flag: --tokne (did you mean --to or --token?) …
+  loom --workspace w --version exit=0  loom 0.1.0
+  ```
+  `node --test packages/core/test/cli/version.test.ts` → 10 pass. Residue: §H.21, §H.26. The row as
+  it stood follows. *(Opened 2026-09-23 by the
   settlement, from the item-29 lane's open list — the class §H.4 closed per verb, one door over.)* On the
   packed `dist/bin.js` at `48de87f6`: `loom --port 1` (a flag, no verb) prints the usage and exits
   **0**, where `loom --bogus` exits 1 — the item-29 lane refused an UNKNOWN flag with no verb and
@@ -3886,9 +4292,51 @@ Each traces to a decision in `DESIGN.md`.
   a shared `tempRoots`/`after` pair per file, following the try/finally-per-`mkdtempSync` idiom
   already used elsewhere in `test/journal/store.test.ts`, rather than one `t.after` per test.
 
+- **H.21 · `loom --help 1` and `loom --help=yes` exit 0, where `loom --version 1` refuses.** *(Opened
+  2026-09-24 by the settlement, from the install-surface lane's review; re-run.)* On
+  `packages/core/dist/bin.js` at `7f576a47`:
+  ```
+  loom --help 1        exit=0  loom — graph-native multi-agent orchestration
+  loom --help=yes      exit=0  loom — graph-native multi-agent orchestration
+  loom --version 1     exit=1  E_CONFIG_INVALID: --version takes no value (got "1") — run `loom --version` on its own.
+  ```
+  §H.19's class, one door over. **Closes when** `--help` gets `--version`'s value refusal, pinned in
+  `test/cli/version.test.ts`.
+
+- **H.22 · `pack.mjs`'s `runPack → archiveHeadInto` call site is unpinned end to end.** *(Opened
+  2026-09-24 by the settlement, from the install-surface lane's review; not re-run here.)*
+  `test/scripts-pack.test.ts` tests the pure functions; a mutant that packs a WORKING-TREE copy
+  instead stays green, and its success line then lies about what shipped. **Closes when** a test
+  packs a checkout holding an uncommitted file through `runPack` and asserts the tarball lacks it.
+
+- **H.23 · A repository nested inside another gives `pack.mjs` a misleading refusal.** *(Opened
+  2026-09-24 by the settlement, from the lane's review, "N6"; not re-run here.)* It fails CLOSED, so
+  nothing wrong ships; the reason printed names the wrong cause. **Closes when** the message names
+  the repository it resolved.
+
+- **H.24 · The OTLP scope name is a subpath the package does not export.** *(Opened 2026-09-24 by
+  the settlement, §H.16's residue; re-run.)* `SCOPE_NAME` is `@caohaotiantian/loom/telemetry`, and
+  `packages/core/package.json`'s `exports` are `"."`, `"./cli"` and `"./package.json"` — so the name
+  reads as an import path that fails. **Closes when** somebody decides whether the scope is an opaque
+  label (say so beside `SCOPE_NAME`) or `./telemetry` becomes an export.
+
+- **H.25 · `packages/core/README.md`'s type requirements cover `module: nodenext` only.** *(Opened
+  2026-09-24 by the settlement, §H.18's residue; not re-run here.)* A consumer on
+  `module: node16` or `moduleResolution: bundler` is not measured or described. **Closes when** both
+  are typechecked against the tarball and the README states the result.
+
+- **H.26 · `loom -h` and `loom -v` exit 2, "unknown command".** *(Opened 2026-09-24 by the
+  settlement; pre-existing, the same on base; re-run.)*
+  ```
+  loom -h   exit=2  unknown command "-h"
+  loom -v   exit=2  unknown command "-v"
+  ```
+  Every other unknown flag with no verb exits 1 (§H.19's door); these reach the verb parser instead.
+  **Closes when** they are aliases of `--help`/`--version`, or refused like any unknown flag, exit 1.
+
 ---
 
-## Z · Closed 2026-08-25 → 2026-09-22b — do not re-fix these
+## Z · Closed 2026-08-25 → 2026-09-24 — do not re-fix these
 
 The register: what closed, and the commit carrying the argument. `git show <sha>` is the citation.
 An em dash means the row records no sha; the closure's evidence is the test or mechanism its row
@@ -4007,6 +4455,25 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | A.80 | `5a0d1637`, `0431ddcb` | `EDGE_KINDS` and the kind check relocated from `compile.ts` into `checkStructure` beside `GRAPH020`, so they reach a child at any depth; the negative pin flipped positive. Message TEXT byte-identical, POSITION not — and the refusal is lost behind an earlier fatal, both disclosed at the site. `renderKind` made total (`KIND_STILL_THROWS` now empty of values); a throwing ACCESSOR still throws at the property read, base extent. Third round: `typeof` before `Object.hasOwn`, because `[Symbol()]` throws at the membership test |
 | A.81 | `d1b452fe`, `83aa54bf` (a) · `648cc9c6`, `78e64ce3` (b) | **both halves, so the row closes whole.** (a) `POLICY_FIELDS`/`NESTED_FIELDS` carry a type, one `blockFieldTypes` pass at 15 sites, 21 fields newly refusing a wrong type and no in-tree graph tightened; `BlockFieldType` stays MODULE-PRIVATE after `check-surface` refused the export. (b) `readableLoopBound` and a THIRD `#assertBound` check under `E_GRAPH_INVALID`; `"6"` and a restart refused too. First cut's blocking: two enumerations — a docstring and a FAULTS census — still said TWO checks. Residue → §A.85, and the drift note on §A.62 |
 | A.84 | `731eca44`, `79cab047`, `0431ddcb` | the compiler reads a graph that HAS a back-edge: `flowEdges`, `flowAncestors` (Tarjan) through `canPrecede` for GRAPH005/GRAPH002, and **DOMINANCE** (`GraphIndex.dominators`, Cooper–Harvey–Kennedy over a virtual root) for GRAPH010; `entryNodes`' loop exception made conditional; `terminalNodes`, `ancestors`, `dagEdges` and `wouldCycle` untouched, so §A.73's coupling survives by construction. `harden-config.json` goes from 3 warnings to ZERO, the only change across the seven shipped graphs. First cut's blocking: a `flowOrder` DFS cut MANUFACTURED pass-2 orderings, so GRAPH010 went silent on a real race and its answer depended on declaration order (527/8,000 seeds) — **and its docstring was the defect**. Final review: dominance oracle 0 mismatches over 435,916 pairs, 0/8,000 permutation flips, no base-ok graph refused. Residue → §A.86, §A.89 |
+| A.90 | `83f86bec` (lane `9288e678`) | D8 phase one: the six-field `"<id>:error"` envelope folded out of `task.failed`, and `fs.read`'s three codes; `grant-access`'s arm branches on the code, `look` and the `KNOWN HAZARD` test deleted |
+| H.20 | `39c5e0b5` | three test files dispose the temp roots they mint, in a module-level `after` |
+| H.16 | `95c5e8cf` | OTLP scope `@caohaotiantian/loom/telemetry` (Q1). Residue → §H.24 |
+| H.17 | `267b3601`, `830aa0f5`, `a332471d`, `c2df008a`, `d558513c` | `pack.mjs` packs `git archive HEAD` in a throwaway checkout, strips map pointers, refuses cleanly. Residue → §H.22, §H.23 |
+| H.18 | `cf7f964b`, `da966096`, `d8e116b9` | shipped `.d.ts` need no `@types/node`; two lib needs documented (Q2). Residue → §H.25 |
+| H.19 | `96c71bd6`, `d74b162c`, `5c2b5c50` | `--port 1`, `--version --tokne x` and (N7) `--help --tokne x` exit 1 naming the flag. Residue → §H.21, §H.26 |
+| A.91 | `96c71bd6` … `6b1a47eb` | one `resolveRecordedGraph` for every by-hash verb: silent sweep, one refusal naming what was searched, advice that guesses nothing. Residue → §A.124–§A.126 |
+| G.5 | `4fe87a88`, `5c236f55` | `graph.mutated.resolutionManifest`; every gate door checks a successor against it — Sequence item 18. Residue → §A.102, §A.103 |
+| A.85 | `6152c2d8` | `#assertBound`'s fourth vocabulary check, over edges and router cases. Residue → §A.104 |
+| A.83 | `26a4f358`, `a2f5244a`, `6f5c1b8b` | the truncation marker out of `content` at three tools, `truncated`/`bytes` on the projection, `maxBytes` in bytes, an in-band note to agents. Residue → §A.105, §A.111 |
+| A.96 | `249c9536`, `f8465b31`, `54116305`, `d28cbb23`, `e2e783ca` | an undone call's task projects no value, identity-bound (name + `argsDigest`) after four keys failed. Residue → §A.108–§A.113 |
+| A.97 | `b2bcc9ab`, `e6ee1709` | `fs.read` refuses a non-regular file before it blocks, `E_FS_UNREADABLE`. Residue → §A.114, §A.120 |
+| A.99 | `b7c1ccc6`, `46f0d3ba`, `3e18c383`, `1dc57ef5`, `21aca685` | `fs.restore` removes a file the run created, by recorded identity, refusing on changed bytes (Q3 = a). Residue → §A.106, §A.107, §A.115, §A.116, §A.118 |
+| A.95 | `b9d75cdb`, `5db93cf6`, `3731883a` | `GRAPH005_ERROR_PROJECTION_IN_LOOP` keyed on multiplicity; a `conditional` exit stays refused (`take` bypasses `when`) |
+| A.94 | `b7b44eda`, `5db93cf6`, `3731883a` | `outcomeExclusive`: a node's success and failure arms are not concurrent writers |
+| A.98 | `044a7821`, `27b07e7f` | `GRAPH016_BAD_MAPPING`'s parent-name half hoisted above every `continue`. Residue → §A.122 |
+| A.88 | `7222b9ea` | `take: null` refused; `STILL_ACCEPTED` deleted |
+| A.77 | `1e37ca87` | static unfanned quorum `k` above the distinct members refused (Q11) |
+| A.86 | `51dd4548` | closed by argument at `rule002Terminals` (Q12) |
 | — | — | — |
 | §A.55, first half | `3a27a98d` | `any` and `firstSuccess` release once no further arrival is possible, instead of waiting for one that cannot come. Kept as its own line because the row closed in TWO waves and the shas differ; the second half is the `A.55` row above |
 | `engine-cross-run` | `5fe7614` | five cross-run touches answer closed |
