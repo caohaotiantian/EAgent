@@ -189,3 +189,27 @@ test("STILL REFUSED: a join edge is in neither arm — a barrier fires on termin
   } as unknown as GraphSpec;
   assert.equal(concurrent(spec).length, 1, JSON.stringify(concurrent(spec)));
 });
+
+test("PER COMPILE, NOT PER PAIR: 150 writers beside 150 error arms compiles well under the bound", () => {
+  // The first cut ran two whole-graph searches per candidate X for EVERY writer pair: a reviewer
+  // measured 80/80 at 5,965 ms and 150/150 at 71 s (base: 30 ms, 89 ms). Absolute bound, wide margin.
+  const ids = ["r"];
+  const writers: string[] = [];
+  const edges: Edge[] = [];
+  for (let i = 0; i < 150; i++) {
+    ids.push(`x${i}`, `y${i}`, `w${i}`);
+    writers.push(`w${i}`);
+    edges.push(
+      { id: `rx${i}`, from: "r", to: `x${i}`, kind: "seq" },
+      { id: `xe${i}`, from: `x${i}`, to: `y${i}`, kind: "error" },
+      { id: `rw${i}`, from: "r", to: `w${i}`, kind: "seq" },
+    );
+  }
+  const spec = graph(ids, writers, edges);
+  (spec.policy as unknown as { expansion: { maxNodes: number } }).expansion.maxNodes = 1000;
+  const t0 = performance.now();
+  const n = concurrent(spec).length;
+  const ms = performance.now() - t0;
+  assert.equal(n, (150 * 149) / 2, "every pair is still refused — none of them is exclusive");
+  assert.ok(ms < 5000, `compile took ${ms.toFixed(0)} ms`);
+});

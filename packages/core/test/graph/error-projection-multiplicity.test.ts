@@ -231,6 +231,46 @@ test("REFUSED, TWO WAYS: a path to the loop's source that bypasses the exiting n
   assert.equal((await run(graph(ids, edges), { audit: () => FAIL })).tasks["r"], 3);
 });
 
+// THE LOOP HEAD'S HALF OF THE TREE RULE, which a reviewer deleted with the suite green: `H` may have
+// the back-edge and at most ONE other inbound edge, and that edge's source must itself arrive once.
+// Each test below breaks one half; `H` fails on its first arrival (the exit fires), succeeds on the
+// late one (the pass goes on), and fails again on the last pass — so `v` gets `v#0` and `v#2`.
+const HEAD_BODIES: Readonly<Record<string, Body>> = { H: (_v, call) => (call === 0 || call === 3 ? FAIL : ok()) };
+const HEAD_LOOP: readonly Edge[] = [
+  { id: "hs", from: "H", to: "S", kind: "seq" },
+  LOOP("S", "H"),
+  { id: "gave-up", from: "H", to: "v", kind: "error" },
+];
+
+test("NECESSARY: a loop head with TWO outside edges runs twice on the entry pass", async () => {
+  const ids = ["P", "q1", "q2", "H", "S", "v"];
+  const edges: Edge[] = [
+    { id: "ph", from: "P", to: "H", kind: "seq" },
+    { id: "pq1", from: "P", to: "q1", kind: "seq" },
+    { id: "q12", from: "q1", to: "q2", kind: "seq" },
+    { id: "q2h", from: "q2", to: "H", kind: "seq" },
+    ...HEAD_LOOP,
+  ];
+  assert.equal(inLoop(ids, edges, "v"), true);
+  const res = await run(graph(ids, edges), HEAD_BODIES);
+  assert.equal(res.tasks["v"], 2, `v#0 and v#2: ${JSON.stringify(res)}`);
+});
+
+test("NECESSARY: a loop head whose ONE outside edge comes from a node that arrives twice", async () => {
+  const ids = ["s", "m1", "m2", "P", "H", "S", "v"];
+  const edges: Edge[] = [
+    { id: "sp", from: "s", to: "P", kind: "seq" },
+    { id: "sm1", from: "s", to: "m1", kind: "seq" },
+    { id: "m12", from: "m1", to: "m2", kind: "seq" },
+    { id: "m2p", from: "m2", to: "P", kind: "seq" },
+    { id: "ph", from: "P", to: "H", kind: "seq" },
+    ...HEAD_LOOP,
+  ];
+  assert.equal(inLoop(ids, edges, "v"), true);
+  const res = await run(graph(ids, edges), HEAD_BODIES);
+  assert.equal(res.tasks["v"], 2, `v#0 and v#2: ${JSON.stringify(res)}`);
+});
+
 test("A ONCE-CLASS ARRIVING BY TWO EDGES is refused: the late arrival re-runs the node at the same iteration", async () => {
   // r is a clean exit target; r -> a -> z and r -> b1 -> b2 -> b3 -> z reach `z` twice, the second
   // arrival after `z` has committed.
@@ -339,4 +379,22 @@ test("CONSERVATIVE, NOT SHOWN NECESSARY: a barrier inside the body keeps the exi
   assert.ok(refused.some((d) => d.code === "GRAPH005_ERROR_PROJECTION_IN_LOOP"), JSON.stringify(refused.map((d) => d.code)));
   const res = await run(spec, { m: () => FAIL });
   assert.deepEqual([res.status, res.tasks["r"]], ["failed", 1], JSON.stringify(res.tasks));
+});
+
+test("UNDECIDABLE (an unmarked cycle beside a loop) answers with base's relation, not with every node", () => {
+  // The fallback said "every node", so a reader of a LOOP-FREE node got GRAPH005_..._IN_LOOP — whose
+  // message says the node is inside or downstream of a loop — beside GRAPH006. Now: the old set.
+  const ids = ["z", "u1", "u2", "H", "S"];
+  const edges: Edge[] = [
+    { id: "a", from: "u1", to: "u2", kind: "seq" },
+    { id: "b", from: "u2", to: "u1", kind: "seq" },
+    { id: "hs", from: "H", to: "S", kind: "seq" },
+    LOOP("S", "H"),
+  ];
+  const r = reader("z");
+  const codes = compile({ spec: graph(ids, [...edges, r.edge], [r.node]), resolver: stubResolver(), tools: {}, tenantCapabilities: [] })
+    .diagnostics.map((d) => d.code);
+  assert.ok(codes.includes("GRAPH006_UNMARKED_CYCLE"), JSON.stringify(codes));
+  assert.equal(inLoop(ids, edges, "z"), false, "z is on no loop and after none");
+  assert.equal(inLoop(ids, edges, "H"), true, "a loop member still is");
 });

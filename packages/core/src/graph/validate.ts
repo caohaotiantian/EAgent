@@ -3834,7 +3834,11 @@ function singleArrival(idx: GraphIndex): ReadonlySet<NodeId> {
  * one — the old refusal's set. What leaves the set is exactly the nodes whose every inbound route
  * from a loop body is a once-exit of one loop, entered once.
  *
- * FAILS CLOSED: an unmarked forward cycle (no topological order) answers "every node".
+ * WHEN IT CANNOT DECIDE — an unmarked forward cycle leaves no topological order — it answers with
+ * the relation it replaced: every node on a loop's cycle or `canPrecede`-reachable from one. That
+ * fails closed for every loop the graph declares, keeps "only ever quieter" true on that branch
+ * too, and keeps GRAPH005's "inside or downstream of a loop body" true of every node it names. (It
+ * answered "every node" first, which put that message on a loop-free node beside GRAPH006.)
  */
 function multiRunNodes(idx: GraphIndex): ReadonlySet<NodeId> {
   const cached = MULTI_RUN.get(idx);
@@ -3847,7 +3851,16 @@ function multiRunNodes(idx: GraphIndex): ReadonlySet<NodeId> {
 function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
   const all = [...idx.byId.keys()];
   if (idx.loopEdges.length === 0) return new Set();
-  if (new Set(idx.topoOrder).size !== all.length) return new Set(all);
+  // Undecidable: the old relation, which base refused on — see the docstring.
+  const onOrAfterLoop = (): Set<NodeId> => {
+    const out = new Set<NodeId>();
+    for (const l of idx.loopEdges) {
+      const cycle = nodesInCycle(idx, l.from, l.to);
+      for (const id of all) if (cycle.has(id) || [...cycle].some((c) => canPrecede(idx, c, id))) out.add(id);
+    }
+    return out;
+  };
+  if (new Set(idx.topoOrder).size !== all.length) return onOrAfterLoop();
   const entries = new Set(idx.entryNodes);
 
   const cycles = idx.loopEdges.map((l) => ({ loop: l, members: nodesInCycle(idx, l.from, l.to) }));
@@ -3954,7 +3967,7 @@ function computeMultiRun(idx: GraphIndex): ReadonlySet<NodeId> {
     return join(vals);
   };
   for (let round = 0; ; round++) {
-    if (round > 2 * all.length + 2) return new Set(all);
+    if (round > 2 * all.length + 2) return onOrAfterLoop();
     let changed = false;
     for (const id of idx.topoOrder) {
       if (onCycle.has(id)) continue;
@@ -5669,52 +5682,79 @@ function routerExclusive(spec: GraphSpec, _idx: GraphIndex, a: NodeId, b: NodeId
  * operator `steer` can overrule; this rests on success and failure, which nothing overrules.
  */
 function outcomeExclusive(idx: GraphIndex, a: NodeId, b: NodeId): boolean {
+  const { candidates, joinReach } = outcomeArms(idx);
+  // No `join` node on a path from `x` to `target`: none that `x` reaches and that reaches `target`.
+  const noJoinBetween = (after: ReadonlySet<NodeId>, target: NodeId): boolean =>
+    !after.has(target) || [...joinReach].every(([j, reach]) => !after.has(j) || !reach.has(target));
+  for (const c of candidates) {
+    for (const [s, f] of [[a, b], [b, a]] as const) {
+      if (c.withoutSuccess.has(s) || c.withoutFailure.has(f)) continue;
+      if (noJoinBetween(c.after, s) && noJoinBetween(c.after, f)) return true;
+    }
+  }
+  return false;
+}
+
+interface OutcomeArms {
+  /** Every `X` that could decide a pair, with the three reachability sets that decide it. */
+  readonly candidates: readonly {
+    readonly withoutSuccess: ReadonlySet<NodeId>;
+    readonly withoutFailure: ReadonlySet<NodeId>;
+    readonly after: ReadonlySet<NodeId>;
+  }[];
+  /** Each `join` node (itself included) and every node it reaches over `flowEdges`. */
+  readonly joinReach: ReadonlyMap<NodeId, ReadonlySet<NodeId>>;
+}
+
+const OUTCOME_ARMS = new WeakMap<GraphIndex, OutcomeArms>();
+
+/**
+ * `outcomeExclusive`'s graph-wide searches, ONCE PER COMPILE and not once per writer pair. None of
+ * them depends on the pair: the first cut recomputed two whole-graph reachabilities per candidate
+ * `X` for every unordered pair of writers, and a reviewer measured 80 writers beside 80 `error`
+ * nodes (241 nodes, under the default `maxNodes`) at 5,965 ms against base's 30 ms, and 150/150 at
+ * 71 s. Precomputed, the per-pair work is set lookups.
+ */
+function outcomeArms(idx: GraphIndex): OutcomeArms {
+  const cached = OUTCOME_ARMS.get(idx);
+  if (cached !== undefined) return cached;
   const single = singleArrival(idx);
-  const reachableWithout = (cut: ReadonlySet<EdgeId>): Set<NodeId> => {
+  const walk = (from: readonly NodeId[], cut?: ReadonlySet<EdgeId>): Set<NodeId> => {
     const seen = new Set<NodeId>();
-    const stack = [...idx.entryNodes];
+    const stack = [...from];
     while (stack.length > 0) {
       const id = stack.pop()!;
       if (seen.has(id)) continue;
       seen.add(id);
-      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation" && !cut.has(e.id)) stack.push(e.to);
+      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation" && cut?.has(e.id) !== true) stack.push(e.to);
     }
     return seen;
   };
-  const noJoinBetween = (x: NodeId, target: NodeId): boolean => {
-    // The nodes on some path from `x` to `target` over `flowEdges` — `target` included, `x` not.
-    const after = new Set<NodeId>();
-    const fwd = (idx.outbound.get(x) ?? []).filter((e) => e.kind !== "compensation").map((e) => e.to);
-    while (fwd.length > 0) {
-      const id = fwd.pop()!;
-      if (after.has(id)) continue;
-      after.add(id);
-      for (const e of idx.outbound.get(id) ?? []) if (e.kind !== "compensation") fwd.push(e.to);
-    }
-    const between = new Set<NodeId>();
-    const back = [target];
-    while (back.length > 0) {
-      const id = back.pop()!;
-      if (between.has(id) || !after.has(id)) continue;
-      between.add(id);
-      for (const e of idx.inbound.get(id) ?? []) if (e.kind !== "compensation") back.push(e.from);
-    }
-    return [...between].every((id) => idx.byId.get(id)?.type !== "join");
-  };
+  const candidates: OutcomeArms["candidates"][number][] = [];
   for (const [x, outs] of idx.outbound) {
     const failure = outs.filter((e) => e.kind === "error");
     if (failure.length === 0 || !single.has(x)) continue;
+    // CONSERVATIVE, NOT SHOWN NECESSARY: an `X` inside a fan-out is refused. Its writers sit in the
+    // fan too and GRAPH010's per-writer check refuses each of them anyway, so no pin can see this.
     const stack = idx.fanoutEdgeStack.get(x);
     if (stack === undefined || stack.length > 0) continue;
     const success = outs.filter((e) => e.kind === "seq" || e.kind === "conditional" || e.kind === "fanout");
-    const withoutSuccess = reachableWithout(new Set(success.map((e) => e.id)));
-    const withoutFailure = reachableWithout(new Set(failure.map((e) => e.id)));
-    for (const [s, f] of [[a, b], [b, a]] as const) {
-      if (withoutSuccess.has(s) || withoutFailure.has(f)) continue;
-      if (noJoinBetween(x, s) && noJoinBetween(x, f)) return true;
-    }
+    const next = outs.filter((e) => e.kind !== "compensation").map((e) => e.to);
+    candidates.push({
+      withoutSuccess: walk(idx.entryNodes, new Set(success.map((e) => e.id))),
+      withoutFailure: walk(idx.entryNodes, new Set(failure.map((e) => e.id))),
+      after: walk(next),
+    });
   }
-  return false;
+  // CONSERVATIVE, NOT SHOWN NECESSARY: a `join` between `X` and a writer refuses the exemption.
+  // Driven without it, the runs stayed exclusive (a static barrier whose member never ran does not
+  // fire), so no pin distinguishes it; it stays because a barrier fires on TERMINATION, which is
+  // not an arm of `X`, and the argument above does not cover it.
+  const joinReach = new Map<NodeId, ReadonlySet<NodeId>>();
+  if (candidates.length > 0) for (const j of idx.joinNodes) joinReach.set(j, walk([j]));
+  const out = { candidates, joinReach };
+  OUTCOME_ARMS.set(idx, out);
+  return out;
 }
 
 // ── GRAPH011 + GRAPH012 ──────────────────────────────────────────────────────
