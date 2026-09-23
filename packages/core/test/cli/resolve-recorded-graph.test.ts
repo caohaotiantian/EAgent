@@ -16,11 +16,22 @@
  *   (c) AN UNRELATED CANDIDATE, published under `resources/subgraph/`, FAILS TO COMPILE — it must
  *       never be named anywhere in the output; the run's own graph still resolves cleanly.
  *
- * `suite freeze`, `promote --against-cohort` and `promote --suite` are NOT in this table: each
- * refuses a cohort under 30 recorded runs (`MIN_COHORT_SIZE`) before ever reaching
- * `resolveRecordedGraph`, and standing that scaffold up three times (or three times per scenario)
- * buys this table nothing the eight verbs below do not already prove about the shared resolver
- * itself — their own by-hash calls are the same three lines `attestExam`'s is, reviewed by hand.
+ * `promote --suite` is NOT in this table, and not because of `MIN_COHORT_SIZE`: it never calls
+ * `resolveRecordedGraph` at all. `--baseline <file>` is loaded loudly with `loadGraph`, like
+ * `--graph` everywhere else in this binary, and its own `graphsByHash(ws)` call builds nothing
+ * but the `published` set `scanForExam` reads for the exam-attestation-provenance check — never a
+ * resolution, never a refusal.
+ *
+ * `suite freeze` and `promote --against-cohort` WERE claimed absent for the same reason
+ * (`MIN_COHORT_SIZE` first) — false for both, and for two different reasons. `promoteAgainstCohort`
+ * always resolved the cohort's own baseline before measuring it; that ordering was never the bug.
+ * `freezeSuite` did NOT — TODO.md §A.91's third fix round (B1) — so a broken or unpublished cohort
+ * graph made `measureCohort` drop the only member and freeze reported "n = 0 … Record more runs",
+ * blaming the operator's corpus for the operator's `graphs/` directory, while the true reason (a
+ * GRAPH015 or GRAPH017 `resolveRecordedGraph` would have named) never reached them. Fixed to the
+ * same order `promoteAgainstCohort` already used. Both are pinned below, cheaply — a single scored
+ * (freeze) or recorded (promote --against-cohort) run reaches the resolver, because it now runs (or
+ * always ran) before `examFor` and the cohort-size floor, not after.
  *
  * MUTATION, AS THE REVIEWER ASKED: making any ONE caller loud (or dropping its call to
  * `announceResolvedGraph`) turns exactly that verb's row red without touching the others — the
@@ -295,6 +306,107 @@ test("(c) AN UNRELATED CANDIDATE UNDER resources/subgraph/ IS NEVER NAMED, and t
       /GRAPH017_CAPABILITY_NOT_GRANTED|GRAPH013_UNKNOWN_TOOL|broken-elsewhere|resources\/subgraph/,
       `exam attest must stay silent about the unrelated candidate:\n${text}`,
     );
+  } finally {
+    w.dispose();
+  }
+});
+
+// ── promote --against-cohort — TODO.md §A.91 B2: it was already right, now pinned ────
+
+/**
+ * A priced, never-dialled adapter — `promoteAgainstCohort`'s two door checks (`ws.models`
+ * defined, no unpriced route) read only this file's SHAPE. Both scenarios below throw at
+ * `resolveRecordedGraph`, before any provider would be called, so this never needs to answer.
+ */
+const PROMOTE_MODELS_FILE = JSON.stringify({
+  adapters: [{ provider: "openai", name: "stub", baseUrl: "http://stub.invalid/v1", apiKeyEnv: null, prices: { m1: { input: 1, output: 1 } } }],
+  routes: { "agent_profile/x@stable": { adapter: "stub", model: "m1" } },
+});
+
+const PICK_FN = `(view) => ({ writes: { picked: (view.get("items") ?? []).slice() } })`;
+
+function pickGraph(opts: { name: string; version: number; ref?: string; warn?: boolean }): unknown {
+  return {
+    apiVersion: "loom.dev/v1",
+    kind: "GraphSpec",
+    metadata: { name: opts.name, project: "lane-d", version: opts.version },
+    policy: { posture: "out", capabilities: [] },
+    channels: {
+      items: { type: "array", reduce: "replace" },
+      // GRAPH013_CLOCK_DEPENDENT when `warn` — a warning, not a refusal, so the graph still
+      // compiles and the run still succeeds.
+      picked: { type: "array", reduce: opts.warn === true ? "last_write_wins_by_ts" : "replace" },
+    },
+    inputs: ["items"],
+    outputs: ["picked"],
+    nodes: [{ id: "pick", type: "function", reads: ["items"], writes: ["picked"], function: { ref: opts.ref ?? "function/pick@stable" } }],
+    edges: [],
+  };
+}
+
+test("PROMOTE --AGAINST-COHORT ANNOUNCES THE COHORT'S OWN GRAPH WARNING — TODO.md §A.91 B2", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "resources", "function", "pick.js"), PICK_FN);
+    writeFileSync(join(w.dir, "graphs", "pick-warn.json"), JSON.stringify(pickGraph({ name: "pick-cohort-warn", version: 1, warn: true })));
+    writeFileSync(join(w.dir, "candidate-warn.json"), JSON.stringify(pickGraph({ name: "pick-cohort-warn", version: 2, warn: true })));
+    writeFileSync(join(w.dir, "models.json"), PROMOTE_MODELS_FILE);
+
+    const recorded = await run(["run", join(w.dir, "graphs", "pick-warn.json"), "--workspace", w.dir, "--input", JSON.stringify({ items: ["a", "b"] })]);
+    assert.equal(recorded.code, 0, recorded.err);
+    const { runId } = JSON.parse(recorded.out) as { runId: string };
+
+    // ONE recorded run, no exam, nowhere near MIN_COHORT_SIZE — the command still fails
+    // downstream. What is pinned here is EARLIER: `promoteAgainstCohort` already resolved the
+    // cohort's own graph before measuring it (this was never the B1 bug), and announces its
+    // warning when it does.
+    const r = await run([
+      "promote", join(w.dir, "candidate-warn.json"),
+      "--against-cohort", runId,
+      "--models-file", join(w.dir, "models.json"),
+      "--workspace", w.dir,
+    ]);
+    assert.match(r.out + r.err, /GRAPH013_CLOCK_DEPENDENT/, `the resolved baseline's own warning must be announced:\n${r.out}${r.err}`);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("PROMOTE --AGAINST-COHORT NAMES THE COHORT'S BROKEN GRAPH, NOT AN EMPTY POPULATION — TODO.md §A.91 B2", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "resources", "function", "pick.js"), PICK_FN);
+    // The candidate reads a DIFFERENT resource than the baseline, so deleting the baseline's own
+    // function below breaks only the cohort's graph — a candidate that also went dark would
+    // refuse at `loadGraph`, before `promoteAgainstCohort` is even reached, and prove nothing
+    // about the resolver this test is pinning.
+    writeFileSync(join(w.dir, "resources", "function", "pick-v2.js"), PICK_FN);
+    writeFileSync(join(w.dir, "graphs", "pick.json"), JSON.stringify(pickGraph({ name: "pick-cohort", version: 1 })));
+    writeFileSync(join(w.dir, "candidate.json"), JSON.stringify(pickGraph({ name: "pick-cohort", version: 2, ref: "function/pick-v2@stable" })));
+    writeFileSync(join(w.dir, "models.json"), PROMOTE_MODELS_FILE);
+
+    const recorded = await run(["run", join(w.dir, "graphs", "pick.json"), "--workspace", w.dir, "--input", JSON.stringify({ items: ["a", "b"] })]);
+    assert.equal(recorded.code, 0, recorded.err);
+    const { runId } = JSON.parse(recorded.out) as { runId: string };
+
+    // THE COHORT'S OWN RESOURCE, DELETED OUT FROM UNDER IT — the same repro B1 used for `suite
+    // freeze`, one verb over.
+    rmSync(join(w.dir, "resources", "function", "pick.js"));
+
+    const r = await run([
+      "promote", join(w.dir, "candidate.json"),
+      "--against-cohort", runId,
+      "--models-file", join(w.dir, "models.json"),
+      "--workspace", w.dir,
+    ]);
+    const text = r.out + r.err;
+    assert.match(text, /GRAPH015_RESOURCE_NOT_FOUND/, `the true reason must reach the operator:\n${text}`);
+    assert.match(text, /graphs[\\/]pick\.json/, `it must name the broken file:\n${text}`);
+    // THIS ORDERING WAS NEVER THE B1 BUG — `promoteAgainstCohort` already resolved the cohort's
+    // graph before `measureCohort` — but it is pinned here for the same reason `suite freeze`'s
+    // is: nothing else in this file drove a broken cohort graph through this verb.
+    assert.doesNotMatch(text, /n = 0 comparable runs/, `must not fall back to the population refusal:\n${text}`);
+    assert.doesNotMatch(text, /Record more runs of this workflow first/, `must not fall back to the population refusal:\n${text}`);
   } finally {
     w.dispose();
   }
