@@ -65,9 +65,9 @@
  *     scope naming a different run than the command did, so the flag cannot be judged without the
  *     RUN ID — which is a positional, not a workspace.
  *
- * Three further rows are `null` and are NOT in that set, because there is nothing there to
- * refuse: `--help` is answered before the door is reached, and `--reason` and `--reject` have no
- * bad shape at all — a bare `--reason` is deliberately the default `"operator"` and a bare
+ * Two further rows are `null` and are NOT in that set, because there is nothing there to
+ * refuse (`--help` used to be a third; it has a reader now, `helpFlag`, TODO.md §H.21): `--reason`
+ * and `--reject` have no bad shape at all — a bare `--reason` is deliberately the default `"operator"` and a bare
  * `--reject` is deliberately the reason "(no reason given)". Both defaults are pinned in
  * `operator-pause.test.ts` against the journal, because three docstrings asserting a default is
  * not the same as one test reading it back.
@@ -251,7 +251,7 @@ const STILL_OPENS_A_WORKSPACE: Readonly<Record<string, { readonly argv: readonly
 };
 
 /** `null` rows that are not in the set above, each because there is nothing to refuse. */
-const NOTHING_TO_REFUSE: readonly string[] = ["help", "reason", "reject"];
+const NOTHING_TO_REFUSE: readonly string[] = ["reason", "reject"];
 
 test("THE OPEN SET IS EXACTLY `FLAGS`' NULL ROWS — so it shrinks with the table, not with this file", () => {
   const src = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
