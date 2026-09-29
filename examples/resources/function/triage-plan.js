@@ -18,8 +18,9 @@
  *    branches, and nothing in the run, the trace or the report says the other six were never read.
  *    A triage report missing a quarter of its evidence is worse than no report, so the count is
  *    checked HERE, where the number is still known and the refusal can name it.
- *  - **The LISTING was truncated.** `fs.glob` caps at 100 paths and says so in a final `… ` line.
- *    Dropping that line and triaging the 100 is the clamp again, one layer up — and this one the
+ *  - **The LISTING was truncated.** `fs.glob` caps at 100 paths and says so on `scan`'s reserved
+ *    `"scan:error"` projection (`truncated: true`), which this node reads — not in the content.
+ *    Triaging the 100 anyway is the clamp again, one layer up — and this one the
  *    ceiling check cannot catch, because 100 arriving under a width of 128 looks like a complete
  *    answer. Unreachable at the shipped width (100 > 24, so the ceiling fires first) and refused
  *    anyway: a guard whose reachability depends on another guard's constant is not a guard.
@@ -49,17 +50,24 @@ function (view, ctx) {
   // that `.trim()` here would hide and that `triage-classify.js`'s anchored regexes would NOT.
   const found = String(view.require("found"));
   const lines = found.split(/\r?\n/).map((line) => line.trim());
-  // `fs.glob`'s truncation marker, which is the ONE line here that must not be quietly dropped.
-  const truncated = lines.filter((line) => line.startsWith("…"));
-  const shards = lines.filter((line) => line !== "" && line !== "(no matches)" && !line.startsWith("…"));
+  const shards = lines.filter((line) => line !== "" && line !== "(no matches)");
 
-  if (truncated.length > 0) {
+  // §A.105: whether the listing was capped is a FACT on `scan`'s reserved projection
+  // (`"scan:error"` in this node's `reads`: `{ok: true, truncated, ...}`), never a line in the
+  // content — `fs.glob` no longer writes one. A projection that cannot say the listing was
+  // complete is a refusal too, because the alternative is triaging a subset as the whole.
+  const scan = view.get("scan:error");
+  if (scan === null || typeof scan !== "object" || scan.ok !== true || scan.truncated !== false) {
+    const cut = scan !== null && typeof scan === "object" && scan.truncated === true;
     return {
       refuse: {
-        reason:
-          "the file listing was TRUNCATED, so these " + shards.length + " paths are not all of them: " +
-          truncated.join(" ") + ". Triaging a capped listing reports a subset of the evidence as if it " +
-          "were the whole. Narrow the pattern until the listing is complete.",
+        reason: cut
+          ? "the file listing was TRUNCATED, so these " + shards.length + " paths are not all of them. " +
+            "Triaging a capped listing reports a subset of the evidence as if it were the whole. " +
+            "Narrow the pattern until the listing is complete."
+          : "cannot tell whether the file listing was complete: \"scan\"'s projection says " +
+            JSON.stringify(scan === undefined ? null : scan) + ", not {ok: true, truncated: false}. " +
+            "Triaging a listing that may be capped reports a subset of the evidence as if it were the whole.",
       },
     };
   }

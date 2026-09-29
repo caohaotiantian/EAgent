@@ -762,6 +762,60 @@ test("§A.97 — a DIRECTORY at an fs.read path keeps its errno, and a regular f
   }
 });
 
+/**
+ * `fs.write` of `pipe` in `root`, IN A CHILD under a wall-clock bound, for the same reason as
+ * `readInChild`. `withReader` opens the FIFO for reading first (non-blocking), so the write-open
+ * SUCCEEDS and it is the `fstat` — not the `ENXIO` of a reader-less open — that must refuse.
+ */
+function writeInChild(root: string, withReader: boolean): { status: number | null; signal: string | null; out: string; err: string } {
+  const tools = new URL("../../src/builtin/tools.ts", import.meta.url).href;
+  const script =
+    `const fs = await import("node:fs");` +
+    (withReader ? `fs.openSync(${JSON.stringify(join(root, "pipe"))}, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);` : ``) +
+    `const { builtinTools } = await import(${JSON.stringify(tools)});` +
+    `const w = builtinTools({ root: ${JSON.stringify(root)}, deny: [] }).find((t) => t.name === "fs.write");` +
+    `const r = await w.execute({ path: "pipe", body: "x" }, { taskId: "t@root#0", signal: new AbortController().signal, progress() {} });` +
+    `process.stdout.write(JSON.stringify({ isError: r.isError === true, code: r.error?.code, cls: r.error?.class, content: r.content, details: r.error?.details }));`;
+  const c = spawnSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8", timeout: 10_000 });
+  return { status: c.status, signal: c.signal, out: c.stdout, err: c.stderr };
+}
+
+for (const withReader of [false, true]) {
+  test(`§A.114 — a FIFO at an fs.write path (${withReader ? "with a reader" : "no reader"}) is refused E_FS_UNREADABLE at once, and never blocks`, { skip: process.platform === "win32" }, () => {
+    const s = sandbox();
+    try {
+      execFileSync("mkfifo", [join(s.root, "pipe")]);
+      const c = writeInChild(s.root, withReader);
+      assert.equal(c.signal, null, `the write BLOCKED and the child was killed by the 10 s bound (${String(c.signal)})`);
+      assert.equal(c.status, 0, c.err);
+      const r = JSON.parse(c.out) as { isError: boolean; code?: string; cls?: string; content: string; details: { errno: string } };
+      assert.equal(r.isError, true);
+      assert.equal(r.code, "E_FS_UNREADABLE", c.out);
+      assert.equal(r.cls, "policy");
+      assert.equal(r.details.errno, "ENOTREG");
+      assert.match(r.content, /a FIFO, not a regular file; refusing to write it/);
+    } finally {
+      s.cleanup();
+    }
+  });
+}
+
+test("§A.114 — the ordinary half: fs.write still overwrites a regular file, truncating it, and creates a new one", async () => {
+  const s = sandbox();
+  try {
+    writeFileSync(join(s.root, "plain.txt"), "a much longer previous body");
+    const write = byName(builtinTools({ root: s.root, deny: [] }), "fs.write");
+    const over = await write.execute({ path: "plain.txt", body: "short" }, ctx());
+    assert.equal(over.isError, undefined);
+    assert.equal(readFileSync(join(s.root, "plain.txt"), "utf8"), "short");
+    assert.equal((over.details as { previous?: string }).previous, "a much longer previous body");
+    await write.execute({ path: "sub/new.txt", body: "fresh" }, ctx());
+    assert.equal(readFileSync(join(s.root, "sub", "new.txt"), "utf8"), "fresh");
+  } finally {
+    s.cleanup();
+  }
+});
+
 // ── §A.99: fs.restore undoes a CREATE, from what fs.write recorded ────────────────────────
 
 test("§A.99 — fs.write RECORDS a create (`created`, a digest of its bytes) and an overwrite (`previous`)", async () => {

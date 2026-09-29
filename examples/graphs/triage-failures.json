@@ -36,7 +36,7 @@
     {
       "id": "plan",
       "type": "function",
-      "reads": ["found"],
+      "reads": ["found", "scan:error"],
       "writes": ["shards"],
       "function": { "ref": "function/triage-plan@stable" }
     },

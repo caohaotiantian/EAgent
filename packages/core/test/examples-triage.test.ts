@@ -276,6 +276,15 @@ test("a pattern matching nothing FAILS the run rather than reporting a clean sui
   }
 });
 
+/** The shipped `scan` node, for the throwaway graphs that feed `triage-plan.js` a real listing. */
+const scanNode = {
+  id: "scan",
+  type: "tool",
+  reads: ["pattern"],
+  writes: ["found"],
+  tool: { name: "fs.glob", version: "1.0", args: { pattern: "${pattern}" } },
+};
+
 // ── the four a fresh review found, three of which REPORTED A GREEN SUITE ──────
 
 test("a CRLF shard is triaged identically to an LF one", async () => {
@@ -455,6 +464,7 @@ test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names t
       metadata: { name: "two-fanouts", project: "examples-test", version: 1 },
       policy: { posture: "on", expansion: { maxNodes: 64, maxDepth: 1, maxFanout: 24, maxLoopIterations: 1 } },
       channels: {
+        pattern: { type: "string", reduce: "replace" },
         found: { type: "string", reduce: "replace" },
         shards: { type: "array", reduce: "replace" },
         wide: { type: "string", reduce: "replace" },
@@ -462,16 +472,18 @@ test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names t
         seenWide: { type: "array", reduce: "append_ordered" },
         seenNarrow: { type: "array", reduce: "append_ordered" },
       },
-      inputs: ["found"],
+      inputs: ["pattern"],
       outputs: ["seenWide", "seenNarrow"],
       nodes: [
-        fn("plan", ["found"], ["shards"], "function/triage-plan@stable"),
+        scanNode,
+        fn("plan", ["found", "scan:error"], ["shards"], "function/triage-plan@stable"),
         fn("a", ["wide"], ["seenWide"], "function/triage-classify@stable"),
         fn("b", ["narrow"], ["seenNarrow"], "function/triage-classify@stable"),
         { id: "joinA", type: "join", reads: ["seenWide"], writes: ["seenWide"], join: { branches: ["a"], mode: "all", onBranchError: "fail" } },
         { id: "joinB", type: "join", reads: ["seenNarrow"], writes: ["seenNarrow"], join: { branches: ["b"], mode: "all", onBranchError: "fail" } },
       ],
       edges: [
+        { id: "e", from: "scan", to: "plan", kind: "seq" },
         { id: "fan-wide", from: "plan", to: "a", kind: "fanout", over: "shards", as: "wide", maxWidth: 9 },
         { id: "fan-narrow", from: "plan", to: "b", kind: "fanout", over: "shards", as: "narrow", maxWidth: 2 },
         { id: "collect-a", from: "a", to: "joinA", kind: "join" },
@@ -482,7 +494,9 @@ test("two fan-outs over one channel: the TIGHTEST binds, and the refusal names t
     writeFileSync(graph, JSON.stringify(spec, null, 2));
 
     // Three paths: under the wide edge's 9, over the narrow edge's 2.
-    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt\nc.txt" })]);
+    mkdirSync(join(ws.dir, "reports"));
+    for (const f of ["a.txt", "b.txt", "c.txt"]) writeFileSync(join(ws.dir, "reports", f), "x\n");
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ pattern: "reports/*.txt" })]);
     assert.notEqual(r.code, 0, `the tightest fan-out must bind:\n${r.out}${r.err}`);
     const error = summary(r)["error"] as Record<string, unknown>;
     assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
@@ -546,8 +560,9 @@ test("a fan-out width that is not a NUMBER is refused BY THE COMPILER, before an
 });
 
 test("a TRUNCATED file listing refuses, rather than triaging the part that fits", async () => {
-  // `fs.glob` caps at 100 paths and appends a `… (truncated at …)` line. The body used to filter
-  // that line out with the blanks, so at any width ≥ 100 it would have triaged 100 shards and the
+  // `fs.glob` caps at 100 paths and says so as `truncated: true` on `scan`'s reserved projection
+  // (§A.105: no marker line in the content any more). A body that ignored that fact would, at any
+  // width ≥ 100, have triaged 100 shards and the
   // report would have called them the whole evidence — the silent clamp one layer above the one
   // this body was written for, and invisible to the ceiling check because 100 < the width.
   //
@@ -574,8 +589,27 @@ test("a TRUNCATED file listing refuses, rather than triaging the part that fits"
     // The refusal quotes the marker back, so the operator sees the cap that produced it rather
     // than a count they would have to work out.
     assert.match(String(error["message"]), /listing was TRUNCATED, so these 100 paths are not all of them/, r.out);
-    assert.match(String(error["message"]), /truncated at 100 files/, r.out);
     assert.equal(existsSync(join(ws.dir, "out", "triage.md")), false);
+  } finally {
+    ws.dispose();
+  }
+});
+
+test("a graph that does not hand the body scan's projection REFUSES, rather than assuming the listing is whole (§A.105)", async () => {
+  // The guard now rests on a read, so the case where the read is absent is reachable: a graph
+  // pointing this body at a node without `"scan:error"` in its `reads`. Guessing "complete" there
+  // would be the silent clamp again.
+  const ws = workspace();
+  try {
+    const raw = JSON.parse(readFileSync(join(ws.dir, GRAPH), "utf8")) as { nodes: { id: string; reads: string[] }[] };
+    const plan = raw.nodes.find((n) => n.id === "plan")!;
+    plan.reads = plan.reads.filter((c) => c !== "scan:error");
+    writeFileSync(join(ws.dir, GRAPH), JSON.stringify(raw, null, 2));
+    const r = await loom(ws.dir, ["run", join(ws.dir, GRAPH), "--input", INPUT]);
+    assert.notEqual(r.code, 0, r.out + r.err);
+    const error = summary(r)["error"] as Record<string, unknown>;
+    assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
+    assert.match(String(error["message"]), /cannot tell whether the file listing was complete/, r.out);
   } finally {
     ws.dispose();
   }
@@ -599,16 +633,25 @@ test("the body REFUSES when it cannot read a width, instead of picking one", asy
       kind: "GraphSpec",
       metadata: { name: "no-fanout", project: "examples-test", version: 1 },
       policy: { posture: "on", expansion: { maxNodes: 8, maxDepth: 1, maxFanout: 4, maxLoopIterations: 1 } },
-      channels: { found: { type: "string", reduce: "replace" }, shards: { type: "array", reduce: "replace" } },
-      inputs: ["found"],
+      channels: {
+        pattern: { type: "string", reduce: "replace" },
+        found: { type: "string", reduce: "replace" },
+        shards: { type: "array", reduce: "replace" },
+      },
+      inputs: ["pattern"],
       outputs: ["shards"],
-      nodes: [{ id: "plan", type: "function", reads: ["found"], writes: ["shards"], function: { ref: "function/triage-plan@stable" } }],
-      edges: [],
+      nodes: [
+        scanNode,
+        { id: "plan", type: "function", reads: ["found", "scan:error"], writes: ["shards"], function: { ref: "function/triage-plan@stable" } },
+      ],
+      edges: [{ id: "e", from: "scan", to: "plan", kind: "seq" }],
     };
     const graph = join(ws.dir, "graphs", "no-fanout.json");
     writeFileSync(graph, JSON.stringify(spec, null, 2));
+    mkdirSync(join(ws.dir, "reports"));
+    for (const f of ["a.txt", "b.txt"]) writeFileSync(join(ws.dir, "reports", f), "x\n");
 
-    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ found: "a.txt\nb.txt" })]);
+    const r = await loom(ws.dir, ["run", graph, "--input", JSON.stringify({ pattern: "reports/*.txt" })]);
     assert.notEqual(r.code, 0, `a body that cannot read its width must refuse:\n${r.out}${r.err}`);
     const error = summary(r)["error"] as Record<string, unknown>;
     assert.equal(error["code"], "E_FUNCTION_REFUSED", r.out);
