@@ -37,35 +37,37 @@ lane plan and the owed-decision table). **Amended 2026-09-24:** that plan's five
 hygiene (§H.16–§H.19) closed, so **the publish is unblocked**. Next, in order: **§A.101**, a
 KERNEL defect (a committed Task re-runs on a late arrival) — then item 31's first slice, item 24's
 fold once Q6 is answered, and the fourth port after the publish (`docs/handoff-2026-09-24.md` §6–§7).
-**Amended 2026-09-29:** the six `wave-0929-*` lanes are merged (`393a48f0` … `d5e4f32a`) — §A.101
+**Amended 2026-09-29:** the seven `wave-0929-*` lanes are merged (`393a48f0` … `7dbecf2b`) — §A.101
 CLOSED, item 24 CLOSED by the fold (Q6), §A.102 and eleven more struck; item 31's first slice
-(Lane L) was in flight at settlement time. Next, in order: **§A.140** — a join whose member feeds
+BUILT (`744e6f8f`, `d8b06631`, merged `7dbecf2b`: §C.1's `loom.compile`, §C.2's `node.type`).
+Next, in order: **§A.140** — a join whose member feeds
 another member never releases and the run says `succeeded`, the fail-open class — with §A.141 (the
 same outcome inside a loop), then the other engine rows, item 31's remainder, and the fourth port
 after the publish (`docs/handoff-2026-09-29.md` §6–§7).
 
 ---
 
-## State — one command each, re-run 2026-09-29 on `d5e4f32a`
+## State — one command each, re-run 2026-09-29 on `7dbecf2b`
 
-Measured by the settlement in a worktree at `d5e4f32a` (the orchestrator's serialized `npm run
-check` there: exit 0, the same numbers); the settlement's own commits change comments and documents
-only, and the tests were re-run at its tip too (`docs/handoff-2026-09-29.md` §1).
+Measured by the settlement on its merge of `7dbecf2b` (Lane L; `d5e4f32a` before it gave 4,415 tests
+and 20 seams); the settlement's own commits change comments and documents only, and the tests were
+re-run at its tip too (`docs/handoff-2026-09-29.md` §1).
 
 | fact | value | command |
 |---|---|---|
 | the gate | **exit 0** (the orchestrator's run; the settlement ran `npm test` and the three guards) | `npm run check` |
-| tests on `loom` | **4,415 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,293 → 4,415) | `npm test` |
+| tests on `loom` | **4,423 pass / 0 fail** (suites 0, cancelled 0, skipped 0, todo 0; 4,293 → 4,415 at `d5e4f32a` → 4,423 at `7dbecf2b`) | `npm test` |
 | pinned exports | **544**, unchanged — `run/served.ts` is new and NOT exported. **LEDGER WATCH, carried**: `POLICY_FIELDS`, `NESTED_FIELDS` and `EDGE_FIELDS` changed SHAPE under unchanged names in earlier waves, and the guard pins names only (`TODO.md` §D.11) | `node scripts/check-surface.mjs` |
-| kernel | 10 files pinned, **20 declared seams** (19 → 20: `be7aef7c`, `feat(replay)`, the replay report carries the shadow journal — §A.29's seam). Kernel files the wave touched: `run/engine.ts`, `run/projection.ts` (§A.101), `run/replay.ts` (§A.102, §A.29, §A.111); the settlement touched `graph/spec.ts`'s comments only. **Seven** of the twenty are written with flush-left continuation lines that `git interpret-trailers --parse` rejects (6 → 7: `be7aef7c` is the seventh) | `node scripts/check-kernel.mjs`; per seam, `git log -1 --format=%B <sha> \| git interpret-trailers --parse` |
+| kernel | 10 files pinned, **21 declared seams** (19 → 21: `be7aef7c`, `feat(replay)`, the replay report carries the shadow journal — §A.29's seam; and `744e6f8f`, `feat(telemetry)`, `task.leased.nodeType` and `run.compiled.durationMs` — item 31). Kernel files the wave touched: `run/engine.ts`, `run/projection.ts` (§A.101), `run/replay.ts` (§A.102, §A.29, §A.111), `journal/events.ts` and `run/engine.ts` again (item 31); the settlement touched `graph/spec.ts`'s comments only. **Eight** of the twenty-one are written with flush-left continuation lines that `git interpret-trailers --parse` rejects (6 → 8: `be7aef7c` and `744e6f8f`) | `node scripts/check-kernel.mjs`; per seam, `git log -1 --format=%B <sha> \| git interpret-trailers --parse` |
 | zero runtime deps | ok, **70 files** (69 → 70: `run/served.ts`) | `node scripts/check-zero-dep.mjs` |
 | NUL census | **5** files carry a NUL byte, **0** are invalid UTF-8, unmoved. The denominator is deliberately not a cell (rule 3) | read every `git ls-files` path; see CLAUDE.md |
-| journal vocabulary | 51 event types, unmoved — §A.101 changed what the fold does with a `task.ready`, not the vocabulary, and §A.29's seam is a field of the replay REPORT, not of the journal | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
+| journal vocabulary | 51 event types, unmoved — §A.101 changed what the fold does with a `task.ready`, not the vocabulary; §A.29's seam is a field of the replay REPORT; item 31 added two FIELDS (`task.leased.nodeType`, `run.compiled.durationMs`), not types | `EVENT_TYPES.length`, asserted in `test/journal/store.test.ts` |
 | error vocabulary | **62 codes**, unmoved — §A.114 answers with the existing `E_FS_UNREADABLE` (and §A.129 says why that name now misleads) | `Object.keys(CODES).length` |
 | README's extensibility ledger | **18** and **3**, both unmoved | the two `sed … \| /usr/bin/grep -a -c` commands in `CLAUDE.md` §2 |
-| README's test floor | **3,500+**, unchanged; the probe counts **4,086** `test(` declarations across **383** files (4,030 / 378 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
+| README's test floor | **3,500+**, unchanged; the probe counts **4,094** `test(` declarations across **385** files (4,030 / 378 last wave) | the Gates row of `README.md`, and `readme-gaps.test.ts`'s own probe |
 
-The kernel guard also prints a commits-judged count (1,022 at `d5e4f32a`; 981 one wave ago). It is
+The kernel guard also prints a commits-judged count (1,022 at `d5e4f32a`, 1,033 at the settlement's
+merge of `7dbecf2b`; 981 one wave ago). It is
 deliberately not a cell above: it moves with every commit, this file's own included — rule 3.
 
 **Every wave lane is merged into `loom`.** `git merge-base --is-ancestor <sha> loom` is the check
@@ -73,10 +75,11 @@ per lane — a merge that REPORTS merged is not evidence the work arrived. The 2
 are `d33d7ca4` (wave-0929-m, the examples' debts and `fs.write`), `89d9a09c` (wave-0929-p, the CLI
 doors and `pack.mjs`), `b0e6a380` (wave-0929-c2, a subgraph's mapping shape), `b10bdefd`
 (wave-0929-n, replay binds successors), `0fd272aa` (wave-0929-f, item 24's fold) and `5486458f`
-(wave-0929-k, §A.101), merged `--no-ff` in that order (`393a48f0`, `be8e3ce9`, `45c8344b`,
-`68b5da77`, `8a6c2eba`, `d5e4f32a`) with zero conflicts — the ELEVENTH wave running; for each,
+(wave-0929-k, §A.101) and `d8b06631` (wave-0929-l, item 31's first slice: `744e6f8f`, `d8b06631`),
+merged `--no-ff` in that order (`393a48f0`, `be8e3ce9`, `45c8344b`, `68b5da77`, `8a6c2eba`,
+`d5e4f32a`, `7dbecf2b`) with zero conflicts — the ELEVENTH wave running; for each,
 `git merge-tree --write-tree <merge>^1 <merge>^2` exits 0 and equals the merge's own tree (re-run
-for this settlement). Lane L (item 31's first slice) was not merged at settlement time.
+for this settlement).
 `docs/handoff-2026-09-29.md` is the current handoff; `docs/handoff-2026-09-24.md` is the one before
 it.
 
@@ -97,9 +100,10 @@ at `bde693e2`, `0a9483c0` and `279b5c73`, by the first two commands above — an
 but struck none — every strike is the settlement's — and **82** after that settlement
 (203 rows, 121 struck: seventeen closed, thirty-three opened, and one of those, §A.124, withdrawn
 by the settlement's review as a false premise); **82** again at `d5e4f32a`, the 2026-09-29 wave's
-merge (203 rows, 121 struck — its lanes closed fourteen rows and struck none), and **86** after that
-settlement (222 rows, 136 struck: fourteen struck, nineteen opened, and one of those, §A.128, filed
-already CLOSED because it opened and closed inside the wave). The 2026-09-22b
+merge (203 rows, 121 struck — its lanes closed fourteen rows and struck none), and **87** after that
+settlement (223 rows, 136 struck: fourteen struck, twenty opened, and one of those, §A.128, filed
+already CLOSED because it opened and closed inside the wave; Lane L's slice moved §C.1 and §C.2 by
+one member each and struck neither). The 2026-09-22b
 assessment added §D.10, §D.11 and §H.15, and **none of the three is new WORK**, but they are not
 new in the same way: **§D.10** collects one question that THREE rows — §A.82, §A.83 and §A.90 —
 were each waiting on separately; **§D.11** is where a question already raised twice in prose gets a
@@ -125,7 +129,7 @@ be wrong without being falsifiable, which is why there are three columns.
 | §A0 | 17 | 15 | 2 | the phase-2-4 merge's remainder, plus what the 2026-09 waves recorded rather than fixed |
 | §A | 144 | 86 | 58 | **2026-09-29: the `wave-0929-*` lanes CLOSED TEN (§A.29 — item 24, by the fold — §A.101, §A.102, §A.105, §A.111 by argument, §A.114, §A.122, §A.125, §A.126, §A.127) and their residue OPENED EIGHTEEN (§A.128–§A.145, §A.128 filed closed), so open went 51 → 58. §A.140 is HIGH and fail-open — a join whose member feeds another member never fires and the run says `succeeded`, pre-existing, excluded by Lane K's oracle "on its own row" when no row existed — and is the next wave's first lane.** **2026-09-24: the `wave-0923-*` lanes CLOSED TWELVE (§A.77, §A.83, §A.85, §A.86, §A.88, §A.91, §A.94–§A.99) and their residue OPENED TWENTY-SEVEN (§A.101–§A.127, the last found by the settlement itself; §A.124 then WITHDRAWN, its premise false), so open went 37 → 51 — the largest rise yet, and by the same mechanism as the last two: every lane was reviewed adversarially, and a reviewer names what a closure left. §A.101 is a KERNEL defect found by building a compiler rule and is the next wave's first lane.** **§A.90 CLOSED 2026-09-23 by `DESIGN.md` D8's phase one — struck on its row, with the binary repro; its review opened FOUR (§A.95–§A.98), two of them residue of the projection and two pre-existing.** **§A.99 opened by the 2026-09-23 settlement** — the veto example says nothing undoes a late reject, and over an existing file the run-failed compensation does. **§A.100 opened after it, by the docs lane** — `loom trace` draws that failed compensation `[ok]`. open defects, unguarded behaviour, two deliberate non-defects recorded so nobody "fixes" them, the FIRST stranger's port (all six closed, F1 with them), three still-open rows from the 2026-09-22 settlement (§A.77, §A.82, §A.83 — the last two now wait on a PRODUCER for a field that exists, §A.90's half having landed 2026-09-23) and ten opened by the 2026-09-22b one (§A.85–§A.94). The 2026-09-22b wave closed FIVE (§A.78, §A.79, §A.80, §A.81, §A.84) and opened TEN, so open went 27 → 32 — **a RISE for the SECOND settlement running, and again the largest in this file's history**, by the same mechanism: five of the ten (§A.90–§A.94) are the THIRD workflow port's friction log, met by a stranger driving the shipped binary, and five (§A.85–§A.89) are residue of the four compiler rows this wave closed, found by probing what the closures now compute. **The five that closed were all rows a stranger could RUN** — which is the argument for the repro discipline rather than for the count |
 | §B | 2 | 2 | 0 | **empty** — declared and wired to nothing, down from 13, and now from 2 |
-| §C | 5 | 2 | 3 | unbuilt observability |
+| §C | 6 | 2 | 4 | unbuilt observability. **2026-09-29: item 31's first slice built §C.1's `loom.compile` and §C.2's `node.type` (`744e6f8f`, `d8b06631`), so C.1 is five names and C.2 seven attributes; §C.6 OPENED (a cache-served child compile records no `durationMs`)** |
 | §D | 11 | 6 | 5 | decisions still owed; two narrow, whether `CODES` belongs on README's fork list, and whether a join's inbound edge must be `kind: join`. §D.9 was answered (a) by the wave orchestrator, not by the maintainer, and says so. **TWO OPENED 2026-09-22b by the settlement's assessment, and neither is new work — each collects a question existing rows were already waiting on separately, and each names those rows**: §D.10 (what a channel carries when a tool fails, truncates or holds a secret — collecting §A.82, §A.83 and §A.90; **ANSWERED 2026-09-22 by the maintainer, option (a), and struck — `DESIGN.md` D8**, which is why struck is 6 and open 5 here) and §D.11 (the shape-break policy for exported kernel constants — raised by §A.62's closing clause and by §State's two LEDGER WATCH cells, which is where §A.81(a)'s repeat of it is recorded) |
 | §E | 8 | 0 | 8 | deferred on purpose, with the reason — do not silently revive |
 | §F | 19 | — | — | properties to preserve; nothing here is "open" |
@@ -3375,7 +3379,7 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
   `history` `replace`, five labels; `node --test packages/core/test/examples-grant.test.ts` → 35
   pass. **A consequence no lane listed**: no shipped example now uses a reducer other than `replace`
   and `append_ordered` — `/usr/bin/grep -arhoE '"reduce": *"[a-z_]+"' examples | sort | uniq -c` →
-  9 `append_ordered`, 81 `replace` — so the "four mechanisms" `CLAUDE.md` credited port 3 with are
+  `9 "reduce": "append_ordered"`, `80 "reduce": "replace"`, `1 "reduce":"replace"` — so the "four mechanisms" `CLAUDE.md` credited port 3 with are
   three; this settlement corrects `CLAUDE.md`, `examples/README.md` (§10 and its table) and dates a
   note into `docs/workflow-port-2026-09-22b.md`. Residue, left:
   `packages/core/test/examples-grant.test.ts:331`'s comment still reasons in `merge_object`. The row as it stood follows. *(Found by this settlement; re-run.)* File:
@@ -3605,32 +3609,65 @@ reproduced on the pre-wave base `2af9716a` by two agents independently, and agai
 **This block gates the UI direction.** A richer operator surface over a plane that is not emitting is
 a better view of nothing.
 
-- **C.1 · Six designed span names are unbuilt.** Repro:
-  `/usr/bin/grep -anc 'name: "loom\.' packages/core/src/telemetry/spans.ts` → 7, and the grep
-  UNDERCOUNTS by two: `loom.model` and `loom.tool` are minted through one ternary, so nine names
-  exist. The constraint is that `spansFrom` is a pure fold over one journal, so a name is buildable
-  only if the journal already covers it — and each of the six names the event it would need:
+- **C.1 · Five designed span names are unbuilt (six until `744e6f8f`).** Repro:
+  `/usr/bin/grep -anc 'name: "loom\.' packages/core/src/telemetry/spans.ts` → **8** (7 before
+  `744e6f8f`), and the grep UNDERCOUNTS by two: `loom.model` and `loom.tool` are minted through one
+  ternary (`spans.ts:1003`), so TEN names exist. The constraint is that `spansFrom` is a pure fold
+  over one journal, so a name is buildable only if the journal already covers it — and each of the
+  five names the event it would need:
   **`loom.request`** (nothing covers ingress; a request is accepted before a runId exists, so it
-  needs a durable stream not keyed on a run); **`loom.compile`** (measured impossible —
+  needs a durable stream not keyed on a run); ~~**`loom.compile`** (measured impossible —
   `run.submitted`/`run.compiled`/`run.started` and the entry `task.ready`s are ONE append with one
   `ts`, and `compileOrThrow` runs in the caller; needs a `durationMs` on `run.compiled`, a kernel
-  change); **`loom.schedule.pick`** (three of its four attributes are scheduler state no event
+  change)~~ **BUILT 2026-09-29, below**; **`loom.schedule.pick`** (three of its four attributes are scheduler state no event
   carries; needs a `schedule.picked` event); **`loom.context.assemble`** (`run/context.ts` journals
   nothing); **`loom.replay`** (the shadow run's journal carries no marker and its `MemoryStateStore`
   dies with the call; needs `replayOf: RunId` on `run.submitted` plus a durable shadow store);
   **`loom.scheduler.tick`** (C.3 — no tick loop to instrument). **Closes** name by name, each with
   the event it names. `loom.schedule.admit` is NOT among them and never will be: §D refused
   admission control permanently, so the name has no subject.
-- **C.2 · Eight of eleven documented span attributes are NOT DERIVABLE, which falsifies this row's
-  own premise rather than shrinking it.** Repro: count both spellings, since `spans.ts` writes
-  `capability` as a bare identifier —
+  **2026-09-29: `loom.compile` BUILT at `744e6f8f` (a `feat:` with a `Kernel-seam:`) and `d8b06631`
+  (Lane L, DESIGN item 31's first slice, merged `7dbecf2b`).** `run.compiled` gains an optional
+  `durationMs` — absent means "not measured" — which the caller supplies as
+  `SubmitInput.compileDurationMs` (`loom run` times `compile()` in `loadGraph`; `#runSubgraph` times
+  a child's compile on a cache miss); a value that is not finite, is negative, or exceeds the clock
+  is dropped (`d8b06631`). `spansFrom` draws `loom.compile` as `[ts - durationMs, ts]` under
+  `loom.run`, only when the field is present. Driven for this settlement on {BIN}, README's
+  `copy.json`:
+  ```
+  $ loom run graphs/copy.json --input '{{"source":"input.txt"}}'   exit=0 status=succeeded
+  $ loom trace <runId>
+  loom.run [ok] 8ms
+    loom.compile [ok] 3ms
+    loom.task read root [ok] 6ms
+    …
+  $ loom trace <runId> --otlp http://127.0.0.1:<port>             exit=0   (a local collector)
+    loom.compile  parent=loom.run  3ms
+  $ loom replay <runId>                                          exit=0 match=true hermetic=true
+  ```
+  Pins: `node --test packages/core/test/telemetry/compile-span-and-node-type.test.ts
+  packages/core/test/telemetry/compile-span-cli.test.ts` → 7 and 1 pass. **Residue, named and not carried as rows,
+  because the field is ABSENT there, never false:** `POST /runs` (`server/http.ts`), `agent.ts`,
+  `loom exam` grading and `promote --against-cohort` compile one graph for many runs and record no
+  `durationMs` — absent is the honest answer; and the span's POSITION is an upper bound (the submit
+  batch's `ts`), only its WIDTH is measured, so an untimed gap of about a millisecond sits between
+  the compile's end and the append. A child compiled by `#childContextFor` first, or a second
+  sibling of the same ref, is §C.6.
+- **C.2 · Seven of eleven documented span attributes are NOT DERIVABLE (eight until `744e6f8f`),
+  which falsifies this row's own premise rather than shrinking it.** Repro: count both spellings,
+  since `spans.ts` writes `capability` as a bare identifier —
   `/usr/bin/grep -aoE '"(gate\.batched|tool\.attempt)"|(^|[^.\w"])capability\s*:' packages/core/src/telemetry/spans.ts`
-  → 3, the three that were journaled fields this fold read and discarded and are now set. The other
-  eight each have a stated reason, and TWO OF THEM MOVED at `bc926f8` (§B.2). `node.type` is now
+  → 3, the three that were journaled fields this fold read and discarded and are now set; with
+  `node\.type` added to the alternation → **4**. The other seven each have a stated reason, and TWO
+  OF THEM MOVED at `bc926f8` (§B.2). ~~`node.type` is now
   UNOBTAINABLE rather than merely unwritten: `task.started` was DELETED, and `task.leased` —
   which records the same MOMENT and is what §A.29 now points at — carries `attempt` and no node
   type, so this attribute needs a new field on an existing event or a new event, not a writer for
-  an existing name;
+  an existing name;~~ **`node.type` BUILT 2026-09-29 at `744e6f8f`** (Lane L, merged `7dbecf2b`):
+  `task.leased` gains `nodeType`, written by its one appender `#runWaveInner` without reordering the
+  append, so its seq is still the fencing token; `spansFrom` sets it on `loom.task` behind a
+  `typeof` guard, so an older journal still traces. Driven with `loom.compile` above: `loom trace
+  --otlp` → `loom.task parent=loom.run node.type=tool`, twice. The seven that remain:
   `budget.cost_usd` (`budget.reserved` carries `remainingUsd` only when a dollar ceiling exists, so
   the ceiling reconstructs on some runs and not others, worse than absent); `reducers`
   (`channel.written` was DELETED at `c816826`, and `state.reduced` carries channels, not reducers);
@@ -3638,7 +3675,7 @@ a better view of nothing.
   the request); `tool.source` (the concept is not in the tree); `loom.replayed` on both its spans (a
   replay rewrites `model.called.provider` to the recorded leaf ON PURPOSE, so a replayed journal is
   designed to be indistinguishable); `gate.posture` (a constant reached by an inference). **Closes
-  when** each of the eight gains the journal event it needs — a `journal/events.ts` change and
+  when** each of the seven gains the journal event it needs — a `journal/events.ts` change and
   therefore a seam, every one — or is struck from the set. **It does not close by emitting them.**
 - **C.3 · No scheduler-tick telemetry, and there is no tick loop to instrument.** Repro:
   `/usr/bin/grep -anc 'tick' packages/core/src/run/scheduler.ts` → **0** (the row said 1; re-run
@@ -3659,6 +3696,13 @@ a better view of nothing.
 - ~~**C.5 · A subgraph renders as `loom.tool`.**~~ CLOSED by `aaa4a9a`, and NOT by adding a name
   (§D.2 answered "no ninth name") — the fold's two-arm partition became three:
   `model|summarize → loom.model`, `tool|compensate → loom.tool`, `subgraph|random → loom.effect`.
+- **C.6 · A child whose compile the cache served records no `durationMs`.** *(Opened 2026-09-29 by
+  the settlement, from Lane L's report; re-run by reading.)* File: `packages/core/src/run/engine.ts`.
+  `#runSubgraph` hands the child's `submit` a `compileDurationMs` only on a compile-cache MISS
+  (`:9806`), so a child first compiled by `#childContextFor` (`:2666`), or the second sibling of the
+  same ref, has no `loom.compile` span. The field is absent, never false. **Closes when** the first
+  compile of each child ref records its duration wherever it happens, or the absence is argued at
+  `#runSubgraph`.
 
 ---
 
@@ -4878,6 +4922,7 @@ names. Ids below the rule are lanes and decisions that closed with no row of the
 | `port-workflow` | `f24bcb7`, `77da881`, `422a730` | `triage-failures` — one real chore ported with no fork, and the eight-entry friction log it produced |
 | `port-workflow-2` | `f43d5a0f` (lane `99be52f6`..`f43d5a0f`) | `harden-config` — a SECOND real workflow ported end to end against the shipped binary with no fork, no `--extension-module` and zero changes under `packages/core/src`: a bounded convergence loop (`loop` + `until` + `maxIterations`, a complementary `conditional` exit, `append_ordered` accumulating across ITERATIONS beside a `replace` projection, `len()` in a stop rule, 8 nodes, 4 function bodies, 11 manifests). `docs/workflow-port-2026-09-22.md` is the commands a stranger runs; **F1–F13 are the product friction and THREE of them are one mechanism** (§A.84), F12 → §A.83, F13 → §A.82. **F14 is the port's own eight defects over four reviews, none found by its author** — every one of them the report asserting something the run had not established, which is the defect class the workflow exists to prevent. Suite `test/examples-harden.test.ts`, 23 tests |
 | `port-workflow-3` | `9ee826a5` (lane `7c203c5d`..`9ee826a5`, merged `86a35a0a`) | `grant-access` — a THIRD real workflow ported end to end against the shipped binary with no fork, no `--extension-module` and zero changes under `packages/core/src`: temporary access to a production resource, ROUTED BY CEREMONY. 13 nodes over four node types (6 `tool`, 5 `function`, 1 `router`, 1 `human_gate`), 14 edges over three kinds (10 `seq`, 3 `conditional`, 1 **`error`**), `merge_object` beside `replace`, 5 `function` bodies, 13 request fixtures. **Four mechanisms no other shipped graph holds**: a `router` with two cases and a `fallbackEdge`, a `kind: "error"` edge, a reducer that is neither `replace` nor `append_ordered`, and a node reached by two mutually exclusive paths that runs exactly once. It overlaps port 1 in `human_gate`/`function`/`tool`/`fs.*`/`seq`/`replace` and port 2 in `conditional` besides. `docs/workflow-port-2026-09-22b.md` is the commands a stranger runs; **SEVEN product friction entries, NONE closed** — F5 → §A.90 (silent data loss, the priority row), F2 → §A.91, F3 → §A.92, F7 → §A.93, F1 → §A.94, F4 a docs gap that `examples/README.md` §10 now fills, F6 the port-2 F9 canonical-form mechanism in a new manifestation (recorded in the log, no row, because port 2's F9 has none either). **§4 is NINE defects in the port's own workflow, and its own table attributes them to the author's mutation sweep (one) and TWO review rounds (six then two), SIX of the nine blocking** — counted from the table here rather than carried, because §5's prose says round one found seven where the table lists six, a disagreement left standing in that doc rather than edited there. A third re-drive then found a TENTH the table does not hold: a sentence in round two's own correction that the table four lines below it contradicted. The shape differs from port 2's F14: five are *a guard nothing distinguishes* (two renewal guards were deletable with the suite green, found by MUTATION and not by reading), and every round's own correction carried a defect of the class it was correcting. First shown by an example here: a failed run's landed `fs.write` is rolled back by `fs.restore` with NO compensation edge, journal-driven. Suite `test/examples-grant.test.ts`, 26 tests |
+| `item-31-slice-1` | `744e6f8f`, `d8b06631` (merged `7dbecf2b`) | `task.leased.nodeType` → `node.type` on `loom.task`; `run.compiled.durationMs` → `loom.compile` under `loom.run` — one member each of §C.2 and §C.1, both rows still open. Residue → §C.6 |
 | `examples-consume` | `b181b55`, `0b3719a`, `f71cd1a`, `aaf4b65`, `76216df` | the ported workflow CONSUMES four of the things this wave built, rather than only no longer suffering them; `docs/workflow-port-2026-09-09.md` §0 is the "Closed since" head |
 
 **The defect class that accounted for nearly every real finding, stated once because it will
