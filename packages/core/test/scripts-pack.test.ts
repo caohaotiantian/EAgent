@@ -18,7 +18,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -218,4 +218,18 @@ test("runPack: a directory nested inside another repository is refused BY NAME â
   const said = lines.join("\n");
   assert.ok(said.includes(realpathSync(outer)), `the refusal must name the repository git resolved (${realpathSync(outer)}):\n${said}`);
   assert.doesNotMatch(said, /does not compile/, "it used to blame a compile of a commit that was never this directory's");
+});
+
+test("pack.mjs RUNS AS A SCRIPT THROUGH A SYMLINKED DIRECTORY â€” it used to exit 0 having done nothing", (t) => {
+  // `import.meta.url` is the realpath, and `isMain` compared it with the unresolved argv[1], so
+  // `node /tmp/.../scripts/pack.mjs` (`/tmp` is a symlink on macOS) was silently not main. A stray
+  // argument is the cheapest proof it ran: main refuses it with exit 2, and a non-main import prints
+  // nothing and exits 0.
+  const dir = mkdtempSync(join(tmpdir(), "loom-pack-link-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const link = join(dir, "scripts-link");
+  symlinkSync(dirname(fileURLToPath(new URL("../../../scripts/pack.mjs", import.meta.url))), link, "dir");
+  const r = spawnSync(process.execPath, [join(link, "pack.mjs"), "--bogus"], { encoding: "utf8" });
+  assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);
+  assert.match(r.stderr, /unknown argument --bogus/);
 });

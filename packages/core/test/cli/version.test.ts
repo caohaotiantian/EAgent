@@ -187,3 +187,20 @@ test("`-h`/`-v` AFTER THE VERB STAY POSITIONALS — the alias is the verb slot's
   assert.equal(parseArgs(["-v"]).flags["version"], true);
   assert.equal(parseArgs(["-h", "1"]).flags["help"], "1");
 });
+
+test("`--help <verb>` STILL PRINTS THE USAGE — base behaviour, kept beside §H.21's refusal", async () => {
+  for (const argv of [["--help", "run"], ["--help", "compile"], ["-h", "run"], ["--help=serve"], ["--help", "help"]]) {
+    const r = await cli(argv);
+    assert.equal(r.code, 0, argv.join(" "));
+    assert.match(r.out, /^loom — graph-native multi-agent orchestration/, argv.join(" "));
+  }
+  // A value that is not a verb name is still refused — including a file name, which cannot be told
+  // from `1`: `compile --help x.json` refuses naming the value (base said "requires a graph file").
+  for (const argv of [["--help", "1"], ["-h", "1"], ["compile", "--help", "x.json"], ["--help", "rn"]]) {
+    await assert.rejects(
+      () => cli(argv),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--help takes no value/.test(e.message),
+      argv.join(" "),
+    );
+  }
+});

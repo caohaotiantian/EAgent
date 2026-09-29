@@ -77,7 +77,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -410,5 +410,8 @@ export function runPack(argv, root = repoRoot) {
   }
 }
 
-const isMain = process.argv[1] !== undefined && pathToFileURL(process.argv[1]).href === import.meta.url;
+// REALPATHS, NOT `pathToFileURL(argv[1])`: `import.meta.url` is the resolved path, so a script run
+// through a symlinked directory (`/tmp` is one on macOS) compared unequal and exited 0 having
+// packed nothing.
+const isMain = process.argv[1] !== undefined && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
 if (isMain) runPack(process.argv.slice(2));

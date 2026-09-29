@@ -763,7 +763,11 @@ function versionFlag(args: Args): boolean {
 function helpFlag(args: Args): boolean {
   const v = args.flags["help"];
   if (v === undefined) return false;
-  if (v !== true) {
+  // A VALUE THAT IS A VERB NAME IS THE `loom --help run` IDIOM, NOT A VALUE — base printed the
+  // usage for it, and `parseArgs` hands the verb over as `--help`'s value. Anything else (`1`,
+  // `yes`, a file name) is still refused: it is the shape §H.21 closed, and a file name cannot be
+  // told from `1`.
+  if (v !== true && !(typeof v === "string" && (v === "help" || dispatchesVerb(v)))) {
     throw err.validation(CODES.E_CONFIG_INVALID, `--help takes no value (got ${JSON.stringify(v)}) — run \`loom --help\` on its own.`);
   }
   return true;
@@ -1581,7 +1585,7 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
  * cosmetic cost, not a forged diagnostic. A homoglyph is a different problem, one name looking
  * like another, and deleting characters is not its answer.
  */
-const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
+const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
 const SPOOFING = new RegExp(`[${SPOOFING_CLASS}]`, "g");
 /**
  * The same set less TAB and NEWLINE, for the diagnostic printer.

@@ -518,7 +518,7 @@ test("PROMOTE --AGAINST-COHORT NAMES THE COHORT'S BROKEN GRAPH, NOT AN EMPTY POP
 
 // ── §A.125 and §A.126 — what the by-hash refusal prints and carries, and when it speaks ──
 
-const BIDI = /[\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const BIDI = /[\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
 
 test("EVERY STRING THE RESOLVER PRINTS OUT OF A FILE IS SANITISED — TODO.md §A.125", async () => {
@@ -594,9 +594,37 @@ test("THE REFUSAL'S STRUCTURED DETAILS CARRY `searched`, THE DIRECTORIES ITS MES
     assert.deepEqual(viaTrace.details?.searched, searched);
     for (const d of searched) assert.ok(viaTrace.message.includes(d), `the message names ${d}`);
 
+    // approve and steer each build their OWN throw from the resolution, so each is pinned.
+    const viaApprove = await thrown(["approve", f.runId, f.gateId, "--as", "u:alice", "--workspace", w.dir]);
+    assert.deepEqual(viaApprove.details?.searched, searched, "approve");
+    const viaSteer = await thrown(["steer", f.runId, "--node", "x", "--take", "e2", "--as", "u:alice", "--workspace", w.dir]);
+    assert.deepEqual(viaSteer.details?.searched, searched, "steer");
+
     writeFileSync(join(w.dir, "resources", "exam.json"), JSON.stringify(EXAM));
     const viaAttest = await thrown(["exam", "attest", join(w.dir, "resources", "exam.json"), "--cohort", f.runId, "--as", "u:alice", "--workspace", w.dir]);
     assert.deepEqual(viaAttest.details?.searched, searched);
+  } finally {
+    w.dispose();
+  }
+});
+
+test("THE RESOLVED-SUCCESS LINE IS SANITISED TOO — TODO.md §A.125", async () => {
+  const w = workspace();
+  try {
+    writeFileSync(join(w.dir, "resources", "function", "pick.js"), PICK_FN);
+    // Name AND file name carry bidi controls, U+061C and an ESC; the graph is the run's own, so the
+    // resolver SUCCEEDS and `recordedGraph` prints "trace: graph <name> ... from <path>".
+    const file = join(w.dir, "graphs", "n\u061c\u202eame\u001b[31m.json");
+    writeFileSync(file, JSON.stringify(pickGraph({ name: "g\u202e\u2066\u061cx", version: 1 })));
+    const started = await run(["run", file, "--workspace", w.dir, "--input", '{"items":[1]}']);
+    assert.equal(started.code, 0, started.err);
+    const { runId } = JSON.parse(started.out) as { runId: string };
+    const traced = await run(["trace", runId, "--workspace", w.dir]);
+    const line = traced.err.split("\n").find((l) => l.startsWith("trace: graph "));
+    assert.ok(line !== undefined, `no resolved-graph line:\n${JSON.stringify(traced.err)}`);
+    assert.doesNotMatch(line!, BIDI, `a bidi control reached the success line:\n${JSON.stringify(line)}`);
+    assert.equal(line!.includes("\u001b"), false, JSON.stringify(line));
+    assert.match(line!, /gx/);
   } finally {
     w.dispose();
   }
