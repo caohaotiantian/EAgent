@@ -500,6 +500,18 @@ export interface ReplayReport {
   readonly original: RunProjection;
   readonly replayed: RunProjection;
   /**
+   * The shadow run's own journal, in seq order — everything `replayed` was folded from.
+   *
+   * THE SEAM, and why a projection was not enough. `replayed` is the FINAL fold: it can say what a
+   * channel ended as, never what it held when a given Task read it. `evolution/gate.ts` needs the
+   * second (`TODO.md` §A.29: three waivers were reverted because they reconstructed what a grader
+   * SAW from the final value and static edges, and a candidate owns both). The shadow lives in a
+   * `MemoryStateStore` that dies with this call, so the events are handed out rather than
+   * re-derived; `run/served.ts` folds a prefix of them with the kernel's own `foldRun`. Nothing in
+   * this file reads it back — it is a report of what ran, not an input to the verdict.
+   */
+  readonly replayedEvents: readonly JournalEvent[];
+  /**
    * Recorded effects the replay never asked for.
    *
    * Non-empty means this replay did not make a call the recording made — because the
@@ -1075,6 +1087,7 @@ export async function replayRun(opts: ReplayOptions): Promise<ReplayReport> {
     frames,
     original,
     replayed,
+    replayedEvents,
     unservedEffects: unserved,
     liveBodies: effects.liveBodies,
     derivedSeeds: effects.derivedSeeds,
@@ -1463,6 +1476,22 @@ function decisionOf(g: GateRecord): Parameters<Engine["resolveGate"]>[1]["decisi
   }
 }
 
+/**
+ * The recording's projection against the shadow's, frame by frame.
+ *
+ * NO JOURNAL COMPATIBILITY BEFORE 0.1.0, and a pre-release journal that replays `match: false` is
+ * not a defect this function owes an excuse for (`TODO.md` §A.111, decided by the maintainer
+ * 2026-09-29). The recording is folded by THIS build's `foldRun`, so when the fold learns a fact —
+ * `TaskRecord.readFacts` at `26a4f358`, or an agent's transcript carrying the in-band truncation note
+ * at `a2f5244a` — a journal written before it folds to a different projection than its own run
+ * held, and the comparison below says so. That is a TRUE statement about two builds, not a false
+ * divergence: the older run really did proceed without the fact. Naming "a build boundary" instead
+ * would need a durable build identity on every journal, which is new vocabulary in
+ * `journal/events.ts` bought for journals that exist only inside this repository — the package is
+ * `private: true` at 0.1.0 and has never been published (`DESIGN.md` item 29), so no operator
+ * holds one. The compatibility promise starts at the first publish; from then on a fold change
+ * that moves an old journal's projection is a breaking change to be versioned, not a row.
+ */
 function compare(original: RunProjection, replayed: RunProjection, effects: ReplayEffects): ReplayFrame[] {
   const frames: ReplayFrame[] = [];
 
