@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { main } from "../../src/cli.ts";
+import { main, parseArgs } from "../../src/cli.ts";
 import { CODES, isLoomError } from "../../src/errors.ts";
 import { VERSION } from "../../src/version.ts";
 
@@ -143,5 +143,64 @@ test("...while the ways to ASK for the usage still get it", async () => {
     const r = await cli(argv);
     assert.equal(r.code, 0, argv.join(" "));
     assert.match(r.out, /^loom — graph-native multi-agent orchestration/, argv.join(" "));
+  }
+});
+
+test("`--help` GIVEN A VALUE IS REFUSED like `--version` — TODO.md §H.21", async () => {
+  // Before: `loom --help 1` and `--help=yes` printed the usage and exited 0, and
+  // `loom run g.json --help 1` ran the verb, because main checked `=== true` and nothing else.
+  for (const argv of [["--help", "1"], ["--help=yes"], ["run", "g.json", "--help", "1"], ["help", "--help", "x"]]) {
+    await assert.rejects(
+      () => cli(argv),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--help takes no value/.test(e.message),
+      argv.join(" "),
+    );
+  }
+});
+
+test("`-h` AND `-v` ARE `--help` AND `--version` IN THE VERB SLOT — TODO.md §H.26", async () => {
+  const h = await cli(["-h"]);
+  assert.equal(h.code, 0);
+  assert.match(h.out, /^loom — graph-native multi-agent orchestration/);
+  const v = await cli(["-v"]);
+  assert.equal(v.code, 0);
+  assert.equal(v.out, `loom ${PKG.version}\n`);
+  // the same value refusal as the long forms, and the same flag-beside-it refusals
+  for (const [argv, re] of [
+    [["-h", "1"], /--help takes no value/],
+    [["-v", "1"], /--version takes no value/],
+    [["-v", "--tokne", "x"], /unknown flag: --tokne/],
+    [["-v", "--port", "1"], /--port is read by `loom serve`/],
+  ] as const) {
+    await assert.rejects(
+      () => cli([...argv]),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && re.test(e.message),
+      argv.join(" "),
+    );
+  }
+});
+
+test("`-h`/`-v` AFTER THE VERB STAY POSITIONALS — the alias is the verb slot's only", () => {
+  // `loom compile -v` names a file called "-v"; the alias must not swallow it.
+  assert.deepEqual(parseArgs(["compile", "-v"]).positional, ["-v"]);
+  assert.equal(parseArgs(["compile", "-v"]).command, "compile");
+  assert.equal(parseArgs(["-v"]).flags["version"], true);
+  assert.equal(parseArgs(["-h", "1"]).flags["help"], "1");
+});
+
+test("`--help <verb>` STILL PRINTS THE USAGE — base behaviour, kept beside §H.21's refusal", async () => {
+  for (const argv of [["--help", "run"], ["--help", "compile"], ["-h", "run"], ["--help=serve"], ["--help", "help"]]) {
+    const r = await cli(argv);
+    assert.equal(r.code, 0, argv.join(" "));
+    assert.match(r.out, /^loom — graph-native multi-agent orchestration/, argv.join(" "));
+  }
+  // A value that is not a verb name is still refused — including a file name, which cannot be told
+  // from `1`: `compile --help x.json` refuses naming the value (base said "requires a graph file").
+  for (const argv of [["--help", "1"], ["-h", "1"], ["compile", "--help", "x.json"], ["--help", "rn"]]) {
+    await assert.rejects(
+      () => cli(argv),
+      (e: unknown) => isLoomError(e) && e.code === CODES.E_CONFIG_INVALID && /--help takes no value/.test(e.message),
+      argv.join(" "),
+    );
   }
 });

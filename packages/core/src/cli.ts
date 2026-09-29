@@ -670,9 +670,8 @@ export function resourceRefsIn(text: string): readonly string[] {
  *     name and neither costs a directory for being given with no value. Both defaults are pinned
  *     against the JOURNAL in `operator-pause.test.ts`, because this paragraph is the argument for
  *     leaving them open and an argument nothing checks is how `String(true)` gets back in.
- *   - ANSWERED BEFORE THE DOOR: `--help`. `main` prints the usage and returns above every check
- *     here, so a reader would never be reached. (`--version` is answered there too, but through
- *     its reader `versionFlag`, because a VALUE given to it must refuse rather than vanish.)
+ *   - (`--help` and `--version` are answered before the door, but each through its reader —
+ *     `helpFlag`, `versionFlag` — because a VALUE given to either must refuse rather than vanish.)
  *   - ARGV GENUINELY CANNOT DECIDE IT: `--as` and `--cohort` (more readers than one), and
  *     `--scope` — `ceilingScope(args, runId)` refuses a scope naming a different run than the
  *     command did, so the RUN ID is needed and that is a positional. These THREE are what still
@@ -697,7 +696,7 @@ const FLAGS: Readonly<Record<string, ((args: Args) => unknown) | null>> = {
   "extension-module": extensionModulePaths,
   grant: grantFlag,
   graph: graphFlag,
-  help: null,
+  help: helpFlag,
   host: httpHost,
   "identity-file": identityFile,
   input: runInputs,
@@ -748,18 +747,28 @@ const KNOWN_FLAGS: readonly string[] = Object.keys(FLAGS);
  * draft of this flag: `loom run g.json --version 1` ran the graph and exited 0, where before the
  * flag existed the same line was refused as unknown.
  *
- * `--help` HAS THE SAME HOLE, AND IT IS STILL OPEN. `main` checks `args.flags["help"] === true` and
- * nothing else — there is no `helpFlag`-shaped reader that refuses a VALUE the way `versionFlag`
- * does here — so `loom run g.json --input … --help 1` and `--help=yes` both still RUN THE VERB AND
- * EXIT 0: `args.flags["help"]` is the string `"1"` or `"yes"`, `=== true` is false, and nothing
- * downstream refuses a KNOWN flag holding a value nobody reads. `loom --version 1` refuses the same
- * shape of value; `--help` does not. Residue, to be filed.
+ * `--help` NOW HAS THE SAME REFUSAL through `helpFlag` below — TODO.md §H.21. It used to check
+ * `=== true` alone, so `loom --help 1`, `--help=yes` and `loom run g.json --help 1` ran the verb (or
+ * printed the usage) and exited 0 with the value dropped.
  */
 function versionFlag(args: Args): boolean {
   const v = args.flags["version"];
   if (v === undefined) return false;
   if (v !== true) {
     throw err.validation(CODES.E_CONFIG_INVALID, `--version takes no value (got ${JSON.stringify(v)}) — run \`loom --version\` on its own.`);
+  }
+  return true;
+}
+
+function helpFlag(args: Args): boolean {
+  const v = args.flags["help"];
+  if (v === undefined) return false;
+  // A VALUE THAT IS A VERB NAME IS THE `loom --help run` IDIOM, NOT A VALUE — base printed the
+  // usage for it, and `parseArgs` hands the verb over as `--help`'s value. Anything else (`1`,
+  // `yes`, a file name) is still refused: it is the shape §H.21 closed, and a file name cannot be
+  // told from `1`.
+  if (v !== true && !(typeof v === "string" && (v === "help" || dispatchesVerb(v)))) {
+    throw err.validation(CODES.E_CONFIG_INVALID, `--help takes no value (got ${JSON.stringify(v)}) — run \`loom --help\` on its own.`);
   }
   return true;
 }
@@ -828,6 +837,15 @@ export function parseArgs(argv: readonly string[]): Args {
       flags[name] = next;
       i++;
     }
+  }
+  // `-h` AND `-v` ARE `--help` AND `--version` WHEN THEY ARE THE VERB — TODO.md §H.26. Only in the
+  // verb slot: a later positional spelled `-v` stays a positional. The next positional, if any, is
+  // taken as the flag's VALUE so `-h 1` refuses exactly as `--help 1` does.
+  const alias = positional[0] === "-h" ? "help" : positional[0] === "-v" ? "version" : undefined;
+  if (alias !== undefined) {
+    const value = positional[1];
+    positional.splice(0, value === undefined ? 1 : 2);
+    if (flags[alias] === undefined) flags[alias] = value ?? true;
   }
   return { command: positional[0] ?? "help", positional: positional.slice(1), flags, repeated };
 }
@@ -1567,7 +1585,7 @@ function otlpHeaders(env: Readonly<Record<string, string | undefined>>): Record<
  * cosmetic cost, not a forged diagnostic. A homoglyph is a different problem, one name looking
  * like another, and deleting characters is not its answer.
  */
-const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
+const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
 const SPOOFING = new RegExp(`[${SPOOFING_CLASS}]`, "g");
 /**
  * The same set less TAB and NEWLINE, for the diagnostic printer.
@@ -5948,7 +5966,7 @@ function subgraphDirs(): readonly string[] {
  * at each call site would be the second spelling `compiledFile`'s own docstring warns against.
  */
 function announceResolvedGraph(files: ReadonlyMap<string, string>, diagnostics: ReadonlyMap<string, readonly Diagnostic[]>, wanted: string): void {
-  const where = basename(files.get(wanted) ?? "?");
+  const where = sanitizeDiagnosticMessage(basename(files.get(wanted) ?? "?"));
   for (const d of diagnostics.get(wanted) ?? []) writeDiagnostic(`! ${where}: ${d.code}: ${d.message}`, 2);
 }
 
@@ -6030,6 +6048,12 @@ interface RecordedGraphResolution {
   readonly files: ReadonlyMap<string, string>;
   readonly failed: readonly FailedCandidate[];
   /**
+   * The directories the sweep walked, absolute — the list `refusal` names, structured. TODO.md
+   * §A.126: `details.searched` (a count, then) was dropped when the eleven print sites became one
+   * resolver, and a caller reading a thrown refusal's `details` lost what the sentence still said.
+   */
+  readonly searched: readonly string[];
+  /**
    * Whether ANY failed candidate carries `GRAPH017_CAPABILITY_NOT_GRANTED` — TODO.md §A.91, the
    * reviewer's third fix round (N4), keyed structurally since the fifth (see `FailedCandidate`).
    * No caller branches on this any more: the fourth fix round (X1) moved the grant advice it gated
@@ -6043,18 +6067,20 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
   const { index, files, failed, diagnostics } = graphsByHash(ws);
   const capabilityIssue = failed.some((f) => f.codes.includes("GRAPH017_CAPABILITY_NOT_GRANTED"));
   const found = index.get(wanted);
+  const dirs = ["graphs", ...subgraphDirs()].filter((d) => existsSync(join(ws.root, d)));
+  const searchedDirs = dirs.map((d) => join(ws.root, d));
   if (found !== undefined) {
     announceResolvedGraph(files, diagnostics, wanted);
-    return { graph: found, index, files, failed, capabilityIssue };
+    return { graph: found, index, files, failed, searched: searchedDirs, capabilityIssue };
   }
   // ONLY THE DIRECTORIES THAT EXIST — TODO.md §A.91, the reviewer's third fix round (N3).
   // `indexGraphs` already skips a directory that is not there (`existsSync` guards its walk);
   // naming `resources/graph` as "searched" when this workspace never published one is the same
   // false claim the row's own history keeps finding a new shape of.
-  const dirs = ["graphs", ...subgraphDirs()].filter((d) => existsSync(join(ws.root, d)));
-  const searched = dirs.length === 0 ? `${ws.root} (no graphs/ or resources/{subgraph,graph} directory exists)` : dirs.map((d) => join(ws.root, d)).join(", ");
+  const searched = dirs.length === 0 ? `${ws.root} (no graphs/ or resources/{subgraph,graph} directory exists)` : searchedDirs.join(", ");
   const others = [...index.values()].map(
-    (g) => `${files.get(g.graphHash) ?? "?"} ${g.spec.metadata.name} v${String(g.spec.metadata.version)} (${g.graphHash})`,
+    (g) =>
+      sanitizeDiagnosticMessage(`${files.get(g.graphHash) ?? "?"} ${g.spec.metadata.name} v${String(g.spec.metadata.version)}`) + ` (${g.graphHash})`,
   );
   // "SEARCHING X: ..." RATHER THAN "X ... IT ...", so the sentence needs no pronoun standing in
   // for a comma-joined list of paths — TODO.md §A.91, the reviewer's third fix round (N3's other
@@ -6095,7 +6121,7 @@ function resolveRecordedGraph(ws: Workspace, wanted: string): RecordedGraphResol
         `RUN had: a graph declaring net:fetch needs the same --egress, and one declaring proc:exec the same ` +
         `--allow-exec`
       : "");
-  return { refusal, index, files, failed, capabilityIssue };
+  return { refusal, index, files, failed, searched: searchedDirs, capabilityIssue };
 }
 
 /**
@@ -6144,7 +6170,7 @@ function noGuessAdvice(): string {
  */
 function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string | undefined): void {
   if (wanted === undefined) return;
-  const { graph, refusal, failed } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, failed, searched } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     ws.engine.attach(runId, graph);
     return;
@@ -6161,7 +6187,7 @@ function bindRecordedGraphOrExplain(ws: Workspace, runId: RunId, wanted: string 
   throw err.notFound(
     CODES.E_RUN_NOT_FOUND,
     `run ${runId} compiled graph ${wanted}, and ${refusal}. ${noGuessAdvice()}`,
-    { details: { runId, graphHash: wanted, failed: failed.map((f) => f.text) } },
+    { details: { runId, graphHash: wanted, searched, failed: failed.map((f) => f.text) } },
   );
 }
 
@@ -6997,8 +7023,15 @@ const MAX_DIAGNOSTIC_MESSAGE_LEN = 200;
  * summary meant to name several.
  */
 function sanitizeDiagnosticMessage(s: string): string {
-  const stripped = s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
-  return stripped.length > MAX_DIAGNOSTIC_MESSAGE_LEN ? `${stripped.slice(0, MAX_DIAGNOSTIC_MESSAGE_LEN)}…` : stripped;
+  // TODO.md §A.125. The class is `SPOOFING_CLASS` — spelled once, beside `legible()` — so the bidi
+  // controls (U+202A-202E, U+2066-2069, U+200E/F) and the line separators U+2028/2029 go with C0/C1
+  // rather than a second copy of the list drifting. The cap counts CODE POINTS: a UTF-16 `slice`
+  // could cut a surrogate pair in half and print a lone surrogate. EVERY string the by-hash resolver
+  // prints out of a candidate FILE goes through here — its path, its `metadata.name`, a parser
+  // message quoting the file's bytes — not just the first diagnostic's message.
+  const stripped = s.replace(SPOOFING, "");
+  const points = Array.from(stripped);
+  return points.length > MAX_DIAGNOSTIC_MESSAGE_LEN ? `${points.slice(0, MAX_DIAGNOSTIC_MESSAGE_LEN).join("")}…` : stripped;
 }
 
 /**
@@ -7058,7 +7091,7 @@ function indexGraphs(ws: Workspace, dirs: readonly string[], silent = false): Gr
         // WHETHER ANY of a candidate's error diagnostics is GRAPH017_CAPABILITY_NOT_GRANTED, and a
         // candidate can carry several; keying on `codes[0]` alone would miss one listed second.
         const codes = allDiagnostics.map((d) => d.code);
-        const text = `${join(rel, file)}: ${(e as Error).message}${first === undefined ? "" : ` — ${sanitizeDiagnosticMessage(first.message)}`}`;
+        const text = `${sanitizeDiagnosticMessage(join(rel, file))}: ${sanitizeDiagnosticMessage((e as Error).message)}${first === undefined ? "" : ` — ${sanitizeDiagnosticMessage(first.message)}`}`;
         failed.push({ path: join(rel, file), text, codes });
       }
     }
@@ -7299,11 +7332,11 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
       { details: { runId } },
     );
   }
-  const { graph, refusal, files, failed } = resolveRecordedGraph(ws, wanted);
+  const { graph, refusal, files, failed, searched } = resolveRecordedGraph(ws, wanted);
   if (graph !== undefined) {
     // SAY WHAT IT RESOLVED. A verb that silently picks a file out of a directory is a verb whose
     // output an operator cannot check; `approve` and `audit` both name what they found.
-    process.stderr.write(`${verb}: graph ${named(graph)} — the hash run ${runId} recorded, from ${files.get(wanted) ?? "?"}\n`);
+    process.stderr.write(`${verb}: graph ${sanitizeDiagnosticMessage(named(graph))} — the hash run ${runId} recorded, from ${sanitizeDiagnosticMessage(files.get(wanted) ?? "?")}\n`);
     return graph;
   }
   // THE GRANT ADVICE IS ALREADY IN `refusal` WHEN IT APPLIES — TODO.md §A.91, the reviewer's
@@ -7318,7 +7351,7 @@ async function recordedGraph(ws: Workspace, args: Args, runId: RunId, verb: stri
     CODES.E_RUN_NOT_FOUND,
     `run ${runId} compiled graph ${wanted}, and ${refusal}. ` +
       `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without publishing it.`,
-    { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
+    { details: { runId, graphHash: wanted, searched, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
   );
 }
 
@@ -8911,7 +8944,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
   // `--tokne` believing it configured something learns nothing from either printout unless this
   // one runs first.
   assertKnownFlags(args);
-  if (args.flags["help"] === true) {
+  if (helpFlag(args)) {
     process.stdout.write(USAGE);
     return 0;
   }
@@ -9236,7 +9269,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // ONE RESOLVER — TODO.md §A.91's second fix round. `resolveRecordedGraph` does the
             // silent sweep and announces this graph's own warnings when it matches; the highest-
             // consequence command in the product must not approve one whose diagnostics it hid.
-            const { graph: found, refusal, failed } = resolveRecordedGraph(ws, wanted);
+            const { graph: found, refusal, failed, searched } = resolveRecordedGraph(ws, wanted);
             if (found !== undefined) {
               ws.engine.attach(runId, found);
               // AND RE-ARM ITS CLOCK. Attaching binds the graph; it does not restore the gate's
@@ -9258,7 +9291,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
                   `${noGuessAdvice()} Pass --graph explicitly to point at a candidate outside graphs/ without ` +
                   `publishing it, or \`loom cancel ${runId} --as ID\` to stop the run, which needs no graph. ` +
                   `NOT --reject: a rejected gate runs the graph's error edges, so it binds like an approval does`,
-                { details: { runId, graphHash: wanted, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
+                { details: { runId, graphHash: wanted, searched, ...(failed.length === 0 ? {} : { failed: failed.map((f) => f.text) }) } },
               );
             }
           }
@@ -10923,18 +10956,6 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
   const attester = attesterFlag(args);
   const anchorId = examCohortFlag(args);
 
-  const exam = loadGraph(ws, file, true);
-  const shape = examShape(exam);
-  if (shape.length > 0) {
-    throw err.validation(
-      CODES.E_CONFIG_INVALID,
-      `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
-        `inputs, NAMES every one of the GRADED channels in some node's \`reads\` or a fanout's \`over\` ("subject" ` +
-        `excepted), has exactly one output "verdict", and runs deterministic bodies ending in an ` +
-        `evaluator{kind:"assertion"} that writes it.`,
-    );
-  }
-
   const anchorEvents = await journalOf(ws, anchorId);
   if (anchorEvents.length === 0) {
     process.stderr.write(`no journal for run ${anchorId} in this workspace (${ws.root}), so it names no workflow\n`);
@@ -10957,8 +10978,25 @@ async function attestExam(ws: Workspace, args: Args): Promise<number> {
         `--cohort names a RECORDING — a run of a graph published in graphs/ — because the exam's inputs are checked ` +
         `against that graph's declared inputs and outputs. A candidate run or an exam run is not one; name a ` +
         `recording. ${noGuessAdvice()}`,
+      { details: { runId: anchorId, graphHash: anchorT.cohort.graphHash, searched: resolved.searched } },
     );
   }
+  // THE EXAM IS LOADED AND SHAPED AFTER THE COHORT'S GRAPH RESOLVES — TODO.md §A.126. It used to
+  // come first, so a malformed exam answered "not an exam" over a cohort whose graph was missing,
+  // and the operator fixed the exam only to meet the refusal that was already true. `suite freeze`
+  // resolves first for the same reason.
+  const exam = loadGraph(ws, file, true);
+  const shape = examShape(exam);
+  if (shape.length > 0) {
+    throw err.validation(
+      CODES.E_CONFIG_INVALID,
+      `${basename(file)} is not an exam: ${shape.join("; ")}. An exam declares "subject" and the channels it grades as ` +
+        `inputs, NAMES every one of the GRADED channels in some node's \`reads\` or a fanout's \`over\` ("subject" ` +
+        `excepted), has exactly one output "verdict", and runs deterministic bodies ending in an ` +
+        `evaluator{kind:"assertion"} that writes it.`,
+    );
+  }
+
   const problems = attestationProblems(exam.spec, baseline.spec);
   if (problems.length > 0) {
     throw err.validation(
@@ -11588,6 +11626,7 @@ async function freezeSuite(ws: Workspace, args: Args): Promise<number> {
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The ` +
         `expectations exclude every channel an evaluator node wrote, and node types live in the spec — without it ` +
         `this would freeze an exam that grades the grader. ${noGuessAdvice()}`,
+      { details: { runId: anchorId, graphHash: anchorT.cohort.graphHash, searched: resolvedBaseline.searched } },
     );
   }
   // NO EXAM, NO FREEZE. `golden` is what selects a must-pass case, and without an attested exam
@@ -12123,6 +12162,7 @@ async function promoteAgainstCohort(ws: Workspace, args: Args, candidate: RunGra
       CODES.E_RUN_NOT_FOUND,
       `cohort "${key}" was produced by graph ${anchorT.cohort.graphHash}, and ${resolvedBaseline.refusal}. The baseline is ` +
         `derived from the cohort rather than passed in, so it has to be publishable. ${noGuessAdvice()}`,
+      { details: { runId: anchorId, graphHash: anchorT.cohort.graphHash, searched: resolvedBaseline.searched } },
     );
   }
   // NO MEASUREMENT THE CANDIDATE CANNOT WRITE, NO LIVE PROMOTION. Both sides of every pair below

@@ -477,7 +477,7 @@ async function compileNamed(dir: string, file: string, tty: number | "pipe"): Pr
  * this file becomes the CHARACTER it denotes — which is how an unterminated string constant got
  * here once already.
  */
-const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
+const SPOOFING_CLASS = "\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069";
 const SPOOFING_ANY = new RegExp("[" + SPOOFING_CLASS + "]");
 const SPOOFING_BUT_WHITESPACE = new RegExp("(?![\\t\\n])[" + SPOOFING_CLASS + "]");
 
