@@ -831,3 +831,58 @@ for (const par of [1, 2, 4]) {
     assert.ok(at("task.committed", "m@root#0") > 0 && at("task.committed", "m@root#0") < at("task.ready", "J@root#0"), "J released before its member m arrived");
   });
 }
+
+// ── 13 · a barrier upstream that is HELD holds everything behind it ─────────
+
+/**
+ * `start→m -join→ J1(all) → y -join→ J2(onBranchError:"fail")`, `start→f(throws) -join→ J2`,
+ * `J2 → deploy` (and, in the error-arm variant, `J2 -error→ handler`). f fails unhandled, so the
+ * run is bound to fail on a node that is NOT a member of J1, and `#failingOutside` holds J1. The
+ * pass then moved on down the ancestry order and released J2 — which folded without `y` ever
+ * running, and whose error arm would fire on that verdict. Base released J1, ran `y`, then J2.
+ * Upstream-first has to be total: a barrier is not released while a barrier upstream of it that
+ * something has ARRIVED at is still unreleased, whatever holds it. (Lane K's independent review
+ * on the merged preview.)
+ */
+for (const errorArm of [false, true]) {
+  for (const par of [1, 4]) {
+    test(`13 · a barrier behind a HELD barrier is not released${errorArm ? " — and its error arm does not fire" : ""} (maxParallelism ${par})`, async () => {
+      const ids = ["start", "m", "y", "f", "deploy", ...(errorArm ? ["handler"] : [])];
+      const spec = graphSpec(
+        "held-upstream",
+        ids.map((id) => fn(id)),
+        [
+          ["sm", "start", "m"],
+          ["sf", "start", "f"],
+          ["j1y", "J1", "y"],
+          ["j2d", "J2", "deploy"],
+          ...(errorArm ? ([["j2h", "J2", "handler", "error"]] as [string, string, string, string?][]) : []),
+        ],
+      ) as unknown as { nodes: unknown[]; edges: unknown[] };
+      spec.nodes.push(
+        { id: n("J1"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("m")], mode: "all", onBranchError: "skip" } },
+        { id: n("J2"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("y"), n("f")], mode: "all", onBranchError: "fail" } },
+      );
+      spec.edges.push(
+        { id: "jm", from: n("m"), to: n("J1"), kind: "join", branches: [n("m")] },
+        { id: "jy", from: n("y"), to: n("J2"), kind: "join", branches: [n("y"), n("f")] },
+        { id: "jf", from: n("f"), to: n("J2"), kind: "join", branches: [n("y"), n("f")] },
+      );
+      const store = new MemoryStateStore({ now: () => NOW });
+      const engine = engineFor(store, ids, { f: () => { throw new Error("f fails"); } }, par);
+      const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+      const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+      const p = await engine.advance(runId);
+      assert.equal(p.status, "failed", "f's failure fails the run, as on base");
+      const j = await journal(store, runId);
+      const at = (type: string, taskId: string): number => j.find((ev) => ev.type === type && ev.taskId === taskId)?.seq ?? -1;
+      const j2 = at("task.ready", "J2@root#0");
+      const y = at("task.committed", "y@root#0");
+      assert.ok(j2 === -1 || (y > 0 && y < j2), `J2 released before its member y ran (J2 ready @${j2}, y committed @${y})`);
+      if (errorArm) {
+        const handler = at("task.committed", "handler@root#0");
+        assert.ok(handler === -1 || (y > 0 && y < handler), "J2's error arm fired on a verdict y never contributed to");
+      }
+    });
+  }
+}

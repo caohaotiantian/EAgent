@@ -12704,8 +12704,24 @@ export class Engine {
   }
 
   /**
-   * True when the run is bound to fail on a Task that is NOT a member of this barrier — and so the
-   * barrier must not release: the work behind it would start in a run `#finish` will fail.
+   * THE POLICY: NOTHING RELEASES WHILE THE RUN IS BOUND TO FAIL ON A NON-MEMBER. True when
+   * `#failuresThatFailTheRun` — `#finish`'s own predicate — holds a Task that is not a member of
+   * this barrier; `#releaseSettledBarriers` then releases neither this barrier nor anything behind
+   * it.
+   *
+   * IT IS FAIL-CLOSED, AND IT CHANGES WHICH SIDE EFFECTS A DOOMED RUN PERFORMS — said plainly
+   * because it is a behaviour, not a refactor. The run's outcome is not moved (it fails either way,
+   * on the same Task's error); what moves is whether the work behind a barrier starts on the way
+   * there, and that now depends on WHEN the failure lands relative to the release. Measured on
+   * `start→x(throws)` beside `start→a, start→b`, `a,b -join→ J -seq→ deploy`:
+   *
+   *     par 1: start,a,b,J,x,deploy — J released before x failed; `deploy` COMMITS (as on base)
+   *     par 4: start,a,b,x          — x failed in the same wave; `deploy` does NOT (base: it did)
+   *
+   * So the same graph deploys at one width and not at another. The alternative — releasing on a
+   * run already known to fail — performs an effect the run's own verdict disowns, and refusing is
+   * the direction a guard here may err in. What would make it width-independent is failing fast (no
+   * new work at all once the run is bound to fail); that is a larger policy, and not this one.
    *
    * A MEMBER's failure is excluded on purpose. Under `onBranchError: "fail"` a failed member is the
    * barrier's to judge — `#foldJoin` refuses with its own error — and suppressing the release would
@@ -12723,9 +12739,11 @@ export class Engine {
    * coordinate — releases when (a) at least one MEMBER Task exists at or under that parent,
    * (b) `barrierReleases` holds on the counts `#joinArrivals` reads, with "quiescent" meaning no
    * Task at or under the parent in a LIVE state (anything `isTerminalTaskState` says is not over)
-   * belongs to a node that is, or statically reaches, a member, and (c) the run is not bound to
-   * fail on a NON-member (`#failingOutside`). All three are read off the projection AFTER every
-   * commit so far, at the top of each pass of the drive loop, before "nothing is ready, finish".
+   * belongs to a node that is, or statically reaches, a member, (c) the run is not bound to fail on
+   * a NON-member (`#failingOutside`), and (d) no join node upstream of it is held by (c), directly
+   * or behind another held one. All four are read off the projection
+   * AFTER every commit so far, at the top of each pass of the drive loop, before "nothing is
+   * ready, finish".
    *
    * WHY ONE ASKER — §A.101, and three measured failures of having two. Until then a barrier was
    * asked at a MEMBER's commit, from the projection BEFORE that member's append, and nowhere else:
@@ -12769,9 +12787,28 @@ export class Engine {
     // The live Tasks, once: in a settled run a handful, where `all` is every Task the run made.
     const liveTasks = all.filter((t) => !isTerminalTaskState(t.state));
     const failing = this.#failuresThatFailTheRun(ctx, p);
+    // A BARRIER THE FAILING POLICY HOLDS HOLDS EVERYTHING BEHIND IT. Ancestry order made
+    // upstream-first total only for the reasons this method itself withholds a release;
+    // `#failingOutside` is a reason of another kind, and the order stepped past the barrier it held:
+    // `start→m -join→ J1 → y -join→ J2`, `start→f(throws) -join→ J2` (onBranchError "fail")
+    // released J2 at par 4 while the policy held J1, and J2 folded — and would have fired an `error`
+    // arm — without `y` ever running. Base ran J1, then `y`, then J2.
+    //
+    // WHY ONLY THE POLICY, AND NOT "ANY UNRELEASED UPSTREAM BARRIER" — measured, not assumed. An
+    // upstream barrier something arrived at can be unreleased for exactly three reasons here:
+    //   - a LIVE holder: every holder of J1 reaches J1's members, which are ancestors of everything
+    //     behind J1, so it is already a live holder of J2 and J2's quiescence already waits;
+    //   - its counts say no while nothing is live (`terminal < expected`) — which, in ancestry
+    //     order, is only the pre-existing unit mismatch of a member that feeds another member
+    //     (`#joinArrivals`' `continuesInBranch`): such a barrier NEVER releases. Holding the
+    //     barriers behind it strands them in a SUCCEEDED run where base released them — the
+    //     200-seed oracle slice went red on exactly that (seed 22: J0 stuck, `any` J1 behind it
+    //     never released; base released it on its other member) when this held for any reason;
+    //   - the failing policy — the one reason nothing else accounts for, and held here.
+    // `held` is transitive: a barrier behind a held one is held, and holds what is behind it.
+    const held = new Set<NodeId>();
     for (const node of joins) {
       const join = node.join!;
-      if (this.#failingOutside(ctx, p, join, failing)) continue;
       const out: NewEvent[] = [];
       const members = new Set<string>(join.branches);
       const reaches = (id: NodeId): boolean =>
@@ -12806,9 +12843,15 @@ export class Engine {
         parents.set(encodeBranch(parent), parent);
       }
 
-      for (const [parentPath, parent] of parents) {
+      const unreleased = [...parents].filter(([, parent]) => p.tasks[makeTaskId(node.id, parent, 0)] === undefined);
+      if (unreleased.length === 0) continue;
+      const behindHeld = [...held].some((h) => ctx.index.ancestors.get(node.id)?.has(h) ?? false);
+      if (behindHeld || this.#failingOutside(ctx, p, join, failing)) {
+        held.add(node.id);
+        continue;
+      }
+      for (const [parentPath, parent] of unreleased) {
         const taskId = makeTaskId(node.id, parent, 0);
-        if (p.tasks[taskId] !== undefined) continue;
         const live = liveTasks.some((t) => isAtOrUnderBranch(t.branch, parent) && reaches(t.nodeId));
         // `all` releases on quiescence alone, so a live holder answers it without the counts.
         if (live && join.mode === "all") continue;

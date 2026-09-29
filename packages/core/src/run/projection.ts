@@ -1179,9 +1179,15 @@ function apply(p: MutableProjection, e: JournalEvent): void {
     // `iteration + 1`, a different Task, so a back-edge still re-runs its target.
     //
     // HERE, where the state lives, so every journal folds to it — including one an older binary
-    // wrote with the late row in it, which a restart would otherwise re-run. Such a journal's
-    // FINAL fold is unchanged (the re-run's own lease, commit and reduce rows still fold); what
-    // changes is that a process attaching between the late row and the re-lease runs nothing.
+    // wrote with the late row in it, which a restart would otherwise re-run: a process attaching
+    // between the late row and the re-lease runs nothing. Such a journal's FINAL fold is NOT
+    // identical to what the older binary folded. The re-run's own lease, commit and reduce rows
+    // still fold, so status, channels, state and attempt agree, but the re-run Task's `edgesIn`
+    // keeps the FIRST arrival's edge instead of taking the late one's — measured on a base-written
+    // `a→b` / `a→c→c2→c3→b` journal: `b@root#0 edgesIn ["c3b"] → ["ab"]`. No engine decision reads
+    // `edgesIn` (the trace's `edges.in` attribute does, and `rewind`/`retry` copy it onto a re-arm).
+    // And `loom replay` of such a run is `match:false` on this binary, which re-executes the graph
+    // and runs the Task once (accepted: no journal compatibility before 0.1.0, §A.111).
     // THE LIVE STATES ARE NOT REFUSED HERE. `leased → ready` is `rewind`'s re-arm and `retrying →
     // ready` is `retry`'s, and this arm cannot tell either row from an arrival. `awaiting_gate`
     // has no writer that re-readies it, and no arrival was measured reaching it — the run suspends
