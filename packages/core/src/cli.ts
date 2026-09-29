@@ -9450,6 +9450,12 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
             // store journals the value where the recording journaled a handle, so every run
             // that externalised anything reported `match: false` about itself.
             payloads: ws.payloads,
+            // AND THE SAME RESOLVER — `ws.resolver`, the object `loom run`'s Engine resolves
+            // through, a module's substitute included. A replay re-adopts every recorded mutation
+            // and resolves the refs it ADDED live; with none passed the Engine resolves nothing,
+            // so a mutation-added `function` failed the shadow's compile (GRAPH015) edited or
+            // not, and a module-resolved ref went missing from the successor (§A.102).
+            resolver: ws.resolver,
           },
         });
         // NOT `writeDiagnostic`, and the reason is what the line IS. §H.14 gave the compile
@@ -10148,6 +10154,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
           // and then blames the run for the difference.
           hooks: ws.hooks,
           policy: { granted: ws.granted },
+          // And its resolver, for the reason `loom replay` gives: a recording that mutated is
+          // re-adopted in each replay, and its added refs resolve through this or not at all.
+          resolver: ws.resolver,
         };
 
         const baseReport = await runEvalSuite({ store: ws.store, suite, graph: baseline, engine });
