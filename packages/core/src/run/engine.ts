@@ -12777,13 +12777,29 @@ export class Engine {
       const reaches = (id: NodeId): boolean =>
         join.branches.some((bn) => bn === id || (ctx.index.ancestors.get(bn as NodeId)?.has(id) ?? false));
 
-      // THE INSTANCES THAT EXIST: the parent coordinate of every member Task, from the graph's
-      // fan-out depth and not the Task's own — `slice(0, -1)` answered "one level up from whoever
-      // arrived", so arms at different depths minted several instances of one barrier;
-      // `GRAPH008_JOIN_DEPTH` refuses the graphs where the compiled depth would differ per arm.
+      // THE INSTANCES THAT EXIST: every coordinate something has ARRIVED at — and an arrival is
+      // either of the two things `#activate` used to hand the barrier at commit: a member's Task
+      // (its `join` edge), or a committed `take` naming an ordinary edge INTO the join node (`seq`,
+      // `conditional`, `error`; a `loop` edge mints `iteration + 1` and is not an arrival here).
+      // Counting members alone dropped the second kind: `start→a(fails) -error-> J` beside a member
+      // behind a `conditional` not taken — `a`'s error arm was the only arrival, the barrier never
+      // released, and the run said `succeeded` with J and everything behind it undone, where base
+      // ran them (lane K's fifth reviewer). A barrier nothing arrived at still does not release.
+      //
+      // The parent comes from the graph's fan-out depth and not the arriving Task's own —
+      // `slice(0, -1)` answered "one level up from whoever arrived", so arms at different depths
+      // minted several instances of one barrier; `GRAPH008_JOIN_DEPTH` refuses the graphs where the
+      // compiled depth would differ per arm.
       const parents = new Map<string, BranchCoordinate>();
       for (const t of all) {
-        if (!members.has(t.nodeId)) continue;
+        const arrived =
+          members.has(t.nodeId) ||
+          (isTerminalTaskState(t.state) &&
+            t.take.some((id) => {
+              const e = ctx.index.edgeById.get(id as EdgeId);
+              return e !== undefined && e.kind !== "loop" && e.to === node.id;
+            }));
+        if (!arrived) continue;
         const depth = ctx.index.fanoutDepth.get(node.id) ?? Math.max(0, t.branch.segments.length - 1);
         if (depth > t.branch.segments.length) continue;
         const parent: BranchCoordinate = { segments: t.branch.segments.slice(0, depth) };

@@ -768,3 +768,66 @@ for (const conditional of [false, true]) {
     });
   }
 }
+
+// ── 12 · an ordinary edge into a join is an arrival too ─────────────────────
+
+/**
+ * `start→a`, `a -<kind>-> J`, and J's only member `m` behind a `conditional` not taken, `J → done`.
+ * When `#activate` stopped minting barrier Tasks, `a`'s edge into J was the only arrival — and the
+ * pass counted instances from MEMBER Tasks alone, so J never released and the run said `succeeded`
+ * with `done` never run, where base ran it (lane K's fifth reviewer; the `error` case is a failure
+ * whose error arm silently vanished). An instance exists wherever something ARRIVED: a member Task,
+ * or a committed `take` naming an ordinary edge into the join.
+ */
+for (const kind of ["seq", "conditional", "error"] as const) {
+  for (const par of [1, 4]) {
+    test(`12 · a ${kind} edge into a join releases it with no member Task (maxParallelism ${par})`, async () => {
+      const spec = graphSpec(
+        `entrance-${kind}`,
+        ["start", "a", "m", "done"].map((id) => fn(id)),
+        [["sa", "start", "a"], ["sm", "start", "m", "conditional"], ["jd", "J", "done"]],
+      ) as unknown as { nodes: unknown[]; edges: unknown[] };
+      spec.nodes.push({ id: n("J"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("m")], mode: "all", onBranchError: "skip" } });
+      spec.edges.push(
+        { id: "jm", from: n("m"), to: n("J"), kind: "join", branches: [n("m")] },
+        // A `conditional` entrance here is one that IS taken: the file's other conditionals are not.
+        { id: "aj", from: n("a"), to: n("J"), kind, ...(kind === "conditional" ? { when: 'seed == "x"' } : {}) },
+      );
+      const store = new MemoryStateStore({ now: () => NOW });
+      const engine = engineFor(store, ["start", "a", "m", "done"], kind === "error" ? { a: () => { throw new Error("a fails"); } } : {}, par);
+      const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+      const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+      const p = await engine.advance(runId);
+      assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+      const j = await journal(store, runId);
+      assert.equal(rows(j, "task.committed", "J@root#0"), 1, "the arrival by an ordinary edge released nothing");
+      assert.equal(rows(j, "task.committed", "done@root#0"), 1);
+    });
+  }
+}
+
+/**
+ * …and that arrival does not release the barrier EARLY: `start→x -seq-> J` beside
+ * `start→a1→a2→m -join-> J`. x arrives first; a1 and a2 are live and reach the member, so J holds
+ * until m commits — as base did at x's commit.
+ */
+for (const par of [1, 2, 4]) {
+  test(`12b · an early ordinary arrival does not release the barrier before its member (maxParallelism ${par})`, async () => {
+    const spec = graphSpec(
+      "entrance-early",
+      ["start", "x", "a1", "a2", "m", "done"].map((id) => fn(id)),
+      [["sx", "start", "x"], ["xj", "x", "J"], ["sa1", "start", "a1"], ["a12", "a1", "a2"], ["a2m", "a2", "m"], ["jd", "J", "done"]],
+    ) as unknown as { nodes: unknown[]; edges: unknown[] };
+    spec.nodes.push({ id: n("J"), type: "join", reads: ["log"], writes: ["log"], join: { branches: [n("m")], mode: "all", onBranchError: "skip" } });
+    spec.edges.push({ id: "jm", from: n("m"), to: n("J"), kind: "join", branches: [n("m")] });
+    const store = new MemoryStateStore({ now: () => NOW });
+    const engine = engineFor(store, ["start", "x", "a1", "a2", "m", "done"], {}, par);
+    const graph = compileOrThrow({ spec: spec as unknown as GraphSpec, resolver: resolver(), tools: {}, tenantCapabilities: [] });
+    const runId = await engine.submit({ graph, inputs: { seed: "x" } });
+    const p = await engine.advance(runId);
+    assert.equal(p.status, "succeeded", JSON.stringify(p.error ?? {}));
+    const j = await journal(store, runId);
+    const at = (type: string, taskId: string): number => j.find((ev) => ev.type === type && ev.taskId === taskId)?.seq ?? -1;
+    assert.ok(at("task.committed", "m@root#0") > 0 && at("task.committed", "m@root#0") < at("task.ready", "J@root#0"), "J released before its member m arrived");
+  });
+}
