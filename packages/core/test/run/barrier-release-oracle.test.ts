@@ -17,7 +17,7 @@
  *   I3  no barrier releases without a member Task;
  *   I4  a succeeded run leaves no barrier with a committed member unreleased — EXCEPT a join one of
  *       whose members has a non-join edge to another of its members, which never releases even
- *       unfixed (a pre-existing unit mismatch in `#joinArrivals`, on its own row);
+ *       unfixed (a pre-existing unit mismatch in `#joinArrivals`, on its own row: `TODO.md` §A.140);
  *   I5  succeeded runs of one variant commit the same (task, state) set at every width.
  */
 

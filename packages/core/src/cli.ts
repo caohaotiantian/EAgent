@@ -9618,8 +9618,9 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         const emit = (sp: (typeof spans)[number], depth: number): void => {
           if (seen.has(sp.spanId)) return;
           seen.add(sp.spanId);
-          // THE EFFECT KIND, because the span NAME cannot carry it. D9.1 fixes the taxonomy at
-          // eight names and registers `loom.effect` as designed-not-built, so every effect folds
+          // THE EFFECT KIND, because the span NAME cannot carry it. D9.1 fixed the taxonomy (eight
+          // names then; `telemetry/spans.ts` owns ten since `744e6f8f` added `loom.compile`, which
+          // is not an effect) and registers `loom.effect` as designed-not-built, so every effect folds
           // into `loom.model` or `loom.tool` — and the fold sends `subgraph` to `loom.tool`.
           // Measured by driving one: a parent whose only node is a `subgraph` traced as
           // `loom.tool`, so the line naming the child graph called it a tool and nothing in the
