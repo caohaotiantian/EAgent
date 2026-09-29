@@ -251,8 +251,9 @@ interface Open {
  * HERE, AND NOT AT THE EXPORTER, because `registries.test.ts` holds one rule about this
  * vocabulary: one file owns it. An attribute spelled in a second file is a name that can be
  * spelled two ways, and the guard caught exactly that — `server/http.ts` minted `"loom.run_id"`
- * of its own when the trace route was added. It is not a span NAME (the taxonomy is nine and §D.2
- * answered "no ninth"), but it is telemetry vocabulary and the rule is about the vocabulary.
+ * of its own when the trace route was added. It is not a span NAME (the taxonomy is closed — §D.2
+ * answered "no ninth" for a subgraph, and `loom.compile`, the tenth, was one of §C.1's designed
+ * six), but it is telemetry vocabulary and the rule is about the vocabulary.
  */
 export const OTLP_RUN_ID_ATTR = "loom.run_id";
 
@@ -571,6 +572,32 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
     }
     if (isEvent(e, "run.compiled")) {
       attr(rootId, { "graph.nodes": e.payload.nodes, "graph.edges": e.payload.edges, "resources.pinned": e.payload.resolutionManifest.length });
+      // `loom.compile` — THE ONE SPAN IN THIS FILE THAT ENDS WHERE ITS PARENT BEGINS.
+      //
+      // `run.submitted`, `run.compiled`, `run.started` and the entry `task.ready`s are ONE
+      // append with ONE `ts`, and the compile ran in the CALLER before that append. So the WIDTH
+      // is measured and the POSITION is a bound: the compile ended AT OR BEFORE `ts`, by a gap
+      // nobody timed (the CLI's body checks and the submit's own work; a subgraph child's
+      // `subgraph.started` append). `[ts − durationMs, ts]` is the latest placement consistent
+      // with the journal, drawn there rather than at an instant the journal does not hold. It
+      // starts before `loom.run` does and is still that run's child: the compile happened for
+      // this run and for nothing else, which is the condition under which a caller records
+      // `durationMs` at all. `cli.ts`'s tree walk parents by id, not by position.
+      //
+      // ONLY WHEN MEASURED. Absent is "not measured" — a catalogue graph compiled once at boot, a
+      // replay's shadow, a subgraph child served from the compile cache — and inventing a
+      // zero-width compile there would be a measurement nobody took. Anything that is not a
+      // finite non-negative number is treated the same way, for a journal written by hand, and
+      // so is one LARGER than `ts` — an absolute clock reading passed where a difference belongs,
+      // which would put the span's start before the epoch and an OTLP collector's at 0. The two
+      // bounds are the whole test: `ts` is finite by the read at the top of this loop, so NaN
+      // fails `>= 0` and either infinity fails one of them.
+      const took: unknown = e.payload.durationMs;
+      if (typeof took === "number" && took >= 0 && took <= ts) {
+        const id = spanId(runId, "compile", String(e.seq));
+        start(id, { name: "loom.compile", kind: "internal", start: ts - took, parent: rootId, attributes: {}, links: [], events: [] });
+        close(id, ts, "ok");
+      }
       continue;
     }
     if (isEvent(e, "run.started")) {
@@ -839,7 +866,16 @@ export function spansFrom(events: readonly JournalEvent[]): readonly Span[] {
       continue;
     }
     if (isEvent(e, "task.leased")) {
-      attr(taskSpan, { "task.attempt": e.payload.attempt, "worker.id": e.payload.workerId });
+      // `node.type` BEHIND A TYPE TEST, because the field is required of a WRITER and not of a
+      // journal: one written before `task.leased` carried it, or by hand, has none, and this
+      // file's second promise is that such a run still traces. Absent stays absent — nothing is
+      // looked up in a graph to fill it, since the fold is over one journal and nothing else.
+      const nodeType: unknown = e.payload.nodeType;
+      attr(taskSpan, {
+        "task.attempt": e.payload.attempt,
+        "worker.id": e.payload.workerId,
+        ...(typeof nodeType === "string" ? { "node.type": nodeType } : {}),
+      });
       note(taskSpan, "task.leased", ts);
       continue;
     }

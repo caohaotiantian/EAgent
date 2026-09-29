@@ -5279,8 +5279,15 @@ function loadGraph(
   source?: string,
   silent = false,
   diagnosticsOut?: Diagnostic[],
+  // HOW LONG `compile` TOOK, for a caller about to submit this graph as ONE run — `loom run`,
+  // which hands it to `SubmitInput.compileDurationMs` and so to `run.compiled.durationMs` and
+  // `loom.compile`. The compile call alone: not the file read before it, and not the hook/function
+  // body checks after it. Whole milliseconds, the resolution of the journal's own `ts`, so a
+  // sub-millisecond compile honestly records 0. Written only when the compile succeeded.
+  timing?: { compileMs?: number },
 ): RunGraph {
   const spec = readSpec(file, source);
+  const began = performance.now();
   const result = compile({
     spec,
     resolver: ws.resolver,
@@ -5293,6 +5300,7 @@ function loadGraph(
     // three capabilities — so a graph could compile `ok` and be denied at run time.
     tenantCapabilities: ws.granted,
   });
+  const compileMs = Math.round(performance.now() - began);
   // EVERY DIAGNOSTIC NAMES ITS FILE, and until it did, the loudest lines in this binary were
   // about a file nobody could identify. `graphsByHash` compiles EVERY file in `<workspace>/graphs/`
   // to find the one a run recorded, and each of those compiles wrote its diagnostics here — so
@@ -5325,6 +5333,7 @@ function loadGraph(
     requireHookBodies(ws, result.graph.spec);
     requireFunctionBodies(ws, result.graph.spec);
   }
+  if (timing !== undefined) timing.compileMs = compileMs;
   return result.graph;
 }
 
@@ -5709,7 +5718,7 @@ export async function driveToRest(ws: Workspace, runId: RunId, first: RunProject
  */
 async function startAndDrive(
   ws: Workspace,
-  input: { graph: RunGraph; inputs: Record<string, unknown>; submittedBy?: SubmittedBy; budgetUsd?: number },
+  input: { graph: RunGraph; inputs: Record<string, unknown>; submittedBy?: SubmittedBy; budgetUsd?: number; compileDurationMs?: number },
   // CALLED BETWEEN THE SUBMIT AND THE FIRST ADVANCE, and that instant is the whole point. The
   // run id is the only durable coordinate a run has, and `loom run` printed it only once the
   // run had reached rest — so an interrupt, a crash or a `kill` at any point before that left a
@@ -9118,7 +9127,10 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
         // BEFORE the graph is compiled: a typo in the flag should not cost a compile, and
         // more importantly it must not be diagnosed as something the graph did.
         const inputs = runInputs(args);
-        const graph = loadGraph(ws, requirePositional(args, 0));
+        // THIS compile is for THIS run and no other, so its time is a fact about the run —
+        // `run.compiled.durationMs`, drawn as `loom.compile`. See `loadGraph`'s `timing`.
+        const timing: { compileMs?: number } = {};
+        const graph = loadGraph(ws, requirePositional(args, 0), true, undefined, false, undefined, timing);
         // AFTER the compile, because the declared set is what this checks against, and BEFORE
         // the submit, because a typo must not cost a journal row or a provider call. See
         // `assertDeclaredInputs`.
@@ -9144,6 +9156,7 @@ export async function main(argv: readonly string[], fetchImpl?: HttpOptions["fet
               inputs,
               ...submitterFlag(args),
               ...(budgetUsd === undefined ? {} : { budgetUsd }),
+              ...(timing.compileMs === undefined ? {} : { compileDurationMs: timing.compileMs }),
             },
             // THE ID, AND THE INTERRUPT — see `announceRun`. The `finally` disarms even when the
             // drive throws, because a listener that outlives the run would answer the operator's

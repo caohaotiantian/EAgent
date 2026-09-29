@@ -49,7 +49,7 @@
  */
 
 import type { LoomError } from "../errors.ts";
-import type { EdgeSpec, NodeSpec } from "../graph/spec.ts";
+import type { EdgeSpec, NodeSpec, NodeType } from "../graph/spec.ts";
 import type { NodeId, RunId, Seq, TaskId, GateId, CheckpointId } from "../ids.ts";
 import type { Classification, Posture, UsageRecord } from "../vocab.ts";
 import type { PayloadRef } from "./payloads.ts";
@@ -291,6 +291,21 @@ export interface EventPayloads {
      * of one: no journal ever carried a per-node floor to compare against.
      */
     readonly postures?: readonly { readonly nodeId: NodeId; readonly posture: Posture }[];
+    /**
+     * HOW LONG THE COMPILE THAT PRODUCED THIS GRAPH TOOK, in milliseconds — the unit of `ts` —
+     * as measured by whoever compiled it. `telemetry/spans.ts`'s `loom.compile` and nothing else
+     * (TODO.md §C.1).
+     *
+     * A CALLER'S MEASUREMENT, because the compile is the caller's: `graph/compile.ts` is pure
+     * and runs before `Engine.submit` is ever called, so the engine cannot time it and a
+     * `RunGraph` must not carry a clock reading. It arrives as `SubmitInput.compileDurationMs`.
+     *
+     * OPTIONAL, AND ABSENT MEANS "NOT MEASURED" — never "took no time". A graph compiled once and
+     * submitted many times (the server's catalogue, `defineAgent`), a replay's shadow submit, and
+     * a subgraph child served from the compile cache all record none, because no compile ran for
+     * THIS run. Descriptive only: no fold, replay frame or decision reads it.
+     */
+    readonly durationMs?: number;
   };
   "run.started": { readonly posture: Posture };
   "run.suspended": { readonly reason: "gate" | "operator" | "budget" | "backoff" };
@@ -325,7 +340,25 @@ export interface EventPayloads {
    * starts at 1 and loses to the first's 3. The store's seq is the only monotonic number every
    * process already shares, so the lease's own seq is the token, and the fold reads `e.seq`.
    */
-  "task.leased": { readonly workerId: string; readonly attempt: number };
+  "task.leased": {
+    readonly workerId: string;
+    readonly attempt: number;
+    /**
+     * THE NODE'S TYPE, AS THE GRAPH THE LEASING ENGINE HELD DECLARED IT — `telemetry/spans.ts`'s
+     * `node.type` and nothing else (TODO.md §C.2).
+     *
+     * On the LEASE because that is the one row per attempt that already means "this Task began
+     * running", which is what `task.started` meant before it was deleted; `task.ready` would
+     * carry it too early, for Tasks that never ran. Descriptive only: no fold, no replay frame
+     * and no decision reads it, so `run/projection.ts` does not fold it and a replay's shadow
+     * compares nothing about it.
+     *
+     * REQUIRED for a writer (the maintainer's 2026-09-29 answer to §A.111: no journal
+     * compatibility before 0.1.0), and a READER still treats it as possibly absent — a journal
+     * written before this field, or by hand, has none, and `spansFrom` must still trace it.
+     */
+    readonly nodeType: NodeType;
+  };
   "task.progress": { readonly chunk: string };
   "task.committed": {
     readonly status: TaskStatus;
